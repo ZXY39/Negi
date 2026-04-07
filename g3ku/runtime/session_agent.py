@@ -59,6 +59,8 @@ class RuntimeAgentSession:
         self._active_cancel_token: ToolCancellationToken | None = None
         self._preserved_inflight_turn: dict[str, Any] | None = None
         self._paused_execution_context: dict[str, Any] | None = None
+        self._frontdoor_stage_state: dict[str, Any] = {}
+        self._compression_state: dict[str, Any] = {}
         self._active_turn_id: str | None = None
         self._last_verified_task_ids: list[str] = []
         self._turn_lock = asyncio.Lock()
@@ -390,6 +392,156 @@ class RuntimeAgentSession:
             )
         return items
 
+    def _frontdoor_execution_trace_summary_snapshot(self) -> dict[str, Any]:
+        stage_state = getattr(self, "_frontdoor_stage_state", None)
+        if isinstance(stage_state, dict) and isinstance(stage_state.get("stages"), list):
+            snapshot = copy.deepcopy(stage_state)
+            interaction_flow = self._interaction_flow_snapshot()
+            if not interaction_flow:
+                return snapshot
+            tools_by_call_id: dict[str, list[dict[str, Any]]] = {}
+            tools_by_name: dict[str, list[dict[str, Any]]] = {}
+            for item in interaction_flow:
+                tool_item = {
+                    "tool_name": str(item.get("tool_name") or "tool").strip() or "tool",
+                    "tool_call_id": str(item.get("tool_call_id") or "").strip(),
+                    "status": str(item.get("status") or "").strip(),
+                    "text": str(item.get("text") or "").strip(),
+                    "timestamp": str(item.get("timestamp") or "").strip(),
+                    "kind": str(item.get("kind") or "").strip(),
+                    "source": str(item.get("source") or "").strip().lower() or "user",
+                }
+                if isinstance(item.get("elapsed_seconds"), (int, float)):
+                    tool_item["elapsed_seconds"] = float(item["elapsed_seconds"])
+                call_id = str(tool_item.get("tool_call_id") or "").strip()
+                tool_name = str(tool_item.get("tool_name") or "").strip()
+                if call_id:
+                    tools_by_call_id.setdefault(call_id, []).append(tool_item)
+                if tool_name:
+                    tools_by_name.setdefault(tool_name, []).append(tool_item)
+            for stage in list(snapshot.get("stages") or []):
+                if not isinstance(stage, dict):
+                    continue
+                for round_item in list(stage.get("rounds") or []):
+                    if not isinstance(round_item, dict):
+                        continue
+                    existing_tools = list(round_item.get("tools") or [])
+                    if existing_tools:
+                        continue
+                    selected: list[dict[str, Any]] = []
+                    seen_keys: set[str] = set()
+                    round_call_ids = [
+                        str(raw or "").strip()
+                        for raw in list(round_item.get("tool_call_ids") or [])
+                        if str(raw or "").strip()
+                    ]
+                    round_tool_names = [
+                        str(raw or "").strip()
+                        for raw in list(round_item.get("tool_names") or [])
+                        if str(raw or "").strip()
+                    ]
+                    for call_id in round_call_ids:
+                        for item in list(tools_by_call_id.get(call_id) or []):
+                            key = str(item.get("tool_call_id") or item.get("tool_name") or "").strip()
+                            if key in seen_keys:
+                                continue
+                            seen_keys.add(key)
+                            selected.append(dict(item))
+                    for tool_name in round_tool_names:
+                        for item in list(tools_by_name.get(tool_name) or []):
+                            key = str(item.get("tool_call_id") or item.get("tool_name") or "").strip()
+                            if key in seen_keys:
+                                continue
+                            seen_keys.add(key)
+                            selected.append(dict(item))
+                    if selected:
+                        round_item["tools"] = selected
+            return snapshot
+        interaction_flow = self._interaction_flow_snapshot()
+        if not interaction_flow:
+            return {}
+        tools_by_key: dict[str, dict[str, Any]] = {}
+        ordered_tools: list[dict[str, Any]] = []
+        for item in interaction_flow:
+            key = str(item.get("tool_call_id") or item.get("tool_name") or "").strip()
+            if not key:
+                continue
+            current = tools_by_key.get(key)
+            if current is None:
+                current = {
+                    "tool_name": str(item.get("tool_name") or "tool").strip() or "tool",
+                    "tool_call_id": str(item.get("tool_call_id") or "").strip(),
+                    "status": str(item.get("status") or "").strip(),
+                    "text": str(item.get("text") or "").strip(),
+                    "timestamp": str(item.get("timestamp") or "").strip(),
+                    "kind": str(item.get("kind") or "").strip(),
+                    "source": str(item.get("source") or "").strip().lower() or "user",
+                }
+                if isinstance(item.get("elapsed_seconds"), (int, float)):
+                    current["elapsed_seconds"] = float(item["elapsed_seconds"])
+                tools_by_key[key] = current
+                ordered_tools.append(current)
+                continue
+            current["status"] = str(item.get("status") or current.get("status") or "").strip()
+            current["timestamp"] = str(item.get("timestamp") or current.get("timestamp") or "").strip()
+            text = str(item.get("text") or "").strip()
+            if text:
+                current["text"] = text
+            kind = str(item.get("kind") or "").strip()
+            if kind:
+                current["kind"] = kind
+            source = str(item.get("source") or "").strip().lower()
+            if source:
+                current["source"] = source
+            if isinstance(item.get("elapsed_seconds"), (int, float)):
+                current["elapsed_seconds"] = float(item["elapsed_seconds"])
+        if not ordered_tools:
+            return {}
+        return {
+            "active_stage_id": "inflight-stage-1",
+            "transition_required": False,
+            "stages": [
+                {
+                    "stage_id": "inflight-stage-1",
+                    "stage_index": 1,
+                    "stage_goal": "",
+                    "tool_round_budget": 0,
+                    "tool_rounds_used": 1,
+                    "status": "active",
+                    "mode": "自主执行",
+                    "stage_kind": "normal",
+                    "system_generated": True,
+                    "completed_stage_summary": "",
+                    "key_refs": [],
+                    "archive_ref": "",
+                    "archive_stage_index_start": 0,
+                    "archive_stage_index_end": 0,
+                    "rounds": [
+                        {
+                            "round_index": 1,
+                            "tools": ordered_tools,
+                        }
+                    ],
+                    "created_at": "",
+                    "finished_at": "",
+                }
+            ],
+        }
+
+    def _compression_snapshot(self) -> dict[str, Any]:
+        raw = getattr(self, "_compression_state", None)
+        if not isinstance(raw, dict):
+            return {}
+        snapshot = {
+            "status": str(raw.get("status") or "").strip(),
+            "text": str(raw.get("text") or "").strip(),
+            "source": str(raw.get("source") or "").strip(),
+            "needs_recheck": bool(raw.get("needs_recheck")),
+        }
+        if not snapshot["status"] and not snapshot["text"] and not snapshot["source"] and not snapshot["needs_recheck"]:
+            return {}
+        return snapshot
+
     def manual_pause_waiting_reason(self) -> bool:
         return bool(getattr(self._state, "manual_pause_waiting_reason", False))
 
@@ -490,11 +642,14 @@ class RuntimeAgentSession:
         if not allow_manual_pause and self.manual_pause_waiting_reason():
             return None
         status = str(status_override or self._state.status or "").strip().lower()
-        if not (self._state.is_running or status in {"paused", "error"}):
+        if not (self._state.is_running or status in {"running", "paused", "error"}):
             return None
+        execution_trace_summary = self._frontdoor_execution_trace_summary_snapshot()
+        compression = self._compression_snapshot()
         snapshot: dict[str, Any] = {
             "status": status or ("running" if self._state.is_running else "idle"),
-            "tool_events": self._interaction_flow_snapshot(),
+            "execution_trace_summary": execution_trace_summary,
+            "compression": compression,
         }
         prompt = self._last_prompt
         prompt_source = self._internal_prompt_source(prompt)
@@ -508,7 +663,8 @@ class RuntimeAgentSession:
         if self._state.last_error is not None:
             snapshot["last_error"] = asdict(self._state.last_error)
         if (
-            not snapshot["tool_events"]
+            not execution_trace_summary
+            and not compression
             and "user_message" not in snapshot
             and "assistant_text" not in snapshot
             and "last_error" not in snapshot
@@ -628,8 +784,12 @@ class RuntimeAgentSession:
                     transcript_state=_TRANSCRIPT_STATE_COMPLETED,
                 )
             assistant_payload: dict[str, Any] = {}
-            if interaction_flow:
-                assistant_payload["tool_events"] = interaction_flow
+            execution_trace_summary = self._frontdoor_execution_trace_summary_snapshot()
+            compression = self._compression_snapshot()
+            if execution_trace_summary:
+                assistant_payload["execution_trace_summary"] = execution_trace_summary
+            if compression:
+                assistant_payload["compression"] = compression
             metadata_payload = dict(assistant_metadata or {})
             verified_task_ids = self._normalize_verified_task_ids(self._last_verified_task_ids)
             if verified_task_ids:

@@ -24,6 +24,7 @@ if "litellm" not in sys.modules:
 from g3ku.agent.tools.base import Tool
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.context.types import ContextAssemblyResult
+from g3ku.runtime.api import websocket_ceo
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor import checkpoint_inspection
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
@@ -37,6 +38,34 @@ from g3ku.runtime.frontdoor.state_models import (
     CeoRuntimeContext,
 )
 from g3ku.session.manager import SessionManager
+
+
+def test_ceo_snapshot_keeps_execution_trace_summary_and_compression_payloads() -> None:
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [
+            {
+                "role": "assistant",
+                "content": "stage running",
+                "execution_trace_summary": {
+                    "active_stage_id": "frontdoor-stage-1",
+                    "transition_required": False,
+                    "stages": [
+                        {
+                            "stage_id": "frontdoor-stage-1",
+                            "stage_goal": "inspect repository",
+                            "rounds": [{"round_index": 1, "tools": [{"tool_name": "filesystem"}]}],
+                        }
+                    ],
+                },
+                "compression": {"status": "running", "text": "上下文压缩中", "source": "user"},
+                "tool_events": [{"tool_name": "skill-installer", "status": "running"}],
+            }
+        ]
+    )
+
+    assert snapshot[0]["execution_trace_summary"]["stages"][0]["stage_goal"] == "inspect repository"
+    assert snapshot[0]["compression"]["status"] == "running"
+    assert "tool_events" not in snapshot[0]
 
 
 class _CompiledGraphRecorder:

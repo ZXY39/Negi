@@ -207,14 +207,43 @@ class _FakeHeartbeatFinalSession(_FakeHeartbeatSession):
             "status": "paused",
             "user_message": {"content": "Install the skill"},
             "assistant_text": "Still working on it...",
-            "tool_events": [
-                {
-                    "status": "running",
-                    "tool_name": "skill-installer",
-                    "text": "install still running",
-                    "tool_call_id": "skill-installer:1",
-                }
-            ],
+            "execution_trace_summary": {
+                "active_stage_id": "inflight-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "inflight-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "",
+                        "tool_round_budget": 0,
+                        "tool_rounds_used": 1,
+                        "status": "active",
+                        "mode": "自主执行",
+                        "stage_kind": "normal",
+                        "system_generated": True,
+                        "completed_stage_summary": "",
+                        "key_refs": [],
+                        "archive_ref": "",
+                        "archive_stage_index_start": 0,
+                        "archive_stage_index_end": 0,
+                        "rounds": [
+                            {
+                                "round_index": 1,
+                                "tools": [
+                                    {
+                                        "status": "running",
+                                        "tool_name": "skill-installer",
+                                        "text": "install still running",
+                                        "tool_call_id": "skill-installer:1",
+                                    }
+                                ],
+                            }
+                        ],
+                        "created_at": "",
+                        "finished_at": "",
+                    }
+                ],
+            },
         }
         self.clear_calls = 0
 
@@ -270,6 +299,40 @@ class _FakeToolExecutionManager:
             "recommended_wait_seconds": 0.05,
             "runtime_snapshot": {"summary_text": "still running"},
         }
+
+
+def _sample_frontdoor_stage_state() -> dict[str, object]:
+    return {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_goal": "inspect repository",
+                "tool_round_budget": 3,
+                "tool_rounds_used": 1,
+                "status": "active",
+                "mode": "自主执行",
+                "stage_kind": "normal",
+                "system_generated": False,
+                "completed_stage_summary": "",
+                "key_refs": [],
+                "archive_ref": "",
+                "archive_stage_index_start": 0,
+                "archive_stage_index_end": 0,
+                "rounds": [
+                    {
+                        "round_index": 1,
+                        "tool_names": ["filesystem"],
+                        "tool_calls": [{"name": "filesystem", "arguments": {"path": "."}}],
+                    }
+                ],
+                "created_at": "2026-04-01T10:00:00Z",
+                "finished_at": "",
+            }
+        ],
+    }
 
 
 def _build_app() -> FastAPI:
@@ -714,7 +777,8 @@ async def test_inflight_snapshot_preserves_paused_user_turn_across_heartbeat_pro
     assert snapshot["status"] == "paused"
     assert snapshot["user_message"]["content"] == "Install the weather skill"
     assert snapshot["assistant_text"] == "Still installing dependencies..."
-    assert [item["tool_name"] for item in snapshot["tool_events"]] == ["skill-installer"]
+    tools = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+    assert [item["tool_name"] for item in tools] == ["skill-installer"]
 
 
 @pytest.mark.asyncio
@@ -780,7 +844,8 @@ async def test_runtime_agent_session_hides_cron_internal_prompt_but_persists_rep
     assert isinstance(inflight, dict)
     assert inflight["source"] == "cron"
     assert "user_message" not in inflight
-    assert [item["tool_name"] for item in inflight["tool_events"]] == ["cron"]
+    tools = inflight["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+    assert [item["tool_name"] for item in tools] == ["cron"]
 
     persisted = loop.sessions.get_or_create("web:shared")
     assert [message["role"] for message in persisted.messages] == ["assistant"]
@@ -1428,12 +1493,48 @@ def test_inflight_snapshot_skips_watchdog_progress_updates() -> None:
     snapshot = session.inflight_turn_snapshot()
 
     assert snapshot is not None
-    assert [item["kind"] for item in snapshot["tool_events"]] == ["", "tool_background"]
-    assert all(item["text"] != "watchdog synthetic update" for item in snapshot["tool_events"])
+    tools = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+    assert [item["kind"] for item in tools] == ["tool_background"]
+    assert all(item["text"] != "watchdog synthetic update" for item in tools)
+
+
+def test_inflight_turn_snapshot_prefers_stage_trace_summary_over_flat_tool_events() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.status = "running"
+    session._frontdoor_stage_state = _sample_frontdoor_stage_state()
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert snapshot is not None
+    assert "execution_trace_summary" in snapshot
+    assert snapshot["execution_trace_summary"]["stages"][0]["stage_goal"] == "inspect repository"
+    assert "tool_events" not in snapshot
+
+
+def test_snapshot_includes_compression_state_when_frontdoor_archive_is_running() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.status = "running"
+    session._compression_state = {"status": "running", "text": "上下文压缩中", "source": "user"}
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert snapshot is not None
+    assert snapshot["compression"]["status"] == "running"
+    assert snapshot["compression"]["text"] == "上下文压缩中"
 
 
 @pytest.mark.asyncio
-async def test_runtime_agent_session_persists_tool_events_into_session_transcript(
+async def test_runtime_agent_session_persists_execution_trace_summary_into_session_transcript(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1488,8 +1589,9 @@ async def test_runtime_agent_session_persists_tool_events_into_session_transcrip
     reloaded_session = SessionManager(tmp_path).get_or_create(session_id)
     assert [message["role"] for message in reloaded_session.messages] == ["user", "assistant"]
     assert reloaded_session.messages[1]["content"] == "The weather skill has been installed."
-    assert [item["status"] for item in reloaded_session.messages[1]["tool_events"]] == ["running", "success"]
-    assert reloaded_session.messages[1]["tool_events"][0]["tool_name"] == "skill-installer"
+    tools = reloaded_session.messages[1]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+    assert [item["status"] for item in tools] == ["success"]
+    assert tools[0]["tool_name"] == "skill-installer"
 
 
 @pytest.mark.asyncio
@@ -1610,7 +1712,8 @@ async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
         "error_message": "CEO frontdoor exceeded maximum iterations",
         "recoverable": True,
     }
-    assert [item["status"] for item in reloaded_session.messages[1]["tool_events"]] == ["running"]
+    tools = reloaded_session.messages[1]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+    assert [item["status"] for item in tools] == ["running"]
 
     recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)
     assert recent_history[-2] == {"role": "user", "content": "Open bilibili"}
@@ -1728,7 +1831,7 @@ def test_ceo_websocket_resume_interrupt_forwards_resume_payload(tmp_path, monkey
     assert live_session.resume_payloads == [{"approved": True}]
 
 
-def test_ceo_websocket_turn_patch_carries_live_tool_events(tmp_path: Path, monkeypatch) -> None:
+def test_ceo_websocket_turn_patch_carries_live_execution_trace_summary(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 
     async def _ensure_services(_agent) -> None:
@@ -1772,18 +1875,47 @@ def test_ceo_websocket_turn_patch_carries_live_tool_events(tmp_path: Path, monke
                 "source": "user",
                 "user_message": {"content": "Install the skill"},
                 "assistant_text": "Working on it...",
-                "tool_events": [],
+                "execution_trace_summary": {},
             }
             await self._emit("state_snapshot", state=self.state_dict())
-            self._snapshot["tool_events"] = [
-                {
-                    "status": "running",
-                    "tool_name": "skill-installer",
-                    "text": "skill-installer started",
-                    "tool_call_id": "skill-installer:1",
-                    "source": "user",
-                }
-            ]
+            self._snapshot["execution_trace_summary"] = {
+                "active_stage_id": "inflight-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "inflight-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "",
+                        "tool_round_budget": 0,
+                        "tool_rounds_used": 1,
+                        "status": "active",
+                        "mode": "自主执行",
+                        "stage_kind": "normal",
+                        "system_generated": True,
+                        "completed_stage_summary": "",
+                        "key_refs": [],
+                        "archive_ref": "",
+                        "archive_stage_index_start": 0,
+                        "archive_stage_index_end": 0,
+                        "rounds": [
+                            {
+                                "round_index": 1,
+                                "tools": [
+                                    {
+                                        "status": "running",
+                                        "tool_name": "skill-installer",
+                                        "text": "skill-installer started",
+                                        "tool_call_id": "skill-installer:1",
+                                        "source": "user",
+                                    }
+                                ],
+                            }
+                        ],
+                        "created_at": "",
+                        "finished_at": "",
+                    }
+                ],
+            }
             await self._emit(
                 "tool_execution_start",
                 tool_name="skill-installer",
@@ -1818,12 +1950,18 @@ def test_ceo_websocket_turn_patch_carries_live_tool_events(tmp_path: Path, monke
             ws,
             lambda payload: payload.get("type") == "ceo.turn.patch"
             and isinstance(payload.get("data", {}).get("inflight_turn"), dict)
-            and list(payload.get("data", {}).get("inflight_turn", {}).get("tool_events") or []),
+            and isinstance(payload.get("data", {}).get("inflight_turn", {}).get("execution_trace_summary"), dict)
+            and list(
+                (payload.get("data", {}).get("inflight_turn", {}).get("execution_trace_summary", {}) or {})
+                .get("stages")
+                or []
+            ),
         )
         inflight_turn = patch_payload["data"]["inflight_turn"]
         assert inflight_turn["assistant_text"] == "Working on it..."
-        assert inflight_turn["tool_events"][0]["tool_name"] == "skill-installer"
-        assert inflight_turn["tool_events"][0]["tool_call_id"] == "skill-installer:1"
+        tool = inflight_turn["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
+        assert tool["tool_name"] == "skill-installer"
+        assert tool["tool_call_id"] == "skill-installer:1"
         assert "interaction_trace" not in inflight_turn
         assert "stage" not in inflight_turn
 
@@ -1952,11 +2090,17 @@ def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_
             ws,
             lambda payload: payload.get("type") == "ceo.turn.patch"
             and isinstance(payload.get("data", {}).get("inflight_turn"), dict)
-            and list(payload.get("data", {}).get("inflight_turn", {}).get("tool_events") or []),
+            and isinstance(payload.get("data", {}).get("inflight_turn", {}).get("execution_trace_summary"), dict)
+            and list(
+                (payload.get("data", {}).get("inflight_turn", {}).get("execution_trace_summary", {}) or {})
+                .get("stages")
+                or []
+            ),
         )
         inflight_turn = patch_payload["data"]["inflight_turn"]
-        assert inflight_turn["tool_events"][0]["tool_name"] == "skill-installer"
-        assert inflight_turn["tool_events"][0]["source"] == "user"
+        tool = inflight_turn["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
+        assert tool["tool_name"] == "skill-installer"
+        assert tool["source"] == "user"
         assert "interaction_trace" not in inflight_turn
         assert "stage" not in inflight_turn
 
@@ -1982,7 +2126,8 @@ def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_
     assert isinstance(inflight_turn, dict)
     assert inflight_turn["status"] == "paused"
     assert inflight_turn["user_message"]["content"] == "Pause and restore me"
-    assert inflight_turn["tool_events"][0]["tool_name"] == "skill-installer"
+    tool = inflight_turn["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
+    assert tool["tool_name"] == "skill-installer"
     assert [message["role"] for message in snapshot["data"].get("messages", [])] == ["user"]
     assert snapshot["data"]["messages"][0]["content"] == "Pause and restore me"
     persisted = SessionManager(tmp_path).get_or_create(session_id)
