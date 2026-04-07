@@ -302,21 +302,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
         enabled = bool(getattr(assembly_cfg, "frontdoor_summarizer_enabled", True))
         model_key = getattr(assembly_cfg, "frontdoor_summarizer_model_key", None)
+        base_keep = 20
+        base_trigger = 10
         keep_count = int(
             getattr(
                 assembly_cfg,
                 "frontdoor_summarizer_keep_message_count",
-                getattr(assembly_cfg, "frontdoor_recent_message_count", 8),
+                getattr(assembly_cfg, "frontdoor_recent_message_count", base_keep),
             )
-            or 8
+            or base_keep
         )
         trigger_count = int(
             getattr(
                 assembly_cfg,
                 "frontdoor_summarizer_trigger_message_count",
-                getattr(assembly_cfg, "frontdoor_summary_trigger_message_count", 24),
+                getattr(assembly_cfg, "frontdoor_summary_trigger_message_count", base_trigger),
             )
-            or 24
+            or base_trigger
         )
         keep_count = max(1, keep_count)
         trigger_count = max(1, trigger_count)

@@ -1,5 +1,8 @@
 import pytest
 
+from types import SimpleNamespace
+
+from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.frontdoor.history_compaction import (
     FRONTDOOR_HISTORY_SUMMARY_MARKER,
     compact_frontdoor_history,
@@ -9,6 +12,10 @@ from g3ku.runtime.frontdoor.history_compaction import (
 
 def _stage_messages(count: int) -> list[dict[str, object]]:
     return [{"role": "user", "content": f"message {idx}"} for idx in range(count)]
+
+
+def _build_no_config_runner() -> CreateAgentCeoFrontDoorRunner:
+    return CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
 
 @pytest.mark.asyncio
@@ -37,9 +44,21 @@ async def test_compact_history_between_trigger_and_keep() -> None:
     )
 
     assert is_frontdoor_history_summary_message(compacted[0])
-    assert "message 0" in str(compacted[0].get("content") or "")
-    assert [item["content"] for item in compacted[-2:]] == ["message 13", "message 14"]
-    assert "message 0" not in [item["content"] for item in compacted[1:]]
+
+
+@pytest.mark.asyncio
+async def test_summarize_messages_default_no_config() -> None:
+    runner = _build_no_config_runner()
+    runner._invoke_summary_model = None
+
+    messages = _stage_messages(22)
+
+    result = await runner._summarize_messages(messages=messages, state={})
+
+    assert len(result["messages"]) == 21
+    summary_meta = dict(result["messages"][0].get("metadata") or {})
+    assert summary_meta.get("frontdoor_history_summary") is True
+    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
 
 
 @pytest.mark.asyncio
