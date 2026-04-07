@@ -94,6 +94,13 @@ async def _runner_for_loop(loop) -> CeoFrontDoorRunner | Any:
     return runner
 
 
+def _compiled_graph_for_runner(runner: Any) -> Any:
+    getter = getattr(runner, "_get_compiled_graph", None)
+    if not callable(getter):
+        raise AttributeError("frontdoor runner does not expose _get_compiled_graph()")
+    return getter()
+
+
 async def get_frontdoor_checkpoint(
     loop,
     *,
@@ -102,7 +109,7 @@ async def get_frontdoor_checkpoint(
     subgraphs: bool = False,
 ) -> dict[str, Any] | None:
     runner = await _runner_for_loop(loop)
-    snapshot = await runner._get_compiled_graph().aget_state(
+    snapshot = await _compiled_graph_for_runner(runner).aget_state(
         _thread_config(session_id=session_id, checkpoint_id=checkpoint_id),
         subgraphs=subgraphs,
     )
@@ -118,6 +125,7 @@ async def get_frontdoor_checkpoint_history(
     metadata_filter: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     runner = await _runner_for_loop(loop)
+    graph = _compiled_graph_for_runner(runner)
     normalized_limit = 20 if limit is None else max(1, int(limit))
     before = (
         _thread_config(session_id=session_id, checkpoint_id=before_checkpoint_id)
@@ -125,7 +133,7 @@ async def get_frontdoor_checkpoint_history(
         else None
     )
     items: list[dict[str, Any]] = []
-    async for snapshot in runner._get_compiled_graph().aget_state_history(
+    async for snapshot in graph.aget_state_history(
         _thread_config(session_id=session_id),
         filter=dict(metadata_filter or {}) or None,
         before=before,

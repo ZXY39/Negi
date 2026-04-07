@@ -8,7 +8,6 @@ from typing import Any, Awaitable, Callable
 
 from langchain_core.messages import AIMessage, convert_to_messages
 from langchain_core.tools import BaseTool, StructuredTool
-from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
@@ -30,6 +29,8 @@ from ._ceo_support import CeoFrontDoorSupport
 from .ceo_summarizer import summarize_frontdoor_history
 from .history_compaction import compact_frontdoor_history, frontdoor_summary_state
 from .state_models import (
+    CeoFrontdoorInterrupted,
+    CeoPendingInterrupt,
     CeoPersistentState,
     CeoRuntimeContext,
 )
@@ -158,57 +159,69 @@ def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any
     return normalized
 
 
-def _build_langgraph_ceo_graph(runner):
-    graph = StateGraph(CeoPersistentState, context_schema=CeoRuntimeContext)
-    graph.add_node("prepare_turn", runner._graph_prepare_turn)
-    graph.add_node("call_model", runner._graph_call_model)
-    graph.add_node("normalize_model_output", runner._graph_normalize_model_output)
-    graph.add_node("review_tool_calls", runner._graph_review_tool_calls)
-    graph.add_node("execute_tools", runner._graph_execute_tools)
-    graph.add_node("finalize_turn", runner._graph_finalize_turn)
-    graph.add_edge(START, "prepare_turn")
-    graph.add_edge("prepare_turn", "call_model")
-    graph.add_edge("call_model", "normalize_model_output")
-    graph.add_conditional_edges(
-        "normalize_model_output",
-        runner._graph_next_step,
-        {
-            "call_model": "call_model",
-            "review_tool_calls": "review_tool_calls",
-            "execute_tools": "execute_tools",
-            "finalize": "finalize_turn",
-        },
-    )
-    graph.add_conditional_edges(
-        "review_tool_calls",
-        runner._graph_next_step,
-        {
-            "execute_tools": "execute_tools",
-            "finalize": "finalize_turn",
-        },
-    )
-    graph.add_conditional_edges(
-        "execute_tools",
-        runner._graph_next_step,
-        {
-            "call_model": "call_model",
-            "finalize": "finalize_turn",
-        },
-    )
-    graph.add_edge("finalize_turn", END)
-    return graph.compile(
-        name="ceo-frontdoor",
-        checkpointer=getattr(runner._loop, "_checkpointer", None),
-        store=getattr(runner._loop, "_store", None),
-    )
-
-
 class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     """Shared CEO runtime operations reused by the create_agent frontdoor path."""
 
     def __init__(self, *, loop) -> None:
         super().__init__(loop=loop)
         self._compiled_graph = None
+
+    def _get_compiled_graph(self):
+        return self._compiled_graph if self._compiled_graph is not None else self._get_agent()
+
+    async def _ensure_ready(self) -> None:
+        ensure_ready = getattr(self._loop, "_ensure_checkpointer_ready", None)
+        if callable(ensure_ready):
+            result = ensure_ready()
+            if hasattr(result, "__await__"):
+                await result
+
+    @staticmethod
+    def _thread_config(session_key: str) -> dict[str, object]:
+        return {"configurable": {"thread_id": str(session_key or "").strip()}}
+
+    @staticmethod
+    def _checkpoint_safe_value(value: Any) -> Any:
+        return _checkpoint_safe_value(value)
+
+    @classmethod
+    def _unwrap_graph_output(cls, graph_output: Any) -> dict[str, Any]:
+        interrupts = [
+            CeoPendingInterrupt(
+                interrupt_id=str(getattr(item, "id", "") or ""),
+                value=cls._checkpoint_safe_value(getattr(item, "value", None)),
+            )
+            for item in list(getattr(graph_output, "interrupts", ()) or ())
+        ]
+        values = cls._checkpoint_safe_value(dict(getattr(graph_output, "value", graph_output) or {}))
+        if not isinstance(values, dict):
+            values = {}
+        if interrupts:
+            first_interrupt_value = interrupts[0].value if interrupts else None
+            interrupt_state = first_interrupt_value if isinstance(first_interrupt_value, dict) else {}
+            interrupt_approval_request = interrupt_state.get("approval_request")
+            if not isinstance(values.get("approval_request"), dict) and isinstance(first_interrupt_value, dict):
+                if isinstance(interrupt_approval_request, dict):
+                    values["approval_request"] = dict(interrupt_approval_request)
+                else:
+                    values["approval_request"] = dict(first_interrupt_value)
+            if not list(values.get("tool_call_payloads") or []):
+                interrupt_payloads = list(interrupt_state.get("tool_call_payloads") or [])
+                if interrupt_payloads:
+                    values["tool_call_payloads"] = interrupt_payloads
+                if not list(values.get("tool_call_payloads") or []):
+                    if isinstance(interrupt_approval_request, dict):
+                        interrupt_tool_calls = list(interrupt_approval_request.get("tool_calls") or [])
+                        if interrupt_tool_calls:
+                            values["tool_call_payloads"] = interrupt_tool_calls
+                if not list(values.get("tool_call_payloads") or []):
+                    approval_request = values.get("approval_request")
+                    if isinstance(approval_request, dict):
+                        tool_call_payloads = list(approval_request.get("tool_calls") or [])
+                        if tool_call_payloads:
+                            values["tool_call_payloads"] = tool_call_payloads
+            raise CeoFrontdoorInterrupted(interrupts=interrupts, values=values)
+        return values
 
     def _build_tool_runtime_context(
         self,

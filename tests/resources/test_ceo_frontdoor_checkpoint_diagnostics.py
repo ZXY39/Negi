@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 from types import SimpleNamespace
 
@@ -15,6 +16,12 @@ from g3ku.runtime.frontdoor.checkpoint_inspection import (
     serialize_state_snapshot,
 )
 from main.api import admin_rest
+
+
+def test_create_agent_runtime_ops_module_imports() -> None:
+    module = importlib.import_module("g3ku.runtime.frontdoor._ceo_runtime_ops")
+
+    assert getattr(module, "CeoFrontDoorRuntimeOps", None) is not None
 
 
 def _build_checkpoint_app() -> FastAPI:

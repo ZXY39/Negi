@@ -24,7 +24,7 @@ if "litellm" not in sys.modules:
 from g3ku.agent.tools.base import Tool
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.context.types import ContextAssemblyResult
-from g3ku.runtime.frontdoor import _ceo_langgraph_impl as ceo_langgraph_impl
+from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor import checkpoint_inspection
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.history_compaction import (
@@ -273,7 +273,7 @@ def test_ceo_frontdoor_review_tool_calls_ignores_resume_payload_tool_call_overri
     override_payloads = [{"name": "message", "arguments": {"content": "mutated"}}]
 
     monkeypatch.setattr(
-        ceo_langgraph_impl,
+        ceo_runtime_ops,
         "interrupt",
         lambda value: {"approved": True, "tool_calls": override_payloads},
     )
@@ -321,53 +321,35 @@ def test_ceo_frontdoor_approval_request_respects_enabled_flag() -> None:
     }
 
 
-def test_ceo_frontdoor_graph_compiles_with_checkpointer_and_store(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ceo_frontdoor_get_compiled_graph_uses_create_agent_with_checkpointer_and_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: dict[str, object] = {}
     compiled_graph = object()
 
-    class _FakeStateGraph:
-        def __init__(self, state_schema, **kwargs) -> None:
-            captured["state_schema"] = state_schema
-            captured["init_kwargs"] = dict(kwargs)
-
-        def add_node(self, name, node) -> None:
-            return None
-
-        def add_edge(self, start, end) -> None:
-            return None
-
-        def add_conditional_edges(self, start, path, path_map) -> None:
-            return None
-
-        def compile(self, **kwargs):
-            captured["compile_kwargs"] = dict(kwargs)
-            return compiled_graph
-
-    monkeypatch.setattr(ceo_langgraph_impl, "StateGraph", _FakeStateGraph)
+    def _fake_create_agent(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = dict(kwargs)
+        return compiled_graph
 
     loop = SimpleNamespace(_checkpointer=object(), _store=object())
-    runner = SimpleNamespace(
-        _loop=loop,
-        _graph_prepare_turn=object(),
-        _graph_call_model=object(),
-        _graph_normalize_model_output=object(),
-        _graph_review_tool_calls=object(),
-        _graph_execute_tools=object(),
-        _graph_finalize_turn=object(),
-        _graph_next_step=object(),
+    runner = CeoFrontDoorRunner(loop=loop)
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor._ceo_create_agent_impl.create_agent",
+        _fake_create_agent,
     )
+    monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: object())
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai:gpt-4.1"])
 
-    result = ceo_langgraph_impl._build_langgraph_ceo_graph(runner)
+    result = runner._get_compiled_graph()
 
     assert result is compiled_graph
-    assert captured["state_schema"] is ceo_langgraph_impl.CeoPersistentState
-    assert captured["state_schema"] is CeoPersistentState
-    assert captured["init_kwargs"] == {"context_schema": ceo_langgraph_impl.CeoRuntimeContext}
-    assert captured["compile_kwargs"] == {
-        "name": "ceo-frontdoor",
-        "checkpointer": loop._checkpointer,
-        "store": loop._store,
-    }
+    kwargs = dict(captured["kwargs"] or {})
+    assert kwargs["checkpointer"] is loop._checkpointer
+    assert kwargs["store"] is loop._store
+    assert kwargs["name"] == "ceo_frontdoor"
+    assert kwargs["state_schema"] is CeoPersistentState
+    assert kwargs["context_schema"] is CeoRuntimeContext
 
 
 @pytest.mark.asyncio
@@ -378,8 +360,8 @@ async def test_ceo_frontdoor_prepare_turn_keeps_runtime_only_objects_out_of_chec
     async def _noop_ready() -> None:
         return None
 
-    monkeypatch.setattr(ceo_langgraph_impl, "current_project_environment", lambda workspace_root=None: {})
-    monkeypatch.setattr(ceo_langgraph_impl, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(ceo_runtime_ops, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
 
     loop = SimpleNamespace(
         _ensure_checkpointer_ready=_noop_ready,
@@ -457,8 +439,8 @@ async def test_ceo_frontdoor_prepare_turn_passes_checkpoint_messages_to_builder(
     async def _noop_ready() -> None:
         return None
 
-    monkeypatch.setattr(ceo_langgraph_impl, "current_project_environment", lambda workspace_root=None: {})
-    monkeypatch.setattr(ceo_langgraph_impl, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(ceo_runtime_ops, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
 
     loop = SimpleNamespace(
         _ensure_checkpointer_ready=_noop_ready,
@@ -699,8 +681,8 @@ async def test_ceo_frontdoor_prepare_turn_compacts_history_into_summary_block(
     async def _noop_ready() -> None:
         return None
 
-    monkeypatch.setattr(ceo_langgraph_impl, "current_project_environment", lambda workspace_root=None: {})
-    monkeypatch.setattr(ceo_langgraph_impl, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(ceo_runtime_ops, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
 
     loop = SimpleNamespace(
         _ensure_checkpointer_ready=_noop_ready,
@@ -820,7 +802,7 @@ async def test_ceo_frontdoor_prepare_turn_prompt_cache_key_changes_when_stable_p
     async def _noop_ready() -> None:
         return None
 
-    monkeypatch.setattr(ceo_langgraph_impl, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
 
     loop = SimpleNamespace(
         _ensure_checkpointer_ready=_noop_ready,
@@ -926,7 +908,7 @@ async def test_ceo_frontdoor_prepare_turn_records_prompt_cache_diagnostics(
     async def _noop_ready() -> None:
         return None
 
-    monkeypatch.setattr(ceo_langgraph_impl, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
 
     loop = SimpleNamespace(
         _ensure_checkpointer_ready=_noop_ready,
@@ -1173,8 +1155,8 @@ async def test_graph_prepare_turn_real_session_path_carries_model_summary_state(
     async def _noop_ready() -> None:
         return None
 
-    monkeypatch.setattr(ceo_langgraph_impl, "current_project_environment", lambda workspace_root=None: {})
-    monkeypatch.setattr(ceo_langgraph_impl, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(ceo_runtime_ops, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
 
     loop = SimpleNamespace(
         _ensure_checkpointer_ready=_noop_ready,
