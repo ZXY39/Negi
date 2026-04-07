@@ -7,6 +7,7 @@ const TASK_VIEW_PATH = "g3ku/web/frontend/org_graph_task_view.js";
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const TASK_VIEW_CODE = fs.readFileSync(TASK_VIEW_PATH, "utf8");
 const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const COMPRESSION_TEXT = "\u4e0a\u4e0b\u6587\u538b\u7f29\u4e2d";
 
 class StubElement {}
 class StubHTMLElement extends StubElement {
@@ -108,7 +109,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, syncCeoCompressionToast, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, S, U };`,
         context
     );
     context.__testExports.U.ceoCompressionToast = new StubHTMLElement();
@@ -125,7 +126,7 @@ test("ceo inflight snapshot renders stage -> round -> tool structure", () => {
             {
                 stage_id: "stage-1",
                 stage_goal: "inspect repository",
-                status: "进行中",
+                status: "running",
                 tool_round_budget: 2,
                 rounds: [
                     {
@@ -158,7 +159,7 @@ test("ceo stage trace with no rounds still signals caller to keep stage view", (
             {
                 stage_id: "stage-no-rounds",
                 stage_goal: "inspect repository",
-                status: "进行中",
+                status: "running",
                 tool_round_budget: 3,
                 rounds: [],
             },
@@ -177,18 +178,46 @@ test("ceo composer shows session-local compression toast only for active compres
         "web:ceo-a": {
             session_id: "web:ceo-a",
             inflight_turn: {
-                compression: { status: "running", text: "上下文压缩中", source: "user" },
+                status: "running",
+                compression: { status: "running", text: COMPRESSION_TEXT, source: "user" },
             },
         },
         "web:ceo-b": {
             session_id: "web:ceo-b",
             inflight_turn: {
-                compression: { status: "running", text: "上下文压缩中", source: "user" },
+                status: "running",
+                compression: { status: "running", text: COMPRESSION_TEXT, source: "user" },
             },
         },
     };
 
     syncCeoCompressionToast();
     assert.equal(U.ceoCompressionToast.hidden, false);
-    assert.equal(U.ceoCompressionToastText.textContent, "上下文压缩中");
+    assert.equal(U.ceoCompressionToastText.textContent, COMPRESSION_TEXT);
+});
+
+test("ceo composer hides compression toast when inflight turn is paused", () => {
+    const { syncCeoCompressionToast, S, U } = loadApp();
+
+    S.activeSessionId = "web:ceo-a";
+    S.ceoSnapshotCache = {
+        "web:ceo-a": {
+            session_id: "web:ceo-a",
+            inflight_turn: {
+                status: "paused",
+                compression: { status: "running", text: COMPRESSION_TEXT, source: "user" },
+            },
+        },
+    };
+
+    syncCeoCompressionToast();
+    assert.equal(U.ceoCompressionToast.hidden, true);
+    assert.equal(U.ceoCompressionToastText.textContent, "");
+});
+
+test("shared stage status maps active to running semantics", () => {
+    const { stageTraceStatus, displayTaskStageStatus } = loadApp();
+
+    assert.equal(stageTraceStatus({ status: "active" }), "running");
+    assert.equal(displayTaskStageStatus("active"), displayTaskStageStatus("running"));
 });

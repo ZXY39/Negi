@@ -1231,6 +1231,8 @@ function clearCeoSessionSnapshotCache(sessionId) {
 function activeCeoSessionCompressionState() {
     const cacheEntry = getCeoSessionSnapshotCache(activeSessionId());
     const inflightTurn = normalizeCeoSnapshotInflight(cacheEntry?.inflight_turn);
+    const inflightStatus = String(inflightTurn?.status || "").trim().toLowerCase();
+    if (inflightStatus && !["running", "in_progress", "active"].includes(inflightStatus)) return null;
     const compression = normalizeCeoSnapshotCompression(inflightTurn?.compression);
     if (!compression) return null;
     return String(compression.status || "").trim().toLowerCase() === "running" ? compression : null;
