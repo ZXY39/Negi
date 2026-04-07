@@ -2636,7 +2636,7 @@ function renderCeoStageTraceIntoTurn(turn, executionTraceSummary = null) {
     turn.flowEl.hidden = false;
     turn.flowEl.open = true;
     updateCeoTurnMeta(turn, `${stageCount} 个阶段 · ${roundCount} 轮工具`);
-    return roundCount;
+    return turn.steps;
 }
 
 function patchCeoInflightTurn(snapshot = null) {

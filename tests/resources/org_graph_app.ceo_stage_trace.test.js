@@ -149,6 +149,26 @@ test("ceo inflight snapshot renders stage -> round -> tool structure", () => {
     assert.match(turn.listEl.innerHTML, /filesystem/);
 });
 
+test("ceo stage trace with no rounds still signals caller to keep stage view", () => {
+    const { renderCeoStageTraceIntoTurn } = loadApp();
+    const turn = makeTurn({ text: "" });
+
+    const rendered = renderCeoStageTraceIntoTurn(turn, {
+        stages: [
+            {
+                stage_id: "stage-no-rounds",
+                stage_goal: "inspect repository",
+                status: "进行中",
+                tool_round_budget: 3,
+                rounds: [],
+            },
+        ],
+    });
+
+    assert.equal(rendered > 0, true);
+    assert.match(turn.listEl.innerHTML, /inspect repository/);
+});
+
 test("ceo composer shows session-local compression toast only for active compressing session", () => {
     const { syncCeoCompressionToast, S, U } = loadApp();
 
