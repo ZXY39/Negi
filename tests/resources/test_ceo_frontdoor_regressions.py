@@ -850,6 +850,50 @@ def test_build_prompt_context_prefers_ceo_stage_overlay_over_summary_default() -
     assert "Use the existing CEO layered context rules." not in overlay
     assert "## CEO Durable Summary" not in overlay
 
+
+def test_build_prompt_context_keeps_dispatch_overlay_and_exhausted_stage_instruction() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    result = runner.build_prompt_context(
+        state={
+            "repair_overlay_text": runner._verified_dispatch_reply_overlay(task_id="task:demo-123"),
+            "frontdoor_stage_state": {
+                "active_stage_id": "stage-1",
+                "transition_required": True,
+                "stages": [
+                    {
+                        "stage_id": "stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Dispatch the follow-up investigation",
+                        "tool_round_budget": 1,
+                        "tool_rounds_used": 1,
+                        "status": "active",
+                        "mode": "自主执行",
+                        "completed_stage_summary": "",
+                        "key_refs": [],
+                        "rounds": [
+                            {
+                                "round_id": "stage-1:round-1",
+                                "round_index": 1,
+                                "tool_names": ["create_async_task"],
+                                "tool_call_ids": ["call-1"],
+                                "budget_counted": True,
+                            }
+                        ],
+                    }
+                ],
+            },
+        },
+        runtime=SimpleNamespace(),
+        tools=[],
+    )
+
+    overlay = str(result["system_overlay"])
+    assert "A real async task has already been created and verified." in overlay
+    assert "The verified task id is `task:demo-123`." in overlay
+    assert "Current CEO stage budget is exhausted: 1/1." in overlay
+    assert "First summarize the completed progress for this stage and call `submit_next_stage`" in overlay
+
 @pytest.mark.asyncio
 async def test_graph_prepare_turn_falls_back_to_heuristic_compaction_when_summarizer_disabled() -> None:
     loop = SimpleNamespace(

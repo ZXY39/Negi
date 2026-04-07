@@ -35,9 +35,15 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
     def build_prompt_context(self, *, state, runtime, tools) -> dict[str, str]:
         _ = runtime, tools
         overlay_text = self._effective_turn_overlay_text(state)
+        default_overlay_text = self._frontdoor_default_overlay_text(state)
         if overlay_text:
-            return {"system_overlay": overlay_text}
-        return {"system_overlay": self._frontdoor_default_overlay_text(state)}
+            combined_overlay = "\n\n".join(
+                part
+                for part in (overlay_text, default_overlay_text)
+                if str(part or "").strip()
+            ).strip()
+            return {"system_overlay": combined_overlay}
+        return {"system_overlay": default_overlay_text}
 
     def visible_langchain_tools(self, *, state, runtime) -> list[Any]:
         return list(self._build_langchain_tools_for_state(state=state, runtime=runtime))
