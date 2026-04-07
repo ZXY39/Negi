@@ -733,6 +733,11 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
     assert len(backend.calls) == 2
 
 
+def test_frontdoor_compaction_settings_defaults_to_stage_budget() -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+
+    assert runner._frontdoor_compaction_settings() == (20, 10)
+
 @pytest.mark.asyncio
 async def test_graph_prepare_turn_falls_back_to_heuristic_compaction_when_summarizer_disabled() -> None:
     loop = SimpleNamespace(

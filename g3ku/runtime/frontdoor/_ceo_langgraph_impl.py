@@ -276,10 +276,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     def _frontdoor_compaction_settings(self) -> tuple[int, int]:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
-        recent_count = max(1, int(getattr(assembly_cfg, "frontdoor_recent_message_count", 8) or 8))
+        recent_count = max(1, int(getattr(assembly_cfg, "frontdoor_recent_message_count", 20) or 20))
         trigger_count = max(
-            recent_count + 1,
-            int(getattr(assembly_cfg, "frontdoor_summary_trigger_message_count", 24) or 24),
+            1,
+            int(getattr(assembly_cfg, "frontdoor_summary_trigger_message_count", 10) or 10),
         )
         return recent_count, trigger_count
 
