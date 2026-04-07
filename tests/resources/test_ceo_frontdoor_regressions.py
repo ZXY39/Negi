@@ -27,7 +27,7 @@ from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
-from g3ku.runtime.frontdoor._ceo_langgraph_impl import _build_args_schema
+from g3ku.runtime.frontdoor._ceo_runtime_ops import _build_args_schema
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.history_compaction import FRONTDOOR_HISTORY_SUMMARY_MARKER
 from g3ku.runtime.session_agent import RuntimeAgentSession
@@ -622,7 +622,7 @@ async def test_ceo_frontdoor_runner_retries_empty_turn_until_valid_result(monkey
     async def _fake_sleep(delay: float) -> None:
         sleep_calls.append(float(delay))
 
-    monkeypatch.setattr("g3ku.runtime.frontdoor._ceo_langgraph_impl.asyncio.sleep", _fake_sleep)
+    monkeypatch.setattr("g3ku.runtime.frontdoor._ceo_runtime_ops.asyncio.sleep", _fake_sleep)
 
     backend = _BackendRecorder(
         [
