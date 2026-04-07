@@ -319,7 +319,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             or 24
         )
         keep_count = max(1, keep_count)
-        trigger_count = max(keep_count + 1, trigger_count)
+        trigger_count = max(1, trigger_count)
         return enabled, model_key, trigger_count, keep_count
 
     async def _summarize_messages(
