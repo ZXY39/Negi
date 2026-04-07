@@ -804,6 +804,66 @@ async def test_inflight_snapshot_preserves_paused_user_turn_across_heartbeat_pro
 
 
 @pytest.mark.asyncio
+async def test_new_user_turn_clears_stale_frontdoor_stage_and_compression_before_first_running_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    class _FakeRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input, session, on_progress
+            return "ok"
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        _ = session_key
+        return 0
+
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=_FakeRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+    )
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+    session._frontdoor_stage_state = _sample_frontdoor_stage_state()
+    session._compression_state = {"status": "running", "text": "旧压缩状态", "source": "user"}
+    captured: dict[str, object] = {}
+
+    async def _listener(event: AgentEvent) -> None:
+        if event.type != "state_snapshot":
+            return
+        state = event.payload.get("state") if isinstance(event.payload, dict) else {}
+        if str((state or {}).get("status") or "") != "running":
+            return
+        if "snapshot" not in captured:
+            captured["snapshot"] = session.inflight_turn_snapshot()
+
+    session.subscribe(_listener)
+    await session.prompt("new prompt")
+
+    snapshot = captured.get("snapshot")
+    assert isinstance(snapshot, dict)
+    assert snapshot.get("execution_trace_summary") == {}
+    assert snapshot.get("compression") == {}
+
+
+@pytest.mark.asyncio
 async def test_runtime_agent_session_hides_cron_internal_prompt_but_persists_reply(
     tmp_path: Path,
     monkeypatch,
@@ -2338,6 +2398,46 @@ def test_ceo_tool_event_serializers_preserve_source() -> None:
     assert serialized is not None
     assert serialized["source"] == "heartbeat"
     assert normalized[0]["source"] == "heartbeat"
+
+
+def test_execution_trace_snapshot_helpers_extract_task_ids_preview_and_updated_at() -> None:
+    snapshot = {
+        "assistant_text": "",
+        "execution_trace_summary": {
+            "stages": [
+                {
+                    "rounds": [
+                        {
+                            "tools": [
+                                {
+                                    "tool_name": "create_async_task",
+                                    "status": "success",
+                                    "text": "created background task task:demo-123",
+                                    "timestamp": "2026-04-07T12:10:00",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        },
+        "persisted_at": "2026-04-07T12:00:00",
+    }
+    message = {
+        "role": "assistant",
+        "content": "",
+        "execution_trace_summary": snapshot["execution_trace_summary"],
+    }
+
+    task_ids = web_ceo_sessions._extract_task_ids_from_message(message)
+    preview = web_ceo_sessions._inflight_preview_text(snapshot)
+    updated_at = web_ceo_sessions._inflight_updated_at(snapshot)
+    has_history = web_ceo_sessions._snapshot_has_material_live_history(snapshot, require_active_stage=False)
+
+    assert task_ids == ["task:demo-123"]
+    assert "task:demo-123" in preview
+    assert updated_at == "2026-04-07T12:10:00"
+    assert has_history is True
 
 
 def test_ceo_snapshot_filters_internal_cron_user_message() -> None:

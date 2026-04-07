@@ -1158,6 +1158,10 @@ class RuntimeAgentSession:
                 self._last_prompt = user_input
                 self._event_log = []
                 self._pending_tool_names.clear()
+                if internal_source is None:
+                    # Fresh user turns should never inherit previous turn stage/compression snapshots.
+                    self._frontdoor_stage_state = {}
+                    self._compression_state = {}
                 self._state.is_running = True
                 self._state.paused = False
                 self._state.status = "running"

@@ -447,7 +447,12 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
             if role == 'assistant' and isinstance(raw.get('compression'), dict)
             else {}
         )
-        if not content and not attachments and not execution_trace_summary and not compression:
+        legacy_tool_events = (
+            _normalize_snapshot_tool_events(raw.get('tool_events'))
+            if role == 'assistant'
+            else []
+        )
+        if not content and not attachments and not execution_trace_summary and not compression and not legacy_tool_events:
             continue
         item = {'role': role, 'content': content}
         timestamp = raw.get('timestamp')
@@ -459,6 +464,8 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
             item['execution_trace_summary'] = execution_trace_summary
         if compression:
             item['compression'] = compression
+        if not execution_trace_summary and not compression and legacy_tool_events:
+            item['tool_events'] = legacy_tool_events
         items.append(item)
     return items
 

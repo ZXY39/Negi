@@ -68,6 +68,31 @@ def test_ceo_snapshot_keeps_execution_trace_summary_and_compression_payloads() -
     assert "tool_events" not in snapshot[0]
 
 
+def test_ceo_snapshot_keeps_legacy_tool_events_when_new_trace_fields_absent() -> None:
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_events": [
+                    {
+                        "status": "running",
+                        "tool_name": "skill-installer",
+                        "text": "starting install",
+                        "tool_call_id": "skill-installer:1",
+                        "source": "user",
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert len(snapshot) == 1
+    assert "execution_trace_summary" not in snapshot[0]
+    assert snapshot[0]["tool_events"][0]["tool_name"] == "skill-installer"
+    assert snapshot[0]["tool_events"][0]["status"] == "running"
+
+
 class _CompiledGraphRecorder:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
