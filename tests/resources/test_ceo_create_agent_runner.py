@@ -97,15 +97,22 @@ class _BrokenValidationTool(Tool):
         raise TypeError("unhashable type: 'list'")
 
 
-def test_memory_assembly_config_exposes_create_agent_and_summarizer_defaults() -> None:
+def test_memory_assembly_config_uses_stage_budget_defaults() -> None:
     cfg = MemoryAssemblyConfig()
 
-    assert cfg.frontdoor_create_agent_enabled is False
-    assert cfg.frontdoor_create_agent_shadow_mode is False
-    assert cfg.frontdoor_summarizer_enabled is False
-    assert cfg.frontdoor_summarizer_model_key is None
-    assert cfg.frontdoor_summarizer_trigger_message_count == 24
-    assert cfg.frontdoor_summarizer_keep_message_count == 8
+    assert cfg.frontdoor_recent_message_count == 20
+    assert cfg.frontdoor_summary_trigger_message_count == 10
+    assert cfg.frontdoor_interrupt_approval_enabled is False
+    assert cfg.frontdoor_interrupt_tool_names == ["message", "create_async_task"]
+
+    for removed_flag in (
+        "frontdoor_create_agent_enabled",
+        "frontdoor_create_agent_shadow_mode",
+        "frontdoor_summarizer_enabled",
+        "frontdoor_summarizer_model_key",
+    ):
+        with pytest.raises(AttributeError):
+            getattr(cfg, removed_flag)
 
 
 def test_initial_persistent_state_contains_summary_payload_and_runtime_marker() -> None:
