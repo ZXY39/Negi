@@ -300,6 +300,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     def _summarizer_settings(self) -> tuple[bool, str | None, int, int]:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
+        enabled = bool(getattr(assembly_cfg, "frontdoor_summarizer_enabled", True))
+        model_key = getattr(assembly_cfg, "frontdoor_summarizer_model_key", None)
         keep_count = int(
             getattr(
                 assembly_cfg,
@@ -318,7 +320,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         keep_count = max(1, keep_count)
         trigger_count = max(keep_count + 1, trigger_count)
-        return True, None, trigger_count, keep_count
+        return enabled, model_key, trigger_count, keep_count
 
     async def _summarize_messages(
         self,
@@ -705,7 +707,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         config, _revision, _changed = get_runtime_config(force=False)
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
-        model_key = str(explicit_model_key or "").strip()
+        model_key = str(explicit_model_key or getattr(assembly_cfg, "frontdoor_summarizer_model_key", None) or "").strip()
         if model_key:
             model = build_chat_model(config, model_key=model_key)
         else:
