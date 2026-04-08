@@ -170,6 +170,57 @@ test("ceo stage trace with no rounds still signals caller to keep stage view", (
     assert.match(turn.listEl.innerHTML, /inspect repository/);
 });
 
+test("ceo stage trace renders real stage goal and budget from true frontdoor stage data", () => {
+    const { renderCeoStageTraceIntoTurn } = loadApp();
+    const turn = makeTurn({ text: "" });
+
+    renderCeoStageTraceIntoTurn(turn, {
+        stages: [
+            {
+                stage_id: "inflight-stage-1",
+                stage_goal: "",
+                status: "running",
+                tool_round_budget: 0,
+                system_generated: true,
+                rounds: [
+                    {
+                        round_id: "round-synthetic-1",
+                        round_index: 1,
+                        tools: [
+                            { tool_name: "load_tool_context", status: "success", output_text: "ok" },
+                            { tool_name: "memory_search", status: "success", output_text: "ok" },
+                            { tool_name: "submit_next_stage", status: "success", output_text: "stage advanced" },
+                        ],
+                    },
+                ],
+            },
+            {
+                stage_id: "frontdoor-stage-1",
+                stage_goal: "查看当前可检索的长期记忆，并向用户按类别清晰汇总我已记住的内容。",
+                status: "running",
+                tool_round_budget: 3,
+                rounds: [
+                    {
+                        round_id: "round-1",
+                        round_index: 1,
+                        tools: [{ tool_name: "load_tool_context", status: "success", output_text: "loaded context" }],
+                    },
+                    {
+                        round_id: "round-2",
+                        round_index: 2,
+                        tools: [{ tool_name: "memory_search", status: "running", output_text: "" }],
+                    },
+                ],
+            },
+        ],
+    });
+
+    assert.match(turn.listEl.innerHTML, /查看当前可检索的长期记忆/);
+    assert.match(turn.listEl.innerHTML, /本阶段最大轮数为3/);
+    assert.doesNotMatch(turn.listEl.innerHTML, /本阶段最大轮数为0/);
+    assert.doesNotMatch(turn.listEl.innerHTML, /submit_next_stage/);
+});
+
 test("ceo composer shows session-local compression toast only for active compressing session", () => {
     const { syncCeoCompressionToast, S, U } = loadApp();
 

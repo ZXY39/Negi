@@ -1598,6 +1598,126 @@ def test_inflight_turn_snapshot_prefers_stage_trace_summary_over_flat_tool_event
     assert "tool_events" not in snapshot
 
 
+def test_inflight_snapshot_without_real_stage_state_keeps_legacy_tool_flow_instead_of_synthetic_stage() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._frontdoor_stage_state = {}
+    session._event_log = [
+        {
+            "type": "tool_execution_start",
+            "timestamp": "2026-04-08T08:00:00Z",
+            "payload": {
+                "tool_name": "load_tool_context",
+                "text": "load_tool_context started",
+                "tool_call_id": "load_tool_context:1",
+            },
+        },
+        {
+            "type": "tool_execution_end",
+            "timestamp": "2026-04-08T08:00:02Z",
+            "payload": {
+                "tool_name": "load_tool_context",
+                "text": "load_tool_context done",
+                "tool_call_id": "load_tool_context:1",
+                "is_error": False,
+            },
+        },
+        {
+            "type": "tool_execution_start",
+            "timestamp": "2026-04-08T08:00:03Z",
+            "payload": {
+                "tool_name": "memory_search",
+                "text": "memory_search started",
+                "tool_call_id": "memory_search:2",
+            },
+        },
+    ]
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert snapshot is not None
+    assert "execution_trace_summary" not in snapshot
+    assert [item["tool_name"] for item in snapshot["tool_events"]] == ["load_tool_context", "memory_search"]
+    assert [item["status"] for item in snapshot["tool_events"]] == ["success", "running"]
+
+
+def test_inflight_snapshot_with_real_stage_state_preserves_goal_budget_and_round_boundaries() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:ceo-da58bee7f1ca",
+        channel="web",
+        chat_id="ceo-da58bee7f1ca",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._frontdoor_stage_state = {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_goal": "查看当前可检索的长期记忆，并向用户按类别清晰汇总我已记住的内容。",
+                "tool_round_budget": 3,
+                "tool_rounds_used": 2,
+                "status": "active",
+                "mode": "自主执行",
+                "stage_kind": "normal",
+                "rounds": [
+                    {"round_index": 1, "tool_names": ["memory_search"]},
+                    {"round_index": 2, "tool_names": ["memory_search"]},
+                ],
+            }
+        ],
+    }
+    session._event_log = [
+        {
+            "type": "tool_execution_start",
+            "timestamp": "2026-04-08T08:01:00Z",
+            "payload": {
+                "tool_name": "memory_search",
+                "text": "round 1 started",
+                "tool_call_id": "memory_search:1",
+            },
+        },
+        {
+            "type": "tool_execution_end",
+            "timestamp": "2026-04-08T08:01:01Z",
+            "payload": {
+                "tool_name": "memory_search",
+                "text": "round 1 done",
+                "tool_call_id": "memory_search:1",
+                "is_error": False,
+            },
+        },
+        {
+            "type": "tool_execution_start",
+            "timestamp": "2026-04-08T08:01:10Z",
+            "payload": {
+                "tool_name": "memory_search",
+                "text": "round 2 started",
+                "tool_call_id": "memory_search:2",
+            },
+        },
+    ]
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert snapshot is not None
+    stage = snapshot["execution_trace_summary"]["stages"][0]
+    assert stage["stage_goal"] == "查看当前可检索的长期记忆，并向用户按类别清晰汇总我已记住的内容。"
+    assert stage["tool_round_budget"] == 3
+    assert [len(round_item["tools"]) for round_item in stage["rounds"]] == [1, 1]
+    assert stage["rounds"][0]["tools"][0]["tool_call_id"] == "memory_search:1"
+    assert stage["rounds"][1]["tools"][0]["tool_call_id"] == "memory_search:2"
+
+
 def test_snapshot_includes_compression_state_when_frontdoor_archive_is_running() -> None:
     session = RuntimeAgentSession(
         SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
