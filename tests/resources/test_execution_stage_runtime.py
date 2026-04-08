@@ -421,6 +421,7 @@ async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrich
     assert list(provided) == ["content"]
     assert len(selector_calls) == 1
     user_payload = json.loads(str(enriched[1]["content"] or ""))
+    assert user_payload["callable_tool_names"] == ["content"]
     assert user_payload["visible_skills"] == [
         {
             "skill_id": "tmux",
@@ -566,6 +567,76 @@ async def test_node_build_tools_preserves_protocol_tools_when_callable_tools_are
     assert isinstance(tools["submit_next_stage"], SubmitNextStageTool)
     assert isinstance(tools["submit_final_result"], SubmitFinalResultTool)
     assert isinstance(tools["spawn_child_nodes"], SpawnChildNodesTool)
+
+
+@pytest.mark.asyncio
+async def test_prepare_node_context_selection_restores_callable_tools_from_persisted_frame_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = SimpleNamespace(
+        task_id="task-1",
+        session_id="web:shared",
+        metadata={"core_requirement": "inspect content navigation"},
+    )
+    node = SimpleNamespace(
+        task_id="task-1",
+        node_id="node-1",
+        node_kind="execution",
+        prompt="inspect content navigation",
+        goal="inspect content navigation",
+    )
+    service = _build_selector_test_service(
+        task=task,
+        visible_skills=[],
+        visible_tool_families=[],
+        visible_tool_names=["content", "filesystem"],
+        tool_instances={
+            "content": _StaticTool("content"),
+            "filesystem": _StaticTool("filesystem"),
+        },
+    )
+    service.log_service = SimpleNamespace(
+        read_runtime_frame=lambda task_id, node_id: {
+            "messages": [
+                {"role": "system", "content": "base prompt"},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "prompt": "inspect content navigation",
+                            "goal": "inspect content navigation",
+                            "core_requirement": "inspect content navigation",
+                            "visible_skills": [
+                                {
+                                    "skill_id": "tmux",
+                                    "display_name": "tmux",
+                                    "description": "terminal workflow",
+                                }
+                            ],
+                            "callable_tool_names": ["content"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ]
+        }
+    )
+
+    async def _unexpected_build_node_context_selection(**kwargs):
+        raise AssertionError(f"selector should not be recomputed when frame messages already carry callable tools: {kwargs!r}")
+
+    monkeypatch.setattr(
+        runtime_service_module,
+        "build_node_context_selection",
+        _unexpected_build_node_context_selection,
+    )
+
+    selection = await service._prepare_node_context_selection(task=task, node=node)
+    provided = service._tool_provider(node)
+
+    assert selection.trace["mode"] == "persisted_frame_restore"
+    assert selection.selected_tool_names == ["content"]
+    assert list(provided) == ["content"]
 
 
 @pytest.mark.asyncio
