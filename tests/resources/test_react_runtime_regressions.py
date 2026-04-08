@@ -730,7 +730,7 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_onl
         return NodeContextSelectionResult(
             mode="dense_rerank",
             memory_search_visible=True,
-            selected_skill_ids=["tmux"],
+            selected_skill_ids=["tmux", "skill-creator"],
             selected_tool_names=["content"],
             memory_query="Prompt: terminal workflow\nGoal: terminal workflow\nCore requirement: terminal workflow",
             retrieval_scope={
@@ -792,6 +792,11 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_onl
             "skill_id": "tmux",
             "display_name": "tmux",
             "description": "terminal workflow",
+        },
+        {
+            "skill_id": "skill-creator",
+            "display_name": "skill-creator",
+            "description": "skill creator",
         }
     ]
     assert "semantic block" in enriched[0]["content"]
@@ -871,6 +876,83 @@ async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_no
         }
     ]
     assert retrieve_block_calls == []
+
+
+@pytest.mark.asyncio
+async def test_enrich_node_messages_still_applies_selector_when_unified_context_feature_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retrieve_block_calls: list[dict[str, object]] = []
+
+    class _MemoryManager:
+        def _feature_enabled(self, key: str) -> bool:
+            _ = key
+            return False
+
+        async def retrieve_block(self, **kwargs):
+            retrieve_block_calls.append(dict(kwargs))
+            return "unexpected memory block"
+
+    async def _fake_build_node_context_selection(**kwargs):
+        _ = kwargs
+        return NodeContextSelectionResult(
+            mode="dense_rerank",
+            memory_search_visible=True,
+            selected_skill_ids=["tmux"],
+            selected_tool_names=["content"],
+            memory_query="Prompt: terminal workflow\nGoal: terminal workflow\nCore requirement: terminal workflow",
+            retrieval_scope={
+                "search_context_types": ["memory"],
+                "allowed_context_types": ["memory"],
+                "allowed_resource_record_ids": [],
+                "allowed_skill_record_ids": [],
+            },
+            trace={"mode": "dense_rerank"},
+        )
+
+    monkeypatch.setattr(
+        runtime_service_module,
+        "build_node_context_selection",
+        _fake_build_node_context_selection,
+    )
+
+    service = object.__new__(MainRuntimeService)
+    service.memory_manager = _MemoryManager()
+    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='content'),
+    ]
+    service.list_visible_skill_resources = lambda *, actor_role, session_id: [
+        SimpleNamespace(skill_id='skill-creator', display_name='skill-creator', description='skill creator'),
+        SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
+    ]
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content', 'memory_search']
+
+    task = SimpleNamespace(
+        session_id="web:ceo-origin",
+        metadata={"memory_scope": {"channel": "web", "chat_id": "shared"}},
+    )
+    node = SimpleNamespace(prompt="terminal workflow", goal="terminal workflow", node_kind="execution")
+
+    enriched = await service._enrich_node_messages(
+        task=task,
+        node=node,
+        messages=[
+            {"role": "system", "content": "base prompt"},
+            {"role": "user", "content": '{"prompt":"terminal workflow"}'},
+        ],
+    )
+
+    user_payload = json.loads(str(enriched[1]["content"] or ""))
+    assert user_payload["visible_skills"] == [
+        {
+            "skill_id": "tmux",
+            "display_name": "tmux",
+            "description": "terminal workflow",
+        }
+    ]
+    assert retrieve_block_calls == []
+
+
 def test_filter_retrieved_records_preserves_memory_and_filters_catalog_context() -> None:
     records = [
         ContextRecordV2(record_id="memory-1", context_type="memory", uri="g3ku://memory/web/shared/memory-1"),

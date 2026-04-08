@@ -5112,18 +5112,25 @@ class MainRuntimeService:
             visible_tool_families=visible_tool_families,
             visible_tool_names=visible_tool_names,
         )
-        selected_skill_ids = {
-            str(skill_id or '').strip()
-            for skill_id in list(getattr(selection, 'selected_skill_ids', []) or [])
-            if str(skill_id or '').strip()
-        }
-        selected_visible_skills = [
-            record
-            for record in visible_skills
-            if str(getattr(record, 'skill_id', '') or '').strip() in selected_skill_ids
-        ]
+        visible_skill_by_id: dict[str, Any] = {}
+        for record in visible_skills:
+            skill_id = str(getattr(record, 'skill_id', '') or '').strip()
+            if skill_id and skill_id not in visible_skill_by_id:
+                visible_skill_by_id[skill_id] = record
+        selected_visible_skills: list[Any] = []
+        seen_selected_skill_ids: set[str] = set()
+        for skill_id in list(getattr(selection, 'selected_skill_ids', []) or []):
+            normalized_skill_id = str(skill_id or '').strip()
+            if not normalized_skill_id or normalized_skill_id in seen_selected_skill_ids:
+                continue
+            record = visible_skill_by_id.get(normalized_skill_id)
+            if record is None:
+                continue
+            seen_selected_skill_ids.add(normalized_skill_id)
+            selected_visible_skills.append(record)
         enriched = self._inject_visible_skills_into_node_messages(messages=messages, visible_skills=selected_visible_skills)
         manager = getattr(self, 'memory_manager', None)
+        # Node catalog narrowing is always selector-driven; unified_context only gates memory block retrieval.
         if manager is None or not getattr(manager, '_feature_enabled', lambda _key: False)('unified_context'):
             return enriched
         if not (prompt or goal or core_requirement):
