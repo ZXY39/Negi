@@ -69,14 +69,16 @@ class CeoPromptBuilder:
                 skill_id = str(item.get('skill_id') or '').strip()
                 display_name = str(item.get('display_name') or '').strip()
                 description = str(item.get('description') or '').strip()
+                l0 = str(item.get('l0') or '').strip()
             else:
                 skill_id = str(getattr(item, 'skill_id', '') or '').strip()
                 display_name = str(getattr(item, 'display_name', '') or '').strip()
                 description = str(getattr(item, 'description', '') or '').strip()
+                l0 = str(getattr(item, 'l0', '') or '').strip()
             if not skill_id:
                 continue
             label = display_name if display_name and display_name != skill_id else skill_id
-            summary = description or display_name or skill_id
+            summary = l0 or description or display_name or skill_id
             lines.append(
                 f'- `{skill_id}` ({label}): {summary}. '
                 f'Load with `load_skill_context(skill_id="{skill_id}")` when you need the full workflow.'

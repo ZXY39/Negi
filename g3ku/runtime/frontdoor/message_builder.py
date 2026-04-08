@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from types import SimpleNamespace
 from typing import Any
 
 from g3ku.runtime.context.semantic_scope import plan_retrieval_scope, semantic_catalog_rankings
@@ -97,6 +98,38 @@ class CeoMessageBuilder:
                 '- Do not invent a new default, propose alternatives, or replace the retrieved default with general best practices unless the user explicitly asks to change the rule.',
             ]
         )
+
+    @staticmethod
+    def _skill_id(item: Any) -> str:
+        if isinstance(item, dict):
+            return str(item.get('skill_id') or '').strip()
+        return str(getattr(item, 'skill_id', '') or '').strip()
+
+    @classmethod
+    def _visible_skill_ids(cls, visible_skills: list[Any]) -> list[str]:
+        ids: list[str] = []
+        for item in list(visible_skills or []):
+            skill_id = cls._skill_id(item)
+            if not skill_id or skill_id in ids:
+                continue
+            ids.append(skill_id)
+        return ids
+
+    @staticmethod
+    def _tool_id(item: Any) -> str:
+        if isinstance(item, dict):
+            return str(item.get('tool_id') or '').strip()
+        return str(getattr(item, 'tool_id', '') or '').strip()
+
+    @classmethod
+    def _visible_tool_ids(cls, visible_families: list[Any]) -> list[str]:
+        ids: list[str] = []
+        for item in list(visible_families or []):
+            tool_id = cls._tool_id(item)
+            if not tool_id or tool_id in ids:
+                continue
+            ids.append(tool_id)
+        return ids
 
     @staticmethod
     def _content_text(value: Any) -> str:
@@ -281,6 +314,7 @@ class CeoMessageBuilder:
         visible_families: list[Any],
         visible_tool_names: list[str],
         top_k: int,
+        l0_only: bool = False,
     ) -> tuple[str, list[dict[str, Any]]]:
         visible_name_set = {
             str(name or '').strip()
@@ -298,7 +332,7 @@ class CeoMessageBuilder:
                 continue
             if callable_flag and available_flag and registered_callable:
                 continue
-            if not install_dir and not callable_flag:
+            if not install_dir and not callable_flag and not l0_only:
                 continue
             eligible.append(family)
         if not eligible:
@@ -309,7 +343,8 @@ class CeoMessageBuilder:
         for family in eligible[: max(1, int(top_k or 1))]:
             tool_id = str(getattr(family, 'tool_id', '') or '').strip()
             display_name = str(getattr(family, 'display_name', '') or tool_id).strip() or tool_id
-            description = str(getattr(family, 'description', '') or '').strip()
+            raw_description = str(getattr(family, 'description', '') or '').strip()
+            description = self._tool_l0_summary(family) if l0_only else raw_description
             install_dir = str(getattr(family, 'install_dir', '') or '').strip()
             callable_flag = bool(getattr(family, 'callable', True))
             available_flag = bool(getattr(family, 'available', True))
@@ -373,6 +408,25 @@ class CeoMessageBuilder:
         warnings = [str(item or '').strip() for item in list(metadata.get('warnings') or []) if str(item or '').strip()]
         errors = [str(item or '').strip() for item in list(metadata.get('errors') or []) if str(item or '').strip()]
         return '; '.join((errors + warnings)[:2])
+
+    @staticmethod
+    def _first_sentence(text: str) -> str:
+        value = str(text or '').strip()
+        if not value:
+            return ''
+        match = re.match(r'^(.*?[.!?。！？])(?:\s+|$)', value)
+        if match:
+            return str(match.group(1) or '').strip()
+        return value
+
+    @classmethod
+    def _tool_l0_summary(cls, family: Any) -> str:
+        metadata = getattr(family, 'metadata', {}) or {}
+        l0 = str(metadata.get('l0') or getattr(family, 'l0', '') or '').strip()
+        if l0:
+            return cls._first_sentence(l0)
+        description = str(getattr(family, 'description', '') or '').strip()
+        return cls._first_sentence(description)
 
     def _select_tools(
         self,
@@ -509,6 +563,46 @@ class CeoMessageBuilder:
         )
         return ordered, {'reserved': reserved, 'core': sorted(selected), 'extension': picked_extension}
 
+    @staticmethod
+    def _visible_only_skill_trace(visible_skills: list[Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                'skill_id': CeoMessageBuilder._skill_id(item),
+                'semantic_rank': None,
+            }
+            for item in list(visible_skills or [])
+            if CeoMessageBuilder._skill_id(item)
+        ]
+
+    @classmethod
+    def _visible_only_skill_items(cls, visible_skills: list[Any]) -> list[Any]:
+        selected: list[Any] = []
+        for item in list(visible_skills or []):
+            if isinstance(item, dict):
+                skill_id = str(item.get('skill_id') or '').strip()
+                if not skill_id:
+                    continue
+                l0 = str(item.get('l0') or '').strip()
+                description = str(item.get('description') or '').strip()
+                summary = cls._first_sentence(l0 or description)
+                selected.append({**item, 'description': summary, 'l0': summary or l0})
+                continue
+            skill_id = str(getattr(item, 'skill_id', '') or '').strip()
+            if not skill_id:
+                continue
+            l0 = str(getattr(item, 'l0', '') or '').strip()
+            description = str(getattr(item, 'description', '') or '').strip()
+            summary = cls._first_sentence(l0 or description)
+            selected.append(
+                SimpleNamespace(
+                    skill_id=skill_id,
+                    display_name=str(getattr(item, 'display_name', '') or '').strip(),
+                    description=summary,
+                    l0=summary or l0,
+                )
+            )
+        return selected
+
     async def build_for_ceo(
         self,
         *,
@@ -548,11 +642,18 @@ class CeoMessageBuilder:
             skill_limit=max(inventory_top_k * 4, len(visible_skills), inventory_top_k, 8),
             tool_limit=max(extension_top_k * 4, len(visible_families), extension_top_k, 8),
         )
-        selected_skills, skill_trace = self._select_skills(
-            visible_skills=visible_skills,
-            top_k=inventory_top_k,
-            ranked_skill_ids=semantic_frontdoor['skill_ids'],
-        )
+        semantic_trace = dict(semantic_frontdoor.get('trace') or {})
+        visible_only_mode = str(semantic_trace.get('mode') or '').strip().lower() == 'unavailable'
+        if visible_only_mode:
+            selected_skills = self._visible_only_skill_items(visible_skills)
+            skill_trace = self._visible_only_skill_trace(selected_skills)
+            semantic_trace = {**semantic_trace, 'mode': 'visible_only'}
+        else:
+            selected_skills, skill_trace = self._select_skills(
+                visible_skills=visible_skills,
+                top_k=inventory_top_k,
+                ranked_skill_ids=semantic_frontdoor['skill_ids'],
+            )
         split_prompt_builder = (
             callable(getattr(self._prompt_builder, 'build_base_prompt', None))
             and callable(getattr(self._prompt_builder, 'build_visible_skills_block', None))
@@ -566,7 +667,8 @@ class CeoMessageBuilder:
         external_tools_block, external_trace = self._build_external_tool_block(
             visible_families=visible_families,
             visible_tool_names=list(exposure.get('tool_names') or []),
-            top_k=8,
+            top_k=(len(visible_families) if visible_only_mode else 8),
+            l0_only=visible_only_mode,
         )
         if external_tools_block:
             system_prompt = f"{system_prompt}\n\n{external_tools_block}"
@@ -585,20 +687,52 @@ class CeoMessageBuilder:
             else:
                 system_prompt = f"{system_prompt}\n\n{self._memory_write_hint_block(memory_write_terms)}"
 
-        selected_tool_names, tool_trace = self._select_tools(
-            query_text=query_text,
-            visible_names=list(exposure.get('tool_names') or []),
-            visible_families=visible_families,
-            core_tools=core_tools,
-            extension_top_k=extension_top_k,
-            ranked_tool_ids=semantic_frontdoor['tool_ids'],
-        )
+        if visible_only_mode:
+            visible_tool_names = list(exposure.get('tool_names') or [])
+            selected_tool_names = []
+            seen_tool_names: set[str] = set()
+            for name in visible_tool_names:
+                normalized = str(name or '').strip()
+                if not normalized or normalized in seen_tool_names:
+                    continue
+                seen_tool_names.add(normalized)
+                selected_tool_names.append(normalized)
+            tool_trace = {
+                'mode': 'visible_only',
+                'reserved': [name for name in selected_tool_names if name in self.RESERVED_INTERNAL_TOOLS],
+                'core': [],
+                'extension': [name for name in selected_tool_names if name not in self.RESERVED_INTERNAL_TOOLS],
+            }
+        else:
+            selected_tool_names, tool_trace = self._select_tools(
+                query_text=query_text,
+                visible_names=list(exposure.get('tool_names') or []),
+                visible_families=visible_families,
+                core_tools=core_tools,
+                extension_top_k=extension_top_k,
+                ranked_tool_ids=semantic_frontdoor['tool_ids'],
+            )
 
         retrieval_scope = plan_retrieval_scope(
             visible_skills=visible_skills,
             visible_families=visible_families,
             semantic_frontdoor=semantic_frontdoor,
         )
+        if visible_only_mode:
+            targeted_skill_ids = self._visible_skill_ids(visible_skills)
+            targeted_tool_ids = self._visible_tool_ids(visible_families)
+            search_context_types = ['memory']
+            if targeted_skill_ids:
+                search_context_types.append('skill')
+            if targeted_tool_ids:
+                search_context_types.append('resource')
+            retrieval_scope = {
+                'mode': 'visible_only',
+                'search_context_types': search_context_types,
+                'allowed_context_types': list(search_context_types),
+                'allowed_resource_record_ids': [f'tool:{item}' for item in targeted_tool_ids],
+                'allowed_skill_record_ids': [f'skill:{item}' for item in targeted_skill_ids],
+            }
         if memory_write_terms:
             retrieval_scope = {
                 **retrieval_scope,
@@ -665,7 +799,7 @@ class CeoMessageBuilder:
         trace = {
             'selected_skills': skill_trace,
             'selected_tools': tool_trace,
-            'semantic_frontdoor': semantic_frontdoor['trace'],
+            'semantic_frontdoor': semantic_trace,
             'external_tools': external_trace,
             'retrieval_scope': {
                 'mode': str(retrieval_scope.get('mode') or ''),

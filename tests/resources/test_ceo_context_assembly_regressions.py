@@ -213,6 +213,145 @@ async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_ava
 
 
 @pytest.mark.asyncio
+async def test_message_builder_dense_unavailable_exposes_all_visible_skills_and_tools_even_when_top_k_is_one() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _SemanticMemoryManager(response="")
+    memory_manager.store = SimpleNamespace(_dense_enabled=False)
+    loop = SimpleNamespace(
+        main_task_service=None,
+        memory_manager=memory_manager,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                skill_inventory_top_k=1,
+                extension_tool_top_k=1,
+                core_tools=[],
+            )
+        ),
+    )
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="need every visible capability for fallback",
+        exposure={
+            "skills": [
+                _skill("focused-skill", "Primary workflow"),
+                _skill("secondary-skill", "Secondary workflow"),
+            ],
+            "tool_families": [
+                _family("agent_browser", "Browser automation"),
+                _family("web_fetch", "HTTP fetch helper"),
+            ],
+            "tool_names": ["filesystem", "agent_browser", "web_fetch"],
+        },
+        persisted_session=None,
+    )
+
+    assert prompt_builder.calls == [["focused-skill", "secondary-skill"]]
+    assert result.tool_names == ["filesystem", "agent_browser", "web_fetch"]
+    assert result.trace["semantic_frontdoor"]["mode"] == "visible_only"
+    assert result.trace["retrieval_scope"]["mode"] == "visible_only"
+    assert result.trace["retrieval_scope"]["allowed_skill_record_ids"] == [
+        "skill:focused-skill",
+        "skill:secondary-skill",
+    ]
+    assert result.trace["retrieval_scope"]["allowed_resource_record_ids"] == [
+        "tool:agent_browser",
+        "tool:web_fetch",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_message_builder_semantic_disabled_keeps_top_k_selection_and_non_visible_only_trace() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    loop = SimpleNamespace(
+        main_task_service=None,
+        memory_manager=memory_manager,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                skill_inventory_top_k=1,
+                extension_tool_top_k=1,
+                core_tools=[],
+            )
+        ),
+    )
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="focused browser workflow",
+        exposure={
+            "skills": [
+                _skill("focused-skill", "Primary workflow"),
+                _skill("secondary-skill", "Secondary workflow"),
+            ],
+            "tool_families": [
+                _family("agent_browser", "Browser automation"),
+                _family("web_fetch", "HTTP fetch helper"),
+            ],
+            "tool_names": ["filesystem", "agent_browser", "web_fetch"],
+        },
+        persisted_session=None,
+    )
+
+    assert prompt_builder.calls == [["focused-skill"]]
+    assert result.trace["semantic_frontdoor"]["mode"] == "disabled"
+    assert result.trace["retrieval_scope"]["mode"] == "rbac_fallback"
+    assert result.trace["selected_tools"].get("mode") != "visible_only"
+    assert len(result.tool_names) == 1
+
+
+@pytest.mark.asyncio
+async def test_message_builder_dense_unavailable_retrieval_scope_includes_dict_visible_skill_ids() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _SemanticMemoryManager(response="")
+    memory_manager.store = SimpleNamespace(_dense_enabled=False)
+    loop = SimpleNamespace(
+        main_task_service=None,
+        memory_manager=memory_manager,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                skill_inventory_top_k=1,
+                extension_tool_top_k=1,
+                core_tools=[],
+            )
+        ),
+    )
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="need fallback scope",
+        exposure={
+            "skills": [
+                {
+                    "skill_id": "dict-skill",
+                    "display_name": "Dict Skill",
+                    "description": "Dict short summary. Dict details should not appear.",
+                    "l0": "Dict short summary.",
+                },
+                _skill("object-skill", "Object workflow"),
+            ],
+            "tool_families": [_family("agent_browser", "Browser automation")],
+            "tool_names": ["filesystem", "agent_browser"],
+        },
+        persisted_session=None,
+    )
+
+    assert result.trace["semantic_frontdoor"]["mode"] == "visible_only"
+    assert result.trace["retrieval_scope"]["mode"] == "visible_only"
+    assert result.trace["retrieval_scope"]["allowed_skill_record_ids"] == [
+        "skill:dict-skill",
+        "skill:object-skill",
+    ]
+    assert [item["skill_id"] for item in result.trace["selected_skills"]] == [
+        "dict-skill",
+        "object-skill",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_message_builder_keeps_control_tools_visible_in_tool_selection() -> None:
     builder = CeoMessageBuilder(
         loop=SimpleNamespace(main_task_service=None, memory_manager=None, _memory_runtime_settings=SimpleNamespace(assembly=SimpleNamespace(core_tools=[]))),
@@ -235,6 +374,152 @@ async def test_message_builder_keeps_control_tools_visible_in_tool_selection() -
     assert "stop_tool_execution" in selected
     assert "wait_tool_execution" in selected
     assert trace["reserved"] == ["stop_tool_execution", "wait_tool_execution"]
+
+
+@pytest.mark.asyncio
+async def test_message_builder_dense_unavailable_renders_l0_only_skill_and_external_tool_summaries() -> None:
+    memory_manager = _SemanticMemoryManager(response="")
+    memory_manager.store = SimpleNamespace(_dense_enabled=False)
+    loop = SimpleNamespace(
+        workspace=Path.cwd(),
+        main_task_service=None,
+        memory_manager=memory_manager,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                skill_inventory_top_k=1,
+                extension_tool_top_k=1,
+                core_tools=[],
+            )
+        ),
+    )
+    builder = CeoMessageBuilder(
+        loop=loop,
+        prompt_builder=CeoPromptBuilder(loop=SimpleNamespace(workspace=Path.cwd())),
+    )
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="fallback summary mode",
+        exposure={
+            "skills": [
+                {
+                    "skill_id": "focused-skill",
+                    "display_name": "Focused Skill",
+                    "description": "L0 concise skill summary. Detail sentence should not appear.",
+                    "l0": "L0 concise skill summary.",
+                }
+            ],
+            "tool_families": [
+                _family(
+                    "external_docs",
+                    "L0 external tool summary. Detail sentence should not appear.",
+                    callable=False,
+                    available=False,
+                    install_dir="plugins/external_docs",
+                    metadata={"l0": "L0 external tool summary."},
+                )
+            ],
+            "tool_names": ["filesystem", "load_tool_context"],
+        },
+        persisted_session=None,
+    )
+
+    system_prompt = str(result.model_messages[0].get("content") or "")
+    overlay = str(getattr(result, "turn_overlay_text", "") or "")
+    assert "L0 concise skill summary." in overlay
+    assert "L0 external tool summary." in system_prompt
+    assert "Detail sentence should not appear." not in system_prompt
+    assert "Detail sentence should not appear." not in overlay
+
+
+@pytest.mark.asyncio
+async def test_message_builder_dense_unavailable_renders_l0_style_for_object_skills() -> None:
+    memory_manager = _SemanticMemoryManager(response="")
+    memory_manager.store = SimpleNamespace(_dense_enabled=False)
+    loop = SimpleNamespace(
+        workspace=Path.cwd(),
+        main_task_service=None,
+        memory_manager=memory_manager,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                skill_inventory_top_k=1,
+                extension_tool_top_k=1,
+                core_tools=[],
+            )
+        ),
+    )
+    builder = CeoMessageBuilder(
+        loop=loop,
+        prompt_builder=CeoPromptBuilder(loop=SimpleNamespace(workspace=Path.cwd())),
+    )
+
+    object_skill = SimpleNamespace(
+        skill_id="object-skill",
+        display_name="Object Skill",
+        description="Object skill short summary. Object detail sentence should not appear.",
+    )
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="fallback summary mode object skill",
+        exposure={
+            "skills": [object_skill],
+            "tool_families": [],
+            "tool_names": ["filesystem", "load_tool_context"],
+        },
+        persisted_session=None,
+    )
+
+    overlay = str(getattr(result, "turn_overlay_text", "") or "")
+    assert "Object skill short summary." in overlay
+    assert "Object detail sentence should not appear." not in overlay
+
+
+@pytest.mark.asyncio
+async def test_message_builder_dense_unavailable_keeps_non_callable_external_tool_with_empty_install_dir() -> None:
+    memory_manager = _SemanticMemoryManager(response="")
+    memory_manager.store = SimpleNamespace(_dense_enabled=False)
+    loop = SimpleNamespace(
+        workspace=Path.cwd(),
+        main_task_service=None,
+        memory_manager=memory_manager,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                skill_inventory_top_k=1,
+                extension_tool_top_k=1,
+                core_tools=[],
+            )
+        ),
+    )
+    builder = CeoMessageBuilder(
+        loop=loop,
+        prompt_builder=CeoPromptBuilder(loop=SimpleNamespace(workspace=Path.cwd())),
+    )
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="fallback summary mode external tool",
+        exposure={
+            "skills": [],
+            "tool_families": [
+                _family(
+                    "external_docs",
+                    "External docs short summary. Detail sentence should not appear.",
+                    callable=False,
+                    available=False,
+                    install_dir="",
+                    metadata={"l0": "External docs short summary."},
+                )
+            ],
+            "tool_names": ["filesystem", "load_tool_context"],
+        },
+        persisted_session=None,
+    )
+
+    system_prompt = str(result.model_messages[0].get("content") or "")
+    assert '`external_docs`' in system_prompt
+    assert "External docs short summary." in system_prompt
+    assert [item["tool_id"] for item in result.trace["external_tools"]] == ["external_docs"]
 
 
 @pytest.mark.asyncio
