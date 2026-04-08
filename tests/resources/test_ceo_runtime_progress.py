@@ -1642,7 +1642,9 @@ def test_inflight_snapshot_without_real_stage_state_keeps_legacy_tool_flow_inste
     snapshot = session.inflight_turn_snapshot()
 
     assert snapshot is not None
-    assert "execution_trace_summary" not in snapshot
+    summary = snapshot.get("execution_trace_summary") if isinstance(snapshot, dict) else None
+    stages = summary.get("stages") if isinstance(summary, dict) else None
+    assert not stages
     assert [item["tool_name"] for item in snapshot["tool_events"]] == ["load_tool_context", "memory_search"]
     assert [item["status"] for item in snapshot["tool_events"]] == ["success", "running"]
 
@@ -1710,7 +1712,11 @@ def test_inflight_snapshot_with_real_stage_state_preserves_goal_budget_and_round
     snapshot = session.inflight_turn_snapshot()
 
     assert snapshot is not None
-    stage = snapshot["execution_trace_summary"]["stages"][0]
+    trace = snapshot["execution_trace_summary"]
+    assert trace["active_stage_id"] == "frontdoor-stage-1"
+    assert len(trace["stages"]) == 1
+    stage = trace["stages"][0]
+    assert stage["stage_id"] == "frontdoor-stage-1"
     assert stage["stage_goal"] == "查看当前可检索的长期记忆，并向用户按类别清晰汇总我已记住的内容。"
     assert stage["tool_round_budget"] == 3
     assert [len(round_item["tools"]) for round_item in stage["rounds"]] == [1, 1]

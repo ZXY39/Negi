@@ -174,7 +174,7 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
     const { renderCeoStageTraceIntoTurn } = loadApp();
     const turn = makeTurn({ text: "" });
 
-    renderCeoStageTraceIntoTurn(turn, {
+    const renderedSteps = renderCeoStageTraceIntoTurn(turn, {
         stages: [
             {
                 stage_id: "inflight-stage-1",
@@ -218,6 +218,10 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
     assert.match(turn.listEl.innerHTML, /查看当前可检索的长期记忆/);
     assert.match(turn.listEl.innerHTML, /本阶段最大轮数为3/);
     assert.doesNotMatch(turn.listEl.innerHTML, /本阶段最大轮数为0/);
+    assert.match(turn.listEl.innerHTML, /loaded context/);
+    assert.match(turn.listEl.innerHTML, /memory_search/);
+    assert.equal(renderedSteps, 2);
+    assert.match(turn.metaEl.textContent, /2/);
     assert.doesNotMatch(turn.listEl.innerHTML, /submit_next_stage/);
 });
 
