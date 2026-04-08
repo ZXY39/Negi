@@ -4,6 +4,7 @@ from typing import Any
 
 
 _PREVIEW_CHAR_LIMIT = 160
+_RAW_OUTPUT_FALLBACK_PREVIEW_LIMIT = 24
 
 
 def _preview_text(value: Any, *, limit: int = _PREVIEW_CHAR_LIMIT) -> str:
@@ -13,25 +14,40 @@ def _preview_text(value: Any, *, limit: int = _PREVIEW_CHAR_LIMIT) -> str:
     return f"{compact[: limit - 3].rstrip()}..."
 
 
+def _raw_output_fallback_preview(value: Any) -> str:
+    compact = " ".join(str(value or "").split()).strip()
+    if not compact:
+        return ""
+    if len(compact) <= 8:
+        return "output available"
+    preview_limit = min(_RAW_OUTPUT_FALLBACK_PREVIEW_LIMIT, max(len(compact) - 1, 8))
+    snippet = compact[:preview_limit].rstrip()
+    if len(snippet) >= len(compact):
+        snippet = compact[: max(min(len(compact) - 1, 12), 1)].rstrip()
+    return f"{snippet}..." if snippet else "output available"
+
+
 def compact_tool_step_for_summary(step: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(step, dict):
         return None
 
+    arguments_preview = _preview_text(step.get("arguments_preview") or step.get("arguments_text"))
+    output_preview = _preview_text(step.get("output_preview") or step.get("output_preview_text"))
+    if not output_preview:
+        output_preview = _raw_output_fallback_preview(step.get("output_text") or step.get("text"))
+
     payload: dict[str, Any] = {
         "tool_call_id": str(step.get("tool_call_id") or "").strip(),
         "tool_name": str(step.get("tool_name") or "").strip() or "tool",
-        "arguments_preview": _preview_text(step.get("arguments_preview") or step.get("arguments_text")),
-        "output_preview": _preview_text(
-            step.get("output_preview")
-            or step.get("output_preview_text")
-            or step.get("output_text")
-            or step.get("text")
-        ),
         "output_ref": str(step.get("output_ref") or "").strip(),
         "status": str(step.get("status") or "").strip(),
         "started_at": str(step.get("started_at") or "").strip(),
         "finished_at": str(step.get("finished_at") or "").strip(),
     }
+    if arguments_preview:
+        payload["arguments_preview"] = arguments_preview
+    if output_preview:
+        payload["output_preview"] = output_preview
 
     elapsed_seconds = step.get("elapsed_seconds")
     if elapsed_seconds is not None:

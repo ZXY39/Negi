@@ -3926,6 +3926,48 @@ def test_node_detail_summary_compacts_tool_payloads_from_trace(tmp_path: Path):
     assert "output_text" not in tool
 
 
+def test_node_detail_summary_mode_keeps_tool_output_only_in_refs(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+    assert root is not None
+    _create_pending_tool_round(
+        service,
+        task_id=record.task_id,
+        node_id=root.node_id,
+        tool_calls=[{"id": "call-1", "name": "filesystem", "arguments": {"path": "."}}],
+        live_tool_calls=[{"tool_call_id": "call-1", "tool_name": "filesystem", "status": "running"}],
+        content="pending compaction regression",
+    )
+    service.log_service.upsert_synthetic_tool_result(
+        task_id=record.task_id,
+        node_id=root.node_id,
+        tool_call_id="call-1",
+        tool_name="filesystem",
+        status="success",
+        arguments_text='{"path": "."}',
+        output_text="full tool output should not be in summary trace",
+        output_ref="artifact:artifact:tool-output",
+    )
+    service.log_service.sync_node_read_model(record.task_id, root.node_id, externalize_execution_trace=True)
+
+    payload = service.node_detail(record.task_id, root.node_id, detail_level="summary")
+
+    assert payload is not None
+    tools = payload["item"]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+
+    assert tools[0]["output_ref"] == "artifact:artifact:tool-output"
+    assert "full tool output should not be in summary trace" not in str(tools[0])
+
+
 def test_node_detail_resolves_full_final_and_acceptance_text_from_refs(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

@@ -2269,6 +2269,61 @@ def test_inflight_execution_trace_summary_compacts_tool_payloads() -> None:
     assert "output_text" not in tools[0]
 
 
+def test_ceo_snapshot_summary_keeps_old_tool_details_only_as_preview_and_ref() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._frontdoor_stage_state = {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_kind": "normal",
+                "stage_goal": "inspect repository",
+                "tool_round_budget": 2,
+                "tool_rounds_used": 1,
+                "status": "active",
+                "rounds": [
+                    {
+                        "round_id": "frontdoor-stage-1:round-1",
+                        "round_index": 1,
+                        "created_at": "2026-04-08T12:00:00+08:00",
+                        "budget_counted": True,
+                        "tool_call_ids": ["call-1"],
+                        "tool_names": ["load_tool_context"],
+                    }
+                ],
+            }
+        ],
+    }
+    session._interaction_flow_snapshot = lambda: [
+        {
+            "tool_call_id": "call-1",
+            "tool_name": "load_tool_context",
+            "arguments_text": '{"tool_id": "filesystem"}',
+            "output_text": "full tool output should not survive in snapshot summary",
+            "output_ref": "artifact:artifact:tool-output",
+            "status": "success",
+            "timestamp": "2026-04-08T12:00:01+08:00",
+        }
+    ]
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert snapshot is not None
+    tools = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+
+    assert tools[0]["output_ref"] == "artifact:artifact:tool-output"
+    assert "full tool output should not survive in snapshot summary" not in str(tools[0])
+
+
 @pytest.mark.parametrize(
     "stages",
     [
