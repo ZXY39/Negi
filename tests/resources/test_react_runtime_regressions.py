@@ -9,6 +9,8 @@ from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager
 from g3ku.agent.tools.base import Tool
 from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.providers.base import LLMResponse, ToolCallRequest
+from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
+import main.service.runtime_service as runtime_service_module
 from main.runtime.internal_tools import SubmitFinalResultTool
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.tool_call_repair import extract_tool_calls_from_xml_pseudo_content
@@ -606,26 +608,53 @@ async def test_react_loop_uses_latest_model_refs_from_supplier_between_turns() -
 
 
 @pytest.mark.asyncio
-async def test_enrich_node_messages_passes_visibility_filtered_allowlists() -> None:
-    captured: dict[str, object] = {}
+async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_skills_and_retrieves_memory_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selector_calls: list[dict[str, object]] = []
+    retrieve_block_calls: list[dict[str, object]] = []
 
     class _MemoryManager:
         def _feature_enabled(self, key: str) -> bool:
             return key == "unified_context"
 
         async def retrieve_block(self, **kwargs):
-            captured.update(kwargs)
+            retrieve_block_calls.append(dict(kwargs))
             return "memory block"
+
+    async def _fake_build_node_context_selection(**kwargs):
+        selector_calls.append(dict(kwargs))
+        return NodeContextSelectionResult(
+            mode="visible_only",
+            memory_search_visible=True,
+            selected_skill_ids=["skill-creator", "tmux"],
+            selected_tool_names=["filesystem", "memory_search"],
+            memory_query="Prompt: where is the plan\nGoal: where is the plan\nCore requirement: where is the plan",
+            retrieval_scope={
+                "search_context_types": ["memory"],
+                "allowed_context_types": ["memory"],
+                "allowed_resource_record_ids": [],
+                "allowed_skill_record_ids": [],
+            },
+            trace={"mode": "visible_only"},
+        )
+
+    monkeypatch.setattr(
+        runtime_service_module,
+        "build_node_context_selection",
+        _fake_build_node_context_selection,
+    )
 
     service = object.__new__(MainRuntimeService)
     service.memory_manager = _MemoryManager()
     service.list_visible_tool_families = lambda *, actor_role, session_id: [
         SimpleNamespace(tool_id='filesystem'),
-        SimpleNamespace(tool_id='content'),
     ]
     service.list_visible_skill_resources = lambda *, actor_role, session_id: [
-        SimpleNamespace(skill_id='skill-creator'),
+        SimpleNamespace(skill_id='skill-creator', display_name='skill-creator', description='skill creator'),
+        SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
     ]
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['filesystem', 'memory_search']
 
     task = SimpleNamespace(
         session_id="web:ceo-origin",
@@ -636,55 +665,99 @@ async def test_enrich_node_messages_passes_visibility_filtered_allowlists() -> N
     enriched = await service._enrich_node_messages(
         task=task,
         node=node,
-        messages=[{"role": "system", "content": "base prompt"}],
+        messages=[
+            {"role": "system", "content": "base prompt"},
+            {"role": "user", "content": '{"prompt":"where is the plan"}'},
+        ],
     )
 
-    assert captured["session_key"] == "web:ceo-origin"
-    assert captured["channel"] == "web"
-    assert captured["chat_id"] == "shared"
-    assert captured["allowed_context_types"] == ["memory", "skill", "resource"]
-    assert captured["allowed_resource_record_ids"] == ["tool:filesystem", "tool:content"]
-    assert captured["allowed_skill_record_ids"] == ["skill:skill-creator"]
+    assert selector_calls == [
+        {
+            "loop": None,
+            "memory_manager": service.memory_manager,
+            "prompt": "where is the plan",
+            "goal": "where is the plan",
+            "core_requirement": "where is the plan",
+            "visible_skills": service.list_visible_skill_resources(actor_role="execution", session_id="web:ceo-origin"),
+            "visible_tool_families": service.list_visible_tool_families(actor_role="execution", session_id="web:ceo-origin"),
+            "visible_tool_names": ["filesystem", "memory_search"],
+        }
+    ]
+    assert retrieve_block_calls == [
+        {
+            "query": "Prompt: where is the plan\nGoal: where is the plan\nCore requirement: where is the plan",
+            "session_key": "web:ceo-origin",
+            "channel": "web",
+            "chat_id": "shared",
+            "search_context_types": ["memory"],
+            "allowed_context_types": ["memory"],
+            "allowed_resource_record_ids": [],
+            "allowed_skill_record_ids": [],
+        }
+    ]
+    user_payload = json.loads(str(enriched[1]["content"] or ""))
+    assert user_payload["visible_skills"] == [
+        {
+            "skill_id": "skill-creator",
+            "display_name": "skill-creator",
+            "description": "skill creator",
+        },
+        {
+            "skill_id": "tmux",
+            "display_name": "tmux",
+            "description": "terminal workflow",
+        },
+    ]
     assert "memory block" in enriched[0]["content"]
 
 
 @pytest.mark.asyncio
-async def test_enrich_node_messages_uses_dense_only_scope_when_semantic_search_is_available() -> None:
-    captured: dict[str, object] = {}
+async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_only_retrieval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retrieve_block_calls: list[dict[str, object]] = []
 
     class _MemoryManager:
-        def __init__(self) -> None:
-            self.store = SimpleNamespace(_dense_enabled=True)
-
         def _feature_enabled(self, key: str) -> bool:
             return key == "unified_context"
 
-        async def semantic_search_context_records(
-            self,
-            *,
-            namespace_prefix=None,
-            query: str,
-            limit: int = 8,
-            context_type: str | None = None,
-        ):
-            _ = namespace_prefix, query, limit
-            record_ids = ['skill:tmux'] if context_type == 'skill' else ['tool:content']
-            return [SimpleNamespace(record_id=record_id) for record_id in record_ids]
-
         async def retrieve_block(self, **kwargs):
-            captured.update(kwargs)
+            retrieve_block_calls.append(dict(kwargs))
             return "semantic block"
+
+    async def _fake_build_node_context_selection(**kwargs):
+        _ = kwargs
+        return NodeContextSelectionResult(
+            mode="dense_rerank",
+            memory_search_visible=True,
+            selected_skill_ids=["tmux"],
+            selected_tool_names=["content"],
+            memory_query="Prompt: terminal workflow\nGoal: terminal workflow\nCore requirement: terminal workflow",
+            retrieval_scope={
+                "search_context_types": ["memory"],
+                "allowed_context_types": ["memory"],
+                "allowed_resource_record_ids": [],
+                "allowed_skill_record_ids": [],
+            },
+            trace={"mode": "dense_rerank"},
+        )
+
+    monkeypatch.setattr(
+        runtime_service_module,
+        "build_node_context_selection",
+        _fake_build_node_context_selection,
+    )
 
     service = object.__new__(MainRuntimeService)
     service.memory_manager = _MemoryManager()
     service.list_visible_tool_families = lambda *, actor_role, session_id: [
-        SimpleNamespace(tool_id='filesystem'),
         SimpleNamespace(tool_id='content'),
     ]
     service.list_visible_skill_resources = lambda *, actor_role, session_id: [
-        SimpleNamespace(skill_id='skill-creator'),
-        SimpleNamespace(skill_id='tmux'),
+        SimpleNamespace(skill_id='skill-creator', display_name='skill-creator', description='skill creator'),
+        SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
     ]
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content', 'memory_search']
 
     task = SimpleNamespace(
         session_id="web:ceo-origin",
@@ -695,16 +768,109 @@ async def test_enrich_node_messages_uses_dense_only_scope_when_semantic_search_i
     enriched = await service._enrich_node_messages(
         task=task,
         node=node,
-        messages=[{"role": "system", "content": "base prompt"}],
+        messages=[
+            {"role": "system", "content": "base prompt"},
+            {"role": "user", "content": '{"prompt":"terminal workflow"}'},
+        ],
     )
 
-    assert captured["search_context_types"] == ["memory", "skill", "resource"]
-    assert captured["allowed_context_types"] == ["memory", "skill", "resource"]
-    assert captured["allowed_resource_record_ids"] == ["tool:content"]
-    assert captured["allowed_skill_record_ids"] == ["skill:tmux"]
+    assert retrieve_block_calls == [
+        {
+            "query": "Prompt: terminal workflow\nGoal: terminal workflow\nCore requirement: terminal workflow",
+            "session_key": "web:ceo-origin",
+            "channel": "web",
+            "chat_id": "shared",
+            "search_context_types": ["memory"],
+            "allowed_context_types": ["memory"],
+            "allowed_resource_record_ids": [],
+            "allowed_skill_record_ids": [],
+        }
+    ]
+    user_payload = json.loads(str(enriched[1]["content"] or ""))
+    assert user_payload["visible_skills"] == [
+        {
+            "skill_id": "tmux",
+            "display_name": "tmux",
+            "description": "terminal workflow",
+        }
+    ]
     assert "semantic block" in enriched[0]["content"]
 
 
+@pytest.mark.asyncio
+async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_not_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retrieve_block_calls: list[dict[str, object]] = []
+
+    class _MemoryManager:
+        def _feature_enabled(self, key: str) -> bool:
+            return key == "unified_context"
+
+        async def retrieve_block(self, **kwargs):
+            retrieve_block_calls.append(dict(kwargs))
+            return "unexpected memory block"
+
+    async def _fake_build_node_context_selection(**kwargs):
+        _ = kwargs
+        return NodeContextSelectionResult(
+            mode="dense_rerank",
+            memory_search_visible=False,
+            selected_skill_ids=["tmux"],
+            selected_tool_names=["filesystem"],
+            memory_query="",
+            retrieval_scope={
+                "search_context_types": [],
+                "allowed_context_types": [],
+                "allowed_resource_record_ids": [],
+                "allowed_skill_record_ids": [],
+            },
+            trace={"mode": "dense_rerank"},
+        )
+
+    monkeypatch.setattr(
+        runtime_service_module,
+        "build_node_context_selection",
+        _fake_build_node_context_selection,
+    )
+
+    service = object.__new__(MainRuntimeService)
+    service.memory_manager = _MemoryManager()
+    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='filesystem'),
+    ]
+    service.list_visible_skill_resources = lambda *, actor_role, session_id: [
+        SimpleNamespace(skill_id='skill-creator', display_name='skill-creator', description='skill'),
+        SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
+    ]
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['filesystem']
+
+    task = SimpleNamespace(
+        session_id="web:ceo-origin",
+        metadata={"memory_scope": {"channel": "web", "chat_id": "shared"}},
+    )
+    node = SimpleNamespace(prompt="where is the plan", goal="where is the plan", node_kind="execution")
+
+    enriched = await service._enrich_node_messages(
+        task=task,
+        node=node,
+        messages=[
+            {"role": "system", "content": "base prompt"},
+            {"role": "user", "content": '{"prompt":"where is the plan"}'},
+        ],
+    )
+
+    user_messages = [message for message in enriched if message.get("role") == "user"]
+    assert len(user_messages) == 1
+    payload = json.loads(str(user_messages[0].get("content") or ""))
+    assert payload["visible_skills"] == [
+        {
+            "skill_id": "tmux",
+            "display_name": "tmux",
+            "description": "terminal workflow",
+        }
+    ]
+    assert retrieve_block_calls == []
 def test_filter_retrieved_records_preserves_memory_and_filters_catalog_context() -> None:
     records = [
         ContextRecordV2(record_id="memory-1", context_type="memory", uri="g3ku://memory/web/shared/memory-1"),
