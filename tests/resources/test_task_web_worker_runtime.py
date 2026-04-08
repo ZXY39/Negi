@@ -3863,7 +3863,7 @@ def test_get_node_detail_payload_summary_mode_uses_previews_instead_of_full_inli
     assert item["final_output_ref"].startswith("artifact:")
 
 
-def test_node_detail_summary_compacts_tool_payloads(tmp_path: Path):
+def test_node_detail_summary_compacts_tool_trace_payloads(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -3880,7 +3880,15 @@ def test_node_detail_summary_compacts_tool_payloads(tmp_path: Path):
         service,
         task_id=record.task_id,
         node_id=root.node_id,
-        tool_calls=[{"id": "call-1", "name": "filesystem", "arguments": '{"path": "."}'}],
+        tool_calls=[
+            {
+                "id": "call-1",
+                "name": "filesystem",
+                "arguments": {"path": str(tmp_path)},
+            }
+        ],
+        live_tool_calls=[{"tool_call_id": "call-1", "tool_name": "filesystem", "status": "running"}],
+        content="pending compaction regression",
     )
     service.log_service.upsert_synthetic_tool_result(
         task_id=record.task_id,
@@ -3888,9 +3896,11 @@ def test_node_detail_summary_compacts_tool_payloads(tmp_path: Path):
         tool_call_id="call-1",
         tool_name="filesystem",
         status="success",
-        arguments_text='{"path": "."}',
+        arguments_text=json.dumps({"path": str(tmp_path)}, ensure_ascii=False),
         output_text="very long inline output",
         output_ref="artifact:artifact:tool-output",
+        started_at=now_iso(),
+        finished_at=now_iso(),
     )
     service.log_service.sync_node_read_model(record.task_id, root.node_id, externalize_execution_trace=True)
     payload = service.get_node_detail_payload(record.task_id, root.node_id)
@@ -3907,7 +3917,7 @@ def test_node_detail_summary_compacts_tool_payloads(tmp_path: Path):
 
     assert tool["tool_call_id"] == "call-1"
     assert tool["tool_name"] == "filesystem"
-    assert tool["arguments_preview"] == '{"path": "."}'
+    assert tool["arguments_preview"] == json.dumps({"path": str(tmp_path)}, ensure_ascii=False)
     assert tool.get("output_preview")
     assert tool["output_ref"] == "artifact:artifact:tool-output"
     assert "arguments_text" not in tool
