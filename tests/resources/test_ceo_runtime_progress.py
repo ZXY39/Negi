@@ -1670,7 +1670,7 @@ def test_inflight_snapshot_with_real_stage_state_preserves_goal_budget_and_round
                 "mode": "自主执行",
                 "stage_kind": "normal",
                 "rounds": [
-                    {"round_index": 1, "tool_names": ["memory_search"]},
+                    {"round_index": 1, "tool_names": ["load_tool_context"]},
                     {"round_index": 2, "tool_names": ["memory_search"]},
                 ],
             }
@@ -1681,18 +1681,18 @@ def test_inflight_snapshot_with_real_stage_state_preserves_goal_budget_and_round
             "type": "tool_execution_start",
             "timestamp": "2026-04-08T08:01:00Z",
             "payload": {
-                "tool_name": "memory_search",
+                "tool_name": "load_tool_context",
                 "text": "round 1 started",
-                "tool_call_id": "memory_search:1",
+                "tool_call_id": "load_tool_context:1",
             },
         },
         {
             "type": "tool_execution_end",
             "timestamp": "2026-04-08T08:01:01Z",
             "payload": {
-                "tool_name": "memory_search",
+                "tool_name": "load_tool_context",
                 "text": "round 1 done",
-                "tool_call_id": "memory_search:1",
+                "tool_call_id": "load_tool_context:1",
                 "is_error": False,
             },
         },
@@ -1714,7 +1714,9 @@ def test_inflight_snapshot_with_real_stage_state_preserves_goal_budget_and_round
     assert stage["stage_goal"] == "查看当前可检索的长期记忆，并向用户按类别清晰汇总我已记住的内容。"
     assert stage["tool_round_budget"] == 3
     assert [len(round_item["tools"]) for round_item in stage["rounds"]] == [1, 1]
-    assert stage["rounds"][0]["tools"][0]["tool_call_id"] == "memory_search:1"
+    assert [item["tool_name"] for item in stage["rounds"][0]["tools"]] == ["load_tool_context"]
+    assert [item["tool_name"] for item in stage["rounds"][1]["tools"]] == ["memory_search"]
+    assert stage["rounds"][0]["tools"][0]["tool_call_id"] == "load_tool_context:1"
     assert stage["rounds"][1]["tools"][0]["tool_call_id"] == "memory_search:2"
 
 
