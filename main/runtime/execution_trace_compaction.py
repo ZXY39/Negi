@@ -25,6 +25,7 @@ def compact_tool_step_for_summary(step: dict[str, Any] | None) -> dict[str, Any]
             step.get("output_preview")
             or step.get("output_preview_text")
             or step.get("output_text")
+            or step.get("text")
         ),
         "output_ref": str(step.get("output_ref") or "").strip(),
         "status": str(step.get("status") or "").strip(),
@@ -63,5 +64,17 @@ def compact_tool_step_for_summary(step: dict[str, Any] | None) -> dict[str, Any]
     lost_result_summary = str(step.get("lost_result_summary") or "").strip()
     if lost_result_summary:
         payload["lost_result_summary"] = lost_result_summary
+
+    timestamp = str(step.get("timestamp") or "").strip()
+    if timestamp:
+        payload["timestamp"] = timestamp
+
+    kind = str(step.get("kind") or "").strip()
+    if kind:
+        payload["kind"] = kind
+
+    source = str(step.get("source") or "").strip()
+    if source:
+        payload["source"] = source
 
     return payload

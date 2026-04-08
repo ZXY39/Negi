@@ -466,6 +466,10 @@ class RuntimeAgentSession:
                     "status": str(item.get("status") or "").strip(),
                     "started_at": str(item.get("started_at") or "").strip(),
                     "finished_at": str(item.get("finished_at") or "").strip(),
+                    "text": str(item.get("text") or "").strip(),
+                    "timestamp": str(item.get("timestamp") or "").strip(),
+                    "kind": str(item.get("kind") or "").strip(),
+                    "source": str(item.get("source") or "").strip().lower(),
                     "recovery_decision": str(item.get("recovery_decision") or "").strip(),
                     "lost_result_summary": str(item.get("lost_result_summary") or "").strip(),
                     "related_tool_call_ids": [
