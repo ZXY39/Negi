@@ -188,6 +188,44 @@ def test_initial_persistent_state_tracks_stage_state_and_runtime_marker() -> Non
     assert state["agent_runtime"] == "create_agent"
 
 
+@pytest.mark.asyncio
+async def test_create_agent_runner_prompt_uses_compacted_history_messages_when_threshold_exceeded() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            _memory_runtime_settings=SimpleNamespace(
+                assembly=SimpleNamespace(
+                    frontdoor_summarizer_trigger_message_count=4,
+                    frontdoor_summarizer_keep_message_count=2,
+                    core_tools=[],
+                )
+            ),
+            main_task_service=None,
+            memory_manager=None,
+            provider_name="openai",
+            model="gpt-test",
+            tools=SimpleNamespace(get=lambda *_: None, tool_names=[]),
+        )
+    )
+
+    state = {
+        "session_key": "web:shared",
+        "messages": [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "u3"},
+        ],
+        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+        "compression_state": {"status": "", "text": "", "source": ""},
+    }
+
+    result = await runner._summarize_messages(messages=state["messages"], state=state)
+
+    assert any("Conversation summary:" in str(item.get("content") or "") for item in result["messages"])
+
+
 def test_build_ceo_agent_uses_create_agent_with_persistence(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

@@ -37,6 +37,7 @@ from main.runtime.tool_call_repair import (
 from g3ku.runtime.web_ceo_sessions import frontdoor_stage_archive_task_id
 
 from ._ceo_support import CeoFrontDoorSupport
+from .history_compaction import compact_history_messages
 from .state_models import (
     CeoFrontdoorInterrupted,
     CeoPendingInterrupt,
@@ -58,6 +59,15 @@ class VisibleToolBundle:
     native_tools: dict[str, Tool]
     langchain_tools: list[BaseTool]
     langchain_tool_map: dict[str, BaseTool]
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return default
+    return normalized if normalized > 0 else default
+
 
 def _checkpoint_safe_value(value: Any) -> Any:
     if value is None or isinstance(value, str | int | float | bool):
@@ -803,7 +813,29 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: CeoGraphState,
     ) -> dict[str, Any]:
         _ = state
-        return {"messages": list(messages or [])}
+        assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
+        trigger = _positive_int(
+            getattr(
+                assembly_cfg,
+                "frontdoor_summarizer_trigger_message_count",
+                getattr(assembly_cfg, "frontdoor_summary_trigger_message_count", 10),
+            ),
+            10,
+        )
+        keep = _positive_int(
+            getattr(
+                assembly_cfg,
+                "frontdoor_summarizer_keep_message_count",
+                getattr(assembly_cfg, "frontdoor_recent_message_count", 20),
+            ),
+            20,
+        )
+        compacted = compact_history_messages(
+            messages=list(messages or []),
+            trigger_message_count=trigger,
+            keep_message_count=keep,
+        )
+        return {"messages": compacted}
 
     def _reviewable_tool_names(self) -> set[str]:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)

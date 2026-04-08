@@ -314,11 +314,41 @@ async def test_summarize_messages_keeps_history_raw_under_stage_budget_defaults(
         )
     )
 
-    messages = [{"role": "user", "content": f"message {idx}"} for idx in range(22)]
+    messages = [{"role": "user", "content": f"message {idx}"} for idx in range(10)]
 
     result = await runner._summarize_messages(messages=messages, state={})
 
     assert result == {"messages": messages}
+
+
+@pytest.mark.asyncio
+async def test_summarize_messages_replaces_old_history_with_compact_boundary_and_summary() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            _memory_runtime_settings=SimpleNamespace(
+                assembly=SimpleNamespace(
+                    frontdoor_summarizer_trigger_message_count=4,
+                    frontdoor_summarizer_keep_message_count=2,
+                )
+            )
+        )
+    )
+
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+    ]
+
+    result = await runner._summarize_messages(messages=messages, state={})
+    compacted = result["messages"]
+
+    assert any("COMPACT BOUNDARY" in str(item.get("content") or "") for item in compacted if isinstance(item, dict))
+    assert any("Conversation summary:" in str(item.get("content") or "") for item in compacted if isinstance(item, dict))
+    assert compacted[-2:] == [{"role": "assistant", "content": "a2"}, {"role": "user", "content": "u3"}]
 
 @pytest.mark.asyncio
 async def test_runtime_agent_session_prompt_keeps_rag_ingest_payload_raw_and_skips_commit(tmp_path, monkeypatch) -> None:
