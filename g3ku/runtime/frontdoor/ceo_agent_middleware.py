@@ -10,6 +10,7 @@ from langchain.messages import AIMessage, SystemMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command, interrupt
 
+from g3ku.json_schema_utils import get_attached_raw_parameters_schema
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from main.runtime.chat_backend import build_prompt_cache_diagnostics, build_session_prompt_cache_key
 
@@ -76,10 +77,11 @@ def _tool_schema(tool: Any) -> dict[str, Any] | None:
     name = str(getattr(tool, "name", "") or "").strip()
     if not name:
         return None
-    args_schema = getattr(tool, "args_schema", None)
-    parameters = {}
-    if args_schema is not None and hasattr(args_schema, "model_json_schema"):
-        parameters = dict(args_schema.model_json_schema() or {})
+    parameters = get_attached_raw_parameters_schema(tool) or {}
+    if not parameters:
+        args_schema = getattr(tool, "args_schema", None)
+        if args_schema is not None and hasattr(args_schema, "model_json_schema"):
+            parameters = dict(args_schema.model_json_schema() or {})
     return {
         "name": name,
         "description": str(getattr(tool, "description", "") or ""),

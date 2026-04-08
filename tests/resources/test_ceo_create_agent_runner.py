@@ -9,7 +9,9 @@ from langgraph.types import Command
 
 from g3ku.agent.tools.base import Tool
 from g3ku.config.schema import MemoryAssemblyConfig
+from g3ku.json_schema_utils import get_attached_raw_parameters_schema
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
+from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor import ceo_agent_middleware, ceo_runner
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, initial_persistent_state
 from g3ku.runtime.session_agent import RuntimeAgentSession
@@ -66,6 +68,57 @@ class _CreateAsyncTaskLikeTool(Tool):
                 "execution_policy": {"type": ["object", "string"]},
             },
             "required": ["task", "core_requirement", "execution_policy"],
+        }
+
+    async def execute(self, **kwargs):
+        return kwargs
+
+
+class _MemoryWriteLikeTool(Tool):
+    @property
+    def name(self) -> str:
+        return "memory_write"
+
+    @property
+    def description(self) -> str:
+        return "write structured memory facts"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "facts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "category": {"type": "string"},
+                            "scope": {"type": "string"},
+                            "entity": {"type": "string"},
+                            "attribute": {"type": "string"},
+                            "value": {
+                                "type": ["string", "number", "boolean", "object", "array", "null"],
+                                "description": "Canonical value for the fact.",
+                            },
+                            "observed_at": {"type": "string"},
+                            "time_semantics": {"type": "string"},
+                            "source_excerpt": {"type": "string"},
+                        },
+                        "required": [
+                            "category",
+                            "scope",
+                            "entity",
+                            "attribute",
+                            "value",
+                            "observed_at",
+                            "time_semantics",
+                            "source_excerpt",
+                        ],
+                    },
+                }
+            },
+            "required": ["facts"],
         }
 
     async def execute(self, **kwargs):
@@ -1290,6 +1343,32 @@ async def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_f
     assert captured["diagnostics_kwargs"]["prompt_cache_key"] == "cache-key"
     assert "submit_next_stage" in str(captured["diagnostics_kwargs"]["overlay_text"])
     assert captured["diagnostics_kwargs"]["overlay_section_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_create_agent_frontdoor_exposes_memory_write_with_stringified_value_schema_only(
+    monkeypatch,
+) -> None:
+    tool = _MemoryWriteLikeTool()
+
+    async def _executor(_tool_name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        return {"result_text": "ok", "status": "success"}
+
+    langchain_tool = ceo_runtime_ops._build_langchain_tool(tool, _executor)
+
+    raw_schema = get_attached_raw_parameters_schema(langchain_tool)
+    assert isinstance(raw_schema, dict)
+    fact_properties = raw_schema["properties"]["facts"]["items"]["properties"]
+    assert fact_properties["value"]["type"] == "string"
+    assert "JSON-serialized string" in str(fact_properties["value"]["description"] or "")
+
+    prompt_schema = ceo_agent_middleware._tool_schema(langchain_tool)
+    assert isinstance(prompt_schema, dict)
+    prompt_fact_properties = prompt_schema["parameters"]["properties"]["facts"]["items"]["properties"]
+    assert prompt_fact_properties["value"]["type"] == "string"
+
+    original_fact_properties = tool.parameters["properties"]["facts"]["items"]["properties"]
+    assert original_fact_properties["value"]["type"] == ["string", "number", "boolean", "object", "array", "null"]
 
 
 @pytest.mark.asyncio

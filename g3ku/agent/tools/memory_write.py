@@ -12,6 +12,24 @@ _ALLOWED_CATEGORIES = set(get_args(StructuredCategory))
 _ALLOWED_TIME_SEMANTICS = set(get_args(TimeSemantics))
 
 
+def _normalize_memory_fact_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+
+    trimmed = value.strip()
+    if not trimmed or trimmed[0] not in {"{", "["}:
+        return value
+
+    try:
+        parsed = json.loads(trimmed)
+    except json.JSONDecodeError:
+        return value
+
+    if isinstance(parsed, (dict, list)):
+        return parsed
+    return value
+
+
 class MemoryWriteTool(Tool):
     """Upsert explicit structured memory facts for the CEO agent."""
 
@@ -166,10 +184,20 @@ class MemoryWriteTool(Tool):
             channel = channel or ch
             chat_id = chat_id or cid
 
+        normalized_facts: list[dict[str, Any]] = []
+        for fact in list(facts or []):
+            if not isinstance(fact, dict):
+                normalized_facts.append(fact)
+                continue
+            normalized_fact = dict(fact)
+            if "value" in normalized_fact:
+                normalized_fact["value"] = _normalize_memory_fact_value(normalized_fact.get("value"))
+            normalized_facts.append(normalized_fact)
+
         result = await self._manager.upsert_structured_memory_facts(
             session_key=session_key,
             channel=str(channel or "unknown"),
             chat_id=str(chat_id or "unknown"),
-            facts=list(facts or []),
+            facts=normalized_facts,
         )
         return json.dumps(result, ensure_ascii=False)

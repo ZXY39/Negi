@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import re
 from dataclasses import dataclass
@@ -108,6 +109,38 @@ def _build_args_schema(tool: Tool):
     return build_args_schema_model(tool.name, tool.parameters)
 
 
+def _ceo_model_compatible_parameters_schema(tool_name: str, schema: dict[str, Any] | None) -> dict[str, Any] | None:
+    normalized = copy.deepcopy(schema) if isinstance(schema, dict) else schema
+    if str(tool_name or "").strip() != "memory_write" or not isinstance(normalized, dict):
+        return normalized
+    facts_schema = dict((normalized.get("properties") or {}).get("facts") or {})
+    items_schema = dict(facts_schema.get("items") or {})
+    fact_properties = items_schema.get("properties")
+    if not isinstance(fact_properties, dict):
+        return normalized
+    value_schema = fact_properties.get("value")
+    if not isinstance(value_schema, dict):
+        return normalized
+    raw_type = value_schema.get("type")
+    if not isinstance(raw_type, list) or not any(item in {"object", "array"} for item in raw_type):
+        return normalized
+    value_schema["type"] = "string"
+    description = str(value_schema.get("description") or "").strip()
+    compatibility_note = (
+        "For CEO frontdoor model compatibility, pass structured values as JSON-serialized strings."
+    )
+    if compatibility_note not in description:
+        value_schema["description"] = f"{description} {compatibility_note}".strip() if description else compatibility_note
+    fact_properties["value"] = value_schema
+    items_schema["properties"] = fact_properties
+    facts_schema["items"] = items_schema
+    normalized["properties"] = {
+        **dict(normalized.get("properties") or {}),
+        "facts": facts_schema,
+    }
+    return normalized
+
+
 def _build_langchain_tool(tool: Tool, executor: ToolExecutor) -> BaseTool:
     async def _invoke(**kwargs: Any) -> Any:
         filtered_kwargs = {
@@ -125,7 +158,7 @@ def _build_langchain_tool(tool: Tool, executor: ToolExecutor) -> BaseTool:
             args_schema=_build_args_schema(tool),
             infer_schema=False,
         ),
-        tool.parameters,
+        _ceo_model_compatible_parameters_schema(tool.name, tool.parameters),
     )
 
 

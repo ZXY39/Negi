@@ -2218,6 +2218,102 @@ async def test_memory_write_uses_structured_fact_contract(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_memory_write_parses_json_object_string_value_before_upsert(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'memory_write', workspace / 'tools' / 'memory_write')
+
+    class _FakeMemoryManager:
+        def __init__(self):
+            self.last_call = None
+
+        async def upsert_structured_memory_facts(self, **kwargs):
+            self.last_call = kwargs
+            return {'ok': True, 'written': 1}
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    descriptor = registry.discover().tools['memory_write']
+    manager = _FakeMemoryManager()
+    tool = ResourceLoader(workspace).load_tool(
+        descriptor,
+        services={'loop': SimpleNamespace(_store_enabled=False), 'memory_manager': manager},
+    )
+
+    payload = json.loads(
+        await tool.execute(
+            facts=[
+                {
+                    'category': 'current_state',
+                    'scope': 'global',
+                    'entity': 'user',
+                    'attribute': 'editor_preferences',
+                    'value': '{"theme":"light","autosave":true,"tab_size":2}',
+                    'observed_at': '2026-04-08T00:00:00',
+                    'time_semantics': 'durable_until_replaced',
+                    'source_excerpt': '记住我的编辑器偏好',
+                }
+            ],
+            __g3ku_runtime={'session_key': 'cli:demo'},
+        )
+    )
+
+    assert payload == {'ok': True, 'written': 1}
+    assert manager.last_call is not None
+    assert manager.last_call['facts'][0]['value'] == {
+        'theme': 'light',
+        'autosave': True,
+        'tab_size': 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_memory_write_keeps_plain_string_value_unchanged(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'memory_write', workspace / 'tools' / 'memory_write')
+
+    class _FakeMemoryManager:
+        def __init__(self):
+            self.last_call = None
+
+        async def upsert_structured_memory_facts(self, **kwargs):
+            self.last_call = kwargs
+            return {'ok': True, 'written': 1}
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    descriptor = registry.discover().tools['memory_write']
+    manager = _FakeMemoryManager()
+    tool = ResourceLoader(workspace).load_tool(
+        descriptor,
+        services={'loop': SimpleNamespace(_store_enabled=False), 'memory_manager': manager},
+    )
+
+    payload = json.loads(
+        await tool.execute(
+            facts=[
+                {
+                    'category': 'default_setting',
+                    'scope': 'global',
+                    'entity': 'user',
+                    'attribute': 'preferred_package_manager',
+                    'value': 'pnpm',
+                    'observed_at': '2026-04-08T00:00:00',
+                    'time_semantics': 'durable_until_replaced',
+                    'source_excerpt': '以后默认用 pnpm',
+                }
+            ],
+            __g3ku_runtime={'session_key': 'cli:demo'},
+        )
+    )
+
+    assert payload == {'ok': True, 'written': 1}
+    assert manager.last_call is not None
+    assert manager.last_call['facts'][0]['value'] == 'pnpm'
+
+
+@pytest.mark.asyncio
 async def test_memory_delete_builds_and_calls_precise_delete(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)

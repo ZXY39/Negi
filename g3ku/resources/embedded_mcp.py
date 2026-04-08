@@ -7,6 +7,7 @@ from typing import Any
 
 from mcp import types
 from mcp.server.fastmcp import FastMCP
+import mcp.server.fastmcp.server as fastmcp_server
 
 from g3ku.agent.tools.base import Tool
 from g3ku.resources.models import ToolResourceDescriptor
@@ -15,6 +16,20 @@ _RUNTIME_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.Co
     "g3ku_embedded_mcp_runtime",
     default=None,
 )
+_FASTMCP_LOGGING_PATCHED = False
+
+
+def _disable_fastmcp_root_logging() -> None:
+    """Keep embedded FastMCP instances from mutating global root logging."""
+    global _FASTMCP_LOGGING_PATCHED
+    if _FASTMCP_LOGGING_PATCHED:
+        return
+
+    def _noop_configure_logging(_level: str = "INFO") -> None:
+        return
+
+    fastmcp_server.configure_logging = _noop_configure_logging
+    _FASTMCP_LOGGING_PATCHED = True
 
 
 def _schema_to_annotation(schema: dict[str, Any] | None) -> Any:
@@ -102,6 +117,7 @@ def _render_mcp_result(value: Any) -> Any:
 
 class EmbeddedMCPTool(Tool):
     def __init__(self, descriptor: ToolResourceDescriptor, handler: Any):
+        _disable_fastmcp_root_logging()
         self._descriptor = descriptor
         self._handler = handler
         self._parameters = _normalize_parameters(descriptor.parameters)

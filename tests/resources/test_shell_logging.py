@@ -12,6 +12,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from g3ku.shells.cli import run_agent_shell
+from g3ku.resources.embedded_mcp import EmbeddedMCPTool
+from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
 
 
 class _CollectHandler(logging.Handler):
@@ -133,3 +135,26 @@ def test_run_agent_shell_routes_openai_logs_to_plain_handler(
     assert leaked_messages == []
     assert "Retrying request to /chat/completions in 0.410672 seconds" in captured.err
     assert "Retrying request to /chat/completions in 0.410672 seconds\n" in captured.err
+
+
+def test_embedded_mcp_tool_does_not_reconfigure_root_logging(
+    tmp_path: Path,
+    restore_logging_state,
+) -> None:
+    root = logging.getLogger()
+    root.handlers = []
+    root.setLevel(logging.WARNING)
+
+    descriptor = ToolResourceDescriptor(
+        kind=ResourceKind.TOOL,
+        name="demo_tool",
+        description="demo",
+        root=tmp_path,
+        manifest_path=tmp_path / "resource.yaml",
+        fingerprint="demo",
+    )
+
+    EmbeddedMCPTool(descriptor, lambda: "ok")
+
+    assert root.handlers == []
+    assert root.level == logging.WARNING
