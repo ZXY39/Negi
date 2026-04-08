@@ -438,7 +438,14 @@ class RuntimeAgentSession:
         stages = stage_state.get("stages") if isinstance(stage_state, dict) else None
         if not isinstance(stages, list):
             return False
-        return any(isinstance(stage, dict) for stage in stages)
+        for stage in stages:
+            if not isinstance(stage, dict):
+                continue
+            stage_id = str(stage.get("stage_id") or "").strip()
+            rounds = stage.get("rounds")
+            if stage_id and isinstance(rounds, list):
+                return True
+        return False
 
     def _frontdoor_execution_trace_summary_snapshot(self) -> dict[str, Any]:
         stage_state = getattr(self, "_frontdoor_stage_state", None)

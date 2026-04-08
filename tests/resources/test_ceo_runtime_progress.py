@@ -1917,7 +1917,15 @@ async def test_runtime_agent_session_persists_execution_trace_summary_into_sessi
     assert "skill-installer (success): installed weather" in recent_history[-1]["content"]
 
 
-def test_inflight_snapshot_with_malformed_stage_state_keeps_legacy_tool_flow() -> None:
+@pytest.mark.parametrize(
+    "stages",
+    [
+        [None],
+        [{}],
+        [{"foo": "bar"}],
+    ],
+)
+def test_inflight_snapshot_with_malformed_stage_state_keeps_legacy_tool_flow(stages: list[object]) -> None:
     session = RuntimeAgentSession(
         SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
         session_key="web:shared",
@@ -1926,7 +1934,7 @@ def test_inflight_snapshot_with_malformed_stage_state_keeps_legacy_tool_flow() -
     )
     session._state.is_running = True
     session._state.status = "running"
-    session._frontdoor_stage_state = {"stages": [None]}
+    session._frontdoor_stage_state = {"stages": stages}
     session._event_log = [
         {
             "type": "tool_execution_start",
