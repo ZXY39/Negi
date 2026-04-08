@@ -519,7 +519,56 @@ async def test_message_builder_dense_unavailable_keeps_non_callable_external_too
     system_prompt = str(result.model_messages[0].get("content") or "")
     assert '`external_docs`' in system_prompt
     assert "External docs short summary." in system_prompt
+    assert "Install dir not configured" in system_prompt
     assert [item["tool_id"] for item in result.trace["external_tools"]] == ["external_docs"]
+
+
+@pytest.mark.asyncio
+async def test_message_builder_dense_unavailable_renders_l0_only_for_unavailable_callable_tool_family() -> None:
+    memory_manager = _SemanticMemoryManager(response="")
+    memory_manager.store = SimpleNamespace(_dense_enabled=False)
+    loop = SimpleNamespace(
+        workspace=Path.cwd(),
+        main_task_service=None,
+        memory_manager=memory_manager,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                skill_inventory_top_k=1,
+                extension_tool_top_k=1,
+                core_tools=[],
+            )
+        ),
+    )
+    builder = CeoMessageBuilder(
+        loop=loop,
+        prompt_builder=CeoPromptBuilder(loop=SimpleNamespace(workspace=Path.cwd())),
+    )
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="fallback summary mode unavailable callable tool",
+        exposure={
+            "skills": [],
+            "tool_families": [
+                _family(
+                    "agent_browser",
+                    "Callable fallback short summary. Later sentence should not appear.",
+                    callable=True,
+                    available=False,
+                    metadata={"l0": "Callable fallback short summary. Later l0 sentence should not appear."},
+                )
+            ],
+            "tool_names": ["filesystem", "load_tool_context"],
+        },
+        persisted_session=None,
+    )
+
+    system_prompt = str(result.model_messages[0].get("content") or "")
+    assert "## Tool Resources That Require `load_tool_context`" in system_prompt
+    assert '`agent_browser`' in system_prompt
+    assert "Callable fallback short summary." in system_prompt
+    assert "Later sentence should not appear." not in system_prompt
+    assert "Later l0 sentence should not appear." not in system_prompt
 
 
 @pytest.mark.asyncio

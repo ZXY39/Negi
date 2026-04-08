@@ -351,7 +351,7 @@ class CeoMessageBuilder:
             registered_callable = self._family_has_registered_callable_executor(family, visible_name_set)
             issue_summary = self._tool_family_issue_summary(family)
             if not callable_flag:
-                state_text = f"Install dir: `{install_dir}`"
+                state_text = f"Install dir: `{install_dir}`" if install_dir else "Install dir not configured"
                 if not available_flag:
                     state_text = f"{state_text}. Status: unavailable"
                     if issue_summary:
