@@ -872,12 +872,106 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
     assert output == "后台修复任务已经建立，任务号 `task:demo-123`。我先继续排查，完成后直接把结果同步给你。"
     assert len(backend.calls) == 3
 
+@pytest.mark.asyncio
+async def test_summarize_messages_uses_legacy_frontdoor_settings_when_new_fields_are_defaults() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            _memory_runtime_settings=SimpleNamespace(
+                assembly=MemoryAssemblyConfig(
+                    frontdoor_summary_trigger_message_count=4,
+                    frontdoor_recent_message_count=2,
+                ),
+            )
+        )
+    )
 
-def test_frontdoor_compaction_settings_defaults_to_stage_budget() -> None:
-    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+    ]
 
-    with pytest.raises(AttributeError):
-        runner._frontdoor_compaction_settings()
+    result = await runner._summarize_messages(messages=messages, state={})
+    compacted = result["messages"]
+
+    assert compacted[0] == {"role": "system", "content": "system"}
+    assert "COMPACT BOUNDARY" in str(compacted[1].get("content") or "")
+    assert "Conversation summary:" in str(compacted[2].get("content") or "")
+    assert compacted[-2:] == [{"role": "assistant", "content": "a2"}, {"role": "user", "content": "u3"}]
+
+
+@pytest.mark.asyncio
+async def test_summarize_messages_keeps_trailing_tool_turn_structurally_intact() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            _memory_runtime_settings=SimpleNamespace(
+                assembly=SimpleNamespace(
+                    frontdoor_summarizer_trigger_message_count=3,
+                    frontdoor_summarizer_keep_message_count=1,
+                )
+            )
+        )
+    )
+
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call-1", "name": "record_tool", "arguments": {"value": "alpha"}}],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "name": "record_tool", "content": "tool-result"},
+    ]
+
+    result = await runner._summarize_messages(messages=messages, state={})
+    compacted = result["messages"]
+
+    assert compacted[-2]["role"] == "assistant"
+    assert compacted[-2]["tool_calls"][0]["id"] == "call-1"
+    assert compacted[-1] == {
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "name": "record_tool",
+        "content": "tool-result",
+    }
+
+
+@pytest.mark.asyncio
+async def test_summarize_messages_summary_includes_recent_compacted_context() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            _memory_runtime_settings=SimpleNamespace(
+                assembly=SimpleNamespace(
+                    frontdoor_summarizer_trigger_message_count=4,
+                    frontdoor_summarizer_keep_message_count=2,
+                )
+            )
+        )
+    )
+
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+        {"role": "assistant", "content": "a3"},
+        {"role": "user", "content": "u4"},
+        {"role": "assistant", "content": "a4"},
+        {"role": "user", "content": "u5"},
+    ]
+
+    result = await runner._summarize_messages(messages=messages, state={})
+    summary_text = str(result["messages"][2].get("content") or "")
+
+    assert "user: u1" in summary_text
+    assert "user: u4" in summary_text
 
 
 def test_build_prompt_context_no_longer_uses_summary_text_overlay() -> None:
