@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import g3ku.runtime.context.frontdoor_catalog_selection as selection_module
 from g3ku.runtime.context.types import RetrievedContextBundle
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
@@ -176,13 +177,25 @@ def test_ceo_prompt_builder_keeps_memory_guidance() -> None:
 
 
 @pytest.mark.asyncio
-async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_available() -> None:
+async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _SemanticMemoryManager(
         response="remembered browser workflow",
         skill_record_ids=["skill:focused-skill", "skill:secondary-skill"],
         tool_record_ids=["tool:agent_browser", "tool:web_fetch"],
     )
+
+    async def _invoke_model_rewrite(**kwargs) -> dict[str, str]:
+        _ = kwargs
+        return {
+            "skill_query": "semantic focused skill query",
+            "tool_query": "semantic focused tool query",
+            "model": "frontdoor-query-rewriter",
+        }
+
+    monkeypatch.setattr(selection_module, "_invoke_frontdoor_catalog_rewrite_model", _invoke_model_rewrite)
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
 
     result = await builder.build_for_ceo(
@@ -203,6 +216,13 @@ async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_ava
     )
 
     assert prompt_builder.calls == [["focused-skill", "secondary-skill"]]
+    assert result.trace["semantic_frontdoor"]["queries"] == {
+        "raw_query": "focused browser workflow",
+        "skill_query": "semantic focused skill query",
+        "tool_query": "semantic focused tool query",
+        "status": "rewritten",
+        "model": "frontdoor-query-rewriter",
+    }
     assert result.trace["retrieval_scope"] == {
         "mode": "dense_only",
         "search_context_types": ["memory", "skill", "resource"],
