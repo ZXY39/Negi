@@ -273,9 +273,9 @@ class CeoMessageBuilder:
         ordered_skills = list(visible_skills or [])
         if ranked_skill_ids is not None:
             skill_map = {
-                str(getattr(item, 'skill_id', '') or '').strip(): item
+                self._skill_id(item): item
                 for item in list(visible_skills or [])
-                if str(getattr(item, 'skill_id', '') or '').strip()
+                if self._skill_id(item)
             }
             ranked: list[Any] = []
             seen: set[str] = set()
@@ -283,15 +283,15 @@ class CeoMessageBuilder:
                 item = skill_map.get(str(skill_id or '').strip())
                 if item is None:
                     continue
-                normalized = str(getattr(item, 'skill_id', '') or '').strip()
+                normalized = self._skill_id(item)
                 if not normalized or normalized in seen:
                     continue
                 seen.add(normalized)
-                ranked.append(item)
+                ranked.append(SimpleNamespace(**item) if isinstance(item, dict) else item)
             ordered_skills = ranked + [
-                item
+                (SimpleNamespace(**item) if isinstance(item, dict) else item)
                 for item in list(visible_skills or [])
-                if str(getattr(item, 'skill_id', '') or '').strip() not in seen
+                if self._skill_id(item) not in seen
             ]
         selected = list(ordered_skills[: max(1, int(top_k or 1))])
         semantic_rank_map = {
@@ -301,8 +301,8 @@ class CeoMessageBuilder:
         }
         trace = [
             {
-                'skill_id': getattr(item, 'skill_id', ''),
-                'semantic_rank': semantic_rank_map.get(str(getattr(item, 'skill_id', '') or '').strip()),
+                'skill_id': self._skill_id(item),
+                'semantic_rank': semantic_rank_map.get(self._skill_id(item)),
             }
             for item in selected
         ]
@@ -635,6 +635,7 @@ class CeoMessageBuilder:
         visible_skills = list(exposure.get('skills') or [])
         visible_families = list(exposure.get('tool_families') or [])
         semantic_frontdoor = await semantic_catalog_rankings(
+            loop=self._loop,
             memory_manager=memory_manager,
             query_text=query_text,
             visible_skills=visible_skills,
@@ -642,17 +643,21 @@ class CeoMessageBuilder:
             skill_limit=max(inventory_top_k * 4, len(visible_skills), inventory_top_k, 8),
             tool_limit=max(extension_top_k * 4, len(visible_families), extension_top_k, 8),
         )
-        semantic_trace = dict(semantic_frontdoor.get('trace') or {})
-        visible_only_mode = str(semantic_trace.get('mode') or '').strip().lower() == 'unavailable'
+        semantic_trace = {
+            'mode': str(semantic_frontdoor.get('mode') or '').strip(),
+            'available': bool(semantic_frontdoor.get('available', False)),
+            **dict(semantic_frontdoor.get('trace') or {}),
+        }
+        visible_only_mode = str(semantic_frontdoor.get('mode') or '').strip().lower() == 'unavailable'
         if visible_only_mode:
             selected_skills = self._visible_only_skill_items(visible_skills)
             skill_trace = self._visible_only_skill_trace(selected_skills)
-            semantic_trace = {**semantic_trace, 'mode': 'visible_only'}
+            semantic_trace = {**semantic_trace, 'mode': 'visible_only', 'available': False}
         else:
             selected_skills, skill_trace = self._select_skills(
                 visible_skills=visible_skills,
                 top_k=inventory_top_k,
-                ranked_skill_ids=semantic_frontdoor['skill_ids'],
+                ranked_skill_ids=list(semantic_frontdoor.get('skill_ids') or []),
             )
         split_prompt_builder = (
             callable(getattr(self._prompt_builder, 'build_base_prompt', None))
@@ -710,7 +715,7 @@ class CeoMessageBuilder:
                 visible_families=visible_families,
                 core_tools=core_tools,
                 extension_top_k=extension_top_k,
-                ranked_tool_ids=semantic_frontdoor['tool_ids'],
+                ranked_tool_ids=list(semantic_frontdoor.get('tool_ids') or []),
             )
 
         retrieval_scope = plan_retrieval_scope(
