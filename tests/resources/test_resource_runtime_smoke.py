@@ -2186,6 +2186,14 @@ async def test_memory_write_uses_structured_fact_contract(tmp_path: Path):
 
     registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
     descriptor = registry.discover().tools['memory_write']
+    manifest = yaml.safe_load((workspace / 'tools' / 'memory_write' / 'resource.yaml').read_text(encoding='utf-8')) or {}
+    item_properties = (
+        manifest.get('parameters', {})
+        .get('properties', {})
+        .get('facts', {})
+        .get('items', {})
+        .get('properties', {})
+    )
     manager = _FakeMemoryManager()
     tool = ResourceLoader(workspace).load_tool(
         descriptor,
@@ -2215,6 +2223,53 @@ async def test_memory_write_uses_structured_fact_contract(tmp_path: Path):
     assert manager.last_call['channel'] == 'cli'
     assert manager.last_call['chat_id'] == 'demo'
     assert manager.last_call['facts'][0]['attribute'] == 'preferred_package_manager'
+    assert item_properties['merge_mode']['enum'] == ['merge']
+
+
+@pytest.mark.asyncio
+async def test_memory_write_restores_json_like_value_strings_before_upsert(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'memory_write', workspace / 'tools' / 'memory_write')
+
+    class _FakeMemoryManager:
+        def __init__(self):
+            self.last_call = None
+
+        async def upsert_structured_memory_facts(self, **kwargs):
+            self.last_call = kwargs
+            return {'ok': True, 'written': 1}
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    descriptor = registry.discover().tools['memory_write']
+    manager = _FakeMemoryManager()
+    tool = ResourceLoader(workspace).load_tool(
+        descriptor,
+        services={'loop': SimpleNamespace(_store_enabled=False), 'memory_manager': manager},
+    )
+
+    payload = json.loads(
+        await tool.execute(
+            facts=[
+                {
+                    'category': 'preference',
+                    'scope': 'user',
+                    'entity': 'response_style',
+                    'attribute': 'format',
+                    'value': '{"tone":"concise","markdown":true}',
+                    'observed_at': '2026-04-08T00:00:00',
+                    'time_semantics': 'durable_until_replaced',
+                    'source_excerpt': 'remember the response format',
+                    'merge_mode': 'merge',
+                }
+            ],
+            __g3ku_runtime={'session_key': 'cli:demo'},
+        )
+    )
+    assert payload['ok'] is True
+    assert manager.last_call['facts'][0]['value'] == {'tone': 'concise', 'markdown': True}
+    assert manager.last_call['facts'][0]['merge_mode'] == 'merge'
 
 
 @pytest.mark.asyncio

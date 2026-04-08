@@ -45,6 +45,9 @@ from g3ku.agent.structured_memory import (
     StructuredMemoryFact,
     canonical_key_for_fact,
     equivalent_fact as _structured_equivalent_fact,
+    is_newer_fact as _structured_is_newer_fact,
+    merge_required as _structured_merge_required,
+    merge_values as _merge_structured_values,
     normalize_fact as _normalize_structured_fact,
     render_statement as _render_structured_statement,
     replacement_required as _structured_replacement_required,
@@ -4425,6 +4428,46 @@ class MemoryManager:
             "meta": meta,
         }
 
+    def _decorate_retrieved_context_bundle(
+        self,
+        *,
+        bundle: RetrievedContextBundle,
+        namespace: tuple[str, ...],
+    ) -> RetrievedContextBundle:
+        active_structured_by_fact_id = self._active_structured_fact_lookup(namespace=namespace)
+        filtered_records: list[dict[str, Any]] = []
+        for raw in list(bundle.records or []):
+            if not isinstance(raw, dict):
+                continue
+            entry = self._decorate_search_view_entry(
+                entry=raw,
+                active_structured_by_fact_id=active_structured_by_fact_id,
+            )
+            if entry is None:
+                continue
+            filtered_records.append(dict(entry))
+
+        for index, entry in enumerate(filtered_records, start=1):
+            entry["rank"] = index
+
+        grouped: dict[str, list[dict[str, Any]]] = {"memory": [], "resource": [], "skill": []}
+        for entry in filtered_records:
+            context_type = str(entry.get("context_type") or "").strip().lower()
+            if context_type not in grouped:
+                grouped[context_type] = []
+            grouped[context_type].append(entry)
+
+        meta = dict(bundle.meta or {})
+        meta["total"] = len(filtered_records)
+        return RetrievedContextBundle(
+            query=str(bundle.query or ""),
+            records=filtered_records,
+            grouped=grouped,
+            plan=list(bundle.plan or []),
+            meta=meta,
+            trace=dict(bundle.trace or {}),
+        )
+
     async def search_tool_view(
         self,
         *,
@@ -4478,6 +4521,8 @@ class MemoryManager:
 
         raw_query = str(query or "").strip()
         top_k = max(1, int(limit or 1))
+        namespace = self.namespace_for(channel=channel, chat_id=chat_id)
+        active_structured_by_fact_id = self._active_structured_fact_lookup(namespace=namespace)
         empty = {
             "query": raw_query,
             "grouped": {"memory": [], "resource": [], "skill": []},
@@ -4499,25 +4544,36 @@ class MemoryManager:
             empty["plan"] = [{"query": raw_query, "context_type": str(context_type), "intent": "legacy_memory_only", "priority": 1, "candidates": 0}]
             return empty
 
-        ranked: list[tuple[float, MemorySyncEvent]] = []
+        ranked: list[tuple[float, MemorySyncEvent, str]] = []
         seen_hashes: set[str] = set()
         journal_total = max(1.0, float(self._journal_seq()))
         for event in self._active_memory_events():
-            text_hash = self._stable_text_hash(event.text)
+            tags = {
+                str(tag or "").strip()
+                for tag in list(event.tags or [])
+                if str(tag or "").strip()
+            }
+            text = str(event.text or "")
+            if "structured_memory" in tags:
+                payload = active_structured_by_fact_id.get(str(event.record_id or "").strip())
+                if payload is None:
+                    continue
+                text = str(payload.get("rendered_statement") or payload.get("statement") or event.text or "")
+            text_hash = self._stable_text_hash(text)
             if text_hash in seen_hashes:
                 continue
-            score = score_query(raw_query, event.text, " ".join(event.tags), event.source)
+            score = score_query(raw_query, text, " ".join(event.tags), event.source)
             if score <= 0:
                 continue
             seen_hashes.add(text_hash)
             recency_bonus = max(0.0, float(event.seq) / journal_total)
-            ranked.append((score + recency_bonus, event))
+            ranked.append((score + recency_bonus, event, text))
         ranked.sort(key=lambda item: (item[0], item[1].seq), reverse=True)
 
         grouped: dict[str, list[dict[str, Any]]] = {"memory": [], "resource": [], "skill": []}
         unified: list[dict[str, Any]] = []
-        for rank, (_score, event) in enumerate(ranked[:top_k], start=1):
-            l2_preview = window_extract(raw_query, event.text, window=3, max_chars=500) if include_l2 else ""
+        for rank, (_score, event, text) in enumerate(ranked[:top_k], start=1):
+            l2_preview = window_extract(raw_query, text, window=3, max_chars=500) if include_l2 else ""
             entry = {
                 "rank": rank,
                 "record_id": event.record_id,
@@ -4525,8 +4581,8 @@ class MemoryManager:
                 "uri": f"g3ku://memory/{event.channel}/{event.chat_id}/{event.record_id}",
                 "source": event.source,
                 "confidence": round(float(event.confidence), 4),
-                "l0": summarize_l0(event.text),
-                "l1": summarize_l1(event.text),
+                "l0": summarize_l0(text),
+                "l1": summarize_l1(text),
                 "l2_preview": l2_preview,
                 "tags": list(event.tags or []),
             }
@@ -4622,10 +4678,11 @@ class MemoryManager:
         allowed_resource_record_ids: Iterable[str] | None = None,
         allowed_skill_record_ids: Iterable[str] | None = None,
     ) -> RetrievedContextBundle:
+        namespace = self.namespace_for(channel=channel, chat_id=chat_id)
         backend = await self._ensure_backend()
         if backend is not None:
             try:
-                return await backend.retrieve_context_bundle(
+                bundle = await backend.retrieve_context_bundle(
                     query=query,
                     channel=channel,
                     chat_id=chat_id,
@@ -4635,6 +4692,7 @@ class MemoryManager:
                     allowed_resource_record_ids=allowed_resource_record_ids,
                     allowed_skill_record_ids=allowed_skill_record_ids,
                 )
+                return self._decorate_retrieved_context_bundle(bundle=bundle, namespace=namespace)
             except Exception as exc:
                 self._mark_backend_failure(exc)
         result = await self._search_legacy_tool_view(
@@ -4646,7 +4704,7 @@ class MemoryManager:
             context_type="memory",
             include_l2=True,
         )
-        return RetrievedContextBundle(
+        bundle = RetrievedContextBundle(
             query=str(result.get("query") or query or ""),
             records=list(result.get("view") or []),
             grouped=dict(result.get("grouped") or {}),
@@ -4654,6 +4712,7 @@ class MemoryManager:
             meta=dict(result.get("meta") or {}),
             trace={},
         )
+        return self._decorate_retrieved_context_bundle(bundle=bundle, namespace=namespace)
 
     async def ingest_turn(
         self,
@@ -4996,13 +5055,82 @@ class MemoryManager:
         namespace = self.namespace_for(channel=channel_safe, chat_id=chat_safe)
 
         now = _now_iso()
+        active_by_key = await self._active_structured_fact_map(namespace)
         rows: list[dict[str, Any]] = []
+        written_count = 0
+        replaced_count = 0
+        merged_count = 0
+        noop_count = 0
         for raw in incoming:
             if not isinstance(raw, dict):
                 continue
             fact_id = str(raw.get("fact_id") or raw.get("id") or uuid.uuid4().hex[:12])
             normalized = _normalize_structured_fact(raw, fact_id=fact_id, now_iso=now)
             canonical_key = normalized.canonical_key or canonical_key_for_fact(normalized)
+            existing_payload = active_by_key.get(canonical_key)
+            if isinstance(existing_payload, dict):
+                old_fact_id = str(existing_payload.get("fact_id") or "").strip() or fact_id
+                old_fact = _normalize_structured_fact(
+                    existing_payload,
+                    fact_id=old_fact_id,
+                    now_iso=str(existing_payload.get("created_at") or now),
+                )
+                if _structured_equivalent_fact(old_fact, normalized):
+                    noop_count += 1
+                    continue
+                if _structured_merge_required(old_fact, normalized):
+                    older_fact = old_fact
+                    newer_fact = normalized
+                    if _structured_is_newer_fact(old_fact, normalized):
+                        older_fact, newer_fact = normalized, old_fact
+                    merged_payload: dict[str, Any] = {
+                        "category": newer_fact.category,
+                        "scope": newer_fact.scope,
+                        "entity": newer_fact.entity,
+                        "attribute": newer_fact.attribute,
+                        "value": _merge_structured_values(older_fact.value, newer_fact.value),
+                        "observed_at": newer_fact.observed_at,
+                        "time_semantics": newer_fact.time_semantics,
+                        "source_excerpt": newer_fact.source_excerpt or older_fact.source_excerpt,
+                        "qualifier": newer_fact.qualifier if newer_fact.qualifier is not None else older_fact.qualifier,
+                        "merge_mode": newer_fact.merge_mode or older_fact.merge_mode,
+                        "expires_at": newer_fact.expires_at if newer_fact.expires_at is not None else older_fact.expires_at,
+                    }
+                    normalized = _normalize_structured_fact(merged_payload, fact_id=newer_fact.fact_id, now_iso=now)
+                    canonical_key = normalized.canonical_key or canonical_key_for_fact(normalized)
+                    if _structured_equivalent_fact(old_fact, normalized):
+                        noop_count += 1
+                        continue
+                    rows.append(
+                        self._structured_delete_row(
+                            namespace=namespace,
+                            session_key=session_key,
+                            channel=channel_safe,
+                            chat_id=chat_safe,
+                            fact_ids=[old_fact.fact_id],
+                            canonical_keys=[canonical_key],
+                            now_iso=now,
+                            reason="merged_into_new_fact",
+                        )
+                    )
+                    merged_count += 1
+                if _structured_replacement_required(old_fact, normalized):
+                    rows.append(
+                        self._structured_delete_row(
+                            namespace=namespace,
+                            session_key=session_key,
+                            channel=channel_safe,
+                            chat_id=chat_safe,
+                            fact_ids=[old_fact.fact_id],
+                            canonical_keys=[canonical_key],
+                            now_iso=now,
+                            reason="superseded_by_newer_fact",
+                        )
+                    )
+                    replaced_count += 1
+                elif not _structured_merge_required(old_fact, normalized):
+                    noop_count += 1
+                    continue
 
             fact_payload: dict[str, Any] = {
                 "fact_id": normalized.fact_id,
@@ -5016,6 +5144,7 @@ class MemoryManager:
                 "time_semantics": normalized.time_semantics,
                 "source_excerpt": normalized.source_excerpt,
                 "qualifier": normalized.qualifier,
+                "merge_mode": normalized.merge_mode,
                 "expires_at": normalized.expires_at,
                 "canonical_key": canonical_key,
                 "statement": normalized.statement,
@@ -5042,14 +5171,20 @@ class MemoryManager:
                     now_iso=now,
                 )
             )
+            active_by_key[canonical_key] = fact_payload
+            written_count += 1
 
         if rows:
             await self._append_memory_events(rows=rows)
             await self._rewrite_structured_current_from_journal()
 
-        # We intentionally do not compute "written/replaced/noop" from the journal
-        # here; the journal is the source of truth and reconciliation happens at read time.
-        return {"ok": True, "written": len(rows)}
+        return {
+            "ok": True,
+            "written": written_count,
+            "replaced": replaced_count,
+            "merged": merged_count,
+            "noop": noop_count,
+        }
 
     async def delete_structured_memory_facts(
         self,
@@ -5070,32 +5205,47 @@ class MemoryManager:
         now = _now_iso()
         channel_safe, chat_safe = self._safe_channel_chat(session_key, channel, chat_id)
         namespace = self.namespace_for(channel=channel_safe, chat_id=chat_safe)
-        requested_fact_ids = list(fact_ids)
+        active = await self._active_structured_fact_map(namespace)
+        matched_fact_ids: list[str] = []
+        matched_canonical_keys: list[str] = []
+
+        if fact_ids:
+            active_by_fact_id = {
+                str(payload.get("fact_id") or "").strip(): dict(payload)
+                for payload in active.values()
+                if isinstance(payload, dict) and str(payload.get("fact_id") or "").strip()
+            }
+            for fact_id in fact_ids:
+                if fact_id in active_by_fact_id:
+                    matched_fact_ids.append(fact_id)
 
         if canonical_keys:
-            active = await self._active_structured_fact_map(namespace)
             for key in canonical_keys:
                 payload = active.get(str(key))
                 if not isinstance(payload, dict):
                     continue
                 fact_id = str(payload.get("fact_id") or "").strip()
                 if fact_id:
-                    fact_ids.append(fact_id)
-        fact_ids = list(dict.fromkeys(fact_ids))
+                    matched_fact_ids.append(fact_id)
+                    matched_canonical_keys.append(str(key))
+        matched_fact_ids = list(dict.fromkeys(matched_fact_ids))
+        matched_canonical_keys = list(dict.fromkeys(matched_canonical_keys))
+        if not matched_fact_ids and not matched_canonical_keys:
+            return {"ok": True, "deleted": 0}
 
         row = self._structured_delete_row(
             namespace=namespace,
             session_key=session_key,
             channel=channel_safe,
             chat_id=chat_safe,
-            fact_ids=fact_ids,
-            canonical_keys=canonical_keys,
+            fact_ids=matched_fact_ids,
+            canonical_keys=matched_canonical_keys,
             now_iso=now,
             reason="explicit_delete",
         )
         await self._append_memory_events(rows=[row])
         await self._rewrite_structured_current_from_journal()
-        return {"ok": True, "deleted": len(requested_fact_ids) + len(canonical_keys)}
+        return {"ok": True, "deleted": len(matched_fact_ids)}
 
     async def list_pending(self, limit: int = 50) -> list[PendingFact]:
         if not self.pending_file.exists():

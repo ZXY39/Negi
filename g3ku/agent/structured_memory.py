@@ -6,6 +6,7 @@ structured fact plus a few small helper utilities used by the memory runtime.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Literal, get_args
@@ -28,6 +29,8 @@ TimeSemantics = Literal[
     "historical_observation",
 ]
 
+MergeMode = Literal["merge"]
+
 
 @dataclass(frozen=True, slots=True)
 class StructuredMemoryFact:
@@ -41,6 +44,7 @@ class StructuredMemoryFact:
     time_semantics: TimeSemantics
     source_excerpt: str | None
     qualifier: dict[str, Any] | None
+    merge_mode: MergeMode | None
     expires_at: str | None
     canonical_key: str
     statement: str
@@ -53,6 +57,24 @@ def _norm_token(value: object) -> str:
     return " ".join(token.split()).lower()
 
 
+def _norm_jsonish(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            return _norm_token(value)
+    return _norm_token(value)
+
+
+def _merge_mode(raw: object) -> MergeMode | None:
+    value = str(raw or "").strip().lower()
+    if value == "merge":
+        return "merge"
+    return None
+
+
 def canonical_key_for_fact(fact: StructuredMemoryFact) -> str:
     """Return a stable key for deduping facts across writes.
 
@@ -61,13 +83,19 @@ def canonical_key_for_fact(fact: StructuredMemoryFact) -> str:
 
     # Keep this human-readable (helps debugging) while remaining stable.
     # Order matters and should only change on a deliberate schema bump.
-    parts = (
+    parts = [
         _norm_token(fact.scope),
         _norm_token(fact.category),
         _norm_token(fact.entity),
         _norm_token(fact.attribute),
         _norm_token(fact.time_semantics),
-    )
+    ]
+    if fact.category == "historical_fact":
+        parts.append(_norm_token(fact.observed_at))
+    if fact.category == "relationship":
+        qualifier_token = _norm_jsonish(fact.qualifier)
+        if qualifier_token:
+            parts.append(qualifier_token)
     return "|".join(part or "_" for part in parts)
 
 
@@ -138,6 +166,8 @@ def normalize_fact(raw: dict[str, Any], *, fact_id: str, now_iso: str) -> Struct
     if qualifier is not None and not isinstance(qualifier, dict):
         qualifier = None
 
+    merge_mode = _merge_mode(raw.get("merge_mode"))
+
     expires_at = raw.get("expires_at")
     if expires_at is not None:
         expires_at = str(expires_at)
@@ -158,6 +188,7 @@ def normalize_fact(raw: dict[str, Any], *, fact_id: str, now_iso: str) -> Struct
         time_semantics=time_semantics,
         source_excerpt=source_excerpt,
         qualifier=qualifier,  # type: ignore[arg-type]
+        merge_mode=merge_mode,
         expires_at=expires_at,
         canonical_key=str(raw.get("canonical_key") or ""),
         statement=statement,
@@ -179,6 +210,7 @@ def normalize_fact(raw: dict[str, Any], *, fact_id: str, now_iso: str) -> Struct
         time_semantics=provisional.time_semantics,
         source_excerpt=provisional.source_excerpt,
         qualifier=provisional.qualifier,
+        merge_mode=provisional.merge_mode,
         expires_at=provisional.expires_at,
         canonical_key=canonical_key,
         statement=final_statement,
@@ -207,8 +239,9 @@ def equivalent_fact(left: StructuredMemoryFact, right: StructuredMemoryFact) -> 
     if left.value != right.value:
         return False
 
-    if (left.qualifier or None) != (right.qualifier or None):
-        return False
+    if left.category == "relationship":
+        if (left.qualifier or None) != (right.qualifier or None):
+            return False
 
     if (left.expires_at or None) != (right.expires_at or None):
         return False
@@ -235,6 +268,8 @@ def fact_to_metadata(fact: StructuredMemoryFact) -> dict[str, Any]:
         meta["source_excerpt"] = fact.source_excerpt
     if fact.qualifier:
         meta["qualifier"] = fact.qualifier
+    if fact.merge_mode:
+        meta["merge_mode"] = fact.merge_mode
     return meta
 
 
@@ -245,51 +280,87 @@ def _parse_iso(value: str) -> datetime | None:
         return None
 
 
+def is_newer_fact(candidate: StructuredMemoryFact, baseline: StructuredMemoryFact) -> bool:
+    """Return True if `candidate` should win a recency tie-break over `baseline`."""
+
+    candidate_ts = _parse_iso(candidate.observed_at)
+    baseline_ts = _parse_iso(baseline.observed_at)
+    if candidate_ts is not None and baseline_ts is not None:
+        if candidate_ts > baseline_ts:
+            return True
+        if candidate_ts < baseline_ts:
+            return False
+    else:
+        if str(candidate.observed_at or "") > str(baseline.observed_at or ""):
+            return True
+        if str(candidate.observed_at or "") < str(baseline.observed_at or ""):
+            return False
+
+    if str(candidate.updated_at or "") > str(baseline.updated_at or ""):
+        return True
+    if str(candidate.updated_at or "") < str(baseline.updated_at or ""):
+        return False
+    return str(candidate.fact_id or "") > str(baseline.fact_id or "")
+
+
 def replacement_required(old: StructuredMemoryFact, new: StructuredMemoryFact) -> bool:
     """Return True if `new` should replace `old` in the active set.
 
-    The runtime currently only performs deterministic replacement for "current_state"
-    slots (stateful facts). Other categories may be handled via merges later.
+    The runtime replaces facts for current-state and durable slots. Historical
+    observations should coexist under distinct canonical keys.
     """
 
     if old.canonical_key != new.canonical_key:
+        return False
+
+    if merge_required(old, new):
         return False
 
     # Never "replace" with an equivalent fact; treat it as a noop.
     if equivalent_fact(old, new):
         return False
 
-    if old.time_semantics != "current_state" or new.time_semantics != "current_state":
+    replaceable_semantics = {"current_state", "durable_until_replaced"}
+    if old.time_semantics not in replaceable_semantics or new.time_semantics not in replaceable_semantics:
         return False
 
-    old_ts = _parse_iso(old.observed_at)
-    new_ts = _parse_iso(new.observed_at)
-    if old_ts is not None and new_ts is not None:
-        if new_ts > old_ts:
-            return True
-        if new_ts < old_ts:
-            return False
-    else:
-        # Fall back to lexicographic ordering for deterministic behavior.
-        if str(new.observed_at or "") > str(old.observed_at or ""):
-            return True
-        if str(new.observed_at or "") < str(old.observed_at or ""):
-            return False
-
-    # Tie-break deterministically when observed_at matches or parsing failed.
-    if str(new.updated_at or "") > str(old.updated_at or ""):
-        return True
-    if str(new.updated_at or "") < str(old.updated_at or ""):
-        return False
-    return str(new.fact_id or "") > str(old.fact_id or "")
+    return is_newer_fact(new, old)
 
 
 def merge_required(old: StructuredMemoryFact, new: StructuredMemoryFact) -> bool:
     """Return True if `new` should be merged into `old` rather than replaced.
 
-    Task 3 scope: no structured merge semantics are required for the runtime tests.
-    This hook exists so Task 4 can add category-specific merges deterministically.
+    The first runtime merge rule is intentionally narrow: only `preference`
+    facts opt into merge behavior, and only when the incoming fact explicitly
+    requests `merge_mode="merge"`.
     """
 
-    _ = old, new
-    return False
+    return (
+        old.canonical_key == new.canonical_key
+        and old.category == new.category == "preference"
+        and not equivalent_fact(old, new)
+        and new.merge_mode == "merge"
+    )
+
+
+def merge_values(old_value: Any, new_value: Any) -> Any:
+    """Merge two structured preference values deterministically."""
+
+    if isinstance(old_value, dict) and isinstance(new_value, dict):
+        merged = dict(old_value)
+        merged.update(new_value)
+        return merged
+
+    def _iter_items(value: Any) -> list[Any]:
+        if isinstance(value, list):
+            return list(value)
+        if isinstance(value, tuple):
+            return list(value)
+        return [value]
+
+    merged_items: list[Any] = []
+    for item in [*_iter_items(old_value), *_iter_items(new_value)]:
+        if any(existing == item for existing in merged_items):
+            continue
+        merged_items.append(item)
+    return merged_items

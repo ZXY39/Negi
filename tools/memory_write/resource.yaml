@@ -75,6 +75,11 @@ parameters:
           qualifier:
             type: object
             description: Optional qualifier metadata (e.g. project context, constraints).
+          merge_mode:
+            type: string
+            enum:
+              - merge
+            description: Optional preference-only merge behavior.
           expires_at:
             type:
               - string
