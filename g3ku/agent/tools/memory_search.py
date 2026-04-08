@@ -24,6 +24,8 @@ class MemorySearchTool(Tool):
         return (
             "Search long-term memory and return structured results grouped by context type "
             "(memory/resource/skill) plus a unified ranked view.\n"
+            "STRUCTURED MEMORY: memory hits for structured facts include fact_id/canonical_key/category/"
+            "observed_at/expires_at fields when available; use these identifiers before memory_delete.\n"
             "MUST CALL: when the answer depends on prior user/project facts not fully present in current turn, "
             "including remembered preferences, previous decisions, constraints, unresolved action items, "
             "or references like 'as discussed before'/'remember'.\n"

@@ -171,6 +171,10 @@ def test_ceo_prompt_builder_keeps_memory_guidance() -> None:
     builder = CeoPromptBuilder(loop=SimpleNamespace(workspace=Path.cwd()))
     prompt = builder.build(skills=[])
     assert "memory_write" in prompt
+    assert "stateful_fact" in prompt
+    assert "observed_at" in prompt
+    assert "memory_delete" in prompt
+    assert "memory_search" in prompt
     assert "Retrieved Context" in prompt
     assert "submit_next_stage" not in prompt
 
