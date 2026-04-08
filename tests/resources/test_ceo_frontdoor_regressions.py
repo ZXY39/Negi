@@ -904,6 +904,35 @@ async def test_summarize_messages_uses_legacy_frontdoor_settings_when_new_fields
 
 
 @pytest.mark.asyncio
+async def test_summarize_messages_prefers_explicit_new_frontdoor_settings_over_legacy_values() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            _memory_runtime_settings=SimpleNamespace(
+                assembly=MemoryAssemblyConfig(
+                    frontdoor_summary_trigger_message_count=4,
+                    frontdoor_recent_message_count=2,
+                    frontdoor_summarizer_trigger_message_count=10,
+                    frontdoor_summarizer_keep_message_count=20,
+                ),
+            )
+        )
+    )
+
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+    ]
+
+    result = await runner._summarize_messages(messages=messages, state={})
+
+    assert result == {"messages": messages}
+
+
+@pytest.mark.asyncio
 async def test_summarize_messages_keeps_trailing_tool_turn_structurally_intact() -> None:
     runner = CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
@@ -972,6 +1001,37 @@ async def test_summarize_messages_summary_includes_recent_compacted_context() ->
 
     assert "user: u1" in summary_text
     assert "user: u4" in summary_text
+
+
+@pytest.mark.asyncio
+async def test_summarize_messages_summary_keeps_repeated_recent_context_samples() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            _memory_runtime_settings=SimpleNamespace(
+                assembly=SimpleNamespace(
+                    frontdoor_summarizer_trigger_message_count=4,
+                    frontdoor_summarizer_keep_message_count=2,
+                )
+            )
+        )
+    )
+
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "repeat"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+        {"role": "user", "content": "repeat"},
+        {"role": "assistant", "content": "a4"},
+        {"role": "user", "content": "u5"},
+    ]
+
+    result = await runner._summarize_messages(messages=messages, state={})
+    summary_text = str(result["messages"][2].get("content") or "")
+
+    assert summary_text.count("user: repeat") == 2
 
 
 def test_build_prompt_context_no_longer_uses_summary_text_overlay() -> None:

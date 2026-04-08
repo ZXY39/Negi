@@ -77,11 +77,7 @@ def build_history_summary_message(*, messages: list[Any]) -> dict[str, Any]:
         head = snippets[:_SUMMARY_HEAD_LIMIT]
         tail_limit = max(_SUMMARY_MESSAGE_LIMIT - len(head), 0)
         tail = snippets[-tail_limit:] if tail_limit else []
-        combined: list[str] = []
-        for item in [*head, *tail]:
-            if item not in combined:
-                combined.append(item)
-        snippets = combined
+        snippets = [*head, *tail]
     summary = " | ".join(snippets) if snippets else "Earlier conversation was compacted."
     return {
         "role": "assistant",

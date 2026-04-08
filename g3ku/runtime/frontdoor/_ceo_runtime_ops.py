@@ -816,24 +816,29 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
         trigger_default = 10
         keep_default = 20
-        new_trigger = _positive_int(
-            getattr(assembly_cfg, "frontdoor_summarizer_trigger_message_count", trigger_default),
-            trigger_default,
+
+        def _configured_count(*, primary_name: str, legacy_name: str, default: int) -> int:
+            fields_set = set(getattr(assembly_cfg, "model_fields_set", ()) or ())
+            if primary_name in fields_set:
+                return _positive_int(getattr(assembly_cfg, primary_name, default), default)
+            if legacy_name in fields_set:
+                return _positive_int(getattr(assembly_cfg, legacy_name, default), default)
+            if hasattr(assembly_cfg, primary_name):
+                return _positive_int(getattr(assembly_cfg, primary_name, default), default)
+            if hasattr(assembly_cfg, legacy_name):
+                return _positive_int(getattr(assembly_cfg, legacy_name, default), default)
+            return default
+
+        trigger = _configured_count(
+            primary_name="frontdoor_summarizer_trigger_message_count",
+            legacy_name="frontdoor_summary_trigger_message_count",
+            default=trigger_default,
         )
-        legacy_trigger = _positive_int(
-            getattr(assembly_cfg, "frontdoor_summary_trigger_message_count", trigger_default),
-            trigger_default,
+        keep = _configured_count(
+            primary_name="frontdoor_summarizer_keep_message_count",
+            legacy_name="frontdoor_recent_message_count",
+            default=keep_default,
         )
-        trigger = legacy_trigger if new_trigger == trigger_default and legacy_trigger != trigger_default else new_trigger
-        new_keep = _positive_int(
-            getattr(assembly_cfg, "frontdoor_summarizer_keep_message_count", keep_default),
-            keep_default,
-        )
-        legacy_keep = _positive_int(
-            getattr(assembly_cfg, "frontdoor_recent_message_count", keep_default),
-            keep_default,
-        )
-        keep = legacy_keep if new_keep == keep_default and legacy_keep != keep_default else new_keep
         compacted = compact_history_messages(
             messages=list(messages or []),
             trigger_message_count=trigger,
