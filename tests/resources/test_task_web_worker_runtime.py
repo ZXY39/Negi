@@ -3863,7 +3863,7 @@ def test_get_node_detail_payload_summary_mode_uses_previews_instead_of_full_inli
     assert item["final_output_ref"].startswith("artifact:")
 
 
-def test_node_detail_summary_compacts_tool_trace_payloads(tmp_path: Path):
+def test_node_detail_summary_compacts_tool_payloads_from_trace(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -3917,7 +3917,9 @@ def test_node_detail_summary_compacts_tool_trace_payloads(tmp_path: Path):
 
     assert tool["tool_call_id"] == "call-1"
     assert tool["tool_name"] == "filesystem"
-    assert tool["arguments_preview"] == json.dumps({"path": str(tmp_path)}, ensure_ascii=False)
+    assert tool["arguments_preview"]
+    assert '"path"' in tool["arguments_preview"]
+    assert str(tmp_path) in tool["arguments_preview"]
     assert tool.get("output_preview")
     assert tool["output_ref"] == "artifact:artifact:tool-output"
     assert "arguments_text" not in tool

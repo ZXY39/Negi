@@ -2238,21 +2238,24 @@ def test_inflight_execution_trace_summary_compacts_tool_payloads() -> None:
                         "round_index": 1,
                         "created_at": "2026-04-08T12:00:00+08:00",
                         "budget_counted": True,
-                        "tools": [
-                            {
-                                "tool_call_id": "call-1",
-                                "tool_name": "load_tool_context",
-                                "arguments_text": '{"tool_id": "filesystem"}',
-                                "output_text": "very long inline tool output",
-                                "output_ref": "artifact:artifact:tool-output",
-                                "status": "success",
-                            }
-                        ],
+                        "tool_call_ids": ["call-1"],
+                        "tool_names": ["load_tool_context"],
                     }
                 ],
             }
         ],
     }
+    session._interaction_flow_snapshot = lambda: [
+        {
+            "tool_call_id": "call-1",
+            "tool_name": "load_tool_context",
+            "arguments_text": '{"tool_id": "filesystem"}',
+            "output_text": "very long inline tool output",
+            "output_ref": "artifact:artifact:tool-output",
+            "status": "success",
+            "timestamp": "2026-04-08T12:00:01+08:00",
+        }
+    ]
 
     snapshot = session.inflight_turn_snapshot()
 

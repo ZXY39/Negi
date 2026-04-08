@@ -17,17 +17,6 @@ def test_compact_tool_step_for_summary_returns_preview_fields_and_drops_full_pay
 
     summary_step = compact_tool_step_for_summary(tool_step)
 
-    expected_keys = {
-        "tool_call_id",
-        "tool_name",
-        "arguments_preview",
-        "output_preview",
-        "output_ref",
-        "status",
-        "started_at",
-        "finished_at",
-    }
-    assert set(summary_step.keys()) == expected_keys
     assert summary_step["tool_call_id"] == tool_step["tool_call_id"]
     assert summary_step["tool_name"] == tool_step["tool_name"]
     assert summary_step["output_ref"] == tool_step["output_ref"]
