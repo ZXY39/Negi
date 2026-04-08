@@ -1912,7 +1912,62 @@ class _RagMemoryBackend:
     async def apply_sync_event(self, event: MemorySyncEvent) -> dict[str, Any]:
         """Apply one journal event to the RAG-backed store idempotently."""
         namespace = self.namespace_for(channel=event.channel, chat_id=event.chat_id)
+        metadata = dict(event.metadata or {}) if isinstance(event.metadata, dict) else {}
+        is_structured = str(metadata.get("memory_format") or "") == "structured_v1"
+        structured_op = str(metadata.get("structured_op") or "").strip().lower()
+        effective_text = str(event.text or "").strip()
+        if is_structured and event.event_type == "memory_write" and structured_op == "write":
+            fact = metadata.get("structured_fact")
+            if isinstance(fact, dict):
+                effective_text = str(fact.get("rendered_statement") or fact.get("statement") or "").strip()
+                if not effective_text:
+                    try:
+                        fact_id = str(fact.get("fact_id") or event.record_id or "").strip() or uuid.uuid4().hex[:12]
+                        normalized = _normalize_structured_fact(
+                            fact,
+                            fact_id=fact_id,
+                            now_iso=str(event.created_at or _now_iso()),
+                        )
+                        effective_text = str(_render_structured_statement(normalized) or "").strip()
+                    except Exception:
+                        effective_text = str(event.text or "").strip()
         if event.event_type == "memory_delete":
+            if is_structured and structured_op == "delete":
+                fact_ids_raw = metadata.get("fact_ids")
+                fact_ids = (
+                    [str(item).strip() for item in list(fact_ids_raw or []) if str(item).strip()]
+                    if isinstance(fact_ids_raw, list)
+                    else []
+                )
+
+                async def _delete_record(record_id: str) -> None:
+                    if self.arch_version == "v2" and self._feature_enabled("unified_context"):
+                        existing_record = await asyncio.to_thread(self.store._fetch_context_v2, namespace, record_id)
+                        if existing_record is not None and existing_record.l2_ref:
+                            try:
+                                path = Path(existing_record.l2_ref)
+                                if path.exists():
+                                    await asyncio.to_thread(path.unlink)
+                            except Exception:
+                                logger.debug("Delete L2 payload ignored for {}", record_id)
+                        await asyncio.to_thread(self.store.delete_context_v2, namespace, record_id)
+                        if str(getattr(self.config, "mode", "") or "").lower() == "dual":
+                            await asyncio.to_thread(self.store.put, namespace, record_id, None)
+                    else:
+                        await asyncio.to_thread(self.store.put, namespace, record_id, None)
+
+                for record_id in fact_ids:
+                    await _delete_record(record_id)
+                envelope_id = str(event.record_id or "").strip()
+                if envelope_id and envelope_id not in set(fact_ids):
+                    await _delete_record(envelope_id)
+                return {
+                    "record_id": event.record_id,
+                    "event_type": event.event_type,
+                    "deleted": True,
+                    "deleted_ids": fact_ids,
+                    "metadata": metadata,
+                }
             if self.arch_version == "v2" and self._feature_enabled("unified_context"):
                 existing_record = await asyncio.to_thread(self.store._fetch_context_v2, namespace, event.record_id)
                 if existing_record is not None and existing_record.l2_ref:
@@ -1936,7 +1991,7 @@ class _RagMemoryBackend:
         if self.arch_version == "v2" and self._feature_enabled("unified_context"):
             l2_ref = None
             if self._feature_enabled("split_store"):
-                l2_ref = await self._write_l2_payload(record_id=event.record_id, content=event.text)
+                l2_ref = await self._write_l2_payload(record_id=event.record_id, content=effective_text)
             record_v2 = ContextRecordV2(
                 record_id=event.record_id,
                 context_type="memory",
@@ -1946,8 +2001,8 @@ class _RagMemoryBackend:
                     chat_id=event.chat_id,
                     record_id=event.record_id,
                 ),
-                l0=self._l0_summary(event.text),
-                l1=self._l1_summary(event.text),
+                l0=self._l0_summary(effective_text),
+                l1=self._l1_summary(effective_text),
                 l2_ref=l2_ref,
                 tags=list(event.tags or []),
                 source=event.source,
@@ -1962,7 +2017,7 @@ class _RagMemoryBackend:
             if str(getattr(self.config, "mode", "") or "").lower() == "dual":
                 legacy_record = MemoryRecord(
                     record_id=event.record_id,
-                    text=event.text,
+                    text=effective_text,
                     source=event.source,
                     confidence=float(event.confidence),
                     created_at=event.created_at,
@@ -1977,7 +2032,7 @@ class _RagMemoryBackend:
 
         legacy_record = MemoryRecord(
             record_id=event.record_id,
-            text=event.text,
+            text=effective_text,
             source=event.source,
             confidence=float(event.confidence),
             created_at=event.created_at,
@@ -3845,27 +3900,177 @@ class MemoryManager:
             return f"[{stamp}] {source} DELETE: {detail}"
         return f"[{stamp}] {source}: {event.text}"
 
+    @staticmethod
+    def _structured_journal_metadata(event: MemorySyncEvent) -> tuple[bool, str, dict[str, Any]]:
+        metadata = dict(event.metadata or {}) if isinstance(event.metadata, dict) else {}
+        is_structured = str(metadata.get("memory_format") or "") == "structured_v1"
+        structured_op = str(metadata.get("structured_op") or "").strip().lower()
+        return is_structured, structured_op, metadata
+
+    @classmethod
+    def _history_line_for_structured_event(cls, event: MemorySyncEvent) -> str:
+        stamp = str(event.created_at or _now_iso()).replace("T", " ")[:16]
+        source = str(event.source or "turn").upper()
+        _is_structured, op, metadata = cls._structured_journal_metadata(event)
+        if event.event_type == "memory_write" and op == "write":
+            fact = metadata.get("structured_fact")
+            statement = ""
+            if isinstance(fact, dict):
+                statement = str(fact.get("rendered_statement") or fact.get("statement") or "").strip()
+            if not statement:
+                statement = str(event.text or "").strip()
+            return f"[{stamp}] {source}: {statement}"
+        if event.event_type == "memory_delete" and op == "delete":
+            fact_ids = metadata.get("fact_ids")
+            canonical_keys = metadata.get("canonical_keys")
+            reason = str(metadata.get("reason") or "explicit_delete").strip()
+            ids = ",".join(str(item).strip() for item in (fact_ids or []) if str(item).strip()) if isinstance(fact_ids, list) else ""
+            keys = (
+                ",".join(str(item).strip() for item in (canonical_keys or []) if str(item).strip())
+                if isinstance(canonical_keys, list)
+                else ""
+            )
+            detail = f"structured_fact_delete reason={reason}"
+            if ids:
+                detail += f" fact_ids=[{ids}]"
+            if keys:
+                detail += f" canonical_keys=[{keys}]"
+            return f"[{stamp}] {source} DELETE: {detail}"
+        return cls._history_line_for_event(event)
+
+    def _structured_active_by_namespace_from_events(
+        self, events: list[MemorySyncEvent]
+    ) -> dict[tuple[str, ...], dict[str, dict[str, Any]]]:
+        """Return namespace -> canonical_key -> payload for active structured facts."""
+
+        active_by_ns: dict[tuple[str, ...], dict[str, dict[str, Any]]] = {}
+        for event in events:
+            is_structured, op, metadata = self._structured_journal_metadata(event)
+            if not is_structured:
+                continue
+            namespace = self._event_namespace(event)
+            active = active_by_ns.setdefault(namespace, {})
+            if event.event_type == "memory_delete" and op == "delete":
+                fact_ids = metadata.get("fact_ids")
+                canonical_keys = metadata.get("canonical_keys")
+                ids = {str(item) for item in (fact_ids or []) if str(item).strip()} if isinstance(fact_ids, list) else set()
+                keys = {str(item) for item in (canonical_keys or []) if str(item).strip()} if isinstance(canonical_keys, list) else set()
+                for key in keys:
+                    active.pop(key, None)
+                if ids:
+                    for key, payload in list(active.items()):
+                        if isinstance(payload, dict) and str(payload.get("fact_id") or "") in ids:
+                            active.pop(key, None)
+                continue
+            if event.event_type != "memory_write" or op != "write":
+                continue
+            payload = metadata.get("structured_fact")
+            if not isinstance(payload, dict):
+                continue
+            fact_id = str(payload.get("fact_id") or event.record_id or "").strip() or uuid.uuid4().hex[:12]
+            normalized = _normalize_structured_fact(payload, fact_id=fact_id, now_iso=str(event.created_at or _now_iso()))
+            canonical_key = str(payload.get("canonical_key") or normalized.canonical_key or canonical_key_for_fact(normalized)).strip()
+            existing = active.get(canonical_key)
+            if isinstance(existing, dict):
+                old_id = str(existing.get("fact_id") or "").strip() or fact_id
+                old_fact = _normalize_structured_fact(existing, fact_id=old_id, now_iso=str(event.created_at or _now_iso()))
+                if _structured_equivalent_fact(old_fact, normalized):
+                    continue
+                if _structured_replacement_required(old_fact, normalized):
+                    active[canonical_key] = dict(payload)
+                continue
+            active[canonical_key] = dict(payload)
+        return active_by_ns
+
+    def _structured_current_projection_content_from_events(self, events: list[MemorySyncEvent]) -> str:
+        active_by_ns = self._structured_active_by_namespace_from_events(events)
+        rows: list[str] = []
+        for namespace, active in sorted(active_by_ns.items(), key=lambda item: _encode_ns(item[0])):
+            ns_key = _encode_ns(namespace)
+            for canonical_key, payload in sorted(active.items(), key=lambda item: str(item[0])):
+                if not isinstance(payload, dict):
+                    continue
+                entry = dict(payload)
+                entry.setdefault("canonical_key", canonical_key)
+                entry["namespace"] = ns_key
+                rows.append(json.dumps(entry, ensure_ascii=False))
+        return "\n".join(rows) + ("\n" if rows else "")
+
+    def _structured_history_projection_content_from_events(self, events: list[MemorySyncEvent]) -> str:
+        rows: list[str] = []
+        for event in events:
+            is_structured, op, metadata = self._structured_journal_metadata(event)
+            if not is_structured:
+                continue
+            namespace = _encode_ns(self._event_namespace(event))
+            base: dict[str, Any] = {
+                "seq": int(event.seq),
+                "event_id": str(event.event_id or ""),
+                "event_type": str(event.event_type or ""),
+                "record_id": str(event.record_id or ""),
+                "op": op,
+                "namespace": namespace,
+                "created_at": str(event.created_at or ""),
+                "updated_at": str(event.updated_at or ""),
+            }
+            if event.event_type == "memory_write" and op == "write":
+                fact = metadata.get("structured_fact") if isinstance(metadata.get("structured_fact"), dict) else {}
+                statement = str(fact.get("rendered_statement") or fact.get("statement") or event.text or "").strip()
+                base["text"] = statement
+                base["fact"] = dict(fact)
+            elif event.event_type == "memory_delete" and op == "delete":
+                base["reason"] = str(metadata.get("reason") or "")
+                base["fact_ids"] = list(metadata.get("fact_ids") or []) if isinstance(metadata.get("fact_ids"), list) else []
+                base["canonical_keys"] = (
+                    list(metadata.get("canonical_keys") or []) if isinstance(metadata.get("canonical_keys"), list) else []
+                )
+            else:
+                base["text"] = str(event.text or "").strip()
+                base["metadata"] = dict(metadata)
+            rows.append(json.dumps(base, ensure_ascii=False))
+        return "\n".join(rows) + ("\n" if rows else "")
+
     async def _sync_legacy_projection(self) -> None:
         if not self._legacy_mirror_enabled():
             return
         events = self._load_journal_events(min_seq=1)
-        active_events = self._active_memory_events()
+        structured_current = self._structured_current_projection_content_from_events(events)
+        structured_history = self._structured_history_projection_content_from_events(events)
+
+        def _is_structured(event: MemorySyncEvent) -> bool:
+            return self._structured_journal_metadata(event)[0]
+
+        active_events = [event for event in self._active_memory_events() if not _is_structured(event)]
         threshold = float(getattr(getattr(self.config, "guard", None), "auto_fact_confidence", 0.8) or 0.8)
         lines = [
             "# Managed Memory Mirror",
             "",
             "This file is generated from system-managed memory journal events.",
             "",
-            "## Facts",
+            "## Structured Facts",
         ]
-        seen_fact_hashes: set[str] = set()
+        active_structured_payloads: list[dict[str, Any]] = []
+        try:
+            active_by_ns = self._structured_active_by_namespace_from_events(events)
+            for namespace, active in sorted(active_by_ns.items(), key=lambda item: _encode_ns(item[0])):
+                _ = namespace
+                for _canonical_key, payload in sorted(active.items(), key=lambda item: str(item[0])):
+                    if isinstance(payload, dict):
+                        active_structured_payloads.append(payload)
+        except Exception:
+            active_structured_payloads = []
+
+        for payload in active_structured_payloads:
+            statement = str(payload.get("rendered_statement") or payload.get("statement") or "").strip()
+            if statement:
+                lines.append(f"- {statement}")
+        if lines[-1] == "## Structured Facts":
+            lines.append("- (empty)")
+
+        lines.extend(["", "## Facts"])
         for event in active_events:
-            text_hash = self._stable_text_hash(event.text)
-            if text_hash in seen_fact_hashes:
-                continue
             if event.source == "turn" and float(event.confidence) < threshold:
                 continue
-            seen_fact_hashes.add(text_hash)
             lines.append(f"- {event.text}")
         if lines[-1] == "## Facts":
             lines.append("- (empty)")
@@ -3876,9 +4081,14 @@ class MemoryManager:
             "",
         ]
         for event in events:
-            history_lines.append(self._history_line_for_event(event))
+            if _is_structured(event):
+                history_lines.append(self._history_line_for_structured_event(event))
+            else:
+                history_lines.append(self._history_line_for_event(event))
             history_lines.append("")
         async with self._io_lock:
+            await asyncio.to_thread(self.structured_current_file.write_text, structured_current, "utf-8")
+            await asyncio.to_thread(self.structured_history_file.write_text, structured_history, "utf-8")
             await asyncio.to_thread(self.memory_file.write_text, "\n".join(lines).rstrip() + "\n", "utf-8")
             await asyncio.to_thread(self.history_file.write_text, "\n".join(history_lines).rstrip() + "\n", "utf-8")
             self._sync_state["legacy_applied_seq"] = self._journal_seq()
@@ -4524,6 +4734,12 @@ class MemoryManager:
         This keeps structured facts "journal-first": the file is a derived artifact.
         """
 
+        events = self._load_journal_events(min_seq=1)
+        content = self._structured_current_projection_content_from_events(events)
+        async with self._io_lock:
+            await asyncio.to_thread(self.structured_current_file.write_text, content, "utf-8")
+        return
+
         # Build active structured facts for each namespace in a single pass.
         active_by_ns: dict[tuple[str, ...], dict[str, dict[str, Any]]] = {}
         events = self._load_journal_events(min_seq=1)
@@ -4581,6 +4797,10 @@ class MemoryManager:
 
     async def _active_structured_fact_map(self, namespace: tuple[str, ...]) -> dict[str, dict[str, Any]]:
         """Return canonical_key -> fact payload for active facts in the namespace."""
+
+        events = self._load_journal_events(min_seq=1)
+        by_ns = self._structured_active_by_namespace_from_events(events)
+        return dict(by_ns.get(namespace, {}))
 
         active: dict[str, dict[str, Any]] = {}
         events = self._load_journal_events(min_seq=1)

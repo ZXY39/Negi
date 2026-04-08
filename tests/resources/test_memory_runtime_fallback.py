@@ -631,6 +631,58 @@ def test_memory_manager_schema_bump_resets_runtime_artifacts(monkeypatch, tmp_pa
         manager.close()
 
 
+@pytest.mark.asyncio
+async def test_structured_memory_dual_write_generates_structured_projections_and_markdown(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _FailingBackend:
+        def __init__(self, workspace, cfg):
+            _ = workspace, cfg
+            raise RuntimeError("backend unavailable")
+
+    monkeypatch.setattr(rag_memory, "_RagMemoryBackend", _FailingBackend)
+    manager = rag_memory.MemoryManager(tmp_path, _memory_cfg())
+
+    try:
+        timestamp = "2026-04-08T12:20:00+00:00"
+        statement = "State is warm."
+        await manager.upsert_structured_memory_facts(
+            session_key="web:shared",
+            channel="web",
+            chat_id="shared",
+            facts=[
+                {
+                    "fact_id": "state-projection-v1",
+                    "slot_id": "current_state",
+                    "stateful_fact": True,
+                    "rendered_statement": statement,
+                    "state": {"value": statement},
+                    "observed_at": timestamp,
+                }
+            ],
+        )
+
+        mem_dir = tmp_path / "memory"
+        current_lines = (mem_dir / "structured_current.jsonl").read_text(encoding="utf-8").splitlines()
+        history_lines = (mem_dir / "structured_history.jsonl").read_text(encoding="utf-8").splitlines()
+        memory_text = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+
+        assert len([line for line in current_lines if line.strip()]) == 1
+        current = json.loads(current_lines[0])
+        assert current["fact_id"] == "state-projection-v1"
+
+        assert len([line for line in history_lines if line.strip()]) == 1
+        history = json.loads(history_lines[0])
+        assert history["op"] == "write"
+        assert history["fact"]["fact_id"] == "state-projection-v1"
+
+        assert statement in memory_text
+        assert timestamp in memory_text
+    finally:
+        manager.close()
+
+
 def test_private_state_paths_are_git_ignored() -> None:
     result = subprocess.run(
         ["git", "check-ignore", ".g3ku/config.json", "memory/MEMORY.md", "memory/HISTORY.md", "sessions/demo.jsonl"],
