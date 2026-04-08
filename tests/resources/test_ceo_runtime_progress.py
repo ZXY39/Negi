@@ -2141,8 +2141,8 @@ def test_stage_trace_round_enrichment_uses_latest_tool_event_status() -> None:
     assert snapshot is not None
     tool = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
     assert tool["tool_call_id"] == "skill-installer:1"
+    assert tool["tool_name"] == "skill-installer"
     assert tool["status"] == "success"
-    assert tool["text"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -2213,72 +2213,57 @@ async def test_runtime_agent_session_persists_execution_trace_summary_into_sessi
 
 def test_inflight_execution_trace_summary_compacts_tool_payloads() -> None:
     session = RuntimeAgentSession(
-        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:compaction-trace",
+        SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
         channel="web",
-        chat_id="compaction-trace",
+        chat_id="shared",
     )
     session._state.is_running = True
     session._state.status = "running"
     session._frontdoor_stage_state = {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": False,
         "stages": [
             {
                 "stage_id": "frontdoor-stage-1",
                 "stage_index": 1,
+                "stage_kind": "normal",
                 "stage_goal": "inspect repository",
+                "tool_round_budget": 2,
+                "tool_rounds_used": 1,
                 "status": "active",
                 "rounds": [
                     {
+                        "round_id": "frontdoor-stage-1:round-1",
                         "round_index": 1,
-                        "round_id": "round-1",
-                        "tool_call_ids": ["skill-installer:1"],
-                        "tool_names": ["skill-installer"],
+                        "created_at": "2026-04-08T12:00:00+08:00",
+                        "budget_counted": True,
+                        "tools": [
+                            {
+                                "tool_call_id": "call-1",
+                                "tool_name": "load_tool_context",
+                                "arguments_text": '{"tool_id": "filesystem"}',
+                                "output_text": "very long inline tool output",
+                                "output_ref": "artifact:artifact:tool-output",
+                                "status": "success",
+                            }
+                        ],
                     }
                 ],
             }
         ],
     }
-    session._event_log = [
-        {
-            "type": "tool_execution_start",
-            "timestamp": "2026-03-18T12:00:00",
-            "payload": {
-                "tool_name": "skill-installer",
-                "text": "started",
-                "tool_call_id": "skill-installer:1",
-            },
-        },
-        {
-            "type": "tool_execution_end",
-            "timestamp": "2026-03-18T12:00:10",
-            "payload": {
-                "tool_name": "skill-installer",
-                "text": "completed",
-                "tool_call_id": "skill-installer:1",
-                "is_error": False,
-            },
-        },
-    ]
 
     snapshot = session.inflight_turn_snapshot()
 
     assert snapshot is not None
-    summary = snapshot["execution_trace_summary"]
-    stages = summary.get("stages") or []
-    assert stages
-    rounds = stages[0].get("rounds") or []
-    assert rounds
-    tools = rounds[0].get("tools") or []
-    assert tools
-    tool = tools[0]
+    tools = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
 
-    assert tool.get("tool_call_id")
-    assert tool.get("tool_name")
-    assert tool.get("arguments_preview")
-    assert tool.get("output_preview")
-    assert "text" not in tool
-    assert "arguments_text" not in tool
-    assert "output_text" not in tool
+    assert tools[0]["arguments_preview"] == '{"tool_id": "filesystem"}'
+    assert tools[0].get("output_preview")
+    assert tools[0]["output_ref"] == "artifact:artifact:tool-output"
+    assert "arguments_text" not in tools[0]
+    assert "output_text" not in tools[0]
 
 
 @pytest.mark.parametrize(
