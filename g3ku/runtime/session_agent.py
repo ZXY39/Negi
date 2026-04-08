@@ -392,6 +392,47 @@ class RuntimeAgentSession:
             )
         return items
 
+    def _legacy_tool_events_snapshot(self) -> list[dict[str, Any]]:
+        interaction_flow = self._interaction_flow_snapshot()
+        if not interaction_flow:
+            return []
+        tools_by_key: dict[str, dict[str, Any]] = {}
+        ordered_tools: list[dict[str, Any]] = []
+        for item in interaction_flow:
+            key = str(item.get("tool_call_id") or item.get("tool_name") or "").strip()
+            if not key:
+                continue
+            current = tools_by_key.get(key)
+            if current is None:
+                current = {
+                    "tool_name": str(item.get("tool_name") or "tool").strip() or "tool",
+                    "tool_call_id": str(item.get("tool_call_id") or "").strip(),
+                    "status": str(item.get("status") or "").strip(),
+                    "text": str(item.get("text") or "").strip(),
+                    "timestamp": str(item.get("timestamp") or "").strip(),
+                    "kind": str(item.get("kind") or "").strip(),
+                    "source": str(item.get("source") or "").strip().lower() or "user",
+                }
+                if isinstance(item.get("elapsed_seconds"), (int, float)):
+                    current["elapsed_seconds"] = float(item["elapsed_seconds"])
+                tools_by_key[key] = current
+                ordered_tools.append(current)
+                continue
+            current["status"] = str(item.get("status") or current.get("status") or "").strip()
+            current["timestamp"] = str(item.get("timestamp") or current.get("timestamp") or "").strip()
+            text = str(item.get("text") or "").strip()
+            if text:
+                current["text"] = text
+            kind = str(item.get("kind") or "").strip()
+            if kind:
+                current["kind"] = kind
+            source = str(item.get("source") or "").strip().lower()
+            if source:
+                current["source"] = source
+            if isinstance(item.get("elapsed_seconds"), (int, float)):
+                current["elapsed_seconds"] = float(item["elapsed_seconds"])
+        return ordered_tools
+
     def _frontdoor_execution_trace_summary_snapshot(self) -> dict[str, Any]:
         stage_state = getattr(self, "_frontdoor_stage_state", None)
         if isinstance(stage_state, dict) and isinstance(stage_state.get("stages"), list):
@@ -474,76 +515,7 @@ class RuntimeAgentSession:
                             for item in selected
                         ]
             return snapshot
-        interaction_flow = self._interaction_flow_snapshot()
-        if not interaction_flow:
-            return {}
-        tools_by_key: dict[str, dict[str, Any]] = {}
-        ordered_tools: list[dict[str, Any]] = []
-        for item in interaction_flow:
-            key = str(item.get("tool_call_id") or item.get("tool_name") or "").strip()
-            if not key:
-                continue
-            current = tools_by_key.get(key)
-            if current is None:
-                current = {
-                    "tool_name": str(item.get("tool_name") or "tool").strip() or "tool",
-                    "tool_call_id": str(item.get("tool_call_id") or "").strip(),
-                    "status": str(item.get("status") or "").strip(),
-                    "text": str(item.get("text") or "").strip(),
-                    "timestamp": str(item.get("timestamp") or "").strip(),
-                    "kind": str(item.get("kind") or "").strip(),
-                    "source": str(item.get("source") or "").strip().lower() or "user",
-                }
-                if isinstance(item.get("elapsed_seconds"), (int, float)):
-                    current["elapsed_seconds"] = float(item["elapsed_seconds"])
-                tools_by_key[key] = current
-                ordered_tools.append(current)
-                continue
-            current["status"] = str(item.get("status") or current.get("status") or "").strip()
-            current["timestamp"] = str(item.get("timestamp") or current.get("timestamp") or "").strip()
-            text = str(item.get("text") or "").strip()
-            if text:
-                current["text"] = text
-            kind = str(item.get("kind") or "").strip()
-            if kind:
-                current["kind"] = kind
-            source = str(item.get("source") or "").strip().lower()
-            if source:
-                current["source"] = source
-            if isinstance(item.get("elapsed_seconds"), (int, float)):
-                current["elapsed_seconds"] = float(item["elapsed_seconds"])
-        if not ordered_tools:
-            return {}
-        return {
-            "active_stage_id": "inflight-stage-1",
-            "transition_required": False,
-            "stages": [
-                {
-                    "stage_id": "inflight-stage-1",
-                    "stage_index": 1,
-                    "stage_goal": "",
-                    "tool_round_budget": 0,
-                    "tool_rounds_used": 1,
-                    "status": "active",
-                    "mode": "自主执行",
-                    "stage_kind": "normal",
-                    "system_generated": True,
-                    "completed_stage_summary": "",
-                    "key_refs": [],
-                    "archive_ref": "",
-                    "archive_stage_index_start": 0,
-                    "archive_stage_index_end": 0,
-                    "rounds": [
-                        {
-                            "round_index": 1,
-                            "tools": ordered_tools,
-                        }
-                    ],
-                    "created_at": "",
-                    "finished_at": "",
-                }
-            ],
-        }
+        return {}
 
     def _compression_snapshot(self) -> dict[str, Any]:
         raw = getattr(self, "_compression_state", None)
@@ -662,12 +634,17 @@ class RuntimeAgentSession:
         if not (self._state.is_running or status in {"running", "paused", "error"}):
             return None
         execution_trace_summary = self._frontdoor_execution_trace_summary_snapshot()
+        stage_state = getattr(self, "_frontdoor_stage_state", None)
+        has_real_stage_state = isinstance(stage_state, dict) and isinstance(stage_state.get("stages"), list)
+        legacy_tool_events = [] if has_real_stage_state else self._legacy_tool_events_snapshot()
         compression = self._compression_snapshot()
         snapshot: dict[str, Any] = {
             "status": status or ("running" if self._state.is_running else "idle"),
             "execution_trace_summary": execution_trace_summary,
             "compression": compression,
         }
+        if legacy_tool_events:
+            snapshot["tool_events"] = legacy_tool_events
         prompt = self._last_prompt
         prompt_source = self._internal_prompt_source(prompt)
         if prompt_source is not None:
@@ -685,6 +662,7 @@ class RuntimeAgentSession:
             and "user_message" not in snapshot
             and "assistant_text" not in snapshot
             and "last_error" not in snapshot
+            and "tool_events" not in snapshot
         ):
             return None
         return snapshot

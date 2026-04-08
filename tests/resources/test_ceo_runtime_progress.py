@@ -799,7 +799,7 @@ async def test_inflight_snapshot_preserves_paused_user_turn_across_heartbeat_pro
     assert snapshot["status"] == "paused"
     assert snapshot["user_message"]["content"] == "Install the weather skill"
     assert snapshot["assistant_text"] == "Still installing dependencies..."
-    tools = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+    tools = snapshot["tool_events"]
     assert [item["tool_name"] for item in tools] == ["skill-installer"]
 
 
@@ -1575,7 +1575,7 @@ def test_inflight_snapshot_skips_watchdog_progress_updates() -> None:
     snapshot = session.inflight_turn_snapshot()
 
     assert snapshot is not None
-    tools = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+    tools = snapshot["tool_events"]
     assert [item["kind"] for item in tools] == ["tool_background"]
     assert all(item["text"] != "watchdog synthetic update" for item in tools)
 
