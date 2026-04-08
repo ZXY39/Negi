@@ -24,6 +24,10 @@ def test_compact_tool_step_for_summary_returns_preview_fields_and_drops_full_pay
     assert summary_step["started_at"] == tool_step["started_at"]
     assert summary_step["finished_at"] == tool_step["finished_at"]
     assert summary_step["arguments_preview"]
+    assert summary_step["arguments_preview"] != tool_step["arguments_text"]
+    assert len(summary_step["arguments_preview"]) < len(tool_step["arguments_text"])
     assert summary_step["output_preview"]
+    assert summary_step["output_preview"] != tool_step["output_text"]
+    assert len(summary_step["output_preview"]) < len(tool_step["output_text"])
     assert "arguments_text" not in summary_step
     assert "output_text" not in summary_step

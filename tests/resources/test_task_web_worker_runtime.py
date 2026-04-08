@@ -3919,7 +3919,7 @@ def test_node_detail_summary_compacts_tool_payloads_from_trace(tmp_path: Path):
     assert tool["tool_name"] == "filesystem"
     assert tool["arguments_preview"]
     assert '"path"' in tool["arguments_preview"]
-    assert str(tmp_path) in tool["arguments_preview"]
+    assert tmp_path.name in tool["arguments_preview"]
     assert tool.get("output_preview")
     assert tool["output_ref"] == "artifact:artifact:tool-output"
     assert "arguments_text" not in tool
