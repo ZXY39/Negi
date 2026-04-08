@@ -2296,22 +2296,31 @@ def test_ceo_snapshot_summary_keeps_old_tool_details_only_as_preview_and_ref() -
                         "round_index": 1,
                         "created_at": "2026-04-08T12:00:00+08:00",
                         "budget_counted": True,
-                        "tool_call_ids": ["call-1"],
                         "tool_names": ["load_tool_context"],
                     }
                 ],
             }
         ],
     }
-    session._interaction_flow_snapshot = lambda: [
+    session._event_log = [
         {
-            "tool_call_id": "call-1",
-            "tool_name": "load_tool_context",
-            "arguments_text": '{"tool_id": "filesystem"}',
-            "output_text": "full tool output should not survive in snapshot summary",
-            "output_ref": "artifact:artifact:tool-output",
-            "status": "success",
             "timestamp": "2026-04-08T12:00:01+08:00",
+            "type": "tool_execution_start",
+            "payload": {
+                "tool_call_id": "call-1",
+                "tool_name": "load_tool_context",
+                "text": "started",
+            },
+        },
+        {
+            "timestamp": "2026-04-08T12:00:05+08:00",
+            "type": "tool_execution_end",
+            "payload": {
+                "tool_call_id": "call-1",
+                "tool_name": "load_tool_context",
+                "text": "full tool output should not survive in snapshot summary",
+                "is_error": False,
+            },
         }
     ]
 
@@ -2320,8 +2329,87 @@ def test_ceo_snapshot_summary_keeps_old_tool_details_only_as_preview_and_ref() -
     assert snapshot is not None
     tools = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
 
-    assert tools[0]["output_ref"] == "artifact:artifact:tool-output"
-    assert "full tool output should not survive in snapshot summary" not in str(tools[0])
+    assert tools[0]["output_preview"]
+    assert tools[0]["output_preview"] != "full tool output should not survive in snapshot summary"
+    assert len(tools[0]["output_preview"]) < len("full tool output should not survive in snapshot summary")
+
+
+def test_stage_trace_name_fallback_does_not_reuse_same_tool_result_across_rounds() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._frontdoor_stage_state = {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_kind": "normal",
+                "stage_goal": "inspect repository",
+                "tool_round_budget": 3,
+                "tool_rounds_used": 2,
+                "status": "active",
+                "rounds": [
+                    {"round_index": 1, "tool_names": ["filesystem"]},
+                    {"round_index": 2, "tool_names": ["filesystem"]},
+                ],
+            }
+        ],
+    }
+    session._event_log = [
+        {
+            "type": "tool_execution_start",
+            "timestamp": "2026-04-08T08:00:00Z",
+            "payload": {
+                "tool_name": "filesystem",
+                "text": "round 1 started",
+                "tool_call_id": "filesystem:1",
+            },
+        },
+        {
+            "type": "tool_execution_end",
+            "timestamp": "2026-04-08T08:00:02Z",
+            "payload": {
+                "tool_name": "filesystem",
+                "text": "round 1 done",
+                "tool_call_id": "filesystem:1",
+                "is_error": False,
+            },
+        },
+        {
+            "type": "tool_execution_start",
+            "timestamp": "2026-04-08T08:00:03Z",
+            "payload": {
+                "tool_name": "filesystem",
+                "text": "round 2 started",
+                "tool_call_id": "filesystem:2",
+            },
+        },
+        {
+            "type": "tool_execution_end",
+            "timestamp": "2026-04-08T08:00:04Z",
+            "payload": {
+                "tool_name": "filesystem",
+                "text": "round 2 done",
+                "tool_call_id": "filesystem:2",
+                "is_error": False,
+            },
+        },
+    ]
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert snapshot is not None
+    rounds = snapshot["execution_trace_summary"]["stages"][0]["rounds"]
+    assert [len(round_item["tools"]) for round_item in rounds] == [1, 1]
+    assert rounds[0]["tools"][0]["tool_call_id"] == "filesystem:1"
+    assert rounds[1]["tools"][0]["tool_call_id"] == "filesystem:2"
 
 
 @pytest.mark.parametrize(

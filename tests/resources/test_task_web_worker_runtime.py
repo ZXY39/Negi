@@ -3964,8 +3964,10 @@ def test_node_detail_summary_mode_keeps_tool_output_only_in_refs(tmp_path: Path)
     assert payload is not None
     tools = payload["item"]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
 
+    assert tools[0]["output_preview"]
+    assert tools[0]["output_preview"] != "full tool output should not be in summary trace"
+    assert len(tools[0]["output_preview"]) < len("full tool output should not be in summary trace")
     assert tools[0]["output_ref"] == "artifact:artifact:tool-output"
-    assert "full tool output should not be in summary trace" not in str(tools[0])
 
 
 def test_node_detail_resolves_full_final_and_acceptance_text_from_refs(tmp_path: Path):

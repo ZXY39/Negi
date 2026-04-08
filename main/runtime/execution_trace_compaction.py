@@ -15,16 +15,7 @@ def _preview_text(value: Any, *, limit: int = _PREVIEW_CHAR_LIMIT) -> str:
 
 
 def _raw_output_fallback_preview(value: Any) -> str:
-    compact = " ".join(str(value or "").split()).strip()
-    if not compact:
-        return ""
-    if len(compact) <= 8:
-        return "output available"
-    preview_limit = min(_RAW_OUTPUT_FALLBACK_PREVIEW_LIMIT, max(len(compact) - 1, 8))
-    snippet = compact[:preview_limit].rstrip()
-    if len(snippet) >= len(compact):
-        snippet = compact[: max(min(len(compact) - 1, 12), 1)].rstrip()
-    return f"{snippet}..." if snippet else "output available"
+    return _preview_text(value, limit=_RAW_OUTPUT_FALLBACK_PREVIEW_LIMIT)
 
 
 def compact_tool_step_for_summary(step: dict[str, Any] | None) -> dict[str, Any] | None:
