@@ -210,7 +210,13 @@ def partition_frontdoor_history(
 
     tail_start = _tail_start_index(history, recent_message_count=recent_message_count)
     if tail_start <= 0:
-        return prefix, [], history
+        if len(history) <= trigger_count:
+            return prefix, [], history
+        tail_start = max(1, len(history) - trigger_count)
+        while tail_start > 0 and _message_role(history[tail_start]) == "tool":
+            tail_start -= 1
+        if tail_start <= 0:
+            return prefix, [], history
 
     older_messages = history[:tail_start]
     recent_tail = history[tail_start:]

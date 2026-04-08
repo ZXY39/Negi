@@ -25,6 +25,12 @@ from g3ku.agent.tools.registry import ToolRegistry
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.context.types import ContextAssemblyResult
+from g3ku.config.schema import MemoryAssemblyConfig
+from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
+from g3ku.config.schema import MemoryAssemblyConfig
+from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
+from g3ku.config.schema import MemoryAssemblyConfig
+from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.frontdoor._ceo_langgraph_impl import _build_args_schema
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.history_compaction import FRONTDOOR_HISTORY_SUMMARY_MARKER
@@ -293,6 +299,47 @@ def test_tool_registry_langchain_tool_preserves_nested_array_object_contracts() 
     assert schema.get("required") == ["items"]
     assert nested_item.get("required") == ["kind", "value", "meta"]
     assert dict(nested_properties.get("kind") or {}).get("enum") == ["profile", "preference"]
+
+
+@pytest.mark.asyncio
+async def test_summarize_messages_respects_stage_budget_defaults() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            _memory_runtime_settings=SimpleNamespace(
+                assembly=MemoryAssemblyConfig(),
+            )
+        )
+    )
+
+    runner._invoke_summary_model = None
+
+    messages = [{"role": "user", "content": f"message {idx}"} for idx in range(22)]
+
+    result = await runner._summarize_messages(messages=messages, state={})
+
+    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
+    assert len(result["messages"]) == 21
+
+
+@pytest.mark.asyncio
+async def test_summarize_messages_compacts_between_trigger_and_keep_stage() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            _memory_runtime_settings=SimpleNamespace(
+                assembly=MemoryAssemblyConfig(),
+            )
+        )
+    )
+
+    runner._invoke_summary_model = None
+
+    messages = [{"role": "user", "content": f"message {idx}"} for idx in range(15)]
+
+    result = await runner._summarize_messages(messages=messages, state={})
+
+    assert len(result["messages"]) < len(messages)
+    summary_meta = dict(result["messages"][0].get("metadata") or {})
+    assert summary_meta.get("frontdoor_history_summary") is True
 
 
 @pytest.mark.asyncio
@@ -731,6 +778,37 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
 
     assert output == "后台修复任务已经建立，任务号 `task:demo-123`。我先继续排查，完成后直接把结果同步给你。"
     assert len(backend.calls) == 2
+
+
+def test_frontdoor_compaction_settings_defaults_to_stage_budget() -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+
+    assert runner._frontdoor_compaction_settings() == (20, 10)
+
+
+
+def test_frontdoor_compaction_settings_defaults_to_stage_budget() -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+
+    assert runner._frontdoor_compaction_settings() == (20, 10)
+
+
+@pytest.mark.asyncio
+async def test_summarize_messages_respects_stage_budget_defaults() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            _memory_runtime_settings=SimpleNamespace(
+                assembly=MemoryAssemblyConfig(),
+            )
+        )
+    )
+
+    messages = [{"role": "user", "content": f"message {idx}"} for idx in range(22)]
+
+    result = await runner._summarize_messages(messages=messages, state={})
+
+    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
+    assert len(result["messages"]) == 21
 
 
 @pytest.mark.asyncio

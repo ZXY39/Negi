@@ -607,9 +607,8 @@ async def test_ceo_frontdoor_finalize_turn_persists_direct_reply_into_checkpoint
 def test_memory_assembly_config_exposes_frontdoor_compaction_defaults() -> None:
     config = MemoryAssemblyConfig()
 
-    assert config.frontdoor_recent_message_count == 8
-    assert config.frontdoor_summary_trigger_message_count == 24
-    assert config.frontdoor_summarizer_enabled is False
+    assert config.frontdoor_recent_message_count == 20
+    assert config.frontdoor_summary_trigger_message_count == 10
     assert config.frontdoor_interrupt_approval_enabled is False
     assert config.frontdoor_interrupt_tool_names == ["message", "create_async_task"]
 

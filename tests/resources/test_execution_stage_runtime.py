@@ -1182,6 +1182,46 @@ def test_execution_stage_overlay_warns_before_zero_progress_stage_switch() -> No
     assert '不要再次调用 `submit_next_stage`' in overlay
 
 
+def test_execution_stage_overlay_exposes_budget_accounting_rules_and_latest_round_status() -> None:
+    overlay = build_execution_stage_overlay(
+        node_kind='execution',
+        stage_gate={
+            'enabled': True,
+            'has_active_stage': True,
+            'transition_required': False,
+            'active_stage': {
+                'mode': '自主执行',
+                'status': '进行中',
+                'stage_goal': '整理 anomaly_dirs_report 的最终证据',
+                'tool_round_budget': 3,
+                'tool_rounds_used': 1,
+                'rounds': [
+                    {
+                        'round_index': 1,
+                        'tool_names': ['spawn_child_nodes'],
+                        'budget_counted': False,
+                    },
+                    {
+                        'round_index': 2,
+                        'tool_names': ['content', 'content'],
+                        'budget_counted': True,
+                    },
+                ],
+            },
+        },
+    )
+
+    assert overlay is not None
+    assert '预算记账由系统决定' in overlay
+    assert '`budget_counted`' in overlay
+    assert '`tool_rounds_used`' in overlay
+    assert '`submit_next_stage`' in overlay
+    assert '`submit_final_result`' in overlay
+    assert '`spawn_child_nodes`' in overlay
+    assert '第 2 轮' in overlay
+    assert 'budget_counted=true' in overlay
+
+
 @pytest.mark.asyncio
 async def test_stage_summary_is_exposed_in_live_runtime_frame(tmp_path: Path):
     service = MainRuntimeService(

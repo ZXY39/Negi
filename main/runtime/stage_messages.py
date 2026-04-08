@@ -6,6 +6,13 @@ from main.runtime.stage_budget import CONTROL_STAGE_TOOL_NAMES, FINAL_RESULT_TOO
 
 _STAGE_BUDGET_NODE_KINDS = {'execution', 'acceptance'}
 _NON_SUBSTANTIVE_PROGRESS_TOOL_NAMES = {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, *CONTROL_STAGE_TOOL_NAMES}
+_NON_BUDGET_ACCOUNTING_TOOL_NAMES = (
+    STAGE_TOOL_NAME,
+    FINAL_RESULT_TOOL_NAME,
+    'spawn_child_nodes',
+    'wait_tool_execution',
+    'stop_tool_execution',
+)
 
 
 def _stage_has_substantive_progress(active: dict[str, Any]) -> bool:
@@ -20,6 +27,34 @@ def _stage_has_substantive_progress(active: dict[str, Any]) -> bool:
         if any(name not in _NON_SUBSTANTIVE_PROGRESS_TOOL_NAMES for name in tool_names):
             return True
     return False
+
+
+def _execution_stage_budget_accounting_note(active: dict[str, Any]) -> str:
+    rounds = [item for item in list(active.get('rounds') or []) if isinstance(item, dict)]
+    counted_rounds = sum(1 for item in rounds if bool(item.get('budget_counted')))
+    non_budget_tools = '、'.join(f'`{name}`' for name in _NON_BUDGET_ACCOUNTING_TOOL_NAMES)
+    note = (
+        ' 预算记账由系统决定，不要按工具名猜：'
+        f'不会计入本阶段 `tool_rounds_used` 的工具只有 {non_budget_tools}。'
+        ' 这不代表预算耗尽后这些工具都一定还能继续调用；是否允许调用仍以阶段门控和系统错误提示为准。'
+        ' 历史 round 是否扣预算，只看 `rounds[*].budget_counted`，其中 `budget_counted` 是权威字段；'
+        '`tool_rounds_used` 只统计 `budget_counted=true` 的 round。'
+    )
+    if not rounds:
+        return f'{note} 当前还没有任何已记录的 round。'
+    latest = rounds[-1]
+    latest_index = int(latest.get('round_index') or len(rounds) or 0)
+    latest_tools = [
+        str(name or '').strip()
+        for name in list(latest.get('tool_names') or [])
+        if str(name or '').strip()
+    ]
+    latest_tools_text = '、'.join(latest_tools) if latest_tools else '（无工具名）'
+    latest_counted = str(bool(latest.get('budget_counted'))).lower()
+    return (
+        f'{note} 当前已记录 {len(rounds)} 轮，其中扣预算 {counted_rounds} 轮。'
+        f'最近一轮是第 {latest_index} 轮，工具：{latest_tools_text}，budget_counted={latest_counted}。'
+    )
 
 
 def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
@@ -102,6 +137,7 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
                 f'创建下一阶段时要结合已检查结果，不能机械重复上一阶段预算 {previous_budget or budget}；'
                 '如果上一阶段仍未收敛，应根据剩余核验工作适当放大预算，但不能超过 10；'
                 '在此之前不能继续使用普通工具，也不能直接输出最终验收结论。'
+                f'{_execution_stage_budget_accounting_note(active)}'
             )
         return (
             f'当前阶段【{mode}】已达到工具轮次预算 {used}/{budget}，阶段目标是：{goal}。'
@@ -109,12 +145,14 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
             f'创建下一阶段时要结合总目标和已完成阶段结果，不能机械重复上一阶段预算 {previous_budget or budget}；'
             '如果上一阶段仍未收敛，应根据剩余工作适当放大预算，但不能超过 10；'
             '在此之前不能继续使用普通工具，也不能继续派生子节点。'
+            f'{_execution_stage_budget_accounting_note(active)}'
         )
     if normalized_kind == 'acceptance':
         return (
             f'当前验收阶段【{status}】目标：{goal}。'
             f'当前普通工具轮次使用 {used}/{budget}。'
             '除创建新阶段外，其余所有思考、工具调用和验收裁定都必须只服务于当前阶段目标。'
+            f'{_execution_stage_budget_accounting_note(active)}'
         )
     reminder = ''
     if not _stage_has_substantive_progress(active):
@@ -126,6 +164,7 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
         f'当前阶段【{mode} | {status}】目标：{goal}。'
         f'当前普通工具轮次使用 {used}/{budget}。'
         '除创建新阶段外，其余所有思考、工具调用和派生行为都必须只服务于当前阶段目标。'
+        f'{_execution_stage_budget_accounting_note(active)}'
         f'{reminder}'
     )
 

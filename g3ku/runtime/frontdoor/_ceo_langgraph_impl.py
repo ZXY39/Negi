@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 
 from langchain_core.messages import AIMessage, convert_to_messages
@@ -276,10 +277,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     def _frontdoor_compaction_settings(self) -> tuple[int, int]:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
-        recent_count = max(1, int(getattr(assembly_cfg, "frontdoor_recent_message_count", 8) or 8))
+        if assembly_cfg is None:
+            assembly_cfg = SimpleNamespace()
+        recent_count = max(1, int(getattr(assembly_cfg, "frontdoor_recent_message_count", 20) or 20))
         trigger_count = max(
-            recent_count + 1,
-            int(getattr(assembly_cfg, "frontdoor_summary_trigger_message_count", 24) or 24),
+            1,
+            int(getattr(assembly_cfg, "frontdoor_summary_trigger_message_count", 10) or 10),
         )
         return recent_count, trigger_count
 
@@ -300,27 +303,27 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     def _summarizer_settings(self) -> tuple[bool, str | None, int, int]:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
-        enabled = bool(getattr(assembly_cfg, "frontdoor_summarizer_enabled", True))
-        model_key = getattr(assembly_cfg, "frontdoor_summarizer_model_key", None)
+        base_keep = 20
+        base_trigger = 10
         keep_count = int(
             getattr(
                 assembly_cfg,
                 "frontdoor_summarizer_keep_message_count",
-                getattr(assembly_cfg, "frontdoor_recent_message_count", 8),
+                getattr(assembly_cfg, "frontdoor_recent_message_count", base_keep),
             )
-            or 8
+            or base_keep
         )
         trigger_count = int(
             getattr(
                 assembly_cfg,
                 "frontdoor_summarizer_trigger_message_count",
-                getattr(assembly_cfg, "frontdoor_summary_trigger_message_count", 24),
+                getattr(assembly_cfg, "frontdoor_summary_trigger_message_count", base_trigger),
             )
-            or 24
+            or base_trigger
         )
         keep_count = max(1, keep_count)
-        trigger_count = max(keep_count + 1, trigger_count)
-        return enabled, model_key, trigger_count, keep_count
+        trigger_count = max(1, trigger_count)
+        return True, None, trigger_count, keep_count
 
     async def _summarize_messages(
         self,
@@ -707,7 +710,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         config, _revision, _changed = get_runtime_config(force=False)
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
-        model_key = str(explicit_model_key or getattr(assembly_cfg, "frontdoor_summarizer_model_key", None) or "").strip()
+        model_key = str(explicit_model_key or "").strip()
         if model_key:
             model = build_chat_model(config, model_key=model_key)
         else:

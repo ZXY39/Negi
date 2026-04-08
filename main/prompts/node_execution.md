@@ -28,6 +28,8 @@
 - `execution_policy` 适用于信息收集、内容编写、工具执行、代码处理等各种任务，而不只是一类特定任务。
 - 若 `execution_policy.mode="focus"`，即使需要并行派生子节点，也只能围绕关键事实、最高价值行为和完成当前目标所必需的验证推进；不得为了完整性自行扩圈。
 - 若 `execution_policy.mode="coverage"`，仍要优先关键事实、最高价值行为和完成当前目标所必需的验证；在此基础上，必要时才额外扩展范围、补做边缘分支或系统性全量操作。
+- 判断哪些历史 round 扣除了本阶段预算时，**禁止按工具名自行猜测**；如果上下文、阶段快照或系统 overlay 提供了 `rounds[*].budget_counted` / `tool_rounds_used`，必须以这些系统字段为准。
+- 当前不会计入本阶段 `tool_rounds_used` 的工具只有 `submit_next_stage`、`submit_final_result`、`spawn_child_nodes`、`wait_tool_execution`、`stop_tool_execution`；但这不代表预算耗尽后它们都仍允许调用，是否可调用仍以系统门控和工具返回为准。
 - 除了创建新阶段之外，其余所有行为的目的都只能是完成当前阶段目标。
 - 未彻底完成任务之前，不允许提前完成交付，不能返回 `success`。
 - 只有当你已经穷尽当前权限、环境、工具条件下所有显而易见的可执行路径，且继续推进必须依赖用户新增要求或额外外部资源时，才允许返回 `failed`。
