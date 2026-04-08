@@ -384,11 +384,42 @@ class RuntimeAgentSession:
                     "text": str(event_payload.get("text") or "").strip(),
                     "timestamp": str(raw.get("timestamp") or "").strip(),
                     "tool_call_id": str(event_payload.get("tool_call_id") or event_data.get("tool_call_id") or "").strip(),
+                    "arguments_text": str(event_data.get("arguments_text") or event_payload.get("arguments_text") or "").strip(),
+                    "output_text": str(event_data.get("output_text") or event_payload.get("output_text") or "").strip(),
+                    "output_preview_text": str(
+                        event_data.get("output_preview_text") or event_payload.get("output_preview_text") or ""
+                    ).strip(),
+                    "output_ref": str(event_data.get("output_ref") or event_payload.get("output_ref") or "").strip(),
+                    "started_at": str(event_data.get("started_at") or event_payload.get("started_at") or "").strip(),
+                    "finished_at": str(event_data.get("finished_at") or event_payload.get("finished_at") or "").strip(),
                     "is_error": bool(event_payload.get("is_error")),
                     "is_update": is_update,
                     "kind": str(event_payload.get("kind") or "").strip(),
                     "source": str(event_payload.get("source") or event_data.get("source") or default_source).strip()
                     or default_source,
+                    "recovery_decision": str(
+                        event_data.get("recovery_decision") or event_payload.get("recovery_decision") or ""
+                    ).strip(),
+                    "lost_result_summary": str(
+                        event_data.get("lost_result_summary") or event_payload.get("lost_result_summary") or ""
+                    ).strip(),
+                    "related_tool_call_ids": [
+                        str(raw_id or "").strip()
+                        for raw_id in list(
+                            event_data.get("related_tool_call_ids") or event_payload.get("related_tool_call_ids") or []
+                        )
+                        if str(raw_id or "").strip()
+                    ],
+                    "attempted_tools": [
+                        str(raw_name or "").strip()
+                        for raw_name in list(event_data.get("attempted_tools") or event_payload.get("attempted_tools") or [])
+                        if str(raw_name or "").strip()
+                    ],
+                    "evidence": [
+                        dict(entry)
+                        for entry in list(event_data.get("evidence") or event_payload.get("evidence") or [])
+                        if isinstance(entry, dict)
+                    ],
                 }
             )
         return items

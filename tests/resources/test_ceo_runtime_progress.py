@@ -2245,15 +2245,36 @@ def test_inflight_execution_trace_summary_compacts_tool_payloads() -> None:
             }
         ],
     }
-    session._interaction_flow_snapshot = lambda: [
+    session._event_log = [
         {
-            "tool_call_id": "call-1",
-            "tool_name": "load_tool_context",
-            "arguments_text": '{"tool_id": "filesystem"}',
-            "output_text": "very long inline tool output",
-            "output_ref": "artifact:artifact:tool-output",
-            "status": "success",
             "timestamp": "2026-04-08T12:00:01+08:00",
+            "type": "tool_execution_start",
+            "payload": {
+                "tool_call_id": "call-1",
+                "tool_name": "load_tool_context",
+                "text": "started",
+                "data": {
+                    "arguments_text": '{"tool_id": "filesystem"}',
+                    "started_at": "2026-04-08T12:00:00+08:00",
+                },
+            },
+        },
+        {
+            "timestamp": "2026-04-08T12:00:05+08:00",
+            "type": "tool_execution_end",
+            "payload": {
+                "tool_call_id": "call-1",
+                "tool_name": "load_tool_context",
+                "text": "very long inline tool output",
+                "is_error": False,
+                "data": {
+                    "arguments_text": '{"tool_id": "filesystem"}',
+                    "output_text": "very long inline tool output",
+                    "output_ref": "artifact:artifact:tool-output",
+                    "started_at": "2026-04-08T12:00:00+08:00",
+                    "finished_at": "2026-04-08T12:00:05+08:00",
+                },
+            },
         }
     ]
 
@@ -2320,6 +2341,11 @@ def test_ceo_snapshot_summary_keeps_old_tool_details_only_as_preview_and_ref() -
                 "tool_name": "load_tool_context",
                 "text": "full tool output should not survive in snapshot summary",
                 "is_error": False,
+                "data": {
+                    "output_text": "full tool output should not survive in snapshot summary",
+                    "output_ref": "artifact:artifact:tool-output",
+                    "finished_at": "2026-04-08T12:00:05+08:00",
+                },
             },
         }
     ]
@@ -2332,6 +2358,7 @@ def test_ceo_snapshot_summary_keeps_old_tool_details_only_as_preview_and_ref() -
     assert tools[0]["output_preview"]
     assert tools[0]["output_preview"] != "full tool output should not survive in snapshot summary"
     assert len(tools[0]["output_preview"]) < len("full tool output should not survive in snapshot summary")
+    assert tools[0]["output_ref"] == "artifact:artifact:tool-output"
 
 
 def test_stage_trace_name_fallback_does_not_reuse_same_tool_result_across_rounds() -> None:
