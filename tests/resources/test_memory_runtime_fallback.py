@@ -576,6 +576,57 @@ def test_memory_manager_first_boot_clears_legacy_memory_artifacts(monkeypatch, t
         manager.close()
 
 
+def test_memory_manager_schema_bump_resets_runtime_artifacts(monkeypatch, tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "MEMORY.md").write_text("old fact", encoding="utf-8")
+    (memory_dir / "HISTORY.md").write_text("old history", encoding="utf-8")
+    (memory_dir / "sync_journal.jsonl").write_text('{"seq":1}\n', encoding="utf-8")
+    (memory_dir / "memory.db").write_text("old db", encoding="utf-8")
+    (memory_dir / "checkpoints.sqlite3").write_text("old checkpoints", encoding="utf-8")
+    (memory_dir / "sync_state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "legacy-schema-v1",
+                "next_seq": 5,
+                "rag_applied_seq": 0,
+                "legacy_applied_seq": 0,
+                "last_reset_at": "2026-04-08T00:00:00",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    context_dir = memory_dir / "context_store"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "old-context.json").write_text("legacy", encoding="utf-8")
+    qdrant_dir = memory_dir / "qdrant"
+    qdrant_dir.mkdir(parents=True, exist_ok=True)
+    (qdrant_dir / "old-vector.bin").write_text("legacy", encoding="utf-8")
+
+    class _FailingBackend:
+        def __init__(self, workspace, cfg):
+            _ = workspace, cfg
+            raise RuntimeError("backend unavailable")
+
+    monkeypatch.setattr(rag_memory, "_RagMemoryBackend", _FailingBackend)
+    manager = rag_memory.MemoryManager(tmp_path, _memory_cfg())
+
+    try:
+        state = json.loads((memory_dir / "sync_state.json").read_text(encoding="utf-8"))
+        assert state["schema_version"] == rag_memory.MEMORY_RUNTIME_SCHEMA_VERSION
+        assert not (memory_dir / "memory.db").exists()
+        assert not (memory_dir / "checkpoints.sqlite3").exists()
+        assert not qdrant_dir.exists()
+        assert list(manager.context_store_dir.iterdir()) == []
+        assert manager.journal_file.read_text(encoding="utf-8").strip() == ""
+        assert "old fact" not in manager.memory_file.read_text(encoding="utf-8")
+        assert "old history" not in manager.history_file.read_text(encoding="utf-8")
+    finally:
+        manager.close()
+
+
 def test_private_state_paths_are_git_ignored() -> None:
     result = subprocess.run(
         ["git", "check-ignore", ".g3ku/config.json", "memory/MEMORY.md", "memory/HISTORY.md", "sessions/demo.jsonl"],
