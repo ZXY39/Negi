@@ -576,6 +576,113 @@ def test_memory_manager_first_boot_clears_legacy_memory_artifacts(monkeypatch, t
         manager.close()
 
 
+def test_memory_manager_schema_bump_resets_runtime_artifacts(monkeypatch, tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "MEMORY.md").write_text("old fact", encoding="utf-8")
+    (memory_dir / "HISTORY.md").write_text("old history", encoding="utf-8")
+    (memory_dir / "sync_journal.jsonl").write_text('{"seq":1}\n', encoding="utf-8")
+    (memory_dir / "memory.db").write_text("old db", encoding="utf-8")
+    (memory_dir / "checkpoints.sqlite3").write_text("old checkpoints", encoding="utf-8")
+    (memory_dir / "sync_state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "legacy-schema-v1",
+                "next_seq": 5,
+                "rag_applied_seq": 0,
+                "legacy_applied_seq": 0,
+                "last_reset_at": "2026-04-08T00:00:00",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    context_dir = memory_dir / "context_store"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "old-context.json").write_text("legacy", encoding="utf-8")
+    qdrant_dir = memory_dir / "qdrant"
+    qdrant_dir.mkdir(parents=True, exist_ok=True)
+    (qdrant_dir / "old-vector.bin").write_text("legacy", encoding="utf-8")
+
+    class _FailingBackend:
+        def __init__(self, workspace, cfg):
+            _ = workspace, cfg
+            raise RuntimeError("backend unavailable")
+
+    monkeypatch.setattr(rag_memory, "_RagMemoryBackend", _FailingBackend)
+    manager = rag_memory.MemoryManager(tmp_path, _memory_cfg())
+
+    try:
+        state = json.loads((memory_dir / "sync_state.json").read_text(encoding="utf-8"))
+        assert state["schema_version"] == rag_memory.MEMORY_RUNTIME_SCHEMA_VERSION
+        assert not (memory_dir / "memory.db").exists()
+        assert not (memory_dir / "checkpoints.sqlite3").exists()
+        assert not qdrant_dir.exists()
+        assert list(manager.context_store_dir.iterdir()) == []
+        assert manager.journal_file.read_text(encoding="utf-8").strip() == ""
+        assert "old fact" not in manager.memory_file.read_text(encoding="utf-8")
+        assert "old history" not in manager.history_file.read_text(encoding="utf-8")
+        structured_state = memory_dir / "structured_state.json"
+        assert structured_state.exists()
+        structured_payload = json.loads(structured_state.read_text(encoding="utf-8"))
+        assert structured_payload.get("schema_version") == rag_memory.MEMORY_RUNTIME_SCHEMA_VERSION
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_structured_memory_dual_write_generates_structured_projections_and_markdown(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _FailingBackend:
+        def __init__(self, workspace, cfg):
+            _ = workspace, cfg
+            raise RuntimeError("backend unavailable")
+
+    monkeypatch.setattr(rag_memory, "_RagMemoryBackend", _FailingBackend)
+    manager = rag_memory.MemoryManager(tmp_path, _memory_cfg())
+
+    try:
+        timestamp = "2026-04-08T12:20:00+00:00"
+        statement = "State is warm."
+        await manager.upsert_structured_memory_facts(
+            session_key="web:shared",
+            channel="web",
+            chat_id="shared",
+            facts=[
+                {
+                    "fact_id": "state-projection-v1",
+                    "slot_id": "current_state",
+                    "stateful_fact": True,
+                    "rendered_statement": statement,
+                    "state": {"value": statement},
+                    "observed_at": timestamp,
+                }
+            ],
+        )
+
+        mem_dir = tmp_path / "memory"
+        current_lines = (mem_dir / "structured_current.jsonl").read_text(encoding="utf-8").splitlines()
+        history_lines = (mem_dir / "structured_history.jsonl").read_text(encoding="utf-8").splitlines()
+        memory_text = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+
+        assert len([line for line in current_lines if line.strip()]) == 1
+        current = json.loads(current_lines[0])
+        assert current["fact_id"] == "state-projection-v1"
+
+        assert len([line for line in history_lines if line.strip()]) == 1
+        history = json.loads(history_lines[0])
+        assert history["op"] == "write"
+        assert history["fact"]["fact_id"] == "state-projection-v1"
+
+        assert statement in memory_text
+        assert timestamp in memory_text
+    finally:
+        manager.close()
+
+
 def test_private_state_paths_are_git_ignored() -> None:
     result = subprocess.run(
         ["git", "check-ignore", ".g3ku/config.json", "memory/MEMORY.md", "memory/HISTORY.md", "sessions/demo.jsonl"],

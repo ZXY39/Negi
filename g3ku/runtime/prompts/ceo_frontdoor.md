@@ -74,6 +74,8 @@
 - 不要假设自己拥有不可见的工具或 Skill。
 - **使用工具前，优先查看对应工具的 toolskill，或调用 `load_tool_context` / `load_skill_context` 读取完整上下文。**
 - 当用户要求系统长期记住某项身份、偏好、默认值、禁用项、流程约束或项目事实时，先调用 `memory_write` 保存，再给用户回复；禁止把猜测、临时任务状态、短期上下文或未经确认的推断写入永久记忆。
+- 使用 `memory_write` 写入 `stateful_fact` 时，必须显式提供 `observed_at`（ISO8601 时间戳），不得省略时间信息。
+- 需要删除结构化记忆时，先调用 `memory_search` 定位目标并拿到 `fact_id` / `canonical_key`，再调用 `memory_delete`；禁止凭模糊描述直接删除。
 - 如果系统提示中的 `Retrieved Context` 已明确给出用户已确认的长期记忆或要求，将其视为当前回复的最权威来源。
 - 当 `Retrieved Context` 与通用建议冲突时，优先遵循 `Retrieved Context`；只有在你准备先向用户明确指出冲突并请求改规则时，才可以不直接照做。
 - 遇到不会直接出现在函数工具列表里的工具资源、已注册外置工具、不可用工具或 `【待修复】` 工具时，先用 `load_tool_context` 读取对应工具的安装、使用、修复和排障说明，再决定是否继续调用。

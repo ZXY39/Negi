@@ -23,44 +23,74 @@ permissions:
 parameters:
   type: object
   properties:
-    items:
+    facts:
       type: array
-      description: One to five normalized permanent memory items to save immediately.
+      description: One to five structured memory facts to upsert immediately.
       items:
         type: object
         properties:
-          kind:
+          category:
             type: string
             enum:
-              - profile
-              - preference
               - constraint
-              - default
-              - avoidance
-              - workflow
-              - project_fact
-              - other
-            description: Memory item category.
-          key:
+              - default_setting
+              - historical_fact
+              - identity
+              - preference
+              - relationship
+              - stateful_fact
+              - workflow_rule
+            description: Structured fact category.
+          scope:
             type: string
-            description: Stable snake_case key used for deterministic replacement.
+            description: Namespace scope for the fact (e.g. global, session, project).
+          entity:
+            type: string
+            description: Entity the fact is about (e.g. user, project:g3ku).
+          attribute:
+            type: string
+            description: Attribute name for the entity (stable key within the entity).
           value:
+            type:
+              - string
+              - number
+              - boolean
+              - object
+              - array
+              - 'null'
+            description: Canonical value for the fact (string/number/bool/object/array).
+          observed_at:
             type: string
-            description: Canonical value for the memory item.
-          statement:
+            description: ISO8601 timestamp when the fact was observed (or recorded).
+          time_semantics:
             type: string
-            description: Human-readable normalized statement that will be indexed for retrieval.
+            enum:
+              - current_state
+              - durable_until_replaced
+              - historical_observation
+            description: How the fact should be interpreted over time.
           source_excerpt:
             type: string
-            description: Short excerpt from the current user turn supporting this memory.
+            description: Short excerpt from the current user turn supporting this fact.
+          qualifier:
+            type: object
+            description: Optional qualifier metadata (e.g. project context, constraints).
+          expires_at:
+            type:
+              - string
+              - 'null'
+            description: Optional ISO8601 expiry timestamp (null for no expiry).
         required:
-          - kind
-          - key
+          - category
+          - scope
+          - entity
+          - attribute
           - value
-          - statement
+          - observed_at
+          - time_semantics
           - source_excerpt
   required:
-    - items
+    - facts
 exposure:
   agent: true
   main_runtime: true

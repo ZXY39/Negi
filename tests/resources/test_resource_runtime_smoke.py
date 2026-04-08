@@ -2170,7 +2170,7 @@ async def test_memory_search_reads_manifest_settings(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_memory_write_builds_without_rag_store_and_writes_explicit_items(tmp_path: Path):
+async def test_memory_write_uses_structured_fact_contract(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -2180,9 +2180,9 @@ async def test_memory_write_builds_without_rag_store_and_writes_explicit_items(t
         def __init__(self):
             self.last_call = None
 
-        async def write_explicit_memory_items(self, **kwargs):
+        async def upsert_structured_memory_facts(self, **kwargs):
             self.last_call = kwargs
-            return {'ok': True, 'written': [{'record_id': 'rec-1', 'key': 'preferred_package_manager', 'kind': 'default'}], 'deleted': [], 'searchable': True}
+            return {'ok': True, 'written': 1}
 
     registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
     descriptor = registry.discover().tools['memory_write']
@@ -2194,23 +2194,64 @@ async def test_memory_write_builds_without_rag_store_and_writes_explicit_items(t
 
     payload = json.loads(
         await tool.execute(
-            items=[
+            facts=[
                 {
-                    'kind': 'default',
-                    'key': 'preferred_package_manager',
+                    'category': 'default_setting',
+                    'scope': 'global',
+                    'entity': 'user',
+                    'attribute': 'preferred_package_manager',
                     'value': 'pnpm',
-                    'statement': 'Default to pnpm for package management.',
+                    'observed_at': '2026-04-08T00:00:00',
+                    'time_semantics': 'durable_until_replaced',
                     'source_excerpt': '以后默认用 pnpm',
+                    'qualifier': {'project': 'g3ku'},
+                    'expires_at': None,
                 }
             ],
             __g3ku_runtime={'session_key': 'cli:demo'},
         )
     )
     assert payload['ok'] is True
-    assert payload['searchable'] is True
     assert manager.last_call['channel'] == 'cli'
     assert manager.last_call['chat_id'] == 'demo'
-    assert manager.last_call['items'][0]['key'] == 'preferred_package_manager'
+    assert manager.last_call['facts'][0]['attribute'] == 'preferred_package_manager'
+
+
+@pytest.mark.asyncio
+async def test_memory_delete_builds_and_calls_precise_delete(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'memory_delete', workspace / 'tools' / 'memory_delete')
+
+    class _FakeMemoryManager:
+        def __init__(self):
+            self.last_call = None
+
+        async def delete_structured_memory_facts(self, **kwargs):
+            self.last_call = kwargs
+            return {'ok': True, 'deleted': 2}
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    descriptor = registry.discover().tools['memory_delete']
+    manager = _FakeMemoryManager()
+    tool = ResourceLoader(workspace).load_tool(
+        descriptor,
+        services={'loop': SimpleNamespace(_store_enabled=False), 'memory_manager': manager},
+    )
+
+    payload = json.loads(
+        await tool.execute(
+            fact_ids=['fact-1'],
+            canonical_keys=['global|identity|user|preferred_package_manager|durable_until_replaced'],
+            __g3ku_runtime={'session_key': 'cli:demo'},
+        )
+    )
+    assert payload == {'ok': True, 'deleted': 2}
+    assert manager.last_call['session_key'] == 'cli:demo'
+    assert manager.last_call['channel'] == 'cli'
+    assert manager.last_call['chat_id'] == 'demo'
+    assert manager.last_call['fact_ids'] == ['fact-1']
 
 
 def test_resource_manager_infers_memory_manager_from_main_task_service_for_memory_write(tmp_path: Path):

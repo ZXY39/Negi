@@ -3,26 +3,17 @@
 from __future__ import annotations
 
 import json
-import re
-from typing import Any
+from typing import Any, get_args
 
+from g3ku.agent.structured_memory import StructuredCategory, TimeSemantics
 from g3ku.agent.tools.base import Tool
 
-_ALLOWED_KINDS = {
-    "profile",
-    "preference",
-    "constraint",
-    "default",
-    "avoidance",
-    "workflow",
-    "project_fact",
-    "other",
-}
-_KEY_PATTERN = re.compile(r"^[a-z0-9_]+$")
+_ALLOWED_CATEGORIES = set(get_args(StructuredCategory))
+_ALLOWED_TIME_SEMANTICS = set(get_args(TimeSemantics))
 
 
 class MemoryWriteTool(Tool):
-    """Write explicit permanent memory items for the CEO agent."""
+    """Upsert explicit structured memory facts for the CEO agent."""
 
     def __init__(self, *, manager: Any):
         self._manager = manager
@@ -34,11 +25,11 @@ class MemoryWriteTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Write explicit long-term memory immediately and make it searchable in future memory retrieval.\n"
+            "Upsert structured long-term memory facts for future retrieval.\n"
             "MUST CALL: when the user explicitly asks the system to remember a stable identity, preference, "
-            "constraint, default, avoidance rule, workflow rule, or durable project fact.\n"
+            "constraint, workflow rule, default setting, relationship, current state, or historical fact.\n"
             "DO NOT CALL: for temporary task status, speculative inferences, short-lived context, or unconfirmed facts.\n"
-            "WRITE RULE: normalize the memory into durable reusable statements and stable keys before saving."
+            "WRITE RULE: send normalized structured facts with category, scope, entity, attribute, value, and time semantics."
         )
 
     @property
@@ -46,79 +37,122 @@ class MemoryWriteTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "items": {
+                "facts": {
                     "type": "array",
-                    "description": "One to five normalized permanent memory items to save immediately.",
+                    "description": "One to five structured memory facts to upsert immediately.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "kind": {
+                            "category": {
                                 "type": "string",
-                                "enum": sorted(_ALLOWED_KINDS),
-                                "description": "Memory item category.",
+                                "enum": sorted(_ALLOWED_CATEGORIES),
+                                "description": "Structured fact category.",
                             },
-                            "key": {
+                            "scope": {
                                 "type": "string",
-                                "description": "Stable snake_case key used for deterministic replacement.",
+                                "description": "Namespace scope for the fact (e.g. global, session, project).",
+                            },
+                            "entity": {
+                                "type": "string",
+                                "description": "Entity the fact is about (e.g. user, project:g3ku).",
+                            },
+                            "attribute": {
+                                "type": "string",
+                                "description": "Attribute name for the entity (stable key within the entity).",
                             },
                             "value": {
-                                "type": "string",
-                                "description": "Canonical value for the memory item.",
+                                "type": ["string", "number", "boolean", "object", "array", "null"],
+                                "description": "Canonical value for the fact (string/number/bool/object/array).",
                             },
-                            "statement": {
+                            "observed_at": {
                                 "type": "string",
-                                "description": "Human-readable normalized statement that will be indexed for retrieval.",
+                                "description": "ISO8601 timestamp when the fact was observed (or recorded).",
+                            },
+                            "time_semantics": {
+                                "type": "string",
+                                "enum": sorted(_ALLOWED_TIME_SEMANTICS),
+                                "description": "How the fact should be interpreted over time.",
                             },
                             "source_excerpt": {
                                 "type": "string",
-                                "description": "Short excerpt from the current user turn supporting this memory.",
+                                "description": "Short excerpt from the current user turn supporting this fact.",
+                            },
+                            "qualifier": {
+                                "type": "object",
+                                "description": "Optional qualifier metadata (e.g. project context, constraints).",
+                            },
+                            "expires_at": {
+                                "type": ["string", "null"],
+                                "description": "Optional ISO8601 expiry timestamp (null for no expiry).",
                             },
                         },
-                        "required": ["kind", "key", "value", "statement", "source_excerpt"],
+                        "required": [
+                            "category",
+                            "scope",
+                            "entity",
+                            "attribute",
+                            "value",
+                            "observed_at",
+                            "time_semantics",
+                            "source_excerpt",
+                        ],
                     },
                 }
             },
-            "required": ["items"],
+            "required": ["facts"],
         }
 
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         errors = super().validate_params(params)
-        items = (params or {}).get("items")
-        if not isinstance(items, list):
+        facts = (params or {}).get("facts")
+        if not isinstance(facts, list):
             return errors
-        if not 1 <= len(items) <= 5:
-            errors.append("items must contain between 1 and 5 entries")
+        if not 1 <= len(facts) <= 5:
+            errors.append("facts must contain between 1 and 5 entries")
             return errors
-        seen_keys: set[str] = set()
-        for index, item in enumerate(items):
-            if not isinstance(item, dict):
+        for index, fact in enumerate(facts):
+            if not isinstance(fact, dict):
                 continue
-            kind = str(item.get("kind") or "").strip()
-            key = str(item.get("key") or "").strip()
-            value = str(item.get("value") or "").strip()
-            statement = str(item.get("statement") or "").strip()
-            source_excerpt = str(item.get("source_excerpt") or "").strip()
-            if kind not in _ALLOWED_KINDS:
-                errors.append(f"items[{index}].kind must be one of {sorted(_ALLOWED_KINDS)}")
-            if not key:
-                errors.append(f"items[{index}].key must not be empty")
-            elif not _KEY_PATTERN.fullmatch(key):
-                errors.append(f"items[{index}].key must use lowercase snake_case")
-            elif key in seen_keys:
-                errors.append(f"items[{index}].key must be unique within one call")
+            category = str(fact.get("category") or "").strip()
+            scope = str(fact.get("scope") or "").strip()
+            entity = str(fact.get("entity") or "").strip()
+            attribute = str(fact.get("attribute") or "").strip()
+            observed_at = str(fact.get("observed_at") or "").strip()
+            time_semantics = str(fact.get("time_semantics") or "").strip()
+            source_excerpt = str(fact.get("source_excerpt") or "").strip()
+
+            if category not in _ALLOWED_CATEGORIES:
+                errors.append(f"facts[{index}].category must be one of {sorted(_ALLOWED_CATEGORIES)}")
+            if not scope:
+                errors.append(f"facts[{index}].scope must not be empty")
+            if not entity:
+                errors.append(f"facts[{index}].entity must not be empty")
+            if not attribute:
+                errors.append(f"facts[{index}].attribute must not be empty")
+            if "value" not in fact:
+                errors.append(f"facts[{index}].value is required")
             else:
-                seen_keys.add(key)
-            if not value:
-                errors.append(f"items[{index}].value must not be empty")
-            if not statement:
-                errors.append(f"items[{index}].statement must not be empty")
+                value = fact.get("value")
+                if isinstance(value, str) and not value.strip():
+                    errors.append(f"facts[{index}].value must not be empty")
+            if not observed_at:
+                errors.append(f"facts[{index}].observed_at must not be empty")
+            if time_semantics not in _ALLOWED_TIME_SEMANTICS:
+                errors.append(f"facts[{index}].time_semantics must be one of {sorted(_ALLOWED_TIME_SEMANTICS)}")
             if not source_excerpt:
-                errors.append(f"items[{index}].source_excerpt must not be empty")
+                errors.append(f"facts[{index}].source_excerpt must not be empty")
+
+            qualifier = fact.get("qualifier")
+            if qualifier is not None and not isinstance(qualifier, dict):
+                errors.append(f"facts[{index}].qualifier must be an object when provided")
+            expires_at = fact.get("expires_at")
+            if expires_at is not None and not isinstance(expires_at, str):
+                errors.append(f"facts[{index}].expires_at must be a string or null when provided")
         return errors
 
     async def execute(
         self,
-        items: list[dict[str, Any]],
+        facts: list[dict[str, Any]],
         **kwargs: Any,
     ) -> str:
         runtime_raw = kwargs.pop("__g3ku_runtime", None)
@@ -132,10 +166,10 @@ class MemoryWriteTool(Tool):
             channel = channel or ch
             chat_id = chat_id or cid
 
-        result = await self._manager.write_explicit_memory_items(
+        result = await self._manager.upsert_structured_memory_facts(
             session_key=session_key,
             channel=str(channel or "unknown"),
             chat_id=str(chat_id or "unknown"),
-            items=list(items or []),
+            facts=list(facts or []),
         )
         return json.dumps(result, ensure_ascii=False)
