@@ -86,8 +86,13 @@ async def build_node_context_selection(
     visible_tool_ids = _visible_ids(visible_tool_families, key="tool_id")
     normalized_tool_names = _tool_names(visible_tool_names)
     memory_search_visible = "memory_search" in set(normalized_tool_names)
+    selection_query = _build_memory_query(
+        prompt=prompt,
+        goal=goal,
+        core_requirement=core_requirement,
+    )
     memory_query = (
-        _build_memory_query(prompt=prompt, goal=goal, core_requirement=core_requirement)
+        selection_query
         if memory_search_visible
         else ""
     )
@@ -96,7 +101,6 @@ async def build_node_context_selection(
     dense_enabled = bool(getattr(getattr(memory_manager, "store", None), "_dense_enabled", False))
     dense_available = bool(
         dense_enabled
-        and memory_search_visible
         and memory_manager is not None
         and hasattr(memory_manager, "semantic_search_context_records")
     )
@@ -113,6 +117,7 @@ async def build_node_context_selection(
                 "dense_enabled": dense_enabled,
                 "dense_available": False,
                 "memory_search_visible": memory_search_visible,
+                "selection_query": selection_query,
                 "visible_skill_ids": list(visible_skill_ids),
                 "visible_tool_ids": list(visible_tool_ids),
                 "visible_tool_names": list(normalized_tool_names),
@@ -122,7 +127,7 @@ async def build_node_context_selection(
     dense_selection = await build_frontdoor_catalog_selection(
         loop=loop,
         memory_manager=memory_manager,
-        query_text=memory_query,
+        query_text=selection_query,
         visible_skills=visible_skills,
         visible_families=visible_tool_families,
         skill_limit=max(len(visible_skill_ids), 1),
@@ -141,6 +146,7 @@ async def build_node_context_selection(
                 "dense_enabled": dense_enabled,
                 "dense_available": False,
                 "memory_search_visible": memory_search_visible,
+                "selection_query": selection_query,
                 "dense_selection": dict(dense_selection or {}),
                 "visible_skill_ids": list(visible_skill_ids),
                 "visible_tool_ids": list(visible_tool_ids),
@@ -167,6 +173,7 @@ async def build_node_context_selection(
             "dense_enabled": dense_enabled,
             "dense_available": True,
             "memory_search_visible": memory_search_visible,
+            "selection_query": selection_query,
             "dense_selection": dict(dense_selection or {}),
             "visible_skill_ids": list(visible_skill_ids),
             "visible_tool_ids": list(visible_tool_ids),

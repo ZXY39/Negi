@@ -38,6 +38,10 @@ def _build_node_context_selection():
     return getattr(module, "build_node_context_selection")
 
 
+def _node_context_selection_module():
+    return importlib.import_module("g3ku.runtime.context.node_context_selection")
+
+
 @pytest.mark.asyncio
 async def test_node_selector_dense_unavailable_returns_full_rbac_visible_sets() -> None:
     build_node_context_selection = _build_node_context_selection()
@@ -60,11 +64,24 @@ async def test_node_selector_dense_unavailable_returns_full_rbac_visible_sets() 
 
 
 @pytest.mark.asyncio
-async def test_node_selector_without_memory_search_permission_emits_no_memory_query() -> None:
+async def test_node_selector_without_memory_search_permission_still_uses_dense_skill_and_tool_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _node_context_selection_module()
     build_node_context_selection = _build_node_context_selection()
     memory_manager = _DenseMemoryManager()
-    memory_manager.skill_records = [SimpleNamespace(record_id="skill:skill-a")]
-    memory_manager.tool_records = [SimpleNamespace(record_id="tool:filesystem")]
+    captured: dict[str, object] = {}
+
+    async def _fake_frontdoor_catalog_selection(**kwargs):
+        captured.update(kwargs)
+        return {
+            "available": True,
+            "skill_ids": ["skill-b"],
+            "tool_ids": ["exec"],
+            "trace": {"queries": {"raw_query": str(kwargs.get("query_text") or "")}},
+        }
+
+    monkeypatch.setattr(module, "build_frontdoor_catalog_selection", _fake_frontdoor_catalog_selection)
 
     result = await build_node_context_selection(
         loop=SimpleNamespace(),
@@ -72,14 +89,21 @@ async def test_node_selector_without_memory_search_permission_emits_no_memory_qu
         prompt="inspect browser workflow",
         goal="inspect browser workflow",
         core_requirement="inspect browser workflow",
-        visible_skills=[SimpleNamespace(skill_id="skill-a")],
-        visible_tool_families=[SimpleNamespace(tool_id="filesystem")],
+        visible_skills=[SimpleNamespace(skill_id="skill-a"), SimpleNamespace(skill_id="skill-b")],
+        visible_tool_families=[SimpleNamespace(tool_id="filesystem"), SimpleNamespace(tool_id="exec")],
         visible_tool_names=["filesystem"],
     )
 
+    assert captured["query_text"] == (
+        "Prompt: inspect browser workflow\n"
+        "Goal: inspect browser workflow\n"
+        "Core requirement: inspect browser workflow"
+    )
+    assert result.mode == "dense_rerank"
     assert result.memory_search_visible is False
     assert result.memory_query == ""
-    assert memory_manager.calls == []
+    assert result.selected_skill_ids == ["skill-b"]
+    assert result.selected_tool_names == []
     assert result.retrieval_scope == {
         "search_context_types": [],
         "allowed_context_types": [],
@@ -89,11 +113,24 @@ async def test_node_selector_without_memory_search_permission_emits_no_memory_qu
 
 
 @pytest.mark.asyncio
-async def test_node_selector_with_memory_search_permission_emits_memory_only_retrieval_scope() -> None:
+async def test_node_selector_with_memory_search_permission_emits_memory_only_retrieval_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _node_context_selection_module()
     build_node_context_selection = _build_node_context_selection()
     memory_manager = _DenseMemoryManager()
-    memory_manager.skill_records = [SimpleNamespace(record_id="skill:skill-a")]
-    memory_manager.tool_records = [SimpleNamespace(record_id="tool:filesystem")]
+    captured: dict[str, object] = {}
+
+    async def _fake_frontdoor_catalog_selection(**kwargs):
+        captured.update(kwargs)
+        return {
+            "available": True,
+            "skill_ids": ["skill-a"],
+            "tool_ids": ["filesystem"],
+            "trace": {"queries": {"raw_query": str(kwargs.get("query_text") or "")}},
+        }
+
+    monkeypatch.setattr(module, "build_frontdoor_catalog_selection", _fake_frontdoor_catalog_selection)
 
     result = await build_node_context_selection(
         loop=SimpleNamespace(),
@@ -106,10 +143,14 @@ async def test_node_selector_with_memory_search_permission_emits_memory_only_ret
         visible_tool_names=["filesystem", "memory_search"],
     )
 
+    assert result.mode == "dense_rerank"
     assert result.memory_search_visible is True
     assert result.memory_query
     assert "inspect browser workflow" in result.memory_query
     assert "Core requirement" in result.memory_query
+    assert captured["query_text"] == result.memory_query
+    assert result.selected_skill_ids == ["skill-a"]
+    assert result.selected_tool_names == ["filesystem"]
     assert result.retrieval_scope == {
         "search_context_types": ["memory"],
         "allowed_context_types": ["memory"],
