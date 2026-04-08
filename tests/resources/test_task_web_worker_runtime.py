@@ -3927,6 +3927,7 @@ def test_node_detail_summary_compacts_tool_payloads_from_trace(tmp_path: Path):
 
 
 def test_node_detail_summary_mode_keeps_tool_output_only_in_refs(tmp_path: Path):
+    raw_output = "short raw result"
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -3954,7 +3955,7 @@ def test_node_detail_summary_mode_keeps_tool_output_only_in_refs(tmp_path: Path)
         tool_name="filesystem",
         status="success",
         arguments_text='{"path": "."}',
-        output_text="full tool output should not be in summary trace",
+        output_text=raw_output,
         output_ref="artifact:artifact:tool-output",
     )
     service.log_service.sync_node_read_model(record.task_id, root.node_id, externalize_execution_trace=True)
@@ -3965,8 +3966,7 @@ def test_node_detail_summary_mode_keeps_tool_output_only_in_refs(tmp_path: Path)
     tools = payload["item"]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
 
     assert tools[0]["output_preview"]
-    assert tools[0]["output_preview"] != "full tool output should not be in summary trace"
-    assert len(tools[0]["output_preview"]) < len("full tool output should not be in summary trace")
+    assert tools[0]["output_preview"] != raw_output
     assert tools[0]["output_ref"] == "artifact:artifact:tool-output"
 
 

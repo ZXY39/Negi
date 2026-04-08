@@ -31,3 +31,21 @@ def test_compact_tool_step_for_summary_returns_preview_fields_and_drops_full_pay
     assert len(summary_step["output_preview"]) < len(tool_step["output_text"])
     assert "arguments_text" not in summary_step
     assert "output_text" not in summary_step
+
+
+def test_compact_tool_step_for_summary_preserves_falsy_scalars_without_ref() -> None:
+    from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
+
+    summary_step = compact_tool_step_for_summary(
+        {
+            "tool_call_id": "calc:1",
+            "tool_name": "calculator",
+            "arguments_text": 0,
+            "output_text": False,
+            "status": "success",
+        }
+    )
+
+    assert summary_step is not None
+    assert summary_step["arguments_preview"] == "0"
+    assert summary_step["output_preview"] == "False"

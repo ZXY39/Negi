@@ -364,6 +364,14 @@ class RuntimeAgentSession:
             payload = raw.get("payload")
             event_payload = payload if isinstance(payload, dict) else {}
             event_data = event_payload.get("data") if isinstance(event_payload.get("data"), dict) else {}
+
+            def _event_value(key: str) -> Any:
+                if key in event_data and event_data.get(key) is not None:
+                    return event_data.get(key)
+                if key in event_payload and event_payload.get(key) is not None:
+                    return event_payload.get(key)
+                return None
+
             if event_type == "tool_execution_update" and bool(event_data.get("watchdog")):
                 continue
             if event_type == "tool_execution_start":
@@ -380,48 +388,43 @@ class RuntimeAgentSession:
             items.append(
                 {
                     "status": status,
-                    "tool_name": str(event_payload.get("tool_name") or event_data.get("tool_name") or "tool").strip() or "tool",
+                    "tool_name": str(_event_value("tool_name") or "tool").strip() or "tool",
                     "text": str(event_payload.get("text") or "").strip(),
                     "timestamp": str(raw.get("timestamp") or "").strip(),
-                    "tool_call_id": str(event_payload.get("tool_call_id") or event_data.get("tool_call_id") or "").strip(),
-                    "arguments_text": str(event_data.get("arguments_text") or event_payload.get("arguments_text") or "").strip(),
-                    "output_text": str(event_data.get("output_text") or event_payload.get("output_text") or "").strip(),
-                    "output_preview_text": str(
-                        event_data.get("output_preview_text") or event_payload.get("output_preview_text") or ""
-                    ).strip(),
-                    "output_ref": str(event_data.get("output_ref") or event_payload.get("output_ref") or "").strip(),
-                    "started_at": str(event_data.get("started_at") or event_payload.get("started_at") or "").strip(),
-                    "finished_at": str(event_data.get("finished_at") or event_payload.get("finished_at") or "").strip(),
+                    "tool_call_id": str(_event_value("tool_call_id") or "").strip(),
+                    "arguments_text": str(_event_value("arguments_text") or "").strip(),
+                    "output_text": str(_event_value("output_text") or "").strip(),
+                    "output_preview_text": str(_event_value("output_preview_text") or "").strip(),
+                    "output_ref": str(_event_value("output_ref") or "").strip(),
+                    "started_at": str(_event_value("started_at") or "").strip(),
+                    "finished_at": str(_event_value("finished_at") or "").strip(),
                     "is_error": bool(event_payload.get("is_error")),
                     "is_update": is_update,
                     "kind": str(event_payload.get("kind") or "").strip(),
                     "source": str(event_payload.get("source") or event_data.get("source") or default_source).strip()
                     or default_source,
-                    "recovery_decision": str(
-                        event_data.get("recovery_decision") or event_payload.get("recovery_decision") or ""
-                    ).strip(),
-                    "lost_result_summary": str(
-                        event_data.get("lost_result_summary") or event_payload.get("lost_result_summary") or ""
-                    ).strip(),
+                    "recovery_decision": str(_event_value("recovery_decision") or "").strip(),
+                    "lost_result_summary": str(_event_value("lost_result_summary") or "").strip(),
                     "related_tool_call_ids": [
                         str(raw_id or "").strip()
-                        for raw_id in list(
-                            event_data.get("related_tool_call_ids") or event_payload.get("related_tool_call_ids") or []
-                        )
+                        for raw_id in list(_event_value("related_tool_call_ids") or [])
                         if str(raw_id or "").strip()
                     ],
                     "attempted_tools": [
                         str(raw_name or "").strip()
-                        for raw_name in list(event_data.get("attempted_tools") or event_payload.get("attempted_tools") or [])
+                        for raw_name in list(_event_value("attempted_tools") or [])
                         if str(raw_name or "").strip()
                     ],
                     "evidence": [
                         dict(entry)
-                        for entry in list(event_data.get("evidence") or event_payload.get("evidence") or [])
+                        for entry in list(_event_value("evidence") or [])
                         if isinstance(entry, dict)
                     ],
                 }
             )
+            elapsed_seconds = event_data.get("elapsed_seconds", event_payload.get("elapsed_seconds"))
+            if isinstance(elapsed_seconds, (int, float)):
+                items[-1]["elapsed_seconds"] = float(elapsed_seconds)
         return items
 
     def _legacy_tool_events_snapshot(self) -> list[dict[str, Any]]:

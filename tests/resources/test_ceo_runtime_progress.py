@@ -2273,6 +2273,12 @@ def test_inflight_execution_trace_summary_compacts_tool_payloads() -> None:
                     "output_ref": "artifact:artifact:tool-output",
                     "started_at": "2026-04-08T12:00:00+08:00",
                     "finished_at": "2026-04-08T12:00:05+08:00",
+                    "elapsed_seconds": 5.0,
+                    "recovery_decision": "retry",
+                    "related_tool_call_ids": ["call-0"],
+                    "attempted_tools": ["filesystem"],
+                    "evidence": [{"kind": "artifact", "ref": "artifact:artifact:tool-output"}],
+                    "lost_result_summary": "preview preserved",
                 },
             },
         }
@@ -2286,11 +2292,20 @@ def test_inflight_execution_trace_summary_compacts_tool_payloads() -> None:
     assert tools[0]["arguments_preview"] == '{"tool_id": "filesystem"}'
     assert tools[0].get("output_preview")
     assert tools[0]["output_ref"] == "artifact:artifact:tool-output"
+    assert tools[0]["started_at"] == "2026-04-08T12:00:00+08:00"
+    assert tools[0]["finished_at"] == "2026-04-08T12:00:05+08:00"
+    assert tools[0]["elapsed_seconds"] == 5.0
+    assert tools[0]["recovery_decision"] == "retry"
+    assert tools[0]["related_tool_call_ids"] == ["call-0"]
+    assert tools[0]["attempted_tools"] == ["filesystem"]
+    assert tools[0]["evidence"] == [{"kind": "artifact", "ref": "artifact:artifact:tool-output"}]
+    assert tools[0]["lost_result_summary"] == "preview preserved"
     assert "arguments_text" not in tools[0]
     assert "output_text" not in tools[0]
 
 
 def test_ceo_snapshot_summary_keeps_old_tool_details_only_as_preview_and_ref() -> None:
+    raw_output = "short raw result"
     session = RuntimeAgentSession(
         SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
         session_key="web:shared",
@@ -2339,10 +2354,10 @@ def test_ceo_snapshot_summary_keeps_old_tool_details_only_as_preview_and_ref() -
             "payload": {
                 "tool_call_id": "call-1",
                 "tool_name": "load_tool_context",
-                "text": "full tool output should not survive in snapshot summary",
+                "text": raw_output,
                 "is_error": False,
                 "data": {
-                    "output_text": "full tool output should not survive in snapshot summary",
+                    "output_text": raw_output,
                     "output_ref": "artifact:artifact:tool-output",
                     "finished_at": "2026-04-08T12:00:05+08:00",
                 },
@@ -2356,8 +2371,7 @@ def test_ceo_snapshot_summary_keeps_old_tool_details_only_as_preview_and_ref() -
     tools = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
 
     assert tools[0]["output_preview"]
-    assert tools[0]["output_preview"] != "full tool output should not survive in snapshot summary"
-    assert len(tools[0]["output_preview"]) < len("full tool output should not survive in snapshot summary")
+    assert tools[0]["output_preview"] != raw_output
     assert tools[0]["output_ref"] == "artifact:artifact:tool-output"
 
 
