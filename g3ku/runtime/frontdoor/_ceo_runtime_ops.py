@@ -144,7 +144,7 @@ def _build_visible_tool_bundle(*, tools: dict[str, Tool], executor: ToolExecutor
 
 def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     normalized = dict(arguments or {})
-    if str(tool_name or "").strip() != "create_async_task":
+    if str(tool_name or "").strip() not in {"create_async_task", "continue_task"}:
         return normalized
     raw_policy = normalized.get("execution_policy")
     policy_payload: dict[str, Any]
@@ -739,7 +739,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not bool(getattr(assembly_cfg, "frontdoor_interrupt_approval_enabled", False)):
             return set()
         raw_names = list(
-            getattr(assembly_cfg, "frontdoor_interrupt_tool_names", ["message", "create_async_task"]) or []
+            getattr(assembly_cfg, "frontdoor_interrupt_tool_names", ["message", "create_async_task", "continue_task"]) or []
         )
         return {str(name).strip() for name in raw_names if str(name).strip()}
 
@@ -963,6 +963,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return normalized
 
     @staticmethod
+    def _normalize_task_id_value(value: Any) -> str:
+        normalized = CeoFrontDoorRuntimeOps._normalize_task_ids(value)
+        return normalized[0] if normalized else ""
+
+    @staticmethod
     def _looks_like_task_dispatch_claim(text: str) -> bool:
         normalized = str(text or "").strip().lower()
         if not normalized or "task:" not in normalized:
@@ -1083,6 +1088,117 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if normalized_task_id:
             lines.insert(1, f"The verified task id is `{normalized_task_id}`.")
             lines.append("Include the verified task id in the reply.")
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _json_object_payload(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        text = str(value or "").strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+
+    def _continue_task_result_payload(self, payload: dict[str, Any] | None) -> dict[str, Any]:
+        normalized = dict(payload or {})
+        parsed = self._json_object_payload(normalized.get("result_text") or normalized.get("content") or "")
+        if parsed:
+            normalized = {**normalized, **parsed}
+        normalized["status"] = str(normalized.get("status") or "").strip().lower()
+        normalized["mode"] = str(normalized.get("mode") or "").strip().lower()
+        return normalized
+
+    def _verified_continuation_result(self, payload: dict[str, Any] | None) -> dict[str, str]:
+        normalized = self._continue_task_result_payload(payload)
+        if str(normalized.get("status") or "") != "completed":
+            return {}
+        mode = str(normalized.get("mode") or "").strip().lower()
+        if mode not in {"recreate", "retry_in_place"}:
+            return {}
+
+        target_task_id = self._normalize_task_id_value(
+            normalized.get("target_task_id")
+            or self._json_object_payload(normalized.get("target_task") or {}).get("task_id")
+        )
+        target_task_id = target_task_id if self._task_id_exists(target_task_id) else ""
+
+        continuation_task = self._json_object_payload(normalized.get("continuation_task") or {})
+        continuation_task_id = self._normalize_task_id_value(continuation_task.get("task_id"))
+        continuation_task_id = continuation_task_id if self._task_id_exists(continuation_task_id) else ""
+
+        resumed_task = self._json_object_payload(normalized.get("resumed_task") or {})
+        resumed_task_id = self._normalize_task_id_value(resumed_task.get("task_id") or normalized.get("target_task_id"))
+        resumed_task_id = resumed_task_id if self._task_id_exists(resumed_task_id) else ""
+
+        if mode == "recreate" and continuation_task_id:
+            return {
+                "mode": mode,
+                "target_task_id": target_task_id,
+                "continuation_task_id": continuation_task_id,
+                "resumed_task_id": "",
+            }
+        if mode == "retry_in_place" and resumed_task_id:
+            return {
+                "mode": mode,
+                "target_task_id": target_task_id or resumed_task_id,
+                "continuation_task_id": "",
+                "resumed_task_id": resumed_task_id,
+            }
+        return {}
+
+    def _unverified_task_continuation_reply(
+        self,
+        *,
+        mode: str = "",
+        target_task_id: str = "",
+        continuation_task_id: str = "",
+        resumed_task_id: str = "",
+    ) -> str:
+        normalized_mode = str(mode or "").strip().lower()
+        if normalized_mode == "retry_in_place":
+            detail = resumed_task_id or target_task_id
+            suffix = f"：`{detail}`" if detail else ""
+            return f"未确认原任务已成功原地续跑{suffix}。当前回合没有可验证的真实续跑结果。"
+        detail = continuation_task_id or target_task_id
+        suffix = f"：`{detail}`" if detail else ""
+        return f"未确认任务已成功续跑{suffix}。当前回合没有可验证的真实续跑结果。"
+
+    @staticmethod
+    def _verified_continuation_reply_overlay(
+        *,
+        mode: str,
+        target_task_id: str = "",
+        continuation_task_id: str = "",
+        resumed_task_id: str = "",
+    ) -> str:
+        normalized_mode = str(mode or "").strip().lower()
+        lines = [
+            "A real task continuation has already completed and been verified.",
+            "Do not call any tools.",
+            "Do not continue the task again.",
+            "Reply with the exact user-facing text to show now.",
+            "Use natural language rather than a rigid template.",
+        ]
+        if normalized_mode == "recreate":
+            if target_task_id:
+                lines.insert(1, f"The original task id is `{target_task_id}`.")
+            if continuation_task_id:
+                lines.insert(2, f"The verified continuation task id is `{continuation_task_id}`.")
+                lines.append("Include the verified continuation task id in the reply.")
+            lines.append("Explain that the original task has been superseded by the continuation task.")
+            return "\n".join(lines).strip()
+        verified_resumed_task_id = str(resumed_task_id or target_task_id or "").strip()
+        if target_task_id and target_task_id != verified_resumed_task_id:
+            lines.insert(1, f"The original task id is `{target_task_id}`.")
+        if verified_resumed_task_id:
+            lines.insert(2, f"The verified resumed task id is `{verified_resumed_task_id}`.")
+            lines.append("Include the verified resumed task id in the reply.")
+        lines.append("Explain that the task is continuing in place rather than being recreated as a new task.")
+        lines.append("Do not say a new task was created.")
         return "\n".join(lines).strip()
 
     async def _call_model_with_tools(
@@ -1592,6 +1708,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ),
             None,
         )
+        successful_continuation = next(
+            (
+                item
+                for item in tool_results
+                if str(item.get("tool_name") or "").strip() == "continue_task"
+                and str(item.get("status") or "").strip().lower() in {"success", "completed"}
+            ),
+            None,
+        )
         if successful_dispatch is not None and set(substantive_tool_names) == {"create_async_task"}:
             verified_task_id = self._verified_dispatch_task_id(
                 str(successful_dispatch.get("result_text") or "")
@@ -1621,6 +1746,47 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "tool_call_payloads": [],
                 "verified_task_ids": [verified_task_id],
                 "repair_overlay_text": self._verified_dispatch_reply_overlay(task_id=verified_task_id),
+                "synthetic_tool_calls_used": False,
+                "next_step": "call_model",
+            }
+        if successful_continuation is not None and set(substantive_tool_names) == {"continue_task"}:
+            verified = self._verified_continuation_result(successful_continuation)
+            if not verified:
+                payload = self._continue_task_result_payload(successful_continuation)
+                return {
+                    "messages": messages,
+                    "used_tools": used_tools,
+                    "route_kind": "direct_reply",
+                    "analysis_text": "",
+                    "tool_call_payloads": [],
+                    "verified_task_ids": [],
+                    "synthetic_tool_calls_used": False,
+                    "final_output": self._unverified_task_continuation_reply(
+                        mode=str(payload.get("mode") or ""),
+                        target_task_id=self._normalize_task_id_value(payload.get("target_task_id")),
+                        continuation_task_id=self._normalize_task_id_value(
+                            self._json_object_payload(payload.get("continuation_task") or {}).get("task_id")
+                        ),
+                        resumed_task_id=self._normalize_task_id_value(
+                            self._json_object_payload(payload.get("resumed_task") or {}).get("task_id")
+                        ),
+                    ),
+                    "next_step": "finalize",
+                }
+            return {
+                "messages": messages,
+                "used_tools": used_tools,
+                "route_kind": route_kind,
+                "analysis_text": "",
+                "tool_names": [],
+                "tool_call_payloads": [],
+                "verified_task_ids": [],
+                "repair_overlay_text": self._verified_continuation_reply_overlay(
+                    mode=verified["mode"],
+                    target_task_id=verified["target_task_id"],
+                    continuation_task_id=verified["continuation_task_id"],
+                    resumed_task_id=verified["resumed_task_id"],
+                ),
                 "synthetic_tool_calls_used": False,
                 "next_step": "call_model",
             }

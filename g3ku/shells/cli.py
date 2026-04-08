@@ -8,6 +8,8 @@ import signal
 from pathlib import Path
 from typing import Any, Callable
 
+from g3ku.utils.sdk_logging import configure_openai_sdk_logging
+
 
 def run_agent_shell(
     *,
@@ -48,6 +50,7 @@ def run_agent_shell(
     cron = CronService(cron_store_path)
 
     set_debug_mode(debug)
+    configure_openai_sdk_logging()
     if logs or debug:
         logger.enable("g3ku")
     else:

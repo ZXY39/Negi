@@ -711,7 +711,15 @@ class WebSessionHeartbeatService:
                 lines.append(f"任务 `{short_task_id}` 已完成：{summary}")
             else:
                 latest_task = self._event_current_task(event)
-                if latest_task is not None and str(getattr(latest_task, "status", "") or "").strip().lower() == "in_progress":
+                recreated_continuation_task_id = self._event_recreated_continuation_task_id(event)
+                if recreated_continuation_task_id:
+                    short_continuation_id = (
+                        recreated_continuation_task_id[5:]
+                        if recreated_continuation_task_id.startswith("task:")
+                        else recreated_continuation_task_id or "task"
+                    )
+                    lines.append(f"任务 `{short_task_id}` 已续跑为 `{short_continuation_id}`，我会继续推进。")
+                elif latest_task is not None and str(getattr(latest_task, "status", "") or "").strip().lower() == "in_progress":
                     lines.append(f"任务 `{short_task_id}` 遇到工程故障，已在原任务内继续重试。")
                 else:
                     lines.append(f"任务 `{short_task_id}` 已失败：{summary}")
@@ -749,9 +757,16 @@ class WebSessionHeartbeatService:
             or str(final_acceptance.get("status") or "").strip().lower() == "failed"
         )
 
+    def _event_recreated_continuation_task_id(self, event: SessionHeartbeatEvent) -> str:
+        latest_task = self._event_current_task(event)
+        metadata = getattr(latest_task, "metadata", None) if isinstance(getattr(latest_task, "metadata", None), dict) else {}
+        if str((metadata or {}).get("continuation_state") or "").strip().lower() != "recreated":
+            return ""
+        return str((metadata or {}).get("continued_by_task_id") or "").strip()
+
     async def _auto_retry_engine_failure_events(self, events: list[SessionHeartbeatEvent]) -> list[str]:
-        retrier = getattr(self._main_task_service, "retry_task", None)
-        if not callable(retrier):
+        continuer = getattr(self._main_task_service, "continue_task", None)
+        if not callable(continuer):
             return []
         retried_task_ids: list[str] = []
         seen: set[str] = set()
@@ -765,8 +780,16 @@ class WebSessionHeartbeatService:
             latest_task = self._event_current_task(event)
             if latest_task is not None and str(getattr(latest_task, "status", "") or "").strip().lower() != "failed":
                 continue
+            if self._event_recreated_continuation_task_id(event):
+                continue
             try:
-                retried = await retrier(task_id)
+                retried = await continuer(
+                    mode="retry_in_place",
+                    target_task_id=task_id,
+                    continuation_instruction="Retry the same task in place after an engine failure.",
+                    reason="engine_failure",
+                    source="heartbeat_terminal",
+                )
             except Exception:
                 continue
             if retried is None:

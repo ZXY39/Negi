@@ -907,70 +907,45 @@ def test_create_async_task_tool_requires_execution_policy_param() -> None:
     assert 'missing required execution_policy' in errors
 
 
-@pytest.mark.asyncio
-async def test_create_async_task_tool_reuses_existing_continuation_task():
-    captured: dict[str, object] = {}
+def test_continue_task_contract_exposes_unified_modes_only() -> None:
+    from main.service.continue_task_contract import build_continue_task_parameters
 
-    class _StubService:
-        def find_reusable_continuation_task(self, *, session_id: str, continuation_of_task_id: str):
-            captured['session_id'] = session_id
-            captured['continuation_of_task_id'] = continuation_of_task_id
-            return SimpleNamespace(task_id='task:cont-1')
+    schema = build_continue_task_parameters()
+    props = dict(schema.get('properties') or {})
 
-        async def create_task(self, *args, **kwargs):
-            raise AssertionError('create_task should not be called when a continuation task can be reused')
-
-    tool = CreateAsyncTaskTool(_StubService())
-    result = await tool.execute(
-        '继续完成失败任务',
-        core_requirement='继续完成打开网页的自动化流程',
-        execution_policy={'mode': 'focus'},
-        continuation_of_task_id='task:old-1',
-        __g3ku_runtime={'session_key': 'web:ceo-demo'},
-    )
-
-    assert result == '复用进行中任务task:cont-1'
-    assert captured == {
-        'session_id': 'web:ceo-demo',
-        'continuation_of_task_id': 'task:old-1',
-    }
+    assert sorted(props['mode']['enum']) == ['recreate', 'retry_in_place']
+    assert 'target_task_id' in props
+    assert 'continuation_instruction' in props
+    assert 'continuation_of_task_id' not in props
+    assert 'reuse_existing' in props
 
 
 @pytest.mark.asyncio
-async def test_create_async_task_tool_creates_continuation_task_with_metadata_when_no_existing_match(tmp_path: Path):
-    service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
-        store_path=tmp_path / 'runtime.sqlite3',
-        files_base_dir=tmp_path / 'tasks',
-        artifact_dir=tmp_path / 'artifacts',
-        governance_store_path=tmp_path / 'governance.sqlite3',
-        execution_mode='embedded',
-    )
-    service.global_scheduler.enqueue_task = _noop_enqueue_task
+async def test_create_async_task_tool_rejects_continuation_of_task_id():
+    tool = CreateAsyncTaskTool(SimpleNamespace())
 
-    try:
-        tool = CreateAsyncTaskTool(service)
-        result = await tool.execute(
+    with pytest.raises(ValueError, match='create_async_task_no_longer_supports_continuation'):
+        await tool.execute(
             '继续完成失败任务',
             core_requirement='继续完成打开网页的自动化流程',
             execution_policy={'mode': 'focus'},
-            continuation_of_task_id='task:old-2',
-            __g3ku_runtime={'session_key': 'web:ceo-demo', 'heartbeat_internal': True},
+            continuation_of_task_id='task:old-1',
+            __g3ku_runtime={'session_key': 'web:ceo-demo'},
         )
 
-        task_id = result.removeprefix('创建任务成功')
-        record = service.get_task(task_id)
-        assert record is not None
-        assert record.metadata['continuation_of_task_id'] == 'task:old-2'
-        assert record.metadata['created_by_source'] == 'heartbeat_auto_continue'
-        assert record.metadata['core_requirement'] == '继续完成打开网页的自动化流程'
-        assert record.metadata['execution_policy'] == {'mode': 'focus'}
-    finally:
-        await service.close()
+
+def test_create_async_task_contract_no_longer_accepts_continuation_fields() -> None:
+    from main.service.create_async_task_contract import build_create_async_task_parameters
+
+    schema = build_create_async_task_parameters()
+    props = dict(schema.get('properties') or {})
+
+    assert 'continuation_of_task_id' not in props
+    assert 'reuse_existing' not in props
 
 
 @pytest.mark.asyncio
-async def test_create_async_task_tool_keeps_session_task_count_when_reusing_existing_continuation(tmp_path: Path):
+async def test_continue_task_recreate_keeps_session_task_count_when_reusing_existing_continuation(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / 'runtime.sqlite3',
@@ -1008,16 +983,18 @@ async def test_create_async_task_tool_keeps_session_task_count_when_reusing_exis
             },
         )
 
-        tool = CreateAsyncTaskTool(service)
-        result = await tool.execute(
-            '重建任务，继续完成',
-            core_requirement='继续完成打开目标网页',
-            execution_policy={'mode': 'focus'},
-            continuation_of_task_id=original.task_id,
-            __g3ku_runtime={'session_key': 'web:shared'},
+        result = await service.continue_task(
+            mode='recreate',
+            target_task_id=original.task_id,
+            continuation_instruction='重建任务，继续完成',
+            reason='heartbeat_stall',
+            source='heartbeat',
         )
 
-        assert result == f'复用进行中任务{continuation.task_id}'
+        assert result['status'] == 'completed'
+        assert result['continuation_task'] is not None
+        assert result['continuation_task'].task_id == continuation.task_id
+        assert result['reused_existing'] is True
         assert len(service.list_tasks_for_session('web:shared')) == 2
     finally:
         await service.close()
@@ -2179,6 +2156,68 @@ def test_task_continue_evaluate_rest_endpoint_normalizes_short_task_id_and_retur
     assert payload['decision'] == 'continuation_created'
     assert payload['task']['task_id'] == 'task:demo'
     assert payload['continuation_task']['task_id'] == 'task:cont-1'
+
+
+def test_task_continue_rest_endpoint_normalizes_short_task_id_and_returns_structured_result():
+    captured: dict[str, object] = {}
+
+    class _TaskRecord:
+        def __init__(self, task_id: str):
+            self.task_id = task_id
+
+        def model_dump(self, mode: str = 'json'):
+            _ = mode
+            return {'task_id': self.task_id, 'status': 'in_progress'}
+
+    class _StubService:
+        def normalize_task_id(self, task_id: str) -> str:
+            captured['normalized_from'] = task_id
+            return f'task:{task_id}'
+
+        async def continue_task(self, **kwargs):
+            captured['continue_payload'] = dict(kwargs)
+            return {
+                'status': 'completed',
+                'mode': 'retry_in_place',
+                'target_task_id': kwargs['target_task_id'],
+                'target_task_terminal_status': 'failed',
+                'target_task_finished_at': '2026-04-08T12:00:00+08:00',
+                'reused_existing': False,
+                'continuation_task': None,
+                'resumed_task': _TaskRecord(kwargs['target_task_id']),
+                'message': 'retried_in_place',
+            }
+
+    from main.api import rest as task_rest
+
+    app = FastAPI()
+    app.include_router(task_rest.router, prefix='/api')
+    task_rest.get_agent = lambda: SimpleNamespace(main_task_service=_StubService())
+
+    client = TestClient(app)
+    response = client.post(
+        '/api/tasks/demo/continue',
+        json={
+            'mode': 'retry_in_place',
+            'continuation_instruction': 'retry safely in place',
+            'reason': 'manual_retry',
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        'normalized_from': 'demo',
+        'continue_payload': {
+            'mode': 'retry_in_place',
+            'target_task_id': 'task:demo',
+            'continuation_instruction': 'retry safely in place',
+            'reason': 'manual_retry',
+        },
+    }
+    payload = response.json()
+    assert payload['status'] == 'completed'
+    assert payload['mode'] == 'retry_in_place'
+    assert payload['resumed_task']['task_id'] == 'task:demo'
 
 
 def test_load_config_rejects_legacy_tools_config(tmp_path: Path, monkeypatch):

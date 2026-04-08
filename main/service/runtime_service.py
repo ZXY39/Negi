@@ -47,6 +47,13 @@ from main.governance.roles import to_public_allowed_roles
 from main.governance.tool_context import build_tool_toolskill_payload, resolve_primary_executor_name
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
+    CONTINUATION_MODE_RECREATE,
+    CONTINUATION_MODE_RETRY_IN_PLACE,
+    CONTINUATION_STATE_NONE,
+    CONTINUATION_STATE_RECREATED,
+    CONTINUATION_STATE_RETRIED_IN_PLACE,
+    CONTINUATION_STATE_TAKEOVER_PENDING,
+    CONTINUATION_STATE_TERMINALIZING,
     FAILURE_CLASS_BUSINESS_UNPASSED,
     FAILURE_CLASS_ENGINE,
     FAILURE_CLASS_NON_RETRYABLE_BLOCKED,
@@ -54,6 +61,8 @@ from main.models import (
     TaskArtifactRecord,
     TaskRecord,
     TokenUsageSummary,
+    normalize_continuation_mode,
+    normalize_continuation_state,
     normalize_failure_class,
     normalize_execution_policy_metadata,
     normalize_final_acceptance_metadata,
@@ -314,8 +323,16 @@ class MainRuntimeService:
         adaptive_budget_settings = self._adaptive_tool_budget_settings(app_config)
         node_dispatch_limits = self._node_dispatch_concurrency_settings(app_config)
         execution_runtime_enabled = self.execution_mode == 'worker'
-        execution_max_concurrency = None
-        acceptance_max_concurrency = None
+        execution_max_concurrency = (
+            app_config.get_role_max_concurrency('execution')
+            if app_config is not None and hasattr(app_config, 'get_role_max_concurrency')
+            else None
+        )
+        acceptance_max_concurrency = (
+            app_config.get_role_max_concurrency('inspection')
+            if app_config is not None and hasattr(app_config, 'get_role_max_concurrency')
+            else None
+        )
         react_loop = ReActToolLoop(
             chat_backend=chat_backend,
             log_service=self.log_service,
@@ -1027,6 +1044,58 @@ class MainRuntimeService:
         next_metadata['last_retry_source'] = entry['source']
         return next_metadata
 
+    @staticmethod
+    def _continuation_metadata(task: TaskRecord | None) -> dict[str, Any]:
+        metadata = dict(getattr(task, 'metadata', {}) or {})
+        return {
+            'continuation_state': normalize_continuation_state(metadata.get('continuation_state'), default=CONTINUATION_STATE_NONE),
+            'continuation_mode': normalize_continuation_mode(metadata.get('continuation_mode')),
+            'continuation_request_id': str(metadata.get('continuation_request_id') or '').strip(),
+            'continued_by_task_id': str(metadata.get('continued_by_task_id') or '').strip(),
+            'continuation_reason': str(metadata.get('continuation_reason') or '').strip(),
+            'continuation_instruction': str(metadata.get('continuation_instruction') or '').strip(),
+            'continuation_source': str(metadata.get('continuation_source') or '').strip(),
+            'superseded_at': str(metadata.get('superseded_at') or '').strip(),
+        }
+
+    def _update_task_continuation_metadata(self, task_id: str, **payload: Any) -> TaskRecord | None:
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            next_metadata = dict(metadata or {})
+            for key, value in dict(payload or {}).items():
+                if key == 'continuation_state':
+                    normalized = normalize_continuation_state(value, default=CONTINUATION_STATE_NONE)
+                    if normalized and normalized != CONTINUATION_STATE_NONE:
+                        next_metadata[key] = normalized
+                    else:
+                        next_metadata.pop(key, None)
+                    continue
+                if key == 'continuation_mode':
+                    normalized = normalize_continuation_mode(value)
+                    if normalized:
+                        next_metadata[key] = normalized
+                    else:
+                        next_metadata.pop(key, None)
+                    continue
+                text = str(value or '').strip()
+                if text:
+                    next_metadata[key] = text
+                else:
+                    next_metadata.pop(key, None)
+            return next_metadata
+
+        return self.log_service.update_task_metadata(task_id, _mutate, mark_unread=True)
+
+    async def _wait_for_task_terminal(self, task_id: str, *, timeout_seconds: float = 30.0) -> TaskRecord | None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        deadline = time.monotonic() + max(0.1, float(timeout_seconds or 30.0))
+        latest = self.get_task(normalized_task_id)
+        while latest is not None and str(getattr(latest, 'status', '') or '').strip().lower() == 'in_progress':
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.05)
+            latest = self.get_task(normalized_task_id)
+        return latest
+
     def _reopen_task_in_place_for_retry(self, task: TaskRecord, *, source: str) -> TaskRecord:
         root = self.store.get_node(task.root_node_id)
         if root is None:
@@ -1117,39 +1186,231 @@ class MainRuntimeService:
         )
         return self.get_task(task.task_id) or task
 
+    async def continue_task(
+        self,
+        *,
+        mode: str,
+        target_task_id: str,
+        continuation_instruction: str,
+        execution_policy: dict[str, Any] | None = None,
+        requires_final_acceptance: bool | None = None,
+        final_acceptance_prompt: str = '',
+        reuse_existing: bool = True,
+        reason: str = '',
+        source: str = '',
+        request_id: str = '',
+    ) -> dict[str, Any]:
+        await self.startup()
+        normalized_mode = normalize_continuation_mode(mode)
+        if normalized_mode not in {CONTINUATION_MODE_RECREATE, CONTINUATION_MODE_RETRY_IN_PLACE}:
+            raise ValueError('invalid_continuation_mode')
+        normalized_task_id = self.normalize_task_id(target_task_id)
+        task = self.get_task(normalized_task_id)
+        if task is None:
+            return {
+                'status': 'blocked',
+                'mode': normalized_mode,
+                'message': 'task_not_found',
+                'target_task_id': normalized_task_id,
+            }
+
+        metadata = dict(task.metadata or {})
+        continuation = self._continuation_metadata(task)
+        if continuation['continuation_state'] == CONTINUATION_STATE_RECREATED:
+            continued_by_task_id = continuation['continued_by_task_id']
+            continuation_task = self.get_task(continued_by_task_id) if continued_by_task_id else None
+            return {
+                'status': 'completed',
+                'mode': CONTINUATION_MODE_RECREATE,
+                'target_task_id': task.task_id,
+                'target_task': task,
+                'target_task_terminal_status': str(task.status or '').strip().lower(),
+                'target_task_finished_at': str(task.finished_at or '').strip(),
+                'continuation_task': continuation_task,
+                'resumed_task': None,
+                'reused_existing': bool(continuation_task is not None),
+                'message': 'task_already_recreated',
+            }
+        if continuation['continuation_state'] == CONTINUATION_STATE_RETRIED_IN_PLACE:
+            return {
+                'status': 'completed',
+                'mode': CONTINUATION_MODE_RETRY_IN_PLACE,
+                'target_task_id': task.task_id,
+                'target_task': task,
+                'target_task_terminal_status': str(task.status or '').strip().lower(),
+                'target_task_finished_at': str(task.finished_at or '').strip(),
+                'continuation_task': None,
+                'resumed_task': task,
+                'reused_existing': False,
+                'message': 'task_already_retried_in_place',
+            }
+
+        normalized_instruction = str(continuation_instruction or '').strip()
+        if not normalized_instruction:
+            raise ValueError('continuation_instruction_required')
+        normalized_reason = str(reason or '').strip()
+        normalized_source = str(source or '').strip() or 'manual'
+        normalized_request_id = str(request_id or '').strip()
+
+        self._update_task_continuation_metadata(
+            task.task_id,
+            continuation_state=CONTINUATION_STATE_TAKEOVER_PENDING,
+            continuation_mode=normalized_mode,
+            continuation_reason=normalized_reason,
+            continuation_instruction=normalized_instruction,
+            continuation_source=normalized_source,
+            continuation_request_id=normalized_request_id,
+        )
+
+        latest = self.get_task(task.task_id) or task
+        if str(latest.status or '').strip().lower() == 'in_progress':
+            self._update_task_continuation_metadata(task.task_id, continuation_state=CONTINUATION_STATE_TERMINALIZING)
+            await self.cancel_task(task.task_id)
+            latest = await self._wait_for_task_terminal(task.task_id)
+        if latest is None:
+            return {
+                'status': 'blocked',
+                'mode': normalized_mode,
+                'message': 'task_not_found',
+                'target_task_id': task.task_id,
+            }
+        if str(latest.status or '').strip().lower() == 'in_progress':
+            return {
+                'status': 'blocked',
+                'mode': normalized_mode,
+                'message': 'task_not_terminalized',
+                'target_task_id': task.task_id,
+            }
+
+        if normalized_mode == CONTINUATION_MODE_RETRY_IN_PLACE:
+            failure_class = normalize_failure_class((latest.metadata or {}).get('failure_class'))
+            final_acceptance = normalize_final_acceptance_metadata((latest.metadata or {}).get('final_acceptance'))
+            if (
+                failure_class in {FAILURE_CLASS_BUSINESS_UNPASSED, FAILURE_CLASS_NON_RETRYABLE_BLOCKED}
+                or (
+                    str(latest.status or '').strip().lower() == 'success'
+                    and bool(final_acceptance.required)
+                    and str(final_acceptance.status or '').strip().lower() == 'failed'
+                )
+                or str(latest.status or '').strip().lower() != 'failed'
+            ):
+                raise ValueError('task_not_retryable')
+            reopened = self._reopen_task_in_place_for_retry(latest, source=normalized_source or 'manual')
+            self._update_task_continuation_metadata(
+                latest.task_id,
+                continuation_state=CONTINUATION_STATE_RETRIED_IN_PLACE,
+                continuation_mode=CONTINUATION_MODE_RETRY_IN_PLACE,
+                continuation_reason=normalized_reason,
+                continuation_instruction=normalized_instruction,
+                continuation_source=normalized_source,
+                continuation_request_id=normalized_request_id,
+                continued_by_task_id='',
+                superseded_at='',
+            )
+            if self.execution_mode in {'embedded', 'worker'}:
+                await self.global_scheduler.enqueue_task(latest.task_id)
+            else:
+                self._enqueue_task_command(
+                    command_type='resume_task',
+                    task_id=latest.task_id,
+                    session_id=latest.session_id,
+                    payload={'task_id': latest.task_id},
+                )
+            resumed = self.get_task(latest.task_id) or reopened
+            return {
+                'status': 'completed',
+                'mode': CONTINUATION_MODE_RETRY_IN_PLACE,
+                'target_task_id': latest.task_id,
+                'target_task': latest,
+                'target_task_terminal_status': 'failed',
+                'target_task_finished_at': str(latest.finished_at or '').strip(),
+                'continuation_task': None,
+                'resumed_task': resumed,
+                'reused_existing': False,
+                'message': 'retried_in_place',
+            }
+
+        next_execution_policy = normalize_execution_policy_metadata(
+            execution_policy if execution_policy is not None else metadata.get('execution_policy')
+        )
+        original_final_acceptance = normalize_final_acceptance_metadata(metadata.get('final_acceptance'))
+        next_requires_final_acceptance = bool(requires_final_acceptance) if requires_final_acceptance is not None else bool(original_final_acceptance.required)
+        next_final_acceptance_prompt = (
+            str(final_acceptance_prompt or '').strip()
+            or str(original_final_acceptance.prompt or '').strip()
+        )
+        origin_session_id = self._task_origin_session_id(latest)
+        continuation_task = None
+        reused_existing = False
+        if reuse_existing:
+            continuation_task = self.find_reusable_continuation_task(
+                session_id=origin_session_id,
+                continuation_of_task_id=latest.task_id,
+            )
+            reused_existing = continuation_task is not None
+        if continuation_task is None:
+            continuation_task = await self.create_task(
+                normalized_instruction,
+                session_id=latest.session_id,
+                max_depth=latest.max_depth,
+                title=latest.title,
+                metadata={
+                    'core_requirement': normalized_instruction,
+                    'execution_policy': next_execution_policy.model_dump(mode='json'),
+                    'continuation_of_task_id': latest.task_id,
+                    'created_by_source': normalized_source,
+                    'final_acceptance': {
+                        'required': next_requires_final_acceptance,
+                        'prompt': next_final_acceptance_prompt,
+                        'node_id': '',
+                        'status': 'pending',
+                    },
+                },
+            )
+        self._update_task_continuation_metadata(
+            latest.task_id,
+            continuation_state=CONTINUATION_STATE_RECREATED,
+            continuation_mode=CONTINUATION_MODE_RECREATE,
+            continuation_reason=normalized_reason,
+            continuation_instruction=normalized_instruction,
+            continuation_source=normalized_source,
+            continuation_request_id=normalized_request_id,
+            continued_by_task_id=str(continuation_task.task_id or '').strip(),
+            superseded_at=now_iso(),
+        )
+        return {
+            'status': 'completed',
+            'mode': CONTINUATION_MODE_RECREATE,
+            'target_task_id': latest.task_id,
+            'target_task': latest,
+            'target_task_terminal_status': str(latest.status or '').strip().lower(),
+            'target_task_finished_at': str(latest.finished_at or '').strip(),
+            'continuation_task': continuation_task,
+            'resumed_task': None,
+            'reused_existing': reused_existing,
+            'message': 'recreated',
+        }
+
     async def retry_task(self, task_id: str) -> TaskRecord | None:
         await self.startup()
-        task_id = self.normalize_task_id(task_id)
-        if self.execution_mode == 'web':
-            self._assert_worker_available()
-        task = self.get_task(task_id)
+        normalized_task_id = self.normalize_task_id(task_id)
+        task = self.get_task(normalized_task_id)
         if task is None:
             return None
-        metadata = dict(task.metadata or {})
-        failure_class = normalize_failure_class(metadata.get('failure_class'))
-        final_acceptance = normalize_final_acceptance_metadata(metadata.get('final_acceptance'))
-        if (
-            failure_class in {FAILURE_CLASS_BUSINESS_UNPASSED, FAILURE_CLASS_NON_RETRYABLE_BLOCKED}
-            or (
-                str(task.status or '').strip().lower() == 'success'
-                and bool(final_acceptance.required)
-                and str(final_acceptance.status or '').strip().lower() == 'failed'
-            )
-        ):
-            raise ValueError('task_not_retryable')
-        if task.status != 'failed':
+        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance'))
+        if str(task.status or '').strip().lower() != 'failed':
+            if bool(final_acceptance.required) and str(final_acceptance.status or '').strip().lower() == 'failed':
+                raise ValueError('task_not_retryable')
             raise ValueError('task_not_failed')
-        reopened = self._reopen_task_in_place_for_retry(task, source='manual')
-        if self.execution_mode in {'embedded', 'worker'}:
-            await self.global_scheduler.enqueue_task(task.task_id)
-        else:
-            self._enqueue_task_command(
-                command_type='resume_task',
-                task_id=task.task_id,
-                session_id=task.session_id,
-                payload={'task_id': task.task_id},
-            )
-        return reopened
+        result = await self.continue_task(
+            mode=CONTINUATION_MODE_RETRY_IN_PLACE,
+            target_task_id=task.task_id,
+            continuation_instruction='Retry the same task in place after an engine failure.',
+            reason='manual_retry',
+            source='api_retry',
+        )
+        resumed = result.get('resumed_task')
+        return resumed if resumed is not None else self.get_task(task.task_id)
 
     async def continue_evaluate_task(self, task_id: str) -> dict[str, Any] | None:
         await self.startup()
@@ -1205,9 +1466,9 @@ class MainRuntimeService:
         prompt_text = (
             'You are evaluating whether a completed but unpassed task should continue in a new continuation task.\n'
             'You must choose exactly one path:\n'
-            '1. If the user request is still clearly unsatisfied and you can continue without asking for new user input or approval, call create_async_task with continuation_of_task_id set to the original task id.\n'
+            '1. If the user request is still clearly unsatisfied and you can continue without asking for new user input or approval, call continue_task with mode set to recreate.\n'
             '2. Otherwise, do not create any new task and instead reply directly to the user with a concise closure that explains what remains uncertain or why no further autonomous work is justified.\n'
-            'Do not claim a continuation was created unless you actually call create_async_task.\n'
+            'Do not claim a continuation was created unless you actually call continue_task and it succeeds.\n'
             'Here is the task context:\n'
             f'{json.dumps(prompt_payload, ensure_ascii=False, indent=2)}'
         )
@@ -3075,8 +3336,8 @@ class MainRuntimeService:
         self.node_runner._acceptance_model_refs = list(config.get_role_model_keys('inspection') or config.get_role_model_keys('execution'))
         self.node_runner._execution_max_iterations = config.get_role_max_iterations('execution')
         self.node_runner._acceptance_max_iterations = config.get_role_max_iterations('inspection')
-        self.node_runner._execution_max_concurrency = None
-        self.node_runner._acceptance_max_concurrency = None
+        self.node_runner._execution_max_concurrency = config.get_role_max_concurrency('execution')
+        self.node_runner._acceptance_max_concurrency = config.get_role_max_concurrency('inspection')
         self.task_actor_service.configure_node_dispatch_limits(
             execution=None,
             inspection=None,
@@ -5528,12 +5789,8 @@ class CreateAsyncTaskTool(Tool):
             core_requirement = str((params or {}).get('core_requirement') or '').strip()
             if not core_requirement:
                 errors.append('core_requirement must not be empty')
-        if 'continuation_of_task_id' in (params or {}):
-            continuation_of_task_id = str((params or {}).get('continuation_of_task_id') or '').strip()
-            if not continuation_of_task_id:
-                errors.append('continuation_of_task_id must not be empty when provided')
-            elif not continuation_of_task_id.startswith('task:'):
-                errors.append('continuation_of_task_id must start with task:')
+        if 'continuation_of_task_id' in (params or {}) or 'reuse_existing' in (params or {}):
+            errors.append('create_async_task_no_longer_supports_continuation')
         requires_final_acceptance = (params or {}).get('requires_final_acceptance')
         final_acceptance_prompt = str((params or {}).get('final_acceptance_prompt') or '').strip()
         if requires_final_acceptance is True and not final_acceptance_prompt:
@@ -5548,6 +5805,8 @@ class CreateAsyncTaskTool(Tool):
         **kwargs: Any,
     ) -> str:
         runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
+        if 'continuation_of_task_id' in kwargs or 'reuse_existing' in kwargs:
+            raise ValueError('create_async_task_no_longer_supports_continuation')
         session_id = str(runtime.get('session_key') or 'web:shared').strip() or 'web:shared'
         explicit_max_depth = kwargs.get('max_depth', kwargs.get('maxDepth'))
         if explicit_max_depth in (None, ''):
@@ -5557,24 +5816,6 @@ class CreateAsyncTaskTool(Tool):
         final_acceptance_prompt = str(kwargs.get('final_acceptance_prompt') or '').strip()
         raw_requires_final_acceptance = kwargs.get('requires_final_acceptance')
         requires_final_acceptance = bool(raw_requires_final_acceptance) or (raw_requires_final_acceptance in (None, '') and bool(final_acceptance_prompt))
-        continuation_of_task_id = MainRuntimeService._normalize_continuation_task_id(kwargs.get('continuation_of_task_id'))
-        raw_reuse_existing = kwargs.get('reuse_existing')
-        reuse_existing = True if raw_reuse_existing in (None, '') else bool(raw_reuse_existing)
-        created_by_source = ''
-        if continuation_of_task_id:
-            created_by_source = 'heartbeat_auto_continue' if bool(runtime.get('heartbeat_internal')) else 'ceo_user_rebuild'
-            if reuse_existing:
-                finder = getattr(self._service, 'find_reusable_continuation_task', None)
-                existing = (
-                    finder(
-                        session_id=session_id,
-                        continuation_of_task_id=continuation_of_task_id,
-                    )
-                    if callable(finder)
-                    else None
-                )
-                if existing is not None:
-                    return f'复用进行中任务{existing.task_id}'
         record = await self._service.create_task(
             str(task or ''),
             session_id=session_id,
@@ -5582,8 +5823,6 @@ class CreateAsyncTaskTool(Tool):
             metadata={
                 'core_requirement': normalized_core_requirement,
                 'execution_policy': normalized_execution_policy.model_dump(mode='json'),
-                'continuation_of_task_id': continuation_of_task_id,
-                'created_by_source': created_by_source,
                 'final_acceptance': {
                     'required': requires_final_acceptance,
                     'prompt': final_acceptance_prompt,

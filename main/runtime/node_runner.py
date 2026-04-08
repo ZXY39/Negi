@@ -416,14 +416,15 @@ class NodeRunner:
 
     def _max_parallel_tool_calls_for(self, node: NodeRecord) -> int | None:
         role_limit = self._acceptance_max_concurrency if node.node_kind == KIND_ACCEPTANCE else self._execution_max_concurrency
-        if role_limit is not None:
+        global_limit = getattr(self._react_loop, '_max_parallel_tool_calls', None)
+        if role_limit is None:
+            return global_limit
+        if global_limit is None:
             return role_limit
-        return getattr(self._react_loop, '_max_parallel_tool_calls', None)
+        return min(int(role_limit), int(global_limit))
 
     def _max_parallel_child_pipelines_for(self, node: NodeRecord) -> int | None:
-        role_limit = self._acceptance_max_concurrency if node.node_kind == KIND_ACCEPTANCE else self._execution_max_concurrency
-        if role_limit is not None:
-            return role_limit
+        _ = node
         return self._max_parallel_child_pipelines
 
     def _runtime_context(self, *, task, node: NodeRecord) -> dict[str, Any]:

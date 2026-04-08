@@ -4300,6 +4300,155 @@ async def test_retry_task_rejects_business_unpassed_task(tmp_path: Path):
         await service.close()
 
 
+@pytest.mark.asyncio
+async def test_continue_task_recreate_cancels_old_task_then_creates_new_task(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task("continue by recreating", session_id="web:shared")
+
+        result = await service.continue_task(
+            mode="recreate",
+            target_task_id=record.task_id,
+            continuation_instruction="continue with recovered context",
+            reason="heartbeat_stall",
+            source="heartbeat",
+        )
+
+        original = service.get_task(record.task_id)
+        continuation = result.get("continuation_task")
+
+        assert result["status"] == "completed"
+        assert result["mode"] == "recreate"
+        assert original is not None
+        assert original.status == "failed"
+        assert original.failure_reason == "canceled"
+        assert continuation is not None
+        assert continuation.task_id != record.task_id
+        assert continuation.metadata.get("continuation_of_task_id") == record.task_id
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_continue_task_retry_in_place_reopens_same_task_after_terminalizing(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task("continue by retrying", session_id="web:shared")
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        service.log_service.update_node_status(
+            record.task_id,
+            root.node_id,
+            status="failed",
+            final_output="engine failure",
+            failure_reason="engine failure",
+        )
+
+        result = await service.continue_task(
+            mode="retry_in_place",
+            target_task_id=record.task_id,
+            continuation_instruction="retry safely in place",
+            reason="engine_failure",
+            source="api",
+        )
+
+        latest = service.get_task(record.task_id)
+
+        assert result["status"] == "completed"
+        assert result["mode"] == "retry_in_place"
+        assert result.get("resumed_task") is not None
+        assert result["resumed_task"].task_id == record.task_id
+        assert latest is not None
+        assert latest.status == "in_progress"
+        assert len(service.store.list_tasks()) == 1
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_continue_task_retry_in_place_rejects_business_unpassed(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task(
+            "continue blocked for unpassed task",
+            session_id="web:shared",
+            metadata={
+                "final_acceptance": {
+                    "required": True,
+                    "prompt": "verify the final answer",
+                }
+            },
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        service.log_service.update_node_status(
+            record.task_id,
+            root.node_id,
+            status="success",
+            final_output="root deliverable",
+        )
+
+        acceptance = service.node_runner.create_acceptance_node(
+            task=task,
+            accepted_node=root,
+            goal="final acceptance",
+            acceptance_prompt="verify the final answer",
+            parent_node_id=root.node_id,
+            metadata={"final_acceptance": True},
+        )
+        service.log_service.update_node_status(
+            record.task_id,
+            acceptance.node_id,
+            status="failed",
+            final_output="acceptance failed",
+            failure_reason="acceptance failed",
+        )
+
+        with pytest.raises(ValueError, match="task_not_retryable"):
+            await service.continue_task(
+                mode="retry_in_place",
+                target_task_id=record.task_id,
+                continuation_instruction="retry",
+                reason="manual",
+                source="api",
+            )
+    finally:
+        await service.close()
+
+
 def test_live_tree_payload_keeps_acceptance_node_kind(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

@@ -144,29 +144,36 @@ class _CountTool(Tool):
 class _ContinuationTaskTool(Tool):
     @property
     def name(self) -> str:
-        return "create_async_task"
+        return "continue_task"
 
     @property
     def description(self) -> str:
-        return "dispatch async task"
+        return "continue an existing task"
 
     @property
     def parameters(self) -> dict[str, object]:
         return {
             "type": "object",
             "properties": {
-                "task": {"type": "string"},
-                "core_requirement": {"type": "string"},
+                "mode": {"type": "string", "enum": ["recreate", "retry_in_place"]},
+                "target_task_id": {"type": "string"},
+                "continuation_instruction": {"type": "string"},
                 "execution_policy": {"type": "object"},
-                "continuation_of_task_id": {"type": "string"},
                 "reuse_existing": {"type": "boolean"},
             },
-            "required": ["task", "core_requirement", "execution_policy"],
+            "required": ["mode", "target_task_id", "continuation_instruction"],
         }
 
-    async def execute(self, task: str, core_requirement: str, execution_policy: dict[str, object], **kwargs) -> str:
-        _ = task, core_requirement, execution_policy, kwargs
-        return "创建任务成功task:demo-123"
+    async def execute(
+        self,
+        mode: str,
+        target_task_id: str,
+        continuation_instruction: str,
+        execution_policy: dict[str, object] | None = None,
+        **kwargs,
+    ) -> str:
+        _ = mode, target_task_id, continuation_instruction, execution_policy, kwargs
+        return '{"status":"completed"}'
 
 
 class _NestedContractTool(Tool):
@@ -245,13 +252,13 @@ def test_build_args_schema_preserves_declared_json_types() -> None:
     schema = schema_model.model_json_schema()
     properties = dict(schema.get("properties") or {})
 
-    continuation_schema = dict(properties.get("continuation_of_task_id") or {})
+    target_task_schema = dict(properties.get("target_task_id") or {})
     reuse_schema = dict(properties.get("reuse_existing") or {})
-    task_schema = dict(properties.get("task") or {})
+    mode_schema = dict(properties.get("mode") or {})
 
-    continuation_types = {
+    target_task_types = {
         str(item.get("type") or "").strip()
-        for item in list(continuation_schema.get("anyOf") or [])
+        for item in list(target_task_schema.get("anyOf") or [])
         if isinstance(item, dict)
     }
     reuse_types = {
@@ -260,8 +267,8 @@ def test_build_args_schema_preserves_declared_json_types() -> None:
         if isinstance(item, dict)
     }
 
-    assert task_schema.get("type") == "string"
-    assert "string" in continuation_types or continuation_schema.get("type") == "string"
+    assert set(mode_schema.get("enum") or []) == {"recreate", "retry_in_place"}
+    assert "string" in target_task_types or target_task_schema.get("type") == "string"
     assert "boolean" in reuse_types or reuse_schema.get("type") == "boolean"
 
 
@@ -716,6 +723,31 @@ async def test_ceo_frontdoor_runner_retries_empty_turn_until_valid_result(monkey
 
 @pytest.mark.asyncio
 async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_dispatch(monkeypatch, tmp_path) -> None:
+    class _DispatchAsyncTaskTool(Tool):
+        @property
+        def name(self) -> str:
+            return "create_async_task"
+
+        @property
+        def description(self) -> str:
+            return "dispatch async task"
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "core_requirement": {"type": "string"},
+                    "execution_policy": {"type": "object"},
+                },
+                "required": ["task", "core_requirement", "execution_policy"],
+            }
+
+        async def execute(self, task: str, core_requirement: str, execution_policy: dict[str, object], **kwargs) -> str:
+            _ = task, core_requirement, execution_policy, kwargs
+            return "创建任务成功task:demo-123"
+
     async def _noop_ready() -> None:
         return None
 
@@ -768,7 +800,7 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
             startup=_noop_startup,
             get_task=lambda task_id: SimpleNamespace(task_id=task_id)
         ),
-        tools=_FakeToolRegistry([_ContinuationTaskTool()]),
+        tools=_FakeToolRegistry([_DispatchAsyncTaskTool()]),
         max_iterations=8,
         resource_manager=None,
         tool_execution_manager=None,

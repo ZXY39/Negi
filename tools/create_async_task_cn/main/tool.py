@@ -33,11 +33,6 @@ def _runtime_task_default_max_depth(runtime: dict[str, Any] | None) -> int | Non
         return None
 
 
-def _normalize_continuation_task_id(value: Any) -> str:
-    task_id = str(value or '').strip()
-    return task_id if task_id.startswith('task:') else ''
-
-
 class _CreateAsyncTaskHandler(Tool):
     def __init__(self, service) -> None:
         self._service = service
@@ -62,6 +57,8 @@ class _CreateAsyncTaskHandler(Tool):
         **kwargs: Any,
     ) -> str:
         runtime = _runtime_payload(__g3ku_runtime, kwargs)
+        if 'continuation_of_task_id' in kwargs or 'reuse_existing' in kwargs:
+            raise ValueError('create_async_task_no_longer_supports_continuation')
         session_id = str(runtime.get('session_key') or 'web:shared').strip() or 'web:shared'
         explicit_max_depth = kwargs.get('max_depth', kwargs.get('maxDepth'))
         if explicit_max_depth in (None, ''):
@@ -73,21 +70,6 @@ class _CreateAsyncTaskHandler(Tool):
         requires_final_acceptance = bool(raw_requires_final_acceptance) or (
             raw_requires_final_acceptance in (None, '') and bool(final_acceptance_prompt)
         )
-        continuation_of_task_id = _normalize_continuation_task_id(kwargs.get('continuation_of_task_id'))
-        raw_reuse_existing = kwargs.get('reuse_existing')
-        reuse_existing = True if raw_reuse_existing in (None, '') else bool(raw_reuse_existing)
-        created_by_source = ''
-        if continuation_of_task_id:
-            created_by_source = 'heartbeat_auto_continue' if bool(runtime.get('heartbeat_internal')) else 'ceo_user_rebuild'
-            if reuse_existing:
-                finder = getattr(self._service, 'find_reusable_continuation_task', None)
-                existing = (
-                    finder(session_id=session_id, continuation_of_task_id=continuation_of_task_id)
-                    if callable(finder)
-                    else None
-                )
-                if existing is not None:
-                    return f'复用进行中任务{existing.task_id}'
         record = await self._service.create_task(
             str(task or ''),
             session_id=session_id,
@@ -95,8 +77,6 @@ class _CreateAsyncTaskHandler(Tool):
             metadata={
                 'core_requirement': normalized_core_requirement,
                 'execution_policy': normalized_execution_policy.model_dump(mode='json'),
-                'continuation_of_task_id': continuation_of_task_id,
-                'created_by_source': created_by_source,
                 'final_acceptance': {
                     'required': requires_final_acceptance,
                     'prompt': final_acceptance_prompt,

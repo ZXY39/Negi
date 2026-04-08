@@ -13,6 +13,7 @@ from g3ku.config.loader import ensure_startup_config_ready, load_config
 from g3ku.runtime.bootstrap_factory import make_agent_loop as _make_agent_loop
 from g3ku.runtime.bootstrap_factory import make_provider as _make_provider
 from g3ku.security import BOOTSTRAP_MASTER_KEY_ENV, get_bootstrap_security_service
+from g3ku.utils.sdk_logging import configure_openai_sdk_logging
 from g3ku.utils.helpers import sync_workspace_templates
 from g3ku.web.worker_control import WEB_AUTO_WORKER_ENV
 from main.service.task_terminal_callback import (
@@ -136,6 +137,7 @@ def prepare_web_server_start(
     with_worker: bool,
 ) -> tuple[Path, str, int]:
     root = _resolve_project_root()
+    configure_openai_sdk_logging()
     ensure_startup_config_ready()
     _ensure_frontend_ready()
     resolved_host, resolved_port = _resolve_web_bind(host, port)
@@ -193,6 +195,7 @@ async def run_worker_runtime() -> None:
     from g3ku.bus.queue import MessageBus
 
     _resolve_project_root()
+    configure_openai_sdk_logging()
     os.environ["G3KU_TASK_RUNTIME_ROLE"] = "worker"
     master_key = str(os.environ.pop(BOOTSTRAP_MASTER_KEY_ENV, "")).strip()
     if master_key:

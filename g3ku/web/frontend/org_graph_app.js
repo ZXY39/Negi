@@ -5841,8 +5841,23 @@ const canPause = (task) => !!task && !task.is_paused && pStatus(task.status) ===
 const canResume = (task) => !!task && !!task.is_paused;
 const taskFailureClass = (task) => String(task?.failure_class || task?.metadata?.failure_class || "").trim().toLowerCase();
 const taskFinalAcceptanceStatus = (task) => String(task?.final_acceptance?.status || task?.metadata?.final_acceptance?.status || "").trim().toLowerCase();
+const taskContinuationState = (task) => String(task?.continuation_state || task?.metadata?.continuation_state || "").trim().toLowerCase();
+const taskContinuedByTaskId = (task) => String(task?.continued_by_task_id || task?.metadata?.continued_by_task_id || "").trim();
 const taskIsUnpassed = (task) => !!task && pStatus(task.status) === "success" && taskFinalAcceptanceStatus(task) === "failed";
-const canRetry = (task) => !!task && pStatus(task.status) === "failed" && taskFailureClass(task) === "engine_failure";
+const taskIsSuperseded = (task) => !!task && taskContinuationState(task) === "recreated" && !!taskContinuedByTaskId(task);
+const taskContinuationSummary = (task) => {
+    if (!task) return "";
+    const continuationState = taskContinuationState(task);
+    if (continuationState === "recreated") {
+        const continuedByTaskId = taskContinuedByTaskId(task);
+        return continuedByTaskId ? `已续跑到 ${continuedByTaskId}` : "已续跑到新任务";
+    }
+    if (continuationState === "retried_in_place") {
+        return pStatus(task.status) === "in_progress" ? "原任务内续跑中" : "原任务已按原地重试续跑";
+    }
+    return "";
+};
+const canRetry = (task) => !!task && !taskIsSuperseded(task) && pStatus(task.status) === "failed" && taskFailureClass(task) === "engine_failure";
 const canContinueEvaluate = (task) => !!task && taskIsUnpassed(task) && taskFailureClass(task) === "business_unpassed";
 const canDelete = (task) => !!task && (!!task.is_paused || ["success", "failed"].includes(pStatus(task.status)));
 const EMPTY_TOKEN_USAGE = () => ({
@@ -5859,6 +5874,7 @@ const EMPTY_TOKEN_USAGE = () => ({
 function taskStatusKey(task) {
     if (!task) return "unknown";
     if (task.is_paused) return "blocked";
+    if (taskIsSuperseded(task)) return "continued";
     if (taskIsUnpassed(task)) return "unpassed";
     return pStatus(task.status) || "unknown";
 }

@@ -212,6 +212,15 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             ),
             None,
         )
+        successful_continuation = next(
+            (
+                item
+                for item in tool_results
+                if str(item.get("tool_name") or "").strip() == "continue_task"
+                and str(item.get("status") or "").strip().lower() in {"success", "completed"}
+            ),
+            None,
+        )
 
         result = {
             **self._replace_messages_update(messages),
@@ -240,6 +249,31 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             result["route_kind"] = "task_dispatch"
             result["tool_names"] = []
             result["repair_overlay_text"] = self._verified_dispatch_reply_overlay(task_id=verified_task_id)
+        if successful_continuation is not None and set(substantive_tool_names) == {"continue_task"}:
+            verified = self._verified_continuation_result(successful_continuation)
+            if not verified:
+                payload = self._continue_task_result_payload(successful_continuation)
+                result["final_output"] = self._unverified_task_continuation_reply(
+                    mode=str(payload.get("mode") or ""),
+                    target_task_id=self._normalize_task_id_value(payload.get("target_task_id")),
+                    continuation_task_id=self._normalize_task_id_value(
+                        self._json_object_payload(payload.get("continuation_task") or {}).get("task_id")
+                    ),
+                    resumed_task_id=self._normalize_task_id_value(
+                        self._json_object_payload(payload.get("resumed_task") or {}).get("task_id")
+                    ),
+                )
+                result["route_kind"] = "direct_reply"
+                result["jump_to"] = "end"
+                return result
+            result["route_kind"] = "task_continuation"
+            result["tool_names"] = []
+            result["repair_overlay_text"] = self._verified_continuation_reply_overlay(
+                mode=verified["mode"],
+                target_task_id=verified["target_task_id"],
+                continuation_task_id=verified["continuation_task_id"],
+                resumed_task_id=verified["resumed_task_id"],
+            )
         return result
 
     def _middleware(self) -> list[Any]:

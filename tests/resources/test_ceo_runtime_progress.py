@@ -62,6 +62,7 @@ class _TaskService:
         self.node_details: dict[tuple[str, str], dict[str, object]] = {}
         self.continuation_tasks: dict[tuple[str, str], object] = {}
         self.retry_calls: list[str] = []
+        self.continue_calls: list[dict[str, object]] = []
 
     async def startup(self) -> None:
         return None
@@ -88,6 +89,26 @@ class _TaskService:
             return None
         current.status = "in_progress"
         return current
+
+    async def continue_task(self, **kwargs):
+        self.continue_calls.append(dict(kwargs))
+        task_id = str(kwargs.get("target_task_id") or "").strip()
+        current = self.tasks.get(task_id)
+        if current is None:
+            return None
+        current.status = "in_progress"
+        return {
+            "status": "completed",
+            "mode": str(kwargs.get("mode") or "").strip(),
+            "target_task_id": task_id,
+            "target_task": current,
+            "target_task_terminal_status": "failed",
+            "target_task_finished_at": "",
+            "continuation_task": None,
+            "resumed_task": current,
+            "reused_existing": False,
+            "message": "retried_in_place",
+        }
 
 
 class _RuntimeManager:
@@ -2877,12 +2898,73 @@ async def test_web_session_heartbeat_auto_retries_engine_failure_in_place(tmp_pa
     next_delay = await service._run_session(session_id)
 
     assert next_delay is None
-    assert task_service.retry_calls == [task_id]
+    assert task_service.retry_calls == []
+    assert task_service.continue_calls == [
+        {
+            "mode": "retry_in_place",
+            "target_task_id": task_id,
+            "continuation_instruction": "Retry the same task in place after an engine failure.",
+            "reason": "engine_failure",
+            "source": "heartbeat_terminal",
+        }
+    ]
     assert len(task_service.registry.published) == 1
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
     assert envelope["type"] == "ceo.reply.final"
     assert envelope["data"]["text"] == "任务 `demo-engine-retry` 遇到工程故障，已在原任务内继续重试。"
+
+
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_skips_engine_failure_retry_after_recreated_takeover(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-task-terminal-engine-superseded"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    task_service = _TaskService()
+    task_id = "task:demo-engine-superseded"
+    task_service.tasks[task_id] = SimpleNamespace(
+        task_id=task_id,
+        status="failed",
+        metadata={
+            "failure_class": "engine_failure",
+            "continuation_state": "recreated",
+            "continued_by_task_id": "task:cont-9",
+        },
+    )
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    payload = {
+        "task_id": task_id,
+        "session_id": session_id,
+        "title": "demo engine superseded task",
+        "status": "failed",
+        "failure_class": "engine_failure",
+        "brief_text": "model provider failed",
+        "failure_reason": "Model provider call failed after exhausting the configured fallback chain.",
+        "finished_at": "2026-03-28T04:34:32+08:00",
+        "dedupe_key": "task-terminal:task:demo-engine-superseded:failed:2026-03-28T04:34:32+08:00",
+    }
+    accepted = service.enqueue_task_terminal_payload(payload)
+    assert accepted is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    assert task_service.retry_calls == []
+    assert task_service.continue_calls == []
+    assert len(task_service.registry.published) == 1
+    published_session, envelope = task_service.registry.published[0]
+    assert published_session == session_id
+    assert envelope["type"] == "ceo.reply.final"
+    assert envelope["data"]["text"] == "任务 `demo-engine-superseded` 已续跑为 `cont-9`，我会继续推进。"
 
 
 @pytest.mark.asyncio
