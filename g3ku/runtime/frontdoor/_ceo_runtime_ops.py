@@ -316,6 +316,44 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         }
 
     @classmethod
+    def _runtime_session_frontdoor_state(
+        cls,
+        state: CeoGraphState | None,
+        *,
+        preview_pending_tool_round: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        frontdoor_stage_state = cls._frontdoor_stage_state_snapshot(state)
+        if preview_pending_tool_round and isinstance(state, dict):
+            frontdoor_stage_state = cls._record_frontdoor_stage_round(
+                frontdoor_stage_state,
+                tool_call_payloads=list(state.get("tool_call_payloads") or []),
+            )
+        compression_state = (
+            dict(state.get("compression_state") or cls._default_compression_state())
+            if isinstance(state, dict)
+            else cls._default_compression_state()
+        )
+        return frontdoor_stage_state, compression_state
+
+    def _sync_runtime_session_frontdoor_state(
+        self,
+        *,
+        state: CeoGraphState | None,
+        runtime: Runtime[CeoRuntimeContext] | None = None,
+        session: Any | None = None,
+        preview_pending_tool_round: bool = False,
+    ) -> None:
+        target_session = session or getattr(getattr(runtime, "context", None), "session", None)
+        if target_session is None:
+            return
+        frontdoor_stage_state, compression_state = self._runtime_session_frontdoor_state(
+            state,
+            preview_pending_tool_round=preview_pending_tool_round,
+        )
+        setattr(target_session, "_frontdoor_stage_state", frontdoor_stage_state)
+        setattr(target_session, "_compression_state", compression_state)
+
+    @classmethod
     def _frontdoor_stage_state_snapshot(cls, state: CeoGraphState | None) -> dict[str, Any]:
         raw = {}
         if isinstance(state, dict):

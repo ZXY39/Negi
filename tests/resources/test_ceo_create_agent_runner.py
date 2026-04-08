@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,7 @@ from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import ceo_agent_middleware, ceo_runner
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, initial_persistent_state
+from g3ku.runtime.session_agent import RuntimeAgentSession
 
 
 class _FakeGraphOutput:
@@ -627,6 +629,154 @@ async def test_create_agent_runner_resume_turn_wires_frontdoor_stage_and_compres
     assert session._last_route_kind == "direct_reply"
     assert session._frontdoor_stage_state["transition_required"] is True
     assert session._compression_state == {"status": "idle", "text": "", "source": ""}
+
+
+@pytest.mark.asyncio
+async def test_create_agent_middleware_syncs_real_stage_state_before_running_tool_round(
+    monkeypatch,
+) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+
+    async def _identity_summarize_messages(*, messages, state):
+        _ = state
+        return {"messages": list(messages)}
+
+    monkeypatch.setattr(runner, "_summarize_messages", _identity_summarize_messages)
+
+    lifecycle = ceo_agent_middleware.CeoTurnLifecycleMiddleware(runner=runner)
+    model_output = ceo_agent_middleware.CeoModelOutputMiddleware(runner=runner)
+    runtime = SimpleNamespace(context=SimpleNamespace(session=session))
+
+    after_submit_state = {
+        "session_key": "web:shared",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-stage-1",
+                        "type": "function",
+                        "function": {
+                            "name": "submit_next_stage",
+                            "arguments": json.dumps(
+                                {
+                                    "stage_goal": "Inspect the repository structure",
+                                    "tool_round_budget": 2,
+                                }
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-stage-1",
+                "name": "submit_next_stage",
+                "content": json.dumps({"result_text": "stage accepted", "status": "success"}),
+            },
+        ],
+        "tool_call_payloads": [
+            {
+                "id": "call-stage-1",
+                "name": "submit_next_stage",
+                "arguments": {
+                    "stage_goal": "Inspect the repository structure",
+                    "tool_round_budget": 2,
+                },
+            }
+        ],
+        "used_tools": [],
+        "route_kind": "direct_reply",
+        "frontdoor_stage_state": {
+            "active_stage_id": "",
+            "transition_required": False,
+            "stages": [],
+        },
+        "compression_state": {"status": "running", "text": "compressing", "source": "user"},
+    }
+
+    lifecycle_update = await lifecycle.abefore_model(after_submit_state, runtime)
+    running_after_submit = session.inflight_turn_snapshot()
+
+    assert lifecycle_update is not None
+    assert isinstance(running_after_submit, dict)
+    assert running_after_submit["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
+    assert running_after_submit["execution_trace_summary"]["stages"][0]["stage_goal"] == "Inspect the repository structure"
+    assert running_after_submit["execution_trace_summary"]["stages"][0]["tool_round_budget"] == 2
+    assert "tool_events" not in running_after_submit
+    assert running_after_submit["compression"]["status"] == "running"
+
+    normalized_calls = [
+        {
+            "id": "call-memory-1",
+            "name": "memory_search",
+            "arguments": {"query": "repository structure"},
+        }
+    ]
+
+    async def _fake_normalize_model_output(state, *, runtime):
+        _ = state, runtime
+        return {
+            "analysis_text": "",
+            "tool_call_payloads": list(normalized_calls),
+            "approval_request": None,
+            "approval_status": "",
+            "synthetic_tool_calls_used": False,
+            "xml_repair_attempt_count": 0,
+            "xml_repair_excerpt": "",
+            "xml_repair_tool_names": [],
+            "xml_repair_last_issue": "",
+            "next_step": "review_tool_calls",
+        }
+
+    monkeypatch.setattr(runner, "_graph_normalize_model_output", _fake_normalize_model_output)
+
+    await model_output.aafter_model(
+        {
+            **after_submit_state,
+            **dict(lifecycle_update or {}),
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call-memory-1",
+                            "name": "memory_search",
+                            "args": {"query": "repository structure"},
+                        }
+                    ],
+                )
+            ],
+        },
+        runtime,
+    )
+    await session._handle_progress(
+        "memory_search started",
+        event_kind="tool_start",
+        event_data={"tool_name": "memory_search", "tool_call_id": "call-memory-1"},
+    )
+
+    running_tool_snapshot = session.inflight_turn_snapshot()
+
+    assert isinstance(running_tool_snapshot, dict)
+    assert "tool_events" not in running_tool_snapshot
+    stage = running_tool_snapshot["execution_trace_summary"]["stages"][0]
+    assert stage["stage_goal"] == "Inspect the repository structure"
+    assert stage["tool_round_budget"] == 2
+    assert [round_item["tool_names"] for round_item in stage["rounds"]] == [["memory_search"]]
+    assert [round_item["tool_call_ids"] for round_item in stage["rounds"]] == [["call-memory-1"]]
+    assert [tool["tool_name"] for tool in stage["rounds"][0]["tools"]] == ["memory_search"]
+    assert str(stage["rounds"][0]["tools"][0]["tool_call_id"]).startswith("memory_search:")
+    assert stage["rounds"][0]["tools"][0]["status"] == "running"
 
 
 @pytest.mark.asyncio

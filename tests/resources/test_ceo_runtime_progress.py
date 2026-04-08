@@ -926,8 +926,9 @@ async def test_runtime_agent_session_hides_cron_internal_prompt_but_persists_rep
     assert isinstance(inflight, dict)
     assert inflight["source"] == "cron"
     assert "user_message" not in inflight
-    tools = inflight["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
-    assert [item["tool_name"] for item in tools] == ["cron"]
+    assert inflight["execution_trace_summary"] == {}
+    assert [item["tool_name"] for item in inflight["tool_events"]] == ["cron"]
+    assert [item["status"] for item in inflight["tool_events"]] == ["running"]
 
     persisted = loop.sessions.get_or_create("web:shared")
     assert [message["role"] for message in persisted.messages] == ["assistant"]
@@ -2083,7 +2084,9 @@ async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
         "error_message": "CEO frontdoor exceeded maximum iterations",
         "recoverable": True,
     }
-    tools = reloaded_session.messages[1]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+    assert "execution_trace_summary" not in reloaded_session.messages[1]
+    tools = reloaded_session.messages[1]["tool_events"]
+    assert [item["tool_name"] for item in tools] == ["agent_browser"]
     assert [item["status"] for item in tools] == ["running"]
 
     recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)

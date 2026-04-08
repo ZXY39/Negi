@@ -288,9 +288,17 @@ class CeoTurnLifecycleMiddleware(AgentMiddleware):
 
     @hook_config(can_jump_to=["end"])
     async def abefore_model(self, state, runtime) -> dict[str, Any] | None:
-        if str(state.get("final_output") or "").strip():
+        current_state = dict(state or {})
+        self._runner._sync_runtime_session_frontdoor_state(state=current_state, runtime=runtime)
+        if str(current_state.get("final_output") or "").strip():
             return {"jump_to": "end"}
-        return await self._runner._postprocess_completed_tool_cycle(state=dict(state or {}))
+        update = await self._runner._postprocess_completed_tool_cycle(state=current_state)
+        if update is not None:
+            self._runner._sync_runtime_session_frontdoor_state(
+                state={**current_state, **dict(update or {})},
+                runtime=runtime,
+            )
+        return update
 
     async def aafter_agent(self, state, runtime) -> dict[str, Any] | None:
         finalized = await self._runner._graph_finalize_turn(
@@ -332,15 +340,17 @@ class CeoModelOutputMiddleware(AgentMiddleware):
 
     @hook_config(can_jump_to=["end", "model"])
     async def aafter_model(self, state, runtime) -> dict[str, Any] | None:
-        raw_messages = list(state.get("messages") or [])
+        current_state = dict(state or {})
+        raw_messages = list(current_state.get("messages") or [])
         last_ai_message = next((item for item in reversed(raw_messages) if isinstance(item, AIMessage)), None)
         if last_ai_message is None:
+            self._runner._sync_runtime_session_frontdoor_state(state=current_state, runtime=runtime)
             return None
 
         response_payload = self._runner._checkpoint_safe_model_response_payload(last_ai_message)
         normalized = await self._runner._graph_normalize_model_output(
             {
-                **dict(state or {}),
+                **current_state,
                 "response_payload": response_payload,
             },
             runtime=runtime,
@@ -357,7 +367,7 @@ class CeoModelOutputMiddleware(AgentMiddleware):
                 else self._runner._model_content(response_payload.get("content", ""))
             )
             ai_record["tool_calls"] = self._runner._assistant_tool_calls_from_payloads(tool_call_payloads)
-            return {
+            update = {
                 **self._runner._replace_messages_update([*history_records, ai_record]),
                 "response_payload": response_payload,
                 "analysis_text": str(normalized.get("analysis_text") or ""),
@@ -376,9 +386,15 @@ class CeoModelOutputMiddleware(AgentMiddleware):
                 "repair_overlay_text": None,
                 "final_output": "",
             }
+            self._runner._sync_runtime_session_frontdoor_state(
+                state={**current_state, **update},
+                runtime=runtime,
+                preview_pending_tool_round=True,
+            )
+            return update
 
         if str(normalized.get("next_step") or "") == "call_model":
-            return {
+            update = {
                 **self._runner._replace_messages_update(history_records),
                 "response_payload": response_payload,
                 "repair_overlay_text": str(normalized.get("repair_overlay_text") or ""),
@@ -388,16 +404,27 @@ class CeoModelOutputMiddleware(AgentMiddleware):
                 "xml_repair_last_issue": str(normalized.get("xml_repair_last_issue") or ""),
                 "jump_to": "model",
             }
+            self._runner._sync_runtime_session_frontdoor_state(
+                state={**current_state, **update},
+                runtime=runtime,
+            )
+            return update
 
         if str(normalized.get("next_step") or "") == "finalize":
             final_messages = [*history_records, self._runner._message_record(last_ai_message)] if keep_last_ai else history_records
-            return {
+            update = {
                 **self._runner._replace_messages_update(final_messages),
                 "response_payload": response_payload,
                 "final_output": str(normalized.get("final_output") or ""),
-                "route_kind": str(normalized.get("route_kind") or state.get("route_kind") or "direct_reply"),
+                "route_kind": str(normalized.get("route_kind") or current_state.get("route_kind") or "direct_reply"),
                 "jump_to": "end",
             }
+            self._runner._sync_runtime_session_frontdoor_state(
+                state={**current_state, **update},
+                runtime=runtime,
+            )
+            return update
+        self._runner._sync_runtime_session_frontdoor_state(state=current_state, runtime=runtime)
         return None
 
 
@@ -422,20 +449,22 @@ class CeoApprovalMiddleware(AgentMiddleware):
 
     @hook_config(can_jump_to=["end"])
     async def aafter_model(self, state, runtime) -> dict[str, Any] | None:
-        approval_request = dict(state.get("approval_request") or {})
+        current_state = dict(state or {})
+        approval_request = dict(current_state.get("approval_request") or {})
         if not approval_request:
+            self._runner._sync_runtime_session_frontdoor_state(state=current_state, runtime=runtime)
             return None
 
         decision = interrupt(approval_request)
         normalized = self._runner._normalize_approval_resume_value(
             decision=decision,
-            original_payloads=list(state.get("tool_call_payloads") or []),
+            original_payloads=list(current_state.get("tool_call_payloads") or []),
         )
         if not normalized["approved"]:
-            history_records = self._runner._state_message_records(state)
+            history_records = self._runner._state_message_records(current_state)
             if history_records and str(history_records[-1].get("role") or "").strip().lower() == "assistant":
                 history_records = history_records[:-1]
-            return {
+            update = {
                 **self._runner._replace_messages_update(history_records),
                 "approval_request": None,
                 "approval_status": "rejected",
@@ -444,24 +473,41 @@ class CeoApprovalMiddleware(AgentMiddleware):
                 "route_kind": "direct_reply",
                 "jump_to": "end",
             }
+            self._runner._sync_runtime_session_frontdoor_state(
+                state={**current_state, **update},
+                runtime=runtime,
+            )
+            return update
 
-        raw_messages = list(state.get("messages") or [])
+        raw_messages = list(current_state.get("messages") or [])
         last_ai_message = next((item for item in reversed(raw_messages) if isinstance(item, AIMessage)), None)
         if last_ai_message is None:
-            return {
+            update = {
                 "approval_request": None,
                 "approval_status": "approved",
                 "tool_call_payloads": list(normalized["tool_call_payloads"]),
             }
+            self._runner._sync_runtime_session_frontdoor_state(
+                state={**current_state, **update},
+                runtime=runtime,
+                preview_pending_tool_round=True,
+            )
+            return update
 
         history_records = self._runner._state_message_records(raw_messages[:-1])
         ai_record = self._runner._message_record(last_ai_message)
         ai_record["tool_calls"] = self._runner._assistant_tool_calls_from_payloads(
             list(normalized["tool_call_payloads"])
         )
-        return {
+        update = {
             **self._runner._replace_messages_update([*history_records, ai_record]),
             "approval_request": None,
             "approval_status": "approved",
             "tool_call_payloads": list(normalized["tool_call_payloads"]),
         }
+        self._runner._sync_runtime_session_frontdoor_state(
+            state={**current_state, **update},
+            runtime=runtime,
+            preview_pending_tool_round=True,
+        )
+        return update
