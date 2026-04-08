@@ -45,6 +45,9 @@ from g3ku.agent.structured_memory import (
     StructuredMemoryFact,
     canonical_key_for_fact,
     equivalent_fact as _structured_equivalent_fact,
+    is_newer_fact as _structured_is_newer_fact,
+    merge_required as _structured_merge_required,
+    merge_values as _merge_structured_values,
     normalize_fact as _normalize_structured_fact,
     render_statement as _render_structured_statement,
     replacement_required as _structured_replacement_required,
@@ -5014,6 +5017,7 @@ class MemoryManager:
         rows: list[dict[str, Any]] = []
         written_count = 0
         replaced_count = 0
+        merged_count = 0
         noop_count = 0
         for raw in incoming:
             if not isinstance(raw, dict):
@@ -5032,6 +5036,42 @@ class MemoryManager:
                 if _structured_equivalent_fact(old_fact, normalized):
                     noop_count += 1
                     continue
+                if _structured_merge_required(old_fact, normalized):
+                    older_fact = old_fact
+                    newer_fact = normalized
+                    if _structured_is_newer_fact(old_fact, normalized):
+                        older_fact, newer_fact = normalized, old_fact
+                    merged_payload: dict[str, Any] = {
+                        "category": newer_fact.category,
+                        "scope": newer_fact.scope,
+                        "entity": newer_fact.entity,
+                        "attribute": newer_fact.attribute,
+                        "value": _merge_structured_values(older_fact.value, newer_fact.value),
+                        "observed_at": newer_fact.observed_at,
+                        "time_semantics": newer_fact.time_semantics,
+                        "source_excerpt": newer_fact.source_excerpt or older_fact.source_excerpt,
+                        "qualifier": newer_fact.qualifier if newer_fact.qualifier is not None else older_fact.qualifier,
+                        "merge_mode": newer_fact.merge_mode or older_fact.merge_mode,
+                        "expires_at": newer_fact.expires_at if newer_fact.expires_at is not None else older_fact.expires_at,
+                    }
+                    normalized = _normalize_structured_fact(merged_payload, fact_id=newer_fact.fact_id, now_iso=now)
+                    canonical_key = normalized.canonical_key or canonical_key_for_fact(normalized)
+                    if _structured_equivalent_fact(old_fact, normalized):
+                        noop_count += 1
+                        continue
+                    rows.append(
+                        self._structured_delete_row(
+                            namespace=namespace,
+                            session_key=session_key,
+                            channel=channel_safe,
+                            chat_id=chat_safe,
+                            fact_ids=[old_fact.fact_id],
+                            canonical_keys=[canonical_key],
+                            now_iso=now,
+                            reason="merged_into_new_fact",
+                        )
+                    )
+                    merged_count += 1
                 if _structured_replacement_required(old_fact, normalized):
                     rows.append(
                         self._structured_delete_row(
@@ -5046,7 +5086,7 @@ class MemoryManager:
                         )
                     )
                     replaced_count += 1
-                else:
+                elif not _structured_merge_required(old_fact, normalized):
                     noop_count += 1
                     continue
 
@@ -5062,6 +5102,7 @@ class MemoryManager:
                 "time_semantics": normalized.time_semantics,
                 "source_excerpt": normalized.source_excerpt,
                 "qualifier": normalized.qualifier,
+                "merge_mode": normalized.merge_mode,
                 "expires_at": normalized.expires_at,
                 "canonical_key": canonical_key,
                 "statement": normalized.statement,
@@ -5099,6 +5140,7 @@ class MemoryManager:
             "ok": True,
             "written": written_count,
             "replaced": replaced_count,
+            "merged": merged_count,
             "noop": noop_count,
         }
 

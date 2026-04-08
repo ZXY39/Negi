@@ -12,6 +12,21 @@ _ALLOWED_CATEGORIES = set(get_args(StructuredCategory))
 _ALLOWED_TIME_SEMANTICS = set(get_args(TimeSemantics))
 
 
+def _restore_json_like_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not ((text.startswith("{") and text.endswith("}")) or (text.startswith("[") and text.endswith("]"))):
+        return value
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return value
+    if isinstance(parsed, (dict, list)):
+        return parsed
+    return value
+
+
 class MemoryWriteTool(Tool):
     """Upsert explicit structured memory facts for the CEO agent."""
 
@@ -29,7 +44,8 @@ class MemoryWriteTool(Tool):
             "MUST CALL: when the user explicitly asks the system to remember a stable identity, preference, "
             "constraint, workflow rule, default setting, relationship, current state, or historical fact.\n"
             "DO NOT CALL: for temporary task status, speculative inferences, short-lived context, or unconfirmed facts.\n"
-            "WRITE RULE: send normalized structured facts with category, scope, entity, attribute, value, and time semantics."
+            "WRITE RULE: send normalized structured facts with category, scope, entity, attribute, value, and time semantics. "
+            "Use merge_mode='merge' only for preference facts that should accumulate values instead of replacing older ones."
         )
 
     @property
@@ -80,6 +96,11 @@ class MemoryWriteTool(Tool):
                             "qualifier": {
                                 "type": "object",
                                 "description": "Optional qualifier metadata (e.g. project context, constraints).",
+                            },
+                            "merge_mode": {
+                                "type": "string",
+                                "enum": ["merge"],
+                                "description": "Optional preference-only merge behavior.",
                             },
                             "expires_at": {
                                 "type": ["string", "null"],
@@ -145,6 +166,12 @@ class MemoryWriteTool(Tool):
             qualifier = fact.get("qualifier")
             if qualifier is not None and not isinstance(qualifier, dict):
                 errors.append(f"facts[{index}].qualifier must be an object when provided")
+            merge_mode = fact.get("merge_mode")
+            if merge_mode is not None:
+                if not isinstance(merge_mode, str) or str(merge_mode).strip().lower() != "merge":
+                    errors.append(f"facts[{index}].merge_mode must be 'merge' when provided")
+                elif category != "preference":
+                    errors.append(f"facts[{index}].merge_mode is only supported for preference facts")
             expires_at = fact.get("expires_at")
             if expires_at is not None and not isinstance(expires_at, str):
                 errors.append(f"facts[{index}].expires_at must be a string or null when provided")
@@ -166,10 +193,19 @@ class MemoryWriteTool(Tool):
             channel = channel or ch
             chat_id = chat_id or cid
 
+        normalized_facts: list[dict[str, Any]] = []
+        for fact in list(facts or []):
+            if not isinstance(fact, dict):
+                continue
+            item = dict(fact)
+            if "value" in item:
+                item["value"] = _restore_json_like_value(item.get("value"))
+            normalized_facts.append(item)
+
         result = await self._manager.upsert_structured_memory_facts(
             session_key=session_key,
             channel=str(channel or "unknown"),
             chat_id=str(chat_id or "unknown"),
-            facts=list(facts or []),
+            facts=normalized_facts,
         )
         return json.dumps(result, ensure_ascii=False)
