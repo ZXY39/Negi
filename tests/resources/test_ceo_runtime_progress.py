@@ -2211,6 +2211,76 @@ async def test_runtime_agent_session_persists_execution_trace_summary_into_sessi
     assert "skill-installer (success): installed weather" in recent_history[-1]["content"]
 
 
+def test_inflight_execution_trace_summary_compacts_tool_payloads() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:compaction-trace",
+        channel="web",
+        chat_id="compaction-trace",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._frontdoor_stage_state = {
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_goal": "inspect repository",
+                "status": "active",
+                "rounds": [
+                    {
+                        "round_index": 1,
+                        "round_id": "round-1",
+                        "tool_call_ids": ["skill-installer:1"],
+                        "tool_names": ["skill-installer"],
+                    }
+                ],
+            }
+        ],
+    }
+    session._event_log = [
+        {
+            "type": "tool_execution_start",
+            "timestamp": "2026-03-18T12:00:00",
+            "payload": {
+                "tool_name": "skill-installer",
+                "text": "started",
+                "tool_call_id": "skill-installer:1",
+            },
+        },
+        {
+            "type": "tool_execution_end",
+            "timestamp": "2026-03-18T12:00:10",
+            "payload": {
+                "tool_name": "skill-installer",
+                "text": "completed",
+                "tool_call_id": "skill-installer:1",
+                "is_error": False,
+            },
+        },
+    ]
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert snapshot is not None
+    summary = snapshot["execution_trace_summary"]
+    stages = summary.get("stages") or []
+    assert stages
+    rounds = stages[0].get("rounds") or []
+    assert rounds
+    tools = rounds[0].get("tools") or []
+    assert tools
+    tool = tools[0]
+
+    assert tool.get("tool_call_id")
+    assert tool.get("tool_name")
+    assert tool.get("arguments_preview")
+    assert tool.get("output_preview")
+    assert "text" not in tool
+    assert "arguments_text" not in tool
+    assert "output_text" not in tool
+
+
 @pytest.mark.parametrize(
     "stages",
     [
