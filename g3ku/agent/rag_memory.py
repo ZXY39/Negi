@@ -4444,16 +4444,6 @@ class MemoryManager:
             "searchable": True,
         }
 
-    def _coerce_structured_state(self, raw: dict[str, Any] | None) -> dict[str, Any]:
-        state = dict(raw or {})
-        if str(state.get("schema_version") or "") != MEMORY_RUNTIME_SCHEMA_VERSION:
-            state["schema_version"] = MEMORY_RUNTIME_SCHEMA_VERSION
-        namespaces = state.get("namespaces")
-        if not isinstance(namespaces, dict):
-            namespaces = {}
-        state["namespaces"] = namespaces
-        return state
-
     @staticmethod
     def _structured_write_row(
         *,
@@ -4464,16 +4454,31 @@ class MemoryManager:
         fact: dict[str, Any],
         now_iso: str,
     ) -> dict[str, Any]:
+        fact_id = str(fact.get("fact_id") or "").strip()
+        canonical_key = str(fact.get("canonical_key") or "").strip()
+        statement = str(fact.get("rendered_statement") or fact.get("statement") or "").strip()
+        if not statement:
+            statement = f"structured_fact_write fact_id={fact_id}"
         return {
-            "event_type": "structured_fact_write",
-            "namespace": _encode_ns(namespace),
+            "record_id": fact_id or uuid.uuid4().hex[:16],
+            "text": statement,
+            "source": "explicit_tool",
+            "confidence": 1.0,
+            "tags": ["structured_memory", "structured_fact_write"],
             "session_key": session_key,
             "channel": channel,
             "chat_id": chat_id,
-            "fact_id": str(fact.get("fact_id") or ""),
-            "canonical_key": str(fact.get("canonical_key") or ""),
-            "payload": dict(fact),
+            "event_type": "memory_write",
+            "metadata": {
+                "memory_format": "structured_v1",
+                "structured_op": "write",
+                "structured_fact": dict(fact),
+                "fact_id": fact_id,
+                "canonical_key": canonical_key,
+                "namespace": list(namespace),
+            },
             "created_at": now_iso,
+            "updated_at": now_iso,
         }
 
     @staticmethod
@@ -4483,62 +4488,142 @@ class MemoryManager:
         session_key: str,
         channel: str,
         chat_id: str,
-        fact_id: str | None,
-        canonical_key: str | None,
+        fact_ids: list[str] | None,
+        canonical_keys: list[str] | None,
         now_iso: str,
         reason: str = "explicit_delete",
     ) -> dict[str, Any]:
+        fact_ids = [str(item) for item in list(fact_ids or []) if str(item).strip()]
+        canonical_keys = [str(item) for item in list(canonical_keys or []) if str(item).strip()]
+        statement = f"structured_fact_delete reason={reason}"
         return {
-            "event_type": "structured_fact_delete",
-            "namespace": _encode_ns(namespace),
+            "record_id": uuid.uuid4().hex[:16],
+            "text": statement,
+            "source": "explicit_tool",
+            "confidence": 1.0,
+            "tags": ["structured_memory", "structured_fact_delete"],
             "session_key": session_key,
             "channel": channel,
             "chat_id": chat_id,
-            "fact_id": str(fact_id or ""),
-            "canonical_key": str(canonical_key or ""),
-            "reason": reason,
+            "event_type": "memory_delete",
+            "metadata": {
+                "memory_format": "structured_v1",
+                "structured_op": "delete",
+                "fact_ids": fact_ids,
+                "canonical_keys": canonical_keys,
+                "reason": reason,
+                "namespace": list(namespace),
+            },
             "created_at": now_iso,
+            "updated_at": now_iso,
         }
 
-    async def _rewrite_structured_current(self, *, state: dict[str, Any]) -> None:
-        namespaces = state.get("namespaces")
-        if not isinstance(namespaces, dict):
-            namespaces = {}
-        rows: list[str] = []
-        for ns_key, payload in sorted(namespaces.items(), key=lambda item: str(item[0])):
+    async def _rewrite_structured_current_from_journal(self) -> None:
+        """Rewrite the `structured_current.jsonl` projection from the journal.
+
+        This keeps structured facts "journal-first": the file is a derived artifact.
+        """
+
+        # Build active structured facts for each namespace in a single pass.
+        active_by_ns: dict[tuple[str, ...], dict[str, dict[str, Any]]] = {}
+        events = self._load_journal_events(min_seq=1)
+        for event in events:
+            metadata = event.metadata if isinstance(event.metadata, dict) else {}
+            if str(metadata.get("memory_format") or "") != "structured_v1":
+                continue
+            namespace = self._event_namespace(event)
+            active = active_by_ns.setdefault(namespace, {})
+            op = str(metadata.get("structured_op") or "").strip().lower()
+            if event.event_type == "memory_delete" and op == "delete":
+                fact_ids = metadata.get("fact_ids")
+                canonical_keys = metadata.get("canonical_keys")
+                ids = {str(item) for item in (fact_ids or []) if str(item).strip()} if isinstance(fact_ids, list) else set()
+                keys = {str(item) for item in (canonical_keys or []) if str(item).strip()} if isinstance(canonical_keys, list) else set()
+                for key in keys:
+                    active.pop(key, None)
+                if ids:
+                    for key, payload in list(active.items()):
+                        if isinstance(payload, dict) and str(payload.get("fact_id") or "") in ids:
+                            active.pop(key, None)
+                continue
+            if event.event_type != "memory_write" or op != "write":
+                continue
+            payload = metadata.get("structured_fact")
             if not isinstance(payload, dict):
                 continue
-            facts = payload.get("facts")
-            if not isinstance(facts, dict):
-                continue
-            for canonical_key, fact in sorted(facts.items(), key=lambda item: str(item[0])):
-                if not isinstance(fact, dict):
+            fact_id = str(payload.get("fact_id") or event.record_id or "").strip() or uuid.uuid4().hex[:12]
+            normalized = _normalize_structured_fact(payload, fact_id=fact_id, now_iso=str(event.created_at or _now_iso()))
+            canonical_key = str(payload.get("canonical_key") or normalized.canonical_key or canonical_key_for_fact(normalized)).strip()
+            existing = active.get(canonical_key)
+            if isinstance(existing, dict):
+                old_id = str(existing.get("fact_id") or "").strip() or fact_id
+                old_fact = _normalize_structured_fact(existing, fact_id=old_id, now_iso=str(event.created_at or _now_iso()))
+                if _structured_equivalent_fact(old_fact, normalized):
                     continue
-                entry = dict(fact)
+                if _structured_replacement_required(old_fact, normalized):
+                    active[canonical_key] = dict(payload)
+                continue
+            active[canonical_key] = dict(payload)
+
+        rows: list[str] = []
+        for namespace, active in sorted(active_by_ns.items(), key=lambda item: _encode_ns(item[0])):
+            ns_key = _encode_ns(namespace)
+            for canonical_key, payload in sorted(active.items(), key=lambda item: str(item[0])):
+                if not isinstance(payload, dict):
+                    continue
+                entry = dict(payload)
                 entry.setdefault("canonical_key", canonical_key)
-                entry["namespace"] = str(ns_key)
+                entry["namespace"] = ns_key
                 rows.append(json.dumps(entry, ensure_ascii=False))
         content = "\n".join(rows) + ("\n" if rows else "")
-        await asyncio.to_thread(self.structured_current_file.write_text, content, "utf-8")
+        async with self._io_lock:
+            await asyncio.to_thread(self.structured_current_file.write_text, content, "utf-8")
 
     async def _active_structured_fact_map(self, namespace: tuple[str, ...]) -> dict[str, dict[str, Any]]:
         """Return canonical_key -> fact payload for active facts in the namespace."""
 
-        ns_key = _encode_ns(namespace)
-        raw_state = await asyncio.to_thread(self._load_json_dict, self.structured_state_file)
-        state = self._coerce_structured_state(raw_state)
-        namespaces = state.get("namespaces") if isinstance(state.get("namespaces"), dict) else {}
-        bucket = namespaces.get(ns_key)
-        if not isinstance(bucket, dict):
-            return {}
-        facts = bucket.get("facts")
-        if not isinstance(facts, dict):
-            return {}
-        out: dict[str, dict[str, Any]] = {}
-        for key, payload in facts.items():
-            if isinstance(payload, dict):
-                out[str(key)] = dict(payload)
-        return out
+        active: dict[str, dict[str, Any]] = {}
+        events = self._load_journal_events(min_seq=1)
+        for event in events:
+            if self._event_namespace(event) != namespace:
+                continue
+            metadata = event.metadata if isinstance(event.metadata, dict) else {}
+            if str(metadata.get("memory_format") or "") != "structured_v1":
+                continue
+            op = str(metadata.get("structured_op") or "").strip().lower()
+            if event.event_type == "memory_delete" and op == "delete":
+                fact_ids = metadata.get("fact_ids")
+                canonical_keys = metadata.get("canonical_keys")
+                ids = {str(item) for item in (fact_ids or []) if str(item).strip()} if isinstance(fact_ids, list) else set()
+                keys = {str(item) for item in (canonical_keys or []) if str(item).strip()} if isinstance(canonical_keys, list) else set()
+                for key in keys:
+                    active.pop(key, None)
+                if ids:
+                    for key, payload in list(active.items()):
+                        if isinstance(payload, dict) and str(payload.get("fact_id") or "") in ids:
+                            active.pop(key, None)
+                continue
+
+            if event.event_type != "memory_write" or op != "write":
+                continue
+            payload = metadata.get("structured_fact")
+            if not isinstance(payload, dict):
+                continue
+            fact_id = str(payload.get("fact_id") or event.record_id or "").strip() or uuid.uuid4().hex[:12]
+            normalized = _normalize_structured_fact(payload, fact_id=fact_id, now_iso=str(event.created_at or _now_iso()))
+            canonical_key = str(payload.get("canonical_key") or normalized.canonical_key or canonical_key_for_fact(normalized)).strip()
+            existing = active.get(canonical_key)
+            if isinstance(existing, dict):
+                old_id = str(existing.get("fact_id") or "").strip() or fact_id
+                old_fact = _normalize_structured_fact(existing, fact_id=old_id, now_iso=str(event.created_at or _now_iso()))
+                if _structured_equivalent_fact(old_fact, normalized):
+                    continue
+                if _structured_replacement_required(old_fact, normalized):
+                    active[canonical_key] = dict(payload)
+                continue
+            active[canonical_key] = dict(payload)
+
+        return active
 
     async def list_active_structured_facts(
         self,
@@ -4572,131 +4657,76 @@ class MemoryManager:
         facts: list[dict[str, Any]] | None = None,
         items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Upsert structured facts, reconciling deterministically within a namespace."""
+        """Upsert structured facts via the journal-first runtime.
+
+        Task 3 scope: Structured facts are appended to `sync_journal.jsonl` using the
+        existing `MemorySyncEvent` envelope. Active structured facts are derived by
+        replaying those journal events deterministically.
+        """
 
         incoming = facts if facts is not None else items
         incoming = list(incoming or [])
         if not incoming:
             return {"ok": True, "written": 0, "replaced": 0, "noop": 0}
 
-        now = _now_iso()
         channel_safe, chat_safe = self._safe_channel_chat(session_key, channel, chat_id)
         namespace = self.namespace_for(channel=channel_safe, chat_id=chat_safe)
-        ns_key = _encode_ns(namespace)
 
-        written = 0
-        replaced = 0
-        noop = 0
-        history_rows: list[dict[str, Any]] = []
+        now = _now_iso()
+        rows: list[dict[str, Any]] = []
+        for raw in incoming:
+            if not isinstance(raw, dict):
+                continue
+            fact_id = str(raw.get("fact_id") or raw.get("id") or uuid.uuid4().hex[:12])
+            normalized = _normalize_structured_fact(raw, fact_id=fact_id, now_iso=now)
+            canonical_key = normalized.canonical_key or canonical_key_for_fact(normalized)
 
-        async with self._io_lock:
-            raw_state = await asyncio.to_thread(self._load_json_dict, self.structured_state_file)
-            state = self._coerce_structured_state(raw_state)
-            namespaces: dict[str, Any] = state["namespaces"]
-            bucket = namespaces.get(ns_key)
-            if not isinstance(bucket, dict):
-                bucket = {}
-                namespaces[ns_key] = bucket
-            facts_map = bucket.get("facts")
-            if not isinstance(facts_map, dict):
-                facts_map = {}
-                bucket["facts"] = facts_map
+            fact_payload: dict[str, Any] = {
+                "fact_id": normalized.fact_id,
+                "category": normalized.category,
+                "scope": normalized.scope,
+                "entity": normalized.entity,
+                "attribute": normalized.attribute,
+                "slot_id": normalized.attribute,
+                "value": normalized.value,
+                "observed_at": normalized.observed_at,
+                "time_semantics": normalized.time_semantics,
+                "source_excerpt": normalized.source_excerpt,
+                "qualifier": normalized.qualifier,
+                "expires_at": normalized.expires_at,
+                "canonical_key": canonical_key,
+                "statement": normalized.statement,
+                "rendered_statement": _render_structured_statement(normalized),
+                "created_at": normalized.created_at,
+                "updated_at": normalized.updated_at,
+                "session_key": session_key,
+                "channel": channel_safe,
+                "chat_id": chat_safe,
+            }
+            if normalized.category == "stateful_fact":
+                fact_payload["stateful_fact"] = True
+                fact_payload["state"] = {"value": normalized.value}
+            if normalized.category == "historical_fact":
+                fact_payload["historical_fact"] = True
 
-            for raw in incoming:
-                if not isinstance(raw, dict):
-                    continue
-                fact_id = str(raw.get("fact_id") or raw.get("id") or uuid.uuid4().hex[:12])
-                normalized = _normalize_structured_fact(raw, fact_id=fact_id, now_iso=now)
-                canonical_key = normalized.canonical_key or canonical_key_for_fact(normalized)
-
-                fact_payload: dict[str, Any] = {
-                    "fact_id": normalized.fact_id,
-                    "category": normalized.category,
-                    "scope": normalized.scope,
-                    "entity": normalized.entity,
-                    "attribute": normalized.attribute,
-                    "slot_id": normalized.attribute,
-                    "value": normalized.value,
-                    "observed_at": normalized.observed_at,
-                    "time_semantics": normalized.time_semantics,
-                    "source_excerpt": normalized.source_excerpt,
-                    "qualifier": normalized.qualifier,
-                    "expires_at": normalized.expires_at,
-                    "canonical_key": canonical_key,
-                    "statement": normalized.statement,
-                    "rendered_statement": _render_structured_statement(normalized),
-                    "created_at": normalized.created_at,
-                    "updated_at": normalized.updated_at,
-                    "session_key": session_key,
-                    "channel": channel_safe,
-                    "chat_id": chat_safe,
-                }
-                if normalized.category == "stateful_fact":
-                    fact_payload["stateful_fact"] = True
-                    fact_payload["state"] = {"value": normalized.value}
-                if normalized.category == "historical_fact":
-                    fact_payload["historical_fact"] = True
-
-                existing = facts_map.get(canonical_key)
-                if isinstance(existing, dict):
-                    old_fact_id = str(existing.get("fact_id") or "")
-                    old_fact = _normalize_structured_fact(existing, fact_id=old_fact_id or fact_id, now_iso=now)
-
-                    if _structured_equivalent_fact(old_fact, normalized):
-                        noop += 1
-                        continue
-
-                    if _structured_replacement_required(old_fact, normalized):
-                        facts_map[canonical_key] = fact_payload
-                        replaced += 1
-                        history_rows.append(
-                            self._structured_delete_row(
-                                namespace=namespace,
-                                session_key=session_key,
-                                channel=channel_safe,
-                                chat_id=chat_safe,
-                                fact_id=old_fact_id,
-                                canonical_key=canonical_key,
-                                now_iso=now,
-                                reason="replacement",
-                            )
-                        )
-                        history_rows.append(
-                            self._structured_write_row(
-                                namespace=namespace,
-                                session_key=session_key,
-                                channel=channel_safe,
-                                chat_id=chat_safe,
-                                fact=fact_payload,
-                                now_iso=now,
-                            )
-                        )
-                        continue
-
-                    noop += 1
-                    continue
-
-                facts_map[canonical_key] = fact_payload
-                written += 1
-                history_rows.append(
-                    self._structured_write_row(
-                        namespace=namespace,
-                        session_key=session_key,
-                        channel=channel_safe,
-                        chat_id=chat_safe,
-                        fact=fact_payload,
-                        now_iso=now,
-                    )
+            rows.append(
+                self._structured_write_row(
+                    namespace=namespace,
+                    session_key=session_key,
+                    channel=channel_safe,
+                    chat_id=chat_safe,
+                    fact=fact_payload,
+                    now_iso=now,
                 )
+            )
 
-            bucket["updated_at"] = now
-            state["updated_at"] = now
-            await asyncio.to_thread(self._write_json_dict, self.structured_state_file, state)
-            for row in history_rows:
-                await asyncio.to_thread(self._append_jsonl, self.structured_history_file, row)
-            await self._rewrite_structured_current(state=state)
+        if rows:
+            await self._append_memory_events(rows=rows)
+            await self._rewrite_structured_current_from_journal()
 
-        return {"ok": True, "written": written, "replaced": replaced, "noop": noop}
+        # We intentionally do not compute "written/replaced/noop" from the journal
+        # here; the journal is the source of truth and reconciliation happens at read time.
+        return {"ok": True, "written": len(rows)}
 
     async def delete_structured_memory_facts(
         self,
@@ -4717,57 +4747,20 @@ class MemoryManager:
         now = _now_iso()
         channel_safe, chat_safe = self._safe_channel_chat(session_key, channel, chat_id)
         namespace = self.namespace_for(channel=channel_safe, chat_id=chat_safe)
-        ns_key = _encode_ns(namespace)
 
-        deleted = 0
-        history_rows: list[dict[str, Any]] = []
-
-        async with self._io_lock:
-            raw_state = await asyncio.to_thread(self._load_json_dict, self.structured_state_file)
-            state = self._coerce_structured_state(raw_state)
-            namespaces: dict[str, Any] = state["namespaces"]
-            bucket = namespaces.get(ns_key)
-            if not isinstance(bucket, dict):
-                return {"ok": True, "deleted": 0}
-            facts_map = bucket.get("facts")
-            if not isinstance(facts_map, dict):
-                return {"ok": True, "deleted": 0}
-
-            targets: set[str] = set(canonical_keys)
-            if fact_ids:
-                ids = set(fact_ids)
-                for canonical_key, payload in list(facts_map.items()):
-                    if not isinstance(payload, dict):
-                        continue
-                    if str(payload.get("fact_id") or "") in ids:
-                        targets.add(str(canonical_key))
-
-            for canonical_key in sorted(targets):
-                existing = facts_map.pop(canonical_key, None)
-                if isinstance(existing, dict):
-                    deleted += 1
-                    history_rows.append(
-                        self._structured_delete_row(
-                            namespace=namespace,
-                            session_key=session_key,
-                            channel=channel_safe,
-                            chat_id=chat_safe,
-                            fact_id=str(existing.get("fact_id") or ""),
-                            canonical_key=str(canonical_key),
-                            now_iso=now,
-                            reason="explicit_delete",
-                        )
-                    )
-
-            if deleted:
-                bucket["updated_at"] = now
-                state["updated_at"] = now
-                await asyncio.to_thread(self._write_json_dict, self.structured_state_file, state)
-                for row in history_rows:
-                    await asyncio.to_thread(self._append_jsonl, self.structured_history_file, row)
-                await self._rewrite_structured_current(state=state)
-
-        return {"ok": True, "deleted": deleted}
+        row = self._structured_delete_row(
+            namespace=namespace,
+            session_key=session_key,
+            channel=channel_safe,
+            chat_id=chat_safe,
+            fact_ids=fact_ids,
+            canonical_keys=canonical_keys,
+            now_iso=now,
+            reason="explicit_delete",
+        )
+        await self._append_memory_events(rows=[row])
+        await self._rewrite_structured_current_from_journal()
+        return {"ok": True, "deleted": len(fact_ids) + len(canonical_keys)}
 
     async def list_pending(self, limit: int = 50) -> list[PendingFact]:
         if not self.pending_file.exists():
