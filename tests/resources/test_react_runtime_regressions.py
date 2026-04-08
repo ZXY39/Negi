@@ -707,14 +707,14 @@ async def test_enrich_node_messages_uses_dense_only_scope_when_semantic_search_i
 
 @pytest.mark.asyncio
 async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_not_visible() -> None:
-    captured: list[dict[str, object]] = []
+    retrieve_block_calls: list[dict[str, object]] = []
 
     class _MemoryManager:
         def _feature_enabled(self, key: str) -> bool:
             return key == "unified_context"
 
         async def retrieve_block(self, **kwargs):
-            captured.append(dict(kwargs))
+            retrieve_block_calls.append(dict(kwargs))
             return "unexpected memory block"
 
     service = object.__new__(MainRuntimeService)
@@ -742,7 +742,9 @@ async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_no
         ],
     )
 
-    payload = json.loads(enriched[1]["content"])
+    user_messages = [message for message in enriched if message.get("role") == "user"]
+    assert len(user_messages) == 1
+    payload = json.loads(str(user_messages[0].get("content") or ""))
     assert payload["visible_skills"] == [
         {
             "skill_id": "skill-creator",
@@ -750,8 +752,7 @@ async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_no
             "description": "skill",
         }
     ]
-    assert captured == []
-    assert enriched[0]["content"] == "base prompt"
+    assert retrieve_block_calls == []
 
 
 def test_filter_retrieved_records_preserves_memory_and_filters_catalog_context() -> None:

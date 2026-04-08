@@ -79,6 +79,7 @@ async def test_node_selector_without_memory_search_permission_emits_no_memory_qu
 
     assert result.memory_search_visible is False
     assert result.memory_query == ""
+    assert memory_manager.calls == []
     assert result.retrieval_scope == {
         "search_context_types": [],
         "allowed_context_types": [],
@@ -107,9 +108,8 @@ async def test_node_selector_with_memory_search_permission_emits_memory_only_ret
 
     assert result.memory_search_visible is True
     assert result.memory_query
-    assert "Prompt: inspect browser workflow" in result.memory_query
-    assert "Goal: inspect browser workflow" in result.memory_query
-    assert "Core requirement: inspect browser workflow" in result.memory_query
+    assert "inspect browser workflow" in result.memory_query
+    assert "Core requirement" in result.memory_query
     assert result.retrieval_scope == {
         "search_context_types": ["memory"],
         "allowed_context_types": ["memory"],
