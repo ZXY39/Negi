@@ -2464,15 +2464,10 @@ def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_
             ws,
             lambda payload: payload.get("type") == "ceo.turn.patch"
             and isinstance(payload.get("data", {}).get("inflight_turn"), dict)
-            and isinstance(payload.get("data", {}).get("inflight_turn", {}).get("execution_trace_summary"), dict)
-            and list(
-                (payload.get("data", {}).get("inflight_turn", {}).get("execution_trace_summary", {}) or {})
-                .get("stages")
-                or []
-            ),
+            and list((payload.get("data", {}).get("inflight_turn", {}) or {}).get("tool_events") or []),
         )
         inflight_turn = patch_payload["data"]["inflight_turn"]
-        tool = inflight_turn["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
+        tool = inflight_turn["tool_events"][0]
         assert tool["tool_name"] == "skill-installer"
         assert tool["source"] == "user"
         assert "interaction_trace" not in inflight_turn
@@ -2500,7 +2495,7 @@ def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_
     assert isinstance(inflight_turn, dict)
     assert inflight_turn["status"] == "paused"
     assert inflight_turn["user_message"]["content"] == "Pause and restore me"
-    tool = inflight_turn["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
+    tool = inflight_turn["tool_events"][0]
     assert tool["tool_name"] == "skill-installer"
     assert [message["role"] for message in snapshot["data"].get("messages", [])] == ["user"]
     assert snapshot["data"]["messages"][0]["content"] == "Pause and restore me"
