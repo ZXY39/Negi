@@ -222,6 +222,7 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
     assert.match(turn.listEl.innerHTML, /memory_search/);
     assert.equal(renderedSteps, 2);
     assert.match(turn.metaEl.textContent, /2/);
+    assert.doesNotMatch(turn.listEl.innerHTML, /ceo:stage:inflight-stage-1/);
     assert.doesNotMatch(turn.listEl.innerHTML, /submit_next_stage/);
 });
 
