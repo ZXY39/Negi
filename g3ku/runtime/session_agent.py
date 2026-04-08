@@ -392,9 +392,11 @@ class RuntimeAgentSession:
                     "text": str(event_payload.get("text") or "").strip(),
                     "timestamp": str(raw.get("timestamp") or "").strip(),
                     "tool_call_id": str(_event_value("tool_call_id") or "").strip(),
-                    "arguments_text": str(_event_value("arguments_text") or "").strip(),
-                    "output_text": str(_event_value("output_text") or "").strip(),
-                    "output_preview_text": str(_event_value("output_preview_text") or "").strip(),
+                    "arguments_text": str("" if _event_value("arguments_text") is None else _event_value("arguments_text")).strip(),
+                    "output_text": str("" if _event_value("output_text") is None else _event_value("output_text")).strip(),
+                    "output_preview_text": str(
+                        "" if _event_value("output_preview_text") is None else _event_value("output_preview_text")
+                    ).strip(),
                     "output_ref": str(_event_value("output_ref") or "").strip(),
                     "started_at": str(_event_value("started_at") or "").strip(),
                     "finished_at": str(_event_value("finished_at") or "").strip(),
