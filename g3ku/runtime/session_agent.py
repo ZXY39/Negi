@@ -17,6 +17,7 @@ from g3ku.core.results import RunResult
 from g3ku.core.state import AgentState, StructuredError
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
 from g3ku.runtime.cancellation import ToolCancellationToken
+from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
 
 _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
 _TRANSCRIPT_TURN_ID_KEY = "_transcript_turn_id"
@@ -452,19 +453,32 @@ class RuntimeAgentSession:
         if self._has_renderable_frontdoor_stage_state():
             snapshot = copy.deepcopy(stage_state)
             interaction_flow = self._interaction_flow_snapshot()
-            if not interaction_flow:
-                return snapshot
             tools_by_call_id: dict[str, list[dict[str, Any]]] = {}
             tools_by_name: dict[str, list[dict[str, Any]]] = {}
             for item in interaction_flow:
                 tool_item = {
                     "tool_name": str(item.get("tool_name") or "tool").strip() or "tool",
                     "tool_call_id": str(item.get("tool_call_id") or "").strip(),
+                    "arguments_text": str(item.get("arguments_text") or item.get("arguments_preview") or ""),
+                    "output_text": str(item.get("output_text") or item.get("output_preview") or ""),
+                    "output_preview_text": str(item.get("output_preview_text") or ""),
+                    "output_ref": str(item.get("output_ref") or "").strip(),
                     "status": str(item.get("status") or "").strip(),
-                    "text": str(item.get("text") or "").strip(),
-                    "timestamp": str(item.get("timestamp") or "").strip(),
-                    "kind": str(item.get("kind") or "").strip(),
-                    "source": str(item.get("source") or "").strip().lower() or "user",
+                    "started_at": str(item.get("started_at") or "").strip(),
+                    "finished_at": str(item.get("finished_at") or "").strip(),
+                    "recovery_decision": str(item.get("recovery_decision") or "").strip(),
+                    "lost_result_summary": str(item.get("lost_result_summary") or "").strip(),
+                    "related_tool_call_ids": [
+                        str(raw or "").strip()
+                        for raw in list(item.get("related_tool_call_ids") or [])
+                        if str(raw or "").strip()
+                    ],
+                    "attempted_tools": [
+                        str(raw or "").strip()
+                        for raw in list(item.get("attempted_tools") or [])
+                        if str(raw or "").strip()
+                    ],
+                    "evidence": [dict(entry) for entry in list(item.get("evidence") or []) if isinstance(entry, dict)],
                 }
                 if isinstance(item.get("elapsed_seconds"), (int, float)):
                     tool_item["elapsed_seconds"] = float(item["elapsed_seconds"])
@@ -480,54 +494,57 @@ class RuntimeAgentSession:
                 for round_item in list(stage.get("rounds") or []):
                     if not isinstance(round_item, dict):
                         continue
-                    existing_tools = list(round_item.get("tools") or [])
-                    if existing_tools:
-                        continue
-                    selected: list[dict[str, Any]] = []
-                    seen_keys: set[str] = set()
-                    round_call_ids = [
-                        str(raw or "").strip()
-                        for raw in list(round_item.get("tool_call_ids") or [])
-                        if str(raw or "").strip()
-                    ]
-                    round_tool_names = [
-                        str(raw or "").strip()
-                        for raw in list(round_item.get("tool_names") or [])
-                        if str(raw or "").strip()
-                    ]
-                    for call_id in round_call_ids:
-                        for item in list(tools_by_call_id.get(call_id) or []):
-                            key = str(item.get("tool_call_id") or item.get("tool_name") or "").strip()
-                            if not key:
-                                continue
-                            if key not in seen_keys:
-                                seen_keys.add(key)
-                                selected.append({"_key": key, **dict(item)})
-                                continue
-                            for index, existing in enumerate(selected):
-                                if str(existing.get("_key") or "").strip() != key:
+                    raw_tools = [dict(item) for item in list(round_item.get("tools") or []) if isinstance(item, dict)]
+                    if not raw_tools:
+                        selected: list[dict[str, Any]] = []
+                        seen_keys: set[str] = set()
+                        round_call_ids = [
+                            str(raw or "").strip()
+                            for raw in list(round_item.get("tool_call_ids") or [])
+                            if str(raw or "").strip()
+                        ]
+                        round_tool_names = [
+                            str(raw or "").strip()
+                            for raw in list(round_item.get("tool_names") or [])
+                            if str(raw or "").strip()
+                        ]
+                        for call_id in round_call_ids:
+                            for item in list(tools_by_call_id.get(call_id) or []):
+                                key = str(item.get("tool_call_id") or item.get("tool_name") or "").strip()
+                                if not key:
                                     continue
-                                selected[index] = {"_key": key, **dict(item)}
-                                break
-                    for tool_name in round_tool_names:
-                        for item in list(tools_by_name.get(tool_name) or []):
-                            key = str(item.get("tool_call_id") or item.get("tool_name") or "").strip()
-                            if not key:
-                                continue
-                            if key not in seen_keys:
-                                seen_keys.add(key)
-                                selected.append({"_key": key, **dict(item)})
-                                continue
-                            for index, existing in enumerate(selected):
-                                if str(existing.get("_key") or "").strip() != key:
+                                if key not in seen_keys:
+                                    seen_keys.add(key)
+                                    selected.append({"_key": key, **dict(item)})
                                     continue
-                                selected[index] = {"_key": key, **dict(item)}
-                                break
-                    if selected:
-                        round_item["tools"] = [
+                                for index, existing in enumerate(selected):
+                                    if str(existing.get("_key") or "").strip() != key:
+                                        continue
+                                    selected[index] = {"_key": key, **dict(item)}
+                                    break
+                        for tool_name in round_tool_names:
+                            for item in list(tools_by_name.get(tool_name) or []):
+                                key = str(item.get("tool_call_id") or item.get("tool_name") or "").strip()
+                                if not key:
+                                    continue
+                                if key not in seen_keys:
+                                    seen_keys.add(key)
+                                    selected.append({"_key": key, **dict(item)})
+                                    continue
+                                for index, existing in enumerate(selected):
+                                    if str(existing.get("_key") or "").strip() != key:
+                                        continue
+                                    selected[index] = {"_key": key, **dict(item)}
+                                    break
+                        raw_tools = [
                             {key: value for key, value in item.items() if key != "_key"}
                             for item in selected
                         ]
+                    compact_tools = [
+                        compact_tool_step_for_summary(tool)
+                        for tool in raw_tools
+                    ]
+                    round_item["tools"] = [tool for tool in compact_tools if tool is not None]
             return snapshot
         return {}
 

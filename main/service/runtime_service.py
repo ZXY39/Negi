@@ -74,6 +74,7 @@ from main.protocol import build_envelope, now_iso
 from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
 from main.runtime.chat_backend import ChatBackend
 from main.runtime.debug_recorder import RuntimeDebugRecorder
+from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
 from main.runtime.global_scheduler import GlobalScheduler
 from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
@@ -4858,36 +4859,7 @@ class MainRuntimeService:
 
     @staticmethod
     def _compact_execution_trace_tool_call(step: Any) -> dict[str, Any] | None:
-        if not isinstance(step, dict):
-            return None
-        tool_name = str(step.get('tool_name') or '').strip() or 'tool'
-        arguments_text = str(step.get('arguments_text') or '')
-        output_text = str(step.get('output_text') or '')
-        output_ref = str(step.get('output_ref') or '')
-        return {
-            'tool_call_id': str(step.get('tool_call_id') or '').strip(),
-            'tool_name': tool_name,
-            'arguments_text': arguments_text,
-            'output_text': output_text,
-            'output_ref': output_ref,
-            'status': str(step.get('status') or '').strip(),
-            'started_at': str(step.get('started_at') or ''),
-            'finished_at': str(step.get('finished_at') or ''),
-            'elapsed_seconds': step.get('elapsed_seconds'),
-            'recovery_decision': str(step.get('recovery_decision') or '').strip(),
-            'related_tool_call_ids': [
-                str(item or '').strip()
-                for item in list(step.get('related_tool_call_ids') or [])
-                if str(item or '').strip()
-            ],
-            'attempted_tools': [
-                str(item or '').strip()
-                for item in list(step.get('attempted_tools') or [])
-                if str(item or '').strip()
-            ],
-            'evidence': [dict(item) for item in list(step.get('evidence') or []) if isinstance(item, dict)],
-            'lost_result_summary': str(step.get('lost_result_summary') or '').strip(),
-        }
+        return compact_tool_step_for_summary(step if isinstance(step, dict) else None)
 
     @staticmethod
     def _normalize_node_detail_level(detail_level: str | None) -> str:
