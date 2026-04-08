@@ -435,7 +435,8 @@ class RuntimeAgentSession:
 
     def _frontdoor_execution_trace_summary_snapshot(self) -> dict[str, Any]:
         stage_state = getattr(self, "_frontdoor_stage_state", None)
-        if isinstance(stage_state, dict) and isinstance(stage_state.get("stages"), list):
+        stages = stage_state.get("stages") if isinstance(stage_state, dict) else None
+        if isinstance(stages, list) and stages:
             snapshot = copy.deepcopy(stage_state)
             interaction_flow = self._interaction_flow_snapshot()
             if not interaction_flow:
@@ -635,7 +636,8 @@ class RuntimeAgentSession:
             return None
         execution_trace_summary = self._frontdoor_execution_trace_summary_snapshot()
         stage_state = getattr(self, "_frontdoor_stage_state", None)
-        has_real_stage_state = isinstance(stage_state, dict) and isinstance(stage_state.get("stages"), list)
+        stages = stage_state.get("stages") if isinstance(stage_state, dict) else None
+        has_real_stage_state = isinstance(stages, list) and bool(stages)
         legacy_tool_events = [] if has_real_stage_state else self._legacy_tool_events_snapshot()
         compression = self._compression_snapshot()
         snapshot: dict[str, Any] = {
