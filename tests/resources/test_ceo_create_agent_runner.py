@@ -221,9 +221,17 @@ async def test_create_agent_runner_prompt_uses_compacted_history_messages_when_t
         "compression_state": {"status": "", "text": "", "source": ""},
     }
 
-    result = await runner._summarize_messages(messages=state["messages"], state=state)
+    prepared = await runner._graph_prepare_turn(
+        state=state,
+        runtime=SimpleNamespace(context=SimpleNamespace(session=None)),
+    )
 
-    assert any("Conversation summary:" in str(item.get("content") or "") for item in result["messages"])
+    assert prepared["messages"][0] == {"role": "system", "content": "system"}
+    assert prepared["messages"][1]["role"] == "system"
+    assert "COMPACT BOUNDARY" in str(prepared["messages"][1].get("content") or "")
+    assert prepared["messages"][2]["role"] == "assistant"
+    assert "Conversation summary:" in str(prepared["messages"][2].get("content") or "")
+    assert prepared["messages"][-2:] == [{"role": "assistant", "content": "a2"}, {"role": "user", "content": "u3"}]
 
 
 def test_build_ceo_agent_uses_create_agent_with_persistence(monkeypatch) -> None:

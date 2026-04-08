@@ -346,9 +346,13 @@ async def test_summarize_messages_replaces_old_history_with_compact_boundary_and
     result = await runner._summarize_messages(messages=messages, state={})
     compacted = result["messages"]
 
-    assert any("COMPACT BOUNDARY" in str(item.get("content") or "") for item in compacted if isinstance(item, dict))
-    assert any("Conversation summary:" in str(item.get("content") or "") for item in compacted if isinstance(item, dict))
+    assert compacted[0] == {"role": "system", "content": "system"}
+    assert compacted[1]["role"] == "system"
+    assert "COMPACT BOUNDARY" in str(compacted[1].get("content") or "")
+    assert compacted[2]["role"] == "assistant"
+    assert "Conversation summary:" in str(compacted[2].get("content") or "")
     assert compacted[-2:] == [{"role": "assistant", "content": "a2"}, {"role": "user", "content": "u3"}]
+    assert len(compacted) == 5
 
 @pytest.mark.asyncio
 async def test_runtime_agent_session_prompt_keeps_rag_ingest_payload_raw_and_skips_commit(tmp_path, monkeypatch) -> None:
