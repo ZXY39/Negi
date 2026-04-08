@@ -28,7 +28,7 @@ from g3ku.resources.tool_settings import (
     raw_tool_settings_from_descriptor,
     validate_tool_settings,
 )
-from g3ku.runtime.context.semantic_scope import plan_retrieval_scope, semantic_catalog_rankings
+from g3ku.runtime.context.node_context_selection import build_node_context_selection
 from g3ku.runtime.context.summarizer import layered_body_payload, score_query
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
@@ -5058,40 +5058,57 @@ class MainRuntimeService:
         session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         actor_role = self._actor_role_for_node(node)
         visible_skills = list(self.list_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
-        enriched = self._inject_visible_skills_into_node_messages(messages=messages, visible_skills=visible_skills)
+        visible_tool_families = list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_key) or [])
+        visible_tool_names = list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_key) or [])
+        task_metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}
+        prompt = str(getattr(node, 'prompt', '') or '').strip()
+        goal = str(getattr(node, 'goal', '') or '').strip()
+        core_requirement = str(task_metadata.get('core_requirement') or prompt or goal).strip()
+        selection = await build_node_context_selection(
+            loop=getattr(self, '_react_loop', None),
+            memory_manager=getattr(self, 'memory_manager', None),
+            prompt=prompt,
+            goal=goal,
+            core_requirement=core_requirement,
+            visible_skills=visible_skills,
+            visible_tool_families=visible_tool_families,
+            visible_tool_names=visible_tool_names,
+        )
+        selected_skill_ids = {
+            str(skill_id or '').strip()
+            for skill_id in list(getattr(selection, 'selected_skill_ids', []) or [])
+            if str(skill_id or '').strip()
+        }
+        selected_visible_skills = [
+            record
+            for record in visible_skills
+            if str(getattr(record, 'skill_id', '') or '').strip() in selected_skill_ids
+        ]
+        enriched = self._inject_visible_skills_into_node_messages(messages=messages, visible_skills=selected_visible_skills)
         manager = getattr(self, 'memory_manager', None)
         if manager is None or not getattr(manager, '_feature_enabled', lambda _key: False)('unified_context'):
             return enriched
-        query_text = str(getattr(node, 'prompt', '') or getattr(node, 'goal', '') or '').strip()
-        if not query_text:
+        if not (prompt or goal or core_requirement):
+            return enriched
+        if not bool(getattr(selection, 'memory_search_visible', False)):
+            return enriched
+        memory_query = str(getattr(selection, 'memory_query', '') or '').strip()
+        if not memory_query:
             return enriched
         memory_scope = self._task_memory_scope(task)
         channel = str(memory_scope.get('channel') or 'unknown')
         chat_id = str(memory_scope.get('chat_id') or 'unknown')
-        visible_families = list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_key) or [])
-        semantic_frontdoor = await semantic_catalog_rankings(
-            memory_manager=manager,
-            query_text=query_text,
-            visible_skills=visible_skills,
-            visible_families=visible_families,
-            skill_limit=max(8, len(visible_skills)),
-            tool_limit=max(8, len(visible_families)),
-        )
-        retrieval_scope = plan_retrieval_scope(
-            visible_skills=visible_skills,
-            visible_families=visible_families,
-            semantic_frontdoor=semantic_frontdoor,
-        )
+        retrieval_scope = dict(getattr(selection, 'retrieval_scope', {}) or {})
         try:
             block = await manager.retrieve_block(
-                query=query_text,
+                query=memory_query,
                 session_key=session_key,
                 channel=channel,
                 chat_id=chat_id,
-                search_context_types=retrieval_scope['search_context_types'],
-                allowed_context_types=retrieval_scope['allowed_context_types'],
-                allowed_resource_record_ids=retrieval_scope['allowed_resource_record_ids'],
-                allowed_skill_record_ids=retrieval_scope['allowed_skill_record_ids'],
+                search_context_types=list(retrieval_scope.get('search_context_types') or []),
+                allowed_context_types=list(retrieval_scope.get('allowed_context_types') or []),
+                allowed_resource_record_ids=list(retrieval_scope.get('allowed_resource_record_ids') or []),
+                allowed_skill_record_ids=list(retrieval_scope.get('allowed_skill_record_ids') or []),
             )
         except Exception:
             return enriched
