@@ -780,6 +780,78 @@ async def test_create_agent_middleware_syncs_real_stage_state_before_running_too
 
 
 @pytest.mark.asyncio
+async def test_create_agent_lifecycle_abefore_model_syncs_only_postprocessed_stage_state(
+    monkeypatch,
+) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    lifecycle = ceo_agent_middleware.CeoTurnLifecycleMiddleware(runner=runner)
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    runtime = SimpleNamespace(context=SimpleNamespace(session=session))
+    sync_calls: list[dict[str, object]] = []
+
+    async def _fake_postprocess_completed_tool_cycle(*, state):
+        _ = state
+        return {
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Inspect the repository structure",
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 0,
+                        "status": "active",
+                        "rounds": [],
+                    }
+                ],
+            },
+            "compression_state": {"status": "running", "text": "compressing", "source": "user"},
+        }
+
+    monkeypatch.setattr(runner, "_postprocess_completed_tool_cycle", _fake_postprocess_completed_tool_cycle)
+
+    def _record_sync(*, state, runtime=None, session=None, preview_pending_tool_round=False):
+        _ = runtime, session, preview_pending_tool_round
+        sync_calls.append(dict(state or {}))
+
+    monkeypatch.setattr(runner, "_sync_runtime_session_frontdoor_state", _record_sync)
+
+    update = await lifecycle.abefore_model(
+        {
+            "frontdoor_stage_state": {
+                "active_stage_id": "",
+                "transition_required": False,
+                "stages": [],
+            },
+            "compression_state": {"status": "", "text": "", "source": ""},
+            "tool_call_payloads": [
+                {
+                    "id": "call-stage-1",
+                    "name": "submit_next_stage",
+                    "arguments": {
+                        "stage_goal": "Inspect the repository structure",
+                        "tool_round_budget": 2,
+                    },
+                }
+            ],
+        },
+        runtime,
+    )
+
+    assert update is not None
+    assert len(sync_calls) == 1
+    assert sync_calls[0]["frontdoor_stage_state"]["active_stage_id"] == "frontdoor-stage-1"
+    assert sync_calls[0]["compression_state"] == {"status": "running", "text": "compressing", "source": "user"}
+
+
+@pytest.mark.asyncio
 async def test_create_agent_runner_rejects_unverified_dispatch_text_from_model() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))

@@ -9,12 +9,15 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from langchain.messages import AIMessage
 
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.session_service import HEARTBEAT_OK, WebSessionHeartbeatService
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.api import ceo_sessions, websocket_ceo
+from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
+from g3ku.runtime.frontdoor import ceo_agent_middleware
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPendingInterrupt
 from g3ku.runtime.manager import SessionRuntimeManager
@@ -638,6 +641,155 @@ async def test_runtime_agent_session_converts_frontdoor_interrupt_into_paused_st
     assert inflight is not None
     assert inflight["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
     assert inflight["compression"]["text"] == "上下文压缩中"
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_session_keeps_real_stage_state_coherent_through_approval_interrupt_pause(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    model_output = ceo_agent_middleware.CeoModelOutputMiddleware(runner=runner)
+    approval = ceo_agent_middleware.CeoApprovalMiddleware(runner=runner)
+    captured: dict[str, object] = {}
+    approval_state_holder: dict[str, object] = {}
+
+    async def _fake_normalize_model_output(state, *, runtime):
+        _ = state, runtime
+        return {
+            "analysis_text": "",
+            "tool_call_payloads": [
+                {
+                    "id": "call-task-1",
+                    "name": "create_async_task",
+                    "arguments": {"task": "Inspect the repository structure"},
+                }
+            ],
+            "approval_request": {
+                "kind": "frontdoor_tool_approval",
+                "tool_calls": [
+                    {
+                        "id": "call-task-1",
+                        "name": "create_async_task",
+                        "arguments": {"task": "Inspect the repository structure"},
+                    }
+                ],
+            },
+            "approval_status": "",
+            "synthetic_tool_calls_used": False,
+            "xml_repair_attempt_count": 0,
+            "xml_repair_excerpt": "",
+            "xml_repair_tool_names": [],
+            "xml_repair_last_issue": "",
+            "next_step": "review_tool_calls",
+        }
+
+    monkeypatch.setattr(runner, "_graph_normalize_model_output", _fake_normalize_model_output)
+
+    def _interrupt(payload):
+        captured["snapshot_at_interrupt"] = approval_state_holder["session"].inflight_turn_snapshot()
+        raise CeoFrontdoorInterrupted(
+            interrupts=[CeoPendingInterrupt(interrupt_id="interrupt-approval-1", value=dict(payload or {}))],
+            values=dict(approval_state_holder["state"] or {}),
+        )
+
+    monkeypatch.setattr(ceo_agent_middleware, "interrupt", _interrupt)
+
+    class _MiddlewareInterruptRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input, on_progress
+            runtime = SimpleNamespace(context=SimpleNamespace(session=session))
+            state = {
+                "session_key": session.state.session_key,
+                "messages": [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "id": "call-task-1",
+                                "name": "create_async_task",
+                                "args": {"task": "Inspect the repository structure"},
+                            }
+                        ],
+                    )
+                ],
+                "frontdoor_stage_state": {
+                    "active_stage_id": "frontdoor-stage-1",
+                    "transition_required": False,
+                    "stages": [
+                        {
+                            "stage_id": "frontdoor-stage-1",
+                            "stage_index": 1,
+                            "stage_goal": "Inspect the repository structure",
+                            "tool_round_budget": 2,
+                            "tool_rounds_used": 0,
+                            "status": "active",
+                            "rounds": [],
+                        }
+                    ],
+                },
+                "compression_state": {"status": "running", "text": "compressing", "source": "user"},
+                "route_kind": "direct_reply",
+                "used_tools": [],
+            }
+            model_update = await model_output.aafter_model(state, runtime)
+            approval_state_holder["session"] = session
+            approval_state_holder["state"] = {**state, **dict(model_update or {})}
+            await approval.aafter_model(dict(approval_state_holder["state"]), runtime)
+            raise AssertionError("approval middleware should interrupt before returning")
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        _ = session_key
+        return 0
+
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=_MiddlewareInterruptRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+    )
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+
+    result = await session.prompt("create a task")
+
+    assert result.output == ""
+    interrupt_snapshot = captured["snapshot_at_interrupt"]
+    assert isinstance(interrupt_snapshot, dict)
+    assert interrupt_snapshot["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
+    interrupt_stage = interrupt_snapshot["execution_trace_summary"]["stages"][0]
+    assert interrupt_stage["stage_goal"] == "Inspect the repository structure"
+    assert interrupt_stage["tool_round_budget"] == 2
+    assert [round_item["tool_names"] for round_item in interrupt_stage["rounds"]] == [["create_async_task"]]
+    assert "tool_events" not in interrupt_snapshot
+    assert interrupt_snapshot["compression"]["status"] == "running"
+
+    assert session.state.status == "paused"
+    paused = session.paused_execution_context_snapshot()
+    assert paused["interrupts"][0]["id"] == "interrupt-approval-1"
+    assert paused["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
+    assert paused["execution_trace_summary"]["stages"][0]["stage_goal"] == "Inspect the repository structure"
+    assert paused["compression"]["status"] == "running"
+    inflight = session.inflight_turn_snapshot()
+    assert inflight is not None
+    assert inflight["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
+    assert inflight["compression"]["text"] == "compressing"
 
 
 @pytest.mark.asyncio

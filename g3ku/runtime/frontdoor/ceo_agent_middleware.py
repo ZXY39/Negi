@@ -289,7 +289,6 @@ class CeoTurnLifecycleMiddleware(AgentMiddleware):
     @hook_config(can_jump_to=["end"])
     async def abefore_model(self, state, runtime) -> dict[str, Any] | None:
         current_state = dict(state or {})
-        self._runner._sync_runtime_session_frontdoor_state(state=current_state, runtime=runtime)
         if str(current_state.get("final_output") or "").strip():
             return {"jump_to": "end"}
         update = await self._runner._postprocess_completed_tool_cycle(state=current_state)
