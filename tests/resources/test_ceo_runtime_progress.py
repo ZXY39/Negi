@@ -10,14 +10,18 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from langchain.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
+from g3ku.agent.tools.base import Tool
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.session_service import HEARTBEAT_OK, WebSessionHeartbeatService
+from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.api import ceo_sessions, websocket_ceo
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import ceo_agent_middleware
+from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPendingInterrupt
 from g3ku.runtime.manager import SessionRuntimeManager
@@ -658,91 +662,220 @@ async def test_runtime_agent_session_preserves_previewed_round_through_real_midd
         def cancel(self, *, reason: str = "") -> None:
             _ = reason
 
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
-    model_output = ceo_agent_middleware.CeoModelOutputMiddleware(runner=runner)
-    approval = ceo_agent_middleware.CeoApprovalMiddleware(runner=runner)
+    class _BackendRecorder:
+        def __init__(self, responses: list[LLMResponse]) -> None:
+            self.responses = list(responses)
 
-    async def _fake_normalize_model_output(state, *, runtime):
-        _ = state, runtime
-        return {
-            "analysis_text": "",
-            "tool_call_payloads": [
-                {
-                    "id": "call-task-1",
-                    "name": "create_async_task",
-                    "arguments": {"task": "Inspect the repository structure"},
-                }
-            ],
-            "approval_request": {
-                "kind": "frontdoor_tool_approval",
-                "tool_calls": [
-                    {
-                        "id": "call-task-1",
-                        "name": "create_async_task",
-                        "arguments": {"task": "Inspect the repository structure"},
-                    }
-                ],
-            },
-            "approval_status": "",
-            "synthetic_tool_calls_used": False,
-            "xml_repair_attempt_count": 0,
-            "xml_repair_excerpt": "",
-            "xml_repair_tool_names": [],
-            "xml_repair_last_issue": "",
-            "next_step": "review_tool_calls",
-        }
+        async def chat(self, **kwargs):
+            _ = kwargs
+            return self.responses.pop(0)
 
-    monkeypatch.setattr(runner, "_graph_normalize_model_output", _fake_normalize_model_output)
+    class _FakeToolRegistry:
+        def __init__(self, tools: list[Tool]) -> None:
+            self._tools = {tool.name: tool for tool in list(tools)}
+            self.tool_names = sorted(self._tools)
 
-    class _MiddlewareInterruptRunner:
-        async def run_turn(self, *, user_input, session, on_progress):
-            _ = user_input, on_progress
-            runtime = SimpleNamespace(context=SimpleNamespace(session=session))
-            state = {
-                "session_key": session.state.session_key,
-                "messages": [
-                    AIMessage(
-                        content="",
-                        tool_calls=[
-                            {
-                                "id": "call-task-1",
-                                "name": "create_async_task",
-                                "args": {"task": "Inspect the repository structure"},
-                            }
-                        ],
-                    )
-                ],
-                "frontdoor_stage_state": {
-                    "active_stage_id": "frontdoor-stage-1",
-                    "transition_required": False,
-                    "stages": [
-                        {
-                            "stage_id": "frontdoor-stage-1",
-                            "stage_index": 1,
+        def get(self, name: str):
+            return self._tools.get(str(name or "").strip())
+
+        def push_runtime_context(self, context: dict[str, object]):
+            _ = context
+            return object()
+
+        def pop_runtime_context(self, token) -> None:
+            _ = token
+
+    class _ContinuationTaskTool(Tool):
+        @property
+        def name(self) -> str:
+            return "create_async_task"
+
+        @property
+        def description(self) -> str:
+            return "dispatch async task"
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "core_requirement": {"type": "string"},
+                    "execution_policy": {"type": "object"},
+                },
+                "required": ["task", "core_requirement", "execution_policy"],
+            }
+
+        async def execute(
+            self,
+            task: str,
+            core_requirement: str,
+            execution_policy: dict[str, object],
+            **kwargs,
+        ) -> str:
+            _ = task, core_requirement, execution_policy, kwargs
+            return json.dumps({"ok": True}, ensure_ascii=False)
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        _ = session_key
+        return 0
+
+    async def _startup() -> None:
+        return None
+
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-stage-1",
+                        name="submit_next_stage",
+                        arguments={
                             "stage_goal": "Inspect the repository structure",
                             "tool_round_budget": 2,
-                            "tool_rounds_used": 0,
-                            "status": "active",
-                            "rounds": [],
-                        }
-                    ],
-                },
-                "compression_state": {"status": "running", "text": "compressing", "source": "user"},
-                "route_kind": "direct_reply",
-                "used_tools": [],
-            }
-            approval_update = await approval.aafter_model(state, runtime)
-            assert approval_update is None
-            model_update = await model_output.aafter_model(state, runtime)
-            merged_state = {**state, **dict(model_update or {})}
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-task-1",
+                        name="create_async_task",
+                        arguments={
+                            "task": "Inspect the repository structure",
+                            "core_requirement": "Inspect the repository structure",
+                            "execution_policy": {"mode": "focus"},
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        _ensure_checkpointer_ready=lambda: None,
+        _checkpointer=InMemorySaver(),
+        _store=None,
+        main_task_service=SimpleNamespace(startup=_startup),
+        tools=_FakeToolRegistry([_ContinuationTaskTool()]),
+        max_iterations=8,
+        resource_manager=None,
+        tool_execution_manager=None,
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                frontdoor_interrupt_approval_enabled=True,
+                frontdoor_interrupt_tool_names=["create_async_task"],
+            )
+        ),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+    loop.multi_agent_runner = runner
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["create_async_task"]}
+
+    async def _build_for_ceo(**kwargs):
+        query_text = str(kwargs.get("query_text") or "")
+        return SimpleNamespace(
+            system_prompt="SYSTEM PROMPT",
+            recent_history=[],
+            tool_names=["create_async_task"],
+            trace={},
+            model_messages=[
+                {"role": "system", "content": "SYSTEM PROMPT"},
+                {"role": "user", "content": query_text},
+            ],
+            turn_overlay_text="",
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+
+    result = await session.prompt("create a task")
+
+    assert result.output == ""
+    assert session.state.status == "paused"
+    assert len(session.state.pending_interrupts) == 1
+    pending_interrupt = session.state.pending_interrupts[0]
+    assert str(pending_interrupt["id"]).strip()
+    assert pending_interrupt["value"]["kind"] == "frontdoor_tool_approval"
+    assert pending_interrupt["value"]["question"] == "Approve the CEO frontdoor tool execution?"
+    assert pending_interrupt["value"]["tool_calls"] == [
+        {
+            "id": "call-task-1",
+            "name": "create_async_task",
+            "arguments": {
+                "task": "Inspect the repository structure",
+                "core_requirement": "Inspect the repository structure",
+                "execution_policy": {"mode": "focus"},
+            },
+        }
+    ]
+    paused = session.paused_execution_context_snapshot()
+    assert paused["interrupts"][0]["id"] == pending_interrupt["id"]
+    assert paused["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
+    paused_stage = paused["execution_trace_summary"]["stages"][0]
+    assert paused_stage["stage_goal"] == "Inspect the repository structure"
+    assert paused_stage["tool_round_budget"] == 2
+    assert [round_item["tool_names"] for round_item in paused_stage["rounds"]] == [["create_async_task"]]
+    assert "tool_events" not in paused
+    assert paused["compression"] == {}
+    inflight = session.inflight_turn_snapshot()
+    assert inflight is not None
+    assert inflight["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
+    assert [round_item["tool_names"] for round_item in inflight["execution_trace_summary"]["stages"][0]["rounds"]] == [
+        ["create_async_task"]
+    ]
+    assert inflight["compression"] == {}
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_session_preserves_pre_synced_frontdoor_state_when_interrupt_values_are_sparse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    class _SparseInterruptRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input, on_progress
+            session._frontdoor_stage_state = _sample_frontdoor_stage_state()
+            session._compression_state = {"status": "running", "text": "compressing", "source": "user"}
             raise CeoFrontdoorInterrupted(
                 interrupts=[
                     CeoPendingInterrupt(
-                        interrupt_id="interrupt-approval-1",
-                        value=dict(merged_state.get("approval_request") or {}),
+                        interrupt_id="interrupt-sparse-1",
+                        value={"kind": "frontdoor_tool_approval"},
                     )
                 ],
-                values=merged_state,
+                values={"approval_request": {"kind": "frontdoor_tool_approval"}},
             )
 
     async def _cancel_session_tasks(session_key: str) -> int:
@@ -753,7 +886,7 @@ async def test_runtime_agent_session_preserves_previewed_round_through_real_midd
         model="gpt-test",
         reasoning_effort=None,
         sessions=SessionManager(tmp_path),
-        multi_agent_runner=_MiddlewareInterruptRunner(),
+        multi_agent_runner=_SparseInterruptRunner(),
         memory_manager=None,
         commit_service=None,
         prompt_trace=False,
@@ -768,36 +901,14 @@ async def test_runtime_agent_session_preserves_previewed_round_through_real_midd
 
     assert result.output == ""
     assert session.state.status == "paused"
-    assert session.state.pending_interrupts == [
-        {
-            "id": "interrupt-approval-1",
-            "value": {
-                "kind": "frontdoor_tool_approval",
-                "tool_calls": [
-                    {
-                        "id": "call-task-1",
-                        "name": "create_async_task",
-                        "arguments": {"task": "Inspect the repository structure"},
-                    }
-                ],
-            },
-        }
-    ]
     paused = session.paused_execution_context_snapshot()
-    assert paused["interrupts"][0]["id"] == "interrupt-approval-1"
+    assert paused is not None
     assert paused["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
-    paused_stage = paused["execution_trace_summary"]["stages"][0]
-    assert paused_stage["stage_goal"] == "Inspect the repository structure"
-    assert paused_stage["tool_round_budget"] == 2
-    assert [round_item["tool_names"] for round_item in paused_stage["rounds"]] == [["create_async_task"]]
-    assert "tool_events" not in paused
+    assert paused["execution_trace_summary"]["stages"][0]["stage_goal"] == "inspect repository"
     assert paused["compression"]["status"] == "running"
     inflight = session.inflight_turn_snapshot()
     assert inflight is not None
     assert inflight["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
-    assert [round_item["tool_names"] for round_item in inflight["execution_trace_summary"]["stages"][0]["rounds"]] == [
-        ["create_async_task"]
-    ]
     assert inflight["compression"]["text"] == "compressing"
 
 

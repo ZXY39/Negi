@@ -1011,9 +1011,33 @@ function normalizeCeoSnapshotToolEvents(events = []) {
         .slice(-CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT);
 }
 
+function isRenderableCeoSnapshotStage(stage = null) {
+    if (!stage || typeof stage !== "object") return false;
+    const stageGoal = String(stage?.stage_goal || "").trim();
+    const stageBudget = Number(stage?.tool_round_budget ?? stage?.stage_total_steps ?? 0);
+    const systemGenerated = stage?.system_generated === true;
+    if (systemGenerated && !stageGoal && (!Number.isFinite(stageBudget) || stageBudget <= 0)) {
+        return false;
+    }
+    return true;
+}
+
 function normalizeCeoSnapshotExecutionTraceSummary(summary = null) {
     if (!summary || typeof summary !== "object") return null;
-    const stages = (Array.isArray(summary?.stages) ? summary.stages : [])
+    const rawStages = Array.isArray(summary?.stages) ? summary.stages : [];
+    const hasRenderableRealStages = rawStages.some((stage) => (
+        isRenderableCeoSnapshotStage(stage) && stage?.system_generated !== true
+    ));
+    const stages = rawStages
+        .filter((stage) => {
+            if (!isRenderableCeoSnapshotStage(stage)) return false;
+            const systemGenerated = stage?.system_generated === true;
+            const stageKind = String(stage?.stage_kind || "normal").trim() || "normal";
+            if (hasRenderableRealStages && systemGenerated && stageKind === "normal") {
+                return false;
+            }
+            return true;
+        })
         .map((stage, index) => {
             if (typeof normalizeExecutionStageTrace !== "function") return null;
             return normalizeExecutionStageTrace(stage, index);

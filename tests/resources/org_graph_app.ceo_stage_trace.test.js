@@ -178,10 +178,11 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
         stages: [
             {
                 stage_id: "inflight-stage-1",
-                stage_goal: "",
+                stage_goal: "synthetic carryover",
                 status: "running",
-                tool_round_budget: 0,
+                tool_round_budget: 1,
                 system_generated: true,
+                stage_kind: "normal",
                 rounds: [
                     {
                         round_id: "round-synthetic-1",
@@ -223,6 +224,7 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
     assert.equal(renderedSteps, 2);
     assert.match(turn.metaEl.textContent, /2/);
     assert.doesNotMatch(turn.listEl.innerHTML, /ceo:stage:inflight-stage-1/);
+    assert.doesNotMatch(turn.listEl.innerHTML, /synthetic carryover/);
     assert.doesNotMatch(turn.listEl.innerHTML, /submit_next_stage/);
 });
 

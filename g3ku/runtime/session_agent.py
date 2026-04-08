@@ -1091,14 +1091,20 @@ class RuntimeAgentSession:
         interrupt_values = dict(exc.values or {}) if isinstance(exc.values, dict) else {}
         frontdoor_stage_state = interrupt_values.get("frontdoor_stage_state")
         compression_state = interrupt_values.get("compression_state")
+        preserved_frontdoor_stage_state = getattr(self, "_frontdoor_stage_state", None)
+        preserved_compression_state = getattr(self, "_compression_state", None)
         self._frontdoor_stage_state = (
             dict(frontdoor_stage_state)
             if isinstance(frontdoor_stage_state, dict)
+            else dict(preserved_frontdoor_stage_state)
+            if isinstance(preserved_frontdoor_stage_state, dict)
             else {}
         )
         self._compression_state = (
             dict(compression_state)
             if isinstance(compression_state, dict)
+            else dict(preserved_compression_state)
+            if isinstance(preserved_compression_state, dict)
             else {}
         )
         self._state.is_running = False

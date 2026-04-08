@@ -247,8 +247,8 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             CeoTurnLifecycleMiddleware(runner=self),
             CeoToolExposureMiddleware(runner=self),
             CeoPromptAssemblyMiddleware(runner=self),
-            CeoModelOutputMiddleware(runner=self),
             CeoApprovalMiddleware(runner=self),
+            CeoModelOutputMiddleware(runner=self),
         ]
 
     def _get_agent(self):
