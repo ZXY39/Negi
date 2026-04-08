@@ -42,12 +42,6 @@ parameters:
     final_acceptance_prompt:
       type: string
       description: Required when `requires_final_acceptance=true`.
-    continuation_of_task_id:
-      type: string
-      description: Failed task id to continue from. Must use `task:...` when provided.
-    reuse_existing:
-      type: boolean
-      description: Reuse an in-progress continuation task for the same source task when possible.
   required: [task, core_requirement, execution_policy]
 governance:
   family: task_runtime

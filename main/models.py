@@ -31,6 +31,26 @@ FAILURE_CLASSES = (
     FAILURE_CLASS_BUSINESS_UNPASSED,
     FAILURE_CLASS_NON_RETRYABLE_BLOCKED,
 )
+CONTINUATION_MODE_RECREATE = 'recreate'
+CONTINUATION_MODE_RETRY_IN_PLACE = 'retry_in_place'
+CONTINUATION_MODES = (
+    CONTINUATION_MODE_RECREATE,
+    CONTINUATION_MODE_RETRY_IN_PLACE,
+)
+CONTINUATION_STATE_NONE = 'none'
+CONTINUATION_STATE_TAKEOVER_PENDING = 'takeover_pending'
+CONTINUATION_STATE_TERMINALIZING = 'terminalizing'
+CONTINUATION_STATE_RECREATED = 'recreated'
+CONTINUATION_STATE_RETRIED_IN_PLACE = 'retried_in_place'
+CONTINUATION_STATE_CLOSED_NO_CONTINUE = 'closed_no_continue'
+CONTINUATION_STATES = (
+    CONTINUATION_STATE_NONE,
+    CONTINUATION_STATE_TAKEOVER_PENDING,
+    CONTINUATION_STATE_TERMINALIZING,
+    CONTINUATION_STATE_RECREATED,
+    CONTINUATION_STATE_RETRIED_IN_PLACE,
+    CONTINUATION_STATE_CLOSED_NO_CONTINUE,
+)
 
 
 def normalize_failure_class(value: Any, *, default: str = '') -> str:
@@ -38,6 +58,21 @@ def normalize_failure_class(value: Any, *, default: str = '') -> str:
     if normalized in FAILURE_CLASSES:
         return normalized
     return str(default or '').strip().lower()
+
+
+def normalize_continuation_mode(value: Any, *, default: str = '') -> str:
+    normalized = str(value or '').strip().lower()
+    if normalized in CONTINUATION_MODES:
+        return normalized
+    return str(default or '').strip().lower()
+
+
+def normalize_continuation_state(value: Any, *, default: str = CONTINUATION_STATE_NONE) -> str:
+    normalized = str(value or '').strip().lower()
+    if normalized in CONTINUATION_STATES:
+        return normalized
+    fallback = str(default or CONTINUATION_STATE_NONE).strip().lower()
+    return fallback if fallback in CONTINUATION_STATES else CONTINUATION_STATE_NONE
 
 
 class NodeEvidenceItem(Model):

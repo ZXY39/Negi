@@ -203,6 +203,40 @@ async def continue_evaluate_task(task_id: str):
     }
 
 
+@router.post('/tasks/{task_id}/continue')
+async def continue_task(task_id: str, payload: dict):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    task_id = service.normalize_task_id(task_id)
+    request_payload = dict(payload or {})
+    request_payload['target_task_id'] = task_id
+    try:
+        result = await service.continue_task(**request_payload)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail in {'task_not_failed', 'task_not_retryable', 'task_not_unpassed'}:
+            raise HTTPException(status_code=409, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    continuation_task = result.get('continuation_task')
+    resumed_task = result.get('resumed_task')
+    target_task = result.get('target_task')
+    return {
+        'ok': True,
+        'status': str(result.get('status') or '').strip(),
+        'mode': str(result.get('mode') or '').strip(),
+        'message': str(result.get('message') or '').strip(),
+        'target_task_id': str(result.get('target_task_id') or task_id).strip(),
+        'target_task_terminal_status': str(result.get('target_task_terminal_status') or '').strip(),
+        'target_task_finished_at': str(result.get('target_task_finished_at') or '').strip(),
+        'reused_existing': bool(result.get('reused_existing')),
+        'target_task': (target_task.model_dump(mode='json') if target_task is not None else None),
+        'continuation_task': (continuation_task.model_dump(mode='json') if continuation_task is not None else None),
+        'resumed_task': (resumed_task.model_dump(mode='json') if resumed_task is not None else None),
+    }
+
+
 @router.post('/tasks/{task_id}/cancel')
 async def cancel_task(task_id: str):
     task_id = _ensure_task_route_id(task_id)

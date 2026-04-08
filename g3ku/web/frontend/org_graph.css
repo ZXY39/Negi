@@ -561,6 +561,11 @@ textarea {
     color: #b45309;
 }
 
+.status-badge[data-status="continued"] {
+    background-color: rgba(14, 165, 233, 0.14);
+    color: #0369a1;
+}
+
 .status-badge[data-status="queued"],
 .status-badge[data-status="unknown"],
 .status-badge[data-status="pending"],
@@ -5909,6 +5914,12 @@ textarea {
     min-width: 0;
     font-size: 0.85rem;
     color: var(--text-secondary);
+}
+
+.pc-continuation-summary {
+    font-size: 0.85rem;
+    color: color-mix(in srgb, var(--text-secondary) 88%, var(--brand-primary) 12%);
+    line-height: 1.45;
 }
 
 .pc-field-label {

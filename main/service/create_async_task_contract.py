@@ -31,11 +31,6 @@ CREATE_ASYNC_TASK_REQUIRES_FINAL_ACCEPTANCE_DESCRIPTION = '是否需要在 root 
 
 CREATE_ASYNC_TASK_FINAL_ACCEPTANCE_PROMPT_DESCRIPTION = '最终验收提示词。仅当 requires_final_acceptance=true 时必填。'
 
-CREATE_ASYNC_TASK_CONTINUATION_OF_TASK_ID_DESCRIPTION = '若这是对某个已失败任务的续跑，请传入原失败任务 id，格式为 task:xxxx。'
-
-CREATE_ASYNC_TASK_REUSE_EXISTING_DESCRIPTION = '是否优先复用同一会话下、针对同一个 continuation_of_task_id 的进行中续跑任务。默认 true。'
-
-
 def build_create_async_task_parameters() -> dict[str, Any]:
     return {
         'type': 'object',
@@ -58,14 +53,6 @@ def build_create_async_task_parameters() -> dict[str, Any]:
             'final_acceptance_prompt': {
                 'type': 'string',
                 'description': CREATE_ASYNC_TASK_FINAL_ACCEPTANCE_PROMPT_DESCRIPTION,
-            },
-            'continuation_of_task_id': {
-                'type': 'string',
-                'description': CREATE_ASYNC_TASK_CONTINUATION_OF_TASK_ID_DESCRIPTION,
-            },
-            'reuse_existing': {
-                'type': 'boolean',
-                'description': CREATE_ASYNC_TASK_REUSE_EXISTING_DESCRIPTION,
             },
         },
         'required': ['task', 'core_requirement', 'execution_policy'],

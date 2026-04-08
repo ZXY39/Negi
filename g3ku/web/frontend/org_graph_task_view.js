@@ -493,7 +493,9 @@ function hasManualTreeRoundSelections() {
 }
 
 function taskDetailStatusLabel(task) {
-    return ({ in_progress: "运行中", success: "已完成", failed: "失败", blocked: "已暂停", unknown: "未知" })[taskStatusKey(task)] || "未知";
+    const base = ({ in_progress: "运行中", success: "已完成", failed: "失败", blocked: "已暂停", continued: "已续跑", unpassed: "未通过", unknown: "未知" })[taskStatusKey(task)] || "未知";
+    const continuationSummary = typeof taskContinuationSummary === "function" ? taskContinuationSummary(task) : "";
+    return continuationSummary ? `${base} · ${continuationSummary}` : base;
 }
 
 function taskInitialPromptText(task = null) {

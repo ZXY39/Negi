@@ -453,6 +453,10 @@ class ApiClient {
         return this.post(`/api/tasks/${taskId}/continue-evaluate`);
     }
 
+    static async continueTask(taskId, payload = {}) {
+        return this.post(`/api/tasks/${taskId}/continue`, payload);
+    }
+
     static async cancelTask(taskId) {
         const data = await this.post(`/api/tasks/${taskId}/cancel`);
         return data.task || null;

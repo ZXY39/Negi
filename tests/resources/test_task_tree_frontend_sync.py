@@ -385,6 +385,133 @@ def test_task_status_helpers_treat_unpassed_as_non_failed_and_show_continue_acti
     assert result["actions"] == ["continue-evaluate", "delete"]
 
 
+def test_task_status_helpers_render_recreated_and_retry_in_place_states() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {};
+        global.U = {};
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const pStatusStart = appCode.indexOf("const pStatus");
+        const helperStart = appCode.indexOf("const canPause");
+        const helperEnd = appCode.indexOf("function normalizeTokenUsage");
+        vm.runInThisContext(appCode.slice(pStatusStart, helperStart));
+        vm.runInThisContext(appCode.slice(helperStart, helperEnd));
+
+        global.taskWorkerControlsAvailable = () => true;
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const labelStart = tasksCode.indexOf("function taskStatusLabel");
+        const labelEnd = tasksCode.indexOf("function getSelectedTasks");
+        const actionStart = tasksCode.indexOf("function taskActionTone");
+        const actionEnd = tasksCode.indexOf("function taskActionSuccessTitle");
+        vm.runInThisContext(tasksCode.slice(labelStart, labelEnd));
+        vm.runInThisContext(tasksCode.slice(actionStart, actionEnd));
+
+        const taskViewCode = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const detailStatusStart = taskViewCode.indexOf("function taskDetailStatusLabel");
+        const detailStatusEnd = taskViewCode.indexOf("function taskInitialPromptText");
+        vm.runInThisContext(taskViewCode.slice(detailStatusStart, detailStatusEnd));
+
+        const recreated = {
+          task_id: "task:recreated",
+          status: "failed",
+          failure_class: "engine_failure",
+          continuation_state: "recreated",
+          continued_by_task_id: "task:cont-1",
+        };
+        const retried = {
+          task_id: "task:retried",
+          status: "in_progress",
+          continuation_state: "retried_in_place",
+        };
+
+        console.log(JSON.stringify({
+          recreatedRetry: canRetry(recreated),
+          recreatedStatus: taskStatusKey(recreated),
+          recreatedLabel: taskStatusLabel(recreated),
+          recreatedSummary: taskContinuationSummary(recreated),
+          recreatedActions: taskCardActions(recreated).map((item) => item.action),
+          recreatedPrimary: primaryTaskAction(recreated),
+          recreatedDetailLabel: taskDetailStatusLabel(recreated),
+          retriedStatus: taskStatusKey(retried),
+          retriedLabel: taskStatusLabel(retried),
+          retriedSummary: taskContinuationSummary(retried),
+          retriedDetailLabel: taskDetailStatusLabel(retried),
+          retriedPrimary: primaryTaskAction(retried),
+        }));
+        """
+    )
+
+    assert result["recreatedRetry"] is False
+    assert result["recreatedStatus"] == "continued"
+    assert result["recreatedLabel"] == "已续跑"
+    assert result["recreatedSummary"] == "已续跑到 task:cont-1"
+    assert result["recreatedActions"] == ["open-continuation", "delete"]
+    assert result["recreatedPrimary"]["action"] == "open-continuation"
+    assert result["recreatedDetailLabel"] == "已续跑 · 已续跑到 task:cont-1"
+    assert result["retriedStatus"] == "in_progress"
+    assert result["retriedLabel"] == "Running"
+    assert result["retriedSummary"] == "原任务内续跑中"
+    assert result["retriedDetailLabel"] == "运行中 · 原任务内续跑中"
+    assert result["retriedPrimary"]["action"] == "pause"
+
+
+def test_retry_action_refreshes_current_task_detail_after_in_place_retry() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          taskBusy: false,
+          currentTaskId: "task:retry-me",
+          view: "task-details",
+        };
+        global.U = {};
+        const loadCalls = [];
+        global.taskWorkerControlsAvailable = () => true;
+        global.taskWorkerNoticeText = () => "offline";
+        global.renderTasksIfVisible = () => {};
+        global.refreshTaskWorkerStatus = () => {};
+        global.showToast = () => {};
+        global.loadTasks = async () => { loadCalls.push("loadTasks"); };
+        global.loadTaskDetail = async (taskId, options = {}) => {
+          loadCalls.push({ kind: "detail", taskId, options });
+        };
+        global.loadTaskArtifacts = async () => { loadCalls.push("artifacts"); };
+        global.handleDeletedTasks = () => {};
+        global.openConfirm = () => {};
+        global.ApiClient = {
+          retryTask: async (taskId) => ({ task_id: taskId, status: "in_progress" }),
+        };
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const actionStart = tasksCode.indexOf("function taskActionTone");
+        const actionEnd = tasksCode.indexOf("async function runTaskBatchAction");
+        vm.runInThisContext(tasksCode.slice(actionStart, actionEnd));
+
+        performTaskAction("task:retry-me", "retry").then(() => {
+          console.log(JSON.stringify({
+            loadCalls,
+            taskBusy: S.taskBusy,
+          }));
+        });
+        """
+    )
+
+    assert result["taskBusy"] is False
+    assert result["loadCalls"][0] == "loadTasks"
+    assert result["loadCalls"][1] == {
+        "kind": "detail",
+        "taskId": "task:retry-me",
+        "options": {"preserveView": True, "reopenSocket": False},
+    }
+    assert result["loadCalls"][2] == "artifacts"
+
+
 def test_format_node_detail_heading_prefixes_node_id_before_title() -> None:
     result = _run_node_script(
         """

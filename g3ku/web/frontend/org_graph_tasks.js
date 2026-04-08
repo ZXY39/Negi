@@ -5,7 +5,7 @@ const TASK_SUMMARY_IDLE_RECONCILE_MS = 15_000;
 
 
 function taskStatusLabel(task) {
-    return ({ in_progress: "Running", success: "Done", failed: "Failed", blocked: "Paused", unpassed: "\u672a\u901a\u8fc7", unknown: "Unknown" })[taskStatusKey(task)] || "Unknown";
+    return ({ in_progress: "Running", success: "Done", failed: "Failed", blocked: "Paused", continued: "\u5df2\u7eed\u8dd1", unpassed: "\u672a\u901a\u8fc7", unknown: "Unknown" })[taskStatusKey(task)] || "Unknown";
 }
 
 function statusBucketMatches(task, bucketKey) {
@@ -242,6 +242,10 @@ function taskCardPatchEligible(previousTask, nextTask) {
     return String(previousTask.status || "") === String(nextTask.status || "")
         && !!previousTask.is_paused === !!nextTask.is_paused
         && !!previousTask.is_unread === !!nextTask.is_unread
+        && taskFailureClass(previousTask) === taskFailureClass(nextTask)
+        && taskFinalAcceptanceStatus(previousTask) === taskFinalAcceptanceStatus(nextTask)
+        && taskContinuationState(previousTask) === taskContinuationState(nextTask)
+        && taskContinuedByTaskId(previousTask) === taskContinuedByTaskId(nextTask)
         && String(previousTask.title || "") === String(nextTask.title || "")
         && String(previousTask.brief || "") === String(nextTask.brief || "")
         && Number(previousTask.max_depth || 0) === Number(nextTask.max_depth || 0);
@@ -611,6 +615,7 @@ function renderTasks() {
             return `<div class="pc-metric${isIncreasing ? " is-increasing" : ""}" data-task-metric="${item.key}"><span class="pc-metric-label">${item.label}</span><strong class="pc-metric-value${isIncreasing ? " is-increasing" : ""}" data-task-metric-value="${item.key}">${esc(hasValue ? formatTokenCount(item.value) : "--")}</strong></div>`;
         }).join("");
         const cardActions = taskCardActions(task);
+        const continuationSummary = taskContinuationSummary(task);
         const el = document.createElement("div");
         el.className = `project-card${selected ? " is-selected" : ""}${S.multiSelectMode ? " is-multi-mode" : ""}`;
         el.dataset.taskId = taskId;
@@ -642,6 +647,7 @@ function renderTasks() {
             </div>
             <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title" data-task-title title="${esc(task.title || taskId)}">${esc(task.title || taskId)}</h3></div></div>
             <div class="pc-created-at"><span class="pc-field-label">创建时间</span><span class="pc-field-value">${esc(taskCreatedAtText(task))}</span></div>
+            ${continuationSummary ? `<div class="pc-continuation-summary">${esc(continuationSummary)}</div>` : ""}
             <div class="pc-metrics">${metricsMarkup}</div>
         `;
         const toggle = el.querySelector(".project-select-toggle");
@@ -749,6 +755,7 @@ function taskCardActions(task) {
     if (taskWorkerControlsAvailable() && canPause(task)) actions.push("pause");
     if (taskWorkerControlsAvailable() && canResume(task)) actions.push("resume");
     if (taskWorkerControlsAvailable() && canRetry(task)) actions.push("retry");
+    if (taskIsSuperseded(task)) actions.push("open-continuation");
     if (canContinueEvaluate(task)) actions.push("continue-evaluate");
     if (canDelete(task)) actions.push("delete");
     return actions.map((action) => ({ action, label: taskActionText(action), tone: taskActionTone(action) }));
@@ -758,12 +765,13 @@ function primaryTaskAction(task) {
     if (taskWorkerControlsAvailable() && canPause(task)) return { action: "pause", label: "暂停", tone: "warn" };
     if (taskWorkerControlsAvailable() && canResume(task)) return { action: "resume", label: "开始", tone: "success" };
     if (taskWorkerControlsAvailable() && canRetry(task)) return { action: "retry", label: "重试", tone: "success" };
+    if (taskIsSuperseded(task)) return { action: "open-continuation", label: "查看续跑任务", tone: "success" };
     if (canContinueEvaluate(task)) return { action: "continue-evaluate", label: "\u8bc4\u4f30\u7eed\u8dd1", tone: "success" };
     return null;
 }
 
 function taskActionText(action) {
-    return ({ pause: "暂停", resume: "开始", retry: "重试", "continue-evaluate": "\u8bc4\u4f30\u7eed\u8dd1", delete: "删除" }[action] || "操作");
+    return ({ pause: "暂停", resume: "开始", retry: "重试", "open-continuation": "查看续跑任务", "continue-evaluate": "\u8bc4\u4f30\u7eed\u8dd1", delete: "删除" }[action] || "操作");
 }
 
 function taskActionSuccessTitle(action) {
@@ -780,6 +788,10 @@ function taskActionErrorText(action, error) {
         if (message.includes("task_not_failed")) return "仅失败任务可重试";
         if (message.includes("task_not_retryable")) return "\u8be5\u4efb\u52a1\u4e0d\u5141\u8bb8\u91cd\u8bd5";
         if (message.includes("task_not_found")) return "任务不存在或已被删除";
+    }
+    if (action === "open-continuation") {
+        if (message.includes("task_not_found")) return "续跑任务不存在或已被删除";
+        if (message.includes("continuation_task_missing")) return "该任务暂无已确认的续跑任务";
     }
     if (action === "continue-evaluate") {
         if (message.includes("task_not_unpassed")) return "\u4ec5\u672a\u901a\u8fc7\u9a8c\u6536\u7684\u4efb\u52a1\u53ef\u8bc4\u4f30\u7eed\u8dd1";
@@ -808,6 +820,23 @@ async function requestTaskAction(taskId, action) {
 
 async function runTaskAction(taskId, action, { returnFocus = null } = {}) {
     if (!taskId || !action) return;
+    if (action === "open-continuation") {
+        const normalizedTaskId = String(taskId || "").trim();
+        const task = S.tasksById?.[normalizedTaskId]
+            || (Array.isArray(S.tasks) ? S.tasks.find((item) => String(item?.task_id || "").trim() === normalizedTaskId) : null);
+        const continuationTaskId = taskContinuedByTaskId(task);
+        if (!continuationTaskId) {
+            showToast({ title: taskActionFailureTitle(action), text: taskActionErrorText(action, "continuation_task_missing"), kind: "warn" });
+            return;
+        }
+        try {
+            await openTask(continuationTaskId);
+            showToast({ title: taskActionSuccessTitle(action), text: continuationTaskId, kind: "success" });
+        } catch (e) {
+            showToast({ title: taskActionFailureTitle(action), text: taskActionErrorText(action, e), kind: "error" });
+        }
+        return;
+    }
     if (action === "delete") {
         openConfirm({
             title: "删除任务",
@@ -845,7 +874,7 @@ async function performTaskAction(taskId, action) {
         } else if (action === "continue-evaluate" && result?.continuation_task?.task_id) {
             await loadTaskDetail(result.continuation_task.task_id, { preserveView: true, reopenSocket: false });
             await loadTaskArtifacts();
-        } else if (action !== "retry" && S.currentTaskId === taskId) {
+        } else if (S.currentTaskId === taskId) {
             await loadTaskDetail(taskId, { preserveView: true, reopenSocket: false });
             await loadTaskArtifacts();
         }
@@ -905,7 +934,7 @@ async function performTaskBatchAction(action, eligible) {
         await loadTasks();
         if (action === "delete") {
             handleDeletedTasks(succeeded);
-        } else if (action !== "retry" && S.currentTaskId && succeeded.includes(S.currentTaskId)) {
+        } else if (S.currentTaskId && succeeded.includes(S.currentTaskId)) {
             await loadTaskDetail(S.currentTaskId, { preserveView: true, reopenSocket: false });
             await loadTaskArtifacts();
         }
