@@ -918,6 +918,48 @@ class G3kuHybridStore(BaseStore):
         except Exception:
             pass
 
+    @classmethod
+    def purge_process_local_dense_backends(
+        cls,
+        *,
+        qdrant_path: Path,
+        qdrant_collection: str,
+    ) -> int:
+        """Drop any process-local dense backend entries for the same Qdrant target.
+
+        This is used during explicit runtime refresh/reset to recover from stale
+        same-process dense backends that still hold the local Qdrant file lock
+        after the active memory runtime has been replaced.
+        """
+
+        normalized_path = str(Path(qdrant_path).expanduser().resolve()).lower()
+        normalized_collection = str(qdrant_collection or "").strip()
+        stale_entries: list[tuple[Any, Any]] = []
+        seen_store_ids: set[int] = set()
+
+        with cls._dense_backend_lock:
+            for dense_key, shared in list(cls._dense_backend_registry.items()):
+                key_path, key_collection, _embedding_model = dense_key
+                if key_path != normalized_path:
+                    continue
+                if normalized_collection and key_collection != normalized_collection:
+                    continue
+                cls._dense_backend_registry.pop(dense_key, None)
+                store = getattr(shared, "store", None)
+                owner_lock = getattr(shared, "owner_lock", None)
+                store_id = id(store)
+                if store is not None and store_id in seen_store_ids:
+                    continue
+                if store is not None:
+                    seen_store_ids.add(store_id)
+                stale_entries.append((store, owner_lock))
+
+        for store, owner_lock in stale_entries:
+            cls._close_qdrant_store(store)
+            _release_file_lock(owner_lock)
+
+        return len(stale_entries)
+
     def close(self) -> None:
         qdrant_store = self._qdrant
         dense_key = self._shared_dense_key

@@ -200,10 +200,12 @@ class RuntimeBootstrapBridge:
             self._close_value(commit_service)
         self._loop.commit_service = None
 
+        memory_cfg = getattr(self._loop, '_memory_runtime_settings', None)
         memory_manager = getattr(self._loop, 'memory_manager', None)
         if memory_manager is not None:
             self._close_value(memory_manager)
         self._loop.memory_manager = None
+        self._purge_stale_dense_backends(memory_cfg)
 
         checkpointer = getattr(self._loop, '_checkpointer', None)
         if checkpointer is not None:
@@ -225,6 +227,32 @@ class RuntimeBootstrapBridge:
         invalidate = getattr(runner, 'invalidate_runtime_bindings', None)
         if callable(invalidate):
             invalidate()
+
+    def _purge_stale_dense_backends(self, memory_cfg: Any | None) -> None:
+        store_cfg = getattr(memory_cfg, 'store', None) if memory_cfg is not None else None
+        if store_cfg is None:
+            return
+        try:
+            from g3ku.agent.rag_memory import G3kuHybridStore
+
+            qdrant_path = resolve_path_in_workspace(
+                getattr(store_cfg, 'qdrant_path', 'memory/qdrant'),
+                self._loop.workspace,
+            )
+            qdrant_collection = str(getattr(store_cfg, 'qdrant_collection', '') or '').strip()
+            purged = G3kuHybridStore.purge_process_local_dense_backends(
+                qdrant_path=qdrant_path,
+                qdrant_collection=qdrant_collection,
+            )
+            if purged:
+                logger.info(
+                    'Purged {} stale process-local dense backend(s) for {} ({})',
+                    purged,
+                    qdrant_path,
+                    qdrant_collection or 'default',
+                )
+        except Exception as exc:
+            logger.debug('stale dense backend purge skipped: {}', exc)
 
     def _close_value(self, value) -> None:
         close = getattr(value, 'close', None)

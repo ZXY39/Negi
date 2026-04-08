@@ -364,6 +364,68 @@ def test_g3ku_hybrid_store_releases_owner_lock_after_last_reference(tmp_path, mo
         G3kuHybridStore._dense_backend_registry.clear()
 
 
+def test_reset_memory_runtime_purges_stale_dense_backends_for_same_qdrant_group(tmp_path, monkeypatch):
+    calls = {"closed": 0, "released": 0}
+    owner_lock = object()
+    qdrant_path = tmp_path / "qdrant"
+
+    class FakeDenseStore:
+        def close(self) -> None:
+            calls["closed"] += 1
+
+    class FakeMemoryManager:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        def close(self) -> None:
+            self.closed += 1
+
+    memory_manager = FakeMemoryManager()
+    loop = SimpleNamespace(
+        workspace=tmp_path,
+        memory_manager=memory_manager,
+        commit_service=None,
+        _memory_runtime_settings=SimpleNamespace(
+            store=SimpleNamespace(
+                qdrant_path=str(qdrant_path),
+                qdrant_collection="test_collection",
+            )
+        ),
+        _store=object(),
+        _store_enabled=True,
+        _checkpointer_enabled=False,
+        _checkpointer_backend="sqlite",
+        _checkpointer_path=None,
+        _checkpointer=None,
+        _checkpointer_cm=None,
+        multi_agent_runner=None,
+    )
+
+    monkeypatch.setattr(
+        "g3ku.agent.rag_memory._release_file_lock",
+        lambda handle: calls.__setitem__("released", calls["released"] + int(handle is owner_lock)),
+    )
+
+    G3kuHybridStore._dense_backend_registry.clear()
+    G3kuHybridStore._dense_backend_registry[
+        (str(qdrant_path.resolve()).lower(), "test_collection", "dashscope:qwen3-vl-embedding")
+    ] = SimpleNamespace(
+        store=FakeDenseStore(),
+        refs=1,
+        owner_lock=owner_lock,
+    )
+
+    try:
+        RuntimeBootstrapBridge(loop)._reset_memory_runtime()
+
+        assert memory_manager.closed == 1
+        assert calls["closed"] == 1
+        assert calls["released"] == 1
+        assert G3kuHybridStore._dense_backend_registry == {}
+    finally:
+        G3kuHybridStore._dense_backend_registry.clear()
+
+
 def test_load_workspace_dashscope_settings_reads_api_key_from_security_overlay(tmp_path):
     workspace = tmp_path / "workspace"
     config_dir = workspace / ".g3ku"
