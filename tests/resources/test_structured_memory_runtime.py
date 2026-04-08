@@ -122,11 +122,13 @@ async def test_delete_structured_fact_removes_only_target(tmp_path: Path) -> Non
             "state-remove",
             statement="State is archived.",
             observed_at="2026-04-08T12:10:00+00:00",
+            slot_id="slot-remove",
         )
         remaining = _stateful_fact(
             "state-keep",
             statement="State is active.",
             observed_at="2026-04-08T12:15:00+00:00",
+            slot_id="slot-keep",
         )
         await manager.upsert_structured_memory_facts(
             session_key=SESSION_KEY,
@@ -134,6 +136,11 @@ async def test_delete_structured_fact_removes_only_target(tmp_path: Path) -> Non
             chat_id=CHAT_ID,
             facts=[removable, remaining],
         )
+        assert {fact["fact_id"] for fact in await manager.list_active_structured_facts(
+            session_key=SESSION_KEY,
+            channel=CHANNEL,
+            chat_id=CHAT_ID,
+        )} == {removable["fact_id"], remaining["fact_id"]}
         await manager.delete_structured_memory_facts(
             session_key=SESSION_KEY,
             channel=CHANNEL,
@@ -145,8 +152,7 @@ async def test_delete_structured_fact_removes_only_target(tmp_path: Path) -> Non
             channel=CHANNEL,
             chat_id=CHAT_ID,
         )
-        assert len(active) == 1
-        assert active[0]["fact_id"] == remaining["fact_id"]
+        assert {fact["fact_id"] for fact in active} == {remaining["fact_id"]}
     finally:
         manager.close()
 
@@ -156,7 +162,7 @@ async def test_current_state_rendered_statement_includes_observed_at(tmp_path: P
     manager = MemoryManager(tmp_path, _memory_cfg())
     try:
         timestamp = "2026-04-08T12:20:00+00:00"
-        statement = f"State is warm. observed_at={timestamp}"
+        statement = "State is warm."
         fact = _stateful_fact(
             "state-rendered",
             statement=statement,
@@ -174,6 +180,7 @@ async def test_current_state_rendered_statement_includes_observed_at(tmp_path: P
             chat_id=CHAT_ID,
         )
         rendered = str(active[0].get("rendered_statement") or "")
+        assert "State is warm." in rendered
         assert timestamp in rendered
     finally:
         manager.close()

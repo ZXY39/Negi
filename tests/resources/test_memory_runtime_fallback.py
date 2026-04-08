@@ -623,6 +623,10 @@ def test_memory_manager_schema_bump_resets_runtime_artifacts(monkeypatch, tmp_pa
         assert manager.journal_file.read_text(encoding="utf-8").strip() == ""
         assert "old fact" not in manager.memory_file.read_text(encoding="utf-8")
         assert "old history" not in manager.history_file.read_text(encoding="utf-8")
+        structured_state = memory_dir / "structured_state.json"
+        assert structured_state.exists()
+        structured_payload = json.loads(structured_state.read_text(encoding="utf-8"))
+        assert structured_payload.get("schema_version") == rag_memory.MEMORY_RUNTIME_SCHEMA_VERSION
     finally:
         manager.close()
 
