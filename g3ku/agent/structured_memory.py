@@ -6,6 +6,7 @@ structured fact plus a few small helper utilities used by the memory runtime.
 
 from __future__ import annotations
 
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Literal, get_args
 
@@ -197,6 +198,12 @@ def equivalent_fact(left: StructuredMemoryFact, right: StructuredMemoryFact) -> 
     if left.time_semantics != right.time_semantics:
         return False
 
+    # For current-state slots, the observation timestamp participates in dedupe.
+    # Otherwise a later observation with the same value would get dropped.
+    if left.time_semantics == "current_state":
+        if (left.observed_at or "") != (right.observed_at or ""):
+            return False
+
     if left.value != right.value:
         return False
 
@@ -230,3 +237,59 @@ def fact_to_metadata(fact: StructuredMemoryFact) -> dict[str, Any]:
         meta["qualifier"] = fact.qualifier
     return meta
 
+
+def _parse_iso(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def replacement_required(old: StructuredMemoryFact, new: StructuredMemoryFact) -> bool:
+    """Return True if `new` should replace `old` in the active set.
+
+    The runtime currently only performs deterministic replacement for "current_state"
+    slots (stateful facts). Other categories may be handled via merges later.
+    """
+
+    if old.canonical_key != new.canonical_key:
+        return False
+
+    # Never "replace" with an equivalent fact; treat it as a noop.
+    if equivalent_fact(old, new):
+        return False
+
+    if old.time_semantics != "current_state" or new.time_semantics != "current_state":
+        return False
+
+    old_ts = _parse_iso(old.observed_at)
+    new_ts = _parse_iso(new.observed_at)
+    if old_ts is not None and new_ts is not None:
+        if new_ts > old_ts:
+            return True
+        if new_ts < old_ts:
+            return False
+    else:
+        # Fall back to lexicographic ordering for deterministic behavior.
+        if str(new.observed_at or "") > str(old.observed_at or ""):
+            return True
+        if str(new.observed_at or "") < str(old.observed_at or ""):
+            return False
+
+    # Tie-break deterministically when observed_at matches or parsing failed.
+    if str(new.updated_at or "") > str(old.updated_at or ""):
+        return True
+    if str(new.updated_at or "") < str(old.updated_at or ""):
+        return False
+    return str(new.fact_id or "") > str(old.fact_id or "")
+
+
+def merge_required(old: StructuredMemoryFact, new: StructuredMemoryFact) -> bool:
+    """Return True if `new` should be merged into `old` rather than replaced.
+
+    Task 3 scope: no structured merge semantics are required for the runtime tests.
+    This hook exists so Task 4 can add category-specific merges deterministically.
+    """
+
+    _ = old, new
+    return False
