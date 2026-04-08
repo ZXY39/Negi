@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import g3ku.runtime.context.frontdoor_catalog_selection as selection_module
 from g3ku.runtime.context.types import RetrievedContextBundle
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
@@ -180,13 +181,25 @@ def test_ceo_prompt_builder_keeps_memory_guidance() -> None:
 
 
 @pytest.mark.asyncio
-async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_available() -> None:
+async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _SemanticMemoryManager(
         response="remembered browser workflow",
         skill_record_ids=["skill:focused-skill", "skill:secondary-skill"],
         tool_record_ids=["tool:agent_browser", "tool:web_fetch"],
     )
+
+    async def _invoke_model_rewrite(**kwargs) -> dict[str, str]:
+        _ = kwargs
+        return {
+            "skill_query": "semantic focused skill query",
+            "tool_query": "semantic focused tool query",
+            "model": "frontdoor-query-rewriter",
+        }
+
+    monkeypatch.setattr(selection_module, "_invoke_frontdoor_catalog_rewrite_model", _invoke_model_rewrite)
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
 
     result = await builder.build_for_ceo(
@@ -207,6 +220,13 @@ async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_ava
     )
 
     assert prompt_builder.calls == [["focused-skill", "secondary-skill"]]
+    assert result.trace["semantic_frontdoor"]["queries"] == {
+        "raw_query": "focused browser workflow",
+        "skill_query": "semantic focused skill query",
+        "tool_query": "semantic focused tool query",
+        "status": "rewritten",
+        "model": "frontdoor-query-rewriter",
+    }
     assert result.trace["retrieval_scope"] == {
         "mode": "dense_only",
         "search_context_types": ["memory", "skill", "resource"],
@@ -523,7 +543,56 @@ async def test_message_builder_dense_unavailable_keeps_non_callable_external_too
     system_prompt = str(result.model_messages[0].get("content") or "")
     assert '`external_docs`' in system_prompt
     assert "External docs short summary." in system_prompt
+    assert "Install dir not configured" in system_prompt
     assert [item["tool_id"] for item in result.trace["external_tools"]] == ["external_docs"]
+
+
+@pytest.mark.asyncio
+async def test_message_builder_dense_unavailable_renders_l0_only_for_unavailable_callable_tool_family() -> None:
+    memory_manager = _SemanticMemoryManager(response="")
+    memory_manager.store = SimpleNamespace(_dense_enabled=False)
+    loop = SimpleNamespace(
+        workspace=Path.cwd(),
+        main_task_service=None,
+        memory_manager=memory_manager,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                skill_inventory_top_k=1,
+                extension_tool_top_k=1,
+                core_tools=[],
+            )
+        ),
+    )
+    builder = CeoMessageBuilder(
+        loop=loop,
+        prompt_builder=CeoPromptBuilder(loop=SimpleNamespace(workspace=Path.cwd())),
+    )
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="fallback summary mode unavailable callable tool",
+        exposure={
+            "skills": [],
+            "tool_families": [
+                _family(
+                    "agent_browser",
+                    "Callable fallback short summary. Later sentence should not appear.",
+                    callable=True,
+                    available=False,
+                    metadata={"l0": "Callable fallback short summary. Later l0 sentence should not appear."},
+                )
+            ],
+            "tool_names": ["filesystem", "load_tool_context"],
+        },
+        persisted_session=None,
+    )
+
+    system_prompt = str(result.model_messages[0].get("content") or "")
+    assert "## Tool Resources That Require `load_tool_context`" in system_prompt
+    assert '`agent_browser`' in system_prompt
+    assert "Callable fallback short summary." in system_prompt
+    assert "Later sentence should not appear." not in system_prompt
+    assert "Later l0 sentence should not appear." not in system_prompt
 
 
 @pytest.mark.asyncio
