@@ -28,6 +28,7 @@ from g3ku.runtime.api import websocket_ceo
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor import checkpoint_inspection
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
+from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.frontdoor.state_models import (
     CeoFrontdoorInterrupted,
     CeoPersistentState,
@@ -87,6 +88,37 @@ def test_ceo_snapshot_keeps_legacy_tool_events_when_new_trace_fields_absent() ->
     assert "execution_trace_summary" not in snapshot[0]
     assert snapshot[0]["tool_events"][0]["tool_name"] == "skill-installer"
     assert snapshot[0]["tool_events"][0]["status"] == "running"
+
+
+def test_execution_snapshot_history_keeps_legacy_tool_events_without_stage_trace() -> None:
+    runtime_session = SimpleNamespace(
+        inflight_turn_snapshot=lambda: {
+            "status": "running",
+            "user_message": {"content": "install weather skill"},
+            "tool_events": [
+                {
+                    "status": "success",
+                    "tool_name": "skill-installer",
+                    "text": "installed weather",
+                    "tool_call_id": "skill-installer:1",
+                    "source": "user",
+                }
+            ],
+        },
+        paused_execution_context_snapshot=lambda: None,
+        state=SimpleNamespace(session_key="web:shared"),
+    )
+
+    history, source = web_ceo_sessions.extract_execution_live_raw_tail(
+        runtime_session,
+        None,
+        require_active_stage=False,
+    )
+
+    assert source == "live_runtime"
+    assert history[0] == {"role": "user", "content": "install weather skill"}
+    assert history[1]["tool_events"][0]["tool_name"] == "skill-installer"
+    assert "Recent tool results:" in history[1]["content"]
 
 
 class _CompiledGraphRecorder:

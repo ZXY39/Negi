@@ -1907,9 +1907,54 @@ async def test_runtime_agent_session_persists_execution_trace_summary_into_sessi
     reloaded_session = SessionManager(tmp_path).get_or_create(session_id)
     assert [message["role"] for message in reloaded_session.messages] == ["user", "assistant"]
     assert reloaded_session.messages[1]["content"] == "The weather skill has been installed."
-    tools = reloaded_session.messages[1]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+    tools = reloaded_session.messages[1]["tool_events"]
     assert [item["status"] for item in tools] == ["success"]
     assert tools[0]["tool_name"] == "skill-installer"
+
+    recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)
+    assert recent_history[-2] == {"role": "user", "content": "Install the weather skill"}
+    assert "Recent tool results:" in recent_history[-1]["content"]
+    assert "skill-installer (success): installed weather" in recent_history[-1]["content"]
+
+
+def test_inflight_snapshot_with_malformed_stage_state_keeps_legacy_tool_flow() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._frontdoor_stage_state = {"stages": [None]}
+    session._event_log = [
+        {
+            "type": "tool_execution_start",
+            "timestamp": "2026-04-08T08:20:00Z",
+            "payload": {
+                "tool_name": "load_tool_context",
+                "text": "load_tool_context started",
+                "tool_call_id": "load_tool_context:1",
+            },
+        },
+        {
+            "type": "tool_execution_end",
+            "timestamp": "2026-04-08T08:20:02Z",
+            "payload": {
+                "tool_name": "load_tool_context",
+                "text": "load_tool_context done",
+                "tool_call_id": "load_tool_context:1",
+                "is_error": False,
+            },
+        },
+    ]
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert snapshot is not None
+    assert snapshot.get("execution_trace_summary") == {}
+    assert [item["tool_name"] for item in snapshot["tool_events"]] == ["load_tool_context"]
+    assert [item["status"] for item in snapshot["tool_events"]] == ["success"]
 
 
 @pytest.mark.asyncio

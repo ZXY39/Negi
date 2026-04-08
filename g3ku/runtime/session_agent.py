@@ -433,10 +433,16 @@ class RuntimeAgentSession:
                 current["elapsed_seconds"] = float(item["elapsed_seconds"])
         return ordered_tools
 
-    def _frontdoor_execution_trace_summary_snapshot(self) -> dict[str, Any]:
+    def _has_renderable_frontdoor_stage_state(self) -> bool:
         stage_state = getattr(self, "_frontdoor_stage_state", None)
         stages = stage_state.get("stages") if isinstance(stage_state, dict) else None
-        if isinstance(stages, list) and stages:
+        if not isinstance(stages, list):
+            return False
+        return any(isinstance(stage, dict) for stage in stages)
+
+    def _frontdoor_execution_trace_summary_snapshot(self) -> dict[str, Any]:
+        stage_state = getattr(self, "_frontdoor_stage_state", None)
+        if self._has_renderable_frontdoor_stage_state():
             snapshot = copy.deepcopy(stage_state)
             interaction_flow = self._interaction_flow_snapshot()
             if not interaction_flow:
@@ -635,9 +641,7 @@ class RuntimeAgentSession:
         if not (self._state.is_running or status in {"running", "paused", "error"}):
             return None
         execution_trace_summary = self._frontdoor_execution_trace_summary_snapshot()
-        stage_state = getattr(self, "_frontdoor_stage_state", None)
-        stages = stage_state.get("stages") if isinstance(stage_state, dict) else None
-        has_real_stage_state = isinstance(stages, list) and bool(stages)
+        has_real_stage_state = self._has_renderable_frontdoor_stage_state()
         legacy_tool_events = [] if has_real_stage_state else self._legacy_tool_events_snapshot()
         compression = self._compression_snapshot()
         snapshot: dict[str, Any] = {
@@ -783,10 +787,14 @@ class RuntimeAgentSession:
             assistant_payload: dict[str, Any] = {}
             execution_trace_summary = self._frontdoor_execution_trace_summary_snapshot()
             compression = self._compression_snapshot()
+            has_real_stage_state = self._has_renderable_frontdoor_stage_state()
+            legacy_tool_events = [] if has_real_stage_state else self._legacy_tool_events_snapshot()
             if execution_trace_summary:
                 assistant_payload["execution_trace_summary"] = execution_trace_summary
             if compression:
                 assistant_payload["compression"] = compression
+            if legacy_tool_events:
+                assistant_payload["tool_events"] = legacy_tool_events
             metadata_payload = dict(assistant_metadata or {})
             verified_task_ids = self._normalize_verified_task_ids(self._last_verified_task_ids)
             if verified_task_ids:

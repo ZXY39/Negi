@@ -323,6 +323,16 @@ def _snapshot_compression(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
 
+def _snapshot_tool_events(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(snapshot, dict):
+        return []
+    items: list[dict[str, Any]] = []
+    for raw in list(snapshot.get("tool_events") or []):
+        if isinstance(raw, dict):
+            items.append(dict(raw))
+    return items
+
+
 def _execution_trace_tool_items(execution_trace_summary: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(execution_trace_summary, dict):
         return []
@@ -400,7 +410,15 @@ def _execution_snapshot_history_messages(snapshot: dict[str, Any] | None) -> lis
     compression = _snapshot_compression(normalized_snapshot)
     if compression:
         assistant_message['compression'] = compression
-    if assistant_message.get('content') or assistant_message.get('execution_trace_summary') or assistant_message.get('compression'):
+    tool_events = _snapshot_tool_events(normalized_snapshot)
+    if tool_events:
+        assistant_message['tool_events'] = tool_events
+    if (
+        assistant_message.get('content')
+        or assistant_message.get('execution_trace_summary')
+        or assistant_message.get('compression')
+        or assistant_message.get('tool_events')
+    ):
         messages.append(_history_entry_from_message(assistant_message))
     return messages
 
@@ -420,7 +438,8 @@ def _snapshot_has_material_live_history(
     has_execution_trace = bool(_execution_trace_tool_items(execution_trace_summary))
     compression = _snapshot_compression(normalized_snapshot)
     has_compression = bool(str(compression.get('text') or '').strip() or str(compression.get('status') or '').strip())
-    if has_execution_trace or assistant_text or has_compression:
+    has_tool_events = bool(_snapshot_tool_events(normalized_snapshot))
+    if has_execution_trace or assistant_text or has_compression or has_tool_events:
         return True
     return False
 
@@ -553,7 +572,7 @@ def _history_entry_from_message(message: dict[str, Any]) -> dict[str, Any]:
         "role": str(message.get("role") or ""),
         "content": _history_content_from_message(message),
     }
-    for key in ("tool_calls", "tool_call_id", "name", "execution_trace_summary", "compression"):
+    for key in ("tool_calls", "tool_call_id", "name", "execution_trace_summary", "compression", "tool_events"):
         if key in message:
             entry[key] = message[key]
     return entry
