@@ -1,22 +1,12 @@
 from __future__ import annotations
 
 import importlib
-import sys
-import types
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
 def _load_admin_rest():
-    stub_module = types.ModuleType("g3ku.runtime.frontdoor.ceo_summarizer")
-
-    async def _stub_summarize_frontdoor_history(**kwargs):
-        _ = kwargs
-        raise AssertionError("frontdoor summarizer should not be called in this test")
-
-    stub_module.summarize_frontdoor_history = _stub_summarize_frontdoor_history
-    sys.modules["g3ku.runtime.frontdoor.ceo_summarizer"] = stub_module
     return importlib.import_module("main.api.admin_rest")
 
 

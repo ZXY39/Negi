@@ -437,8 +437,22 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
             if isinstance(raw_text, str) and raw_text.strip():
                 content = raw_text.strip()
         attachments = _normalize_snapshot_attachments(raw) if role == 'user' else []
-        tool_events = _normalize_snapshot_tool_events(raw.get('tool_events')) if role == 'assistant' else []
-        if not content and not attachments and not tool_events:
+        execution_trace_summary = (
+            dict(raw.get('execution_trace_summary'))
+            if role == 'assistant' and isinstance(raw.get('execution_trace_summary'), dict)
+            else {}
+        )
+        compression = (
+            dict(raw.get('compression'))
+            if role == 'assistant' and isinstance(raw.get('compression'), dict)
+            else {}
+        )
+        legacy_tool_events = (
+            _normalize_snapshot_tool_events(raw.get('tool_events'))
+            if role == 'assistant'
+            else []
+        )
+        if not content and not attachments and not execution_trace_summary and not compression and not legacy_tool_events:
             continue
         item = {'role': role, 'content': content}
         timestamp = raw.get('timestamp')
@@ -446,8 +460,12 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
             item['timestamp'] = timestamp.strip()
         if attachments:
             item['attachments'] = attachments
-        if tool_events:
-            item['tool_events'] = tool_events
+        if execution_trace_summary:
+            item['execution_trace_summary'] = execution_trace_summary
+        if compression:
+            item['compression'] = compression
+        if not execution_trace_summary and not compression and legacy_tool_events:
+            item['tool_events'] = legacy_tool_events
         items.append(item)
     return items
 

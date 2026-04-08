@@ -27,13 +27,8 @@ from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
-from g3ku.config.schema import MemoryAssemblyConfig
-from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
-from g3ku.config.schema import MemoryAssemblyConfig
-from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
-from g3ku.runtime.frontdoor._ceo_langgraph_impl import _build_args_schema
+from g3ku.runtime.frontdoor._ceo_runtime_ops import _build_args_schema
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
-from g3ku.runtime.frontdoor.history_compaction import FRONTDOOR_HISTORY_SUMMARY_MARKER
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import SessionManager
 
@@ -301,8 +296,9 @@ def test_tool_registry_langchain_tool_preserves_nested_array_object_contracts() 
     assert dict(nested_properties.get("kind") or {}).get("enum") == ["profile", "preference"]
 
 
+
 @pytest.mark.asyncio
-async def test_summarize_messages_respects_stage_budget_defaults() -> None:
+async def test_summarize_messages_keeps_history_raw_under_stage_budget_defaults() -> None:
     runner = CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
             _memory_runtime_settings=SimpleNamespace(
@@ -310,37 +306,12 @@ async def test_summarize_messages_respects_stage_budget_defaults() -> None:
             )
         )
     )
-
-    runner._invoke_summary_model = None
 
     messages = [{"role": "user", "content": f"message {idx}"} for idx in range(22)]
 
     result = await runner._summarize_messages(messages=messages, state={})
 
-    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
-    assert len(result["messages"]) == 21
-
-
-@pytest.mark.asyncio
-async def test_summarize_messages_compacts_between_trigger_and_keep_stage() -> None:
-    runner = CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(
-            _memory_runtime_settings=SimpleNamespace(
-                assembly=MemoryAssemblyConfig(),
-            )
-        )
-    )
-
-    runner._invoke_summary_model = None
-
-    messages = [{"role": "user", "content": f"message {idx}"} for idx in range(15)]
-
-    result = await runner._summarize_messages(messages=messages, state={})
-
-    assert len(result["messages"]) < len(messages)
-    summary_meta = dict(result["messages"][0].get("metadata") or {})
-    assert summary_meta.get("frontdoor_history_summary") is True
-
+    assert result == {"messages": messages}
 
 @pytest.mark.asyncio
 async def test_runtime_agent_session_prompt_keeps_rag_ingest_payload_raw_and_skips_commit(tmp_path, monkeypatch) -> None:
@@ -401,6 +372,20 @@ async def test_ceo_frontdoor_runner_directly_executes_visible_tool_without_stage
                 content="",
                 tool_calls=[
                     ToolCallRequest(
+                        id="call-stage-1",
+                        name="submit_next_stage",
+                        arguments={
+                            "stage_goal": "Create the CEO stage before using record_tool",
+                            "tool_round_budget": 1,
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
                         id="call-1",
                         name="record_tool",
                         arguments={"value": "alpha"},
@@ -451,7 +436,7 @@ async def test_ceo_frontdoor_runner_directly_executes_visible_tool_without_stage
 
     assert output == "done"
     assert executed == [("record_tool", "alpha")]
-    assert len(backend.calls) == 2
+    assert len(backend.calls) == 3
 
 
 @pytest.mark.asyncio
@@ -519,6 +504,20 @@ async def test_ceo_frontdoor_runner_executes_xml_tool_call_directly_without_repa
     backend = _BackendRecorder(
         [
             LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-stage-1",
+                        name="submit_next_stage",
+                        arguments={
+                            "stage_goal": "Open a stage before issuing XML tool syntax",
+                            "tool_round_budget": 1,
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
                 content='<minimax:tool_call><invoke name="record_tool"><parameter name="value">alpha</parameter></invoke></minimax:tool_call>',
                 tool_calls=[],
                 finish_reason="stop",
@@ -566,10 +565,10 @@ async def test_ceo_frontdoor_runner_executes_xml_tool_call_directly_without_repa
 
     assert output == "repair succeeded"
     assert executed == [("record_tool", "alpha")]
-    assert len(backend.calls) == 2
+    assert len(backend.calls) == 3
     assert not any(
         "XML-style pseudo tool calling" in str(item.get("content") or "")
-        for item in list(backend.calls[1].get("messages") or [])
+        for item in list(backend.calls[2].get("messages") or [])
     )
 
 
@@ -581,6 +580,20 @@ async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload_after
     executed: list[int] = []
     backend = _BackendRecorder(
         [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-stage-1",
+                        name="submit_next_stage",
+                        arguments={
+                            "stage_goal": "Open a stage before repairing the XML payload",
+                            "tool_round_budget": 1,
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
             LLMResponse(
                 content='<minimax:tool_call><invoke name="count_tool"><parameter name="count">oops</parameter></invoke></minimax:tool_call>',
                 tool_calls=[],
@@ -634,8 +647,8 @@ async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload_after
 
     assert output == "repair succeeded"
     assert executed == [2]
-    assert len(backend.calls) == 3
-    repair_messages = list(backend.calls[1].get("messages") or [])
+    assert len(backend.calls) == 4
+    repair_messages = list(backend.calls[2].get("messages") or [])
     assert any("XML-style pseudo tool calling" in str(item.get("content") or "") for item in repair_messages)
 
 
@@ -649,7 +662,7 @@ async def test_ceo_frontdoor_runner_retries_empty_turn_until_valid_result(monkey
     async def _fake_sleep(delay: float) -> None:
         sleep_calls.append(float(delay))
 
-    monkeypatch.setattr("g3ku.runtime.frontdoor._ceo_langgraph_impl.asyncio.sleep", _fake_sleep)
+    monkeypatch.setattr("g3ku.runtime.frontdoor._ceo_runtime_ops.asyncio.sleep", _fake_sleep)
 
     backend = _BackendRecorder(
         [
@@ -711,6 +724,20 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
 
     backend = _BackendRecorder(
         [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-stage-1",
+                        name="submit_next_stage",
+                        arguments={
+                            "stage_goal": "Create a stage before dispatching the async task",
+                            "tool_round_budget": 1,
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
             LLMResponse(
                 content="",
                 tool_calls=[
@@ -777,51 +804,98 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
     output = await runner.run_turn(user_input=SimpleNamespace(content="帮我查有没有上下文管理 skill"), session=session)
 
     assert output == "后台修复任务已经建立，任务号 `task:demo-123`。我先继续排查，完成后直接把结果同步给你。"
-    assert len(backend.calls) == 2
+    assert len(backend.calls) == 3
 
 
 def test_frontdoor_compaction_settings_defaults_to_stage_budget() -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
 
-    assert runner._frontdoor_compaction_settings() == (20, 10)
+    with pytest.raises(AttributeError):
+        runner._frontdoor_compaction_settings()
 
 
+def test_build_prompt_context_no_longer_uses_summary_text_overlay() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
-def test_frontdoor_compaction_settings_defaults_to_stage_budget() -> None:
-    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
-
-    assert runner._frontdoor_compaction_settings() == (20, 10)
-
-
-@pytest.mark.asyncio
-async def test_summarize_messages_respects_stage_budget_defaults() -> None:
-    runner = CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(
-            _memory_runtime_settings=SimpleNamespace(
-                assembly=MemoryAssemblyConfig(),
-            )
-        )
+    result = runner.build_prompt_context(
+        state={
+            "summary_text": "## CEO Durable Summary\n- durable memory",
+            "frontdoor_stage_state": {
+                "active_stage_id": "stage-1",
+                "transition_required": True,
+                "stages": [
+                    {
+                        "stage_id": "stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Inspect the current request",
+                        "tool_round_budget": 1,
+                        "tool_rounds_used": 1,
+                        "status": "active",
+                        "mode": "自主执行",
+                        "completed_stage_summary": "",
+                        "key_refs": [],
+                        "rounds": [],
+                    }
+                ],
+            },
+        },
+        runtime=SimpleNamespace(),
+        tools=[],
     )
 
-    messages = [{"role": "user", "content": f"message {idx}"} for idx in range(22)]
+    overlay = str(result["system_overlay"])
+    assert "Current CEO stage budget is exhausted: 1/1." in overlay
+    assert "Do not finish yet. First summarize the completed progress for this stage" in overlay
+    assert "Use the existing CEO layered context rules." not in overlay
+    assert "## CEO Durable Summary" not in overlay
 
-    result = await runner._summarize_messages(messages=messages, state={})
 
-    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
-    assert len(result["messages"]) == 21
+def test_build_prompt_context_keeps_dispatch_overlay_and_exhausted_stage_instruction() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
+    result = runner.build_prompt_context(
+        state={
+            "repair_overlay_text": runner._verified_dispatch_reply_overlay(task_id="task:demo-123"),
+            "frontdoor_stage_state": {
+                "active_stage_id": "stage-1",
+                "transition_required": True,
+                "stages": [
+                    {
+                        "stage_id": "stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Dispatch the follow-up investigation",
+                        "tool_round_budget": 1,
+                        "tool_rounds_used": 1,
+                        "status": "active",
+                        "mode": "自主执行",
+                        "completed_stage_summary": "",
+                        "key_refs": [],
+                        "rounds": [
+                            {
+                                "round_id": "stage-1:round-1",
+                                "round_index": 1,
+                                "tool_names": ["create_async_task"],
+                                "tool_call_ids": ["call-1"],
+                                "budget_counted": True,
+                            }
+                        ],
+                    }
+                ],
+            },
+        },
+        runtime=SimpleNamespace(),
+        tools=[],
+    )
+
+    overlay = str(result["system_overlay"])
+    assert "A real async task has already been created and verified." in overlay
+    assert "The verified task id is `task:demo-123`." in overlay
+    assert "Current CEO stage budget is exhausted: 1/1." in overlay
+    assert "First summarize the completed progress for this stage and call `submit_next_stage`" in overlay
 
 @pytest.mark.asyncio
-async def test_graph_prepare_turn_falls_back_to_heuristic_compaction_when_summarizer_disabled() -> None:
-    loop = SimpleNamespace(
-        _memory_runtime_settings=SimpleNamespace(
-            assembly=SimpleNamespace(
-                frontdoor_summarizer_enabled=False,
-                frontdoor_summarizer_trigger_message_count=4,
-                frontdoor_summarizer_keep_message_count=3,
-            )
-        )
-    )
+async def test_graph_prepare_turn_keeps_messages_raw_and_drops_summary_state() -> None:
+    loop = SimpleNamespace()
     runner = CeoFrontDoorRunner(loop=loop)
 
     result = await runner._graph_prepare_turn(
@@ -832,13 +906,14 @@ async def test_graph_prepare_turn_falls_back_to_heuristic_compaction_when_summar
         runtime=SimpleNamespace(context=SimpleNamespace(session=None)),
     )
 
-    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
-    assert result["summary_payload"] == {}
-    assert result["summary_model_key"] == ""
+    assert result["messages"] == [{"role": "user", "content": f"message {idx}"} for idx in range(6)]
+    assert "summary_text" not in result
+    assert "summary_payload" not in result
+    assert "summary_model_key" not in result
 
 
 @pytest.mark.asyncio
-async def test_graph_execute_tools_preserves_model_summary_state(monkeypatch, tmp_path) -> None:
+async def test_graph_execute_tools_drops_frontdoor_summary_fields(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None
 
@@ -852,28 +927,8 @@ async def test_graph_execute_tools_preserves_model_summary_state(monkeypatch, tm
         max_iterations=8,
         workspace=tmp_path,
         temp_dir=str(tmp_path / "tmp"),
-        _memory_runtime_settings=SimpleNamespace(
-            assembly=SimpleNamespace(
-                frontdoor_summarizer_enabled=True,
-                frontdoor_summarizer_model_key="summary-model",
-                frontdoor_summarizer_trigger_message_count=4,
-                frontdoor_summarizer_keep_message_count=3,
-            )
-        ),
     )
     runner = CeoFrontDoorRunner(loop=loop)
-
-    async def _fake_model_invoke(prompt: dict[str, object]) -> dict[str, object]:
-        assert prompt["messages"]
-        return {
-            "stable_preferences": ["reply concisely"],
-            "stable_facts": ["fact"],
-            "open_loops": ["follow up"],
-            "recent_actions": ["tool executed"],
-            "narrative": "CEO frontdoor durable context.",
-        }
-
-    monkeypatch.setattr(runner, "_invoke_summary_model", _fake_model_invoke)
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
@@ -910,19 +965,13 @@ async def test_graph_execute_tools_preserves_model_summary_state(monkeypatch, tm
         runtime=runtime,
     )
 
-    assert "## CEO Durable Summary" in str(result["summary_text"])
-    assert result["summary_payload"] == {
-        "stable_preferences": ["reply concisely"],
-        "stable_facts": ["fact"],
-        "open_loops": ["follow up"],
-        "recent_actions": ["tool executed"],
-        "narrative": "CEO frontdoor durable context.",
-    }
-    assert result["summary_model_key"] == "summary-model"
+    assert "summary_text" not in result
+    assert "summary_payload" not in result
+    assert "summary_model_key" not in result
 
 
 @pytest.mark.asyncio
-async def test_graph_execute_tools_fallback_clears_stale_model_summary_payload(monkeypatch, tmp_path) -> None:
+async def test_graph_execute_tools_ignores_stale_frontdoor_summary_inputs(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None
 
@@ -936,22 +985,8 @@ async def test_graph_execute_tools_fallback_clears_stale_model_summary_payload(m
         max_iterations=8,
         workspace=tmp_path,
         temp_dir=str(tmp_path / "tmp"),
-        _memory_runtime_settings=SimpleNamespace(
-            assembly=SimpleNamespace(
-                frontdoor_summarizer_enabled=True,
-                frontdoor_summarizer_model_key="summary-model",
-                frontdoor_summarizer_trigger_message_count=4,
-                frontdoor_summarizer_keep_message_count=3,
-            )
-        ),
     )
     runner = CeoFrontDoorRunner(loop=loop)
-
-    async def _boom(prompt: dict[str, object]) -> dict[str, object]:
-        _ = prompt
-        raise RuntimeError("summary model unavailable")
-
-    monkeypatch.setattr(runner, "_invoke_summary_model", _boom)
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
@@ -994,6 +1029,6 @@ async def test_graph_execute_tools_fallback_clears_stale_model_summary_payload(m
         runtime=runtime,
     )
 
-    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
-    assert result["summary_payload"] == {"fallback": "heuristic"}
-    assert result["summary_model_key"] == ""
+    assert "summary_text" not in result
+    assert "summary_payload" not in result
+    assert "summary_model_key" not in result

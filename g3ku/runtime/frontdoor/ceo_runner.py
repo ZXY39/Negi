@@ -11,6 +11,9 @@ class CeoFrontDoorRunner:
         setattr(self._impl, "_agent", None)
         setattr(self._impl, "_compiled_graph", None)
 
+    def _get_compiled_graph(self):
+        return self._impl._get_compiled_graph()
+
     def __getattr__(self, name: str):
         return getattr(self._impl, name)
 

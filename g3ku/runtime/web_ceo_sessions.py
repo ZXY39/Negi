@@ -233,6 +233,21 @@ def _extract_task_ids_from_message(message: dict[str, Any], *, limit: int = _TAS
         if not isinstance(item, dict):
             continue
         task_ids.extend(_extract_task_ids_from_text(item.get('text'), limit=limit))
+    execution_trace_summary = (
+        message.get('execution_trace_summary')
+        if isinstance(message.get('execution_trace_summary'), dict)
+        else {}
+    )
+    for stage in list(execution_trace_summary.get('stages') or []):
+        if not isinstance(stage, dict):
+            continue
+        for round_item in list(stage.get('rounds') or []):
+            if not isinstance(round_item, dict):
+                continue
+            for tool in list(round_item.get('tools') or []):
+                if not isinstance(tool, dict):
+                    continue
+                task_ids.extend(_extract_task_ids_from_text(tool.get('text'), limit=limit))
     return _normalize_task_ids(task_ids, limit=limit)
 
 
@@ -294,6 +309,36 @@ def _normalize_execution_snapshot(snapshot: Any) -> dict[str, Any] | None:
     return dict(snapshot)
 
 
+def _snapshot_execution_trace_summary(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    raw = snapshot.get("execution_trace_summary")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _snapshot_compression(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    raw = snapshot.get("compression")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _execution_trace_tool_items(execution_trace_summary: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(execution_trace_summary, dict):
+        return []
+    tools: list[dict[str, Any]] = []
+    for stage in list(execution_trace_summary.get("stages") or []):
+        if not isinstance(stage, dict):
+            continue
+        for round_item in list(stage.get("rounds") or []):
+            if not isinstance(round_item, dict):
+                continue
+            for item in list(round_item.get("tools") or []):
+                if isinstance(item, dict):
+                    tools.append(item)
+    return tools
+
+
 def _session_key_for_execution_sources(runtime_session: Any | None, persisted_session: Any | None) -> str:
     session_key = str(
         getattr(getattr(runtime_session, 'state', None), 'session_key', '')
@@ -349,10 +394,13 @@ def _execution_snapshot_history_messages(snapshot: dict[str, Any] | None) -> lis
     assistant_text = summarize_preview_text(normalized_snapshot.get('assistant_text') or '', max_chars=480)
     if assistant_text:
         assistant_message['content'] = assistant_text
-    tool_events = normalized_snapshot.get('tool_events')
-    if isinstance(tool_events, list) and tool_events:
-        assistant_message['tool_events'] = list(tool_events)
-    if assistant_message.get('content') or assistant_message.get('tool_events'):
+    execution_trace_summary = _snapshot_execution_trace_summary(normalized_snapshot)
+    if execution_trace_summary:
+        assistant_message['execution_trace_summary'] = execution_trace_summary
+    compression = _snapshot_compression(normalized_snapshot)
+    if compression:
+        assistant_message['compression'] = compression
+    if assistant_message.get('content') or assistant_message.get('execution_trace_summary') or assistant_message.get('compression'):
         messages.append(_history_entry_from_message(assistant_message))
     return messages
 
@@ -368,9 +416,11 @@ def _snapshot_has_material_live_history(
     if require_active_stage:
         return False
     assistant_text = str(normalized_snapshot.get('assistant_text') or '').strip()
-    tool_events = normalized_snapshot.get('tool_events')
-    has_tool_events = isinstance(tool_events, list) and bool(tool_events)
-    if has_tool_events or assistant_text:
+    execution_trace_summary = _snapshot_execution_trace_summary(normalized_snapshot)
+    has_execution_trace = bool(_execution_trace_tool_items(execution_trace_summary))
+    compression = _snapshot_compression(normalized_snapshot)
+    has_compression = bool(str(compression.get('text') or '').strip() or str(compression.get('status') or '').strip())
+    if has_execution_trace or assistant_text or has_compression:
         return True
     return False
 
@@ -444,6 +494,22 @@ def _compact_tool_trace_payload(message: dict[str, Any]) -> list[dict[str, str]]
         if not text:
             continue
         summaries.append({'tool': tool_name, 'status': status, 'text': text})
+    execution_trace_summary = (
+        message.get('execution_trace_summary')
+        if isinstance(message.get('execution_trace_summary'), dict)
+        else {}
+    )
+    for item in _execution_trace_tool_items(execution_trace_summary):
+        if not isinstance(item, dict):
+            continue
+        tool_name = str(item.get('tool_name') or 'tool').strip() or 'tool'
+        status = str(item.get('status') or '').strip().lower()
+        if status not in {'success', 'error'}:
+            continue
+        text = summarize_preview_text(item.get('text') or '', max_chars=_RECENT_HISTORY_TOOL_TEXT_MAX_CHARS)
+        if not text:
+            continue
+        summaries.append({'tool': tool_name, 'status': status, 'text': text})
     return summaries[-_RECENT_HISTORY_TOOL_TRACE_LIMIT:]
 
 
@@ -487,7 +553,7 @@ def _history_entry_from_message(message: dict[str, Any]) -> dict[str, Any]:
         "role": str(message.get("role") or ""),
         "content": _history_content_from_message(message),
     }
-    for key in ("tool_calls", "tool_call_id", "name"):
+    for key in ("tool_calls", "tool_call_id", "name", "execution_trace_summary", "compression"):
         if key in message:
             entry[key] = message[key]
     return entry
@@ -745,6 +811,10 @@ def upload_dir_for_session(session_id: str, *, create: bool = True) -> Path:
     return ensure_dir(path) if create else path
 
 
+def frontdoor_stage_archive_task_id(session_id: str) -> str:
+    return f"frontdoor-stage-archive:{str(session_id or '').strip()}"
+
+
 def inflight_snapshot_path_for_session(session_id: str, *, create: bool = True) -> Path:
     safe_session = safe_filename(str(session_id or "web_shared").replace(":", "_")) or "web_shared"
     root = workspace_path() / WEB_CEO_INFLIGHT_ROOT
@@ -874,6 +944,13 @@ def _inflight_preview_text(snapshot: dict[str, Any] | None) -> str:
     assistant_preview = summarize_preview_text((snapshot or {}).get("assistant_text") or "")
     if assistant_preview:
         return assistant_preview
+    execution_trace_summary = _snapshot_execution_trace_summary(snapshot)
+    for item in reversed(_execution_trace_tool_items(execution_trace_summary)):
+        if not isinstance(item, dict):
+            continue
+        preview = summarize_preview_text(item.get("text") or "")
+        if preview:
+            return preview
     for item in reversed(list((snapshot or {}).get("tool_events") or [])):
         if not isinstance(item, dict):
             continue
@@ -890,6 +967,13 @@ def _inflight_updated_at(snapshot: dict[str, Any] | None) -> str:
     user_message = _inflight_user_message(snapshot)
     if user_message is not None:
         timestamp = str(user_message.get("timestamp") or "").strip()
+        if timestamp:
+            candidates.append(timestamp)
+    execution_trace_summary = _snapshot_execution_trace_summary(snapshot)
+    for item in _execution_trace_tool_items(execution_trace_summary):
+        if not isinstance(item, dict):
+            continue
+        timestamp = str(item.get("timestamp") or "").strip()
         if timestamp:
             candidates.append(timestamp)
     for item in list(snapshot.get("tool_events") or []):
@@ -1395,7 +1479,7 @@ def create_web_ceo_session(session_manager: Any, *, session_id: str | None = Non
     return session
 
 
-def delete_web_ceo_session_artifacts(*, session_manager: Any, session_id: str) -> None:
+def delete_web_ceo_session_artifacts(*, session_manager: Any, session_id: str, task_service: Any | None = None) -> None:
     path = session_manager.get_path(session_id)
     if path.exists():
         path.unlink()
@@ -1405,6 +1489,21 @@ def delete_web_ceo_session_artifacts(*, session_manager: Any, session_id: str) -
     upload_dir = upload_dir_for_session(session_id, create=False)
     if upload_dir.exists():
         shutil.rmtree(upload_dir, ignore_errors=True)
+    archive_task_id = frontdoor_stage_archive_task_id(session_id)
+    artifact_store = getattr(task_service, "artifact_store", None) if task_service is not None else None
+    list_artifacts = getattr(artifact_store, "list_artifacts", None) if artifact_store is not None else None
+    delete_artifacts = getattr(artifact_store, "delete_artifacts_for_task", None) if artifact_store is not None else None
+    store = getattr(task_service, "store", None) if task_service is not None else None
+    delete_task = getattr(store, "delete_task", None) if store is not None else None
+    if callable(list_artifacts) and callable(delete_artifacts):
+        artifacts = list(list_artifacts(archive_task_id) or [])
+        if artifacts:
+            delete_artifacts(archive_task_id, artifacts=artifacts)
+    if callable(delete_task):
+        try:
+            delete_task(archive_task_id)
+        except Exception:
+            pass
 
 
 def list_web_ceo_sessions(

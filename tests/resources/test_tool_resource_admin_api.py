@@ -203,6 +203,10 @@ def _running_task_record(
     )
 
 
+def _frontdoor_stage_archive_task_id(session_id: str) -> str:
+    return f"frontdoor-stage-archive:{str(session_id or '').strip()}"
+
+
 def test_main_runtime_session_task_counts_distinguish_running_paused_and_deletable_records():
     tasks = [
         SimpleNamespace(task_id='task:done', status='success', is_paused=False),
@@ -1543,6 +1547,153 @@ def test_ceo_session_delete_allows_unfinished_related_tasks(tmp_path: Path, monk
         'removed_session': current.key,
         'cancelled_session': current.key,
     }
+
+
+@pytest.mark.asyncio
+async def test_ceo_session_delete_removes_session_owned_frontdoor_stage_archives(tmp_path: Path, monkeypatch):
+    _mock_ceo_catalog_config(monkeypatch)
+
+    class _SessionManager:
+        def __init__(self, sessions: list[Session], paths: dict[str, Path]):
+            self._sessions = {session.key: session for session in sessions}
+            self._paths = dict(paths)
+
+        def get_path(self, key: str) -> Path:
+            return self._paths[key]
+
+        def get_or_create(self, key: str):
+            return self._sessions[key]
+
+        def save(self, session) -> None:
+            self._sessions[session.key] = session
+
+        def invalidate(self, key: str) -> None:
+            self._sessions.pop(key, None)
+            self._paths.pop(key, None)
+
+        def list_sessions(self) -> list[dict[str, str]]:
+            return [{"key": key} for key in self._sessions]
+
+    class _TaskService:
+        def __init__(self, service: MainRuntimeService) -> None:
+            self._service = service
+            self.artifact_store = service.artifact_store
+            self.store = service.store
+
+        async def startup(self) -> None:
+            return None
+
+        def list_tasks_for_session(self, session_id: str):
+            _ = session_id
+            return []
+
+        def get_session_task_counts(self, session_id: str) -> dict[str, int]:
+            _ = session_id
+            return {"all": 0, "in_progress": 0}
+
+    class _RuntimeManager:
+        def get(self, session_id: str):
+            _ = session_id
+            return None
+
+        def remove(self, session_id: str):
+            captured["removed_session"] = session_id
+            return None
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        captured["cancelled_session"] = session_key
+        return 0
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    current = Session(key="web:ceo-frontdoor-archive-delete", metadata={"title": "Delete Frontdoor Archive"})
+    other = Session(key="web:ceo-frontdoor-archive-keep", metadata={"title": "Keep Frontdoor Archive"})
+    current_path = tmp_path / "sessions" / "web_ceo_frontdoor_archive_delete.jsonl"
+    other_path = tmp_path / "sessions" / "web_ceo_frontdoor_archive_keep.jsonl"
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text('{"_type":"metadata"}\n', encoding="utf-8")
+    other_path.write_text('{"_type":"metadata"}\n', encoding="utf-8")
+    manager = _SessionManager(
+        [current, other],
+        {
+            current.key: current_path,
+            other.key: other_path,
+        },
+    )
+    captured: dict[str, object] = {}
+
+    try:
+        await service.startup()
+        current_summary, current_ref = service.content_store.summarize_for_storage(
+            json.dumps({"session_id": current.key, "stages": [{"stage_index": 1}]}, ensure_ascii=False, indent=2),
+            runtime={
+                "task_id": _frontdoor_stage_archive_task_id(current.key),
+                "session_key": current.key,
+            },
+            display_name="frontdoor-stage-history:current",
+            source_kind="stage_history_archive",
+            force=True,
+        )
+        other_summary, other_ref = service.content_store.summarize_for_storage(
+            json.dumps({"session_id": other.key, "stages": [{"stage_index": 2}]}, ensure_ascii=False, indent=2),
+            runtime={
+                "task_id": _frontdoor_stage_archive_task_id(other.key),
+                "session_key": other.key,
+            },
+            display_name="frontdoor-stage-history:other",
+            source_kind="stage_history_archive",
+            force=True,
+        )
+
+        assert current_summary
+        assert other_summary
+        current_artifact = service.get_artifact(str(current_ref).split(":", 1)[1])
+        other_artifact = service.get_artifact(str(other_ref).split(":", 1)[1])
+        assert current_artifact is not None
+        assert other_artifact is not None
+
+        from g3ku.runtime.api import ceo_sessions
+
+        app = FastAPI()
+        app.include_router(ceo_sessions.router, prefix="/api")
+        monkeypatch.setattr(
+            ceo_sessions,
+            "get_agent",
+            lambda: SimpleNamespace(
+                sessions=manager,
+                main_task_service=_TaskService(service),
+                cancel_session_tasks=_cancel_session_tasks,
+            ),
+        )
+        monkeypatch.setattr(ceo_sessions, "get_runtime_manager", lambda _agent: _RuntimeManager())
+        monkeypatch.setattr(ceo_sessions, "get_web_heartbeat_service", lambda _agent: None)
+        monkeypatch.setattr(ceo_sessions, "workspace_path", lambda: tmp_path)
+
+        ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(current.key)
+        client = TestClient(app)
+
+        response = client.delete(f"/api/ceo/sessions/{current.key}")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["deleted"] is True
+        assert captured == {
+            "removed_session": current.key,
+            "cancelled_session": current.key,
+        }
+        assert service.artifact_store.list_artifacts(_frontdoor_stage_archive_task_id(current.key)) == []
+        assert not Path(current_artifact.path).exists()
+        remaining = service.artifact_store.list_artifacts(_frontdoor_stage_archive_task_id(other.key))
+        assert len(remaining) == 1
+        assert Path(other_artifact.path).exists()
+    finally:
+        await service.close()
 
 
 def test_ceo_session_delete_stops_detached_background_tool_executions(tmp_path: Path, monkeypatch):

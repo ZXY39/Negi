@@ -12,7 +12,7 @@ from langgraph.types import Command
 
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 
-from ._ceo_langgraph_impl import CeoFrontDoorRuntimeOps
+from ._ceo_runtime_ops import CeoFrontDoorRuntimeOps
 from .ceo_agent_middleware import (
     CeoApprovalMiddleware,
     CeoModelOutputMiddleware,
@@ -21,8 +21,6 @@ from .ceo_agent_middleware import (
     CeoTurnLifecycleMiddleware,
 )
 from .state_models import (
-    CeoFrontdoorInterrupted,
-    CeoPendingInterrupt,
     CeoPersistentState,
     CeoRuntimeContext,
     initial_persistent_state,
@@ -37,13 +35,15 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
     def build_prompt_context(self, *, state, runtime, tools) -> dict[str, str]:
         _ = runtime, tools
         overlay_text = self._effective_turn_overlay_text(state)
+        default_overlay_text = self._frontdoor_default_overlay_text(state)
         if overlay_text:
-            return {"system_overlay": overlay_text}
-        summary_text = str(state.get("summary_text") or "").strip()
-        system_overlay = "Use the existing CEO layered context rules."
-        if summary_text:
-            system_overlay = f"{system_overlay}\n\n{summary_text}"
-        return {"system_overlay": system_overlay}
+            combined_overlay = "\n\n".join(
+                part
+                for part in (overlay_text, default_overlay_text)
+                if str(part or "").strip()
+            ).strip()
+            return {"system_overlay": combined_overlay}
+        return {"system_overlay": default_overlay_text}
 
     def visible_langchain_tools(self, *, state, runtime) -> list[Any]:
         return list(self._build_langchain_tools_for_state(state=state, runtime=runtime))
@@ -192,6 +192,11 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 strict=False,
             )
         ]
+        frontdoor_stage_state = self._frontdoor_stage_state_after_tool_cycle(
+            state,
+            tool_call_payloads=tool_call_payloads,
+            tool_results=tool_results,
+        )
         substantive_tool_names = [
             str(payload.get("name") or "").strip()
             for payload in tool_call_payloads
@@ -210,10 +215,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
 
         result = {
             **self._replace_messages_update(messages),
-            "summary_text": str(compacted_state.get("summary_text") or ""),
-            "summary_payload": dict(compacted_state.get("summary_payload") or {}),
-            "summary_version": int(compacted_state.get("summary_version") or 0),
-            "summary_model_key": str(compacted_state.get("summary_model_key") or ""),
+            "frontdoor_stage_state": frontdoor_stage_state,
             "used_tools": used_tools,
             "route_kind": route_kind,
             "analysis_text": "",
@@ -270,71 +272,12 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             )
         return self._agent
 
-    def _get_compiled_graph(self):
-        return self._compiled_graph if self._compiled_graph is not None else self._get_agent()
-
-    async def _ensure_ready(self) -> None:
-        ensure_ready = getattr(self._loop, "_ensure_checkpointer_ready", None)
-        if callable(ensure_ready):
-            result = ensure_ready()
-            if hasattr(result, "__await__"):
-                await result
-
     @staticmethod
-    def _thread_config(session_key: str) -> dict[str, object]:
-        return {"configurable": {"thread_id": str(session_key or "").strip()}}
-
-    @staticmethod
-    def _checkpoint_safe_value(value: Any) -> Any:
-        if value is None or isinstance(value, str | int | float | bool):
-            return value
-        if isinstance(value, dict):
-            return {
-                str(key): CreateAgentCeoFrontDoorRunner._checkpoint_safe_value(item)
-                for key, item in value.items()
-            }
-        if isinstance(value, list | tuple | set):
-            return [CreateAgentCeoFrontDoorRunner._checkpoint_safe_value(item) for item in value]
-        return str(value)
-
-    @classmethod
-    def _unwrap_graph_output(cls, graph_output: Any) -> dict[str, Any]:
-        interrupts = [
-            CeoPendingInterrupt(
-                interrupt_id=str(getattr(item, "id", "") or ""),
-                value=cls._checkpoint_safe_value(getattr(item, "value", None)),
-            )
-            for item in list(getattr(graph_output, "interrupts", ()) or ())
-        ]
-        values = cls._checkpoint_safe_value(dict(getattr(graph_output, "value", graph_output) or {}))
-        if not isinstance(values, dict):
-            values = {}
-        if interrupts:
-            first_interrupt_value = interrupts[0].value if interrupts else None
-            interrupt_state = first_interrupt_value if isinstance(first_interrupt_value, dict) else {}
-            interrupt_approval_request = interrupt_state.get("approval_request")
-            if not isinstance(values.get("approval_request"), dict) and isinstance(first_interrupt_value, dict):
-                if isinstance(interrupt_approval_request, dict):
-                    values["approval_request"] = dict(interrupt_approval_request)
-                else:
-                    values["approval_request"] = dict(first_interrupt_value)
-            if not list(values.get("tool_call_payloads") or []):
-                interrupt_payloads = list(interrupt_state.get("tool_call_payloads") or [])
-                if interrupt_payloads:
-                    values["tool_call_payloads"] = interrupt_payloads
-                if not list(values.get("tool_call_payloads") or []):
-                    if isinstance(interrupt_approval_request, dict):
-                        interrupt_tool_calls = list(interrupt_approval_request.get("tool_calls") or [])
-                        if interrupt_tool_calls:
-                            values["tool_call_payloads"] = interrupt_tool_calls
-                if not list(values.get("tool_call_payloads") or []):
-                    approval_request = values.get("approval_request")
-                    if isinstance(approval_request, dict):
-                        tool_call_payloads = list(approval_request.get("tool_calls") or [])
-                        if tool_call_payloads:
-                            values["tool_call_payloads"] = tool_call_payloads
-            raise CeoFrontdoorInterrupted(interrupts=interrupts, values=values)
-        return values
+    def _sync_frontdoor_session_state(*, session: Any, values: dict[str, Any]) -> None:
+        frontdoor_stage_state = values.get("frontdoor_stage_state")
+        compression_state = values.get("compression_state")
+        setattr(session, "_frontdoor_stage_state", dict(frontdoor_stage_state) if isinstance(frontdoor_stage_state, dict) else {})
+        setattr(session, "_compression_state", dict(compression_state) if isinstance(compression_state, dict) else {})
 
     async def run_turn(self, *, user_input, session, on_progress=None) -> str:
         await self._ensure_ready()
@@ -362,6 +305,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         values = self._unwrap_graph_output(graph_output)
         setattr(session, "_last_route_kind", str(values.get("route_kind") or "direct_reply"))
         setattr(session, "_last_verified_task_ids", list(values.get("verified_task_ids") or []))
+        self._sync_frontdoor_session_state(session=session, values=values)
         return str(values.get("final_output") or "")
 
     async def resume_turn(self, *, session, resume_value, on_progress=None) -> str:
@@ -381,4 +325,5 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         values = self._unwrap_graph_output(graph_output)
         setattr(session, "_last_route_kind", str(values.get("route_kind") or "direct_reply"))
         setattr(session, "_last_verified_task_ids", list(values.get("verified_task_ids") or []))
+        self._sync_frontdoor_session_state(session=session, values=values)
         return str(values.get("final_output") or "")
