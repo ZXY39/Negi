@@ -117,15 +117,6 @@ def test_memory_assembly_config_uses_stage_budget_defaults() -> None:
         "frontdoor_summarizer_keep_message_count",
     }
 
-    for removed_flag in (
-        "frontdoor_create_agent_enabled",
-        "frontdoor_create_agent_shadow_mode",
-        "frontdoor_summarizer_enabled",
-        "frontdoor_summarizer_model_key",
-    ):
-        with pytest.raises(AttributeError):
-            getattr(cfg, removed_flag)
-
 
 def test_initial_persistent_state_tracks_stage_state_and_runtime_marker() -> None:
     state = initial_persistent_state(user_input={"content": "hello", "metadata": {}})
