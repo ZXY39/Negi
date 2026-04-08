@@ -6,6 +6,7 @@ structured fact plus a few small helper utilities used by the memory runtime.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Literal, get_args
@@ -53,6 +54,17 @@ def _norm_token(value: object) -> str:
     return " ".join(token.split()).lower()
 
 
+def _norm_jsonish(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            return _norm_token(value)
+    return _norm_token(value)
+
+
 def canonical_key_for_fact(fact: StructuredMemoryFact) -> str:
     """Return a stable key for deduping facts across writes.
 
@@ -61,13 +73,18 @@ def canonical_key_for_fact(fact: StructuredMemoryFact) -> str:
 
     # Keep this human-readable (helps debugging) while remaining stable.
     # Order matters and should only change on a deliberate schema bump.
-    parts = (
+    parts = [
         _norm_token(fact.scope),
         _norm_token(fact.category),
         _norm_token(fact.entity),
         _norm_token(fact.attribute),
         _norm_token(fact.time_semantics),
-    )
+    ]
+    if fact.category == "historical_fact":
+        parts.append(_norm_token(fact.observed_at))
+    qualifier_token = _norm_jsonish(fact.qualifier)
+    if qualifier_token:
+        parts.append(qualifier_token)
     return "|".join(part or "_" for part in parts)
 
 
@@ -248,8 +265,8 @@ def _parse_iso(value: str) -> datetime | None:
 def replacement_required(old: StructuredMemoryFact, new: StructuredMemoryFact) -> bool:
     """Return True if `new` should replace `old` in the active set.
 
-    The runtime currently only performs deterministic replacement for "current_state"
-    slots (stateful facts). Other categories may be handled via merges later.
+    The runtime replaces facts for current-state and durable slots. Historical
+    observations should coexist under distinct canonical keys.
     """
 
     if old.canonical_key != new.canonical_key:
@@ -259,7 +276,8 @@ def replacement_required(old: StructuredMemoryFact, new: StructuredMemoryFact) -
     if equivalent_fact(old, new):
         return False
 
-    if old.time_semantics != "current_state" or new.time_semantics != "current_state":
+    replaceable_semantics = {"current_state", "durable_until_replaced"}
+    if old.time_semantics not in replaceable_semantics or new.time_semantics not in replaceable_semantics:
         return False
 
     old_ts = _parse_iso(old.observed_at)
