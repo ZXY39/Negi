@@ -65,6 +65,7 @@ class NodeContextSelectionResult:
     mode: Literal["dense_rerank", "visible_only"]
     memory_search_visible: bool
     selected_skill_ids: list[str] = field(default_factory=list)
+    selected_tool_family_ids: list[str] = field(default_factory=list)
     selected_tool_names: list[str] = field(default_factory=list)
     memory_query: str = ""
     retrieval_scope: dict[str, Any] = field(default_factory=dict)
@@ -109,6 +110,7 @@ async def build_node_context_selection(
             mode="visible_only",
             memory_search_visible=memory_search_visible,
             selected_skill_ids=visible_skill_ids,
+            selected_tool_family_ids=visible_tool_ids,
             selected_tool_names=normalized_tool_names,
             memory_query=memory_query,
             retrieval_scope=retrieval_scope,
@@ -138,6 +140,7 @@ async def build_node_context_selection(
             mode="visible_only",
             memory_search_visible=memory_search_visible,
             selected_skill_ids=visible_skill_ids,
+            selected_tool_family_ids=visible_tool_ids,
             selected_tool_names=normalized_tool_names,
             memory_query=memory_query,
             retrieval_scope=retrieval_scope,
@@ -155,7 +158,13 @@ async def build_node_context_selection(
         )
 
     visible_tool_name_set = set(normalized_tool_names)
+    visible_tool_id_set = set(visible_tool_ids)
     selected_skill_ids = _tool_names(list((dense_selection or {}).get("skill_ids") or []))
+    selected_tool_family_ids = [
+        tool_id
+        for tool_id in _tool_names(list((dense_selection or {}).get("tool_ids") or []))
+        if tool_id in visible_tool_id_set
+    ]
     selected_tool_names = [
         tool_name
         for tool_name in list((dense_selection or {}).get("tool_ids") or [])
@@ -165,6 +174,7 @@ async def build_node_context_selection(
         mode="dense_rerank",
         memory_search_visible=memory_search_visible,
         selected_skill_ids=selected_skill_ids,
+        selected_tool_family_ids=selected_tool_family_ids,
         selected_tool_names=selected_tool_names,
         memory_query=memory_query,
         retrieval_scope=retrieval_scope,
