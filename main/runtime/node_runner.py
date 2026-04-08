@@ -59,6 +59,8 @@ class NodeRunner:
         execution_max_concurrency: int | None = None,
         acceptance_max_concurrency: int | None = None,
         context_enricher=None,
+        context_preparer=None,
+        context_finalizer=None,
         workspace_root_getter=None,
     ) -> None:
         self._store = store
@@ -81,6 +83,8 @@ class NodeRunner:
         self._parallel_child_pipelines_enabled = True
         self._adaptive_tool_budget_controller = getattr(react_loop, '_adaptive_tool_budget_controller', None)
         self._context_enricher = context_enricher
+        self._context_preparer = context_preparer
+        self._context_finalizer = context_finalizer
         self._workspace_root_getter = workspace_root_getter
         self.nested_node_executor = None
         self.cancel_node_subtree_executor = None
@@ -256,6 +260,8 @@ class NodeRunner:
         if task.cancel_requested:
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         try:
+            if self._context_preparer is not None:
+                await self._context_preparer(task=task, node=node)
             tools = self._build_tools(task=task, node=node)
             react_state = await self._resume_react_state(task=task, node=node)
             result = await self._react_loop.run(
@@ -290,6 +296,9 @@ class NodeRunner:
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         except Exception as exc:
             return self._mark_failed(task_id, node.node_id, reason=describe_exception(exc))
+        finally:
+            if self._context_finalizer is not None:
+                self._context_finalizer(task=task, node=node)
 
     async def _run_nested_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         executor = self.nested_node_executor

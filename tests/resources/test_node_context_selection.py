@@ -60,6 +60,7 @@ async def test_node_selector_dense_unavailable_returns_full_rbac_visible_sets() 
 
     assert result.mode == "visible_only"
     assert result.selected_skill_ids == ["skill-a", "skill-b"]
+    assert result.selected_tool_family_ids == ["filesystem", "exec"]
     assert result.selected_tool_names == ["filesystem", "exec"]
 
 
@@ -103,6 +104,7 @@ async def test_node_selector_without_memory_search_permission_still_uses_dense_s
     assert result.memory_search_visible is False
     assert result.memory_query == ""
     assert result.selected_skill_ids == ["skill-b"]
+    assert result.selected_tool_family_ids == ["exec"]
     assert result.selected_tool_names == []
     assert result.retrieval_scope == {
         "search_context_types": [],
@@ -150,6 +152,7 @@ async def test_node_selector_with_memory_search_permission_emits_memory_only_ret
     assert "Core requirement" in result.memory_query
     assert captured["query_text"] == result.memory_query
     assert result.selected_skill_ids == ["skill-a"]
+    assert result.selected_tool_family_ids == ["filesystem"]
     assert result.selected_tool_names == ["filesystem"]
     assert result.retrieval_scope == {
         "search_context_types": ["memory"],
