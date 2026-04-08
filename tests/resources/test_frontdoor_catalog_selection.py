@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 import g3ku.runtime.context.frontdoor_catalog_selection as selection_module
+import g3ku.runtime.context.semantic_scope as semantic_scope_module
 
 
 class _MemoryManagerRecorder:
@@ -450,6 +451,72 @@ async def test_build_frontdoor_catalog_selection_enforces_unavailable_when_dense
     assert result["available"] is False
     assert result["skill_ids"] == []
     assert result["tool_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_plan_retrieval_scope_falls_back_to_visible_ids_when_dense_hits_are_hidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory_manager = _MemoryManagerRecorder()
+    memory_manager.set_response(
+        context_type="skill",
+        records=[SimpleNamespace(record_id="skill:hidden-zeta", score=0.99)],
+    )
+    memory_manager.set_response(
+        context_type="resource",
+        records=[SimpleNamespace(record_id="tool:hidden-admin", score=0.98)],
+    )
+
+    async def _rewrite_queries(**kwargs) -> dict[str, str]:
+        _ = kwargs
+        return {
+            "raw_query": "browser-focused capabilities only",
+            "skill_query": "rewritten skill query",
+            "tool_query": "rewritten tool query",
+            "status": "rewritten",
+            "model": "frontdoor-query-rewriter",
+        }
+
+    async def _rerank_passthrough(**kwargs) -> dict[str, Any]:
+        records = kwargs.get("records")
+        return {
+            "records": list(records if isinstance(records, list) else []),
+            "trace": {
+                "status": "passthrough",
+                "model": "",
+                "top_n": int(kwargs.get("top_n") or 0),
+                "scores": [],
+            },
+        }
+
+    monkeypatch.setattr(selection_module, "rewrite_frontdoor_catalog_queries", _rewrite_queries)
+    monkeypatch.setattr(selection_module, "rerank_frontdoor_catalog_records", _rerank_passthrough)
+
+    semantic_frontdoor = await selection_module.build_frontdoor_catalog_selection(
+        loop=object(),
+        memory_manager=memory_manager,
+        query_text="browser-focused capabilities only",
+        visible_skills=[{"skill_id": "visible-alpha"}],
+        visible_families=[SimpleNamespace(tool_id="visible-browser")],
+        skill_limit=1,
+        tool_limit=1,
+    )
+    retrieval_scope = semantic_scope_module.plan_retrieval_scope(
+        visible_skills=[{"skill_id": "visible-alpha"}],
+        visible_families=[SimpleNamespace(tool_id="visible-browser")],
+        semantic_frontdoor=semantic_frontdoor,
+    )
+
+    assert semantic_frontdoor["available"] is True
+    assert semantic_frontdoor["skill_ids"] == []
+    assert semantic_frontdoor["tool_ids"] == []
+    assert retrieval_scope == {
+        "mode": "dense_only",
+        "search_context_types": ["memory", "skill", "resource"],
+        "allowed_context_types": ["memory", "skill", "resource"],
+        "allowed_resource_record_ids": ["tool:visible-browser"],
+        "allowed_skill_record_ids": ["skill:visible-alpha"],
+    }
 
 
 @pytest.mark.asyncio

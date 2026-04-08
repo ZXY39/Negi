@@ -95,6 +95,8 @@ def plan_retrieval_scope(
 ) -> dict[str, Any]:
     semantic_trace = dict((semantic_frontdoor or {}).get('trace') or {})
     semantic_available = bool((semantic_frontdoor or {}).get('available', semantic_trace.get('available', False)))
+    visible_skill_ids = _visible_skill_ids(visible_skills)
+    visible_tool_ids = _visible_tool_ids(visible_families)
     semantic_skill_ids = [
         str(item or '').strip()
         for item in list((semantic_frontdoor or {}).get('skill_ids') or [])
@@ -107,12 +109,12 @@ def plan_retrieval_scope(
     ]
 
     if semantic_available:
-        targeted_skill_ids = semantic_skill_ids[:3]
-        targeted_tool_ids = semantic_tool_ids[:3]
+        targeted_skill_ids = semantic_skill_ids[:3] if semantic_skill_ids else visible_skill_ids
+        targeted_tool_ids = semantic_tool_ids[:3] if semantic_tool_ids else visible_tool_ids
         scope_mode = 'dense_only'
     else:
-        targeted_skill_ids = _visible_skill_ids(visible_skills)
-        targeted_tool_ids = _visible_tool_ids(visible_families)
+        targeted_skill_ids = visible_skill_ids
+        targeted_tool_ids = visible_tool_ids
         scope_mode = 'rbac_fallback'
 
     search_context_types = ['memory']
