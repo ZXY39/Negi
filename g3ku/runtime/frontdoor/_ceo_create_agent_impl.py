@@ -215,10 +215,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
 
         result = {
             **self._replace_messages_update(messages),
-            "summary_text": str(compacted_state.get("summary_text") or ""),
-            "summary_payload": dict(compacted_state.get("summary_payload") or {}),
-            "summary_version": int(compacted_state.get("summary_version") or 0),
-            "summary_model_key": str(compacted_state.get("summary_model_key") or ""),
             "frontdoor_stage_state": frontdoor_stage_state,
             "used_tools": used_tools,
             "route_kind": route_kind,

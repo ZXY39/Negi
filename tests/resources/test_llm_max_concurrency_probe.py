@@ -210,14 +210,6 @@ async def test_probe_concurrency_level_caps_high_level_request_fanout(tmp_path: 
 def test_probe_max_concurrency_route_returns_result(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    stub_module = types.ModuleType("g3ku.runtime.frontdoor.ceo_summarizer")
-
-    async def _stub_summarize_frontdoor_history(**kwargs):
-        _ = kwargs
-        raise AssertionError("frontdoor summarizer should not be called in this test")
-
-    stub_module.summarize_frontdoor_history = _stub_summarize_frontdoor_history
-    monkeypatch.setitem(sys.modules, "g3ku.runtime.frontdoor.ceo_summarizer", stub_module)
     admin_rest = importlib.import_module("main.api.admin_rest")
 
     class _StubFacade:

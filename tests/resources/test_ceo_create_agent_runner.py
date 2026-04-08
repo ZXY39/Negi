@@ -104,6 +104,18 @@ def test_memory_assembly_config_uses_stage_budget_defaults() -> None:
     assert cfg.frontdoor_summary_trigger_message_count == 10
     assert cfg.frontdoor_interrupt_approval_enabled is False
     assert cfg.frontdoor_interrupt_tool_names == ["message", "create_async_task"]
+    assert {
+        key
+        for key in cfg.model_dump().keys()
+        if key.startswith("frontdoor_")
+    } == {
+        "frontdoor_recent_message_count",
+        "frontdoor_summary_trigger_message_count",
+        "frontdoor_interrupt_approval_enabled",
+        "frontdoor_interrupt_tool_names",
+        "frontdoor_summarizer_trigger_message_count",
+        "frontdoor_summarizer_keep_message_count",
+    }
 
     for removed_flag in (
         "frontdoor_create_agent_enabled",
@@ -115,13 +127,18 @@ def test_memory_assembly_config_uses_stage_budget_defaults() -> None:
             getattr(cfg, removed_flag)
 
 
-def test_initial_persistent_state_contains_summary_payload_and_runtime_marker() -> None:
+def test_initial_persistent_state_tracks_stage_state_and_runtime_marker() -> None:
     state = initial_persistent_state(user_input={"content": "hello", "metadata": {}})
 
-    assert state["summary_text"] == ""
-    assert state["summary_payload"] == {}
-    assert state["summary_version"] == 0
-    assert state["summary_model_key"] == ""
+    assert "summary_text" not in state
+    assert "summary_payload" not in state
+    assert "summary_version" not in state
+    assert "summary_model_key" not in state
+    assert state["frontdoor_stage_state"] == {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [],
+    }
     assert state["agent_runtime"] == "create_agent"
 
 
@@ -164,11 +181,7 @@ def test_ceo_runner_always_selects_create_agent_impl(monkeypatch) -> None:
 
     monkeypatch.setattr(ceo_runner, "CreateAgentCeoFrontDoorRunner", _New)
 
-    loop = SimpleNamespace(
-        _memory_runtime_settings=SimpleNamespace(
-            assembly=SimpleNamespace(frontdoor_create_agent_enabled=False)
-        )
-    )
+    loop = SimpleNamespace()
     runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
 
     assert isinstance(runner._impl, _New)
@@ -195,7 +208,8 @@ def test_create_agent_runner_build_prompt_context_uses_effective_turn_overlay(mo
         tools=[],
     )
 
-    assert result == {"system_overlay": "overlay-text"}
+    assert result["system_overlay"].startswith("overlay-text")
+    assert "submit_next_stage" in result["system_overlay"]
 
 
 def test_create_agent_runner_visible_langchain_tools_uses_prepared_state(monkeypatch) -> None:
@@ -241,7 +255,27 @@ async def test_create_agent_langchain_tool_emits_tool_result_progress(monkeypatc
     monkeypatch.setattr(runner, "_execute_tool_call", _fake_execute_tool_call)
 
     tools = runner._build_langchain_tools_for_state(
-        state={"tool_names": ["demo_tool"]},
+        state={
+            "tool_names": ["demo_tool"],
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Inspect the request",
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 0,
+                        "status": "active",
+                        "mode": "自主执行",
+                        "completed_stage_summary": "",
+                        "key_refs": [],
+                        "rounds": [],
+                    }
+                ],
+            },
+        },
         runtime=SimpleNamespace(context=SimpleNamespace()),
     )
 
@@ -276,7 +310,27 @@ async def test_create_agent_langchain_tool_normalizes_create_async_task_executio
     monkeypatch.setattr(runner, "_execute_tool_call", _fake_execute_tool_call)
 
     tools = runner._build_langchain_tools_for_state(
-        state={"tool_names": ["create_async_task"]},
+        state={
+            "tool_names": ["create_async_task"],
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Dispatch follow-up work",
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 0,
+                        "status": "active",
+                        "mode": "自主执行",
+                        "completed_stage_summary": "",
+                        "key_refs": [],
+                        "rounds": [],
+                    }
+                ],
+            },
+        },
         runtime=SimpleNamespace(context=SimpleNamespace()),
     )
 
@@ -319,7 +373,27 @@ async def test_create_agent_langchain_tool_degrades_validation_exception_to_tool
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _on_progress})
 
     tools = runner._build_langchain_tools_for_state(
-        state={"tool_names": ["broken_validation_tool"]},
+        state={
+            "tool_names": ["broken_validation_tool"],
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Validate broken input",
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 0,
+                        "status": "active",
+                        "mode": "自主执行",
+                        "completed_stage_summary": "",
+                        "key_refs": [],
+                        "rounds": [],
+                    }
+                ],
+            },
+        },
         runtime=SimpleNamespace(context=SimpleNamespace()),
     )
 
@@ -589,6 +663,9 @@ async def test_create_agent_runner_rejects_unverified_dispatch_text_from_model()
     assert result["next_step"] == "finalize"
     assert "未确认成功创建后台任务" in result["final_output"]
     assert "task:fake-123" in result["final_output"]
+    assert "summary_text" not in result
+    assert "summary_payload" not in result
+    assert "summary_model_key" not in result
 
 
 @pytest.mark.asyncio
@@ -733,13 +810,7 @@ async def test_create_agent_postprocess_requires_persisted_task_for_dispatch_rep
 
     async def _fake_summarize_messages(*, messages, state):
         _ = state
-        return {
-            "messages": list(messages),
-            "summary_text": "",
-            "summary_payload": {},
-            "summary_version": 0,
-            "summary_model_key": "",
-        }
+        return {"messages": list(messages)}
 
     monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
 
@@ -788,13 +859,7 @@ async def test_create_agent_postprocess_continues_after_verified_async_dispatch(
 
     async def _fake_summarize_messages(*, messages, state):
         _ = state
-        return {
-            "messages": list(messages),
-            "summary_text": "",
-            "summary_payload": {},
-            "summary_version": 0,
-            "summary_model_key": "",
-        }
+        return {"messages": list(messages)}
 
     monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
 
@@ -830,6 +895,9 @@ async def test_create_agent_postprocess_continues_after_verified_async_dispatch(
 
     assert result is not None
     assert "jump_to" not in result
+    assert "summary_text" not in result
+    assert "summary_payload" not in result
+    assert "summary_model_key" not in result
     assert result["verified_task_ids"] == ["task:demo-123"]
     assert result["route_kind"] == "task_dispatch"
     assert result["tool_call_payloads"] == []
@@ -889,7 +957,6 @@ async def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_f
             tools=[initial_tool_schema],
             state={
                 "messages": [{"role": "user", "content": "hello"}],
-                "summary_text": "## Retrieved Context\n- memory",
             },
             runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
         )
@@ -903,47 +970,21 @@ async def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_f
         "prompt_cache_diagnostics": {"stable_prompt_signature": "sig-1"},
     }
     content_blocks = list(getattr(seen_request["system_message"], "content_blocks", []))
-    assert content_blocks == [
-        {"type": "text", "text": "You are the CEO frontdoor agent."},
-        {"type": "text", "text": "Use the existing CEO layered context rules.\n\n## Retrieved Context\n- memory"},
-    ]
+    assert content_blocks[0] == {"type": "text", "text": "You are the CEO frontdoor agent."}
+    assert "submit_next_stage" in str(content_blocks[1]["text"])
     assert seen_request["tools"] == [exposed_tool_schema]
-    assert captured["cache_key_kwargs"] == {
-        "session_key": "web:shared",
-        "provider_model": "openai:gpt-4.1",
-        "scope": "ceo_frontdoor",
-        "stable_messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are the CEO frontdoor agent.\n\n"
-                    "Use the existing CEO layered context rules.\n\n"
-                    "## Retrieved Context\n- memory"
-                ),
-            },
-            {"role": "user", "content": "hello"},
-        ],
-        "tool_schemas": [exposed_tool_schema],
-    }
-    assert captured["diagnostics_kwargs"] == {
-        "stable_messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are the CEO frontdoor agent.\n\n"
-                    "Use the existing CEO layered context rules.\n\n"
-                    "## Retrieved Context\n- memory"
-                ),
-            },
-            {"role": "user", "content": "hello"},
-        ],
-        "tool_schemas": [exposed_tool_schema],
-        "provider_model": "openai:gpt-4.1",
-        "scope": "ceo_frontdoor",
-        "prompt_cache_key": "cache-key",
-        "overlay_text": "Use the existing CEO layered context rules.\n\n## Retrieved Context\n- memory",
-        "overlay_section_count": 2,
-    }
+    assert captured["cache_key_kwargs"]["session_key"] == "web:shared"
+    assert captured["cache_key_kwargs"]["provider_model"] == "openai:gpt-4.1"
+    assert captured["cache_key_kwargs"]["scope"] == "ceo_frontdoor"
+    assert captured["cache_key_kwargs"]["tool_schemas"] == [exposed_tool_schema]
+    assert "submit_next_stage" in str(captured["cache_key_kwargs"]["stable_messages"][0]["content"])
+    assert captured["cache_key_kwargs"]["stable_messages"][1] == {"role": "user", "content": "hello"}
+    assert captured["diagnostics_kwargs"]["tool_schemas"] == [exposed_tool_schema]
+    assert captured["diagnostics_kwargs"]["provider_model"] == "openai:gpt-4.1"
+    assert captured["diagnostics_kwargs"]["scope"] == "ceo_frontdoor"
+    assert captured["diagnostics_kwargs"]["prompt_cache_key"] == "cache-key"
+    assert "submit_next_stage" in str(captured["diagnostics_kwargs"]["overlay_text"])
+    assert captured["diagnostics_kwargs"]["overlay_section_count"] == 1
 
 
 @pytest.mark.asyncio

@@ -29,7 +29,6 @@ from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.frontdoor._ceo_runtime_ops import _build_args_schema
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
-from g3ku.runtime.frontdoor.history_compaction import FRONTDOOR_HISTORY_SUMMARY_MARKER
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import SessionManager
 
@@ -299,7 +298,7 @@ def test_tool_registry_langchain_tool_preserves_nested_array_object_contracts() 
 
 
 @pytest.mark.asyncio
-async def test_summarize_messages_respects_stage_budget_defaults() -> None:
+async def test_summarize_messages_keeps_history_raw_under_stage_budget_defaults() -> None:
     runner = CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
             _memory_runtime_settings=SimpleNamespace(
@@ -312,8 +311,7 @@ async def test_summarize_messages_respects_stage_budget_defaults() -> None:
 
     result = await runner._summarize_messages(messages=messages, state={})
 
-    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
-    assert len(result["messages"]) == 21
+    assert result == {"messages": messages}
 
 @pytest.mark.asyncio
 async def test_runtime_agent_session_prompt_keeps_rag_ingest_payload_raw_and_skips_commit(tmp_path, monkeypatch) -> None:
@@ -812,10 +810,11 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
 def test_frontdoor_compaction_settings_defaults_to_stage_budget() -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
 
-    assert runner._frontdoor_compaction_settings() == (20, 10)
+    with pytest.raises(AttributeError):
+        runner._frontdoor_compaction_settings()
 
 
-def test_build_prompt_context_prefers_ceo_stage_overlay_over_summary_default() -> None:
+def test_build_prompt_context_no_longer_uses_summary_text_overlay() -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
     result = runner.build_prompt_context(
@@ -895,16 +894,8 @@ def test_build_prompt_context_keeps_dispatch_overlay_and_exhausted_stage_instruc
     assert "First summarize the completed progress for this stage and call `submit_next_stage`" in overlay
 
 @pytest.mark.asyncio
-async def test_graph_prepare_turn_falls_back_to_heuristic_compaction_when_summarizer_disabled() -> None:
-    loop = SimpleNamespace(
-        _memory_runtime_settings=SimpleNamespace(
-            assembly=SimpleNamespace(
-                frontdoor_summarizer_enabled=False,
-                frontdoor_summarizer_trigger_message_count=4,
-                frontdoor_summarizer_keep_message_count=3,
-            )
-        )
-    )
+async def test_graph_prepare_turn_keeps_messages_raw_and_drops_summary_state() -> None:
+    loop = SimpleNamespace()
     runner = CeoFrontDoorRunner(loop=loop)
 
     result = await runner._graph_prepare_turn(
@@ -915,13 +906,14 @@ async def test_graph_prepare_turn_falls_back_to_heuristic_compaction_when_summar
         runtime=SimpleNamespace(context=SimpleNamespace(session=None)),
     )
 
-    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
-    assert result["summary_payload"] == {}
-    assert result["summary_model_key"] == ""
+    assert result["messages"] == [{"role": "user", "content": f"message {idx}"} for idx in range(6)]
+    assert "summary_text" not in result
+    assert "summary_payload" not in result
+    assert "summary_model_key" not in result
 
 
 @pytest.mark.asyncio
-async def test_graph_execute_tools_preserves_model_summary_state(monkeypatch, tmp_path) -> None:
+async def test_graph_execute_tools_drops_frontdoor_summary_fields(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None
 
@@ -935,28 +927,8 @@ async def test_graph_execute_tools_preserves_model_summary_state(monkeypatch, tm
         max_iterations=8,
         workspace=tmp_path,
         temp_dir=str(tmp_path / "tmp"),
-        _memory_runtime_settings=SimpleNamespace(
-            assembly=SimpleNamespace(
-                frontdoor_summarizer_enabled=True,
-                frontdoor_summarizer_model_key="summary-model",
-                frontdoor_summarizer_trigger_message_count=4,
-                frontdoor_summarizer_keep_message_count=3,
-            )
-        ),
     )
     runner = CeoFrontDoorRunner(loop=loop)
-
-    async def _fake_model_invoke(prompt: dict[str, object]) -> dict[str, object]:
-        assert prompt["messages"]
-        return {
-            "stable_preferences": ["reply concisely"],
-            "stable_facts": ["fact"],
-            "open_loops": ["follow up"],
-            "recent_actions": ["tool executed"],
-            "narrative": "CEO frontdoor durable context.",
-        }
-
-    monkeypatch.setattr(runner, "_invoke_summary_model", _fake_model_invoke)
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
@@ -993,19 +965,13 @@ async def test_graph_execute_tools_preserves_model_summary_state(monkeypatch, tm
         runtime=runtime,
     )
 
-    assert "## CEO Durable Summary" in str(result["summary_text"])
-    assert result["summary_payload"] == {
-        "stable_preferences": ["reply concisely"],
-        "stable_facts": ["fact"],
-        "open_loops": ["follow up"],
-        "recent_actions": ["tool executed"],
-        "narrative": "CEO frontdoor durable context.",
-    }
-    assert result["summary_model_key"] == "summary-model"
+    assert "summary_text" not in result
+    assert "summary_payload" not in result
+    assert "summary_model_key" not in result
 
 
 @pytest.mark.asyncio
-async def test_graph_execute_tools_fallback_clears_stale_model_summary_payload(monkeypatch, tmp_path) -> None:
+async def test_graph_execute_tools_ignores_stale_frontdoor_summary_inputs(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None
 
@@ -1019,22 +985,8 @@ async def test_graph_execute_tools_fallback_clears_stale_model_summary_payload(m
         max_iterations=8,
         workspace=tmp_path,
         temp_dir=str(tmp_path / "tmp"),
-        _memory_runtime_settings=SimpleNamespace(
-            assembly=SimpleNamespace(
-                frontdoor_summarizer_enabled=True,
-                frontdoor_summarizer_model_key="summary-model",
-                frontdoor_summarizer_trigger_message_count=4,
-                frontdoor_summarizer_keep_message_count=3,
-            )
-        ),
     )
     runner = CeoFrontDoorRunner(loop=loop)
-
-    async def _boom(prompt: dict[str, object]) -> dict[str, object]:
-        _ = prompt
-        raise RuntimeError("summary model unavailable")
-
-    monkeypatch.setattr(runner, "_invoke_summary_model", _boom)
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
@@ -1077,6 +1029,6 @@ async def test_graph_execute_tools_fallback_clears_stale_model_summary_payload(m
         runtime=runtime,
     )
 
-    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
-    assert result["summary_payload"] == {"fallback": "heuristic"}
-    assert result["summary_model_key"] == ""
+    assert "summary_text" not in result
+    assert "summary_payload" not in result
+    assert "summary_model_key" not in result

@@ -304,10 +304,6 @@ class CeoTurnLifecycleMiddleware(AgentMiddleware):
             "final_output": str(finalized.get("final_output") or ""),
             "route_kind": str(finalized.get("route_kind") or "direct_reply"),
             "verified_task_ids": list(state.get("verified_task_ids") or []),
-            "summary_text": str(finalized.get("summary_text") or ""),
-            "summary_payload": dict(finalized.get("summary_payload") or {}),
-            "summary_version": int(finalized.get("summary_version") or 0),
-            "summary_model_key": str(finalized.get("summary_model_key") or ""),
             "frontdoor_stage_state": self._runner._frontdoor_stage_state_snapshot(state),
             "compression_state": dict(
                 state.get("compression_state") or self._runner._default_compression_state()

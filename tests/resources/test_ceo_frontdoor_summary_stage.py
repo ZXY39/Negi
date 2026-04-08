@@ -1,99 +1,69 @@
-import pytest
+from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
-from g3ku.runtime.frontdoor.history_compaction import (
-    FRONTDOOR_HISTORY_SUMMARY_MARKER,
-    compact_frontdoor_history,
-    is_frontdoor_history_summary_message,
-)
-
-
-def _stage_messages(count: int) -> list[dict[str, object]]:
-    return [{"role": "user", "content": f"message {idx}"} for idx in range(count)]
-
-
-def _build_no_config_runner() -> CreateAgentCeoFrontDoorRunner:
-    return CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
 
 @pytest.mark.asyncio
-async def test_compact_history_defaults_to_stage_budget() -> None:
-    messages = _stage_messages(22)
+async def test_frontdoor_postprocess_tool_cycle_drops_summary_fields(monkeypatch) -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
 
-    compacted = compact_frontdoor_history(
-        messages,
-        recent_message_count=20,
-        summary_trigger_message_count=10,
+    async def _fake_summarize_messages(*, messages, state):
+        _ = state
+        return {"messages": list(messages)}
+
+    monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
+
+    result = await runner._postprocess_completed_tool_cycle(
+        state={
+            "tool_call_payloads": [{"id": "call-1", "name": "message", "arguments": {"text": "hello"}}],
+            "messages": [
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1", "name": "message"}]},
+                {"role": "tool", "tool_call_id": "call-1", "name": "message", "content": "sent", "status": "success"},
+            ],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+        }
     )
 
-    assert len(compacted) == 21
-    assert is_frontdoor_history_summary_message(compacted[0])
-    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(compacted[0].get("content") or "")
+    assert result is not None
+    assert "summary_text" not in result
+    assert "summary_payload" not in result
+    assert "summary_model_key" not in result
 
 
-@pytest.mark.asyncio
-async def test_compact_history_between_trigger_and_keep() -> None:
-    messages = _stage_messages(15)
+def test_frontdoor_build_prompt_context_uses_stage_overlay_only() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
-    compacted = compact_frontdoor_history(
-        messages,
-        recent_message_count=20,
-        summary_trigger_message_count=10,
-    )
-
-    assert is_frontdoor_history_summary_message(compacted[0])
-
-
-@pytest.mark.asyncio
-async def test_summarize_messages_default_no_config() -> None:
-    runner = _build_no_config_runner()
-    runner._invoke_summary_model = None
-
-    messages = _stage_messages(22)
-
-    result = await runner._summarize_messages(messages=messages, state={})
-
-    assert len(result["messages"]) == 21
-    summary_meta = dict(result["messages"][0].get("metadata") or {})
-    assert summary_meta.get("frontdoor_history_summary") is True
-    assert FRONTDOOR_HISTORY_SUMMARY_MARKER in str(result["summary_text"])
-
-
-@pytest.mark.asyncio
-async def test_compact_history_does_not_isolate_current_user_turn() -> None:
-    messages = [
-        {"role": "assistant", "content": "answer 0"},
-        {"role": "user", "content": "message 1"},
-    ]
-
-    compacted = compact_frontdoor_history(
-        messages,
-        recent_message_count=20,
-        summary_trigger_message_count=1,
-    )
-
-    assert compacted == messages
-
-
-@pytest.mark.asyncio
-async def test_compact_history_keeps_trailing_tool_tail_intact() -> None:
-    messages = [
-        {"role": "user", "content": "message 0"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [{"id": "call-1", "name": "filesystem", "arguments": {"path": "."}}],
+    context = runner.build_prompt_context(
+        state={
+            "summary_text": "legacy summary should be ignored",
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": True,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Inspect the request",
+                        "tool_round_budget": 1,
+                        "tool_rounds_used": 1,
+                        "status": "active",
+                        "mode": "自主执行",
+                        "completed_stage_summary": "",
+                        "key_refs": [],
+                        "rounds": [],
+                    }
+                ],
+            },
         },
-        {"role": "tool", "tool_call_id": "call-1", "content": "directory listing"},
-    ]
-
-    compacted = compact_frontdoor_history(
-        messages,
-        recent_message_count=1,
-        summary_trigger_message_count=1,
+        runtime=None,
+        tools=[],
     )
 
-    assert is_frontdoor_history_summary_message(compacted[0])
-    assert compacted[-2:] == messages[-2:]
+    assert "legacy summary should be ignored" not in context["system_overlay"]
+    assert "Inspect the request" in context["system_overlay"]

@@ -84,14 +84,6 @@ class CeoPersistentState(TypedDict, total=False):
 
     next_step: str
 
-    summary_text: str
-
-    summary_payload: dict[str, Any]
-
-    summary_version: int
-
-    summary_model_key: str
-
     frontdoor_stage_state: dict[str, Any]
 
     compression_state: dict[str, Any]
@@ -165,14 +157,6 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "route_kind": "direct_reply",
 
         "verified_task_ids": [],
-
-        "summary_text": "",
-
-        "summary_payload": {},
-
-        "summary_version": 0,
-
-        "summary_model_key": "",
 
         "frontdoor_stage_state": {
 
