@@ -65,7 +65,7 @@ except Exception:  # pragma: no cover - optional runtime dependency fallback
 _NS_SEP = "\x1f"
 CONTEXT_TYPE_ALL: tuple[str, ...] = ("memory", "resource", "skill")
 CONTEXT_LAYER_ALL: tuple[str, ...] = ("l0", "l1", "l2")
-MEMORY_RUNTIME_SCHEMA_VERSION = "global-journal-v2"
+MEMORY_RUNTIME_SCHEMA_VERSION = "structured-memory-v3"
 DEFAULT_GLOBAL_MEMORY_NAMESPACE: tuple[str, ...] = ("memory", "global")
 _SENTENCE_SPLIT_RE = re.compile(
     r"[.!?\u3002\uFF01\uFF1F]+(?=\s|$|[\u3400-\u9FFF\u3040-\u30FF\uAC00-\uD7AF])"
@@ -3330,6 +3330,9 @@ class MemoryManager:
         self.cost_file = self.mem_dir / "cost_metrics.json"
         self.memory_file = self.mem_dir / "MEMORY.md"
         self.history_file = self.mem_dir / "HISTORY.md"
+        self.structured_current_file = self.mem_dir / "structured_current.jsonl"
+        self.structured_history_file = self.mem_dir / "structured_history.jsonl"
+        self.structured_state_file = self.mem_dir / "structured_state.json"
         self.journal_file = self.mem_dir / "sync_journal.jsonl"
         self.sync_state_file = self.mem_dir / "sync_state.json"
         self._legacy = MemoryStore(self.workspace)
@@ -3393,6 +3396,16 @@ class MemoryManager:
             self._clear_runtime_artifacts()
             state = self._default_sync_state()
             self._write_json_dict(self.sync_state_file, state)
+            # Structured memory gets its own lightweight bootstrap payload so other
+            # parts of the runtime can tell a reset occurred, even when RAG is down.
+            self._write_json_dict(
+                self.structured_state_file,
+                {
+                    "schema_version": MEMORY_RUNTIME_SCHEMA_VERSION,
+                    "last_reset_at": state.get("last_reset_at") or _now_iso(),
+                    "reason": "schema_bump",
+                },
+            )
         return state
 
     def _default_sync_state(self) -> dict[str, Any]:
@@ -3417,6 +3430,12 @@ class MemoryManager:
             self.memory_file.write_text("# Managed Memory Mirror\n\n", encoding="utf-8")
         if not self.history_file.exists():
             self.history_file.write_text("# Managed Memory History\n\n", encoding="utf-8")
+        if not self.structured_current_file.exists():
+            self.structured_current_file.write_text("", encoding="utf-8")
+        if not self.structured_history_file.exists():
+            self.structured_history_file.write_text("", encoding="utf-8")
+        if not self.structured_state_file.exists():
+            self._write_json_dict(self.structured_state_file, {})
 
     def _clear_runtime_artifacts(self) -> None:
         store_cfg = getattr(self.config, "store", None)
@@ -3448,6 +3467,9 @@ class MemoryManager:
             self.cost_file,
             self.memory_file,
             self.history_file,
+            self.structured_current_file,
+            self.structured_history_file,
+            self.structured_state_file,
             self.journal_file,
             self.sync_state_file,
             _dense_owner_lock_path(qdrant_path),
