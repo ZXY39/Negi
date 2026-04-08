@@ -28,7 +28,7 @@ from g3ku.resources.tool_settings import (
     raw_tool_settings_from_descriptor,
     validate_tool_settings,
 )
-from g3ku.runtime.context.semantic_scope import plan_retrieval_scope, semantic_catalog_rankings
+from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult, build_node_context_selection
 from g3ku.runtime.context.summarizer import layered_body_payload, score_query
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
@@ -319,6 +319,7 @@ class MainRuntimeService:
         self._hard_max_depth = max(self._default_max_depth, int(hard_max_depth or self._default_max_depth))
         self.tool_execution_manager = ToolExecutionManager()
         self._builtin_tool_cache: dict[str, Tool] | None = None
+        self._node_context_selection_cache: dict[tuple[str, str], dict[str, Any]] = {}
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(app_config)
         adaptive_budget_settings = self._adaptive_tool_budget_settings(app_config)
         node_dispatch_limits = self._node_dispatch_concurrency_settings(app_config)
@@ -378,6 +379,8 @@ class MainRuntimeService:
             execution_max_concurrency=execution_max_concurrency,
             acceptance_max_concurrency=acceptance_max_concurrency,
             context_enricher=self._enrich_node_messages,
+            context_preparer=self._prepare_node_context_selection,
+            context_finalizer=self._clear_node_context_selection,
             workspace_root_getter=lambda: self._workspace_root(),
         )
         self.node_runner._tool_snapshot_supplier = lambda task_id: self.get_task_detail_payload(task_id, mark_read=False)
@@ -4981,16 +4984,296 @@ class MainRuntimeService:
     def _actor_role_for_node(self, node: NodeRecord) -> str:
         return 'inspection' if node.node_kind == 'acceptance' else 'execution'
 
+    @staticmethod
+    def _node_context_selection_cache_key(
+        *,
+        task: Any | None = None,
+        node: Any | None = None,
+        task_id: str | None = None,
+        node_id: str | None = None,
+    ) -> tuple[str, str] | None:
+        normalized_task_id = str(task_id or getattr(task, 'task_id', '') or getattr(node, 'task_id', '') or '').strip()
+        normalized_node_id = str(node_id or getattr(node, 'node_id', '') or '').strip()
+        if not normalized_task_id or not normalized_node_id:
+            return None
+        return normalized_task_id, normalized_node_id
+
+    def _cached_node_context_selection_entry(
+        self,
+        *,
+        task: Any | None = None,
+        node: Any | None = None,
+        task_id: str | None = None,
+        node_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        cache_key = self._node_context_selection_cache_key(
+            task=task,
+            node=node,
+            task_id=task_id,
+            node_id=node_id,
+        )
+        if cache_key is None:
+            return None
+        cache = getattr(self, '_node_context_selection_cache', None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._node_context_selection_cache = cache
+        cached = cache.get(cache_key)
+        return dict(cached) if isinstance(cached, dict) else None
+
+    @staticmethod
+    def _skill_record_value(record: Any, key: str) -> Any:
+        if isinstance(record, dict):
+            return record.get(key)
+        return getattr(record, key, None)
+
+    @staticmethod
+    def _node_message_payload(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+        for message in list(messages or []):
+            if str(message.get('role') or '').strip().lower() != 'user':
+                continue
+            raw_content = message.get('content')
+            if not isinstance(raw_content, str):
+                continue
+            try:
+                payload = json.loads(raw_content)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return None
+
+    @staticmethod
+    def _normalized_tool_name_list(items: list[Any]) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for item in list(items or []):
+            normalized = str(item or '').strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        return ordered
+
+    def _restore_node_context_selection_entry(self, *, task, node: NodeRecord) -> dict[str, Any] | None:
+        log_service = getattr(self, 'log_service', None)
+        reader = getattr(log_service, 'read_runtime_frame', None)
+        task_id = str(getattr(task, 'task_id', '') or getattr(node, 'task_id', '') or '').strip()
+        node_id = str(getattr(node, 'node_id', '') or '').strip()
+        if not callable(reader) or not task_id or not node_id:
+            return None
+        frame = reader(task_id, node_id) or {}
+        messages = [item for item in list(frame.get('messages') or []) if isinstance(item, dict)]
+        if not messages:
+            return None
+        payload = self._node_message_payload(messages)
+        if not isinstance(payload, dict):
+            return None
+        callable_tool_names = self._normalized_tool_name_list(list(payload.get('callable_tool_names') or []))
+        if not callable_tool_names:
+            return None
+        visible_skills = [dict(item) for item in list(payload.get('visible_skills') or []) if isinstance(item, dict)]
+        selection = NodeContextSelectionResult(
+            mode='dense_rerank',
+            memory_search_visible='memory_search' in set(callable_tool_names),
+            selected_skill_ids=[
+                str(item.get('skill_id') or '').strip()
+                for item in visible_skills
+                if str(item.get('skill_id') or '').strip()
+            ],
+            selected_tool_family_ids=[],
+            selected_tool_names=callable_tool_names,
+            memory_query='',
+            retrieval_scope={},
+            trace={'mode': 'persisted_frame_restore'},
+        )
+        return {
+            'session_key': str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared',
+            'actor_role': self._actor_role_for_node(node),
+            'visible_skills': visible_skills,
+            'visible_tool_families': [],
+            'visible_tool_names': callable_tool_names,
+            'prompt': str(payload.get('prompt') or getattr(node, 'prompt', '') or '').strip(),
+            'goal': str(payload.get('goal') or getattr(node, 'goal', '') or '').strip(),
+            'core_requirement': str(payload.get('core_requirement') or '').strip(),
+            'selection': selection,
+        }
+
+    def _node_context_selection_inputs(self, *, task, node: NodeRecord) -> dict[str, Any]:
+        session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        actor_role = self._actor_role_for_node(node)
+        visible_skills = list(self.list_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
+        visible_tool_families = list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_key) or [])
+        visible_tool_names = list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_key) or [])
+        task_metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}
+        prompt = str(getattr(node, 'prompt', '') or '').strip()
+        goal = str(getattr(node, 'goal', '') or '').strip()
+        core_requirement = str(task_metadata.get('core_requirement') or prompt or goal).strip()
+        return {
+            'session_key': session_key,
+            'actor_role': actor_role,
+            'visible_skills': visible_skills,
+            'visible_tool_families': visible_tool_families,
+            'visible_tool_names': visible_tool_names,
+            'prompt': prompt,
+            'goal': goal,
+            'core_requirement': core_requirement,
+        }
+
+    async def _prepare_node_context_selection(self, *, task, node: NodeRecord) -> NodeContextSelectionResult:
+        cached = self._cached_node_context_selection_entry(task=task, node=node)
+        if cached is not None and isinstance(cached.get('selection'), NodeContextSelectionResult):
+            return cached['selection']
+        restored = self._restore_node_context_selection_entry(task=task, node=node)
+        cache_key = self._node_context_selection_cache_key(task=task, node=node)
+        if restored is not None and cache_key is not None:
+            cache = getattr(self, '_node_context_selection_cache', None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._node_context_selection_cache = cache
+            cache[cache_key] = restored
+            return restored['selection']
+        inputs = self._node_context_selection_inputs(task=task, node=node)
+        selection = await build_node_context_selection(
+            loop=getattr(self, '_react_loop', None),
+            memory_manager=getattr(self, 'memory_manager', None),
+            prompt=str(inputs.get('prompt') or ''),
+            goal=str(inputs.get('goal') or ''),
+            core_requirement=str(inputs.get('core_requirement') or ''),
+            visible_skills=list(inputs.get('visible_skills') or []),
+            visible_tool_families=list(inputs.get('visible_tool_families') or []),
+            visible_tool_names=list(inputs.get('visible_tool_names') or []),
+        )
+        if cache_key is not None:
+            cache = getattr(self, '_node_context_selection_cache', None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._node_context_selection_cache = cache
+            cache[cache_key] = {**inputs, 'selection': selection}
+        return selection
+
+    def _clear_node_context_selection(
+        self,
+        *,
+        task: Any | None = None,
+        node: Any | None = None,
+        task_id: str | None = None,
+        node_id: str | None = None,
+    ) -> None:
+        cache_key = self._node_context_selection_cache_key(
+            task=task,
+            node=node,
+            task_id=task_id,
+            node_id=node_id,
+        )
+        if cache_key is None:
+            return
+        cache = getattr(self, '_node_context_selection_cache', None)
+        if isinstance(cache, dict):
+            cache.pop(cache_key, None)
+
+    def _tool_family_executor_names(self, family: Any) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        def _add(value: Any) -> None:
+            normalized = str(value or '').strip()
+            if not normalized or normalized in seen:
+                return
+            seen.add(normalized)
+            ordered.append(normalized)
+
+        _add(self._tool_family_executor_name(family))
+        for action in list(getattr(family, 'actions', []) or []):
+            for executor_name in list(getattr(action, 'executor_names', []) or []):
+                _add(executor_name)
+        tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+        if tool_id and self._resource_manager is not None:
+            descriptor = (
+                self._resource_manager.get_tool_descriptor(tool_id)
+                if hasattr(self._resource_manager, 'get_tool_descriptor')
+                else None
+            )
+            if descriptor is not None:
+                _add(tool_id)
+        return ordered
+
+    def _selected_callable_tool_names(
+        self,
+        *,
+        selection: NodeContextSelectionResult | None,
+        visible_tool_families: list[Any],
+        visible_tool_names: list[str],
+    ) -> list[str]:
+        normalized_visible_tool_names: list[str] = []
+        seen_visible_tool_names: set[str] = set()
+        for item in list(visible_tool_names or []):
+            normalized = str(item or '').strip()
+            if not normalized or normalized in seen_visible_tool_names:
+                continue
+            seen_visible_tool_names.add(normalized)
+            normalized_visible_tool_names.append(normalized)
+        if selection is None or str(getattr(selection, 'mode', '') or 'visible_only') == 'visible_only':
+            return normalized_visible_tool_names
+
+        visible_tool_name_set = set(normalized_visible_tool_names)
+        selected_tool_family_ids: list[str] = []
+        seen_selected_tool_family_ids: set[str] = set()
+        for item in list(getattr(selection, 'selected_tool_family_ids', []) or []):
+            normalized = str(item or '').strip()
+            if not normalized or normalized in seen_selected_tool_family_ids:
+                continue
+            seen_selected_tool_family_ids.add(normalized)
+            selected_tool_family_ids.append(normalized)
+        if not selected_tool_family_ids:
+            return [
+                name
+                for name in list(getattr(selection, 'selected_tool_names', []) or [])
+                if str(name or '').strip() in visible_tool_name_set
+            ]
+
+        family_by_id: dict[str, Any] = {}
+        for family in list(visible_tool_families or []):
+            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+            if tool_id and tool_id not in family_by_id:
+                family_by_id[tool_id] = family
+
+        selected_tool_names: list[str] = []
+        seen_selected_tool_names: set[str] = set()
+        for tool_id in selected_tool_family_ids:
+            family = family_by_id.get(tool_id)
+            if family is None:
+                continue
+            for executor_name in self._tool_family_executor_names(family):
+                if executor_name not in visible_tool_name_set or executor_name in seen_selected_tool_names:
+                    continue
+                seen_selected_tool_names.add(executor_name)
+                selected_tool_names.append(executor_name)
+        return selected_tool_names
+
     def _tool_provider(self, node: NodeRecord) -> dict[str, Tool]:
         task = self.store.get_task(node.task_id)
         session_id = task.session_id if task is not None else 'web:shared'
         actor_role = self._actor_role_for_node(node)
-        visible = set(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id))
+        cached = self._cached_node_context_selection_entry(task=task, node=node)
+        visible_tool_families = list(cached.get('visible_tool_families') or []) if cached is not None else list(
+            self.list_visible_tool_families(actor_role=actor_role, session_id=session_id) or []
+        )
+        visible_tool_names = list(cached.get('visible_tool_names') or []) if cached is not None else list(
+            self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or []
+        )
+        selected_visible = set(
+            self._selected_callable_tool_names(
+                selection=(cached.get('selection') if cached is not None else None),
+                visible_tool_families=visible_tool_families,
+                visible_tool_names=visible_tool_names,
+            )
+        )
         provided = dict(self._external_tool_provider(node) or {})
         provided.update(self._builtin_tool_instances(actor_role=actor_role))
         if self._resource_manager is not None:
             for name, tool in self._resource_manager.tool_instances().items():
-                if name in visible:
+                if name in selected_visible:
                     provided[name] = tool
         return provided
 
@@ -5014,14 +5297,14 @@ class MainRuntimeService:
     def _visible_skill_prompt_items(visible_skills: list[Any]) -> list[dict[str, str]]:
         items: list[dict[str, str]] = []
         for record in list(visible_skills or []):
-            skill_id = str(getattr(record, 'skill_id', '') or '').strip()
+            skill_id = str(MainRuntimeService._skill_record_value(record, 'skill_id') or '').strip()
             if not skill_id:
                 continue
             items.append(
                 {
                     'skill_id': skill_id,
-                    'display_name': str(getattr(record, 'display_name', '') or skill_id).strip() or skill_id,
-                    'description': str(getattr(record, 'description', '') or '').strip(),
+                    'display_name': str(MainRuntimeService._skill_record_value(record, 'display_name') or skill_id).strip() or skill_id,
+                    'description': str(MainRuntimeService._skill_record_value(record, 'description') or '').strip(),
                 }
             )
         return items
@@ -5031,9 +5314,11 @@ class MainRuntimeService:
         *,
         messages: list[dict[str, Any]],
         visible_skills: list[Any],
+        callable_tool_names: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         enriched = list(messages or [])
         skill_items = self._visible_skill_prompt_items(visible_skills)
+        normalized_callable_tool_names = self._normalized_tool_name_list(list(callable_tool_names or []))
         for index, message in enumerate(enriched):
             if str(message.get('role') or '').strip().lower() != 'user':
                 continue
@@ -5047,6 +5332,7 @@ class MainRuntimeService:
             if not isinstance(payload, dict):
                 continue
             payload['visible_skills'] = skill_items
+            payload['callable_tool_names'] = normalized_callable_tool_names
             enriched[index] = {
                 **message,
                 'content': json.dumps(payload, ensure_ascii=False, indent=2),
@@ -5055,43 +5341,64 @@ class MainRuntimeService:
         return enriched
 
     async def _enrich_node_messages(self, *, task, node: NodeRecord, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
-        actor_role = self._actor_role_for_node(node)
-        visible_skills = list(self.list_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
-        enriched = self._inject_visible_skills_into_node_messages(messages=messages, visible_skills=visible_skills)
+        selection = await self._prepare_node_context_selection(task=task, node=node)
+        cached = self._cached_node_context_selection_entry(task=task, node=node)
+        inputs = cached or self._node_context_selection_inputs(task=task, node=node)
+        session_key = str(inputs.get('session_key') or getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        visible_skills = list(inputs.get('visible_skills') or [])
+        visible_skill_by_id: dict[str, Any] = {}
+        for record in visible_skills:
+            skill_id = str(self._skill_record_value(record, 'skill_id') or '').strip()
+            if skill_id and skill_id not in visible_skill_by_id:
+                visible_skill_by_id[skill_id] = record
+        selected_visible_skills: list[Any] = []
+        seen_selected_skill_ids: set[str] = set()
+        for skill_id in list(getattr(selection, 'selected_skill_ids', []) or []):
+            normalized_skill_id = str(skill_id or '').strip()
+            if not normalized_skill_id or normalized_skill_id in seen_selected_skill_ids:
+                continue
+            record = visible_skill_by_id.get(normalized_skill_id)
+            if record is None:
+                continue
+            seen_selected_skill_ids.add(normalized_skill_id)
+            selected_visible_skills.append(record)
+        enriched = self._inject_visible_skills_into_node_messages(
+            messages=messages,
+            visible_skills=selected_visible_skills,
+            callable_tool_names=self._selected_callable_tool_names(
+                selection=selection,
+                visible_tool_families=list(inputs.get('visible_tool_families') or []),
+                visible_tool_names=list(inputs.get('visible_tool_names') or []),
+            ),
+        )
         manager = getattr(self, 'memory_manager', None)
+        # Node catalog narrowing is always selector-driven; unified_context only gates memory block retrieval.
         if manager is None or not getattr(manager, '_feature_enabled', lambda _key: False)('unified_context'):
             return enriched
-        query_text = str(getattr(node, 'prompt', '') or getattr(node, 'goal', '') or '').strip()
-        if not query_text:
+        prompt = str(inputs.get('prompt') or '')
+        goal = str(inputs.get('goal') or '')
+        core_requirement = str(inputs.get('core_requirement') or '')
+        if not (prompt or goal or core_requirement):
+            return enriched
+        if not bool(getattr(selection, 'memory_search_visible', False)):
+            return enriched
+        memory_query = str(getattr(selection, 'memory_query', '') or '').strip()
+        if not memory_query:
             return enriched
         memory_scope = self._task_memory_scope(task)
         channel = str(memory_scope.get('channel') or 'unknown')
         chat_id = str(memory_scope.get('chat_id') or 'unknown')
-        visible_families = list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_key) or [])
-        semantic_frontdoor = await semantic_catalog_rankings(
-            memory_manager=manager,
-            query_text=query_text,
-            visible_skills=visible_skills,
-            visible_families=visible_families,
-            skill_limit=max(8, len(visible_skills)),
-            tool_limit=max(8, len(visible_families)),
-        )
-        retrieval_scope = plan_retrieval_scope(
-            visible_skills=visible_skills,
-            visible_families=visible_families,
-            semantic_frontdoor=semantic_frontdoor,
-        )
+        retrieval_scope = dict(getattr(selection, 'retrieval_scope', {}) or {})
         try:
             block = await manager.retrieve_block(
-                query=query_text,
+                query=memory_query,
                 session_key=session_key,
                 channel=channel,
                 chat_id=chat_id,
-                search_context_types=retrieval_scope['search_context_types'],
-                allowed_context_types=retrieval_scope['allowed_context_types'],
-                allowed_resource_record_ids=retrieval_scope['allowed_resource_record_ids'],
-                allowed_skill_record_ids=retrieval_scope['allowed_skill_record_ids'],
+                search_context_types=list(retrieval_scope.get('search_context_types') or []),
+                allowed_context_types=list(retrieval_scope.get('allowed_context_types') or []),
+                allowed_resource_record_ids=list(retrieval_scope.get('allowed_resource_record_ids') or []),
+                allowed_skill_record_ids=list(retrieval_scope.get('allowed_skill_record_ids') or []),
             )
         except Exception:
             return enriched
