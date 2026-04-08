@@ -705,6 +705,55 @@ async def test_enrich_node_messages_uses_dense_only_scope_when_semantic_search_i
     assert "semantic block" in enriched[0]["content"]
 
 
+@pytest.mark.asyncio
+async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_not_visible() -> None:
+    captured: list[dict[str, object]] = []
+
+    class _MemoryManager:
+        def _feature_enabled(self, key: str) -> bool:
+            return key == "unified_context"
+
+        async def retrieve_block(self, **kwargs):
+            captured.append(dict(kwargs))
+            return "unexpected memory block"
+
+    service = object.__new__(MainRuntimeService)
+    service.memory_manager = _MemoryManager()
+    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='filesystem'),
+    ]
+    service.list_visible_skill_resources = lambda *, actor_role, session_id: [
+        SimpleNamespace(skill_id='skill-creator', display_name='skill-creator', description='skill'),
+    ]
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['filesystem']
+
+    task = SimpleNamespace(
+        session_id="web:ceo-origin",
+        metadata={"memory_scope": {"channel": "web", "chat_id": "shared"}},
+    )
+    node = SimpleNamespace(prompt="where is the plan", goal="where is the plan", node_kind="execution")
+
+    enriched = await service._enrich_node_messages(
+        task=task,
+        node=node,
+        messages=[
+            {"role": "system", "content": "base prompt"},
+            {"role": "user", "content": '{"prompt":"where is the plan"}'},
+        ],
+    )
+
+    payload = json.loads(enriched[1]["content"])
+    assert payload["visible_skills"] == [
+        {
+            "skill_id": "skill-creator",
+            "display_name": "skill-creator",
+            "description": "skill",
+        }
+    ]
+    assert captured == []
+    assert enriched[0]["content"] == "base prompt"
+
+
 def test_filter_retrieved_records_preserves_memory_and_filters_catalog_context() -> None:
     records = [
         ContextRecordV2(record_id="memory-1", context_type="memory", uri="g3ku://memory/web/shared/memory-1"),
