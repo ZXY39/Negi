@@ -1,0 +1,42 @@
+schema_version: 1
+kind: tool
+name: memory_delete
+description: Delete structured memory facts precisely by fact_id and/or canonical_key.
+source:
+  type: ''
+  url: ''
+  ref: ''
+current_version:
+  summary: Repository-managed structured memory delete tool for precise fact removals.
+  compare_rule: Treat changes in main implementation, parameters, permissions, settings, or return payload shape as version changes.
+  source_of_truth: This resource.yaml and the main implementation are authoritative; toolskills supplement usage guidance when present.
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    fact_ids:
+      type: array
+      description: Structured fact ids to delete (exact match).
+      items:
+        type: string
+    canonical_keys:
+      type: array
+      description: Structured canonical keys to delete (exact match).
+      items:
+        type: string
+  required: []
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true
+

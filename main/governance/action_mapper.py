@@ -84,6 +84,20 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
             }
         ],
     },
+    'memory_delete': {
+        'tool_id': 'memory',
+        'display_name': 'Memory',
+        'description': 'Delete structured memory facts precisely by fact_id or canonical_key.',
+        'actions': [
+            {
+                'id': 'delete',
+                'label': 'Delete Memory',
+                'risk_level': 'medium',
+                'destructive': True,
+                'allowed_roles': ['ceo'],
+            }
+        ],
+    },
     'memory_runtime': {
         'tool_id': 'memory',
         'display_name': 'Memory',
