@@ -366,6 +366,14 @@ class CeoModelOutputMiddleware(AgentMiddleware):
                 else self._runner._model_content(response_payload.get("content", ""))
             )
             ai_record["tool_calls"] = self._runner._assistant_tool_calls_from_payloads(tool_call_payloads)
+            preview_state = {
+                **current_state,
+                "tool_call_payloads": tool_call_payloads,
+            }
+            preview_frontdoor_stage_state, preview_compression_state = self._runner._runtime_session_frontdoor_state(
+                preview_state,
+                preview_pending_tool_round=True,
+            )
             update = {
                 **self._runner._replace_messages_update([*history_records, ai_record]),
                 "response_payload": response_payload,
@@ -384,11 +392,12 @@ class CeoModelOutputMiddleware(AgentMiddleware):
                 "xml_repair_last_issue": str(normalized.get("xml_repair_last_issue") or ""),
                 "repair_overlay_text": None,
                 "final_output": "",
+                "frontdoor_stage_state": preview_frontdoor_stage_state,
+                "compression_state": preview_compression_state,
             }
             self._runner._sync_runtime_session_frontdoor_state(
                 state={**current_state, **update},
                 runtime=runtime,
-                preview_pending_tool_round=True,
             )
             return update
 
@@ -451,7 +460,6 @@ class CeoApprovalMiddleware(AgentMiddleware):
         current_state = dict(state or {})
         approval_request = dict(current_state.get("approval_request") or {})
         if not approval_request:
-            self._runner._sync_runtime_session_frontdoor_state(state=current_state, runtime=runtime)
             return None
 
         decision = interrupt(approval_request)
@@ -489,7 +497,6 @@ class CeoApprovalMiddleware(AgentMiddleware):
             self._runner._sync_runtime_session_frontdoor_state(
                 state={**current_state, **update},
                 runtime=runtime,
-                preview_pending_tool_round=True,
             )
             return update
 
@@ -507,6 +514,5 @@ class CeoApprovalMiddleware(AgentMiddleware):
         self._runner._sync_runtime_session_frontdoor_state(
             state={**current_state, **update},
             runtime=runtime,
-            preview_pending_tool_round=True,
         )
         return update

@@ -644,7 +644,7 @@ async def test_runtime_agent_session_converts_frontdoor_interrupt_into_paused_st
 
 
 @pytest.mark.asyncio
-async def test_runtime_agent_session_keeps_real_stage_state_coherent_through_approval_interrupt_pause(
+async def test_runtime_agent_session_preserves_previewed_round_through_real_middleware_order_interrupt_pause(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -661,8 +661,6 @@ async def test_runtime_agent_session_keeps_real_stage_state_coherent_through_app
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
     model_output = ceo_agent_middleware.CeoModelOutputMiddleware(runner=runner)
     approval = ceo_agent_middleware.CeoApprovalMiddleware(runner=runner)
-    captured: dict[str, object] = {}
-    approval_state_holder: dict[str, object] = {}
 
     async def _fake_normalize_model_output(state, *, runtime):
         _ = state, runtime
@@ -695,15 +693,6 @@ async def test_runtime_agent_session_keeps_real_stage_state_coherent_through_app
         }
 
     monkeypatch.setattr(runner, "_graph_normalize_model_output", _fake_normalize_model_output)
-
-    def _interrupt(payload):
-        captured["snapshot_at_interrupt"] = approval_state_holder["session"].inflight_turn_snapshot()
-        raise CeoFrontdoorInterrupted(
-            interrupts=[CeoPendingInterrupt(interrupt_id="interrupt-approval-1", value=dict(payload or {}))],
-            values=dict(approval_state_holder["state"] or {}),
-        )
-
-    monkeypatch.setattr(ceo_agent_middleware, "interrupt", _interrupt)
 
     class _MiddlewareInterruptRunner:
         async def run_turn(self, *, user_input, session, on_progress):
@@ -742,11 +731,19 @@ async def test_runtime_agent_session_keeps_real_stage_state_coherent_through_app
                 "route_kind": "direct_reply",
                 "used_tools": [],
             }
+            approval_update = await approval.aafter_model(state, runtime)
+            assert approval_update is None
             model_update = await model_output.aafter_model(state, runtime)
-            approval_state_holder["session"] = session
-            approval_state_holder["state"] = {**state, **dict(model_update or {})}
-            await approval.aafter_model(dict(approval_state_holder["state"]), runtime)
-            raise AssertionError("approval middleware should interrupt before returning")
+            merged_state = {**state, **dict(model_update or {})}
+            raise CeoFrontdoorInterrupted(
+                interrupts=[
+                    CeoPendingInterrupt(
+                        interrupt_id="interrupt-approval-1",
+                        value=dict(merged_state.get("approval_request") or {}),
+                    )
+                ],
+                values=merged_state,
+            )
 
     async def _cancel_session_tasks(session_key: str) -> int:
         _ = session_key
@@ -770,25 +767,37 @@ async def test_runtime_agent_session_keeps_real_stage_state_coherent_through_app
     result = await session.prompt("create a task")
 
     assert result.output == ""
-    interrupt_snapshot = captured["snapshot_at_interrupt"]
-    assert isinstance(interrupt_snapshot, dict)
-    assert interrupt_snapshot["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
-    interrupt_stage = interrupt_snapshot["execution_trace_summary"]["stages"][0]
-    assert interrupt_stage["stage_goal"] == "Inspect the repository structure"
-    assert interrupt_stage["tool_round_budget"] == 2
-    assert [round_item["tool_names"] for round_item in interrupt_stage["rounds"]] == [["create_async_task"]]
-    assert "tool_events" not in interrupt_snapshot
-    assert interrupt_snapshot["compression"]["status"] == "running"
-
     assert session.state.status == "paused"
+    assert session.state.pending_interrupts == [
+        {
+            "id": "interrupt-approval-1",
+            "value": {
+                "kind": "frontdoor_tool_approval",
+                "tool_calls": [
+                    {
+                        "id": "call-task-1",
+                        "name": "create_async_task",
+                        "arguments": {"task": "Inspect the repository structure"},
+                    }
+                ],
+            },
+        }
+    ]
     paused = session.paused_execution_context_snapshot()
     assert paused["interrupts"][0]["id"] == "interrupt-approval-1"
     assert paused["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
-    assert paused["execution_trace_summary"]["stages"][0]["stage_goal"] == "Inspect the repository structure"
+    paused_stage = paused["execution_trace_summary"]["stages"][0]
+    assert paused_stage["stage_goal"] == "Inspect the repository structure"
+    assert paused_stage["tool_round_budget"] == 2
+    assert [round_item["tool_names"] for round_item in paused_stage["rounds"]] == [["create_async_task"]]
+    assert "tool_events" not in paused
     assert paused["compression"]["status"] == "running"
     inflight = session.inflight_turn_snapshot()
     assert inflight is not None
     assert inflight["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
+    assert [round_item["tool_names"] for round_item in inflight["execution_trace_summary"]["stages"][0]["rounds"]] == [
+        ["create_async_task"]
+    ]
     assert inflight["compression"]["text"] == "compressing"
 
 
