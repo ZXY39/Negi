@@ -2035,21 +2035,8 @@ class TaskLogService:
             self._store.upsert_task(updated)
             if self._is_terminal_status(next_status):
                 self.flush_live_patch_history(updated.task_id)
-                if next_status == 'failed':
-                    frame_records = [
-                        record.model_copy(
-                            update={
-                                'active': False,
-                                'runnable': False,
-                                'waiting': False,
-                                'updated_at': now_iso(),
-                            }
-                        )
-                        for record in list(self._store.list_task_runtime_frames(updated.task_id) or [])
-                    ]
-                    self._projector.replace_runtime_frames(updated.task_id, frame_records)
-                else:
-                    self._store.replace_task_runtime_frames(updated.task_id, [])
+                self._store.replace_task_runtime_frames(updated.task_id, [])
+                self._projector.replace_runtime_frames(updated.task_id, [])
                 self.update_task_runtime_meta(updated.task_id)
             self._publish_task_summary_patch_locked(task=updated, previous_task=task)
             if terminal_transition:

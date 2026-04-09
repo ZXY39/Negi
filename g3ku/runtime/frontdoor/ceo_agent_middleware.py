@@ -394,11 +394,14 @@ class CeoModelOutputMiddleware(AgentMiddleware):
                 "xml_repair_last_issue": str(normalized.get("xml_repair_last_issue") or ""),
                 "repair_overlay_text": None,
                 "final_output": "",
-                "frontdoor_stage_state": preview_frontdoor_stage_state,
-                "compression_state": preview_compression_state,
             }
             self._runner._sync_runtime_session_frontdoor_state(
-                state={**current_state, **update},
+                state={
+                    **current_state,
+                    **update,
+                    "frontdoor_stage_state": preview_frontdoor_stage_state,
+                    "compression_state": preview_compression_state,
+                },
                 runtime=runtime,
             )
             return update
@@ -464,7 +467,22 @@ class CeoApprovalMiddleware(AgentMiddleware):
         if not approval_request:
             return None
 
-        decision = interrupt(approval_request)
+        preview_state = {
+            **current_state,
+            "tool_call_payloads": list(current_state.get("tool_call_payloads") or []),
+        }
+        preview_frontdoor_stage_state, preview_compression_state = self._runner._runtime_session_frontdoor_state(
+            preview_state,
+            preview_pending_tool_round=True,
+        )
+        interrupt_payload = {
+            **approval_request,
+            "frontdoor_stage_state": preview_frontdoor_stage_state,
+            "compression_state": preview_compression_state,
+            "tool_call_payloads": list(current_state.get("tool_call_payloads") or []),
+        }
+
+        decision = interrupt(interrupt_payload)
         normalized = self._runner._normalize_approval_resume_value(
             decision=decision,
             original_payloads=list(current_state.get("tool_call_payloads") or []),

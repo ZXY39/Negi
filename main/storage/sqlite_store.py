@@ -780,21 +780,32 @@ class SQLiteTaskStore:
         suffix = '.json.gz' if self._event_history_archive_encoding == 'gzip' else '.json'
         relative_path = Path(task_component) / f'{int(seq)}{suffix}'
         archive_path = self._event_history_dir / relative_path
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = archive_path.with_name(f'{archive_path.name}.tmp')
-        try:
-            if self._event_history_archive_encoding == 'gzip':
-                with gzip.open(temp_path, 'wt', encoding='utf-8') as handle:
-                    handle.write(payload_json)
-            else:
-                temp_path.write_text(payload_json, encoding='utf-8')
-            temp_path.replace(archive_path)
-        finally:
-            if temp_path.exists():
-                try:
-                    temp_path.unlink()
-                except FileNotFoundError:
-                    pass
+        last_error: OSError | None = None
+        for _attempt in range(3):
+            try:
+                self._event_history_dir.mkdir(parents=True, exist_ok=True)
+                archive_path.parent.mkdir(parents=True, exist_ok=True)
+                if self._event_history_archive_encoding == 'gzip':
+                    with gzip.open(temp_path, 'wt', encoding='utf-8') as handle:
+                        handle.write(payload_json)
+                else:
+                    temp_path.write_text(payload_json, encoding='utf-8')
+                temp_path.replace(archive_path)
+                break
+            except (FileNotFoundError, PermissionError, NotADirectoryError) as exc:
+                last_error = exc
+                time.sleep(0.01)
+                continue
+            finally:
+                if temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except FileNotFoundError:
+                        pass
+        else:
+            if last_error is not None:
+                raise last_error
         return relative_path.as_posix()
 
     def _read_task_event_archive(self, *, path: str, encoding: str) -> dict[str, object] | None:

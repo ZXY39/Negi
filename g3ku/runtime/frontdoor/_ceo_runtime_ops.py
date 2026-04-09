@@ -274,6 +274,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         tool_call_payloads = list(approval_request.get("tool_calls") or [])
                         if tool_call_payloads:
                             values["tool_call_payloads"] = tool_call_payloads
+            if isinstance(interrupt_state.get("frontdoor_stage_state"), dict):
+                values["frontdoor_stage_state"] = dict(interrupt_state.get("frontdoor_stage_state") or {})
+            if isinstance(interrupt_state.get("compression_state"), dict):
+                values["compression_state"] = dict(interrupt_state.get("compression_state") or {})
             raise CeoFrontdoorInterrupted(interrupts=interrupts, values=values)
         return values
 

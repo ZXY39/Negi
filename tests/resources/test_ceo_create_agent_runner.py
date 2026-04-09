@@ -874,7 +874,7 @@ async def test_create_agent_middleware_syncs_real_stage_state_before_running_too
     assert [round_item["tool_names"] for round_item in stage["rounds"]] == [["memory_search"]]
     assert [round_item["tool_call_ids"] for round_item in stage["rounds"]] == [["call-memory-1"]]
     assert [tool["tool_name"] for tool in stage["rounds"][0]["tools"]] == ["memory_search"]
-    assert str(stage["rounds"][0]["tools"][0]["tool_call_id"]).startswith("memory_search:")
+    assert stage["rounds"][0]["tools"][0]["tool_call_id"] == "call-memory-1"
     assert stage["rounds"][0]["tools"][0]["status"] == "running"
 
 
