@@ -1155,6 +1155,57 @@ async def test_graph_finalize_turn_ignores_stale_summary_fields_on_direct_reply(
 
 
 @pytest.mark.asyncio
+async def test_graph_finalize_turn_completes_active_frontdoor_stage_for_direct_reply() -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+
+    result = await runner._graph_finalize_turn(
+        {
+            "messages": [{"role": "user", "content": "remember this"}],
+            "final_output": "记住了。以后默认把文档保存到桌面。",
+            "route_kind": "direct_reply",
+            "heartbeat_internal": False,
+            "query_text": "记住，文档保存到桌面",
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-2",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-2",
+                        "stage_index": 2,
+                        "stage_kind": "normal",
+                        "mode": "自主执行",
+                        "status": "active",
+                        "stage_goal": "save memory",
+                        "completed_stage_summary": "",
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 1,
+                        "created_at": "2026-04-09T13:46:30+08:00",
+                        "finished_at": "",
+                        "rounds": [
+                            {
+                                "round_id": "frontdoor-stage-2:round-1",
+                                "round_index": 1,
+                                "created_at": "2026-04-09T13:46:36+08:00",
+                                "budget_counted": True,
+                                "tool_names": ["memory_write"],
+                                "tool_call_ids": ["call-1"],
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+
+    stage_state = dict(result.get("frontdoor_stage_state") or {})
+    assert stage_state["active_stage_id"] == ""
+    assert stage_state["transition_required"] is False
+    stage = stage_state["stages"][0]
+    assert stage["status"] == "completed"
+    assert stage["finished_at"]
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_inspection_uses_runner_graph_surface(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

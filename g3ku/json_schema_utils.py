@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import re
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -160,6 +161,42 @@ def attach_raw_parameters_schema(tool: Any, schema: dict[str, Any] | None) -> An
 def get_attached_raw_parameters_schema(tool: Any) -> dict[str, Any] | None:
     schema = getattr(tool, _RAW_PARAMETERS_SCHEMA_ATTR, None)
     return copy.deepcopy(schema) if isinstance(schema, dict) else None
+
+
+def normalize_runtime_tool_argument(value: Any) -> Any:
+    """Coerce Pydantic/nested schema values back to plain JSON-like Python values."""
+
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(mode="python", exclude_unset=True)
+        except TypeError:
+            try:
+                dumped = model_dump(exclude_unset=True)
+            except TypeError:
+                dumped = model_dump()
+        return normalize_runtime_tool_argument(dumped)
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): normalize_runtime_tool_argument(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, list):
+        return [normalize_runtime_tool_argument(item) for item in value]
+
+    if isinstance(value, tuple):
+        return [normalize_runtime_tool_argument(item) for item in value]
+
+    return value
+
+
+def normalize_runtime_tool_arguments_dict(arguments: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = normalize_runtime_tool_argument(arguments if isinstance(arguments, dict) else {})
+    if isinstance(normalized, dict):
+        return normalized
+    return {}
 
 
 def to_openai_tool_definition(tool: Any) -> dict[str, Any]:

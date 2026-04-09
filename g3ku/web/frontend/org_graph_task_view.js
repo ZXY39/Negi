@@ -815,14 +815,15 @@ function normalizeSummaryTraceToolCall(step, index = 0) {
         warning: "warning",
         interrupted: "interrupted",
     }[rawStatus] || "");
-    const outputText = String(step?.output_text || "");
+    const argumentsText = String(step?.arguments_text || step?.arguments_preview || "");
+    const outputText = String(step?.output_text || step?.output_preview || step?.text || "");
     const outputRef = String(step?.output_ref || "");
     const startedAt = String(step?.started_at || "");
     const finishedAt = String(step?.finished_at || "");
     return {
         tool_call_id: String(step?.tool_call_id || `summary-tool-${index + 1}`),
         tool_name: String(step?.tool_name || "tool"),
-        arguments_text: String(step?.arguments_text || ""),
+        arguments_text: argumentsText,
         output_text: outputText,
         output_ref: outputRef,
         started_at: startedAt,
@@ -850,15 +851,27 @@ function normalizeSummaryExecutionTrace(summary) {
         const fallbackTools = (Array.isArray(stage?.tool_calls) ? stage.tool_calls : []).map((step, toolIndex) => (
             normalizeSummaryTraceToolCall(step, toolIndex)
         ));
-        const rounds = (Array.isArray(stage?.rounds) ? stage.rounds : []).map((round, roundIndex) => ({
-            round_id: String(round?.round_id || ""),
-            round_index: toInt(round?.round_index, roundIndex + 1),
-            created_at: String(round?.created_at || ""),
-            budget_counted: !!round?.budget_counted,
-            tools: (Array.isArray(round?.tools) ? round.tools : []).map((step, toolIndex) => (
+        const rounds = (Array.isArray(stage?.rounds) ? stage.rounds : []).map((round, roundIndex) => {
+            let tools = (Array.isArray(round?.tools) ? round.tools : []).map((step, toolIndex) => (
                 normalizeSummaryTraceToolCall(step, toolIndex)
-            )),
-        }));
+            ));
+            if (!tools.length) {
+                const roundToolNames = Array.isArray(round?.tool_names) ? round.tool_names : [];
+                const roundToolCallIds = Array.isArray(round?.tool_call_ids) ? round.tool_call_ids : [];
+                tools = roundToolNames.map((toolName, toolIndex) => normalizeSummaryTraceToolCall({
+                    tool_name: toolName,
+                    tool_call_id: roundToolCallIds[toolIndex] || "",
+                    status: round?.status || stage?.status || "",
+                }, toolIndex));
+            }
+            return {
+                round_id: String(round?.round_id || ""),
+                round_index: toInt(round?.round_index, roundIndex + 1),
+                created_at: String(round?.created_at || ""),
+                budget_counted: !!round?.budget_counted,
+                tools,
+            };
+        });
         return {
             stage_id: String(stage?.stage_id || `summary-stage-${stageIndex + 1}`),
             stage_index: toInt(stage?.stage_index, stageIndex + 1),
@@ -931,8 +944,8 @@ function buildNodeExecutionTrace(node, detail, liveFrame = null) {
         tool_steps: toolSteps.map((step) => ({
             tool_call_id: String(step?.tool_call_id || ""),
             tool_name: String(step?.tool_name || "tool"),
-            arguments_text: String(step?.arguments_text || ""),
-            output_text: String(step?.output_text || ""),
+            arguments_text: String(step?.arguments_text || step?.arguments_preview || ""),
+            output_text: String(step?.output_text || step?.output_preview || step?.text || ""),
             started_at: String(step?.started_at || ""),
             finished_at: String(step?.finished_at || ""),
             elapsed_seconds: Number.isFinite(Number(step?.elapsed_seconds)) ? Number(step.elapsed_seconds) : null,
@@ -973,8 +986,8 @@ function normalizeExecutionStageTrace(stage, index = 0) {
             tools: (Array.isArray(round?.tools) ? round.tools : []).map((step) => ({
                 tool_call_id: String(step?.tool_call_id || ""),
                 tool_name: String(step?.tool_name || "tool"),
-                arguments_text: String(step?.arguments_text || ""),
-                output_text: String(step?.output_text || ""),
+                arguments_text: String(step?.arguments_text || step?.arguments_preview || ""),
+                output_text: String(step?.output_text || step?.output_preview || step?.text || ""),
                 started_at: String(step?.started_at || ""),
                 finished_at: String(step?.finished_at || ""),
                 elapsed_seconds: Number.isFinite(Number(step?.elapsed_seconds)) ? Number(step.elapsed_seconds) : null,

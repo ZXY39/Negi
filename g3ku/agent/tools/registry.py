@@ -10,7 +10,11 @@ from typing import Any
 from langchain_core.tools import BaseTool, StructuredTool
 
 from g3ku.agent.tools.base import Tool
-from g3ku.json_schema_utils import attach_raw_parameters_schema, build_args_schema_model
+from g3ku.json_schema_utils import (
+    attach_raw_parameters_schema,
+    build_args_schema_model,
+    normalize_runtime_tool_arguments_dict,
+)
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 
 _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
@@ -78,7 +82,9 @@ class ToolRegistry:
         try:
             # StructuredTool may include optional args as `None`; legacy schema validators
             # treat these as type mismatches, so drop unset values before validation/dispatch.
-            normalized = {k: v for k, v in params.items() if v is not None}
+            normalized = normalize_runtime_tool_arguments_dict(
+                {k: v for k, v in params.items() if v is not None}
+            )
             try:
                 errors = tool.validate_params(normalized)
             except Exception as exc:

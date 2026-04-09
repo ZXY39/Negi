@@ -991,6 +991,8 @@ function cloneCeoSnapshotAttachments(items = []) {
 
 function normalizeCeoSnapshotToolEvent(event = {}) {
     if (!event || typeof event !== "object") return null;
+    const toolName = String(event?.tool_name || "").trim().toLowerCase();
+    if (toolName === "submit_next_stage") return null;
     const next = {};
     ["status", "tool_name", "text", "timestamp", "tool_call_id", "kind", "source"].forEach((key) => {
         const value = String(event?.[key] || "").trim();

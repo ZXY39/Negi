@@ -46,6 +46,10 @@ class StubDocument {
         return null;
     }
 
+    createElement() {
+        return new StubHTMLElement();
+    }
+
     querySelector() {
         return null;
     }
@@ -109,7 +113,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, S, U };`,
         context
     );
     context.__testExports.U.ceoCompressionToast = new StubHTMLElement();
@@ -226,6 +230,22 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
     assert.doesNotMatch(turn.listEl.innerHTML, /ceo:stage:inflight-stage-1/);
     assert.doesNotMatch(turn.listEl.innerHTML, /synthetic carryover/);
     assert.doesNotMatch(turn.listEl.innerHTML, /submit_next_stage/);
+});
+
+test("ceo legacy tool flow hides submit_next_stage events until stage trace arrives", () => {
+    const { normalizeCeoSnapshotToolEvents } = loadApp();
+
+    const events = normalizeCeoSnapshotToolEvents([
+        {
+            tool_name: "submit_next_stage",
+            status: "success",
+            text: "stage advanced",
+            tool_call_id: "submit_next_stage:1",
+            source: "user",
+        },
+    ]);
+
+    assert.deepEqual(events, []);
 });
 
 test("ceo composer shows session-local compression toast only for active compressing session", () => {

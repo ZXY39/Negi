@@ -13,7 +13,11 @@ from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
 from g3ku.agent.tools.base import Tool
-from g3ku.json_schema_utils import attach_raw_parameters_schema, build_args_schema_model
+from g3ku.json_schema_utils import (
+    attach_raw_parameters_schema,
+    build_args_schema_model,
+    normalize_runtime_tool_arguments_dict,
+)
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from g3ku.runtime.project_environment import current_project_environment
@@ -158,7 +162,7 @@ def _build_langchain_tool(tool: Tool, executor: ToolExecutor) -> BaseTool:
             for key, value in dict(kwargs or {}).items()
             if value is not None
         }
-        return await executor(tool.name, filtered_kwargs)
+        return await executor(tool.name, normalize_runtime_tool_arguments_dict(filtered_kwargs))
 
     return attach_raw_parameters_schema(
         StructuredTool.from_function(
@@ -186,7 +190,7 @@ def _build_visible_tool_bundle(*, tools: dict[str, Tool], executor: ToolExecutor
 
 
 def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
-    normalized = dict(arguments or {})
+    normalized = normalize_runtime_tool_arguments_dict(arguments)
     if str(tool_name or "").strip() not in {"create_async_task", "continue_task"}:
         return normalized
     raw_policy = normalized.get("execution_policy")
@@ -790,6 +794,41 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             session_key=str(state.get("session_key") or "").strip(),
             stage_state=updated_state,
         )
+
+    @classmethod
+    def _complete_active_frontdoor_stage_state(
+        cls,
+        stage_state: dict[str, Any] | None,
+        *,
+        completed_stage_summary: str = "",
+    ) -> dict[str, Any]:
+        normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state or {}})
+        active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
+        if not active_stage_id:
+            return normalized_state
+
+        now = now_iso()
+        normalized_summary = str(completed_stage_summary or "").strip()
+        stages: list[dict[str, Any]] = []
+        completed_any = False
+        for stage in list(normalized_state.get("stages") or []):
+            current = dict(stage)
+            if (
+                str(current.get("stage_id") or "").strip() == active_stage_id
+                and str(current.get("status") or "").strip().lower() == "active"
+            ):
+                current["status"] = "completed"
+                current["finished_at"] = str(current.get("finished_at") or "").strip() or now
+                if normalized_summary and not str(current.get("completed_stage_summary") or "").strip():
+                    current["completed_stage_summary"] = normalized_summary
+                completed_any = True
+            stages.append(current)
+
+        return {
+            "active_stage_id": "" if completed_any else active_stage_id,
+            "transition_required": False if completed_any else bool(normalized_state.get("transition_required")),
+            "stages": stages,
+        }
 
     @classmethod
     def _frontdoor_stage_gate_error(cls, *, tool_name: str, stage_state: dict[str, Any]) -> str:
@@ -1933,6 +1972,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 messages.append({"role": "assistant", "content": output})
             compacted_state = await self._summarize_messages(messages=messages, state=state)
             result["messages"] = list(compacted_state.get("messages") or [])
+            result["frontdoor_stage_state"] = self._complete_active_frontdoor_stage_state(
+                state.get("frontdoor_stage_state"),
+                completed_stage_summary=output,
+            )
             return result
         compacted_state = await self._summarize_messages(messages=messages, state=state)
         result["messages"] = list(compacted_state.get("messages") or [])

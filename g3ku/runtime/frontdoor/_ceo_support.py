@@ -9,6 +9,7 @@ from typing import Any
 from loguru import logger
 
 from g3ku.agent.tools.base import Tool
+from g3ku.json_schema_utils import normalize_runtime_tool_arguments_dict
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.frontdoor.exposure_resolver import CeoExposureResolver
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
@@ -372,8 +373,9 @@ class CeoFrontDoorSupport:
         runtime_context: dict[str, Any],
         on_progress,
     ) -> tuple[str, str, str, str, float | None]:
+        normalized_arguments = normalize_runtime_tool_arguments_dict(arguments)
         try:
-            errors = tool.validate_params(arguments)
+            errors = tool.validate_params(normalized_arguments)
         except Exception as exc:
             error_text = f"Error validating {tool_name}: {exc}"
             return error_text, "error", "", "", None
@@ -384,12 +386,15 @@ class CeoFrontDoorSupport:
         started_monotonic = time.monotonic()
         await self._emit_progress(
             on_progress,
-            self._tool_invocation_hint(tool_name, arguments),
+            self._tool_invocation_hint(tool_name, normalized_arguments),
             event_kind="tool_start",
-            event_data={"tool_name": tool_name},
+            event_data={
+                "tool_name": tool_name,
+                "arguments_text": self._tool_invocation_hint(tool_name, normalized_arguments),
+            },
         )
 
-        execute_kwargs = dict(arguments)
+        execute_kwargs = dict(normalized_arguments)
         per_call_runtime = {
             **runtime_context,
             "tool_name": tool_name,
@@ -410,7 +415,7 @@ class CeoFrontDoorSupport:
                 outcome = await run_tool_with_watchdog(
                     _invoke(),
                     tool_name=tool_name,
-                    arguments=arguments,
+                    arguments=normalized_arguments,
                     runtime_context=per_call_runtime,
                     snapshot_supplier=runtime_context.get("tool_snapshot_supplier"),
                     manager=getattr(self._loop, "tool_execution_manager", None),

@@ -66,6 +66,38 @@ class _BrokenValidatorTool(Tool):
         raise TypeError("unhashable type: 'list'")
 
 
+class _NestedArrayObjectTool(Tool):
+    @property
+    def name(self) -> str:
+        return "nested_array_object_tool"
+
+    @property
+    def description(self) -> str:
+        return "tool with array<object> parameter"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"type": "string"},
+                        },
+                        "required": ["kind"],
+                    },
+                }
+            },
+            "required": ["items"],
+        }
+
+    async def execute(self, **kwargs):
+        return kwargs
+
+
 def test_tool_validate_params_accepts_union_type_object_and_string() -> None:
     tool = _UnionTypeTool()
 
@@ -87,6 +119,17 @@ async def test_tool_registry_execute_degrades_validator_crash_to_error() -> None
 
     assert result.startswith("Error validating tool 'broken_validator_tool':")
     assert "unhashable type: 'list'" in result
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_langchain_tool_normalizes_nested_array_object_arguments() -> None:
+    registry = ToolRegistry()
+    registry.register(_NestedArrayObjectTool())
+
+    langchain_tool = registry.to_langchain_tools_filtered(["nested_array_object_tool"])[0]
+    result = await langchain_tool.ainvoke({"items": [{"kind": "memory_write"}]})
+
+    assert result == {"items": [{"kind": "memory_write"}]}
 
 
 def test_build_last_task_memory_ignores_unverified_assistant_dispatch_claim(tmp_path) -> None:

@@ -8,6 +8,7 @@ from langchain.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import Command
 
 from g3ku.agent.tools.base import Tool
+from g3ku.agent.tools.memory_write import MemoryWriteTool
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.json_schema_utils import get_attached_raw_parameters_schema
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
@@ -1415,6 +1416,132 @@ async def test_create_agent_frontdoor_exposes_memory_write_with_stringified_valu
 
     original_fact_properties = tool.parameters["properties"]["facts"]["items"]["properties"]
     assert original_fact_properties["value"]["type"] == ["string", "number", "boolean", "object", "array", "null"]
+
+
+@pytest.mark.asyncio
+async def test_create_agent_frontdoor_execute_tool_call_normalizes_nested_array_object_arguments() -> None:
+    tool = _MemoryWriteLikeTool()
+    captured: dict[str, object] = {}
+
+    async def _executor(_tool_name: str, arguments: dict[str, object]) -> dict[str, object]:
+        captured["arguments"] = arguments
+        return {"result_text": "ok", "status": "success"}
+
+    langchain_tool = ceo_runtime_ops._build_langchain_tool(tool, _executor)
+    await langchain_tool.ainvoke(
+        {
+            "facts": [
+                {
+                    "category": "preference",
+                    "scope": "global",
+                    "entity": "user",
+                    "attribute": "default_document_save_location",
+                    "value": "desktop",
+                    "observed_at": "2026-04-09T13:05:00+08:00",
+                    "time_semantics": "durable_until_replaced",
+                    "source_excerpt": "remember this preference",
+                }
+            ]
+        }
+    )
+
+    class _RuntimeToolStack:
+        def push_runtime_context(self, _context):
+            return "token"
+
+        def pop_runtime_context(self, _token):
+            return None
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            tools=_RuntimeToolStack(),
+            resource_manager=None,
+            tool_execution_manager=None,
+        )
+    )
+
+    result_text, status, _started_at, _finished_at, _elapsed_seconds = await runner._execute_tool_call(
+        tool=tool,
+        tool_name="memory_write",
+        arguments=dict(captured["arguments"] or {}),
+        runtime_context={},
+        on_progress=None,
+    )
+
+    payload = json.loads(result_text)
+    assert status == "success"
+    assert payload["facts"][0]["attribute"] == "default_document_save_location"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_frontdoor_execute_tool_call_omits_unset_optional_nested_fields() -> None:
+    class _FakeMemoryManager:
+        async def upsert_structured_memory_facts(self, **kwargs):
+            return {"ok": True, "facts": kwargs.get("facts")}
+
+    captured: dict[str, object] = {}
+
+    async def _executor(_tool_name: str, arguments: dict[str, object]) -> dict[str, object]:
+        captured["arguments"] = arguments
+        return {"result_text": "ok", "status": "success"}
+
+    tool = MemoryWriteTool(manager=_FakeMemoryManager())
+    langchain_tool = ceo_runtime_ops._build_langchain_tool(tool, _executor)
+    await langchain_tool.ainvoke(
+        {
+            "facts": [
+                {
+                    "category": "preference",
+                    "scope": "global",
+                    "entity": "user",
+                    "attribute": "default_document_save_location",
+                    "value": "desktop",
+                    "observed_at": "2026-04-09T13:46:20+08:00",
+                    "time_semantics": "durable_until_replaced",
+                    "source_excerpt": "remember this preference",
+                }
+            ]
+        }
+    )
+
+    class _RuntimeToolStack:
+        def push_runtime_context(self, _context):
+            return "token"
+
+        def pop_runtime_context(self, _token):
+            return None
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            tools=_RuntimeToolStack(),
+            resource_manager=None,
+            tool_execution_manager=None,
+        )
+    )
+
+    result_text, status, _started_at, _finished_at, _elapsed_seconds = await runner._execute_tool_call(
+        tool=tool,
+        tool_name="memory_write",
+        arguments=dict(captured["arguments"] or {}),
+        runtime_context={},
+        on_progress=None,
+    )
+
+    payload = json.loads(result_text)
+    assert status == "success"
+    assert payload["ok"] is True
+    assert payload["facts"] == [
+        {
+            "category": "preference",
+            "scope": "global",
+            "entity": "user",
+            "attribute": "default_document_save_location",
+            "value": "desktop",
+            "observed_at": "2026-04-09T13:46:20+08:00",
+            "time_semantics": "durable_until_replaced",
+            "source_excerpt": "remember this preference",
+        }
+    ]
 
 
 @pytest.mark.asyncio

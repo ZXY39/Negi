@@ -1234,6 +1234,134 @@ def test_render_execution_stage_rounds_show_completed_round_and_tool_result_labe
     assert result["roundClasses"][:1] == ["success"]
     assert result["labels"][:2] == ["成功", "失败"]
     assert result["classes"][:2] == ["success", "error"]
+
+
+def test_summary_execution_trace_preview_fields_render_tool_arguments_and_output() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = { liveFrameMap: {} };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const trace = buildNodeExecutionTrace(
+          { node_id: "node:test", goal: "remember preference" },
+          {
+            execution_trace_summary: {
+              stages: [
+                {
+                  stage_goal: "remember preference",
+                  mode: "自主执行",
+                  status: "active",
+                  rounds: [
+                    {
+                      round_id: "round:1",
+                      round_index: 1,
+                      tools: [
+                        {
+                          tool_call_id: "call-1",
+                          tool_name: "memory_write",
+                          arguments_preview: '{"facts":[{"attribute":"default_document_save_location"}]}',
+                          output_preview: 'Error: facts[0] should be object',
+                          status: "error",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        );
+        const html = renderExecutionStageRounds(trace.stages[0]);
+
+        console.log(JSON.stringify({
+          hasArgumentsPreview: html.includes("default_document_save_location"),
+          hasOutputPreview: html.includes("facts[0] should be object"),
+        }));
+        """
+    )
+
+    assert result["hasArgumentsPreview"] is True
+    assert result["hasOutputPreview"] is True
+
+
+def test_summary_execution_trace_round_with_tool_names_only_renders_placeholder_tool_chip() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = { liveFrameMap: {} };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const trace = buildNodeExecutionTrace(
+          { node_id: "node:test", goal: "remember preference" },
+          {
+            execution_trace_summary: {
+              stages: [
+                {
+                  stage_goal: "remember preference",
+                  mode: "自主执行",
+                  status: "active",
+                  rounds: [
+                    {
+                      round_id: "round:2",
+                      round_index: 2,
+                      tool_names: ["memory_write"],
+                      tool_call_ids: ["call-2"],
+                      tools: [],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        );
+        const html = renderExecutionStageRounds(trace.stages[0]);
+
+        console.log(JSON.stringify({
+          showsEmptyRoundPlaceholder: html.includes("本轮暂无工具记录"),
+          hasToolChip: html.includes("工具 · memory_write"),
+        }));
+        """
+    )
+
+    assert result["showsEmptyRoundPlaceholder"] is False
+    assert result["hasToolChip"] is True
+
+
 def test_execution_trace_round_status_supports_warning_and_interrupted() -> None:
     result = _run_node_script(
         """
