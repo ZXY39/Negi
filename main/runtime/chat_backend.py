@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 from g3ku.config.schema import Config
 from g3ku.providers.provider_factory import build_provider_from_model_key
+from g3ku.providers.registry import find_by_model
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
@@ -205,6 +206,9 @@ def build_prompt_cache_diagnostics(
     cache_family_revision: str | None = None,
     stable_prefix_hash: str | None = None,
     dynamic_appendix_hash: str | None = None,
+    provider_cache_capable: bool | None = None,
+    prompt_lane: str | None = None,
+    prefix_invalidation_reason: str | None = None,
 ) -> dict[str, object]:
     normalized_messages = list(stable_messages or [])
     normalized_tools = list(tool_schemas or []) or None
@@ -232,10 +236,18 @@ def build_prompt_cache_diagnostics(
         str(dynamic_appendix_hash or '').strip()
         or _dynamic_appendix_hash(normalized_dynamic_messages)
     )
+    if provider_cache_capable is None:
+        provider_spec = find_by_model(str(provider_model or '').strip())
+        resolved_provider_cache_capable = bool(getattr(provider_spec, 'supports_prompt_caching', False))
+    else:
+        resolved_provider_cache_capable = bool(provider_cache_capable)
     return {
         'scope': str(scope or '').strip(),
+        'prompt_lane': str(prompt_lane or scope or '').strip(),
         'provider_model': str(provider_model or '').strip(),
+        'provider_cache_capable': resolved_provider_cache_capable,
         'cache_family_revision': str(cache_family_revision or '').strip(),
+        'prefix_invalidation_reason': str(prefix_invalidation_reason or '').strip(),
         'stable_prompt_signature': resolved_stable_prefix_hash,
         'stable_prefix_hash': resolved_stable_prefix_hash,
         'dynamic_appendix_hash': resolved_dynamic_appendix_hash,

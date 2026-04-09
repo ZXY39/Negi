@@ -20,6 +20,7 @@ from g3ku.runtime.frontdoor.prompt_cache_contract import (
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, initial_persistent_state
 from g3ku.runtime.session_agent import RuntimeAgentSession
+from main.runtime.chat_backend import build_prompt_cache_diagnostics
 
 
 class _FakeGraphOutput:
@@ -269,6 +270,64 @@ def test_build_ceo_agent_uses_create_agent_with_persistence(monkeypatch) -> None
     assert kwargs["context_schema"].__name__ == "CeoRuntimeContext"
     assert kwargs["state_schema"].__name__ == "CeoPersistentState"
     assert kwargs["middleware"]
+
+
+def test_create_agent_runner_resolve_ceo_model_refs_prefers_cache_capable_refs(monkeypatch) -> None:
+    from g3ku.runtime.frontdoor import _ceo_support as ceo_support
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            app_config=SimpleNamespace(
+                get_role_model_keys=lambda role: [
+                    "openai:gpt-4.1",
+                    "anthropic:claude-sonnet-4",
+                    "openrouter:claude-3.7-sonnet",
+                ]
+            ),
+            provider_name="openai",
+            model="gpt-test",
+        )
+    )
+
+    monkeypatch.setattr(ceo_support, "refresh_loop_runtime_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ceo_support,
+        "build_provider_from_model_key",
+        lambda _config, ref: SimpleNamespace(provider_id=str(ref).split(":", 1)[0]),
+    )
+    monkeypatch.setattr(
+        ceo_support,
+        "find_by_name",
+        lambda name: SimpleNamespace(
+            supports_prompt_caching=name in {"anthropic", "openrouter"}
+        ),
+    )
+
+    assert runner._resolve_ceo_model_refs() == [
+        "anthropic:claude-sonnet-4",
+        "openrouter:claude-3.7-sonnet",
+    ]
+
+
+def test_build_prompt_cache_diagnostics_surfaces_cache_capability_and_prefix_reason() -> None:
+    diagnostics = build_prompt_cache_diagnostics(
+        stable_messages=[{"role": "system", "content": "stable system"}],
+        dynamic_appendix_messages=[{"role": "assistant", "content": "dynamic appendix"}],
+        tool_schemas=[],
+        provider_model="claude-sonnet-4",
+        scope="ceo_frontdoor",
+        prompt_cache_key="cache-key",
+        cache_family_revision="exp:rev-7",
+        prompt_lane="ceo_frontdoor",
+        prefix_invalidation_reason="cache_family_revision_changed",
+    )
+
+    assert diagnostics["provider_cache_capable"] is True
+    assert diagnostics["prompt_lane"] == "ceo_frontdoor"
+    assert diagnostics["cache_family_revision"] == "exp:rev-7"
+    assert diagnostics["stable_prefix_hash"]
+    assert diagnostics["dynamic_appendix_hash"]
+    assert diagnostics["prefix_invalidation_reason"] == "cache_family_revision_changed"
 
 
 def test_ceo_runner_always_selects_create_agent_impl(monkeypatch) -> None:
