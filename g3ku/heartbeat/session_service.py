@@ -966,6 +966,7 @@ class WebSessionHeartbeatService:
         metadata = {
             "source": "heartbeat",
             "reason": reason,
+            "history_visible": False,
             "task_ids": normalized_task_ids,
         }
         normalized_results = [dict(item) for item in list(task_results or []) if isinstance(item, dict)]

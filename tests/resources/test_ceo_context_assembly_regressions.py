@@ -4,8 +4,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import convert_to_messages
 
 import g3ku.runtime.context.frontdoor_catalog_selection as selection_module
+import g3ku.runtime.web_ceo_sessions as web_ceo_sessions
+from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.context.types import RetrievedContextBundle
 from g3ku.runtime.frontdoor.capability_snapshot import build_capability_snapshot
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
@@ -1163,6 +1166,97 @@ async def test_message_builder_collects_retrieved_context_separately_from_histor
         {"role": "assistant", "content": "prior answer"},
         {"role": "user", "content": "remembered preference"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_message_builder_task_ledger_preserves_continuity_when_history_visibility_filters_internal_status_turns() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    persisted_session = Session(key="web:shared")
+    persisted_session.add_message("user", "Install the weather skill")
+    persisted_session.add_message("assistant", "I started the install.")
+    persisted_session.add_message(
+        "assistant",
+        "Background task task:demo-ledger finished successfully.",
+        metadata={
+            "source": "heartbeat",
+            "history_visible": False,
+            "task_ids": ["task:demo-ledger"],
+            "task_results": [
+                {
+                    "task_id": "task:demo-ledger",
+                    "node_id": "node:root",
+                    "node_kind": "execution",
+                    "node_reason": "root_terminal",
+                    "output": "Weather skill installed successfully",
+                    "output_ref": "artifact:weather-skill",
+                    "check_result": "accepted",
+                }
+            ],
+        },
+    )
+    persisted_session.metadata = {
+        "last_task_memory": web_ceo_sessions.build_last_task_memory(persisted_session),
+    }
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="what happened with that task?",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=persisted_session,
+        user_content="what happened with that task?",
+    )
+
+    stable_contents = [str(item.get("content") or "") for item in result.stable_messages]
+    overlay = str(result.turn_overlay_text or "")
+
+    assert "Background task task:demo-ledger finished successfully." not in "\n\n".join(stable_contents)
+    assert result.trace["transcript_message_count"] == 2
+    assert result.trace["history_source"] == "transcript"
+    assert "## Task Ledger" in overlay
+    assert "task:demo-ledger" in overlay
+    assert "Weather skill installed successfully" in overlay
+    assert "artifact:weather-skill" in overlay
+    assert any("## Task Ledger" in str(item.get("content") or "") for item in result.dynamic_appendix_messages)
+
+
+@pytest.mark.asyncio
+async def test_message_builder_history_visibility_checkpoint_round_trip_keeps_hidden_internal_assistant_turn_out_of_history() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    checkpoint_messages = runner._state_message_records(
+        convert_to_messages(
+            [
+                {"role": "user", "content": "checkpoint question"},
+                {"role": "assistant", "content": "checkpoint answer"},
+                {
+                    "role": "assistant",
+                    "content": "Background task task:demo-checkpoint finished successfully.",
+                    "metadata": {"history_visible": False, "source": "heartbeat"},
+                },
+            ]
+        )
+    )
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="follow up question",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=None,
+        checkpoint_messages=checkpoint_messages,
+        user_content="follow up question",
+    )
+
+    contents = [str(item.get("content") or "") for item in result.model_messages]
+    assert "checkpoint question" in contents
+    assert "checkpoint answer" in contents
+    assert "Background task task:demo-checkpoint finished successfully." not in contents
+    assert contents[-1] == "follow up question"
+    assert result.trace["history_source"] == "checkpoint"
+    assert result.trace["checkpoint_message_count"] == 2
 
 
 @pytest.mark.asyncio

@@ -72,6 +72,11 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             "role": role,
             "content": getattr(value, "content", ""),
         }
+        additional_kwargs = getattr(value, "additional_kwargs", None)
+        if isinstance(additional_kwargs, dict):
+            metadata = additional_kwargs.get("metadata")
+            if isinstance(metadata, dict) and metadata:
+                record["metadata"] = dict(metadata)
         if role == "assistant":
             tool_calls = list(getattr(value, "tool_calls", None) or [])
             if tool_calls:

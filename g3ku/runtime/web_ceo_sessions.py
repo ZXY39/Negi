@@ -151,6 +151,33 @@ def _extract_task_ids_from_text(text: Any, *, limit: int = _TASK_MEMORY_MAX_IDS)
     return _normalize_task_ids(_TASK_ID_PATTERN.findall(str(text or '')), limit=limit)
 
 
+def message_role(value: Any) -> str:
+    if isinstance(value, dict):
+        role = str(value.get("role") or "").strip().lower()
+    else:
+        role = str(getattr(value, "type", "") or getattr(value, "role", "")).strip().lower()
+    if role == "human":
+        return "user"
+    if role == "ai":
+        return "assistant"
+    return role
+
+
+def message_metadata(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        metadata = value.get("metadata")
+        return dict(metadata) if isinstance(metadata, dict) else {}
+    metadata = getattr(value, "metadata", None)
+    if isinstance(metadata, dict):
+        return dict(metadata)
+    additional_kwargs = getattr(value, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        nested_metadata = additional_kwargs.get("metadata")
+        if isinstance(nested_metadata, dict):
+            return dict(nested_metadata)
+    return {}
+
+
 def _looks_like_task_dispatch_claim(text: Any) -> bool:
     normalized = str(text or '').strip().lower()
     if not normalized or 'task:' not in normalized:
@@ -252,13 +279,21 @@ def _extract_task_ids_from_message(message: dict[str, Any], *, limit: int = _TAS
 
 
 def is_internal_ceo_user_message(message: Any) -> bool:
-    if not isinstance(message, dict):
-        return False
-    role = str(message.get('role') or '').strip().lower()
+    role = message_role(message)
     if role != 'user':
         return False
-    metadata = message.get('metadata') if isinstance(message.get('metadata'), dict) else {}
+    metadata = message_metadata(message)
     return bool(metadata.get('heartbeat_internal')) or bool(metadata.get('cron_internal'))
+
+
+def is_history_visible_message(message: Any) -> bool:
+    role = message_role(message)
+    if role not in {'user', 'assistant', 'tool'}:
+        return False
+    metadata = message_metadata(message)
+    if metadata.get('history_visible') is False:
+        return False
+    return not is_internal_ceo_user_message(message)
 
 
 def build_last_task_memory(session: Any) -> dict[str, Any]:
@@ -583,9 +618,8 @@ def transcript_messages(session: Any) -> list[dict[str, Any]]:
         item
         for item in list(getattr(session, 'messages', []) or [])
         if (
-            isinstance(item, dict)
-            and str(item.get('role') or '').strip().lower() in {'user', 'assistant'}
-            and not is_internal_ceo_user_message(item)
+            message_role(item) in {'user', 'assistant'}
+            and is_history_visible_message(item)
         )
     ]
 
@@ -654,11 +688,7 @@ def extract_execution_live_raw_tail(
 def _complete_transcript_turns(session: Any) -> list[list[dict[str, Any]]]:
     turns: list[list[dict[str, Any]]] = []
     current_user: dict[str, Any] | None = None
-    for raw in list(getattr(session, "messages", []) or []):
-        if not isinstance(raw, dict):
-            continue
-        if is_internal_ceo_user_message(raw):
-            continue
+    for raw in transcript_messages(session):
         role = str(raw.get("role") or "").strip().lower()
         if role == "user":
             current_user = raw
@@ -711,11 +741,14 @@ def _has_visible_message_content(content: Any) -> bool:
 
 def latest_llm_output_at(session: Any) -> str:
     for item in reversed(list(getattr(session, "messages", []) or [])):
-        if str(item.get("role") or "").strip().lower() != "assistant":
+        if not is_history_visible_message(item):
             continue
-        if not _has_visible_message_content(item.get("content")):
+        if message_role(item) != "assistant":
             continue
-        timestamp = str(item.get("timestamp") or "").strip()
+        content = item.get("content") if isinstance(item, dict) else getattr(item, "content", "")
+        if not _has_visible_message_content(content):
+            continue
+        timestamp = str(item.get("timestamp") or getattr(item, "timestamp", "") or "").strip()
         if timestamp:
             return timestamp
     return ""
@@ -1021,25 +1054,19 @@ def build_session_summary(
         if isinstance(normalized_metadata, dict)
         else normalize_ceo_metadata(getattr(session, "metadata", None), session_key=session_key)
     )
-    messages = [
-        item
-        for item in list(getattr(session, "messages", []) or [])
-        if isinstance(item, dict) and not is_internal_ceo_user_message(item)
-    ]
-    preview_text = str(metadata.get("last_preview_text") or "").strip()
-    if not preview_text:
-        for item in reversed(messages):
-            content = item.get("content")
-            if isinstance(content, str) and content.strip():
-                preview_text = summarize_preview_text(content)
-                break
+    messages = transcript_messages(session)
+    preview_text = ""
+    for item in reversed(messages):
+        content = item.get("content")
+        if isinstance(content, str) and content.strip():
+            preview_text = summarize_preview_text(content)
+            break
     inflight_preview = _inflight_preview_text(inflight_turn)
     if inflight_preview:
         preview_text = inflight_preview
     created_at = getattr(session, "created_at", None)
-    updated_at = getattr(session, "updated_at", None)
     inflight_updated_at = _inflight_updated_at(inflight_turn)
-    updated_at_text = updated_at.isoformat() if isinstance(updated_at, datetime) else str(updated_at or "")
+    updated_at_text = _session_updated_at(session)
     if inflight_updated_at and inflight_updated_at > updated_at_text:
         updated_at_text = inflight_updated_at
     title = str(metadata.get("title") or DEFAULT_CEO_SESSION_TITLE)
@@ -1150,11 +1177,7 @@ def _channel_title(parsed) -> str:
 
 
 def _channel_preview_text(session: Any, *, fallback_text: str = "") -> str:
-    messages = [
-        item
-        for item in list(getattr(session, "messages", []) or [])
-        if isinstance(item, dict) and not is_internal_ceo_user_message(item)
-    ]
+    messages = transcript_messages(session)
     for item in reversed(messages):
         content = item.get("content") if isinstance(item, dict) else ""
         preview = summarize_preview_text(content or "")
@@ -1174,14 +1197,7 @@ def _session_created_at(session: Any) -> str:
 
 
 def _session_updated_at(session: Any) -> str:
-    updated_at = _session_time_value(getattr(session, "updated_at", None))
-    if updated_at:
-        return updated_at
-    messages = [
-        item
-        for item in list(getattr(session, "messages", []) or [])
-        if isinstance(item, dict) and not is_internal_ceo_user_message(item)
-    ]
+    messages = transcript_messages(session)
     for item in reversed(messages):
         if isinstance(item, dict) and str(item.get("timestamp") or "").strip():
             return str(item.get("timestamp") or "").strip()
@@ -1351,11 +1367,7 @@ def list_channel_ceo_sessions(
         session = session_manager.get_or_create(key)
         canonical_id = _canonical_china_session_id(parsed)
         canonical_parsed = parse_china_session_key(canonical_id) or parsed
-        visible_messages = [
-            entry
-            for entry in list(getattr(session, "messages", []) or [])
-            if isinstance(entry, dict) and not is_internal_ceo_user_message(entry)
-        ]
+        visible_messages = transcript_messages(session)
         summary = _channel_session_summary_from_entry(
             session_id=canonical_id,
             parsed=canonical_parsed,

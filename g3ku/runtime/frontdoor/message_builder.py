@@ -11,7 +11,14 @@ from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBu
 from g3ku.runtime.core_tools import resolve_core_tool_targets
 from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
-from g3ku.runtime.web_ceo_sessions import transcript_messages
+from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
+from g3ku.runtime.web_ceo_sessions import (
+    is_history_visible_message,
+    message_metadata,
+    message_role,
+    normalize_task_memory,
+    transcript_messages,
+)
 
 
 class CeoMessageBuilder:
@@ -219,14 +226,22 @@ class CeoMessageBuilder:
         return str(value or "")
 
     @staticmethod
-    def _history_message(message: dict[str, Any]) -> dict[str, Any]:
+    def _history_message(message: Any) -> dict[str, Any]:
         entry = {
-            'role': str(message.get('role') or '').strip().lower(),
-            'content': message.get('content'),
+            'role': message_role(message),
+            'content': message.get('content') if isinstance(message, dict) else getattr(message, 'content', ''),
         }
-        for key in ('tool_calls', 'tool_call_id', 'name', 'metadata'):
-            if key in message:
-                entry[key] = message[key]
+        metadata = message_metadata(message)
+        if metadata:
+            entry['metadata'] = metadata
+        for key in ('tool_calls', 'tool_call_id', 'name'):
+            if isinstance(message, dict):
+                if key in message:
+                    entry[key] = message[key]
+                continue
+            value = getattr(message, key, None)
+            if value not in (None, '', [], {}):
+                entry[key] = value
         return entry
 
     def _transcript_history(self, persisted_session: Any | None) -> list[dict[str, Any]]:
@@ -241,8 +256,8 @@ class CeoMessageBuilder:
         history = [
             self._history_message(message)
             for message in list(checkpoint_messages or [])
-            if isinstance(message, dict)
-            and str(message.get('role') or '').strip().lower() in {'user', 'assistant', 'tool'}
+            if message_role(message) in {'user', 'assistant', 'tool'}
+            and is_history_visible_message(message)
         ]
         while history:
             first = history[0]
@@ -289,11 +304,7 @@ class CeoMessageBuilder:
     ) -> bool:
         if persisted_session is None:
             return False
-        messages = [
-            message
-            for message in list(getattr(persisted_session, 'messages', []) or [])
-            if isinstance(message, dict) and str(message.get('role') or '').strip().lower() in {'user', 'assistant'}
-        ]
+        messages = transcript_messages(persisted_session)
         if not messages:
             return False
         last = dict(messages[-1])
@@ -304,6 +315,14 @@ class CeoMessageBuilder:
         if turn_id and str(last_metadata.get('_transcript_turn_id') or '').strip() == turn_id:
             return True
         return self._content_text(last.get('content')).strip() == str(query_text or '').strip()
+
+    @staticmethod
+    def _task_ledger_state(persisted_session: Any | None) -> dict[str, Any]:
+        if persisted_session is None:
+            return normalize_task_memory({})
+        metadata = getattr(persisted_session, 'metadata', None)
+        payload = dict(metadata or {}) if isinstance(metadata, dict) else {}
+        return normalize_task_memory(payload.get('last_task_memory', payload.get('lastTaskMemory')))
 
     def _render_retrieved_context(self, bundle: RetrievedContextBundle) -> str:
         records = list(bundle.records or [])
@@ -956,12 +975,20 @@ class CeoMessageBuilder:
             query_text=query_text,
             user_metadata=user_metadata,
         )
+        task_ledger_state = self._task_ledger_state(persisted_session)
+        task_ledger_text = build_task_ledger_summary(task_ledger_state)
+        turn_overlay_parts = list(context_sources['turn_overlay_parts'])
+        if task_ledger_text:
+            insert_index = len(turn_overlay_parts)
+            if str(context_sources['retrieved_markdown'] or '').strip():
+                insert_index = max(0, insert_index - 1)
+            turn_overlay_parts.insert(insert_index, task_ledger_text)
         model_messages, stable_messages, dynamic_appendix_messages, turn_overlay_text = self._inject_turn_context(
             system_prompt=str(context_sources['system_prompt'] or ''),
             history_messages=list(history_state['history_messages']),
             user_content=context_sources['user_content'],
             split_prompt_builder=bool(context_sources['split_prompt_builder']),
-            turn_overlay_parts=list(context_sources['turn_overlay_parts']),
+            turn_overlay_parts=turn_overlay_parts,
             current_user_in_history=bool(history_state['current_user_in_history']),
         )
 
@@ -993,13 +1020,16 @@ class CeoMessageBuilder:
             'current_user_in_checkpoint': bool(history_state['current_user_in_checkpoint']),
             'current_user_in_history': bool(history_state['current_user_in_history']),
             'current_user_in_transcript': bool(history_state['current_user_in_transcript']),
+            'task_ledger_present': bool(task_ledger_text),
+            'task_ledger_task_count': len(list(task_ledger_state.get('task_ids') or [])),
+            'task_ledger_result_count': len(list(task_ledger_state.get('task_results') or [])),
             'retrieved_record_count': len(list(context_sources['retrieved_bundle'].records or [])),
             'same_session_turn_memory_filtered_count': int(context_sources['same_session_turn_memory_filtered_count']),
             'model_messages_count': len(model_messages),
             'stable_prefix_message_count': len(stable_messages),
             'dynamic_appendix_message_count': len(dynamic_appendix_messages),
             'turn_overlay_present': bool(turn_overlay_text),
-            'turn_overlay_section_count': len(context_sources['turn_overlay_parts']),
+            'turn_overlay_section_count': len(turn_overlay_parts),
             'turn_overlay_character_count': len(turn_overlay_text),
             'turn_overlay_text_hash': (
                 hashlib.sha256(turn_overlay_text.encode('utf-8')).hexdigest()

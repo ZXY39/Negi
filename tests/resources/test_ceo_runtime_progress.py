@@ -1226,11 +1226,81 @@ async def test_runtime_agent_session_hides_cron_internal_prompt_but_persists_rep
     persisted = loop.sessions.get_or_create("web:shared")
     assert [message["role"] for message in persisted.messages] == ["assistant"]
     assert persisted.messages[0]["content"] == "Scheduled progress update."
-    assert persisted.messages[0]["metadata"] == {"source": "cron", "cron_job_id": "job-77"}
+    assert persisted.messages[0]["metadata"] == {
+        "source": "cron",
+        "cron_job_id": "job-77",
+        "history_visible": False,
+    }
 
     message_end = next(event for event in events if event.type == "message_end")
     assert message_end.payload["source"] == "cron"
     assert message_end.payload["heartbeat_internal"] is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_session_history_visibility_hides_internal_heartbeat_reply(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    class _FakeRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input, on_progress
+            session._last_verified_task_ids = ["task:demo-heartbeat"]
+            return "Background task completed."
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        _ = session_key
+        return 0
+
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=_FakeRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+    )
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+
+    await session.prompt(
+        UserInputMessage(
+            content="heartbeat",
+            metadata={"heartbeat_internal": True, "heartbeat_reason": "tool_background"},
+        )
+    )
+
+    persisted = loop.sessions.get_or_create("web:shared")
+    assert [message["role"] for message in persisted.messages] == ["assistant"]
+    assert persisted.messages[0]["content"] == "Background task completed."
+    assert persisted.messages[0]["metadata"] == {
+        "source": "heartbeat",
+        "history_visible": False,
+        "task_ids": ["task:demo-heartbeat"],
+    }
+    assert web_ceo_sessions.transcript_messages(persisted) == []
+    assert persisted.metadata["last_task_memory"] == {
+        "version": web_ceo_sessions.TASK_MEMORY_VERSION,
+        "task_ids": ["task:demo-heartbeat"],
+        "source": "heartbeat",
+        "reason": "",
+        "updated_at": persisted.messages[0]["timestamp"],
+        "task_results": [],
+    }
 
 
 @pytest.mark.asyncio
@@ -4072,6 +4142,125 @@ async def test_web_session_heartbeat_calls_reply_notifier_for_final_output(tmp_p
 
     assert next_delay is None
     assert notified == [(session_id, "Background install finished successfully.")]
+
+
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_history_visibility_hides_internal_heartbeat_persisted_final_reply(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-hidden-persisted-reply"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    persisted.add_message("user", "Install the weather skill")
+    persisted.add_message("assistant", "I started the install.")
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(output="Background install finished successfully.")
+    task_service = _TaskService()
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    accepted = service.enqueue_task_terminal_payload(
+        {
+            "task_id": "task:demo-hidden-persist",
+            "session_id": session_id,
+            "title": "demo hidden persist task",
+            "status": "success",
+            "brief_text": "task finished successfully",
+            "finished_at": "2026-03-27T09:34:32+08:00",
+            "dedupe_key": "task-terminal:task:demo-hidden-persist:success:2026-03-27T09:34:32+08:00",
+        }
+    )
+    assert accepted is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    assert reloaded.messages[-1]["content"] == "Background install finished successfully."
+    assert reloaded.messages[-1]["metadata"]["source"] == "heartbeat"
+    assert reloaded.messages[-1]["metadata"]["history_visible"] is False
+    assert web_ceo_sessions.transcript_messages(reloaded) == [
+        {"role": "user", "content": "Install the weather skill", "timestamp": reloaded.messages[0]["timestamp"]},
+        {"role": "assistant", "content": "I started the install.", "timestamp": reloaded.messages[1]["timestamp"]},
+    ]
+
+
+def test_web_ceo_session_summary_helpers_exclude_hidden_heartbeat_reply_surfaces() -> None:
+    session = SimpleNamespace(
+        key="web:summary-hidden-heartbeat",
+        created_at="2026-03-27T08:00:00+08:00",
+        updated_at="",
+        metadata={"title": "Visible Session", "last_preview_text": ""},
+        messages=[
+            {
+                "role": "user",
+                "content": "Visible user request",
+                "timestamp": "2026-03-27T08:00:00+08:00",
+            },
+            {
+                "role": "assistant",
+                "content": "Visible assistant reply",
+                "timestamp": "2026-03-27T08:01:00+08:00",
+            },
+            {
+                "role": "assistant",
+                "content": "Hidden heartbeat reply",
+                "timestamp": "2026-03-27T08:02:00+08:00",
+                "metadata": {"source": "heartbeat", "history_visible": False},
+            },
+        ],
+    )
+    normalized_metadata = web_ceo_sessions.normalize_ceo_metadata(session.metadata, session_key=session.key)
+
+    summary = web_ceo_sessions.build_session_summary(
+        session,
+        is_active=False,
+        normalized_metadata=normalized_metadata,
+    )
+
+    assert summary["preview_text"] == "Visible assistant reply"
+    assert summary["message_count"] == 2
+    assert summary["updated_at"] == "2026-03-27T08:01:00+08:00"
+    assert summary["last_llm_output_at"] == "2026-03-27T08:01:00+08:00"
+    assert web_ceo_sessions._channel_preview_text(session) == "Visible assistant reply"
+    assert web_ceo_sessions._session_updated_at(session) == "2026-03-27T08:01:00+08:00"
+    assert web_ceo_sessions._session_last_assistant_at(session) == "2026-03-27T08:01:00+08:00"
+
+    hidden_only_session = SimpleNamespace(
+        key="web:hidden-only-heartbeat",
+        created_at="2026-03-27T09:00:00+08:00",
+        updated_at="2026-03-27T09:05:00+08:00",
+        metadata={"title": "Hidden Only", "last_preview_text": "Hidden heartbeat reply"},
+        messages=[
+            {
+                "role": "assistant",
+                "content": "Hidden heartbeat reply",
+                "timestamp": "2026-03-27T09:05:00+08:00",
+                "metadata": {"source": "heartbeat", "history_visible": False},
+            }
+        ],
+    )
+    hidden_only_metadata = web_ceo_sessions.normalize_ceo_metadata(
+        hidden_only_session.metadata,
+        session_key=hidden_only_session.key,
+    )
+
+    hidden_only_summary = web_ceo_sessions.build_session_summary(
+        hidden_only_session,
+        is_active=False,
+        normalized_metadata=hidden_only_metadata,
+    )
+
+    assert hidden_only_summary["preview_text"] == ""
+    assert hidden_only_summary["message_count"] == 0
+    assert hidden_only_summary["updated_at"] == ""
+    assert hidden_only_summary["last_llm_output_at"] == ""
+    assert web_ceo_sessions._channel_preview_text(hidden_only_session) == ""
+    assert web_ceo_sessions._session_updated_at(hidden_only_session) == ""
+    assert web_ceo_sessions._session_last_assistant_at(hidden_only_session) == ""
 
 
 def test_context_assembly_always_keeps_tool_execution_control_tools_visible() -> None:
