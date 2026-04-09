@@ -25,14 +25,28 @@ def _append_retrieval_parts(parts: list[str], *values: Any) -> None:
         parts.append(text)
 
 
+def _float_value(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _int_value(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def _tool_background_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list[str]:
     tool_name = _non_empty_text(event.get("tool_name")) or "tool"
     execution_id = _non_empty_text(event.get("execution_id"))
     status = _non_empty_text(event.get("status")) or "background_running"
     snapshot = event.get("runtime_snapshot") if isinstance(event.get("runtime_snapshot"), dict) else {}
     summary = _non_empty_text(snapshot.get("summary_text") or event.get("message")) or "No snapshot summary."
-    elapsed_seconds = float(event.get("elapsed_seconds") or 0.0)
-    wait_seconds = float(event.get("recommended_wait_seconds") or 0.0)
+    elapsed_seconds = _float_value(event.get("elapsed_seconds"), 0.0)
+    wait_seconds = _float_value(event.get("recommended_wait_seconds"), 0.0)
     _append_retrieval_parts(
         retrieval_parts,
         "tool_background",
@@ -69,8 +83,8 @@ def _task_stall_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list
     task_id = _non_empty_text(event.get("task_id"))
     title = _non_empty_text(event.get("title")) or task_id or "task"
     stall_reason = _non_empty_text(event.get("reason")) or "suspected_stall"
-    stalled_minutes = int(event.get("stalled_minutes") or 0)
-    bucket_minutes = int(event.get("bucket_minutes") or 0)
+    stalled_minutes = _int_value(event.get("stalled_minutes"), 0)
+    bucket_minutes = _int_value(event.get("bucket_minutes"), 0)
     brief_text = _non_empty_text(event.get("brief_text")) or "No task summary."
     latest_node_summary = _non_empty_text(event.get("latest_node_summary")) or "No latest node summary."
     runtime_excerpt = _non_empty_text(event.get("runtime_summary_excerpt")) or "No runtime summary."
