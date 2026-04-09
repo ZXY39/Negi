@@ -3978,6 +3978,118 @@ async def test_web_session_heartbeat_prompt_includes_terminal_root_output_and_me
 
 
 @pytest.mark.asyncio
+async def test_ceo_frontdoor_prepare_turn_uses_separate_prompt_lane_for_heartbeat_internal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
+    from g3ku.runtime.frontdoor.prompt_cache_contract import FrontdoorPromptContract
+
+    async def _noop_ready() -> None:
+        return None
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+    captured: dict[str, object] = {}
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["message"]}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            tool_names=["message"],
+            model_messages=[
+                {"role": "system", "content": "frontdoor fallback"},
+                {"role": "user", "content": "fallback heartbeat user"},
+            ],
+        )
+
+    def _fake_build_frontdoor_prompt_contract(**kwargs):
+        captured.update(kwargs)
+        return FrontdoorPromptContract(
+            request_messages=[
+                {"role": "system", "content": "heartbeat stable system"},
+                {"role": "user", "content": "heartbeat request bundle"},
+            ],
+            prompt_cache_key="heartbeat-cache-key",
+            diagnostics={"stable_prompt_signature": "heartbeat-sig"},
+            stable_prefix_hash="stable-hash",
+            dynamic_appendix_hash="dynamic-hash",
+            stable_messages=[{"role": "system", "content": "heartbeat stable system"}],
+            dynamic_appendix_messages=[{"role": "user", "content": "heartbeat event bundle"}],
+            diagnostic_dynamic_messages=[{"role": "assistant", "content": "heartbeat overlay"}],
+            cache_family_revision="ceo_heartbeat:stable-prefix:v1",
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai:gpt-4.1"])
+    monkeypatch.setattr(ceo_runtime_ops, "build_frontdoor_prompt_contract", _fake_build_frontdoor_prompt_contract)
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+    runtime = SimpleNamespace(
+        context=ceo_runtime_ops.CeoRuntimeContext(
+            loop=loop,
+            session=session,
+            session_key="web:shared",
+            on_progress=None,
+        )
+    )
+
+    state_update = await runner._graph_prepare_turn(
+        {
+            "user_input": {
+                "content": "heartbeat request bundle",
+                "metadata": {
+                    "heartbeat_internal": True,
+                    "heartbeat_prompt_lane": "ceo_heartbeat",
+                    "heartbeat_retrieval_query": "tool_background skill-installer task:demo-1",
+                },
+            }
+        },
+        runtime=runtime,
+    )
+
+    assert captured["scope"] == "ceo_heartbeat"
+    assert captured["stable_messages"] == [{"role": "system", "content": "frontdoor fallback"}]
+    assert captured["live_request_messages"] == [
+        {"role": "system", "content": "frontdoor fallback"},
+        {"role": "user", "content": "fallback heartbeat user"},
+    ]
+    assert state_update["messages"] == [
+        {"role": "system", "content": "heartbeat stable system"},
+        {"role": "user", "content": "heartbeat request bundle"},
+    ]
+    assert state_update["stable_messages"] == [{"role": "system", "content": "heartbeat stable system"}]
+    assert state_update["dynamic_appendix_messages"] == [{"role": "user", "content": "heartbeat event bundle"}]
+    assert state_update["cache_family_revision"] == "ceo_heartbeat:stable-prefix:v1"
+    assert state_update["prompt_cache_key"] == "heartbeat-cache-key"
+    assert state_update["prompt_cache_diagnostics"] == {"stable_prompt_signature": "heartbeat-sig"}
+
+
+@pytest.mark.asyncio
 async def test_web_session_heartbeat_prefers_acceptance_output_when_final_acceptance_failed(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-task-terminal-acceptance-output"
     session_manager = SessionManager(tmp_path)

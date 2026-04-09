@@ -7,7 +7,7 @@ def _field(value, name: str):
     return getattr(value, name)
 
 
-def test_build_heartbeat_prompt_lane_keeps_artifact_refs_out_of_retrieval_query_in_heartbeat_lane() -> None:
+def test_build_heartbeat_lane_keeps_artifact_refs_out_of_retrieval_query_in_heartbeat_lane() -> None:
     from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
 
     lane = build_heartbeat_prompt_lane(
@@ -45,3 +45,48 @@ def test_build_heartbeat_prompt_lane_keeps_artifact_refs_out_of_retrieval_query_
     assert "provider chain exhausted" in retrieval_query
     assert matching_dynamic_user_messages
     assert any(message in request_messages for message in matching_dynamic_user_messages)
+
+
+def test_build_heartbeat_lane_reuses_stable_prefix_when_only_event_payload_changes() -> None:
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    base_kwargs = {
+        "provider_model": "openai:gpt-4.1",
+        "stable_rules_text": "Keep the user informed without exposing internal mechanics.",
+        "task_ledger_summary": "task:demo-1 was already dispatched and is still running.",
+    }
+    first = build_heartbeat_prompt_lane(
+        **base_kwargs,
+        events=[
+            {
+                "reason": "tool_background",
+                "tool_name": "skill-installer",
+                "execution_id": "tool-exec:1",
+                "status": "background_running",
+                "elapsed_seconds": 30.0,
+                "recommended_wait_seconds": 45.0,
+                "runtime_snapshot": {"summary_text": "still fetching remote repository"},
+            }
+        ],
+    )
+    second = build_heartbeat_prompt_lane(
+        **base_kwargs,
+        events=[
+            {
+                "reason": "tool_background",
+                "tool_name": "skill-installer",
+                "execution_id": "tool-exec:1",
+                "status": "background_running",
+                "elapsed_seconds": 90.0,
+                "recommended_wait_seconds": 45.0,
+                "runtime_snapshot": {"summary_text": "now installing dependencies"},
+            }
+        ],
+    )
+
+    assert _field(first, "scope") == "ceo_heartbeat"
+    assert _field(second, "scope") == "ceo_heartbeat"
+    assert list(_field(first, "stable_messages")) == list(_field(second, "stable_messages"))
+    assert list(_field(first, "dynamic_appendix_messages")) != list(_field(second, "dynamic_appendix_messages"))
+    assert list(_field(first, "request_messages")) != list(_field(second, "request_messages"))
+    assert str(_field(first, "retrieval_query") or "") != str(_field(second, "retrieval_query") or "")

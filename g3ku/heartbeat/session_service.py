@@ -10,6 +10,7 @@ from loguru import logger
 
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
+from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
 from g3ku.runtime.web_ceo_sessions import (
@@ -1033,12 +1034,21 @@ class WebSessionHeartbeatService:
         await self._auto_retry_engine_failure_events(events)
         reasons = sorted({str(event.reason or "").strip().lower() or "heartbeat" for event in events})
         heartbeat_reason = reasons[0] if len(reasons) == 1 else "mixed"
+        heartbeat_prompt = self._build_prompt(events)
+        heartbeat_lane = build_heartbeat_prompt_lane(
+            provider_model="",
+            stable_rules_text=_bundled_heartbeat_rules_text(),
+            task_ledger_summary="",
+            events=[dict(event.payload or {}, reason=event.reason) for event in events],
+        )
         user_input = UserInputMessage(
-            content=self._build_prompt(events),
+            content=heartbeat_prompt,
             metadata={
                 "heartbeat_internal": True,
                 "heartbeat_reason": heartbeat_reason,
                 "heartbeat_task_ids": [str((event.payload or {}).get("task_id") or "").strip() for event in events],
+                "heartbeat_prompt_lane": heartbeat_lane.scope,
+                "heartbeat_retrieval_query": heartbeat_lane.retrieval_query,
             },
         )
 

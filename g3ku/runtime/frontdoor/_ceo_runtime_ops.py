@@ -42,6 +42,7 @@ from g3ku.runtime.web_ceo_sessions import frontdoor_stage_archive_task_id
 
 from ._ceo_support import CeoFrontDoorSupport
 from .history_compaction import compact_history_messages
+from .prompt_cache_contract import build_frontdoor_prompt_contract
 from .state_models import (
     CeoFrontdoorInterrupted,
     CeoPendingInterrupt,
@@ -341,6 +342,38 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             except Exception:
                 continue
         return schemas
+
+    @staticmethod
+    def _prompt_message_records(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in list(messages or []):
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            if role not in {"system", "user", "assistant", "tool"}:
+                continue
+            normalized.append(dict(item))
+        return normalized
+
+    @classmethod
+    def _heartbeat_stable_prefix_messages(
+        cls,
+        *,
+        assembly: Any,
+        live_request_messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        explicit_stable_messages = cls._prompt_message_records(getattr(assembly, "stable_messages", None))
+        if explicit_stable_messages:
+            return explicit_stable_messages
+        if not live_request_messages:
+            return []
+        if str(live_request_messages[-1].get("role") or "").strip().lower() == "user":
+            fallback_prefix = live_request_messages[:-1]
+            if fallback_prefix:
+                return fallback_prefix
+        if str(live_request_messages[0].get("role") or "").strip().lower() == "system":
+            return [live_request_messages[0]]
+        return []
 
     @staticmethod
     def _effective_turn_overlay_text(state: CeoGraphState) -> str:
@@ -1406,6 +1439,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         metadata = _user_input_metadata(user_input)
         heartbeat_internal = bool(metadata.get("heartbeat_internal"))
         cron_internal = bool(metadata.get("cron_internal"))
+        retrieval_query = str(metadata.get("heartbeat_retrieval_query") or "").strip()
+        builder_query_text = retrieval_query if heartbeat_internal and retrieval_query else query_text
         runtime_session = self._loop.sessions.get_or_create(session.state.session_key)
         main_service = getattr(self._loop, "main_task_service", None)
         if main_service is not None:
@@ -1435,7 +1470,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         assembly = await self._builder.build_for_ceo(
             session=session,
-            query_text=query_text,
+            query_text=builder_query_text,
             exposure=exposure,
             persisted_session=runtime_session,
             checkpoint_messages=list(state.get("messages") or []),
@@ -1458,22 +1493,55 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         model_refs = self._resolve_ceo_model_refs()
         provider_model = str(model_refs[0] if model_refs else "").strip()
         tool_schemas = self._selected_tool_schemas(tool_names)
-        prompt_cache_key = build_session_prompt_cache_key(
-            session_key=str(getattr(session.state, "session_key", "") or ""),
-            provider_model=provider_model,
-            scope="ceo_frontdoor",
-            stable_messages=messages,
-            tool_schemas=tool_schemas,
-        )
-        prompt_cache_diagnostics = build_prompt_cache_diagnostics(
-            stable_messages=messages,
-            tool_schemas=tool_schemas,
-            provider_model=provider_model,
-            scope="ceo_frontdoor",
-            prompt_cache_key=prompt_cache_key,
-            overlay_text=str(getattr(assembly, "turn_overlay_text", "") or ""),
-            overlay_section_count=int(getattr(assembly, "trace", {}).get("turn_overlay_section_count", 0) or 0),
-        )
+        stable_messages = list(messages)
+        dynamic_appendix_messages: list[dict[str, Any]] = []
+        cache_family_revision = str(getattr(assembly, "cache_family_revision", "") or "").strip()
+        prompt_scope = "ceo_frontdoor"
+        if heartbeat_internal:
+            live_request_messages = self._prompt_message_records(messages)
+            stable_messages = self._heartbeat_stable_prefix_messages(
+                assembly=assembly,
+                live_request_messages=live_request_messages,
+            )
+            dynamic_appendix_messages = self._prompt_message_records(
+                getattr(assembly, "dynamic_appendix_messages", None)
+            )
+            prompt_scope = str(metadata.get("heartbeat_prompt_lane") or "ceo_heartbeat").strip() or "ceo_heartbeat"
+            contract = build_frontdoor_prompt_contract(
+                scope=prompt_scope,
+                provider_model=provider_model,
+                stable_messages=stable_messages,
+                dynamic_appendix_messages=dynamic_appendix_messages,
+                live_request_messages=live_request_messages,
+                tool_schemas=tool_schemas,
+                cache_family_revision=cache_family_revision,
+                session_key=str(getattr(session.state, "session_key", "") or ""),
+                overlay_text=str(getattr(assembly, "turn_overlay_text", "") or ""),
+                overlay_section_count=int(getattr(assembly, "trace", {}).get("turn_overlay_section_count", 0) or 0),
+            )
+            messages = list(contract.request_messages)
+            stable_messages = list(contract.stable_messages)
+            dynamic_appendix_messages = list(contract.dynamic_appendix_messages)
+            cache_family_revision = str(contract.cache_family_revision or "").strip()
+            prompt_cache_key = contract.prompt_cache_key
+            prompt_cache_diagnostics = dict(contract.diagnostics)
+        else:
+            prompt_cache_key = build_session_prompt_cache_key(
+                session_key=str(getattr(session.state, "session_key", "") or ""),
+                provider_model=provider_model,
+                scope=prompt_scope,
+                stable_messages=messages,
+                tool_schemas=tool_schemas,
+            )
+            prompt_cache_diagnostics = build_prompt_cache_diagnostics(
+                stable_messages=messages,
+                tool_schemas=tool_schemas,
+                provider_model=provider_model,
+                scope=prompt_scope,
+                prompt_cache_key=prompt_cache_key,
+                overlay_text=str(getattr(assembly, "turn_overlay_text", "") or ""),
+                overlay_section_count=int(getattr(assembly, "trace", {}).get("turn_overlay_section_count", 0) or 0),
+            )
         parallel_enabled, max_parallel_tool_calls = self._parallel_tool_settings()
         return {
             "session_key": str(getattr(session.state, "session_key", "") or ""),
@@ -1498,6 +1566,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "heartbeat_internal": heartbeat_internal,
             "cron_internal": cron_internal,
             "model_refs": model_refs,
+            "stable_messages": stable_messages,
+            "dynamic_appendix_messages": dynamic_appendix_messages,
+            "cache_family_revision": cache_family_revision,
             "prompt_cache_key": prompt_cache_key,
             "prompt_cache_diagnostics": prompt_cache_diagnostics,
             "parallel_enabled": parallel_enabled,
