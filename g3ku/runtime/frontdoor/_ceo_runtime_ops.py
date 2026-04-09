@@ -360,8 +360,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         cls,
         *,
         assembly: Any,
+        metadata: dict[str, Any],
         live_request_messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        heartbeat_stable_rules_text = str(metadata.get("heartbeat_stable_rules_text") or "").strip()
+        if heartbeat_stable_rules_text:
+            metadata_stable_messages: list[dict[str, Any]] = [
+                {"role": "system", "content": heartbeat_stable_rules_text}
+            ]
+            heartbeat_task_ledger_summary = str(metadata.get("heartbeat_task_ledger_summary") or "").strip()
+            if heartbeat_task_ledger_summary:
+                metadata_stable_messages.append(
+                    {"role": "assistant", "content": heartbeat_task_ledger_summary}
+                )
+            return metadata_stable_messages
         explicit_stable_messages = cls._prompt_message_records(getattr(assembly, "stable_messages", None))
         if explicit_stable_messages:
             return explicit_stable_messages
@@ -1501,11 +1513,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             live_request_messages = self._prompt_message_records(messages)
             stable_messages = self._heartbeat_stable_prefix_messages(
                 assembly=assembly,
+                metadata=metadata,
                 live_request_messages=live_request_messages,
             )
-            dynamic_appendix_messages = self._prompt_message_records(
-                getattr(assembly, "dynamic_appendix_messages", None)
-            )
+            if str(metadata.get("heartbeat_stable_rules_text") or "").strip():
+                dynamic_appendix_messages = [
+                    {"role": "user", "content": self._model_content(user_content)}
+                ]
+                live_request_messages = [*list(stable_messages), *list(dynamic_appendix_messages)]
+            else:
+                dynamic_appendix_messages = self._prompt_message_records(
+                    getattr(assembly, "dynamic_appendix_messages", None)
+                )
             prompt_scope = str(metadata.get("heartbeat_prompt_lane") or "ceo_heartbeat").strip() or "ceo_heartbeat"
             contract = build_frontdoor_prompt_contract(
                 scope=prompt_scope,
