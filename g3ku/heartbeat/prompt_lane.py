@@ -211,11 +211,24 @@ def build_heartbeat_prompt_lane(
         if event_bundle_text
         else []
     )
+    request_messages = [*stable_messages, *dynamic_appendix_messages]
+    combined_user_sections = [
+        str(message.get("content") or "").strip()
+        for message in [*stable_messages, *dynamic_appendix_messages]
+        if str(message.get("content") or "").strip()
+    ]
+    if combined_user_sections:
+        request_messages.append(
+            {
+                "role": "user",
+                "content": "\n\n".join(combined_user_sections).strip(),
+            }
+        )
     return HeartbeatPromptLane(
         scope="ceo_heartbeat",
         stable_messages=stable_messages,
         dynamic_appendix_messages=dynamic_appendix_messages,
-        request_messages=[*stable_messages, *dynamic_appendix_messages],
+        request_messages=request_messages,
         retrieval_query=retrieval_query,
     )
 
