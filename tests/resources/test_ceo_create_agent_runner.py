@@ -1393,6 +1393,56 @@ async def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_f
 
 
 @pytest.mark.asyncio
+async def test_create_agent_prompt_cache_key_contract_ignores_dynamic_appendix_messages() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    runner.visible_langchain_tools = lambda **kwargs: [
+        {
+            "name": "memory_write",
+            "description": "",
+            "parameters": {"type": "object"},
+        }
+    ]
+
+    async def _invoke_with_overlay(overlay_text: str) -> dict[str, object]:
+        async def _terminal_handler(request):
+            return ModelResponse(result=[AIMessage(content="ok")])
+
+        handler = _terminal_handler
+        for middleware in reversed(runner._middleware()):
+            previous_handler = handler
+
+            async def _wrap(request, handler=previous_handler, middleware=middleware):
+                return await middleware.awrap_model_call(request, handler)
+
+            handler = _wrap
+
+        response = await handler(
+            ModelRequest(
+                model=SimpleNamespace(),
+                system_message=SystemMessage(content="You are the CEO frontdoor agent."),
+                messages=[HumanMessage(content="原始用户问题")],
+                tools=[],
+                state={
+                    "messages": [{"role": "user", "content": "原始用户问题"}],
+                    "turn_overlay_text": overlay_text,
+                },
+                runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
+            )
+        )
+
+        assert isinstance(response, ExtendedModelResponse)
+        assert isinstance(response.command, Command)
+        return dict(response.command.update or {})
+
+    first = await _invoke_with_overlay("## Retrieved Context\n- authoritative memory A")
+    second = await _invoke_with_overlay("## Retrieved Context\n- authoritative memory B")
+
+    assert first["prompt_cache_key"] == second["prompt_cache_key"]
+    assert first["prompt_cache_diagnostics"]["dynamic_appendix_hash"] != second["prompt_cache_diagnostics"]["dynamic_appendix_hash"]
+
+
+@pytest.mark.asyncio
 async def test_create_agent_frontdoor_exposes_memory_write_with_stringified_value_schema_only(
     monkeypatch,
 ) -> None:

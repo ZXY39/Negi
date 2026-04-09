@@ -697,6 +697,46 @@ async def test_message_builder_moves_turn_specific_context_into_overlay_for_stab
 
 
 @pytest.mark.asyncio
+async def test_message_builder_exposes_dynamic_appendix_messages_for_prompt_cache_key_contract() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="authoritative preference")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    persisted_session = Session(key="web:shared")
+    persisted_session.add_message("user", "prior question")
+    persisted_session.add_message("assistant", "prior answer")
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="from now on default to the focused browser workflow",
+        exposure={
+            "skills": [_skill("focused-skill", "Primary workflow")],
+            "tool_families": [_family("agent_browser", "Browser automation via semantic shortlist.")],
+            "tool_names": ["filesystem", "agent_browser", "memory_write"],
+        },
+        persisted_session=persisted_session,
+        user_content="from now on default to the focused browser workflow",
+    )
+
+    stable_messages = list(getattr(result, "stable_messages"))
+    dynamic_appendix_messages = list(getattr(result, "dynamic_appendix_messages"))
+    stable_contents = [str(item.get("content") or "") for item in stable_messages]
+    dynamic_contents = [str(item.get("content") or "") for item in dynamic_appendix_messages]
+
+    assert stable_messages[0]["role"] == "system"
+    assert "## Retrieved Context" not in str(stable_messages[0]["content"] or "")
+    assert "prior question" in stable_contents
+    assert "prior answer" in stable_contents
+    assert "from now on default to the focused browser workflow" in stable_contents
+    assert any(
+        "## Retrieved Context" in str(item.get("content") or "")
+        for item in dynamic_appendix_messages
+    )
+    assert "prior question" not in dynamic_contents
+    assert "prior answer" not in dynamic_contents
+    assert "from now on default to the focused browser workflow" not in dynamic_contents
+
+
+@pytest.mark.asyncio
 async def test_message_builder_includes_retrieval_and_full_transcript_without_duplicate_current_user() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _MemoryManager(response="authoritative preference")
