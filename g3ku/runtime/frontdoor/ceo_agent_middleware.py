@@ -12,7 +12,6 @@ from langgraph.types import Command, interrupt
 
 from g3ku.json_schema_utils import get_attached_raw_parameters_schema
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
-from main.runtime.chat_backend import build_prompt_cache_diagnostics, build_session_prompt_cache_key
 
 
 def _message_role(value: Any) -> str:
@@ -49,28 +48,6 @@ def _message_content(value: Any) -> Any:
     return content
 
 
-def _stable_messages_from_request(*, system_message: Any, messages: list[Any] | None) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    if system_message is not None:
-        result.append(
-            {
-                "role": "system",
-                "content": _message_content(system_message),
-            }
-        )
-    for item in list(messages or []):
-        role = _message_role(item)
-        if not role:
-            continue
-        result.append(
-            {
-                "role": role,
-                "content": _message_content(item),
-            }
-        )
-    return result
-
-
 def _tool_schema(tool: Any) -> dict[str, Any] | None:
     if isinstance(tool, dict):
         return dict(tool)
@@ -96,18 +73,12 @@ class CeoPromptAssemblyMiddleware(AgentMiddleware):
 
     def _prepare_request_and_update(self, request: ModelRequest) -> tuple[ModelRequest, dict[str, Any]]:
         state = dict(request.state or {})
-        request_system_message, request_messages = self._runner._request_messages_for_state(state=state)
         prompt_context = self._runner.build_prompt_context(
             state=state,
             runtime=request.runtime,
             tools=request.tools,
         )
-        current_blocks = list((request_system_message or request.system_message or SystemMessage(content="")).content_blocks)
         overlay_text = str(prompt_context.get("system_overlay") or "").strip()
-        blocks = list(current_blocks)
-        if overlay_text:
-            blocks = [*blocks, {"type": "text", "text": overlay_text}]
-        system_message = SystemMessage(content=blocks) if blocks else None
         tool_schemas = [
             schema
             for schema in (
@@ -119,29 +90,33 @@ class CeoPromptAssemblyMiddleware(AgentMiddleware):
         model_refs = list(self._runner._resolve_ceo_model_refs() or [])
         provider_model = str(model_refs[0] if model_refs else "").strip()
         session_key = str(getattr(getattr(request.runtime, "context", None), "session_key", "") or "").strip()
-        stable_messages = _stable_messages_from_request(
-            system_message=system_message,
-            messages=list(request.messages or []),
-        )
-        prompt_cache_key = build_session_prompt_cache_key(
-            session_key=session_key,
+        contract = self._runner._frontdoor_prompt_contract(
+            state=state,
             provider_model=provider_model,
-            scope="ceo_frontdoor",
-            stable_messages=stable_messages,
             tool_schemas=tool_schemas,
-        )
-        prompt_cache_diagnostics = build_prompt_cache_diagnostics(
-            stable_messages=stable_messages,
-            tool_schemas=tool_schemas,
-            provider_model=provider_model,
-            scope="ceo_frontdoor",
-            prompt_cache_key=prompt_cache_key,
             overlay_text=overlay_text,
+            fallback_system_message=request.system_message,
+            fallback_messages=list(request.messages or []),
+            session_key=session_key,
             overlay_section_count=len([section for section in overlay_text.split("\n\n") if section.strip()]),
         )
-        return request.override(system_message=system_message, messages=request_messages), {
-            "prompt_cache_key": prompt_cache_key,
-            "prompt_cache_diagnostics": prompt_cache_diagnostics,
+        request_system_message, request_messages = self._runner._render_request_records(contract.request_messages)
+        current_blocks = list((request_system_message or request.system_message or SystemMessage(content="")).content_blocks)
+        blocks = list(current_blocks)
+        if overlay_text:
+            blocks = [*blocks, {"type": "text", "text": overlay_text}]
+        system_message = SystemMessage(content=blocks) if blocks else None
+        updated_model_settings = {
+            **dict(request.model_settings or {}),
+            "prompt_cache_key": contract.prompt_cache_key,
+        }
+        return request.override(
+            system_message=system_message,
+            messages=request_messages,
+            model_settings=updated_model_settings,
+        ), {
+            "prompt_cache_key": contract.prompt_cache_key,
+            "prompt_cache_diagnostics": dict(contract.diagnostics),
         }
 
     @staticmethod

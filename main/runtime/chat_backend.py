@@ -60,6 +60,13 @@ def _message_content_signature(message: dict) -> str:
     return _json_compact(content)
 
 
+def _dynamic_appendix_hash(messages: list[dict[str, Any]] | None) -> str:
+    normalized = sanitize_provider_messages(messages)
+    if not normalized:
+        return ''
+    return hashlib.sha256(_json_compact(normalized).encode('utf-8')).hexdigest()
+
+
 def _normalize_provider_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for item in list(tool_calls or []):
@@ -188,12 +195,16 @@ def build_stable_prompt_cache_key(messages: list[dict], tools: list[dict] | None
 def build_prompt_cache_diagnostics(
     *,
     stable_messages: list[dict] | None,
+    dynamic_appendix_messages: list[dict] | None = None,
     tool_schemas: list[dict] | None,
     provider_model: str,
     scope: str,
     prompt_cache_key: str | None = None,
     overlay_text: str | None = None,
     overlay_section_count: int | None = None,
+    cache_family_revision: str | None = None,
+    stable_prefix_hash: str | None = None,
+    dynamic_appendix_hash: str | None = None,
 ) -> dict[str, object]:
     normalized_messages = list(stable_messages or [])
     normalized_tools = list(tool_schemas or []) or None
@@ -203,16 +214,33 @@ def build_prompt_cache_diagnostics(
         for section in normalized_overlay.split('\n\n')
         if section.strip()
     ]
+    normalized_dynamic_messages = sanitize_provider_messages(dynamic_appendix_messages)
+    if not normalized_dynamic_messages and normalized_overlay:
+        normalized_dynamic_messages = [
+            {
+                'role': 'assistant',
+                'content': normalized_overlay,
+            }
+        ]
     tool_signatures = _tool_signature(normalized_tools)
+    resolved_stable_prefix_hash = str(stable_prefix_hash or '').strip() or build_stable_prompt_cache_key(
+        normalized_messages,
+        normalized_tools,
+        str(provider_model or '').strip(),
+    )
+    resolved_dynamic_appendix_hash = (
+        str(dynamic_appendix_hash or '').strip()
+        or _dynamic_appendix_hash(normalized_dynamic_messages)
+    )
     return {
         'scope': str(scope or '').strip(),
         'provider_model': str(provider_model or '').strip(),
-        'stable_prompt_signature': build_stable_prompt_cache_key(
-            normalized_messages,
-            normalized_tools,
-            str(provider_model or '').strip(),
-        ),
+        'cache_family_revision': str(cache_family_revision or '').strip(),
+        'stable_prompt_signature': resolved_stable_prefix_hash,
+        'stable_prefix_hash': resolved_stable_prefix_hash,
+        'dynamic_appendix_hash': resolved_dynamic_appendix_hash,
         'stable_prefix_message_count': len(normalized_messages),
+        'dynamic_appendix_message_count': len(normalized_dynamic_messages),
         'tool_signature_count': len(tool_signatures),
         'tool_signature_hash': (
             hashlib.sha256(_json_compact(tool_signatures).encode('utf-8')).hexdigest()
@@ -244,11 +272,13 @@ def build_session_prompt_cache_key(
     scope: str = 'chat',
     stable_messages: list[dict] | None = None,
     tool_schemas: list[dict] | None = None,
+    cache_family_revision: str | None = None,
 ) -> str:
     payload = {
         'scope': str(scope or '').strip() or 'chat',
         'session_key': str(session_key or '').strip(),
         'provider_model': str(provider_model or '').strip(),
+        'cache_family_revision': str(cache_family_revision or '').strip(),
     }
     if stable_messages is not None or tool_schemas is not None:
         payload['stable_prompt_signature'] = build_stable_prompt_cache_key(

@@ -9,6 +9,7 @@ from g3ku.runtime.context.semantic_scope import plan_retrieval_scope, semantic_c
 from g3ku.runtime.context.summarizer import score_query
 from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBundle
 from g3ku.runtime.core_tools import resolve_core_tool_targets
+from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 from g3ku.runtime.web_ceo_sessions import transcript_messages
 
 
@@ -915,15 +916,33 @@ class CeoMessageBuilder:
         split_prompt_builder: bool,
         turn_overlay_parts: list[str],
         current_user_in_history: bool,
-    ) -> tuple[list[dict[str, Any]], str]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
         turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts) if split_prompt_builder else ''
-        model_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-        if retrieved_markdown and not split_prompt_builder:
-            model_messages.append({"role": "assistant", "content": retrieved_markdown})
-        model_messages.extend(history_messages)
+        stable_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        stable_messages.extend(history_messages)
         if not current_user_in_history:
-            model_messages.append({"role": "user", "content": user_content})
-        return model_messages, turn_overlay_text
+            stable_messages.append({"role": "user", "content": user_content})
+        dynamic_appendix_messages: list[dict[str, Any]] = []
+        if split_prompt_builder:
+            dynamic_appendix_messages.extend(
+                [
+                    {"role": "assistant", "content": part}
+                    for part in turn_overlay_parts
+                    if str(part or "").strip()
+                ]
+            )
+            model_messages = list(stable_messages)
+        else:
+            if retrieved_markdown:
+                dynamic_appendix_messages.append({"role": "assistant", "content": retrieved_markdown})
+            model_messages = list(stable_messages)
+            if dynamic_appendix_messages:
+                model_messages = [
+                    stable_messages[0],
+                    *dynamic_appendix_messages,
+                    *stable_messages[1:],
+                ]
+        return model_messages, stable_messages, dynamic_appendix_messages, turn_overlay_text
 
     async def build_for_ceo(
         self,
@@ -948,7 +967,7 @@ class CeoMessageBuilder:
             query_text=query_text,
             user_metadata=user_metadata,
         )
-        model_messages, turn_overlay_text = self._inject_turn_context(
+        model_messages, stable_messages, dynamic_appendix_messages, turn_overlay_text = self._inject_turn_context(
             system_prompt=str(context_sources['system_prompt'] or ''),
             retrieved_markdown=str(context_sources['retrieved_markdown'] or ''),
             history_messages=list(history_state['history_messages']),
@@ -984,7 +1003,8 @@ class CeoMessageBuilder:
             'retrieved_record_count': len(list(context_sources['retrieved_bundle'].records or [])),
             'same_session_turn_memory_filtered_count': int(context_sources['same_session_turn_memory_filtered_count']),
             'model_messages_count': len(model_messages),
-            'stable_prefix_message_count': len(model_messages),
+            'stable_prefix_message_count': len(stable_messages),
+            'dynamic_appendix_message_count': len(dynamic_appendix_messages),
             'turn_overlay_present': bool(turn_overlay_text),
             'turn_overlay_section_count': len(context_sources['turn_overlay_parts']),
             'turn_overlay_character_count': len(turn_overlay_text),
@@ -1010,7 +1030,10 @@ class CeoMessageBuilder:
         }
         return ContextAssemblyResult(
             model_messages=model_messages,
+            stable_messages=stable_messages,
+            dynamic_appendix_messages=dynamic_appendix_messages,
             tool_names=list(context_sources['selected_tool_names']),
             trace=trace,
             turn_overlay_text=turn_overlay_text,
+            cache_family_revision=DEFAULT_CACHE_FAMILY_REVISION,
         )

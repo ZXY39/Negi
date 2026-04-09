@@ -736,6 +736,28 @@ async def test_message_builder_exposes_dynamic_appendix_messages_for_prompt_cach
     assert "from now on default to the focused browser workflow" not in dynamic_contents
 
 
+def test_context_assembly_result_dynamic_appendix_model_messages_stays_combined_compatibility_view() -> None:
+    from g3ku.runtime.context.types import ContextAssemblyResult
+
+    result = ContextAssemblyResult(
+        stable_messages=[
+            {"role": "system", "content": "BASE PROMPT"},
+            {"role": "user", "content": "prior question"},
+        ],
+        dynamic_appendix_messages=[
+            {"role": "assistant", "content": "## Retrieved Context\n- memory"},
+        ],
+        tool_names=["filesystem"],
+        trace={},
+    )
+
+    assert result.model_messages == [
+        {"role": "system", "content": "BASE PROMPT"},
+        {"role": "user", "content": "prior question"},
+        {"role": "assistant", "content": "## Retrieved Context\n- memory"},
+    ]
+
+
 @pytest.mark.asyncio
 async def test_message_builder_includes_retrieval_and_full_transcript_without_duplicate_current_user() -> None:
     prompt_builder = _PromptBuilder()

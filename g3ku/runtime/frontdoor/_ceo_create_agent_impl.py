@@ -25,6 +25,7 @@ from .state_models import (
     CeoRuntimeContext,
     initial_persistent_state,
 )
+from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION, build_frontdoor_prompt_contract
 
 
 class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
@@ -34,7 +35,10 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
 
     def build_prompt_context(self, *, state, runtime, tools) -> dict[str, str]:
         _ = runtime, tools
-        overlay_text = self._effective_turn_overlay_text(state)
+        if list(state.get("dynamic_appendix_messages") or []):
+            overlay_text = str(state.get("repair_overlay_text") or "").strip()
+        else:
+            overlay_text = self._effective_turn_overlay_text(state)
         default_overlay_text = self._frontdoor_default_overlay_text(state)
         if overlay_text:
             combined_overlay = "\n\n".join(
@@ -89,6 +93,158 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             raw_messages = list(state_or_messages or [])
         return [self._message_record(item) for item in raw_messages]
 
+    @staticmethod
+    def _overlay_text_from_messages(messages: list[dict[str, Any]] | None) -> str:
+        return "\n\n".join(
+            str(message.get("content") or "").strip()
+            for message in list(messages or [])
+            if str(message.get("content") or "").strip()
+        ).strip()
+
+    @staticmethod
+    def _prompt_cache_family_revision(state: dict[str, Any]) -> str:
+        return str(state.get("cache_family_revision") or "").strip() or DEFAULT_CACHE_FAMILY_REVISION
+
+    def _fallback_request_records(
+        self,
+        *,
+        fallback_system_message: Any = None,
+        fallback_messages: list[Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        if fallback_system_message is not None:
+            records.append(self._message_record(fallback_system_message))
+        records.extend(self._message_record(item) for item in list(fallback_messages or []))
+        return records
+
+    @staticmethod
+    def _leading_system_record(records: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+        if not records:
+            return None
+        first = dict(records[0])
+        if str(first.get("role") or "").strip().lower() != "system":
+            return None
+        return first
+
+    def _effective_system_record(
+        self,
+        *,
+        state: dict[str, Any],
+        fallback_system_message: Any = None,
+        fallback_messages: list[Any] | None = None,
+    ) -> dict[str, Any] | None:
+        candidates = (
+            [self._message_record(item) for item in list(state.get("stable_messages") or [])],
+            self._state_message_records(state),
+            self._fallback_request_records(
+                fallback_system_message=fallback_system_message,
+                fallback_messages=fallback_messages,
+            ),
+        )
+        for records in candidates:
+            system_record = self._leading_system_record(records)
+            if system_record is not None:
+                return system_record
+        return None
+
+    def _with_effective_system_prefix(
+        self,
+        *,
+        records: list[dict[str, Any]],
+        effective_system_record: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        normalized_records = [self._message_record(item) for item in list(records or [])]
+        if effective_system_record is None:
+            return normalized_records
+        if self._leading_system_record(normalized_records) == effective_system_record:
+            return normalized_records
+        if self._leading_system_record(normalized_records) is not None:
+            normalized_records = normalized_records[1:]
+        return [dict(effective_system_record), *normalized_records]
+
+    def _stable_message_records_for_state(
+        self,
+        *,
+        state: dict[str, Any],
+        fallback_system_message: Any = None,
+        fallback_messages: list[Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        raw_stable_messages = list(state.get("stable_messages") or [])
+        effective_system_record = self._effective_system_record(
+            state=state,
+            fallback_system_message=fallback_system_message,
+            fallback_messages=fallback_messages,
+        )
+        if raw_stable_messages:
+            return self._with_effective_system_prefix(
+                records=[self._message_record(item) for item in raw_stable_messages],
+                effective_system_record=effective_system_record,
+            )
+        live_records = self._state_message_records(state)
+        if live_records:
+            return self._with_effective_system_prefix(
+                records=live_records,
+                effective_system_record=effective_system_record,
+            )
+        return self._with_effective_system_prefix(
+            records=self._fallback_request_records(
+                fallback_system_message=fallback_system_message,
+                fallback_messages=fallback_messages,
+            ),
+            effective_system_record=effective_system_record,
+        )
+
+    def _live_request_message_records_for_state(
+        self,
+        *,
+        state: dict[str, Any],
+        fallback_system_message: Any = None,
+        fallback_messages: list[Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        effective_system_record = self._effective_system_record(
+            state=state,
+            fallback_system_message=fallback_system_message,
+            fallback_messages=fallback_messages,
+        )
+        live_records = self._state_message_records(state)
+        if live_records:
+            return self._with_effective_system_prefix(
+                records=live_records,
+                effective_system_record=effective_system_record,
+            )
+        return self._with_effective_system_prefix(
+            records=self._fallback_request_records(
+                fallback_system_message=fallback_system_message,
+                fallback_messages=fallback_messages,
+            ),
+            effective_system_record=effective_system_record,
+        )
+
+    def _dynamic_appendix_message_records_for_state(
+        self,
+        *,
+        state: dict[str, Any],
+        overlay_text: str = "",
+    ) -> list[dict[str, Any]]:
+        raw_dynamic_messages = list(state.get("dynamic_appendix_messages") or [])
+        if raw_dynamic_messages:
+            return [self._message_record(item) for item in raw_dynamic_messages]
+        normalized_overlay_text = str(overlay_text or "").strip()
+        if not normalized_overlay_text:
+            return []
+        return [{"role": "assistant", "content": normalized_overlay_text}]
+
+    def _render_request_records(
+        self,
+        records: list[dict[str, Any]] | None,
+    ) -> tuple[CoreSystemMessage | None, list[BaseMessage]]:
+        normalized_records = [self._message_record(item) for item in list(records or [])]
+        system_message = None
+        if normalized_records and str(normalized_records[0].get("role") or "").strip().lower() == "system":
+            system_message = CoreSystemMessage(content=normalized_records[0].get("content", ""))
+            normalized_records = normalized_records[1:]
+        return system_message, list(convert_to_messages(normalized_records))
+
     def _replace_messages_update(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *list(messages or [])]}
 
@@ -96,13 +252,88 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         self,
         *,
         state: dict[str, Any],
+        fallback_system_message: Any = None,
+        fallback_messages: list[Any] | None = None,
+        session_key: str | None = None,
+        provider_model: str = "",
+        tool_schemas: list[dict[str, Any]] | None = None,
+        overlay_text: str = "",
+        overlay_section_count: int | None = None,
     ) -> tuple[CoreSystemMessage | None, list[BaseMessage]]:
-        records = self._state_message_records(state)
-        system_message = None
-        if records and str(records[0].get("role") or "").strip().lower() == "system":
-            system_message = CoreSystemMessage(content=records[0].get("content", ""))
-            records = records[1:]
-        return system_message, list(convert_to_messages(records))
+        contract = self._frontdoor_prompt_contract(
+            state=state,
+            provider_model=provider_model,
+            tool_schemas=tool_schemas,
+            overlay_text=overlay_text,
+            fallback_system_message=fallback_system_message,
+            fallback_messages=fallback_messages,
+            session_key=session_key,
+            overlay_section_count=overlay_section_count,
+        )
+        return self._render_request_records(contract.request_messages)
+
+    def _frontdoor_prompt_contract(
+        self,
+        *,
+        state: dict[str, Any],
+        provider_model: str,
+        tool_schemas: list[dict[str, Any]] | None,
+        overlay_text: str = "",
+        fallback_system_message: Any = None,
+        fallback_messages: list[Any] | None = None,
+        session_key: str | None = None,
+        overlay_section_count: int | None = None,
+    ):
+        return build_frontdoor_prompt_contract(
+            scope="ceo_frontdoor",
+            provider_model=provider_model,
+            stable_messages=self._stable_message_records_for_state(
+                state=state,
+                fallback_system_message=fallback_system_message,
+                fallback_messages=fallback_messages,
+            ),
+            dynamic_appendix_messages=self._dynamic_appendix_message_records_for_state(
+                state=state,
+                overlay_text=overlay_text,
+            ),
+            live_request_messages=self._live_request_message_records_for_state(
+                state=state,
+                fallback_system_message=fallback_system_message,
+                fallback_messages=fallback_messages,
+            ),
+            tool_schemas=list(tool_schemas or []),
+            cache_family_revision=self._prompt_cache_family_revision(state),
+            session_key=str(session_key or state.get("session_key") or "").strip(),
+            overlay_text=overlay_text,
+            overlay_section_count=overlay_section_count,
+        )
+
+    def _refresh_prompt_cache_state(self, *, state: dict[str, Any]) -> dict[str, Any]:
+        updated_state = dict(state or {})
+        model_refs = list(updated_state.get("model_refs") or self._resolve_ceo_model_refs() or [])
+        provider_model = str(model_refs[0] if model_refs else "").strip()
+        tool_schemas = []
+        try:
+            tool_schemas = self._selected_tool_schemas(list(updated_state.get("tool_names") or []))
+        except Exception:
+            tool_schemas = []
+        contract = self._frontdoor_prompt_contract(
+            state=updated_state,
+            provider_model=provider_model,
+            tool_schemas=tool_schemas,
+            overlay_text=str(updated_state.get("turn_overlay_text") or "").strip(),
+            session_key=str(updated_state.get("session_key") or "").strip(),
+            overlay_section_count=len(list(updated_state.get("dynamic_appendix_messages") or [])),
+        )
+        return {
+            **updated_state,
+            "messages": list(contract.request_messages),
+            "stable_messages": list(contract.stable_messages),
+            "dynamic_appendix_messages": list(contract.dynamic_appendix_messages),
+            "cache_family_revision": contract.cache_family_revision,
+            "prompt_cache_key": contract.prompt_cache_key,
+            "prompt_cache_diagnostics": dict(contract.diagnostics),
+        }
 
     def _tool_result_payload(self, tool_message: dict[str, Any]) -> dict[str, Any]:
         content = tool_message.get("content", "")
@@ -141,7 +372,9 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             runtime=type("RuntimeShim", (), {"context": runtime_context})(),
         )
         prepared["agent_runtime"] = "create_agent"
-        return dict(prepared)
+        refreshed = self._refresh_prompt_cache_state(state=dict(prepared))
+        refreshed["agent_runtime"] = "create_agent"
+        return refreshed
 
     async def _postprocess_completed_tool_cycle(
         self,

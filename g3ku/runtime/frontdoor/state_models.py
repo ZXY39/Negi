@@ -12,6 +12,7 @@ from langgraph.graph.message import add_messages
 
 from typing_extensions import TypedDict
 
+from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 
 
 
@@ -30,9 +31,15 @@ class CeoPersistentState(TypedDict, total=False):
 
     messages: Annotated[list[Any], add_messages]
 
+    stable_messages: list[dict[str, Any]]
+
+    dynamic_appendix_messages: list[dict[str, Any]]
+
     turn_overlay_text: str | None
 
     tool_names: list[str]
+
+    cache_family_revision: str
 
     used_tools: list[str]
 
@@ -150,9 +157,15 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
 
         "messages": [],
 
+        "stable_messages": [],
+
+        "dynamic_appendix_messages": [],
+
         "used_tools": [],
 
         "tool_names": [],
+
+        "cache_family_revision": DEFAULT_CACHE_FAMILY_REVISION,
 
         "route_kind": "direct_reply",
 

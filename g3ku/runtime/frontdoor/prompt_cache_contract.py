@@ -1,0 +1,247 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from os.path import commonprefix
+from typing import Any
+
+from g3ku.runtime.frontdoor.history_compaction import (
+    build_compact_boundary_message,
+    build_history_summary_message,
+)
+from main.runtime.chat_backend import (
+    build_prompt_cache_diagnostics,
+    build_session_prompt_cache_key,
+    sanitize_provider_messages,
+)
+
+DEFAULT_CACHE_FAMILY_REVISION = "ceo_frontdoor:stable-prefix:v1"
+
+
+def _marker_prefix(*values: str) -> str:
+    return commonprefix([str(value or "") for value in values if str(value or "")])
+
+
+_COMPACT_BOUNDARY_PREFIX = _marker_prefix(
+    str(build_compact_boundary_message(summarized_count=0).get("content") or ""),
+    str(build_compact_boundary_message(summarized_count=1).get("content") or ""),
+)
+_CONVERSATION_SUMMARY_PREFIX = _marker_prefix(
+    str(build_history_summary_message(messages=[]).get("content") or ""),
+    str(build_history_summary_message(messages=[{"role": "user", "content": "x"}]).get("content") or ""),
+)
+
+
+def _records_contain_slice(records: list[dict[str, Any]], target: list[dict[str, Any]]) -> bool:
+    if not target:
+        return True
+    target_len = len(target)
+    if target_len > len(records):
+        return False
+    for start in range(len(records) - target_len + 1):
+        if records[start : start + target_len] == target:
+            return True
+    return False
+
+
+def _strip_first_slice(records: list[dict[str, Any]], target: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not target:
+        return list(records)
+    target_len = len(target)
+    if target_len > len(records):
+        return list(records)
+    for start in range(len(records) - target_len + 1):
+        if records[start : start + target_len] == target:
+            return [*records[:start], *records[start + target_len :]]
+    return list(records)
+
+
+def _shared_prefix_length(first: list[dict[str, Any]], second: list[dict[str, Any]]) -> int:
+    limit = min(len(first), len(second))
+    index = 0
+    while index < limit and first[index] == second[index]:
+        index += 1
+    return index
+
+
+def _shortest_common_supersequence(
+    first: list[dict[str, Any]],
+    second: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows = len(first)
+    cols = len(second)
+    dp: list[list[list[dict[str, Any]]]] = [
+        [[] for _ in range(cols + 1)]
+        for _ in range(rows + 1)
+    ]
+    for row in range(rows, -1, -1):
+        for col in range(cols, -1, -1):
+            if row == rows and col == cols:
+                continue
+            if row == rows:
+                dp[row][col] = list(second[col:])
+                continue
+            if col == cols:
+                dp[row][col] = list(first[row:])
+                continue
+            if first[row] == second[col]:
+                dp[row][col] = [dict(first[row]), *dp[row + 1][col + 1]]
+                continue
+            take_first = [dict(first[row]), *dp[row + 1][col]]
+            take_second = [dict(second[col]), *dp[row][col + 1]]
+            if len(take_first) <= len(take_second):
+                dp[row][col] = take_first
+            else:
+                dp[row][col] = take_second
+    return dp[0][0]
+
+
+def _dynamic_diagnostic_messages(
+    *,
+    dynamic_appendix_messages: list[dict[str, Any]],
+    overlay_text: str,
+) -> list[dict[str, Any]]:
+    diagnostics = list(dynamic_appendix_messages)
+    normalized_overlay_text = str(overlay_text or "").strip()
+    if normalized_overlay_text:
+        diagnostics.append({"role": "assistant", "content": normalized_overlay_text})
+    return diagnostics
+
+
+def _contains_compacted_history(records: list[dict[str, Any]]) -> bool:
+    items = list(records or [])
+    for index, record in enumerate(items):
+        role = str(record.get("role") or "").strip().lower()
+        content = str(record.get("content") or "").strip()
+        if role != "system" or not content.startswith(_COMPACT_BOUNDARY_PREFIX):
+            continue
+        if index + 1 >= len(items):
+            continue
+        next_record = items[index + 1]
+        next_role = str(next_record.get("role") or "").strip().lower()
+        next_content = str(next_record.get("content") or "").strip()
+        if next_role == "assistant" and next_content.startswith(_CONVERSATION_SUMMARY_PREFIX):
+            return True
+    return False
+
+
+def _effective_stable_messages(
+    *,
+    stable_messages: list[dict[str, Any]],
+    live_request_messages: list[dict[str, Any]],
+    dynamic_appendix_messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    live_without_appendix = _strip_first_slice(live_request_messages, dynamic_appendix_messages)
+    if live_without_appendix and _contains_compacted_history(live_without_appendix):
+        return live_without_appendix
+    return list(stable_messages)
+
+
+def _build_request_messages(
+    *,
+    stable_messages: list[dict[str, Any]],
+    live_request_messages: list[dict[str, Any]],
+    dynamic_appendix_messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not live_request_messages:
+        request_messages = list(stable_messages)
+    else:
+        live_without_appendix = _strip_first_slice(live_request_messages, dynamic_appendix_messages)
+        prefix_length = _shared_prefix_length(stable_messages, live_without_appendix)
+        request_messages = [
+            *list(stable_messages[:prefix_length]),
+            *_shortest_common_supersequence(
+                list(stable_messages[prefix_length:]),
+                list(live_without_appendix[prefix_length:]),
+            ),
+        ]
+    if dynamic_appendix_messages and not _records_contain_slice(request_messages, dynamic_appendix_messages):
+        request_messages = [*request_messages, *list(dynamic_appendix_messages)]
+    return request_messages
+
+
+@dataclass(slots=True)
+class FrontdoorPromptContract:
+    request_messages: list[dict[str, Any]]
+    prompt_cache_key: str
+    diagnostics: dict[str, Any]
+    stable_prefix_hash: str
+    dynamic_appendix_hash: str
+    stable_messages: list[dict[str, Any]] = field(default_factory=list)
+    dynamic_appendix_messages: list[dict[str, Any]] = field(default_factory=list)
+    diagnostic_dynamic_messages: list[dict[str, Any]] = field(default_factory=list)
+    cache_family_revision: str = DEFAULT_CACHE_FAMILY_REVISION
+
+
+def build_frontdoor_prompt_contract(
+    *,
+    scope: str,
+    provider_model: str,
+    stable_messages: list[dict[str, Any]] | None,
+    dynamic_appendix_messages: list[dict[str, Any]] | None,
+    tool_schemas: list[dict[str, Any]] | None,
+    cache_family_revision: str | None,
+    session_key: str | None = None,
+    live_request_messages: list[dict[str, Any]] | None = None,
+    overlay_text: str | None = None,
+    overlay_section_count: int | None = None,
+) -> FrontdoorPromptContract:
+    normalized_stable_messages = sanitize_provider_messages(stable_messages)
+    normalized_dynamic_appendix_messages = sanitize_provider_messages(dynamic_appendix_messages)
+    normalized_live_request_messages = sanitize_provider_messages(live_request_messages)
+    normalized_scope = str(scope or "").strip()
+    normalized_provider_model = str(provider_model or "").strip()
+    normalized_cache_family_revision = (
+        str(cache_family_revision or "").strip() or DEFAULT_CACHE_FAMILY_REVISION
+    )
+    normalized_overlay_text = str(overlay_text or "").strip()
+    normalized_effective_stable_messages = _effective_stable_messages(
+        stable_messages=normalized_stable_messages,
+        live_request_messages=normalized_live_request_messages,
+        dynamic_appendix_messages=normalized_dynamic_appendix_messages,
+    )
+    normalized_request_messages = _build_request_messages(
+        stable_messages=normalized_effective_stable_messages,
+        live_request_messages=normalized_live_request_messages,
+        dynamic_appendix_messages=normalized_dynamic_appendix_messages,
+    )
+    normalized_diagnostic_dynamic_messages = _dynamic_diagnostic_messages(
+        dynamic_appendix_messages=normalized_dynamic_appendix_messages,
+        overlay_text=normalized_overlay_text,
+    )
+    prompt_cache_key = build_session_prompt_cache_key(
+        session_key=str(session_key or "").strip(),
+        provider_model=normalized_provider_model,
+        scope=normalized_scope,
+        stable_messages=normalized_effective_stable_messages,
+        tool_schemas=list(tool_schemas or []),
+        cache_family_revision=normalized_cache_family_revision,
+    )
+    diagnostics = build_prompt_cache_diagnostics(
+        stable_messages=normalized_effective_stable_messages,
+        dynamic_appendix_messages=normalized_diagnostic_dynamic_messages,
+        tool_schemas=list(tool_schemas or []),
+        provider_model=normalized_provider_model,
+        scope=normalized_scope,
+        prompt_cache_key=prompt_cache_key,
+        overlay_text=normalized_overlay_text,
+        overlay_section_count=overlay_section_count,
+        cache_family_revision=normalized_cache_family_revision,
+    )
+    return FrontdoorPromptContract(
+        request_messages=normalized_request_messages,
+        prompt_cache_key=prompt_cache_key,
+        diagnostics=diagnostics,
+        stable_prefix_hash=str(diagnostics.get("stable_prefix_hash") or ""),
+        dynamic_appendix_hash=str(diagnostics.get("dynamic_appendix_hash") or ""),
+        stable_messages=normalized_effective_stable_messages,
+        dynamic_appendix_messages=normalized_dynamic_appendix_messages,
+        diagnostic_dynamic_messages=normalized_diagnostic_dynamic_messages,
+        cache_family_revision=normalized_cache_family_revision,
+    )
+
+
+__all__ = [
+    "DEFAULT_CACHE_FAMILY_REVISION",
+    "FrontdoorPromptContract",
+    "build_frontdoor_prompt_contract",
+]
