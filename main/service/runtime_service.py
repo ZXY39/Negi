@@ -269,8 +269,9 @@ class MainRuntimeService:
         resolved_files_base_dir = Path(files_base_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'tasks'))
         resolved_artifact_dir = Path(artifact_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'artifacts'))
         event_history_settings = self._event_history_settings(app_config)
+        configured_event_history_dir = str(event_history_settings.get('dir') or '').strip()
         resolved_event_history_dir = Path(
-            str(event_history_settings.get('dir') or (Path.cwd() / '.g3ku' / 'main-runtime' / 'event-history'))
+            configured_event_history_dir or (resolved_store_path.parent / 'event-history')
         )
         _prepare_task_runtime_v3_root(
             store_path=resolved_store_path,
@@ -3228,7 +3229,7 @@ class MainRuntimeService:
         history = getattr(main_runtime, 'event_history', None) if main_runtime is not None else None
         return {
             'enabled': bool(getattr(history, 'enabled', True)) if history is not None else True,
-            'dir': str(getattr(history, 'dir', '.g3ku/main-runtime/event-history') or '.g3ku/main-runtime/event-history'),
+            'dir': str(getattr(history, 'dir', '') or ''),
             'live_patch_persist_window_ms': max(
                 0,
                 int(getattr(history, 'live_patch_persist_window_ms', 1000) or 1000),

@@ -78,6 +78,37 @@ def test_main_runtime_service_refresh_updates_role_tool_concurrency(monkeypatch,
     assert service._react_loop._max_parallel_tool_calls == 6
 
 
+def test_main_runtime_service_defaults_event_history_to_store_sibling_with_config(tmp_path: Path):
+    config = Config()
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        app_config=config,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+    )
+
+    assert Path(service.store._event_history_dir) == tmp_path / "event-history"
+
+
+def test_main_runtime_service_honors_explicit_event_history_dir_from_config(tmp_path: Path):
+    config = Config()
+    config.main_runtime.event_history.dir = str(tmp_path / "history-explicit")
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        app_config=config,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+    )
+
+    assert Path(service.store._event_history_dir) == tmp_path / "history-explicit"
+
+
 def test_node_runner_uses_min_of_role_and_global_tool_parallel_limits() -> None:
     runner = NodeRunner(
         store=SimpleNamespace(),

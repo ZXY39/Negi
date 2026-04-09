@@ -746,7 +746,7 @@ class MainRuntimeConfig(Base):
 
 class MainRuntimeEventHistoryConfig(Base):
     enabled: bool = True
-    dir: str = '.g3ku/main-runtime/event-history'
+    dir: str = ''
     live_patch_persist_window_ms: int = 1000
     archive_encoding: str = 'gzip'
 
