@@ -86,3 +86,45 @@ def test_frontdoor_prompt_cache_key_changes_when_capability_revision_changes() -
     )
 
     assert _field(first, "prompt_cache_key") != _field(second, "prompt_cache_key")
+
+
+def test_frontdoor_prompt_cache_key_changes_when_exposure_revision_changes() -> None:
+    from g3ku.runtime.frontdoor.prompt_cache_contract import build_frontdoor_prompt_contract
+
+    stable_messages = [
+        {"role": "system", "content": "stable system\n\n## Capability Exposure Snapshot\n- Exposure revision: `exp:rev-1`"},
+        {"role": "user", "content": "鍘熷鐢ㄦ埛闂"},
+    ]
+    tool_schemas = [
+        {
+            "name": "memory_write",
+            "description": "",
+            "parameters": {"type": "object"},
+        }
+    ]
+
+    first = build_frontdoor_prompt_contract(
+        scope="ceo_frontdoor",
+        provider_model="openai:gpt-4.1",
+        stable_messages=stable_messages,
+        dynamic_appendix_messages=[
+            {"role": "assistant", "content": "## Visible Skills For This Turn\n- `focused-skill`"}
+        ],
+        tool_schemas=tool_schemas,
+        cache_family_revision="exp:rev-1",
+    )
+    second = build_frontdoor_prompt_contract(
+        scope="ceo_frontdoor",
+        provider_model="openai:gpt-4.1",
+        stable_messages=[
+            {"role": "system", "content": "stable system\n\n## Capability Exposure Snapshot\n- Exposure revision: `exp:rev-2`"},
+            {"role": "user", "content": "鍘熷鐢ㄦ埛闂"},
+        ],
+        dynamic_appendix_messages=[
+            {"role": "assistant", "content": "## Visible Skills For This Turn\n- `focused-skill`"}
+        ],
+        tool_schemas=tool_schemas,
+        cache_family_revision="exp:rev-2",
+    )
+
+    assert _field(first, "prompt_cache_key") != _field(second, "prompt_cache_key")

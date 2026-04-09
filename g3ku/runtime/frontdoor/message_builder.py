@@ -9,6 +9,7 @@ from g3ku.runtime.context.semantic_scope import plan_retrieval_scope, semantic_c
 from g3ku.runtime.context.summarizer import score_query
 from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBundle
 from g3ku.runtime.core_tools import resolve_core_tool_targets
+from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 from g3ku.runtime.web_ceo_sessions import transcript_messages
 
@@ -131,6 +132,71 @@ class CeoMessageBuilder:
                 continue
             ids.append(tool_id)
         return ids
+
+    @staticmethod
+    def _capability_snapshot(exposure: dict[str, Any]) -> CapabilitySnapshot:
+        existing = exposure.get('capability_snapshot')
+        if isinstance(existing, CapabilitySnapshot):
+            return existing
+        return build_capability_snapshot(
+            visible_skills=list(exposure.get('skills') or []),
+            visible_families=list(exposure.get('tool_families') or []),
+            visible_tool_names=list(exposure.get('tool_names') or []),
+        )
+
+    @staticmethod
+    def _skill_label(item: Any) -> str:
+        skill_id = CeoMessageBuilder._skill_id(item)
+        if isinstance(item, dict):
+            display_name = str(item.get('display_name') or '').strip()
+        else:
+            display_name = str(getattr(item, 'display_name', '') or '').strip()
+        return display_name if display_name and display_name != skill_id else skill_id
+
+    @classmethod
+    def _skill_summary(cls, item: Any) -> str:
+        if isinstance(item, dict):
+            l0 = str(item.get('l0') or '').strip()
+            description = str(item.get('description') or '').strip()
+        else:
+            l0 = str(getattr(item, 'l0', '') or '').strip()
+            description = str(getattr(item, 'description', '') or '').strip()
+        return cls._first_sentence(l0 or description)
+
+    @classmethod
+    def _build_turn_skill_overlay(
+        cls,
+        *,
+        selected_skills: list[Any],
+        capability_snapshot: CapabilitySnapshot,
+        visible_only_mode: bool,
+    ) -> str:
+        skill_ids = [cls._skill_id(item) for item in list(selected_skills or []) if cls._skill_id(item)]
+        if not skill_ids:
+            return ''
+        all_visible_skill_ids = set(capability_snapshot.visible_skill_ids)
+        selected_skill_ids = set(skill_ids)
+        if visible_only_mode and selected_skill_ids == all_visible_skill_ids and len(skill_ids) == len(all_visible_skill_ids):
+            lines = [
+                '## Skill Summaries For Visible Exposure',
+                '- Semantic ranking is unavailable, so the full visible skill set is summarized below.',
+            ]
+        else:
+            lines = [
+                '## Skills Most Relevant To This Turn',
+                '- These summaries are selected from the stable visible capability exposure for the current turn.',
+            ]
+        for item in list(selected_skills or []):
+            skill_id = cls._skill_id(item)
+            if not skill_id:
+                continue
+            label = cls._skill_label(item)
+            summary = cls._skill_summary(item)
+            if summary:
+                lines.append(f'- `{skill_id}` ({label}): {summary}')
+            else:
+                lines.append(f'- `{skill_id}` ({label})')
+        return '\n'.join(lines)
 
     @staticmethod
     def _content_text(value: Any) -> str:
@@ -377,89 +443,6 @@ class CeoMessageBuilder:
         ]
         return selected, trace
 
-    def _build_external_tool_block(
-        self,
-        *,
-        visible_families: list[Any],
-        visible_tool_names: list[str],
-        top_k: int,
-        l0_only: bool = False,
-    ) -> tuple[str, list[dict[str, Any]]]:
-        visible_name_set = {
-            str(name or '').strip()
-            for name in list(visible_tool_names or [])
-            if str(name or '').strip()
-        }
-        eligible: list[Any] = []
-        for family in list(visible_families or []):
-            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-            install_dir = str(getattr(family, 'install_dir', '') or '').strip()
-            callable_flag = bool(getattr(family, 'callable', True))
-            available_flag = bool(getattr(family, 'available', True))
-            registered_callable = self._family_has_registered_callable_executor(family, visible_name_set)
-            if not tool_id:
-                continue
-            if callable_flag and available_flag and registered_callable:
-                continue
-            if not install_dir and not callable_flag and not l0_only:
-                continue
-            eligible.append(family)
-        if not eligible:
-            return '', []
-
-        lines = ['## Tool Resources That Require `load_tool_context`']
-        trace: list[dict[str, Any]] = []
-        for family in eligible[: max(1, int(top_k or 1))]:
-            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-            display_name = str(getattr(family, 'display_name', '') or tool_id).strip() or tool_id
-            raw_description = str(getattr(family, 'description', '') or '').strip()
-            description = self._tool_l0_summary(family) if l0_only else raw_description
-            install_dir = str(getattr(family, 'install_dir', '') or '').strip()
-            callable_flag = bool(getattr(family, 'callable', True))
-            available_flag = bool(getattr(family, 'available', True))
-            registered_callable = self._family_has_registered_callable_executor(family, visible_name_set)
-            issue_summary = self._tool_family_issue_summary(family)
-            if not callable_flag:
-                state_text = f"Install dir: `{install_dir}`" if install_dir else "Install dir not configured"
-                if not available_flag:
-                    state_text = f"{state_text}. Status: unavailable"
-                    if issue_summary:
-                        state_text = f"{state_text} ({issue_summary})"
-                line = (
-                    f"- `{tool_id}` ({display_name}): {description or 'Registered external tool resource.'} {state_text}. "
-                    f"For install, update, troubleshooting, or usage guidance, call `load_tool_context(tool_id=\"{tool_id}\")`."
-                )
-            else:
-                if available_flag and not registered_callable:
-                    state_text = "Status: enabled but not currently registered in the callable function tool list for this turn"
-                    next_step = f"For repair steps or usage guidance, call `load_tool_context(tool_id=\"{tool_id}\")`."
-                elif not available_flag and registered_callable:
-                    state_text = "Status: unavailable but exposed in the callable function tool list as `【待修复】`"
-                    next_step = (
-                        f"If you call `{tool_id}`, it will return structured repair guidance instead of executing the real capability. "
-                        f"For repair steps or usage guidance, call `load_tool_context(tool_id=\"{tool_id}\")`."
-                    )
-                else:
-                    state_text = "Status: unavailable"
-                    next_step = f"For repair steps or usage guidance, call `load_tool_context(tool_id=\"{tool_id}\")`."
-                if issue_summary:
-                    state_text = f"{state_text} ({issue_summary})"
-                line = (
-                    f"- `{tool_id}` ({display_name}): {description or 'Tool guidance resource.'} {state_text}. "
-                    f"{next_step}"
-                )
-            lines.append(line)
-            trace.append(
-                {
-                    'tool_id': tool_id,
-                    'install_dir': install_dir,
-                    'callable': callable_flag,
-                    'available': available_flag,
-                    'registered_callable': registered_callable,
-                }
-            )
-        return '\n'.join(lines), trace
-
     @staticmethod
     def _family_has_registered_callable_executor(family: Any, visible_name_set: set[str]) -> bool:
         executor_names: set[str] = set()
@@ -471,12 +454,36 @@ class CeoMessageBuilder:
             )
         return bool(executor_names & visible_name_set)
 
-    @staticmethod
-    def _tool_family_issue_summary(family: Any) -> str:
-        metadata = getattr(family, 'metadata', {}) or {}
-        warnings = [str(item or '').strip() for item in list(metadata.get('warnings') or []) if str(item or '').strip()]
-        errors = [str(item or '').strip() for item in list(metadata.get('errors') or []) if str(item or '').strip()]
-        return '; '.join((errors + warnings)[:2])
+    def _trace_external_tool_families(
+        self,
+        *,
+        visible_families: list[Any],
+        visible_tool_names: list[str],
+    ) -> list[dict[str, Any]]:
+        visible_name_set = {
+            str(name or '').strip()
+            for name in list(visible_tool_names or [])
+            if str(name or '').strip()
+        }
+        trace: list[dict[str, Any]] = []
+        for family in list(visible_families or []):
+            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+            callable_flag = bool(getattr(family, 'callable', True))
+            available_flag = bool(getattr(family, 'available', True))
+            registered_callable = self._family_has_registered_callable_executor(family, visible_name_set)
+            if not tool_id:
+                continue
+            if callable_flag and available_flag and registered_callable:
+                continue
+            trace.append(
+                {
+                    'tool_id': tool_id,
+                    'callable': callable_flag,
+                    'available': available_flag,
+                    'registered_callable': registered_callable,
+                }
+            )
+        return trace
 
     @staticmethod
     def _first_sentence(text: str) -> str:
@@ -487,15 +494,6 @@ class CeoMessageBuilder:
         if match:
             return str(match.group(1) or '').strip()
         return value
-
-    @classmethod
-    def _tool_l0_summary(cls, family: Any) -> str:
-        metadata = getattr(family, 'metadata', {}) or {}
-        l0 = str(metadata.get('l0') or getattr(family, 'l0', '') or '').strip()
-        if l0:
-            return cls._first_sentence(l0)
-        description = str(getattr(family, 'description', '') or '').strip()
-        return cls._first_sentence(description)
 
     def _select_tools(
         self,
@@ -700,6 +698,7 @@ class CeoMessageBuilder:
         memory_write_terms = self._detect_memory_write_intent(query_text)
         visible_skills = list(exposure.get('skills') or [])
         visible_families = list(exposure.get('tool_families') or [])
+        capability_snapshot = self._capability_snapshot(exposure)
         semantic_frontdoor = await semantic_catalog_rankings(
             loop=self._loop,
             memory_manager=memory_manager,
@@ -725,24 +724,22 @@ class CeoMessageBuilder:
                 top_k=inventory_top_k,
                 ranked_skill_ids=list(semantic_frontdoor.get('skill_ids') or []),
             )
-        split_prompt_builder = (
-            callable(getattr(self._prompt_builder, 'build_base_prompt', None))
-            and callable(getattr(self._prompt_builder, 'build_visible_skills_block', None))
-        )
+        split_prompt_builder = callable(getattr(self._prompt_builder, 'build_base_prompt', None))
         if split_prompt_builder:
             system_prompt = self._prompt_builder.build_base_prompt()
-            visible_skills_block = self._prompt_builder.build_visible_skills_block(skills=list(selected_skills))
         else:
-            system_prompt = self._prompt_builder.build(skills=list(selected_skills))
-            visible_skills_block = ''
-        external_tools_block, external_trace = self._build_external_tool_block(
+            system_prompt = self._prompt_builder.build(skills=[])
+        visible_skills_block = self._build_turn_skill_overlay(
+            selected_skills=list(selected_skills),
+            capability_snapshot=capability_snapshot,
+            visible_only_mode=visible_only_mode,
+        )
+        if capability_snapshot.stable_catalog_message:
+            system_prompt = f"{system_prompt}\n\n{capability_snapshot.stable_catalog_message}".strip()
+        external_trace = self._trace_external_tool_families(
             visible_families=visible_families,
             visible_tool_names=list(exposure.get('tool_names') or []),
-            top_k=(len(visible_families) if visible_only_mode else 8),
-            l0_only=visible_only_mode,
         )
-        if external_tools_block:
-            system_prompt = f"{system_prompt}\n\n{external_tools_block}"
 
         memory_write_visible = 'memory_write' in {
             str(name or '').strip()
@@ -750,13 +747,10 @@ class CeoMessageBuilder:
             if str(name or '').strip()
         }
         turn_overlay_parts: list[str] = []
-        if split_prompt_builder and visible_skills_block:
+        if visible_skills_block:
             turn_overlay_parts.append(visible_skills_block)
         if memory_write_terms and memory_write_visible:
-            if split_prompt_builder:
-                turn_overlay_parts.append(self._memory_write_hint_block(memory_write_terms))
-            else:
-                system_prompt = f"{system_prompt}\n\n{self._memory_write_hint_block(memory_write_terms)}"
+            turn_overlay_parts.append(self._memory_write_hint_block(memory_write_terms))
 
         if visible_only_mode:
             visible_tool_names = list(exposure.get('tool_names') or [])
@@ -845,10 +839,11 @@ class CeoMessageBuilder:
                 turn_overlay_parts.append(self._retrieved_memory_resolution_hint_block())
             else:
                 retrieved_markdown = f"{self._retrieved_memory_resolution_hint_block()}\n\n{retrieved_markdown}"
-        if split_prompt_builder and retrieved_markdown:
+        if retrieved_markdown:
             turn_overlay_parts.append(retrieved_markdown)
 
         return {
+            'capability_snapshot': capability_snapshot,
             'memory_write_terms': memory_write_terms,
             'memory_write_visible': memory_write_visible,
             'selected_skills': selected_skills,
@@ -910,31 +905,25 @@ class CeoMessageBuilder:
         self,
         *,
         system_prompt: str,
-        retrieved_markdown: str,
         history_messages: list[dict[str, Any]],
         user_content: Any,
         split_prompt_builder: bool,
         turn_overlay_parts: list[str],
         current_user_in_history: bool,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
-        turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts) if split_prompt_builder else ''
+        turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts)
         stable_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         stable_messages.extend(history_messages)
         if not current_user_in_history:
             stable_messages.append({"role": "user", "content": user_content})
-        dynamic_appendix_messages: list[dict[str, Any]] = []
+        dynamic_appendix_messages = [
+            {"role": "assistant", "content": part}
+            for part in turn_overlay_parts
+            if str(part or "").strip()
+        ]
         if split_prompt_builder:
-            dynamic_appendix_messages.extend(
-                [
-                    {"role": "assistant", "content": part}
-                    for part in turn_overlay_parts
-                    if str(part or "").strip()
-                ]
-            )
             model_messages = list(stable_messages)
         else:
-            if retrieved_markdown:
-                dynamic_appendix_messages.append({"role": "assistant", "content": retrieved_markdown})
             model_messages = list(stable_messages)
             if dynamic_appendix_messages:
                 model_messages = [
@@ -969,7 +958,6 @@ class CeoMessageBuilder:
         )
         model_messages, stable_messages, dynamic_appendix_messages, turn_overlay_text = self._inject_turn_context(
             system_prompt=str(context_sources['system_prompt'] or ''),
-            retrieved_markdown=str(context_sources['retrieved_markdown'] or ''),
             history_messages=list(history_state['history_messages']),
             user_content=context_sources['user_content'],
             split_prompt_builder=bool(context_sources['split_prompt_builder']),
@@ -982,6 +970,11 @@ class CeoMessageBuilder:
             'selected_tools': dict(context_sources['tool_trace']),
             'semantic_frontdoor': dict(context_sources['semantic_trace']),
             'external_tools': list(context_sources['external_trace']),
+            'capability_snapshot': {
+                'exposure_revision': str(context_sources['capability_snapshot'].exposure_revision or ''),
+                'visible_skill_ids': list(context_sources['capability_snapshot'].visible_skill_ids),
+                'visible_tool_ids': list(context_sources['capability_snapshot'].visible_tool_ids),
+            },
             'retrieval_scope': {
                 'mode': str(context_sources['retrieval_scope'].get('mode') or ''),
                 'search_context_types': list(context_sources['retrieval_scope']['search_context_types']),
@@ -1035,5 +1028,8 @@ class CeoMessageBuilder:
             tool_names=list(context_sources['selected_tool_names']),
             trace=trace,
             turn_overlay_text=turn_overlay_text,
-            cache_family_revision=DEFAULT_CACHE_FAMILY_REVISION,
+            cache_family_revision=(
+                str(context_sources['capability_snapshot'].exposure_revision or '').strip()
+                or DEFAULT_CACHE_FAMILY_REVISION
+            ),
         )

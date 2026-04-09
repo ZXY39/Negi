@@ -7,6 +7,7 @@ import pytest
 
 import g3ku.runtime.context.frontdoor_catalog_selection as selection_module
 from g3ku.runtime.context.types import RetrievedContextBundle
+from g3ku.runtime.frontdoor.capability_snapshot import build_capability_snapshot
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.session.manager import Session
@@ -155,6 +156,7 @@ def _family(
     available: bool = True,
     install_dir: str = "",
     metadata: dict[str, object] | None = None,
+    executor_names: list[str] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         tool_id=tool_id,
@@ -164,7 +166,7 @@ def _family(
         available=available,
         install_dir=install_dir,
         metadata=dict(metadata or {}),
-        actions=[SimpleNamespace(executor_names=[tool_id])],
+        actions=[SimpleNamespace(executor_names=list(executor_names or [tool_id]))],
     )
 
 
@@ -178,6 +180,68 @@ def test_ceo_prompt_builder_keeps_memory_guidance() -> None:
     assert "memory_search" in prompt
     assert "Retrieved Context" in prompt
     assert "submit_next_stage" not in prompt
+
+
+def test_capability_snapshot_exposure_revision_ignores_hidden_executor_names() -> None:
+    first = build_capability_snapshot(
+        visible_skills=[],
+        visible_families=[
+            _family(
+                "agent_browser",
+                "Browser automation via semantic shortlist.",
+                executor_names=["agent_browser"],
+            )
+        ],
+        visible_tool_names=["agent_browser"],
+    )
+    second = build_capability_snapshot(
+        visible_skills=[],
+        visible_families=[
+            _family(
+                "agent_browser",
+                "Browser automation via semantic shortlist.",
+                executor_names=["agent_browser", "hidden_browser_admin"],
+            )
+        ],
+        visible_tool_names=["agent_browser"],
+    )
+
+    assert first.exposure_revision == second.exposure_revision
+    assert first.stable_catalog_message == second.stable_catalog_message
+
+
+def test_capability_snapshot_exposure_revision_ignores_warning_and_install_dir_churn() -> None:
+    first = build_capability_snapshot(
+        visible_skills=[],
+        visible_families=[
+            _family(
+                "external_docs",
+                "External docs short summary.",
+                callable=False,
+                available=False,
+                install_dir="plugins/external_docs_v1",
+                metadata={"warnings": ["missing index"], "l0": "External docs short summary."},
+            )
+        ],
+        visible_tool_names=["load_tool_context"],
+    )
+    second = build_capability_snapshot(
+        visible_skills=[],
+        visible_families=[
+            _family(
+                "external_docs",
+                "External docs short summary.",
+                callable=False,
+                available=False,
+                install_dir="plugins/external_docs_v2",
+                metadata={"warnings": ["refresh required"], "l0": "External docs short summary."},
+            )
+        ],
+        visible_tool_names=["load_tool_context"],
+    )
+
+    assert first.exposure_revision == second.exposure_revision
+    assert first.stable_catalog_message == second.stable_catalog_message
 
 
 @pytest.mark.asyncio
@@ -219,7 +283,11 @@ async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_ava
         persisted_session=None,
     )
 
-    assert prompt_builder.calls == [["focused-skill", "secondary-skill"]]
+    assert prompt_builder.calls == [[]]
+    assert [item["skill_id"] for item in result.trace["selected_skills"]] == [
+        "focused-skill",
+        "secondary-skill",
+    ]
     assert result.trace["semantic_frontdoor"]["queries"] == {
         "raw_query": "focused browser workflow",
         "skill_query": "semantic focused skill query",
@@ -271,7 +339,11 @@ async def test_message_builder_dense_unavailable_exposes_all_visible_skills_and_
         persisted_session=None,
     )
 
-    assert prompt_builder.calls == [["focused-skill", "secondary-skill"]]
+    assert prompt_builder.calls == [[]]
+    assert [item["skill_id"] for item in result.trace["selected_skills"]] == [
+        "focused-skill",
+        "secondary-skill",
+    ]
     assert result.tool_names == ["filesystem", "agent_browser", "web_fetch"]
     assert result.trace["semantic_frontdoor"]["mode"] == "visible_only"
     assert result.trace["retrieval_scope"]["mode"] == "visible_only"
@@ -319,7 +391,8 @@ async def test_message_builder_semantic_disabled_keeps_top_k_selection_and_non_v
         persisted_session=None,
     )
 
-    assert prompt_builder.calls == [["focused-skill"]]
+    assert prompt_builder.calls == [[]]
+    assert [item["skill_id"] for item in result.trace["selected_skills"]] == ["focused-skill"]
     assert result.trace["semantic_frontdoor"]["mode"] == "disabled"
     assert result.trace["retrieval_scope"]["mode"] == "rbac_fallback"
     assert result.trace["selected_tools"].get("mode") != "visible_only"
@@ -451,7 +524,7 @@ async def test_message_builder_dense_unavailable_renders_l0_only_skill_and_exter
     system_prompt = str(result.model_messages[0].get("content") or "")
     overlay = str(getattr(result, "turn_overlay_text", "") or "")
     assert "L0 concise skill summary." in overlay
-    assert "L0 external tool summary." in system_prompt
+    assert '`external_docs`' in system_prompt
     assert "Detail sentence should not appear." not in system_prompt
     assert "Detail sentence should not appear." not in overlay
 
@@ -542,8 +615,7 @@ async def test_message_builder_dense_unavailable_keeps_non_callable_external_too
 
     system_prompt = str(result.model_messages[0].get("content") or "")
     assert '`external_docs`' in system_prompt
-    assert "External docs short summary." in system_prompt
-    assert "Install dir not configured" in system_prompt
+    assert "Install dir not configured" not in system_prompt
     assert [item["tool_id"] for item in result.trace["external_tools"]] == ["external_docs"]
 
 
@@ -588,9 +660,8 @@ async def test_message_builder_dense_unavailable_renders_l0_only_for_unavailable
     )
 
     system_prompt = str(result.model_messages[0].get("content") or "")
-    assert "## Tool Resources That Require `load_tool_context`" in system_prompt
+    assert "## Visible Tool Resources" in system_prompt
     assert '`agent_browser`' in system_prompt
-    assert "Callable fallback short summary." in system_prompt
     assert "Later sentence should not appear." not in system_prompt
     assert "Later l0 sentence should not appear." not in system_prompt
 
@@ -620,8 +691,9 @@ async def test_message_builder_renders_external_tool_context_for_unavailable_cal
         persisted_session=None,
     )
 
-    assert 'load_tool_context(tool_id="agent_browser")' in result.system_prompt
-    assert "missing required bins" in result.system_prompt
+    assert "## Visible Tool Resources" in result.system_prompt
+    assert '`agent_browser`' in result.system_prompt
+    assert "missing required bins" not in result.system_prompt
     assert [item["tool_id"] for item in result.trace["external_tools"]] == ["agent_browser"]
 
 
@@ -676,9 +748,10 @@ async def test_message_builder_moves_turn_specific_context_into_overlay_for_stab
     rendered_messages = "\n\n".join(contents)
     overlay = str(getattr(result, "turn_overlay_text", "") or "")
 
-    assert contents[0] == "BASE PROMPT"
+    assert contents[0].startswith("BASE PROMPT")
+    assert "## Capability Exposure Snapshot" in contents[0]
     assert "## Retrieved Context" not in rendered_messages
-    assert "Visible Skills For This Turn" not in rendered_messages
+    assert "Skills Most Relevant To This Turn" not in rendered_messages
     assert "Long-Term Memory Write Hint" not in rendered_messages
     assert contents[-3:] == [
         "prior question",
@@ -686,10 +759,10 @@ async def test_message_builder_moves_turn_specific_context_into_overlay_for_stab
         "from now on default to the focused browser workflow",
     ]
     assert "## Retrieved Context" in overlay
-    assert "Visible Skills For This Turn" in overlay
+    assert "Skills Most Relevant To This Turn" in overlay
     assert "Long-Term Memory Write Hint" in overlay
     assert prompt_builder.base_calls == 1
-    assert prompt_builder.skill_calls == [["focused-skill"]]
+    assert prompt_builder.skill_calls == []
     assert result.trace["turn_overlay_present"] is True
     assert result.trace["stable_prefix_message_count"] == len(result.model_messages)
     assert result.trace["turn_overlay_character_count"] == len(overlay)
@@ -734,6 +807,121 @@ async def test_message_builder_exposes_dynamic_appendix_messages_for_prompt_cach
     assert "prior question" not in dynamic_contents
     assert "prior answer" not in dynamic_contents
     assert "from now on default to the focused browser workflow" not in dynamic_contents
+
+
+@pytest.mark.asyncio
+async def test_message_builder_keeps_capability_snapshot_stable_when_semantic_skill_selection_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _SemanticMemoryManager(response="")
+    loop = SimpleNamespace(
+        main_task_service=None,
+        memory_manager=memory_manager,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                skill_inventory_top_k=1,
+                extension_tool_top_k=1,
+                core_tools=[],
+            )
+        ),
+    )
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
+    exposure = {
+        "skills": [
+            _skill("focused-skill", "Focused workflow summary."),
+            _skill("secondary-skill", "Secondary workflow summary."),
+        ],
+        "tool_families": [
+            _family("agent_browser", "Browser automation via semantic shortlist."),
+            _family("web_fetch", "HTTP fetch helper."),
+        ],
+        "tool_names": ["filesystem", "agent_browser", "web_fetch"],
+    }
+
+    async def _semantic_rankings(*, query_text: str, **kwargs) -> dict[str, object]:
+        _ = kwargs
+        if query_text == "focused browser workflow":
+            return {
+                "mode": "dense_only",
+                "available": True,
+                "skill_ids": ["focused-skill", "secondary-skill"],
+                "tool_ids": ["agent_browser", "web_fetch"],
+                "trace": {"queries": {"raw_query": query_text}},
+            }
+        return {
+            "mode": "dense_only",
+            "available": True,
+            "skill_ids": ["secondary-skill", "focused-skill"],
+            "tool_ids": ["web_fetch", "agent_browser"],
+            "trace": {"queries": {"raw_query": query_text}},
+        }
+
+    monkeypatch.setattr("g3ku.runtime.frontdoor.message_builder.semantic_catalog_rankings", _semantic_rankings)
+
+    first = await builder.build_for_ceo(
+        session=_session(),
+        query_text="focused browser workflow",
+        exposure=exposure,
+        persisted_session=None,
+        user_content="same user turn",
+    )
+    second = await builder.build_for_ceo(
+        session=_session(),
+        query_text="fetch workflow details",
+        exposure=exposure,
+        persisted_session=None,
+        user_content="same user turn",
+    )
+
+    assert first.trace["selected_skills"] != second.trace["selected_skills"]
+    assert first.turn_overlay_text != second.turn_overlay_text
+    assert first.stable_messages[0] == second.stable_messages[0]
+    assert first.trace["capability_snapshot"] == second.trace["capability_snapshot"]
+    assert first.cache_family_revision == second.cache_family_revision
+    assert "## Capability Exposure Snapshot" in str(first.stable_messages[0]["content"] or "")
+    assert "focused-skill" in str(first.turn_overlay_text or "")
+    assert "secondary-skill" in str(second.turn_overlay_text or "")
+
+
+@pytest.mark.asyncio
+async def test_message_builder_uses_exposure_revision_when_capability_snapshot_exists() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    snapshot = build_capability_snapshot(
+        visible_skills=[
+            _skill("focused-skill", "Focused workflow summary."),
+            _skill("secondary-skill", "Secondary workflow summary."),
+        ],
+        visible_families=[
+            _family("agent_browser", "Browser automation via semantic shortlist."),
+            _family("web_fetch", "HTTP fetch helper."),
+        ],
+        visible_tool_names=["filesystem", "agent_browser", "web_fetch"],
+    )
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="focused browser workflow",
+        exposure={
+            "skills": [
+                _skill("focused-skill", "Focused workflow summary."),
+                _skill("secondary-skill", "Secondary workflow summary."),
+            ],
+            "tool_families": [
+                _family("agent_browser", "Browser automation via semantic shortlist."),
+                _family("web_fetch", "HTTP fetch helper."),
+            ],
+            "tool_names": ["filesystem", "agent_browser", "web_fetch"],
+            "capability_snapshot": snapshot,
+        },
+        persisted_session=None,
+    )
+
+    assert result.cache_family_revision == snapshot.exposure_revision
+    assert "## Capability Exposure Snapshot" in str(result.stable_messages[0]["content"] or "")
+    assert snapshot.stable_catalog_message in str(result.stable_messages[0]["content"] or "")
 
 
 def test_context_assembly_result_dynamic_appendix_model_messages_stays_combined_compatibility_view() -> None:
@@ -782,7 +970,8 @@ async def test_message_builder_includes_retrieval_and_full_transcript_without_du
     )
 
     contents = [str(item.get("content") or "") for item in result.model_messages]
-    assert contents[0] == "BASE PROMPT"
+    assert contents[0].startswith("BASE PROMPT")
+    assert "## Capability Exposure Snapshot" in contents[0]
     assert "## Retrieved Context" in contents[1]
     assert contents.count("follow up question") == 1
     assert contents[-1] == "follow up question"
@@ -827,7 +1016,8 @@ async def test_message_builder_prefers_checkpoint_history_over_transcript_once_a
     )
 
     contents = [str(item.get("content") or "") for item in result.model_messages]
-    assert contents[0] == "BASE PROMPT"
+    assert contents[0].startswith("BASE PROMPT")
+    assert "## Capability Exposure Snapshot" in contents[0]
     assert "OLD SYSTEM" not in contents
     assert "## Retrieved Context\n- stale memory" not in contents
     assert "checkpoint question" in contents
