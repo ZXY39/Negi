@@ -283,16 +283,13 @@ class CeoMessageBuilder:
         channel: str,
         chat_id: str,
     ) -> bool:
+        _ = channel, chat_id
         if str(record.get("context_type") or "").strip().lower() != "memory":
             return False
         if str(record.get("source") or "").strip().lower() != "turn":
             return False
         record_session_key = str(record.get("session_key") or "").strip()
-        record_channel = str(record.get("channel") or "").strip()
-        record_chat_id = str(record.get("chat_id") or "").strip()
-        if session_key and record_session_key and record_session_key == session_key:
-            return True
-        return bool(channel and chat_id and record_channel == channel and record_chat_id == chat_id)
+        return bool(session_key and record_session_key and record_session_key == session_key)
 
     @classmethod
     def _filter_same_session_turn_memory_records(

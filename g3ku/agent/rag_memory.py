@@ -3456,16 +3456,13 @@ class MemoryManager:
         channel: str,
         chat_id: str,
     ) -> bool:
+        _ = channel, chat_id
         if str(entry.get("context_type") or "").strip().lower() != "memory":
             return False
         if str(entry.get("source") or "").strip().lower() != "turn":
             return False
         entry_session_key = str(entry.get("session_key") or "").strip()
-        entry_channel = str(entry.get("channel") or "").strip()
-        entry_chat_id = str(entry.get("chat_id") or "").strip()
-        if session_key and entry_session_key and entry_session_key == session_key:
-            return True
-        return bool(channel and chat_id and entry_channel == channel and entry_chat_id == chat_id)
+        return bool(session_key and entry_session_key and entry_session_key == session_key)
 
     @classmethod
     def _exclude_same_session_turn_memory_from_bundle(

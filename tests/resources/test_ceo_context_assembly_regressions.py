@@ -957,3 +957,44 @@ async def test_message_builder_ignores_same_session_turn_memory_records_for_ceo_
     assert "turn memory snippet" not in overlay
     assert result.trace["same_session_turn_memory_filtered_count"] == 1
     assert result.trace["retrieved_record_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_message_builder_keeps_turn_memory_from_different_session_in_shared_chat() -> None:
+    memory_manager = _MemoryManager(response="")
+
+    async def _retrieve_context_bundle(**kwargs):
+        memory_manager.calls.append(dict(kwargs))
+        return RetrievedContextBundle(
+            query=str(kwargs.get("query") or ""),
+            records=[
+                {
+                    "record_id": "turn-memory-other-session",
+                    "context_type": "memory",
+                    "l0": "other session turn memory",
+                    "l1": "other session snippet",
+                    "l2_preview": "",
+                    "source": "turn",
+                    "session_key": "web:other",
+                    "channel": "web",
+                    "chat_id": "shared",
+                    "confidence": 1.0,
+                }
+            ],
+        )
+
+    memory_manager.retrieve_context_bundle = _retrieve_context_bundle  # type: ignore[method-assign]
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=_SplitPromptBuilder())
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="follow up question",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=None,
+        user_content="follow up question",
+    )
+
+    overlay = str(result.turn_overlay_text or "")
+    assert "other session snippet" in overlay
+    assert result.trace["same_session_turn_memory_filtered_count"] == 0
+    assert result.trace["retrieved_record_count"] == 1
