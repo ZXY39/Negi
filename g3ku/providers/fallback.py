@@ -13,7 +13,8 @@ from g3ku.utils.api_keys import APIKeyConfigurationError, iter_api_key_retry_slo
 
 PUBLIC_PROVIDER_FAILURE_MESSAGE = "Model provider call failed after exhausting the configured fallback chain."
 RETRYABLE_MODEL_CHAIN_MAX_ROUNDS = 10
-DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 30.0
+# Shared per-attempt provider timeout for CEO and task-runtime model chains.
+DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 60.0
 _INTERNAL_RUNTIME_ERROR_TOKENS = (
     "sqlite",
     "database",

@@ -12,6 +12,7 @@ const TREE_SCALE_MIN = 0.12;
 const TREE_SCALE_MAX = 3.5;
 const TREE_SCALE_FACTOR = 1.12;
 const RESOURCE_PAGE_SIZES = [20, 50, 100];
+const TASK_MODEL_CALLS_PAGE_SIZE = 100;
 const TASK_DEPTH_PRESET_VALUES = Object.freeze([1, 2, 3, 4, 5]);
 const TASK_DEPTH_PRESET_MAX = TASK_DEPTH_PRESET_VALUES[TASK_DEPTH_PRESET_VALUES.length - 1];
 const TASK_DEPTH_CUSTOM_VALUE = "__custom__";
@@ -146,6 +147,8 @@ const S = {
     taskWorkerStatusPollId: null,
     taskPerformanceRefreshId: null,
     taskTokenStatsOpen: false,
+    taskModelCallsPage: 1,
+    taskModelCallsPageSize: TASK_MODEL_CALLS_PAGE_SIZE,
     taskArtifacts: [],
     selectedArtifactId: "",
     artifactContent: "",
@@ -6538,6 +6541,13 @@ function bind() {
     U.taskTokenButton?.addEventListener("click", () => setTaskTokenStatsOpen(true));
     U.taskTokenClose?.addEventListener("click", () => setTaskTokenStatsOpen(false));
     U.taskTokenBackdrop?.addEventListener("click", () => setTaskTokenStatsOpen(false));
+    U.taskTokenContent?.addEventListener("click", (e) => {
+        const control = e.target instanceof Element ? e.target.closest("[data-task-model-call-page]") : null;
+        if (!control) return;
+        const direction = String(control.dataset.taskModelCallPage || "").trim();
+        if (direction === "prev") setTaskModelCallsPage((Number(S.taskModelCallsPage || 1) || 1) - 1);
+        if (direction === "next") setTaskModelCallsPage((Number(S.taskModelCallsPage || 1) || 1) + 1);
+    });
     U.nodeContextDisclosure?.addEventListener("toggle", () => void handleNodeContextDisclosureToggle());
     U.ceoSessionPanelToggle?.addEventListener("click", () => setCeoSessionPanelExpanded(!S.ceoSessionPanelExpanded));
     U.ceoNewSession?.addEventListener("click", () => void createNewCeoSession());

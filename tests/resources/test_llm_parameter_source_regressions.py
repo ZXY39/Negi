@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import importlib
 from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import HumanMessage
 
 import main.runtime.chat_backend as chat_backend_module
+import g3ku.providers.fallback as fallback_module
 from g3ku.providers.fallback import DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.registry import ToolRegistry
@@ -125,6 +127,15 @@ def test_template_marks_model_parameters_optional_and_removes_timeout() -> None:
     assert fields["temperature"].default is None
     assert fields["reasoning_effort"].required is False
     assert fields["reasoning_effort"].default is None
+
+
+def test_default_provider_attempt_timeout_seconds_is_sixty_seconds() -> None:
+    fallback_runtime = importlib.reload(fallback_module)
+    chat_backend_runtime = importlib.reload(chat_backend_module)
+    backend = chat_backend_runtime.ConfigChatBackend(config=SimpleNamespace())
+
+    assert fallback_runtime.DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS == 60.0
+    assert backend._model_attempt_timeout_seconds == 60.0
 
 
 def test_normalize_draft_omits_optional_model_parameters_when_left_blank() -> None:
@@ -366,6 +377,8 @@ async def test_config_chat_backend_sanitizes_internal_runtime_message_fields_bef
 
 @pytest.mark.asyncio
 async def test_config_chat_backend_recommends_dynamic_hard_timeout_from_model_chain_budget(monkeypatch) -> None:
+    chat_backend_runtime = importlib.reload(chat_backend_module)
+
     class _Provider:
         async def chat(self, **kwargs):
             _ = kwargs
@@ -395,14 +408,14 @@ async def test_config_chat_backend_recommends_dynamic_hard_timeout_from_model_ch
     }
 
     monkeypatch.setattr(
-        chat_backend_module,
+        chat_backend_runtime,
         "build_provider_from_model_key",
         lambda config, ref, api_key_index=None: targets[str(ref)],
     )
 
-    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    backend = chat_backend_runtime.ConfigChatBackend(config=SimpleNamespace())
 
-    assert backend.recommended_model_response_timeout_seconds(model_refs=["primary", "secondary"]) == 4215.0
+    assert backend.recommended_model_response_timeout_seconds(model_refs=["primary", "secondary"]) == 8415.0
 
 
 @pytest.mark.asyncio

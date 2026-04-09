@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 
 def test_compact_tool_step_for_summary_returns_preview_fields_and_drops_full_payload() -> None:
     from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
@@ -49,3 +56,25 @@ def test_compact_tool_step_for_summary_preserves_falsy_scalars_without_ref() -> 
     assert summary_step is not None
     assert summary_step["arguments_preview"] == "0"
     assert summary_step["output_preview"] == "False"
+
+
+def test_compact_tool_step_for_summary_falls_back_to_text_when_output_text_is_blank() -> None:
+    from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
+
+    raw_text = '{"result_text":"loaded full skill body","status":"success"}'
+
+    summary_step = compact_tool_step_for_summary(
+        {
+            "tool_call_id": "load-skill:1",
+            "tool_name": "load_skill_context",
+            "arguments_text": "load_skill_context (skill_id=find-skills)",
+            "output_text": "",
+            "text": raw_text,
+            "status": "success",
+        }
+    )
+
+    assert summary_step is not None
+    assert summary_step["arguments_preview"] == "load_skill_context (skill_id=find-skills)"
+    assert "output_preview" in summary_step, summary_step
+    assert summary_step["output_preview"] == '{"result_text":"loade...'

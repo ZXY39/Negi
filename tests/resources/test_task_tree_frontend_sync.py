@@ -514,6 +514,104 @@ def test_retry_action_refreshes_current_task_detail_after_in_place_retry() -> No
     assert result["loadCalls"][2] == "artifacts"
 
 
+def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.esc = (v) => String(v ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+        global.S = {
+          currentTask: {
+            token_usage: {
+              tracked: true,
+              input_tokens: 13500,
+              output_tokens: 2700,
+              cache_hit_tokens: 5400,
+              call_count: 135,
+              calls_with_usage: 135,
+              calls_without_usage: 0,
+              is_partial: false,
+            },
+          },
+          taskSummary: {
+            token_usage_by_model: [],
+          },
+          recentModelCalls: Array.from({ length: 135 }, (_, idx) => ({
+            call_index: idx + 1,
+            prepared_message_count: idx + 2,
+            prepared_message_chars: (idx + 1) * 100,
+            response_tool_call_count: idx % 4,
+            delta_usage: {
+              tracked: true,
+              input_tokens: idx + 10,
+              output_tokens: idx + 5,
+              cache_hit_tokens: idx + 3,
+              call_count: 1,
+              calls_with_usage: 1,
+              calls_without_usage: 0,
+              is_partial: false,
+            },
+            delta_usage_by_model: [{ model_key: `model-${idx + 1}` }],
+          })),
+          taskModelCallsPage: 2,
+          taskModelCallsPageSize: 100,
+        };
+        global.U = {
+          taskTokenContent: { innerHTML: "" },
+          taskTokenSummaryText: { textContent: "" },
+          taskTokenButton: { title: "" },
+        };
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
+        const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
+        vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const tokenStatsStart = tasksCode.indexOf("function renderTaskTokenStats");
+        const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
+        vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
+
+        renderTaskTokenStats();
+        const html = U.taskTokenContent.innerHTML;
+        const tableBody = html.match(/<tbody>([\\s\\S]*?)<\\/tbody>/)?.[1] || "";
+        const firstColumnValues = Array.from(tableBody.matchAll(/<tr>\\s*<td>([\\d,]+)<\\/td>/g))
+          .map((match) => Number(String(match[1] || "").replaceAll(",", "")));
+
+        console.log(JSON.stringify({
+          headingLocalized: html.includes("模型调用明细"),
+          paginationLocalized: html.includes("第 2/2 页") && html.includes("显示 101-135 / 共 135 条"),
+          columnsLocalized: [
+            "调用序号",
+            "预处理字符数",
+            "消息数",
+            "新增输入 Token",
+            "新增缓存命中",
+            "命中率",
+            "工具调用数",
+            "模型",
+          ].every((label) => html.includes(label)),
+          rowCount: firstColumnValues.length,
+          firstCallIndex: firstColumnValues[0],
+          lastCallIndex: firstColumnValues[firstColumnValues.length - 1],
+        }));
+        """
+    )
+
+    assert result["headingLocalized"] is True
+    assert result["paginationLocalized"] is True
+    assert result["columnsLocalized"] is True
+    assert result["rowCount"] == 35
+    assert result["firstCallIndex"] == 35
+    assert result["lastCallIndex"] == 1
+
+
 def test_format_node_detail_heading_prefixes_node_id_before_title() -> None:
     result = _run_node_script(
         """

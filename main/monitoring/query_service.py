@@ -223,7 +223,7 @@ class TaskQueryService:
             'root_node': root_node.model_dump(mode='json') if root_node is not None else None,
             'frontier': frontier,
             'counts': counts,
-            'recent_model_calls': [item.model_dump(mode='json') for item in self._recent_model_calls(task.task_id)],
+            'recent_model_calls': [item.model_dump(mode='json') for item in self._recent_model_calls(task.task_id, limit=None)],
         }
         self._record_debug('query_service.get_task_snapshot', started_at=started_at, started_mono=started_mono)
         return payload
@@ -799,9 +799,10 @@ class TaskQueryService:
         except Exception:
             return
 
-    def _recent_model_calls(self, task_id: str, *, limit: int = 50) -> list[TaskModelCallRecord]:
+    def _recent_model_calls(self, task_id: str, *, limit: int | None = 50) -> list[TaskModelCallRecord]:
         records: list[TaskModelCallRecord] = []
-        for event in list(self._store.list_task_model_calls(task_id, limit=max(1, int(limit or 50))) or []):
+        store_limit = None if limit is None else max(1, int(limit or 50))
+        for event in list(self._store.list_task_model_calls(task_id, limit=store_limit) or []):
             payload = dict(event.get('payload') or {})
             records.append(
                 TaskModelCallRecord(
@@ -818,6 +819,8 @@ class TaskQueryService:
                     ],
                 )
             )
+        if limit is None:
+            return records
         return records[-max(1, int(limit or 1)) :]
 
     def _projection_token_usage_by_model(self, task_id: str) -> list[ModelTokenUsageRecord]:

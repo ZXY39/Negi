@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +12,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from langchain.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from g3ku.agent.tools.base import Tool
 from g3ku.core.events import AgentEvent
@@ -2433,6 +2438,78 @@ def test_ceo_snapshot_summary_preserves_falsy_event_payload_values() -> None:
 
     assert tool["arguments_preview"] == "0"
     assert tool["output_preview"] == "False"
+
+
+def test_ceo_snapshot_summary_falls_back_to_tool_result_text_when_output_text_missing() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._frontdoor_stage_state = {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_kind": "normal",
+                "stage_goal": "inspect skill workflow",
+                "tool_round_budget": 2,
+                "tool_rounds_used": 1,
+                "status": "active",
+                "rounds": [
+                    {
+                        "round_id": "frontdoor-stage-1:round-1",
+                        "round_index": 1,
+                        "created_at": "2026-04-08T12:00:00+08:00",
+                        "budget_counted": True,
+                        "tool_call_ids": ["call-1"],
+                        "tool_names": ["load_skill_context"],
+                    }
+                ],
+            }
+        ],
+    }
+    session._event_log = [
+        {
+            "timestamp": "2026-04-08T12:00:01+08:00",
+            "type": "tool_execution_start",
+            "payload": {
+                "tool_call_id": "call-1",
+                "tool_name": "load_skill_context",
+                "text": "load_skill_context (skill_id=find-skills)",
+                "data": {
+                    "arguments_text": "load_skill_context (skill_id=find-skills)",
+                },
+            },
+        },
+        {
+            "timestamp": "2026-04-08T12:00:05+08:00",
+            "type": "tool_execution_end",
+            "payload": {
+                "tool_call_id": "call-1",
+                "tool_name": "load_skill_context",
+                "text": '{"result_text":"loaded full skill body","status":"success"}',
+                "is_error": False,
+                "data": {
+                    "output_text": "",
+                },
+            },
+        },
+    ]
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert snapshot is not None
+    tool = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
+
+    assert tool["arguments_preview"] == "load_skill_context (skill_id=find-skills)"
+    assert "output_preview" in tool, tool
+    assert tool["output_preview"] == '{"result_text":"loade...'
 
 
 def test_stage_trace_name_fallback_does_not_reuse_same_tool_result_across_rounds() -> None:

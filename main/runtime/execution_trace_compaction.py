@@ -7,10 +7,21 @@ _PREVIEW_CHAR_LIMIT = 160
 _RAW_OUTPUT_FALLBACK_PREVIEW_LIMIT = 24
 
 
+def _has_summary_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
 def _first_present(step: dict[str, Any], *keys: str) -> Any:
     for key in keys:
-        if key in step and step.get(key) is not None:
-            return step.get(key)
+        if key not in step:
+            continue
+        value = step.get(key)
+        if _has_summary_value(value):
+            return value
     return None
 
 

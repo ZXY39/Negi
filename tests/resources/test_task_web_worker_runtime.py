@@ -2049,6 +2049,53 @@ def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: P
         assert event["data"]["call_index"] == 4
 
 
+def test_task_detail_payload_includes_all_model_calls_for_token_window(tmp_path: Path) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    for call_index in range(1, 121):
+        service.store.append_task_model_call(
+            task_id=record.task_id,
+            node_id=record.root_node_id,
+            created_at=now_iso(),
+            payload={
+                "task_id": record.task_id,
+                "node_id": record.root_node_id,
+                "call_index": call_index,
+                "prepared_message_count": call_index,
+                "prepared_message_chars": call_index * 10,
+                "response_tool_call_count": call_index % 3,
+                "delta_usage": {
+                    "tracked": True,
+                    "input_tokens": call_index * 2,
+                    "output_tokens": call_index,
+                    "cache_hit_tokens": call_index // 2,
+                    "call_count": 1,
+                    "calls_with_usage": 1,
+                    "calls_without_usage": 0,
+                    "is_partial": False,
+                },
+                "delta_usage_by_model": [],
+            },
+        )
+
+    payload = service.get_task_detail_payload(record.task_id, mark_read=False)
+
+    assert payload is not None
+    assert len(payload["recent_model_calls"]) == 120
+    assert payload["recent_model_calls"][0]["call_index"] == 1
+    assert payload["recent_model_calls"][-1]["call_index"] == 120
+
+
 def test_task_tree_snapshot_payload_contains_root_and_child_nodes(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

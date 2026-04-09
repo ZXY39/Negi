@@ -1889,11 +1889,17 @@ class SQLiteTaskStore:
             return int(cursor.lastrowid or 0)
         return self._run_write(operation)
 
-    def list_task_model_calls(self, task_id: str, *, limit: int = 50) -> list[dict[str, object]]:
-        rows = self._fetchall(
-            'SELECT seq, task_id, node_id, created_at, payload_json FROM task_model_calls WHERE task_id = ? ORDER BY seq DESC LIMIT ?',
-            (task_id, max(1, int(limit or 50))),
-        )
+    def list_task_model_calls(self, task_id: str, *, limit: int | None = 50) -> list[dict[str, object]]:
+        if limit is None:
+            rows = self._fetchall(
+                'SELECT seq, task_id, node_id, created_at, payload_json FROM task_model_calls WHERE task_id = ? ORDER BY seq DESC',
+                (task_id,),
+            )
+        else:
+            rows = self._fetchall(
+                'SELECT seq, task_id, node_id, created_at, payload_json FROM task_model_calls WHERE task_id = ? ORDER BY seq DESC LIMIT ?',
+                (task_id, max(1, int(limit or 50))),
+            )
         items: list[dict[str, object]] = []
         for row in rows:
             payload = json.loads(row['payload_json'])

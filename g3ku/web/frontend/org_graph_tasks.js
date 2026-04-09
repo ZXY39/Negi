@@ -989,6 +989,10 @@ function resetTaskView() {
     S.rootNode = null;
     S.frontier = [];
     S.recentModelCalls = [];
+    S.taskModelCallsPage = 1;
+    S.taskModelCallsPageSize = typeof TASK_MODEL_CALLS_PAGE_SIZE === "number" && TASK_MODEL_CALLS_PAGE_SIZE > 0
+        ? TASK_MODEL_CALLS_PAGE_SIZE
+        : 100;
     S.liveFrameMap = {};
     S.currentNodeDetail = null;
     S.taskNodeDetails = {};
@@ -1081,6 +1085,7 @@ function renderTaskTokenStats() {
     const recentModelCalls = Array.isArray(S.recentModelCalls)
         ? S.recentModelCalls.map(normalizeTaskModelCall).sort((a, b) => Number(b.call_index || 0) - Number(a.call_index || 0))
         : [];
+    const modelCallPageMeta = paginateTaskModelCalls(recentModelCalls);
     const partialNote = summary.is_partial
         ? '<span class="task-token-badge warn">部分模型未返回 usage</span>'
         : '<span class="task-token-badge success">统计完整</span>';
@@ -1131,28 +1136,31 @@ function renderTaskTokenStats() {
         ? `
             <div class="task-token-call-card">
                 <div class="task-token-call-head">
-                    <h3>Recent model calls</h3>
-                    <p>Showing the latest ${esc(formatTokenCount(recentModelCalls.length))} calls</p>
+                    <div>
+                        <h3>模型调用明细</h3>
+                        <p>任务开始以来共 ${esc(formatTokenCount(modelCallPageMeta.total))} 次调用 · 每页 ${esc(formatTokenCount(modelCallPageMeta.pageSize))} 条</p>
+                    </div>
+                    <div class="task-token-call-page-info">${esc(taskModelCallPageSummary(modelCallPageMeta))}</div>
                 </div>
                 <div class="task-token-call-table-wrap">
                     <table class="task-token-call-table">
                         <thead>
                             <tr>
-                                <th>#</th>
-                                <th>prepared chars</th>
-                                <th>msgs</th>
-                                <th>delta input</th>
-                                <th>delta cache</th>
-                                <th>hit %</th>
-                                <th>tool calls</th>
-                                <th>models</th>
+                                <th>调用序号</th>
+                                <th>预处理字符数</th>
+                                <th>消息数</th>
+                                <th>新增输入 Token</th>
+                                <th>新增缓存命中</th>
+                                <th>命中率</th>
+                                <th>工具调用数</th>
+                                <th>模型</th>
                             </tr>
                         </thead>
                         <tbody>
-                            ${recentModelCalls.map((item) => {
+                            ${modelCallPageMeta.items.map((item) => {
                                 const modelNames = item.delta_usage_by_model.length
                                     ? item.delta_usage_by_model.map((row) => row.model_key || row.provider_model || row.provider_id || "").filter(Boolean).join(", ")
-                                    : "n/a";
+                                    : "未提供";
                                 return `
                                     <tr>
                                         <td>${esc(formatTokenCount(item.call_index))}</td>
@@ -1169,14 +1177,64 @@ function renderTaskTokenStats() {
                         </tbody>
                     </table>
                 </div>
+                <div class="task-token-call-footer">
+                    <div class="task-token-call-page-info">${esc(taskModelCallPageSummary(modelCallPageMeta))}</div>
+                    <div class="task-token-call-actions">
+                        <button class="toolbar-btn ghost" type="button" data-task-model-call-page="prev" ${modelCallPageMeta.currentPage <= 1 ? "disabled" : ""}>上一页</button>
+                        <button class="toolbar-btn ghost" type="button" data-task-model-call-page="next" ${modelCallPageMeta.currentPage >= modelCallPageMeta.totalPages ? "disabled" : ""}>下一页</button>
+                    </div>
+                </div>
             </div>
         `
-        : '<div class="empty-state task-token-empty">No per-call telemetry yet.</div>';
+        : '<div class="empty-state task-token-empty">暂无逐次调用明细。</div>';
     U.taskTokenContent.innerHTML = `
         ${topline}
         <div class="task-token-model-list">${rowsMarkup}</div>
         ${recentCallMarkup}
     `;
+}
+
+function taskModelCallsPageSize() {
+    const fallback = typeof TASK_MODEL_CALLS_PAGE_SIZE === "number" && TASK_MODEL_CALLS_PAGE_SIZE > 0
+        ? TASK_MODEL_CALLS_PAGE_SIZE
+        : 100;
+    const next = Number(S.taskModelCallsPageSize || 0);
+    return Number.isInteger(next) && next > 0 ? next : fallback;
+}
+
+function paginateTaskModelCalls(items) {
+    const total = Array.isArray(items) ? items.length : 0;
+    const pageSize = taskModelCallsPageSize();
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const requestedPage = Number(S.taskModelCallsPage || 1);
+    const currentPage = Number.isFinite(requestedPage)
+        ? Math.min(Math.max(1, Math.floor(requestedPage)), totalPages)
+        : 1;
+    const startIndex = total ? ((currentPage - 1) * pageSize) + 1 : 0;
+    const endIndex = total ? Math.min(currentPage * pageSize, total) : 0;
+    const startOffset = total ? startIndex - 1 : 0;
+    S.taskModelCallsPage = currentPage;
+    S.taskModelCallsPageSize = pageSize;
+    return {
+        total,
+        pageSize,
+        totalPages,
+        currentPage,
+        startIndex,
+        endIndex,
+        items: total ? items.slice(startOffset, startOffset + pageSize) : [],
+    };
+}
+
+function taskModelCallPageSummary(meta) {
+    if (!meta.total) return "第 1/1 页 · 共 0 条";
+    return `第 ${formatTokenCount(meta.currentPage)}/${formatTokenCount(meta.totalPages)} 页 · 显示 ${formatTokenCount(meta.startIndex)}-${formatTokenCount(meta.endIndex)} / 共 ${formatTokenCount(meta.total)} 条`;
+}
+
+function setTaskModelCallsPage(page) {
+    const next = Number(page);
+    S.taskModelCallsPage = Number.isFinite(next) ? Math.max(1, Math.floor(next)) : 1;
+    renderTaskTokenStats();
 }
 
 async function loadTaskDetail(taskId, { preserveView = false, reopenSocket = true } = {}) {
@@ -1249,8 +1307,7 @@ function handleTaskEvent(payload) {
         const existing = Array.isArray(S.recentModelCalls) ? S.recentModelCalls : [];
         const withoutSame = existing.filter((item) => Number(item?.call_index || 0) !== Number(nextCall.call_index || 0));
         const merged = [...withoutSame, nextCall]
-            .sort((a, b) => Number(a?.call_index || 0) - Number(b?.call_index || 0))
-            .slice(-50);
+            .sort((a, b) => Number(a?.call_index || 0) - Number(b?.call_index || 0));
         S.recentModelCalls = merged;
         renderTaskTokenStats();
         return;

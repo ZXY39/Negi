@@ -2248,6 +2248,10 @@ function applyTaskPayload(payload) {
     S.rootNode = rootNode;
     S.frontier = frontier;
     S.recentModelCalls = recentModelCalls;
+    S.taskModelCallsPageSize = typeof TASK_MODEL_CALLS_PAGE_SIZE === "number" && TASK_MODEL_CALLS_PAGE_SIZE > 0
+        ? TASK_MODEL_CALLS_PAGE_SIZE
+        : 100;
+    if (previousTaskId !== nextTaskId) S.taskModelCallsPage = 1;
     S.liveFrameMap = indexTaskLiveFrames(frontier);
     if (rootNode && String(rootNode?.node_id || "").trim()) {
         S.taskNodeDetails = { ...(S.taskNodeDetails || {}), [String(rootNode.node_id || "").trim()]: rootNode };

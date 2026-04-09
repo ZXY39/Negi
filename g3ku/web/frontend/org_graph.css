@@ -7398,6 +7398,25 @@ textarea {
     border-bottom: none;
 }
 
+.task-token-call-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+}
+
+.task-token-call-page-info {
+    font-size: 0.84rem;
+    color: var(--text-secondary);
+}
+
+.task-token-call-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
 @media (max-width: 900px) {
     .task-token-topline {
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -7423,6 +7442,11 @@ textarea {
     }
 
     .task-token-call-head {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .task-token-call-footer {
         flex-direction: column;
         align-items: flex-start;
     }
