@@ -1770,6 +1770,63 @@ class TaskLogService:
             )
             return self.read_task_runtime_meta(task.task_id) or current
 
+    def capture_retry_resume_snapshot(self, task_id: str, node_id: str, *, failure_reason: str = '') -> dict[str, Any] | None:
+        with self._task_lock(task_id):
+            task = self._store.get_task(task_id)
+            node = self._store.get_node(node_id)
+            if task is None or node is None:
+                return None
+            frame = self.read_runtime_frame(task_id, node_id) or {}
+            messages = [dict(item) for item in list(frame.get('messages') or []) if isinstance(item, dict)]
+            if not messages:
+                try:
+                    parsed_input = json.loads(str(node.input or ''))
+                except Exception:
+                    parsed_input = []
+                if isinstance(parsed_input, list):
+                    messages = [dict(item) for item in parsed_input if isinstance(item, dict)]
+            snapshot = {
+                'captured_at': now_iso(),
+                'task_id': str(task.task_id or '').strip(),
+                'node_id': str(node.node_id or '').strip(),
+                'failure_reason': str(failure_reason or '').strip(),
+                'task_metadata': copy.deepcopy(dict(task.metadata or {})),
+                'node_metadata': copy.deepcopy(dict(node.metadata or {})),
+                'node_input_text': str(node.input or ''),
+                'frame': self._sanitize_runtime_frame({**dict(frame or {}), 'messages': messages}),
+            }
+            current = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
+            current['retry_resume_snapshot'] = snapshot
+            current['updated_at'] = now_iso()
+            self._store.upsert_task_runtime_meta(
+                task_id=task.task_id,
+                updated_at=str(current.get('updated_at') or now_iso()),
+                payload=current,
+            )
+            return copy.deepcopy(snapshot)
+
+    def read_retry_resume_snapshot(self, task_id: str) -> dict[str, Any] | None:
+        current = self.read_task_runtime_meta(task_id) or {}
+        snapshot = current.get('retry_resume_snapshot')
+        return copy.deepcopy(snapshot) if isinstance(snapshot, dict) else None
+
+    def clear_retry_resume_snapshot(self, task_id: str) -> dict[str, Any] | None:
+        with self._task_lock(task_id):
+            task = self._store.get_task(task_id)
+            if task is None:
+                return None
+            current = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
+            if 'retry_resume_snapshot' not in current:
+                return self.read_task_runtime_meta(task.task_id) or current
+            current.pop('retry_resume_snapshot', None)
+            current['updated_at'] = now_iso()
+            self._store.upsert_task_runtime_meta(
+                task_id=task.task_id,
+                updated_at=str(current.get('updated_at') or now_iso()),
+                payload=current,
+            )
+            return self.read_task_runtime_meta(task.task_id) or current
+
     def update_task_max_depth(self, task_id: str, max_depth: int) -> TaskRecord | None:
         with self._task_lock(task_id):
             task = self._require_task(task_id)

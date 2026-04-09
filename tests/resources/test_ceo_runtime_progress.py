@@ -3718,6 +3718,73 @@ async def test_web_session_heartbeat_auto_retries_engine_failure_in_place(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_web_session_heartbeat_allows_retry_after_prior_in_place_retry_failure(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-task-terminal-engine-retry-again"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    task_service = _TaskService()
+    task_id = "task:demo-engine-retry-again"
+    task_service.tasks[task_id] = SimpleNamespace(
+        task_id=task_id,
+        status="failed",
+        metadata={
+            "failure_class": "engine_failure",
+            "continuation_state": "retried_in_place",
+            "continuation_mode": "retry_in_place",
+            "retry_history": [
+                {
+                    "retried_at": "2026-03-28T03:34:32+08:00",
+                    "source": "heartbeat_terminal",
+                    "failure_class": "engine_failure",
+                    "failure_reason": "first provider failure",
+                }
+            ],
+        },
+    )
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    payload = {
+        "task_id": task_id,
+        "session_id": session_id,
+        "title": "demo engine retry again task",
+        "status": "failed",
+        "failure_class": "engine_failure",
+        "brief_text": "model provider failed again",
+        "failure_reason": "Model provider call failed after exhausting the configured fallback chain.",
+        "finished_at": "2026-03-28T05:34:32+08:00",
+        "dedupe_key": "task-terminal:task:demo-engine-retry-again:failed:2026-03-28T05:34:32+08:00",
+    }
+    accepted = service.enqueue_task_terminal_payload(payload)
+    assert accepted is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    assert task_service.continue_calls == [
+        {
+            "mode": "retry_in_place",
+            "target_task_id": task_id,
+            "continuation_instruction": "Retry the same task in place after an engine failure.",
+            "reason": "engine_failure",
+            "source": "heartbeat_terminal",
+        }
+    ]
+    assert len(task_service.registry.published) == 1
+    published_session, envelope = task_service.registry.published[0]
+    assert published_session == session_id
+    assert envelope["type"] == "ceo.reply.final"
+    assert envelope["data"]["text"] == "任务 `demo-engine-retry-again` 遇到工程故障，已在原任务内继续重试。"
+
+
+@pytest.mark.asyncio
 async def test_web_session_heartbeat_skips_engine_failure_retry_after_recreated_takeover(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-task-terminal-engine-superseded"
     session_manager = SessionManager(tmp_path)

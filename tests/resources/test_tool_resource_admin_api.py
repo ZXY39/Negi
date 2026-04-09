@@ -1881,6 +1881,194 @@ def test_ceo_session_delete_accepts_inflight_only_session(tmp_path: Path, monkey
     assert not inflight_path.exists()
 
 
+def _build_channel_ceo_session_delete_client(tmp_path: Path, monkeypatch):
+    _mock_ceo_catalog_config(monkeypatch)
+
+    from g3ku.runtime.api import ceo_sessions
+
+    class _SessionManager:
+        def __init__(self, sessions: list[Session], paths: dict[str, Path], extra_keys: list[str]):
+            self._sessions = {session.key: session for session in sessions}
+            self._paths = dict(paths)
+            self._extra_keys = list(extra_keys)
+
+        def get_path(self, key: str) -> Path:
+            return self._paths[key]
+
+        def get_or_create(self, key: str):
+            return self._sessions[key]
+
+        def save(self, session) -> None:
+            self._sessions[session.key] = session
+
+        def invalidate(self, key: str) -> None:
+            self._sessions.pop(key, None)
+            self._paths.pop(key, None)
+
+        def list_sessions(self) -> list[dict[str, str]]:
+            keys = list(self._sessions) + [key for key in self._extra_keys if key not in self._sessions]
+            return [{'key': key} for key in keys]
+
+    class _TaskService:
+        async def startup(self) -> None:
+            return None
+
+        def list_tasks_for_session(self, session_id: str):
+            _ = session_id
+            return [
+                SimpleNamespace(task_id='task:channel-done', title='Channel Done', status='success', is_paused=False),
+                SimpleNamespace(task_id='task:channel-running', title='Channel Running', status='in_progress', is_paused=False),
+            ]
+
+        def get_session_task_counts(self, session_id: str) -> dict[str, int]:
+            _ = session_id
+            return {
+                'total': 2,
+                'unfinished': 1,
+                'in_progress': 1,
+                'paused': 0,
+                'terminal': 1,
+                'deletable': 1,
+            }
+
+        async def delete_task_records_for_session(self, session_id: str) -> int:
+            captured['deleted_task_session'] = session_id
+            return 2
+
+    class _RuntimeManager:
+        def get(self, session_id: str):
+            _ = session_id
+            return None
+
+        def remove(self, session_id: str):
+            captured['removed_session'] = session_id
+            return None
+
+    class _Heartbeat:
+        def clear_session(self, session_id: str) -> None:
+            captured['heartbeat_cleared'] = session_id
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        captured['cancelled_session'] = session_key
+        return 0
+
+    current = Session(key='web:ceo-channel-clear-fallback', metadata={'title': 'Fallback Local'})
+    current_path = tmp_path / 'sessions' / 'web_ceo_channel_clear_fallback.jsonl'
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    channel_id = 'china:qqbot:default:dm:user-42'
+    manager = _SessionManager([current], {current.key: current_path}, [channel_id])
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(web_ceo_sessions, 'workspace_path', lambda: tmp_path)
+    monkeypatch.setattr(ceo_sessions, 'workspace_path', lambda: tmp_path)
+    monkeypatch.setattr(
+        ceo_sessions,
+        '_build_catalog',
+        lambda _session_manager, _runtime_manager, *, active_session_id: {
+            'items': [{'session_id': current.key, 'title': 'Fallback Local', 'session_family': 'local'}],
+            'channel_groups': [{
+                'channel_id': 'qqbot',
+                'label': 'QQ Bot',
+                'items': [{
+                    'session_id': channel_id,
+                    'title': 'QQ Channel',
+                    'session_family': 'channel',
+                    'session_origin': 'china',
+                    'channel_id': 'qqbot',
+                    'is_readonly': True,
+                }],
+            }],
+            'active_session_family': 'channel' if active_session_id == channel_id else 'local',
+        },
+    )
+
+    web_ceo_sessions.write_inflight_turn_snapshot(
+        channel_id,
+        {
+            'status': 'running',
+            'started_at': datetime.now().isoformat(),
+            'user_message': {'role': 'user', 'content': 'clear this channel session'},
+        },
+    )
+    web_ceo_sessions.write_paused_execution_context(
+        channel_id,
+        {
+            'status': 'paused',
+            'started_at': datetime.now().isoformat(),
+            'interrupts': [],
+        },
+    )
+    upload_dir = web_ceo_sessions.upload_dir_for_session(channel_id)
+    (upload_dir / 'artifact.txt').write_text('channel artifact', encoding='utf-8')
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix='/api')
+    monkeypatch.setattr(
+        ceo_sessions,
+        'get_agent',
+        lambda: SimpleNamespace(
+            sessions=manager,
+            main_task_service=_TaskService(),
+            cancel_session_tasks=_cancel_session_tasks,
+        ),
+    )
+    monkeypatch.setattr(ceo_sessions, 'get_runtime_manager', lambda _agent: _RuntimeManager())
+    monkeypatch.setattr(ceo_sessions, 'get_web_heartbeat_service', lambda _agent: _Heartbeat())
+
+    ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(channel_id)
+    client = TestClient(app)
+    inflight_path = web_ceo_sessions.inflight_snapshot_path_for_session(channel_id, create=False)
+    paused_path = web_ceo_sessions.paused_execution_context_path_for_session(channel_id, create=False)
+    return client, current, channel_id, captured, inflight_path, paused_path, upload_dir
+
+
+def test_channel_ceo_session_delete_check_returns_clear_payload(tmp_path: Path, monkeypatch):
+    client, _current, channel_id, _captured, inflight_path, paused_path, upload_dir = _build_channel_ceo_session_delete_client(tmp_path, monkeypatch)
+
+    response = client.get(f'/api/ceo/sessions/{channel_id}/delete-check')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['session_id'] == channel_id
+    assert payload['can_delete'] is True
+    assert payload['related_tasks']['deletable'] == 1
+    assert [item['task_id'] for item in payload['usage']['completed_tasks']] == ['task:channel-done']
+    assert [item['task_id'] for item in payload['usage']['in_progress_tasks']] == ['task:channel-running']
+    assert inflight_path.exists()
+    assert paused_path.exists()
+    assert upload_dir.exists()
+
+
+def test_channel_ceo_session_delete_clears_context_without_deleting_channel_entry(tmp_path: Path, monkeypatch):
+    client, _current, channel_id, captured, inflight_path, paused_path, upload_dir = _build_channel_ceo_session_delete_client(tmp_path, monkeypatch)
+
+    response = client.request(
+        'DELETE',
+        f'/api/ceo/sessions/{channel_id}',
+        json={'delete_task_records': True},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['deleted'] is False
+    assert payload['cleared'] is True
+    assert payload['session_id'] == channel_id
+    assert payload['deleted_task_count'] == 2
+    assert payload['active_session_id'] == channel_id
+    channel_items = payload['channel_groups'][0]['items']
+    assert [item['session_id'] for item in channel_items] == [channel_id]
+    assert captured == {
+        'heartbeat_cleared': channel_id,
+        'deleted_task_session': channel_id,
+        'removed_session': channel_id,
+        'cancelled_session': channel_id,
+    }
+    assert not inflight_path.exists()
+    assert not paused_path.exists()
+    assert not upload_dir.exists()
+
+
 @pytest.mark.asyncio
 async def test_ceo_session_delete_with_task_record_cleanup_deletes_task_disk_footprint(tmp_path: Path, monkeypatch):
     _mock_ceo_catalog_config(monkeypatch)

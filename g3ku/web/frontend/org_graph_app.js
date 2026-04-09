@@ -84,6 +84,8 @@ const S = {
     ceoSessionUnread: {},
     ceoSessionMessageCounts: {},
     ceoSessionHydrated: false,
+    ceoBulkMode: false,
+    ceoSelectedSessionIds: new Set(),
     ceoScrollToLatestOnSnapshot: false,
     ceoSnapshotCache: {},
     ceoSnapshotPersistId: null,
@@ -250,7 +252,11 @@ const U = {
     ceoSessionTabs: document.getElementById("ceo-session-tabs"),
     ceoSessionTabLocal: document.getElementById("ceo-session-tab-local"),
     ceoSessionTabChannel: document.getElementById("ceo-session-tab-channel"),
+    ceoSessionBulkToggle: document.getElementById("ceo-session-bulk-toggle"),
     ceoSessionList: document.getElementById("ceo-session-list"),
+    ceoSessionBulkActions: document.getElementById("ceo-session-bulk-actions"),
+    ceoSessionBulkDelete: document.getElementById("ceo-session-bulk-delete"),
+    ceoSessionBulkSelectAll: document.getElementById("ceo-session-bulk-select-all"),
     ceoSessionCurrent: document.getElementById("ceo-session-current"),
     ceoNewSession: document.getElementById("ceo-new-session-btn"),
     renameSessionBackdrop: document.getElementById("rename-session-backdrop"),
@@ -458,6 +464,55 @@ function visibleCeoSessions() {
     return Array.isArray(S.ceoLocalSessions) ? S.ceoLocalSessions : [];
 }
 
+function clearCeoBulkSelection() {
+    S.ceoSelectedSessionIds = new Set();
+}
+
+function visibleCeoBulkSelectableSessionIds() {
+    return visibleCeoSessions()
+        .map((item) => String(item?.session_id || "").trim())
+        .filter(Boolean);
+}
+
+function isCeoBulkSessionSelected(sessionId) {
+    const key = String(sessionId || "").trim();
+    return !!key && S.ceoSelectedSessionIds instanceof Set && S.ceoSelectedSessionIds.has(key);
+}
+
+function toggleCeoBulkMode(force = null) {
+    const next = force == null ? !S.ceoBulkMode : !!force;
+    if (next && !S.ceoSessionPanelExpanded) return false;
+    if (S.ceoBulkMode === next) return next;
+    S.ceoBulkMode = next;
+    closeCeoSessionMenus();
+    if (!next) clearCeoBulkSelection();
+    renderCeoSessions();
+    syncCeoSessionActions();
+    return next;
+}
+
+function toggleCeoBulkSessionSelection(sessionId) {
+    const key = String(sessionId || "").trim();
+    if (!key) return false;
+    const next = new Set(S.ceoSelectedSessionIds instanceof Set ? [...S.ceoSelectedSessionIds] : []);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    S.ceoSelectedSessionIds = next;
+    return next.has(key);
+}
+
+function areAllVisibleCeoBulkSessionsSelected() {
+    const ids = visibleCeoBulkSelectableSessionIds();
+    return ids.length > 0 && ids.every((sessionId) => isCeoBulkSessionSelected(sessionId));
+}
+
+function toggleCeoBulkSelectAll() {
+    const ids = visibleCeoBulkSelectableSessionIds();
+    const allSelected = ids.length > 0 && ids.every((sessionId) => isCeoBulkSessionSelected(sessionId));
+    S.ceoSelectedSessionIds = allSelected ? new Set() : new Set(ids);
+    return S.ceoSelectedSessionIds.size;
+}
+
 function rebuildCeoSessionIndex() {
     S.ceoSessions = [...(Array.isArray(S.ceoLocalSessions) ? S.ceoLocalSessions : []), ...flattenChannelGroups(S.ceoChannelGroups)];
 }
@@ -533,13 +588,21 @@ function syncCeoSessionPanelState() {
 
 function setCeoSessionPanelExpanded(expanded) {
     S.ceoSessionPanelExpanded = !!expanded;
+    if (!S.ceoSessionPanelExpanded) {
+        S.ceoBulkMode = false;
+        clearCeoBulkSelection();
+        closeCeoSessionMenus();
+    }
     syncCeoSessionPanelState();
+    syncCeoSessionActions();
 }
 
 function setCeoSessionTab(tab) {
     const next = String(tab || "local").trim() === "channel" ? "channel" : "local";
     if (S.ceoSessionTab === next) return;
     S.ceoSessionTab = next;
+    clearCeoBulkSelection();
+    closeCeoSessionMenus();
     renderCeoSessions();
     syncCeoSessionActions();
 }
@@ -2008,15 +2071,32 @@ function syncCeoSessionActions() {
     const mutationDisabled = !canMutateCeoSessions();
     const creationDisabled = !canCreateCeoSessions();
     const activationDisabled = !canActivateCeoSessions();
+    const bulkIds = visibleCeoBulkSelectableSessionIds();
+    const allSelected = bulkIds.length > 0 && bulkIds.every((sessionId) => isCeoBulkSessionSelected(sessionId));
     if (U.ceoNewSession) U.ceoNewSession.disabled = creationDisabled;
+    if (U.ceoSessionBulkToggle) {
+        U.ceoSessionBulkToggle.hidden = !S.ceoSessionPanelExpanded;
+        U.ceoSessionBulkToggle.disabled = mutationDisabled && !S.ceoBulkMode;
+        U.ceoSessionBulkToggle.textContent = S.ceoBulkMode ? "取消" : "多选";
+        U.ceoSessionBulkToggle.setAttribute("aria-pressed", S.ceoBulkMode ? "true" : "false");
+    }
+    if (U.ceoSessionBulkActions) U.ceoSessionBulkActions.hidden = !(S.ceoSessionPanelExpanded && S.ceoBulkMode);
+    if (U.ceoSessionBulkDelete) U.ceoSessionBulkDelete.disabled = mutationDisabled || S.ceoSelectedSessionIds.size <= 0;
+    if (U.ceoSessionBulkSelectAll) {
+        U.ceoSessionBulkSelectAll.disabled = mutationDisabled || bulkIds.length <= 0;
+        U.ceoSessionBulkSelectAll.setAttribute("aria-pressed", allSelected ? "true" : "false");
+    }
     U.ceoSessionList?.querySelectorAll("[data-session-activate]")?.forEach((button) => {
         const targetId = String(button?.dataset?.sessionActivate || "").trim();
-        button.disabled = activationDisabled || targetId === activeSessionId();
+        button.disabled = S.ceoBulkMode ? false : activationDisabled || targetId === activeSessionId();
+    });
+    U.ceoSessionList?.querySelectorAll("[data-session-bulk-checkbox]")?.forEach((input) => {
+        input.disabled = mutationDisabled;
     });
     U.ceoSessionList?.querySelectorAll("[data-session-menu-toggle], [data-session-rename], [data-session-delete]")?.forEach((button) => {
         button.disabled = mutationDisabled;
     });
-    if (mutationDisabled) closeCeoSessionMenus();
+    if (mutationDisabled || S.ceoBulkMode) closeCeoSessionMenus();
     if (U.ceoSessionTabLocal) U.ceoSessionTabLocal.setAttribute("aria-pressed", S.ceoSessionTab === "local" ? "true" : "false");
     if (U.ceoSessionTabChannel) U.ceoSessionTabChannel.setAttribute("aria-pressed", S.ceoSessionTab === "channel" ? "true" : "false");
     if (U.ceoSessionTabs) {
@@ -5355,6 +5435,8 @@ function renderCeoSessionCard(item, { allowActions = false } = {}) {
     const sessionId = String(item?.session_id || "");
     const isActive = sessionId === activeSessionId();
     const isRunning = !!item?.is_running;
+    const isBulkMode = !!S.ceoBulkMode;
+    const isSelected = isCeoBulkSessionSelected(sessionId);
     const preview = String(item?.preview_text || "").trim() || "No messages yet.";
     const title = String(item?.title || sessionId || "Session");
     const glyph = ceoSessionGlyph(item);
@@ -5369,12 +5451,17 @@ function renderCeoSessionCard(item, { allowActions = false } = {}) {
         item?.is_readonly ? '<span class="ceo-session-pill readonly">只读</span>' : "",
     ].filter(Boolean).join("");
     return `
-        <div class="ceo-session-card${isActive ? " is-active" : ""}${unreadCount > 0 ? " has-unread" : ""}${isRunning ? " is-running" : ""}" role="listitem">
+        <div class="ceo-session-card${isActive ? " is-active" : ""}${unreadCount > 0 ? " has-unread" : ""}${isRunning ? " is-running" : ""}${isBulkMode ? " is-bulk-mode" : ""}${isSelected ? " is-bulk-selected" : ""}" role="listitem">
+            ${isBulkMode ? `
+                <label class="ceo-session-checkbox" aria-label="${esc(`选择会话 ${title}`)}">
+                    <input type="checkbox" data-session-bulk-checkbox="${esc(sessionId)}" ${isSelected ? "checked" : ""}>
+                </label>
+            ` : ""}
             <button
                 type="button"
                 class="ceo-session-main ceo-session-select"
                 data-session-activate="${esc(sessionId)}"
-                aria-pressed="${isActive ? "true" : "false"}"
+                aria-pressed="${isBulkMode ? (isSelected ? "true" : "false") : (isActive ? "true" : "false")}"
                 aria-label="${esc(`${title}${isRunning ? "（运行中）" : ""}`)}"
                 title="${esc(title)}"
             >
@@ -5390,7 +5477,7 @@ function renderCeoSessionCard(item, { allowActions = false } = {}) {
                 </span>
                 ${unreadCount > 0 ? `<span class="ceo-session-unread" aria-label="${esc(`${unreadCount} unread message${unreadCount > 1 ? "s" : ""}`)}">${esc(unreadText)}</span>` : ""}
             </button>
-            ${allowActions ? `
+            ${allowActions && !isBulkMode ? `
                 <div class="ceo-session-actions toolbar-dropdown" data-session-menu="${esc(sessionId)}" aria-label="Session actions">
                     <button type="button" class="ceo-session-action ceo-session-menu-trigger" data-session-menu-toggle="${esc(sessionId)}" aria-label="More session actions" aria-haspopup="menu" aria-expanded="false">
                         <i data-lucide="more-horizontal"></i>
@@ -5715,6 +5802,83 @@ function formatSessionDeleteTaskDetails(payload = {}) {
     return lines.join("\n");
 }
 
+function buildCeoBulkDeleteSummary(items = []) {
+    const entries = (Array.isArray(items) ? items : [])
+        .map((entry) => {
+            const item = entry?.item && typeof entry.item === "object"
+                ? entry.item
+                : (S.ceoSessions || []).find((session) => String(session?.session_id || "").trim() === String(entry?.session_id || "").trim()) || null;
+            const sessionId = String(entry?.session_id || item?.session_id || "").trim();
+            if (!sessionId) return null;
+            return {
+                item,
+                sessionId,
+                deleteCheck: entry?.deleteCheck && typeof entry.deleteCheck === "object" ? entry.deleteCheck : {},
+            };
+        })
+        .filter(Boolean);
+    const completedTaskIds = new Set();
+    const pausedTaskIds = new Set();
+    const inProgressTaskIds = new Set();
+    let fallbackTotal = 0;
+    let fallbackDeletable = 0;
+    let fallbackInProgress = 0;
+    let channelCount = 0;
+    let localCount = 0;
+    entries.forEach(({ item, sessionId }) => {
+        if (isChannelSessionItem(item) || sessionId.startsWith("china:")) channelCount += 1;
+        else localCount += 1;
+        const deleteCheck = entries.find((entry) => entry.sessionId === sessionId)?.deleteCheck || {};
+        const relatedTasks = deleteCheck?.related_tasks && typeof deleteCheck.related_tasks === "object" ? deleteCheck.related_tasks : {};
+        fallbackTotal += normalizeInt(relatedTasks.total, 0);
+        fallbackDeletable += normalizeInt(relatedTasks.deletable, normalizeInt(relatedTasks.terminal, 0));
+        fallbackInProgress += normalizeInt(relatedTasks.in_progress, normalizeInt(relatedTasks.unfinished, 0));
+        normalizeSessionDeleteTaskIds(deleteCheck?.usage?.completed_tasks).forEach((taskId) => completedTaskIds.add(taskId));
+        normalizeSessionDeleteTaskIds(deleteCheck?.usage?.paused_tasks).forEach((taskId) => pausedTaskIds.add(taskId));
+        normalizeSessionDeleteTaskIds(deleteCheck?.usage?.in_progress_tasks).forEach((taskId) => inProgressTaskIds.add(taskId));
+        normalizeSessionDeleteTaskIds(deleteCheck?.usage?.tasks).forEach((taskId) => inProgressTaskIds.add(taskId));
+    });
+    const totalTaskIds = new Set([...completedTaskIds, ...pausedTaskIds, ...inProgressTaskIds]);
+    const deletableTaskIds = new Set([...completedTaskIds, ...pausedTaskIds]);
+    const relatedPayload = {
+        related_tasks: {
+            total: totalTaskIds.size || fallbackTotal,
+            deletable: deletableTaskIds.size || fallbackDeletable,
+            in_progress: inProgressTaskIds.size || fallbackInProgress,
+            terminal: deletableTaskIds.size || fallbackDeletable,
+            unfinished: inProgressTaskIds.size || fallbackInProgress,
+        },
+        usage: {
+            completed_tasks: [...completedTaskIds],
+            paused_tasks: [...pausedTaskIds],
+            in_progress_tasks: [...inProgressTaskIds],
+        },
+    };
+    const onlyChannel = channelCount > 0 && localCount === 0;
+    const onlyLocal = localCount > 0 && channelCount === 0;
+    const title = onlyChannel
+        ? (entries.length > 1 ? "批量清空渠道会话" : "清空渠道会话")
+        : onlyLocal
+            ? (entries.length > 1 ? "批量删除会话" : "删除会话")
+            : "批量清理会话";
+    const textLines = [];
+    if (localCount > 0) {
+        textLines.push(`将删除所选 ${localCount} 个本地会话的聊天记录与附件。`);
+    }
+    if (channelCount > 0) {
+        textLines.push(`将清空所选 ${channelCount} 个渠道会话的上下文与附件。`);
+    }
+    const text = textLines.join("\n");
+    return {
+        title,
+        text,
+        checkboxLabel: "清除关联任务",
+        checkboxHint: formatSessionDeleteHint(relatedPayload),
+        checkboxDetails: formatSessionDeleteTaskDetails(relatedPayload),
+        sessionIds: entries.map((entry) => entry.sessionId),
+    };
+}
+
 function shortSessionIdLabel(sessionId) {
     const raw = String(sessionId || "").trim();
     if (!raw) return "";
@@ -5723,9 +5887,9 @@ function shortSessionIdLabel(sessionId) {
     return `${normalized.slice(0, 6)}...${normalized.slice(-4)}`;
 }
 
-async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false } = {}) {
+async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false, refreshTasks = true } = {}) {
     const targetId = String(sessionId || "").trim();
-    if (!targetId) return;
+    if (!targetId) return false;
     const wasActive = targetId === activeSessionId();
     S.ceoSessionCatalogBusy = true;
     renderCeoSessions();
@@ -5743,9 +5907,12 @@ async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false } 
             }
         }
         clearCeoComposerDraft(targetId);
-        if (S.view === "tasks") await loadTasks();
+        if (refreshTasks && S.view === "tasks") await loadTasks();
+        clearCeoBulkSelection();
+        return true;
     } catch (e) {
         showToast({ title: "删除失败", text: e.message || "Unknown error", kind: "error" });
+        return false;
     } finally {
         S.ceoSessionCatalogBusy = false;
         renderCeoSessions();
@@ -5789,6 +5956,87 @@ async function requestDeleteCeoSession(sessionId) {
             checked: false,
         },
         onConfirm: ({ checked } = {}) => performDeleteCeoSession(current.session_id, { deleteTaskRecords: !!checked }),
+    });
+}
+
+async function performDeleteSelectedCeoSessions(sessionIds = [], { deleteTaskRecords = false } = {}) {
+    const ids = [...new Set((Array.isArray(sessionIds) ? sessionIds : []).map((sessionId) => String(sessionId || "").trim()).filter(Boolean))];
+    if (!ids.length) return;
+    let successCount = 0;
+    let failureCount = 0;
+    for (const sessionId of ids) {
+        const success = await performDeleteCeoSession(sessionId, { deleteTaskRecords, refreshTasks: false });
+        if (success) successCount += 1;
+        else failureCount += 1;
+    }
+    clearCeoBulkSelection();
+    if (S.view === "tasks" && successCount > 0) await loadTasks();
+    renderCeoSessions();
+    syncCeoSessionActions();
+    if (failureCount > 0) {
+        showToast({
+            title: "部分删除失败",
+            text: `已删除 ${successCount} 个会话，${failureCount} 个会话删除失败。`,
+            kind: "warn",
+        });
+        return;
+    }
+    if (successCount > 0) {
+        showToast({
+            title: "删除完成",
+            text: `已删除 ${successCount} 个会话。`,
+            kind: "success",
+        });
+    }
+}
+
+async function requestDeleteSelectedCeoSessions() {
+    const selectedIds = [...(S.ceoSelectedSessionIds instanceof Set ? S.ceoSelectedSessionIds : new Set())]
+        .map((sessionId) => String(sessionId || "").trim())
+        .filter(Boolean);
+    if (!selectedIds.length) return;
+    if (!canMutateCeoSessions()) {
+        showToast({ title: "当前不可删除", text: "请先等待当前回合完成或暂停后再操作。", kind: "warn" });
+        return;
+    }
+    const selectedItems = selectedIds
+        .map((sessionId) => (S.ceoSessions || []).find((item) => String(item?.session_id || "").trim() === sessionId) || null)
+        .filter(Boolean);
+    if (!selectedItems.length) return;
+    S.ceoSessionCatalogBusy = true;
+    renderCeoSessions();
+    syncCeoPrimaryButton();
+    let entries = [];
+    try {
+        entries = await Promise.all(selectedItems.map(async (item) => ({
+            item,
+            session_id: String(item?.session_id || "").trim(),
+            deleteCheck: await ApiClient.getCeoSessionDeleteCheck(String(item?.session_id || "").trim()),
+        })));
+    } catch (e) {
+        S.ceoSessionCatalogBusy = false;
+        renderCeoSessions();
+        syncCeoPrimaryButton();
+        showToast({ title: "删除失败", text: e.message || "Unknown error", kind: "error" });
+        return;
+    }
+    S.ceoSessionCatalogBusy = false;
+    renderCeoSessions();
+    syncCeoPrimaryButton();
+    const summary = buildCeoBulkDeleteSummary(entries);
+    openConfirm({
+        title: summary.title,
+        text: summary.text,
+        confirmLabel: "删除",
+        confirmKind: "danger",
+        returnFocus: U.ceoSessionBulkToggle || U.ceoNewSession,
+        checkbox: {
+            label: summary.checkboxLabel,
+            hint: summary.checkboxHint,
+            details: summary.checkboxDetails,
+            checked: false,
+        },
+        onConfirm: ({ checked } = {}) => performDeleteSelectedCeoSessions(summary.sessionIds, { deleteTaskRecords: !!checked }),
     });
 }
 
@@ -6282,6 +6530,13 @@ function bind() {
     U.ceoNewSession?.addEventListener("click", () => void createNewCeoSession());
     U.ceoSessionTabLocal?.addEventListener("click", () => setCeoSessionTab("local"));
     U.ceoSessionTabChannel?.addEventListener("click", () => setCeoSessionTab("channel"));
+    U.ceoSessionBulkToggle?.addEventListener("click", () => toggleCeoBulkMode());
+    U.ceoSessionBulkDelete?.addEventListener("click", () => void requestDeleteSelectedCeoSessions());
+    U.ceoSessionBulkSelectAll?.addEventListener("click", () => {
+        toggleCeoBulkSelectAll();
+        renderCeoSessions();
+        syncCeoSessionActions();
+    });
     U.renameSessionCancel?.addEventListener("click", handleRenameCancel);
     U.renameSessionAccept?.addEventListener("click", handleRenameAccept);
     U.renameSessionInput?.addEventListener("keydown", (e) => {
@@ -6289,6 +6544,14 @@ function bind() {
         if (e.key === "Escape") handleRenameCancel();
     });
     U.ceoSessionList?.addEventListener("click", (e) => {
+        const bulkCheckbox = e.target.closest("[data-session-bulk-checkbox]");
+        if (bulkCheckbox) {
+            e.stopPropagation();
+            toggleCeoBulkSessionSelection(bulkCheckbox.dataset.sessionBulkCheckbox);
+            renderCeoSessions();
+            syncCeoSessionActions();
+            return;
+        }
         const menuToggle = e.target.closest("[data-session-menu-toggle]");
         if (menuToggle) {
             e.stopPropagation();
@@ -6300,6 +6563,13 @@ function bind() {
         }
         const activate = e.target.closest("[data-session-activate]");
         if (activate) {
+            if (S.ceoBulkMode) {
+                e.stopPropagation();
+                toggleCeoBulkSessionSelection(activate.dataset.sessionActivate);
+                renderCeoSessions();
+                syncCeoSessionActions();
+                return;
+            }
             closeCeoSessionMenus();
             void activateCeoSession(activate.dataset.sessionActivate);
             return;

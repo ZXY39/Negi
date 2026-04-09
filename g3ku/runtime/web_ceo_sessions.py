@@ -1498,11 +1498,7 @@ def create_web_ceo_session(session_manager: Any, *, session_id: str | None = Non
     return session
 
 
-def delete_web_ceo_session_artifacts(*, session_manager: Any, session_id: str, task_service: Any | None = None) -> None:
-    path = session_manager.get_path(session_id)
-    if path.exists():
-        path.unlink()
-    session_manager.invalidate(session_id)
+def clear_web_ceo_session_artifacts(*, session_id: str, task_service: Any | None = None) -> None:
     clear_inflight_turn_snapshot(session_id)
     clear_paused_execution_context(session_id)
     upload_dir = upload_dir_for_session(session_id, create=False)
@@ -1523,6 +1519,14 @@ def delete_web_ceo_session_artifacts(*, session_manager: Any, session_id: str, t
             delete_task(archive_task_id)
         except Exception:
             pass
+
+
+def delete_web_ceo_session_artifacts(*, session_manager: Any, session_id: str, task_service: Any | None = None) -> None:
+    path = session_manager.get_path(session_id)
+    if path.exists():
+        path.unlink()
+    session_manager.invalidate(session_id)
+    clear_web_ceo_session_artifacts(session_id=session_id, task_service=task_service)
 
 
 def list_web_ceo_sessions(

@@ -1098,20 +1098,79 @@ class MainRuntimeService:
             latest = self.get_task(normalized_task_id)
         return latest
 
+    def _read_retry_resume_snapshot(self, task_id: str) -> dict[str, Any] | None:
+        reader = getattr(self.log_service, 'read_retry_resume_snapshot', None)
+        if not callable(reader):
+            return None
+        try:
+            snapshot = reader(task_id)
+        except Exception:
+            return None
+        return dict(snapshot or {}) if isinstance(snapshot, dict) else None
+
+    @staticmethod
+    def _retry_resume_messages(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+        payload = dict(snapshot or {})
+        frame = dict(payload.get('frame') or {}) if isinstance(payload.get('frame'), dict) else {}
+        messages = [dict(item) for item in list(frame.get('messages') or []) if isinstance(item, dict)]
+        if messages:
+            return messages
+        raw_input = str(payload.get('node_input_text') or '').strip()
+        if not raw_input:
+            return []
+        try:
+            parsed = json.loads(raw_input)
+        except Exception:
+            return []
+        return [dict(item) for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+
+    @staticmethod
+    def _retry_resume_runnable_state(frame: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+        node_id = str(frame.get('node_id') or '').strip()
+        if not node_id:
+            return [], [], []
+        phase = str(frame.get('phase') or '').strip().lower()
+        active_ids = [node_id]
+        runnable_ids: list[str] = []
+        waiting_ids: list[str] = []
+        if phase in {'before_model', 'waiting_tool_results', 'after_model'}:
+            runnable_ids = [node_id]
+        elif phase in {'waiting_children', 'waiting_acceptance'}:
+            waiting_ids = [node_id]
+        tool_calls = [dict(item) for item in list(frame.get('tool_calls') or []) if isinstance(item, dict)]
+        if any(str(item.get('status') or '').strip().lower() in {'queued', 'running'} for item in tool_calls):
+            runnable_ids = [node_id]
+        child_pipelines = [dict(item) for item in list(frame.get('child_pipelines') or []) if isinstance(item, dict)]
+        if any(str(item.get('status') or '').strip().lower() in {'queued', 'running'} for item in child_pipelines):
+            waiting_ids = [node_id]
+        return active_ids, runnable_ids, waiting_ids
+
     def _reopen_task_in_place_for_retry(self, task: TaskRecord, *, source: str) -> TaskRecord:
         root = self.store.get_node(task.root_node_id)
         if root is None:
             raise ValueError('task_not_retryable')
 
-        failure_class = normalize_failure_class((task.metadata or {}).get('failure_class'), default=FAILURE_CLASS_ENGINE)
+        snapshot = self._read_retry_resume_snapshot(task.task_id) or {}
+        snapshot_task_metadata = dict(snapshot.get('task_metadata') or {})
+        snapshot_node_metadata = dict(snapshot.get('node_metadata') or {})
+        base_task_metadata = snapshot_task_metadata or dict(task.metadata or {})
+        base_node_metadata = snapshot_node_metadata or dict(root.metadata or {})
+        failure_class = normalize_failure_class((task.metadata or {}).get('failure_class') or base_task_metadata.get('failure_class'), default=FAILURE_CLASS_ENGINE)
         retry_metadata = self._append_retry_history(
-            dict(task.metadata or {}),
+            dict(base_task_metadata),
             source=source,
             failure_class=failure_class,
             failure_reason=str(task.failure_reason or root.failure_reason or '').strip(),
         )
         retry_metadata.pop('final_execution_output', None)
         retry_metadata.pop('failure_class', None)
+        for key in (
+            'result_schema_version',
+            'result_payload',
+            'result_payload_ref',
+            'result_payload_summary',
+        ):
+            base_node_metadata.pop(key, None)
 
         def _mutate_task(record: TaskRecord) -> TaskRecord:
             return record.model_copy(
@@ -1130,11 +1189,6 @@ class MainRuntimeService:
             )
 
         def _mutate_root(record: NodeRecord) -> NodeRecord:
-            metadata = dict(record.metadata or {})
-            metadata.pop('result_schema_version', None)
-            metadata.pop('result_payload', None)
-            metadata.pop('result_payload_ref', None)
-            metadata.pop('result_payload_summary', None)
             return record.model_copy(
                 update={
                     'status': 'in_progress',
@@ -1145,37 +1199,45 @@ class MainRuntimeService:
                     'failure_reason': '',
                     'finished_at': None,
                     'updated_at': now_iso(),
-                    'metadata': metadata,
+                    'metadata': dict(base_node_metadata),
                 }
             )
 
         self.store.update_task(task.task_id, _mutate_task)
         self.store.update_node(root.node_id, _mutate_root)
-        self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
-
-        runtime_state = self.log_service.read_runtime_state(task.task_id) or {}
-        frames = [
-            dict(item)
-            for item in list(runtime_state.get('frames') or [])
-            if isinstance(item, dict) and str(item.get('node_id') or '').strip()
-        ]
-        if not any(str(item.get('node_id') or '').strip() == root.node_id for item in frames):
-            frames.append(
-                self.log_service._default_frame(
-                    node_id=root.node_id,
-                    depth=root.depth,
-                    node_kind=root.node_kind,
-                    phase='before_model',
-                )
-            )
+        restored_messages = self._retry_resume_messages(snapshot)
+        restored_frame = dict(snapshot.get('frame') or {})
+        if restored_messages:
+            restored_frame['messages'] = restored_messages
+        restored_frame.update(
+            {
+                'node_id': root.node_id,
+                'depth': root.depth,
+                'node_kind': root.node_kind,
+                'last_error': '',
+            }
+        )
+        if not str(restored_frame.get('phase') or '').strip():
+            restored_frame['phase'] = 'before_model'
+        active_node_ids, runnable_node_ids, waiting_node_ids = self._retry_resume_runnable_state(restored_frame)
         self.log_service.replace_runtime_frames(
             task.task_id,
-            frames=frames,
-            active_node_ids=[root.node_id],
-            runnable_node_ids=[root.node_id],
-            waiting_node_ids=[],
+            frames=[restored_frame],
+            active_node_ids=active_node_ids or [root.node_id],
+            runnable_node_ids=runnable_node_ids,
+            waiting_node_ids=waiting_node_ids,
             publish_snapshot=False,
         )
+        restored_input_text = str(snapshot.get('node_input_text') or '').strip()
+        if restored_messages:
+            self.log_service.update_node_input(
+                task.task_id,
+                root.node_id,
+                json.dumps(restored_messages, ensure_ascii=False, indent=2),
+            )
+        elif restored_input_text:
+            self.log_service.update_node_input(task.task_id, root.node_id, restored_input_text)
+        self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
         self.log_service.update_task_runtime_meta(
             task.task_id,
             last_visible_output_at=self._stall_now_iso(),
@@ -1233,7 +1295,10 @@ class MainRuntimeService:
                 'reused_existing': bool(continuation_task is not None),
                 'message': 'task_already_recreated',
             }
-        if continuation['continuation_state'] == CONTINUATION_STATE_RETRIED_IN_PLACE:
+        if (
+            continuation['continuation_state'] == CONTINUATION_STATE_RETRIED_IN_PLACE
+            and str(task.status or '').strip().lower() != 'failed'
+        ):
             return {
                 'status': 'completed',
                 'mode': CONTINUATION_MODE_RETRY_IN_PLACE,

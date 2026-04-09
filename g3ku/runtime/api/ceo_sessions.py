@@ -14,6 +14,7 @@ from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
     build_ceo_session_catalog,
     ceo_session_family,
+    clear_web_ceo_session_artifacts,
     create_web_ceo_session,
     delete_web_ceo_session_artifacts,
     ensure_ceo_session_metadata,
@@ -135,6 +136,31 @@ def _is_channel_session_id(session_id: str) -> bool:
 
 def _raise_channel_session_readonly() -> None:
     raise HTTPException(status_code=409, detail="channel_session_readonly")
+
+
+def _assert_known_catalog_session(
+    session_manager,
+    runtime_manager,
+    state_store,
+    session_id: str,
+) -> tuple[str, dict[str, object]]:
+    requested_session_id = str(session_id or "").strip()
+    if not requested_session_id:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=requested_session_id)
+    item = find_ceo_session_catalog_item(catalog, requested_session_id)
+    if item is None:
+        for group in list(catalog.get("channel_groups") or []):
+            for candidate in list((group or {}).get("items") or []):
+                if str(candidate.get("session_id") or "").strip() == requested_session_id:
+                    item = candidate
+                    break
+            if item is not None:
+                break
+    if item is None:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    resolved_session_id = str(item.get("session_id") or "").strip() or requested_session_id
+    return resolved_session_id, catalog
 
 
 def _build_catalog(session_manager, runtime_manager, *, active_session_id: str) -> dict[str, object]:
@@ -456,50 +482,68 @@ async def activate_ceo_session(session_id: str):
 
 @router.get('/ceo/sessions/{session_id}/delete-check')
 async def get_ceo_session_delete_check(session_id: str):
-    if _is_channel_session_id(session_id):
-        _raise_channel_session_readonly()
-    agent, session_manager, _runtime_manager, _state_store = _sessions()
-    session = _assert_known_session(session_manager, session_id)
+    agent, session_manager, runtime_manager, state_store = _sessions()
     service = await _task_service(agent)
+    if _is_channel_session_id(session_id):
+        resolved_session_id, _catalog = _assert_known_catalog_session(
+            session_manager,
+            runtime_manager,
+            state_store,
+            session_id,
+        )
+        return _session_task_delete_payload(service, resolved_session_id)
+    session = _assert_known_session(session_manager, session_id)
     return _session_task_delete_payload(service, session.key)
 
 
 @router.delete("/ceo/sessions/{session_id}")
 async def delete_ceo_session(session_id: str, payload: dict | None = Body(default=None)):
-    if _is_channel_session_id(session_id):
-        _raise_channel_session_readonly()
     agent, session_manager, runtime_manager, state_store = _sessions()
     service = await _task_service(agent)
-    session = _assert_known_session(session_manager, session_id)
+    is_channel_session = _is_channel_session_id(session_id)
+    if is_channel_session:
+        resolved_session_id, _catalog = _assert_known_catalog_session(
+            session_manager,
+            runtime_manager,
+            state_store,
+            session_id,
+        )
+        session_key = resolved_session_id
+    else:
+        session = _assert_known_session(session_manager, session_id)
+        session_key = session.key
     stopped_background_tool_count = 0
     tool_execution_manager = getattr(agent, 'tool_execution_manager', None)
     if tool_execution_manager is not None and hasattr(tool_execution_manager, 'stop_session_executions'):
         stopped_results = await tool_execution_manager.stop_session_executions(
-            session.key,
-            reason='session_deleted',
+            session_key,
+            reason='session_cleared' if is_channel_session else 'session_deleted',
         )
         stopped_background_tool_count = len(list(stopped_results or []))
     heartbeat = get_web_heartbeat_service(agent)
     if heartbeat is not None:
-        heartbeat.clear_session(session.key)
+        heartbeat.clear_session(session_key)
     delete_task_records = bool((payload or {}).get('delete_task_records'))
     deleted_task_count = 0
     if delete_task_records:
         try:
-            deleted_task_count = await service.delete_task_records_for_session(session.key)
+            deleted_task_count = await service.delete_task_records_for_session(session_key)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    delete_web_ceo_session_artifacts(
-        session_manager=session_manager,
-        session_id=session.key,
-        task_service=service,
-    )
+    if is_channel_session:
+        clear_web_ceo_session_artifacts(session_id=session_key, task_service=service)
+    else:
+        delete_web_ceo_session_artifacts(
+            session_manager=session_manager,
+            session_id=session_key,
+            task_service=service,
+        )
     remover = getattr(runtime_manager, "remove", None)
     if callable(remover):
-        remover(session.key)
+        remover(session_key)
     cancel = getattr(agent, "cancel_session_tasks", None)
     if callable(cancel):
-        await cancel(session.key)
+        await cancel(session_key)
     active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
     state_store.set_active_session_id(active_session_id)
     catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
@@ -513,8 +557,9 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
     )
     return {
         "ok": True,
-        "deleted": True,
-        "session_id": session.key,
+        "deleted": not is_channel_session,
+        "cleared": is_channel_session,
+        "session_id": session_key,
         "deleted_task_count": deleted_task_count,
         "stopped_background_tool_count": stopped_background_tool_count,
         "items": catalog.get("items") or [],

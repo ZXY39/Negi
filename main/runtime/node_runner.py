@@ -2356,9 +2356,27 @@ class NodeRunner:
         return dict(payload or {})
 
     def _mark_finished(self, task_id: str, node_id: str, result: NodeFinalResult) -> NodeFinalResult:
+        task = self._store.get_task(task_id)
+        if (
+            task is not None
+            and str(task.root_node_id or '').strip() == str(node_id or '').strip()
+            and result.status == STATUS_FAILED
+        ):
+            capture_retry_snapshot = getattr(self._log_service, 'capture_retry_resume_snapshot', None)
+            if callable(capture_retry_snapshot):
+                try:
+                    capture_retry_snapshot(task_id, node_id, failure_reason=result.failure_text)
+                except Exception:
+                    pass
         status = STATUS_SUCCESS if result.status == STATUS_SUCCESS else STATUS_FAILED
         self._log_service.finalize_execution_stage(task_id, node_id, status=status)
         if status == STATUS_SUCCESS:
+            clear_retry_snapshot = getattr(self._log_service, 'clear_retry_resume_snapshot', None)
+            if callable(clear_retry_snapshot):
+                try:
+                    clear_retry_snapshot(task_id)
+                except Exception:
+                    pass
             self._log_service.remove_frame(task_id, node_id, publish_snapshot=False)
         self._persist_result_payload(task_id, node_id, result)
         self._log_service.update_node_status(

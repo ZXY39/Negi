@@ -23,6 +23,7 @@ from main.models import (
     SpawnChildResult,
     SpawnChildSpec,
     TaskRecord,
+    normalize_execution_stage_metadata,
     normalize_final_acceptance_metadata,
 )
 from main.protocol import now_iso
@@ -4488,6 +4489,199 @@ async def test_continue_task_retry_in_place_reopens_same_task_after_terminalizin
         assert latest is not None
         assert latest.status == "in_progress"
         assert len(service.store.list_tasks()) == 1
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_continue_task_retry_in_place_restores_failed_runtime_context(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task("resume prior runtime context", session_id="web:shared")
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        stage_payload = service.log_service.submit_next_stage(
+            record.task_id,
+            root.node_id,
+            stage_goal="Continue validating the remaining high-signal candidates.",
+            tool_round_budget=3,
+        )
+        service.log_service.record_execution_stage_round(
+            record.task_id,
+            root.node_id,
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "name": "content",
+                    "arguments": {"action": "open", "ref": "artifact:demo"},
+                }
+            ],
+            created_at=now_iso(),
+        )
+        prepared_history = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": '{"prompt":"resume prior runtime context"}'},
+            {"role": "assistant", "content": "The previous two stages are already complete."},
+            {"role": "assistant", "content": "Continue validating the remaining high-signal candidates."},
+        ]
+        service.log_service.update_node_input(
+            record.task_id,
+            root.node_id,
+            json.dumps(prepared_history, ensure_ascii=False, indent=2),
+        )
+        service.log_service.update_frame(
+            record.task_id,
+            root.node_id,
+            lambda frame: {
+                **frame,
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "messages": prepared_history,
+                "stage_mode": "自主执行",
+                "stage_status": "进行中",
+                "stage_goal": "Continue validating the remaining high-signal candidates.",
+                "stage_total_steps": 3,
+            },
+            publish_snapshot=False,
+        )
+
+        service.node_runner._mark_failed(record.task_id, root.node_id, reason="provider failure")
+
+        failed_root = service.get_node(root.node_id)
+        failed_task = service.get_task(record.task_id)
+
+        assert failed_root is not None
+        assert failed_task is not None
+        assert failed_task.status == "failed"
+        assert normalize_execution_stage_metadata((failed_root.metadata or {}).get("execution_stages")).active_stage_id == ""
+
+        result = await service.continue_task(
+            mode="retry_in_place",
+            target_task_id=record.task_id,
+            continuation_instruction="Resume from the preserved failure context instead of restarting.",
+            reason="engine_failure",
+            source="api",
+        )
+
+        latest_task = service.get_task(record.task_id)
+        latest_root = service.get_node(root.node_id)
+        runtime_frame = service.log_service.read_runtime_frame(record.task_id, root.node_id)
+        resumed_state = await service.node_runner._resume_react_state(task=latest_task, node=latest_root)
+        restored_stage_state = normalize_execution_stage_metadata((latest_root.metadata or {}).get("execution_stages"))
+
+        assert result["status"] == "completed"
+        assert latest_task is not None
+        assert latest_root is not None
+        assert latest_task.status == "in_progress"
+        assert runtime_frame is not None
+        assert runtime_frame.get("messages") == prepared_history
+        assert runtime_frame.get("stage_goal") == "Continue validating the remaining high-signal candidates."
+        assert resumed_state["messages"] == prepared_history
+        assert restored_stage_state.active_stage_id == str(stage_payload.get("stage_id") or "")
+        assert len(list(latest_task.metadata.get("retry_history") or [])) == 1
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_continue_task_retry_in_place_allows_second_engine_failure_retry(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task("retry the same failed task twice", session_id="web:shared")
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        service.log_service.update_frame(
+            record.task_id,
+            root.node_id,
+            lambda frame: {
+                **frame,
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "messages": [
+                    {"role": "system", "content": "system prompt"},
+                    {"role": "user", "content": "first attempt context"},
+                ],
+            },
+            publish_snapshot=False,
+        )
+        service.node_runner._mark_failed(record.task_id, root.node_id, reason="first provider failure")
+
+        first_retry = await service.continue_task(
+            mode="retry_in_place",
+            target_task_id=record.task_id,
+            continuation_instruction="Retry after the first engine failure.",
+            reason="engine_failure",
+            source="api",
+        )
+
+        assert first_retry["status"] == "completed"
+        assert service.get_task(record.task_id) is not None
+        assert service.get_task(record.task_id).status == "in_progress"
+
+        service.log_service.update_frame(
+            record.task_id,
+            root.node_id,
+            lambda frame: {
+                **frame,
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "messages": [
+                    {"role": "system", "content": "system prompt"},
+                    {"role": "user", "content": "second attempt context"},
+                ],
+            },
+            publish_snapshot=False,
+        )
+        service.node_runner._mark_failed(record.task_id, root.node_id, reason="second provider failure")
+
+        second_retry = await service.continue_task(
+            mode="retry_in_place",
+            target_task_id=record.task_id,
+            continuation_instruction="Retry after the second engine failure.",
+            reason="engine_failure",
+            source="api",
+        )
+
+        latest_task = service.get_task(record.task_id)
+        runtime_frame = service.log_service.read_runtime_frame(record.task_id, root.node_id)
+
+        assert second_retry["status"] == "completed"
+        assert latest_task is not None
+        assert latest_task.status == "in_progress"
+        assert len(list(latest_task.metadata.get("retry_history") or [])) == 2
+        assert runtime_frame is not None
+        assert runtime_frame.get("messages") == [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "second attempt context"},
+        ]
     finally:
         await service.close()
 
