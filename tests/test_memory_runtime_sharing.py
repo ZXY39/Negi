@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.agent.rag_memory import (
+    ContextRecordV2,
     DashScopeMultimodalEmbeddings,
     DashScopeTextReranker,
     G3kuHybridStore,
@@ -186,20 +187,49 @@ def test_g3ku_hybrid_store_reuses_qdrant_backend_per_process(tmp_path, monkeypat
     calls = {"existing": 0, "closed": 0}
 
     class FakeDenseStore:
+        def __init__(self, **kwargs):
+            _ = kwargs
+
         def close(self) -> None:
             calls["closed"] += 1
 
+        def add_texts(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
     class FakeQdrantVectorStore:
-        @classmethod
-        def from_existing_collection(cls, **kwargs):
+        def __init__(self, **kwargs):
             _ = kwargs
             calls["existing"] += 1
-            return FakeDenseStore()
+            self._store = FakeDenseStore()
+
+        def __getattr__(self, name):
+            return getattr(self._store, name)
+
+    class FakeQdrantClient:
+        def __init__(self, **kwargs):
+            _ = kwargs
+
+        def collection_exists(self, _collection_name):
+            return True
+
+        def close(self) -> None:
+            return None
 
     monkeypatch.setitem(
         sys.modules,
         "langchain_qdrant",
         SimpleNamespace(QdrantVectorStore=FakeQdrantVectorStore),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "qdrant_client",
+        SimpleNamespace(
+            QdrantClient=FakeQdrantClient,
+            models=SimpleNamespace(
+                VectorParams=lambda **kwargs: kwargs,
+                Distance=SimpleNamespace(COSINE="cosine"),
+            ),
+        ),
     )
     monkeypatch.setattr(
         "g3ku.agent.rag_memory.DashScopeMultimodalEmbeddings",
@@ -234,27 +264,67 @@ def test_g3ku_hybrid_store_reuses_qdrant_backend_per_process(tmp_path, monkeypat
 
 
 def test_g3ku_hybrid_store_uses_dashscope_embedding_adapter_for_configured_protocol(tmp_path, monkeypatch):
-    calls = {"existing": 0, "dashscope_model": ""}
+    calls = {"existing": 0, "dashscope_model": "", "bootstrap_adds": 0}
 
     class FakeDenseStore:
+        def __init__(self, **kwargs):
+            _ = kwargs
+
         def close(self) -> None:
             return None
 
+        def add_texts(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+            calls["bootstrap_adds"] += 1
+
     class FakeQdrantVectorStore:
-        @classmethod
-        def from_existing_collection(cls, **kwargs):
+        def __init__(self, **kwargs):
             _ = kwargs
             calls["existing"] += 1
-            return FakeDenseStore()
+            self._store = FakeDenseStore()
+
+        def __getattr__(self, name):
+            return getattr(self._store, name)
+
+    class FakeQdrantClient:
+        def __init__(self, **kwargs):
+            _ = kwargs
+
+        def collection_exists(self, _collection_name):
+            return False
+
+        def create_collection(self, **kwargs):
+            _ = kwargs
+            return True
+
+        def close(self) -> None:
+            return None
 
     def _fake_dashscope_embeddings(**kwargs):
         calls["dashscope_model"] = str(kwargs.get("model") or "")
-        return object()
+
+        class _Embeddings:
+            def embed_documents(self, texts):
+                _ = texts
+                return [[0.1, 0.2, 0.3]]
+
+        return _Embeddings()
 
     monkeypatch.setitem(
         sys.modules,
         "langchain_qdrant",
         SimpleNamespace(QdrantVectorStore=FakeQdrantVectorStore),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "qdrant_client",
+        SimpleNamespace(
+            QdrantClient=FakeQdrantClient,
+            models=SimpleNamespace(
+                VectorParams=lambda **kwargs: kwargs,
+                Distance=SimpleNamespace(COSINE="cosine"),
+            ),
+        ),
     )
     monkeypatch.setattr(
         "g3ku.agent.rag_memory.DashScopeMultimodalEmbeddings",
@@ -274,6 +344,7 @@ def test_g3ku_hybrid_store_uses_dashscope_embedding_adapter_for_configured_proto
     try:
         assert calls["existing"] == 1
         assert calls["dashscope_model"] == "multimodal-embedding-v1"
+        assert calls["bootstrap_adds"] == 1
         assert store._dense_enabled is True
     finally:
         store.close()
@@ -284,16 +355,32 @@ def test_g3ku_hybrid_store_skips_dense_backend_when_owner_lock_is_busy(tmp_path,
     calls = {"existing": 0}
 
     class FakeQdrantVectorStore:
-        @classmethod
-        def from_existing_collection(cls, **kwargs):
+        def __init__(self, **kwargs):
             _ = kwargs
             calls["existing"] += 1
-            return object()
+
+    class FakeQdrantClient:
+        def __init__(self, **kwargs):
+            _ = kwargs
+
+        def collection_exists(self, _collection_name):
+            return True
 
     monkeypatch.setitem(
         sys.modules,
         "langchain_qdrant",
         SimpleNamespace(QdrantVectorStore=FakeQdrantVectorStore),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "qdrant_client",
+        SimpleNamespace(
+            QdrantClient=FakeQdrantClient,
+            models=SimpleNamespace(
+                VectorParams=lambda **kwargs: kwargs,
+                Distance=SimpleNamespace(COSINE="cosine"),
+            ),
+        ),
     )
     monkeypatch.setattr(
         "g3ku.agent.rag_memory.DashScopeMultimodalEmbeddings",
@@ -359,20 +446,49 @@ def test_g3ku_hybrid_store_releases_owner_lock_after_last_reference(tmp_path, mo
     owner_lock = object()
 
     class FakeDenseStore:
+        def __init__(self, **kwargs):
+            _ = kwargs
+
         def close(self) -> None:
             calls["closed"] += 1
 
+        def add_texts(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
     class FakeQdrantVectorStore:
-        @classmethod
-        def from_existing_collection(cls, **kwargs):
+        def __init__(self, **kwargs):
             _ = kwargs
             calls["existing"] += 1
-            return FakeDenseStore()
+            self._store = FakeDenseStore()
+
+        def __getattr__(self, name):
+            return getattr(self._store, name)
+
+    class FakeQdrantClient:
+        def __init__(self, **kwargs):
+            _ = kwargs
+
+        def collection_exists(self, _collection_name):
+            return True
+
+        def close(self) -> None:
+            return None
 
     monkeypatch.setitem(
         sys.modules,
         "langchain_qdrant",
         SimpleNamespace(QdrantVectorStore=FakeQdrantVectorStore),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "qdrant_client",
+        SimpleNamespace(
+            QdrantClient=FakeQdrantClient,
+            models=SimpleNamespace(
+                VectorParams=lambda **kwargs: kwargs,
+                Distance=SimpleNamespace(COSINE="cosine"),
+            ),
+        ),
     )
     monkeypatch.setattr(
         "g3ku.agent.rag_memory.DashScopeMultimodalEmbeddings",
@@ -470,6 +586,103 @@ def test_reset_memory_runtime_purges_stale_dense_backends_for_same_qdrant_group(
         assert calls["released"] == 1
         assert G3kuHybridStore._dense_backend_registry == {}
     finally:
+        G3kuHybridStore._dense_backend_registry.clear()
+
+
+def test_context_v2_dense_backfill_reports_post_rebuild_stats(tmp_path, monkeypatch):
+    class FakeQdrantClient:
+        def __init__(self, **kwargs):
+            _ = kwargs
+            self.ids: set[str] = set()
+
+        def collection_exists(self, _collection_name):
+            return True
+
+        def count(self, *, collection_name, exact=True):
+            _ = collection_name, exact
+            return SimpleNamespace(count=len(self.ids))
+
+        def retrieve(self, *, collection_name, ids, with_payload=False, with_vectors=False):
+            _ = collection_name, with_payload, with_vectors
+            return [SimpleNamespace(id=point_id) for point_id in ids if point_id in self.ids]
+
+        def close(self) -> None:
+            return None
+
+    class FakeQdrantVectorStore:
+        def __init__(self, **kwargs):
+            self.client = kwargs["client"]
+
+        def add_texts(self, *, texts, metadatas, ids):
+            _ = texts, metadatas
+            self.client.ids.update(str(point_id) for point_id in ids)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "langchain_qdrant",
+        SimpleNamespace(QdrantVectorStore=FakeQdrantVectorStore),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "qdrant_client",
+        SimpleNamespace(
+            QdrantClient=FakeQdrantClient,
+            models=SimpleNamespace(
+                VectorParams=lambda **kwargs: kwargs,
+                Distance=SimpleNamespace(COSINE="cosine"),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "g3ku.agent.rag_memory.DashScopeMultimodalEmbeddings",
+        lambda **kwargs: object(),
+    )
+
+    G3kuHybridStore._dense_backend_registry.clear()
+    store = G3kuHybridStore(
+        sqlite_path=tmp_path / "memory.db",
+        qdrant_path=tmp_path / "qdrant",
+        qdrant_collection="test_collection",
+        embedding_model="dashscope:qwen3-vl-embedding",
+        dashscope_api_key="test-key",
+    )
+
+    try:
+        store._dense_enabled = False
+        store.put_context_v2(
+            ("resource",),
+            ContextRecordV2(
+                record_id="tool:alpha",
+                context_type="resource",
+                uri="g3ku://resource/tool/alpha",
+                l0="alpha l0",
+                l1="alpha l1",
+            ),
+        )
+        store.put_context_v2(
+            ("skill",),
+            ContextRecordV2(
+                record_id="skill:beta",
+                context_type="skill",
+                uri="g3ku://skill/beta",
+                l0="beta l0",
+                l1="beta l1",
+            ),
+        )
+        store._dense_enabled = True
+
+        result = store.ensure_context_v2_dense_backfill(batch_size=8)
+
+        assert result["needed"] is True
+        assert result["eligible"] == 2
+        assert result["indexed"] == 2
+        assert result["dense_points"] == 2
+        assert result["sample_missing"] is False
+    finally:
+        store.close()
         G3kuHybridStore._dense_backend_registry.clear()
 
 

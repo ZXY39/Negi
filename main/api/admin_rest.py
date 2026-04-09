@@ -882,6 +882,123 @@ async def _refresh_runtime(reason: str) -> None:
         ) from exc
 
 
+def _config_summary_probe_status(facade, config_id: str) -> str | None:
+    for summary in list(getattr(facade.repository, 'list_summaries', lambda: [])() or []):
+        if str(getattr(summary, 'config_id', '') or '').strip() == str(config_id or '').strip():
+            return getattr(summary, 'last_probe_status', None)
+    return None
+
+
+def _snapshot_config_record(facade, config_id: str | None) -> dict[str, Any] | None:
+    normalized = str(config_id or '').strip()
+    if not normalized:
+        return None
+    record = facade._hydrate_record_secrets(facade.repository.get(normalized))
+    return {
+        'config_id': normalized,
+        'record': record,
+        'last_probe_status': _config_summary_probe_status(facade, normalized),
+    }
+
+
+def _restore_config_record_snapshot(facade, snapshot: dict[str, Any] | None) -> None:
+    if not snapshot:
+        return
+    record = snapshot.get('record')
+    if record is None:
+        return
+    facade.repository.save(
+        facade._sanitize_record_for_storage(record),
+        last_probe_status=snapshot.get('last_probe_status'),
+    )
+    facade._store_record_secrets(record)
+
+
+async def _save_memory_embedding_atomically(
+    *,
+    facade,
+    embedding_payload: dict[str, Any],
+    rerank_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    current_binding = facade.get_memory_binding()
+    original_binding = {
+        'embedding_config_id': current_binding.embedding_config_id,
+        'rerank_config_id': current_binding.rerank_config_id,
+    }
+    original_embedding_snapshot = _snapshot_config_record(facade, current_binding.embedding_config_id)
+    original_rerank_snapshot = _snapshot_config_record(facade, current_binding.rerank_config_id)
+
+    created_config_ids: list[str] = []
+    target_embedding_config_id = str(embedding_payload.get('config_id') or current_binding.embedding_config_id or '').strip() or None
+    target_rerank_config_id = (
+        str((rerank_payload or {}).get('config_id') or current_binding.rerank_config_id or '').strip() or None
+    )
+
+    try:
+        embedding_draft = embedding_payload.get('draft') if isinstance(embedding_payload.get('draft'), dict) else None
+        if embedding_draft is None:
+            raise ValueError('embedding draft is required')
+        if target_embedding_config_id:
+            embedding_item = facade.update_config_record(target_embedding_config_id, embedding_draft)
+        else:
+            embedding_item = facade.create_config_record(embedding_draft)
+            created_config_ids.append(str(embedding_item.get('config_id') or '').strip())
+        next_embedding_config_id = str(embedding_item.get('config_id') or '').strip() or None
+
+        next_rerank_config_id = original_binding['rerank_config_id']
+        if rerank_payload is not None:
+            rerank_draft = rerank_payload.get('draft') if isinstance(rerank_payload.get('draft'), dict) else None
+            if rerank_draft is None:
+                raise ValueError('rerank draft is required')
+            if target_rerank_config_id:
+                rerank_item = facade.update_config_record(target_rerank_config_id, rerank_draft)
+            else:
+                rerank_item = facade.create_config_record(rerank_draft)
+                created_config_ids.append(str(rerank_item.get('config_id') or '').strip())
+            next_rerank_config_id = str(rerank_item.get('config_id') or '').strip() or None
+
+        binding = facade.set_memory_binding(
+            embedding_config_id=next_embedding_config_id,
+            rerank_config_id=next_rerank_config_id,
+        )
+        await refresh_web_agent_runtime(force=True, reason='admin_llm_memory_embedding_atomic_save')
+        manager = _runtime_memory_manager()
+        reset_result = await manager.reset_dense_index(reason='embedding_model_changed')
+        rebuild_result = await manager.rebuild_dense_index(reason='embedding_model_changed')
+        return {
+            'binding': binding.model_dump(mode='json'),
+            'reset': reset_result,
+            'rebuild': rebuild_result,
+        }
+    except Exception as exc:
+        rollback_error: Exception | None = None
+        try:
+            for config_id in created_config_ids:
+                try:
+                    facade.delete_config_record(config_id)
+                except Exception:
+                    pass
+            _restore_config_record_snapshot(facade, original_embedding_snapshot)
+            _restore_config_record_snapshot(facade, original_rerank_snapshot)
+            facade.set_memory_binding(
+                embedding_config_id=original_binding['embedding_config_id'],
+                rerank_config_id=original_binding['rerank_config_id'],
+            )
+            await refresh_web_agent_runtime(force=True, reason='admin_llm_memory_embedding_atomic_rollback')
+        except Exception as rollback_exc:
+            rollback_error = rollback_exc
+
+        status_code = 503 if original_binding['embedding_config_id'] or created_config_ids else 400
+        detail = {
+            'code': 'memory_embedding_atomic_save_failed',
+            'saved': False,
+            'rolled_back': rollback_error is None,
+            'error': str(exc or 'memory_embedding_atomic_save_failed').strip() or 'memory_embedding_atomic_save_failed',
+        }
+        if rollback_error is not None:
+            detail['rollback_error'] = str(rollback_error or 'rollback_failed').strip() or 'rollback_failed'
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
 
 def _model_roles(manager: ModelManager) -> dict[str, list[str]]:
     return {scope: list(getattr(manager.config.models.roles, scope)) for scope in VALID_SCOPES}
@@ -2074,6 +2191,22 @@ async def update_llm_memory_binding(payload: dict | None = Body(default=None)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _refresh_runtime('admin_llm_memory_update')
     return {'ok': True, 'item': result.model_dump(mode='json')}
+
+
+@router.post('/llm/memory/embedding-atomic-save')
+async def atomic_save_llm_memory_embedding(payload: dict | None = Body(default=None)):
+    manager = ModelManager.load()
+    body = payload if isinstance(payload, dict) else {}
+    embedding_payload = body.get('embedding') if isinstance(body.get('embedding'), dict) else None
+    rerank_payload = body.get('rerank') if isinstance(body.get('rerank'), dict) else None
+    if embedding_payload is None:
+        raise HTTPException(status_code=400, detail='embedding payload is required')
+    item = await _save_memory_embedding_atomically(
+        facade=manager.facade,
+        embedding_payload=embedding_payload,
+        rerank_payload=rerank_payload,
+    )
+    return {'ok': True, 'item': item}
 
 
 @router.post('/llm/migrate')

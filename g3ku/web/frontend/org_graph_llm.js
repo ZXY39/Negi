@@ -1611,6 +1611,61 @@
         }
       }
 
+      if (rebuildRequired) {
+        const embeddingPrepared = preparedBySection.get("embedding");
+        const rerankPrepared = sectionKeys.includes("rerank")
+          ? (preparedBySection.get("rerank") || prepareMemorySectionDraft("rerank"))
+          : null;
+        const validationResults = [];
+        for (const [sectionKey, prepared] of preparedBySection.entries()) {
+          const section = prepared.section;
+          const label = section?.label || capabilityLabel(sectionKey);
+          if (!section || !prepared.draft) {
+            validationResults.push({ sectionKey, label, ok: false, message: prepared.message || `${label} is invalid.` });
+            continue;
+          }
+          showToast({
+            title: "Testing",
+            text: `Testing ${label} connection...`,
+            kind: "info",
+            persistent: true,
+          });
+          const ok = await probeMemoryDraft(sectionKey, prepared.draft);
+          validationResults.push({ sectionKey, label, ok, message: ok ? "" : draftFailureMessage(section) });
+        }
+        const failedValidation = validationResults.filter((item) => !item.ok);
+        if (failedValidation.length) {
+          throw new Error(failedValidation.map((item) => `${item.label}: ${item.message}`).join("; "));
+        }
+
+        showToast({
+          title: "Saving",
+          text: "Saving memory embedding config...",
+          kind: "info",
+          persistent: true,
+        });
+        const atomicResult = await ApiClient.atomicSaveMemoryEmbedding({
+          embedding: {
+            config_id: trim(embeddingPrepared?.section?.configId || ""),
+            draft: embeddingPrepared?.draft || null,
+          },
+          rerank: rerankPrepared?.draft
+            ? {
+                config_id: trim(rerankPrepared.section?.configId || ""),
+                draft: rerankPrepared.draft,
+              }
+            : null,
+        });
+        showToast({
+          title: "Save Complete",
+          text: `Memory embedding updated. Dense rebuild indexed ${Number(atomicResult?.rebuild?.indexed || 0)} records.`,
+          kind: "success",
+        });
+        closeEditor();
+        await loadAll();
+        return;
+      }
+
       const results = [];
       const bindingPayload = {};
       for (const sectionKey of sectionKeys) {

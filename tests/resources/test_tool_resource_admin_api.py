@@ -2706,6 +2706,135 @@ def test_memory_dense_index_rebuild_endpoint_calls_memory_manager(monkeypatch):
     assert calls == {'reason': 'embedding_model_changed'}
 
 
+def test_memory_embedding_atomic_save_returns_binding_and_rebuild_result(monkeypatch):
+    calls: dict[str, object] = {}
+
+    class _StubFacade:
+        pass
+
+    class _StubManager:
+        def __init__(self):
+            self.facade = _StubFacade()
+
+    async def _fake_atomic_save(*, facade, embedding_payload, rerank_payload=None):
+        calls['facade'] = facade
+        calls['embedding_payload'] = embedding_payload
+        calls['rerank_payload'] = rerank_payload
+        return {
+            'binding': {
+                'embedding_config_id': 'cfg-embedding-new',
+                'embedding_provider_model': 'dashscope:multimodal-embedding-v1',
+                'rerank_config_id': None,
+                'rerank_provider_model': '',
+            },
+            'reset': {'status': 'reset'},
+            'rebuild': {'status': 'ready', 'indexed': 26, 'dense_points': 26},
+        }
+
+    monkeypatch.setattr(admin_rest.ModelManager, 'load', classmethod(lambda cls: _StubManager()))
+    monkeypatch.setattr(admin_rest, '_save_memory_embedding_atomically', _fake_atomic_save)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.post(
+        '/api/llm/memory/embedding-atomic-save',
+        json={
+            'embedding': {'config_id': 'cfg-embedding-old', 'draft': {'default_model': 'multimodal-embedding-v1'}},
+            'rerank': None,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()['item']['rebuild']['indexed'] == 26
+    assert calls['embedding_payload'] == {'config_id': 'cfg-embedding-old', 'draft': {'default_model': 'multimodal-embedding-v1'}}
+    assert calls['rerank_payload'] is None
+
+
+@pytest.mark.asyncio
+async def test_memory_embedding_atomic_save_rolls_back_on_rebuild_failure(monkeypatch):
+    events: list[tuple[str, object]] = []
+
+    class _StubFacade:
+        def __init__(self):
+            self.binding = SimpleNamespace(embedding_config_id='cfg-embedding-old', rerank_config_id='cfg-rerank-old')
+            self.records = {
+                'cfg-embedding-old': SimpleNamespace(config_id='cfg-embedding-old', auth={'api_key': 'k'}, headers={}),
+                'cfg-rerank-old': SimpleNamespace(config_id='cfg-rerank-old', auth={'api_key': 'r'}, headers={}),
+            }
+            self.repository = SimpleNamespace(
+                list_summaries=lambda: [
+                    SimpleNamespace(config_id='cfg-embedding-old', last_probe_status='success'),
+                    SimpleNamespace(config_id='cfg-rerank-old', last_probe_status='success'),
+                ],
+                get=lambda config_id: self.records[config_id],
+                save=lambda config, last_probe_status=None: events.append(('save', getattr(config, 'config_id', None), last_probe_status)),
+            )
+
+        def get_memory_binding(self):
+            return self.binding
+
+        def _hydrate_record_secrets(self, record):
+            return record
+
+        def _sanitize_record_for_storage(self, record):
+            return record
+
+        def _store_record_secrets(self, record):
+            events.append(('store_secrets', getattr(record, 'config_id', None)))
+
+        def update_config_record(self, config_id, payload):
+            events.append(('update', config_id, dict(payload)))
+            self.records[config_id] = SimpleNamespace(config_id=config_id, auth={'api_key': 'new'}, headers={})
+            return {'config_id': config_id}
+
+        def create_config_record(self, payload):
+            raise AssertionError('create should not be called')
+
+        def delete_config_record(self, config_id):
+            events.append(('delete', config_id))
+
+        def set_memory_binding(self, *, embedding_config_id, rerank_config_id):
+            events.append(('set_binding', embedding_config_id, rerank_config_id))
+            self.binding = SimpleNamespace(embedding_config_id=embedding_config_id, rerank_config_id=rerank_config_id)
+            return SimpleNamespace(model_dump=lambda mode='json': {})
+
+    class _StubMemoryManager:
+        async def reset_dense_index(self, *, reason='manual'):
+            events.append(('reset_dense', reason))
+            return {'status': 'reset', 'dense_enabled': True}
+
+        async def rebuild_dense_index(self, *, reason='manual'):
+            events.append(('rebuild_dense', reason))
+            raise RuntimeError('dense rebuild failed')
+
+    async def _fake_refresh_web_agent_runtime(*, force=False, reason='runtime'):
+        events.append(('refresh', force, reason))
+        return True
+
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh_web_agent_runtime)
+    monkeypatch.setattr(admin_rest, '_runtime_memory_manager', lambda: _StubMemoryManager())
+
+    with pytest.raises(Exception) as exc_info:
+        await admin_rest._save_memory_embedding_atomically(
+            facade=_StubFacade(),
+            embedding_payload={'config_id': 'cfg-embedding-old', 'draft': {'default_model': 'multimodal-embedding-v1'}},
+            rerank_payload=None,
+        )
+
+    detail = exc_info.value.detail
+    assert exc_info.value.status_code == 503
+    assert detail['code'] == 'memory_embedding_atomic_save_failed'
+    assert detail['saved'] is False
+    assert detail['rolled_back'] is True
+    assert ('update', 'cfg-embedding-old', {'default_model': 'multimodal-embedding-v1'}) in events
+    assert ('reset_dense', 'embedding_model_changed') in events
+    assert ('rebuild_dense', 'embedding_model_changed') in events
+    assert ('set_binding', 'cfg-embedding-old', 'cfg-rerank-old') in events
+    assert ('refresh', True, 'admin_llm_memory_embedding_atomic_rollback') in events
+
+
 def test_load_config_backfills_missing_role_iterations(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)

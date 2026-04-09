@@ -757,6 +757,11 @@ class ApiClient {
         return data.item || null;
     }
 
+    static async atomicSaveMemoryEmbedding(payload) {
+        const data = await this.post("/api/llm/memory/embedding-atomic-save", payload || {});
+        return data.item || null;
+    }
+
     static async runLlmMigration() {
         return this.post("/api/llm/migrate", {});
     }

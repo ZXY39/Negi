@@ -832,6 +832,7 @@ class G3kuHybridStore(BaseStore):
         dense_owner_lock = None
         try:
             from langchain_qdrant import QdrantVectorStore
+            from qdrant_client import QdrantClient, models as qdrant_models
 
             dense_key = (
                 str(self.qdrant_path.expanduser().resolve()).lower(),
@@ -895,20 +896,40 @@ class G3kuHybridStore(BaseStore):
 
                     self._embeddings = init_embeddings(self.embedding_model)
 
+                qdrant_client = QdrantClient(path=str(self.qdrant_path))
+                collection_exists = False
                 try:
-                    qdrant_store = QdrantVectorStore.from_existing_collection(
-                        collection_name=self.qdrant_collection,
-                        embedding=self._embeddings,
-                        path=str(self.qdrant_path),
-                    )
+                    collection_exists = bool(qdrant_client.collection_exists(self.qdrant_collection))
                 except Exception:
-                    qdrant_store = QdrantVectorStore.from_texts(
+                    collection_exists = False
+
+                if not collection_exists:
+                    bootstrap_text = "g3ku memory bootstrap"
+                    bootstrap_vectors = self._embeddings.embed_documents([bootstrap_text])
+                    vector_size = len(bootstrap_vectors[0]) if bootstrap_vectors and bootstrap_vectors[0] else 0
+                    if vector_size <= 0:
+                        raise RuntimeError("Failed to infer embedding vector size for Qdrant collection bootstrap")
+                    qdrant_client.create_collection(
+                        collection_name=self.qdrant_collection,
+                        vectors_config=qdrant_models.VectorParams(
+                            size=vector_size,
+                            distance=qdrant_models.Distance.COSINE,
+                        ),
+                    )
+
+                qdrant_store = QdrantVectorStore(
+                    client=qdrant_client,
+                    collection_name=self.qdrant_collection,
+                    embedding=self._embeddings,
+                    distance=qdrant_models.Distance.COSINE,
+                    validate_collection_config=collection_exists,
+                )
+
+                if not collection_exists:
+                    qdrant_store.add_texts(
                         texts=["g3ku memory bootstrap"],
                         metadatas=[{"namespace": "__bootstrap__", "key": "__bootstrap__"}],
                         ids=[_vector_point_id("__bootstrap__", "__bootstrap__")],
-                        collection_name=self.qdrant_collection,
-                        embedding=self._embeddings,
-                        path=str(self.qdrant_path),
                     )
 
                 self._qdrant = qdrant_store
@@ -1482,12 +1503,14 @@ class G3kuHybridStore(BaseStore):
                 _flush()
 
         _flush()
+        dense_points_after = self._count_dense_points()
+        sample_missing_after = self._missing_context_v2_dense_sample()
         return {
             "needed": True,
             "eligible": eligible,
             "indexed": indexed,
-            "dense_points": dense_points,
-            "sample_missing": sample_missing,
+            "dense_points": dense_points_after,
+            "sample_missing": sample_missing_after,
         }
 
     def search_context_v2(

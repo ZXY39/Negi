@@ -206,7 +206,7 @@ def run_server(*, host: str, port: int, reload: bool, log_level: str = 'info') -
     if reload:
         uvicorn.run('g3ku.web.main:app', host=host, port=port, reload=True, log_level=log_level)
         return
-    config = uvicorn.Config('g3ku.web.main:app', host=host, port=port, reload=False, log_level=log_level)
+    config = uvicorn.Config(app, host=host, port=port, reload=False, log_level=log_level)
     server = uvicorn.Server(config)
     set_server_instance(server)
     try:
