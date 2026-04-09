@@ -263,6 +263,74 @@ class CeoMessageBuilder:
         sections = [str(part or '').strip() for part in list(parts or []) if str(part or '').strip()]
         return '\n\n'.join(sections).strip()
 
+    @staticmethod
+    def _group_retrieved_records(records: list[dict[str, Any]] | None) -> dict[str, list[dict[str, Any]]]:
+        grouped: dict[str, list[dict[str, Any]]] = {"memory": [], "resource": [], "skill": []}
+        for record in list(records or []):
+            if not isinstance(record, dict):
+                continue
+            context_type = str(record.get("context_type") or "").strip().lower()
+            if context_type not in grouped:
+                grouped[context_type] = []
+            grouped[context_type].append(record)
+        return grouped
+
+    @staticmethod
+    def _is_same_session_turn_memory_record(
+        record: dict[str, Any],
+        *,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+    ) -> bool:
+        _ = channel, chat_id
+        if str(record.get("context_type") or "").strip().lower() != "memory":
+            return False
+        if str(record.get("source") or "").strip().lower() != "turn":
+            return False
+        record_session_key = str(record.get("session_key") or "").strip()
+        return bool(session_key and record_session_key and record_session_key == session_key)
+
+    @classmethod
+    def _filter_same_session_turn_memory_records(
+        cls,
+        bundle: RetrievedContextBundle,
+        *,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+    ) -> tuple[RetrievedContextBundle, int]:
+        filtered_records: list[dict[str, Any]] = []
+        filtered_count = 0
+        for record in list(bundle.records or []):
+            if (
+                isinstance(record, dict)
+                and cls._is_same_session_turn_memory_record(
+                    record,
+                    session_key=session_key,
+                    channel=channel,
+                    chat_id=chat_id,
+                )
+            ):
+                filtered_count += 1
+                continue
+            filtered_records.append(record)
+        if filtered_count == 0:
+            return bundle, 0
+        meta = dict(bundle.meta or {})
+        meta["total"] = len(filtered_records)
+        return (
+            RetrievedContextBundle(
+                query=str(bundle.query or ""),
+                records=filtered_records,
+                grouped=cls._group_retrieved_records(filtered_records),
+                plan=list(bundle.plan or []),
+                meta=meta,
+                trace=dict(bundle.trace or {}),
+            ),
+            filtered_count,
+        )
+
     def _select_skills(
         self,
         *,
@@ -603,17 +671,14 @@ class CeoMessageBuilder:
             )
         return selected
 
-    async def build_for_ceo(
+    async def _collect_turn_context_sources(
         self,
         *,
         session: Any,
         query_text: str,
         exposure: dict[str, Any],
-        persisted_session: Any | None,
-        checkpoint_messages: list[dict[str, Any]] | None = None,
-        user_content: Any | None = None,
-        user_metadata: dict[str, Any] | None = None,
-    ) -> ContextAssemblyResult:
+        user_content: Any | None,
+    ) -> dict[str, Any]:
         main_service = getattr(self._loop, 'main_task_service', None)
         memory_manager = getattr(self._loop, 'memory_manager', None)
         assembly_cfg = getattr(getattr(self._loop, '_memory_runtime_settings', None), 'assembly', None)
@@ -747,22 +812,32 @@ class CeoMessageBuilder:
                 'allowed_skill_record_ids': [],
             }
 
+        session_key = str(session.state.session_key or '')
+        channel = str(getattr(session, '_memory_channel', getattr(session, '_channel', 'cli')) or 'cli')
+        chat_id = str(getattr(session, '_memory_chat_id', getattr(session, '_chat_id', session_key)) or session_key)
         retrieved_bundle = RetrievedContextBundle(query=query_text)
         if memory_manager is not None and query_text:
             try:
                 retrieved_bundle = await memory_manager.retrieve_context_bundle(
                     query=query_text,
-                    session_key=session.state.session_key,
-                    channel=getattr(session, '_memory_channel', getattr(session, '_channel', 'cli')),
-                    chat_id=getattr(session, '_memory_chat_id', getattr(session, '_chat_id', session.state.session_key)),
+                    session_key=session_key,
+                    channel=channel,
+                    chat_id=chat_id,
                     search_context_types=retrieval_scope['search_context_types'],
                     allowed_context_types=retrieval_scope['allowed_context_types'],
                     allowed_resource_record_ids=retrieval_scope['allowed_resource_record_ids'],
                     allowed_skill_record_ids=retrieval_scope['allowed_skill_record_ids'],
+                    exclude_same_session_turn_memory=True,
                 )
             except Exception:
                 retrieved_bundle = RetrievedContextBundle(query=query_text)
 
+        retrieved_bundle, same_session_turn_memory_filtered_count = self._filter_same_session_turn_memory_records(
+            retrieved_bundle,
+            session_key=session_key,
+            channel=channel,
+            chat_id=chat_id,
+        )
         retrieved_markdown = self._render_retrieved_context(retrieved_bundle)
         if memory_write_terms and retrieved_markdown:
             if split_prompt_builder:
@@ -772,6 +847,33 @@ class CeoMessageBuilder:
         if split_prompt_builder and retrieved_markdown:
             turn_overlay_parts.append(retrieved_markdown)
 
+        return {
+            'memory_write_terms': memory_write_terms,
+            'memory_write_visible': memory_write_visible,
+            'selected_skills': selected_skills,
+            'skill_trace': skill_trace,
+            'semantic_trace': semantic_trace,
+            'external_trace': external_trace,
+            'selected_tool_names': selected_tool_names,
+            'tool_trace': tool_trace,
+            'retrieval_scope': retrieval_scope,
+            'retrieved_bundle': retrieved_bundle,
+            'retrieved_markdown': retrieved_markdown,
+            'turn_overlay_parts': turn_overlay_parts,
+            'split_prompt_builder': split_prompt_builder,
+            'system_prompt': system_prompt,
+            'same_session_turn_memory_filtered_count': same_session_turn_memory_filtered_count,
+            'user_content': user_content if user_content is not None else query_text,
+        }
+
+    def _resolve_history_injection(
+        self,
+        *,
+        persisted_session: Any | None,
+        checkpoint_messages: list[dict[str, Any]] | None,
+        query_text: str,
+        user_metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         checkpoint_history = self._checkpoint_history(checkpoint_messages)
         transcript_history = self._transcript_history(persisted_session)
         current_user_in_checkpoint = self._history_has_current_user(
@@ -793,53 +895,122 @@ class CeoMessageBuilder:
             query_text=query_text,
             user_metadata=user_metadata,
         )
+        return {
+            'history_messages': history_messages,
+            'history_source': 'checkpoint' if use_checkpoint_history else 'transcript',
+            'checkpoint_history': checkpoint_history,
+            'transcript_history': transcript_history,
+            'current_user_in_checkpoint': current_user_in_checkpoint,
+            'current_user_in_history': current_user_in_history,
+            'current_user_in_transcript': current_user_in_transcript,
+        }
+
+    def _inject_turn_context(
+        self,
+        *,
+        system_prompt: str,
+        retrieved_markdown: str,
+        history_messages: list[dict[str, Any]],
+        user_content: Any,
+        split_prompt_builder: bool,
+        turn_overlay_parts: list[str],
+        current_user_in_history: bool,
+    ) -> tuple[list[dict[str, Any]], str]:
         turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts) if split_prompt_builder else ''
         model_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         if retrieved_markdown and not split_prompt_builder:
             model_messages.append({"role": "assistant", "content": retrieved_markdown})
         model_messages.extend(history_messages)
         if not current_user_in_history:
-            model_messages.append({"role": "user", "content": user_content if user_content is not None else query_text})
+            model_messages.append({"role": "user", "content": user_content})
+        return model_messages, turn_overlay_text
+
+    async def build_for_ceo(
+        self,
+        *,
+        session: Any,
+        query_text: str,
+        exposure: dict[str, Any],
+        persisted_session: Any | None,
+        checkpoint_messages: list[dict[str, Any]] | None = None,
+        user_content: Any | None = None,
+        user_metadata: dict[str, Any] | None = None,
+    ) -> ContextAssemblyResult:
+        context_sources = await self._collect_turn_context_sources(
+            session=session,
+            query_text=query_text,
+            exposure=exposure,
+            user_content=user_content,
+        )
+        history_state = self._resolve_history_injection(
+            persisted_session=persisted_session,
+            checkpoint_messages=checkpoint_messages,
+            query_text=query_text,
+            user_metadata=user_metadata,
+        )
+        model_messages, turn_overlay_text = self._inject_turn_context(
+            system_prompt=str(context_sources['system_prompt'] or ''),
+            retrieved_markdown=str(context_sources['retrieved_markdown'] or ''),
+            history_messages=list(history_state['history_messages']),
+            user_content=context_sources['user_content'],
+            split_prompt_builder=bool(context_sources['split_prompt_builder']),
+            turn_overlay_parts=list(context_sources['turn_overlay_parts']),
+            current_user_in_history=bool(history_state['current_user_in_history']),
+        )
 
         trace = {
-            'selected_skills': skill_trace,
-            'selected_tools': tool_trace,
-            'semantic_frontdoor': semantic_trace,
-            'external_tools': external_trace,
+            'selected_skills': list(context_sources['skill_trace']),
+            'selected_tools': dict(context_sources['tool_trace']),
+            'semantic_frontdoor': dict(context_sources['semantic_trace']),
+            'external_tools': list(context_sources['external_trace']),
             'retrieval_scope': {
-                'mode': str(retrieval_scope.get('mode') or ''),
-                'search_context_types': list(retrieval_scope['search_context_types']),
-                'allowed_context_types': list(retrieval_scope['allowed_context_types']),
-                'allowed_resource_record_ids': list(retrieval_scope['allowed_resource_record_ids']),
-                'allowed_skill_record_ids': list(retrieval_scope['allowed_skill_record_ids']),
+                'mode': str(context_sources['retrieval_scope'].get('mode') or ''),
+                'search_context_types': list(context_sources['retrieval_scope']['search_context_types']),
+                'allowed_context_types': list(context_sources['retrieval_scope']['allowed_context_types']),
+                'allowed_resource_record_ids': list(context_sources['retrieval_scope']['allowed_resource_record_ids']),
+                'allowed_skill_record_ids': list(context_sources['retrieval_scope']['allowed_skill_record_ids']),
             },
             'memory_write_hint': {
-                'triggered': bool(memory_write_terms and memory_write_visible),
-                'matched_terms': list(memory_write_terms),
-                'visible': memory_write_visible,
+                'triggered': bool(context_sources['memory_write_terms'] and context_sources['memory_write_visible']),
+                'matched_terms': list(context_sources['memory_write_terms']),
+                'visible': bool(context_sources['memory_write_visible']),
             },
-            'history_source': 'checkpoint' if use_checkpoint_history else 'transcript',
-            'checkpoint_message_count': len(checkpoint_history),
-            'transcript_message_count': len(transcript_history),
-            'current_user_in_checkpoint': current_user_in_checkpoint,
-            'current_user_in_history': current_user_in_history,
-            'current_user_in_transcript': current_user_in_transcript,
-            'retrieved_record_count': len(list(retrieved_bundle.records or [])),
+            'history_source': str(history_state['history_source']),
+            'checkpoint_message_count': len(history_state['checkpoint_history']),
+            'transcript_message_count': len(history_state['transcript_history']),
+            'current_user_in_checkpoint': bool(history_state['current_user_in_checkpoint']),
+            'current_user_in_history': bool(history_state['current_user_in_history']),
+            'current_user_in_transcript': bool(history_state['current_user_in_transcript']),
+            'retrieved_record_count': len(list(context_sources['retrieved_bundle'].records or [])),
+            'same_session_turn_memory_filtered_count': int(context_sources['same_session_turn_memory_filtered_count']),
             'model_messages_count': len(model_messages),
             'stable_prefix_message_count': len(model_messages),
             'turn_overlay_present': bool(turn_overlay_text),
-            'turn_overlay_section_count': len(turn_overlay_parts),
+            'turn_overlay_section_count': len(context_sources['turn_overlay_parts']),
             'turn_overlay_character_count': len(turn_overlay_text),
             'turn_overlay_text_hash': (
                 hashlib.sha256(turn_overlay_text.encode('utf-8')).hexdigest()
                 if turn_overlay_text
                 else ''
             ),
-            'stable_prompt_split': split_prompt_builder,
+            'stable_prompt_split': bool(context_sources['split_prompt_builder']),
+            'context_collection': {
+                'retrieved_record_count': len(list(context_sources['retrieved_bundle'].records or [])),
+                'retrieval_scope_mode': str(context_sources['retrieval_scope'].get('mode') or ''),
+                'retrieved_context_present': bool(context_sources['retrieved_markdown']),
+            },
+            'message_injection': {
+                'history_source': str(history_state['history_source']),
+                'history_message_count': len(history_state['history_messages']),
+                'current_user_appended': not bool(history_state['current_user_in_history']),
+                'retrieved_context_in_model_messages': bool(
+                    context_sources['retrieved_markdown'] and not context_sources['split_prompt_builder']
+                ),
+            },
         }
         return ContextAssemblyResult(
             model_messages=model_messages,
-            tool_names=selected_tool_names,
+            tool_names=list(context_sources['selected_tool_names']),
             trace=trace,
             turn_overlay_text=turn_overlay_text,
         )

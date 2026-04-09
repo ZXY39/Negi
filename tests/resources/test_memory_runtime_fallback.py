@@ -262,6 +262,73 @@ async def test_memory_manager_fallback_ingest_and_retrieve_when_rag_backend_boot
 
 
 @pytest.mark.asyncio
+async def test_retrieve_block_can_ignore_same_session_turn_memory_records(tmp_path: Path) -> None:
+    manager = rag_memory.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager.ingest_turn(
+            session_key="web:shared",
+            channel="web",
+            chat_id="shared",
+            messages=[
+                {"role": "user", "content": "remember zebra-cascade-481 deployment window"},
+                {"role": "assistant", "content": "Stored zebra-cascade-481 deployment window"},
+            ],
+        )
+
+        unfiltered = await manager.retrieve_block(
+            query="zebra-cascade-481",
+            channel="web",
+            chat_id="shared",
+            session_key="web:shared",
+            search_context_types=["memory"],
+            allowed_context_types=["memory"],
+        )
+        filtered = await manager.retrieve_block(
+            query="zebra-cascade-481",
+            channel="web",
+            chat_id="shared",
+            session_key="web:shared",
+            search_context_types=["memory"],
+            allowed_context_types=["memory"],
+            exclude_same_session_turn_memory=True,
+        )
+
+        assert "zebra-cascade-481" in unfiltered.lower()
+        assert "zebra-cascade-481" not in filtered.lower()
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_retrieve_block_keeps_turn_memory_from_different_session_in_shared_scope(tmp_path: Path) -> None:
+    manager = rag_memory.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager.ingest_turn(
+            session_key="web:other",
+            channel="web",
+            chat_id="shared",
+            messages=[
+                {"role": "user", "content": "remember amber-reef-192 deployment window"},
+                {"role": "assistant", "content": "Stored amber-reef-192 deployment window"},
+            ],
+        )
+
+        filtered = await manager.retrieve_block(
+            query="amber-reef-192",
+            channel="web",
+            chat_id="shared",
+            session_key="web:shared",
+            search_context_types=["memory"],
+            allowed_context_types=["memory"],
+            exclude_same_session_turn_memory=True,
+        )
+
+        assert "amber-reef-192" in filtered.lower()
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_memory_manager_bootstrap_new_only_replays_pending_journal_inside_running_loop(
     monkeypatch,
     tmp_path: Path,

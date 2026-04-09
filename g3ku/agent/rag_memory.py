@@ -3004,6 +3004,9 @@ class _RagMemoryBackend:
                 "l1": record.l1,
                 "l2_preview": l2_preview,
                 "tags": list(record.tags or []),
+                "session_key": record.session_key,
+                "channel": record.channel,
+                "chat_id": record.chat_id,
             }
             grouped.setdefault(record.context_type, []).append(entry)
             unified.append(entry)
@@ -3563,6 +3566,68 @@ class MemoryManager:
             allowed_context_types=allowed_context_types,
             allowed_resource_record_ids=allowed_resource_record_ids,
             allowed_skill_record_ids=allowed_skill_record_ids,
+        )
+
+    @staticmethod
+    def _is_same_session_turn_memory_entry(
+        entry: dict[str, Any],
+        *,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+    ) -> bool:
+        _ = channel, chat_id
+        if str(entry.get("context_type") or "").strip().lower() != "memory":
+            return False
+        if str(entry.get("source") or "").strip().lower() != "turn":
+            return False
+        entry_session_key = str(entry.get("session_key") or "").strip()
+        return bool(session_key and entry_session_key and entry_session_key == session_key)
+
+    @classmethod
+    def _exclude_same_session_turn_memory_from_bundle(
+        cls,
+        *,
+        bundle: RetrievedContextBundle,
+        session_key: str | None,
+        channel: str | None,
+        chat_id: str | None,
+    ) -> RetrievedContextBundle:
+        normalized_session_key = str(session_key or "").strip()
+        normalized_channel = str(channel or "").strip()
+        normalized_chat_id = str(chat_id or "").strip()
+        filtered_records: list[dict[str, Any]] = []
+        for raw in list(bundle.records or []):
+            if not isinstance(raw, dict):
+                continue
+            if cls._is_same_session_turn_memory_entry(
+                raw,
+                session_key=normalized_session_key,
+                channel=normalized_channel,
+                chat_id=normalized_chat_id,
+            ):
+                continue
+            filtered_records.append(dict(raw))
+
+        if len(filtered_records) == len(list(bundle.records or [])):
+            return bundle
+
+        grouped: dict[str, list[dict[str, Any]]] = {"memory": [], "resource": [], "skill": []}
+        for entry in filtered_records:
+            context_type = str(entry.get("context_type") or "").strip().lower()
+            if context_type not in grouped:
+                grouped[context_type] = []
+            grouped[context_type].append(entry)
+
+        meta = dict(bundle.meta or {})
+        meta["total"] = len(filtered_records)
+        return RetrievedContextBundle(
+            query=str(bundle.query or ""),
+            records=filtered_records,
+            grouped=grouped,
+            plan=list(bundle.plan or []),
+            meta=meta,
+            trace=dict(bundle.trace or {}),
         )
 
     def __init__(self, workspace: Path, config: Any):
@@ -4725,6 +4790,9 @@ class MemoryManager:
                 "l1": summarize_l1(text),
                 "l2_preview": l2_preview,
                 "tags": list(event.tags or []),
+                "session_key": event.session_key,
+                "channel": event.channel,
+                "chat_id": event.chat_id,
             }
             grouped["memory"].append(entry)
             unified.append(entry)
@@ -4771,6 +4839,7 @@ class MemoryManager:
         allowed_context_types: Iterable[str] | None = None,
         allowed_resource_record_ids: Iterable[str] | None = None,
         allowed_skill_record_ids: Iterable[str] | None = None,
+        exclude_same_session_turn_memory: bool = False,
     ) -> str:
         bundle = await self.retrieve_context_bundle(
             query=query,
@@ -4781,6 +4850,7 @@ class MemoryManager:
             allowed_context_types=allowed_context_types,
             allowed_resource_record_ids=allowed_resource_record_ids,
             allowed_skill_record_ids=allowed_skill_record_ids,
+            exclude_same_session_turn_memory=exclude_same_session_turn_memory,
         )
         view = list(bundle.records or [])
         if not view:
@@ -4817,6 +4887,7 @@ class MemoryManager:
         allowed_context_types: Iterable[str] | None = None,
         allowed_resource_record_ids: Iterable[str] | None = None,
         allowed_skill_record_ids: Iterable[str] | None = None,
+        exclude_same_session_turn_memory: bool = False,
     ) -> RetrievedContextBundle:
         namespace = self.namespace_for(channel=channel, chat_id=chat_id)
         backend = await self._ensure_backend()
@@ -4832,7 +4903,15 @@ class MemoryManager:
                     allowed_resource_record_ids=allowed_resource_record_ids,
                     allowed_skill_record_ids=allowed_skill_record_ids,
                 )
-                return self._decorate_retrieved_context_bundle(bundle=bundle, namespace=namespace)
+                bundle = self._decorate_retrieved_context_bundle(bundle=bundle, namespace=namespace)
+                if exclude_same_session_turn_memory:
+                    bundle = self._exclude_same_session_turn_memory_from_bundle(
+                        bundle=bundle,
+                        session_key=session_key,
+                        channel=channel,
+                        chat_id=chat_id,
+                    )
+                return bundle
             except Exception as exc:
                 self._mark_backend_failure(exc)
         result = await self._search_legacy_tool_view(
@@ -4852,7 +4931,15 @@ class MemoryManager:
             meta=dict(result.get("meta") or {}),
             trace={},
         )
-        return self._decorate_retrieved_context_bundle(bundle=bundle, namespace=namespace)
+        bundle = self._decorate_retrieved_context_bundle(bundle=bundle, namespace=namespace)
+        if exclude_same_session_turn_memory:
+            bundle = self._exclude_same_session_turn_memory_from_bundle(
+                bundle=bundle,
+                session_key=session_key,
+                channel=channel,
+                chat_id=chat_id,
+            )
+        return bundle
 
     async def ingest_turn(
         self,
