@@ -3863,6 +3863,38 @@ def test_get_node_detail_payload_summary_mode_uses_previews_instead_of_full_inli
     assert item["final_output_ref"].startswith("artifact:")
 
 
+def test_node_detail_summary_compacts_tool_trace_payloads(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    payload = service.get_node_detail_payload(record.task_id, record.root_node_id)
+
+    assert payload is not None
+    summary = payload["item"]["execution_trace_summary"]
+    stages = summary.get("stages") or []
+    assert stages
+    rounds = stages[0].get("rounds") or []
+    assert rounds
+    tools = rounds[0].get("tools") or []
+    assert tools
+    tool = tools[0]
+
+    assert tool.get("tool_call_id")
+    assert tool.get("tool_name")
+    assert tool.get("arguments_preview")
+    assert tool.get("output_preview")
+    assert "arguments_text" not in tool
+    assert "output_text" not in tool
+    assert "output_ref" in tool
+
+
 def test_node_detail_resolves_full_final_and_acceptance_text_from_refs(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

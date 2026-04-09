@@ -3595,8 +3595,14 @@ function setCommunicationDirty(next = true) {
     renderCommunicationActions();
 }
 
-function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", onConfirm, returnFocus = null, checkbox = null }) {
-    S.confirmState = { onConfirm, returnFocus, checkbox: checkbox && typeof checkbox === "object" ? checkbox : null };
+function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", onConfirm, onClose = null, returnFocus = null, checkbox = null }) {
+    S.confirmState = {
+        onConfirm,
+        onClose,
+        returnFocus,
+        checkbox: checkbox && typeof checkbox === "object" ? checkbox : null,
+        accepted: false,
+    };
     U.confirmTitle.textContent = title;
     U.confirmText.textContent = text;
     if (U.confirmOptions && U.confirmCheckbox && U.confirmCheckboxLabel && U.confirmCheckboxHint) {
@@ -3628,6 +3634,31 @@ function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "dang
     U.confirmBackdrop.hidden = false;
     U.confirmBackdrop.classList.add("is-open");
     window.requestAnimationFrame(() => U.confirmCancel?.focus());
+}
+
+function requestInlineConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", returnFocus = null, checkbox = null }) {
+    const focusTarget = returnFocus || (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    return new Promise((resolve) => {
+        let settled = false;
+        openConfirm({
+            title,
+            text,
+            confirmLabel,
+            confirmKind,
+            returnFocus: focusTarget,
+            checkbox,
+            onConfirm: async ({ checked }) => {
+                if (settled) return;
+                settled = true;
+                resolve({ confirmed: true, checked: !!checked });
+            },
+            onClose: () => {
+                if (settled) return;
+                settled = true;
+                resolve({ confirmed: false, checked: false });
+            },
+        });
+    });
 }
 
 function resourceDeleteErrorText(error) {
@@ -3972,6 +4003,8 @@ function enhanceResourceSelects() {
 
 function closeConfirm({ restoreFocus = true } = {}) {
     const returnFocus = S.confirmState?.returnFocus;
+    const onClose = S.confirmState?.onClose;
+    const accepted = !!S.confirmState?.accepted;
     S.confirmState = null;
     if (U.confirmOptions) U.confirmOptions.hidden = true;
     if (U.confirmCheckbox) {
@@ -3981,6 +4014,13 @@ function closeConfirm({ restoreFocus = true } = {}) {
     if (U.confirmCheckboxHint) U.confirmCheckboxHint.textContent = "";
     U.confirmBackdrop.hidden = true;
     U.confirmBackdrop.classList.remove("is-open");
+    if (!accepted && typeof onClose === "function") {
+        try {
+            onClose();
+        } catch (error) {
+            void error;
+        }
+    }
     if (restoreFocus) returnFocus?.focus?.();
 }
 
@@ -3990,9 +4030,11 @@ async function acceptConfirm() {
     U.confirmCancel.disabled = true;
     if (U.confirmCheckbox) U.confirmCheckbox.disabled = true;
     try {
+        S.confirmState.accepted = true;
         await S.confirmState.onConfirm({ checked: !!U.confirmCheckbox?.checked });
         closeConfirm();
     } catch (error) {
+        if (S.confirmState) S.confirmState.accepted = false;
         showToast({ title: "操作失败", text: error?.message || "Unknown error", kind: "error" });
     } finally {
         U.confirmAccept.disabled = false;
@@ -5152,7 +5194,12 @@ async function saveModelDetail() {
 async function deleteModelDetail(modelKey) {
     const targetKey = String(modelKey || "").trim();
     if (!targetKey) return;
-    const confirmed = window.confirm(`删除模型 ${targetKey}？此操作会同时从 catalog 和所有角色链移除它。`);
+    const { confirmed } = await requestInlineConfirm({
+        title: "确认删除模型？",
+        text: `删除模型 ${targetKey} 后，会同时从 catalog 和所有角色链移除它。`,
+        confirmLabel: "删除模型",
+        confirmKind: "danger",
+    });
     if (!confirmed) return;
     try {
         const payload = await ApiClient.deleteManagedModel(targetKey);

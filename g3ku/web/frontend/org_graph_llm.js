@@ -485,7 +485,7 @@
 
   function memorySectionNeedsInitialSave(section) {
     if (!section) return false;
-    return !trim(section.configId) && !trim(section.error) && !!trim(section.jsonText);
+    return !trim(section.configId) && !trim(section.error) && !!trim(section.jsonText) && !trim(section.initialJsonText);
   }
 
   function memorySectionHasPendingChanges(section) {
@@ -494,6 +494,35 @@
 
   function modifiedMemorySectionKeys(memory = llmState().editor.memory) {
     return ["embedding", "rerank"].filter((sectionKey) => memorySectionHasPendingChanges(memory?.[sectionKey]));
+  }
+
+  function initialMemorySectionProviderModel(section) {
+    if (!section) return "";
+    const initialText = trim(section.initialJsonText || "");
+    if (!initialText) return trim(section.providerModel || "");
+    try {
+      const draft = parseMemoryDraftJson(
+        initialText,
+        section.providerId || "",
+        section.capability,
+        section.label || section.capability || "memory"
+      );
+      return providerModelFromDraft(draft);
+    } catch (_error) {
+      return trim(section.providerModel || "");
+    }
+  }
+
+  function memorySaveRequiresRebuildConfirmation({
+    currentEmbeddingProviderModel = "",
+    nextEmbeddingProviderModel = "",
+    embeddingModified = false,
+    rerankModified = false,
+  } = {}) {
+    void rerankModified;
+    const currentModel = trim(currentEmbeddingProviderModel);
+    const nextModel = trim(nextEmbeddingProviderModel);
+    return Boolean(embeddingModified && currentModel && nextModel && currentModel !== nextModel);
   }
 
   function memorySectionKeyFromTextareaId(elementId) {
@@ -1558,10 +1587,34 @@
     state.saving = true;
     renderAll();
     try {
+      const preparedBySection = new Map();
+      sectionKeys.forEach((sectionKey) => {
+        preparedBySection.set(sectionKey, prepareMemorySectionDraft(sectionKey));
+      });
+      const embeddingSection = state.editor.memory?.embedding;
+      const preparedEmbedding = preparedBySection.get("embedding");
+      const rebuildRequired = memorySaveRequiresRebuildConfirmation({
+        currentEmbeddingProviderModel: initialMemorySectionProviderModel(embeddingSection),
+        nextEmbeddingProviderModel: preparedEmbedding?.draft ? providerModelFromDraft(preparedEmbedding.draft) : "",
+        embeddingModified: sectionKeys.includes("embedding"),
+        rerankModified: sectionKeys.includes("rerank"),
+      });
+      if (rebuildRequired) {
+        const { confirmed } = await requestInlineConfirm({
+          title: "确认重建向量数据库？",
+          text: "检测到 Embedding 模型已更改，需要立即全量重建数据库。确认后将保存新模型，并立即清空本地 Qdrant 后重新全量构建。",
+          confirmLabel: "保存并重建",
+          confirmKind: "danger",
+        });
+        if (!confirmed) {
+          return;
+        }
+      }
+
       const results = [];
       const bindingPayload = {};
       for (const sectionKey of sectionKeys) {
-        const prepared = prepareMemorySectionDraft(sectionKey);
+        const prepared = preparedBySection.get(sectionKey) || prepareMemorySectionDraft(sectionKey);
         const section = prepared.section;
         const label = section?.label || capabilityLabel(sectionKey);
         if (!section || !prepared.draft) {
@@ -1601,6 +1654,7 @@
 
       const savedItems = results.filter((item) => item.saved);
       const failedItems = results.filter((item) => !item.saved);
+      let rebuildResult = null;
 
       if (Object.keys(bindingPayload).length) {
         const updatedBinding = await ApiClient.updateLlmMemoryModels(bindingPayload);
@@ -1618,6 +1672,23 @@
         }
       }
 
+      if (rebuildRequired && savedItems.some((item) => item.sectionKey === "embedding")) {
+        showToast({
+          title: "\u91cd\u5efa\u4e2d",
+          text: "\u6b63\u5728\u6e05\u7a7a\u672c\u5730 Qdrant...",
+          kind: "info",
+          persistent: true,
+        });
+        await ApiClient.resetMemoryDenseIndex({ reason: "embedding_model_changed" });
+        showToast({
+          title: "\u91cd\u5efa\u4e2d",
+          text: "\u6b63\u5728\u5168\u91cf\u91cd\u5efa\u5411\u91cf\u6570\u636e\u5e93...",
+          kind: "info",
+          persistent: true,
+        });
+        rebuildResult = await ApiClient.rebuildMemoryDenseIndex({ reason: "embedding_model_changed" });
+      }
+
       if (!savedItems.length) {
         throw new Error(failedItems.map((item) => `${item.label}: ${item.message}`).join("; ") || "No memory configs were saved.");
       }
@@ -1625,7 +1696,9 @@
       if (!failedItems.length) {
         showToast({
           title: "Save Complete",
-          text: "Memory model settings updated.",
+          text: rebuildResult
+            ? `Memory model settings updated. Dense rebuild indexed ${Number(rebuildResult.indexed || 0)} records.`
+            : "Memory model settings updated.",
           kind: "success",
         });
         closeEditor();
@@ -1648,7 +1721,12 @@
   async function handleDelete() {
     const binding = currentBinding();
     if (!binding) return;
-    const confirmed = window.confirm(`确认删除模型 ${binding.key} 吗？这会删除模型及其关联配置。`);
+    const { confirmed } = await requestInlineConfirm({
+      title: "确认删除模型？",
+      text: `删除模型 ${binding.key} 后，会删除该模型及其关联配置。`,
+      confirmLabel: "删除模型",
+      confirmKind: "danger",
+    });
     if (!confirmed) return;
     llmState().saving = true;
     renderAll();
@@ -1797,6 +1875,8 @@
     bindingNameLabel,
     bindingNameRequiredMessage,
     normalizeBindingNameText,
+    memorySaveRequiresRebuildConfirmation,
+    modifiedMemorySectionKeys,
   };
   window.handleModelRoleEditorAction = async function handleModelRoleEditorAction() {
     if (!S.modelCatalog.roleEditing) {

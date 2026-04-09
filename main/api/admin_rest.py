@@ -2404,6 +2404,39 @@ async def get_retrieval_traces(limit: int = Query(20, ge=1, le=200)):
     return await service.get_context_traces(trace_kind='retrieval', limit=limit)
 
 
+def _runtime_memory_manager():
+    agent = get_agent()
+    manager = getattr(agent, 'memory_manager', None)
+    if manager is None:
+        service = getattr(agent, 'main_task_service', None)
+        manager = getattr(service, 'memory_manager', None) if service is not None else None
+    if manager is None:
+        raise HTTPException(status_code=503, detail='memory_manager_unavailable')
+    return manager
+
+
+@router.post('/memory/dense-index/reset')
+async def reset_memory_dense_index(payload: dict | None = Body(default=None)):
+    manager = _runtime_memory_manager()
+    reason = str((payload or {}).get('reason') or 'manual').strip() or 'manual'
+    try:
+        item = await manager.reset_dense_index(reason=reason)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'ok': True, 'item': item}
+
+
+@router.post('/memory/dense-index/rebuild')
+async def rebuild_memory_dense_index(payload: dict | None = Body(default=None)):
+    manager = _runtime_memory_manager()
+    reason = str((payload or {}).get('reason') or 'manual').strip() or 'manual'
+    try:
+        item = await manager.rebuild_dense_index(reason=reason)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'ok': True, 'item': item}
+
+
 @router.get('/memory/runtime-stats')
 async def get_memory_runtime_stats():
     agent = get_agent()

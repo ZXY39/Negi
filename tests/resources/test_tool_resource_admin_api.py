@@ -2664,6 +2664,48 @@ def test_llm_memory_binding_partial_update_keeps_unspecified_side(monkeypatch):
     }
 
 
+def test_memory_dense_index_reset_endpoint_calls_memory_manager(monkeypatch):
+    calls: dict[str, object] = {}
+
+    class _StubMemoryManager:
+        async def reset_dense_index(self, *, reason: str = 'manual') -> dict[str, object]:
+            calls['reason'] = reason
+            return {'ok': True, 'dense_enabled': True}
+
+    monkeypatch.setattr(admin_rest, 'get_agent', lambda: SimpleNamespace(memory_manager=_StubMemoryManager()))
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.post('/api/memory/dense-index/reset', json={'reason': 'embedding_model_changed'})
+
+    assert response.status_code == 200
+    assert response.json()['item']['ok'] is True
+    assert calls == {'reason': 'embedding_model_changed'}
+
+
+def test_memory_dense_index_rebuild_endpoint_calls_memory_manager(monkeypatch):
+    calls: dict[str, object] = {}
+
+    class _StubMemoryManager:
+        async def rebuild_dense_index(self, *, reason: str = 'manual') -> dict[str, object]:
+            calls['reason'] = reason
+            return {'ok': True, 'indexed': 26, 'dense_points': 26}
+
+    monkeypatch.setattr(admin_rest, 'get_agent', lambda: SimpleNamespace(memory_manager=_StubMemoryManager()))
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.post('/api/memory/dense-index/rebuild', json={'reason': 'embedding_model_changed'})
+
+    assert response.status_code == 200
+    assert response.json()['item']['indexed'] == 26
+    assert calls == {'reason': 'embedding_model_changed'}
+
+
 def test_load_config_backfills_missing_role_iterations(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)

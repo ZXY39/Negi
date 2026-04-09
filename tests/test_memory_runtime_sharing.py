@@ -233,6 +233,53 @@ def test_g3ku_hybrid_store_reuses_qdrant_backend_per_process(tmp_path, monkeypat
         G3kuHybridStore._dense_backend_registry.clear()
 
 
+def test_g3ku_hybrid_store_uses_dashscope_embedding_adapter_for_configured_protocol(tmp_path, monkeypatch):
+    calls = {"existing": 0, "dashscope_model": ""}
+
+    class FakeDenseStore:
+        def close(self) -> None:
+            return None
+
+    class FakeQdrantVectorStore:
+        @classmethod
+        def from_existing_collection(cls, **kwargs):
+            _ = kwargs
+            calls["existing"] += 1
+            return FakeDenseStore()
+
+    def _fake_dashscope_embeddings(**kwargs):
+        calls["dashscope_model"] = str(kwargs.get("model") or "")
+        return object()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "langchain_qdrant",
+        SimpleNamespace(QdrantVectorStore=FakeQdrantVectorStore),
+    )
+    monkeypatch.setattr(
+        "g3ku.agent.rag_memory.DashScopeMultimodalEmbeddings",
+        _fake_dashscope_embeddings,
+    )
+
+    G3kuHybridStore._dense_backend_registry.clear()
+    store = G3kuHybridStore(
+        sqlite_path=tmp_path / "memory.db",
+        qdrant_path=tmp_path / "qdrant",
+        qdrant_collection="test_collection",
+        embedding_model="dashscope:multimodal-embedding-v1",
+        embedding_protocol_adapter="dashscope-embedding",
+        dashscope_api_key="test-key",
+    )
+
+    try:
+        assert calls["existing"] == 1
+        assert calls["dashscope_model"] == "multimodal-embedding-v1"
+        assert store._dense_enabled is True
+    finally:
+        store.close()
+        G3kuHybridStore._dense_backend_registry.clear()
+
+
 def test_g3ku_hybrid_store_skips_dense_backend_when_owner_lock_is_busy(tmp_path, monkeypatch):
     calls = {"existing": 0}
 

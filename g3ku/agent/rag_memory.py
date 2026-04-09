@@ -35,6 +35,7 @@ from langgraph.store.base import (
 )
 from loguru import logger
 
+from g3ku.llm_config.enums import ProtocolAdapter
 from g3ku.llm_config.runtime_resolver import (
     resolve_memory_embedding_target,
     resolve_memory_rerank_target,
@@ -282,6 +283,27 @@ def _is_dashscope_vl_embedding_model(model: str) -> bool:
 def _is_dashscope_rerank_model(model: str) -> bool:
     provider, model_id = _split_provider_model(model, default_provider="dashscope")
     return model_id == "qwen3-vl-rerank" and provider in {None, "dashscope"}
+
+
+def _protocol_adapter_value(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    return str(raw or "").strip().lower()
+
+
+def _uses_dashscope_embedding_adapter(
+    *,
+    provider_id: str | None = None,
+    protocol_adapter: Any = None,
+    model: str | None = None,
+) -> bool:
+    normalized_provider = _normalize_provider_id(provider_id)
+    normalized_protocol = _protocol_adapter_value(protocol_adapter)
+    model_provider, _model_id = _split_provider_model(str(model or "").strip(), default_provider=None)
+    return (
+        normalized_protocol == ProtocolAdapter.DASHSCOPE_EMBEDDING.value
+        or normalized_provider in {"dashscope", "dashscope_embedding"}
+        or model_provider == "dashscope"
+    )
 
 
 def _extract_embedding_vectors(payload: dict[str, Any], expected_count: int) -> list[list[float]]:
@@ -697,6 +719,8 @@ class G3kuHybridStore(BaseStore):
         qdrant_path: Path,
         qdrant_collection: str,
         embedding_model: str,
+        embedding_provider_id: str = "",
+        embedding_protocol_adapter: str = "",
         embedding_batch_size: int = 32,
         dashscope_api_key: str = "",
         dashscope_api_base: str | None = None,
@@ -707,6 +731,8 @@ class G3kuHybridStore(BaseStore):
         self.qdrant_path = qdrant_path
         self.qdrant_collection = qdrant_collection
         self.embedding_model = embedding_model
+        self.embedding_provider_id = str(embedding_provider_id or "").strip()
+        self.embedding_protocol_adapter = str(embedding_protocol_adapter or "").strip()
         self.embedding_batch_size = max(1, int(embedding_batch_size or 1))
         self.dashscope_api_key = str(dashscope_api_key or "").strip()
         self.dashscope_api_base = dashscope_api_base
@@ -846,12 +872,16 @@ class G3kuHybridStore(BaseStore):
                     self._shared_dense_key = None
                     return
 
-                if _is_dashscope_vl_embedding_model(self.embedding_model):
+                if _uses_dashscope_embedding_adapter(
+                    provider_id=self.embedding_provider_id,
+                    protocol_adapter=self.embedding_protocol_adapter,
+                    model=self.embedding_model,
+                ):
                     _, model_id = _split_provider_model(self.embedding_model, default_provider="dashscope")
                     api_key = self.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", "").strip()
                     if not api_key:
                         raise RuntimeError(
-                            "DashScope API key is not configured for qwen3-vl-embedding "
+                            "DashScope API key is not configured for the selected embedding model "
                             "(set providers.dashscope.apiKey or DASHSCOPE_API_KEY)"
                         )
                     self._embeddings = DashScopeMultimodalEmbeddings(
@@ -962,6 +992,35 @@ class G3kuHybridStore(BaseStore):
             _release_file_lock(owner_lock)
 
         return len(stale_entries)
+
+    def reset_dense_index(self) -> dict[str, Any]:
+        self.purge_process_local_dense_backends(
+            qdrant_path=self.qdrant_path,
+            qdrant_collection=self.qdrant_collection,
+        )
+        self._qdrant = None
+        self._shared_dense_key = None
+        self._dense_enabled = False
+
+        try:
+            shutil.rmtree(self.qdrant_path, ignore_errors=True)
+        except Exception:
+            pass
+        try:
+            dense_lock_path = _dense_owner_lock_path(self.qdrant_path)
+            if dense_lock_path.exists():
+                dense_lock_path.unlink()
+        except Exception:
+            pass
+
+        ensure_dir(self.qdrant_path)
+        self._init_dense_backend()
+        return {
+            "qdrant_path": str(self.qdrant_path),
+            "qdrant_collection": str(self.qdrant_collection or ""),
+            "embedding_model": str(self.embedding_model or ""),
+            "dense_enabled": bool(self._dense_enabled and self._qdrant is not None),
+        }
 
     def close(self) -> None:
         qdrant_store = self._qdrant
@@ -1763,6 +1822,8 @@ class _RagMemoryBackend:
             "observability": False,
         }
         self._resolved_embedding_model = ""
+        self._resolved_embedding_provider_id = ""
+        self._resolved_embedding_protocol_adapter = ""
         self._dashscope_api_key, self._dashscope_api_base = _load_workspace_dashscope_settings(
             self.workspace
         )
@@ -1772,6 +1833,8 @@ class _RagMemoryBackend:
             provider_id = _normalize_provider_id(embedding_target.provider_id)
             if provider_id in {"dashscope_embedding", "dashscope_rerank"}:
                 provider_id = "dashscope"
+            self._resolved_embedding_provider_id = str(provider_id or "")
+            self._resolved_embedding_protocol_adapter = _protocol_adapter_value(embedding_target.protocol_adapter)
             self._resolved_embedding_model = (
                 f"{provider_id}:{embedding_target.resolved_model}" if provider_id else embedding_target.resolved_model
             )
@@ -1788,6 +1851,7 @@ class _RagMemoryBackend:
         self.pending_file = mem_dir / "pending_facts.jsonl"
         self.trace_file = mem_dir / "retrieval_trace.jsonl"
         self.cost_file = mem_dir / "cost_metrics.json"
+        self.dense_index_state_file = mem_dir / "dense_index_state.json"
         self.context_store_dir = ensure_dir(mem_dir / "context_store")
         self._cost_metrics = self._load_cost_metrics()
 
@@ -1798,6 +1862,8 @@ class _RagMemoryBackend:
             qdrant_path=qdrant_path,
             qdrant_collection=config.store.qdrant_collection,
             embedding_model=self._resolved_embedding_model,
+            embedding_provider_id=self._resolved_embedding_provider_id,
+            embedding_protocol_adapter=self._resolved_embedding_protocol_adapter,
             embedding_batch_size=config.embedding.batch_size,
             dashscope_api_key=self._dashscope_api_key,
             dashscope_api_base=self._dashscope_api_base,
@@ -1807,6 +1873,50 @@ class _RagMemoryBackend:
         self._legacy = MemoryStore(self.workspace)
         self._io_lock = asyncio.Lock()
         self._trace_lock = asyncio.Lock()
+
+    def _dense_index_signature(self) -> dict[str, Any]:
+        return {
+            "provider_id": str(self._resolved_embedding_provider_id or ""),
+            "protocol_adapter": str(self._resolved_embedding_protocol_adapter or ""),
+            "model": str(self._resolved_embedding_model or ""),
+            "base_url": str(self._dashscope_api_base or ""),
+        }
+
+    def _write_dense_index_state(self, payload: dict[str, Any]) -> None:
+        self.dense_index_state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.dense_index_state_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    async def reset_dense_index(self, *, reason: str = "manual") -> dict[str, Any]:
+        result = await asyncio.to_thread(self.store.reset_dense_index)
+        if not bool((result or {}).get("dense_enabled")):
+            raise RuntimeError("dense_backend_unavailable_after_reset")
+        payload = {
+            "status": "reset",
+            "reason": str(reason or "manual"),
+            "updated_at": _now_iso(),
+            "embedding_signature": self._dense_index_signature(),
+            **dict(result or {}),
+        }
+        await asyncio.to_thread(self._write_dense_index_state, payload)
+        return payload
+
+    async def rebuild_dense_index(self, *, reason: str = "manual") -> dict[str, Any]:
+        result = await self.ensure_dense_backfill()
+        if not bool(getattr(self.store, "_dense_enabled", False)):
+            raise RuntimeError("dense_backend_unavailable_after_rebuild")
+        payload = {
+            "status": "ready",
+            "reason": str(reason or "manual"),
+            "updated_at": _now_iso(),
+            "embedding_signature": self._dense_index_signature(),
+            **dict(result or {}),
+            "dense_enabled": bool(getattr(self.store, "_dense_enabled", False)),
+        }
+        await asyncio.to_thread(self._write_dense_index_state, payload)
+        return payload
 
     def close(self) -> None:
         self.store.close()
@@ -1893,10 +2003,20 @@ class _RagMemoryBackend:
     async def ensure_dense_backfill(self) -> dict[str, Any]:
         if self.arch_version != 'v2' or not self._feature_enabled('unified_context'):
             return {'needed': False, 'eligible': 0, 'indexed': 0, 'dense_points': 0}
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             self.store.ensure_context_v2_dense_backfill,
             batch_size=getattr(self.store, 'embedding_batch_size', 32),
         )
+        payload = {
+            "status": "ready",
+            "reason": "sync",
+            "updated_at": _now_iso(),
+            "embedding_signature": self._dense_index_signature(),
+            **dict(result or {}),
+            "dense_enabled": bool(getattr(self.store, "_dense_enabled", False)),
+        }
+        await asyncio.to_thread(self._write_dense_index_state, payload)
+        return result
 
     async def read_trace_file(self, *, trace_kind: str, limit: int = 20) -> list[dict[str, Any]]:
         path = self.trace_file
@@ -3876,6 +3996,26 @@ class MemoryManager:
                 self._last_backend_error = str(exc)
                 logger.warning("RAG memory backend unavailable; using legacy fallback: {}", exc)
                 return None
+
+    async def reset_dense_index(self, *, reason: str = "manual") -> dict[str, Any]:
+        backend = await self._ensure_backend(force_retry=True)
+        if backend is None:
+            raise RuntimeError("rag_memory_backend_unavailable")
+        result = await backend.reset_dense_index(reason=reason)
+        self.store = backend.store
+        self._backend_state = "rag_recovering"
+        self._last_backend_error = ""
+        return result
+
+    async def rebuild_dense_index(self, *, reason: str = "manual") -> dict[str, Any]:
+        backend = await self._ensure_backend(force_retry=True)
+        if backend is None:
+            raise RuntimeError("rag_memory_backend_unavailable")
+        result = await backend.rebuild_dense_index(reason=reason)
+        self.store = backend.store
+        self._backend_state = "rag_healthy"
+        self._last_backend_error = ""
+        return result
 
     async def _ensure_dense_backfill(self, backend: _RagMemoryBackend) -> None:
         ensure_fn = getattr(backend, "ensure_dense_backfill", None)
