@@ -246,6 +246,8 @@ function taskCardPatchEligible(previousTask, nextTask) {
         && taskFinalAcceptanceStatus(previousTask) === taskFinalAcceptanceStatus(nextTask)
         && taskContinuationState(previousTask) === taskContinuationState(nextTask)
         && taskContinuedByTaskId(previousTask) === taskContinuedByTaskId(nextTask)
+        && taskRetryCount(previousTask) === taskRetryCount(nextTask)
+        && taskRecoveryNotice(previousTask) === taskRecoveryNotice(nextTask)
         && String(previousTask.title || "") === String(nextTask.title || "")
         && String(previousTask.brief || "") === String(nextTask.brief || "")
         && Number(previousTask.max_depth || 0) === Number(nextTask.max_depth || 0);

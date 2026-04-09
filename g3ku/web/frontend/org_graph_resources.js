@@ -757,6 +757,40 @@ async function saveCommunication() {
     }
 }
 
+function cancelSkillAutosave() {
+    if (S.skillAutosaveTimerId) {
+        window.clearTimeout(S.skillAutosaveTimerId);
+        S.skillAutosaveTimerId = null;
+    }
+}
+
+function queueSkillAutosave(delayMs = 900) {
+    cancelSkillAutosave();
+    if (!S.selectedSkill || !S.skillDirty) return;
+    S.skillAutosaveTimerId = window.setTimeout(() => {
+        S.skillAutosaveTimerId = null;
+        if (!S.selectedSkill || !S.skillDirty) return;
+        void saveSkill({ showProgressToast: false, showSuccessToast: false, reopenDetail: false, silentIfPristine: true, autosave: true });
+    }, Math.max(0, Number(delayMs) || 0));
+}
+
+function cancelToolAutosave() {
+    if (S.toolAutosaveTimerId) {
+        window.clearTimeout(S.toolAutosaveTimerId);
+        S.toolAutosaveTimerId = null;
+    }
+}
+
+function queueToolAutosave(delayMs = 300) {
+    cancelToolAutosave();
+    if (!S.selectedTool || !S.toolDirty) return;
+    S.toolAutosaveTimerId = window.setTimeout(() => {
+        S.toolAutosaveTimerId = null;
+        if (!S.selectedTool || !S.toolDirty) return;
+        void saveTool({ showProgressToast: false, showSuccessToast: false, reopenDetail: false, silentIfPristine: true, autosave: true });
+    }, Math.max(0, Number(delayMs) || 0));
+}
+
 function renderSkillDetail() {
     if (!S.selectedSkill) {
         U.skillEmpty.style.display = "block";
@@ -788,7 +822,6 @@ function renderSkillDetail() {
                 </div>
                 <div class="detail-modal-actions">
                     <button type="button" class="toolbar-btn ghost" id="skill-modal-close" data-modal-close>关闭</button>
-                    <button type="button" class="toolbar-btn success" id="skill-modal-save">保存</button>
                 </div>
             </div>
             <div class="detail-modal-body">
@@ -828,16 +861,17 @@ function renderSkillDetail() {
         </article>`;
     dockResourceStatusBadge(U.skillDetail);
     U.skillDetail.querySelector("#skill-modal-close")?.addEventListener("click", clearSkillSelection);
-    U.skillDetail.querySelector("#skill-modal-save")?.addEventListener("click", () => void saveSkill());
     U.skillDetail.querySelector("#skill-enable-btn")?.addEventListener("click", () => {
         S.selectedSkill.enabled = true;
         setSkillDirty(true);
         renderSkillDetail();
+        queueSkillAutosave(120);
     });
     U.skillDetail.querySelector("#skill-disable-btn")?.addEventListener("click", () => {
         S.selectedSkill.enabled = false;
         setSkillDirty(true);
         renderSkillDetail();
+        queueSkillAutosave(120);
     });
     U.skillDetail.querySelector("#skill-delete-btn")?.addEventListener("click", () => void requestDeleteSkill());
     U.skillDetail.querySelectorAll(".skill-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
@@ -847,6 +881,7 @@ function renderSkillDetail() {
         S.selectedSkill.allowed_roles = [...nextRoles];
         setSkillDirty(true);
         renderSkillDetail();
+        queueSkillAutosave(120);
     }));
     U.skillDetail.querySelectorAll(".skill-file").forEach((button) => button.addEventListener("click", () => {
         const nextFileKey = String(button.dataset.file || "").trim();
@@ -864,6 +899,7 @@ function renderSkillDetail() {
         if (!S.selectedSkillFile) return;
         S.skillContents[S.selectedSkillFile] = e.target.value;
         setSkillDirty(true);
+        queueSkillAutosave(1200);
     });
     renderSkillActions();
 }
@@ -964,8 +1000,17 @@ async function openSkill(skillId, quiet = false) {
     }
 }
 
-async function saveSkill() {
-    if (S.skillBusy) return;
+async function saveSkill({
+    showProgressToast = true,
+    showSuccessToast = true,
+    reopenDetail = true,
+    silentIfPristine = false,
+    autosave = false,
+} = {}) {
+    if (S.skillBusy) {
+        if (autosave) S.skillAutosavePending = true;
+        return;
+    }
     const selectedId = String(S.selectedSkill?.skill_id || "").trim();
     const displayName = String(S.selectedSkill?.display_name || selectedId || "Skill").trim();
     const enabled = !!S.selectedSkill?.enabled;
@@ -976,12 +1021,17 @@ async function saveSkill() {
         return;
     }
     if (!S.skillDirty) {
-        showToast({ title: "No pending changes", text: "This skill has no unsaved changes.", kind: "info", durationMs: 1800 });
+        if (!silentIfPristine) {
+            showToast({ title: "No pending changes", text: "This skill has no unsaved changes.", kind: "info", durationMs: 1800 });
+        }
         return;
     }
+    cancelSkillAutosave();
     S.skillBusy = true;
     renderSkillActions();
-    showToast({ title: "保存中", text: "正在保存 Skill，请稍候…", kind: "info", persistent: true });
+    if (showProgressToast) {
+        showToast({ title: "保存中", text: "正在保存 Skill，请稍候…", kind: "info", persistent: true });
+    }
     try {
         const editor = document.getElementById("skill-editor");
         if (editor && S.selectedSkillFile) S.skillContents[S.selectedSkillFile] = editor.value;
@@ -994,16 +1044,23 @@ async function saveSkill() {
         });
         await ApiClient.reloadResources();
         await loadSkills({ renderDetail: false });
-        await openSkill(selectedId, true);
+        if (reopenDetail) {
+            await openSkill(selectedId, true);
+        }
         setSkillDirty(false);
-        addNotice({ kind: "resource_saved", title: "Skill saved", text: displayName || selectedId });
-        showToast({ title: "保存成功", text: "Skill 配置已保存", kind: "success", durationMs: 2200 });
+        if (showSuccessToast) {
+            addNotice({ kind: "resource_saved", title: "Skill saved", text: displayName || selectedId });
+            showToast({ title: "保存成功", text: "Skill 配置已保存", kind: "success", durationMs: 2200 });
+        }
     } catch (e) {
         addNotice({ kind: "resource_failed", title: "Skill save failed", text: e.message || "Unknown error" });
         showToast({ title: "保存失败", text: e.message || "Unknown error", kind: "error", durationMs: 2600 });
     } finally {
         S.skillBusy = false;
+        const queuedAutosave = !!S.skillAutosavePending;
+        S.skillAutosavePending = false;
         renderSkillActions();
+        if (queuedAutosave && S.skillDirty) queueSkillAutosave(300);
     }
 }
 
@@ -1072,7 +1129,6 @@ function renderToolDetail() {
                 </div>
                 <div class="detail-modal-actions">
                     <button type="button" class="toolbar-btn ghost" id="tool-modal-close" data-modal-close>关闭</button>
-                    <button type="button" class="toolbar-btn success" id="tool-modal-save">保存</button>
                 </div>
             </div>
             <div class="detail-modal-body">
@@ -1171,16 +1227,17 @@ function renderToolDetail() {
     }
     dockResourceStatusBadge(U.toolDetail);
     U.toolDetail.querySelector("#tool-modal-close")?.addEventListener("click", clearToolSelection);
-    U.toolDetail.querySelector("#tool-modal-save")?.addEventListener("click", () => void saveTool());
     U.toolDetail.querySelector("#tool-enable-btn")?.addEventListener("click", () => {
         S.selectedTool.enabled = true;
         setToolDirty(true);
         renderToolDetail();
+        queueToolAutosave(120);
     });
     U.toolDetail.querySelector("#tool-disable-btn")?.addEventListener("click", () => {
         S.selectedTool.enabled = false;
         setToolDirty(true);
         renderToolDetail();
+        queueToolAutosave(120);
     });
     U.toolDetail.querySelector("#tool-delete-btn")?.addEventListener("click", () => void requestDeleteTool());
     U.toolDetail.querySelectorAll(".tool-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
@@ -1192,6 +1249,7 @@ function renderToolDetail() {
         action.allowed_roles = [...set];
         e.target.closest(".role-toggle")?.classList.toggle("checked", e.target.checked);
         setToolDirty(true);
+        queueToolAutosave(120);
     }));
     renderToolActions();
 }
@@ -1258,8 +1316,17 @@ async function openTool(toolId, quiet = false) {
     }
 }
 
-async function saveTool() {
-    if (S.toolBusy) return;
+async function saveTool({
+    showProgressToast = true,
+    showSuccessToast = true,
+    reopenDetail = true,
+    silentIfPristine = false,
+    autosave = false,
+} = {}) {
+    if (S.toolBusy) {
+        if (autosave) S.toolAutosavePending = true;
+        return;
+    }
     const selectedId = String(S.selectedTool?.tool_id || "").trim();
     const displayName = String(S.selectedTool?.display_name || selectedId || "Tool").trim();
     const enabled = !!S.selectedTool?.enabled;
@@ -1277,12 +1344,17 @@ async function saveTool() {
         return;
     }
     if (!S.toolDirty) {
-        showToast({ title: "No pending changes", text: "This tool has no unsaved changes.", kind: "info", durationMs: 1800 });
+        if (!silentIfPristine) {
+            showToast({ title: "No pending changes", text: "This tool has no unsaved changes.", kind: "info", durationMs: 1800 });
+        }
         return;
     }
+    cancelToolAutosave();
     S.toolBusy = true;
     renderToolActions();
-    showToast({ title: "保存中", text: "正在保存工具权限，请稍候…", kind: "info", persistent: true });
+    if (showProgressToast) {
+        showToast({ title: "保存中", text: "正在保存工具权限，请稍候…", kind: "info", persistent: true });
+    }
     try {
         await ApiClient.updateToolPolicy(selectedId, {
             enabled,
@@ -1290,16 +1362,23 @@ async function saveTool() {
         });
         await ApiClient.reloadResources();
         await loadTools({ renderDetail: false });
-        await openTool(selectedId, true);
+        if (reopenDetail) {
+            await openTool(selectedId, true);
+        }
         setToolDirty(false);
-        addNotice({ kind: "resource_saved", title: "Tool saved", text: displayName || selectedId });
-        showToast({ title: "保存成功", text: "工具权限已保存", kind: "success", durationMs: 2200 });
+        if (showSuccessToast) {
+            addNotice({ kind: "resource_saved", title: "Tool saved", text: displayName || selectedId });
+            showToast({ title: "保存成功", text: "工具权限已保存", kind: "success", durationMs: 2200 });
+        }
     } catch (e) {
         addNotice({ kind: "resource_failed", title: "Tool save failed", text: e.message || "Unknown error" });
         showToast({ title: "保存失败", text: e.message || "Unknown error", kind: "error", durationMs: 2600 });
     } finally {
         S.toolBusy = false;
+        const queuedAutosave = !!S.toolAutosavePending;
+        S.toolAutosavePending = false;
         renderToolActions();
+        if (queuedAutosave && S.toolDirty) queueToolAutosave(300);
     }
 }
 

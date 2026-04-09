@@ -1206,7 +1206,7 @@
         <section class="model-chain-card">
           <div class="card-header">
             <h3>${escv(SCOPE_LABELS[scope.key] || scope.key)}</h3>
-            <p class="subtitle">${escv(chain[0] ? `当前首选 ${chain[0]}` : "尚未配置")}</p>
+            <p class="subtitle">${escv(chain.length ? `已配置 ${chain.length} 个模型` : "尚未配置")}</p>
           </div>
           ${renderRoleLimitControl({ scopeKey: scope.key, kind: "iterations", label: "最大轮数", value: maxIterations, editing })}
           ${renderRoleLimitControl({ scopeKey: scope.key, kind: "concurrency", label: "最大并发数", value: maxConcurrency, editing })}

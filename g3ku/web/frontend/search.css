@@ -5472,7 +5472,7 @@ textarea {
     color: var(--text-primary);
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
     gap: 12px;
     text-align: left;
     font-size: 0.9rem;
@@ -5498,26 +5498,9 @@ textarea {
 .resource-select-option-label {
     min-width: 0;
     flex: 1;
-}
-
-.resource-select-option-check {
-    width: 18px;
-    height: 18px;
-    border-radius: 999px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.78rem;
-    font-weight: 800;
-    color: transparent;
-    background: color-mix(in srgb, var(--bg-app) 82%, transparent);
-    border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
-}
-
-.resource-select-option.is-selected .resource-select-option-check {
-    color: var(--text-inverse);
-    background: color-mix(in srgb, var(--brand-primary) 88%, #0ea5e9 12%);
-    border-color: transparent;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .resource-filter-row {

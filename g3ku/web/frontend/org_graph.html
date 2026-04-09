@@ -92,11 +92,6 @@
 
         <main class="main-content">
             <section id="view-ceo" class="view-section active">
-                <header class="content-header">
-                    <h1>CEO 会话</h1>
-                    <p class="subtitle">通过 CEO 前门与 main 运行时交互，查看工具执行流与最终回复。</p>
-                </header>
-
                 <div id="ceo-shell" class="ceo-shell">
                     <aside id="ceo-session-panel" class="ceo-session-panel" aria-label="CEO session list">
                         <div class="ceo-session-panel-header">
@@ -116,12 +111,12 @@
                                 <button id="ceo-session-bulk-toggle" class="toolbar-btn ghost ceo-session-bulk-toggle" type="button" aria-pressed="false" hidden>多选</button>
                             </div>
                         </div>
+                        <div id="ceo-session-bulk-actions" class="ceo-session-bulk-actions" role="group" aria-label="CEO session bulk actions" hidden>
+                            <button id="ceo-session-bulk-select-all" class="toolbar-btn ghost" type="button">全选</button>
+                            <button id="ceo-session-bulk-delete" class="toolbar-btn danger" type="button">删除</button>
+                        </div>
                         <div id="ceo-session-current" class="ceo-session-current" aria-live="polite" hidden></div>
                         <div id="ceo-session-list" class="ceo-session-list" role="list"></div>
-                        <div id="ceo-session-bulk-actions" class="ceo-session-bulk-actions" role="group" aria-label="CEO session bulk actions" hidden>
-                            <button id="ceo-session-bulk-delete" class="toolbar-btn danger" type="button">删除</button>
-                            <button id="ceo-session-bulk-select-all" class="toolbar-btn ghost" type="button">全选</button>
-                        </div>
                     </aside>
 
                     <div class="chat-wrapper">
@@ -249,38 +244,31 @@
             </section>
 
             <section id="view-skills" class="view-section" style="display: none;">
-                <header class="content-header resource-header">
-                    <div>
+                <header class="content-header resource-header compact-resource-header">
+                    <div class="resource-header-title">
                         <h1>Skill 管理</h1>
-                        <p class="subtitle">查看、编辑 Skill 文件内容与角色可见性策略。</p>
                     </div>
-                    <div class="resource-header-actions">
+                    <div class="resource-header-actions compact-resource-header-actions">
                         <button id="skill-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
-                        <button id="skill-save-btn" class="toolbar-btn success" type="button">保存</button>
+                        <select id="skill-risk-filter" class="resource-select">
+                            <option value="all">风险</option>
+                            <option value="low">低风险</option>
+                            <option value="medium">中风险</option>
+                            <option value="high">高风险</option>
+                        </select>
+                        <select id="skill-status-filter" class="resource-select">
+                            <option value="all">状态</option>
+                            <option value="enabled">已启用</option>
+                            <option value="disabled">已禁用</option>
+                            <option value="unavailable">不可用</option>
+                        </select>
+                        <input id="skill-search-input" class="resource-search resource-header-search" type="search"
+                            placeholder="搜索 Skill 名称、ID 或路径">
                     </div>
                 </header>
 
                 <div class="resource-layout full-list-layout">
                     <aside class="resource-list-panel skill-list-panel full-width-panel">
-                        <div class="resource-controls">
-                            <input id="skill-search-input" class="resource-search" type="search"
-                                placeholder="搜索 Skill 名称、ID 或路径">
-                            <div class="resource-filter-row">
-                                <select id="skill-risk-filter" class="resource-select">
-                                    <option value="all">全部风险</option>
-                                    <option value="low">低风险</option>
-                                    <option value="medium">中风险</option>
-                                    <option value="high">高风险</option>
-                                </select>
-                                <select id="skill-status-filter" class="resource-select">
-                                    <option value="all">全部状态</option>
-                                    <option value="enabled">已启用</option>
-                                    <option value="disabled">已禁用</option>
-                                    <option value="unavailable">不可用</option>
-                                </select>
-                            </div>
-                        </div>
-
                         <div id="skill-list" class="resource-list"></div>
                         <div class="resource-pagination" aria-label="Skills pagination">
                             <div class="resource-pagination-group">
@@ -310,38 +298,31 @@
             </section>
 
             <section id="view-tools" class="view-section" style="display: none;">
-                <header class="content-header resource-header">
-                    <div>
+                <header class="content-header resource-header compact-resource-header">
+                    <div class="resource-header-title">
                         <h1>Tool 管理</h1>
-                        <p class="subtitle">查看工具族、各 action 权限，以及当前资源可用状态。</p>
                     </div>
-                    <div class="resource-header-actions">
+                    <div class="resource-header-actions compact-resource-header-actions">
                         <button id="tool-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
-                        <button id="tool-save-btn" class="toolbar-btn success" type="button">保存</button>
+                        <select id="tool-risk-filter" class="resource-select">
+                            <option value="all">风险</option>
+                            <option value="low">低风险</option>
+                            <option value="medium">中风险</option>
+                            <option value="high">高风险</option>
+                        </select>
+                        <select id="tool-status-filter" class="resource-select">
+                            <option value="all">状态</option>
+                            <option value="enabled">已启用</option>
+                            <option value="disabled">已禁用</option>
+                            <option value="unavailable">不可用</option>
+                        </select>
+                        <input id="tool-search-input" class="resource-search resource-header-search" type="search"
+                            placeholder="搜索 Tool 名称、ID 或路径">
                     </div>
                 </header>
 
                 <div class="resource-layout full-list-layout">
                     <aside class="resource-list-panel tool-list-panel full-width-panel">
-                        <div class="resource-controls">
-                            <input id="tool-search-input" class="resource-search" type="search"
-                                placeholder="搜索 Tool 名称、ID 或路径">
-                            <div class="resource-filter-row">
-                                <select id="tool-status-filter" class="resource-select">
-                                    <option value="all">全部状态</option>
-                                    <option value="enabled">已启用</option>
-                                    <option value="disabled">已禁用</option>
-                                    <option value="unavailable">不可用</option>
-                                </select>
-                                <select id="tool-risk-filter" class="resource-select">
-                                    <option value="all">全部风险</option>
-                                    <option value="low">低风险</option>
-                                    <option value="medium">中风险</option>
-                                    <option value="high">高风险</option>
-                                </select>
-                            </div>
-                        </div>
-
                         <div id="tool-list" class="resource-list"></div>
                         <div class="resource-pagination" aria-label="Tools pagination">
                             <div class="resource-pagination-group">
@@ -371,21 +352,19 @@
             </section>
 
             <section id="view-models" class="view-section" style="display: none;">
-                <header class="content-header resource-header model-page-header">
-                    <div>
-                        <h1>LLM 配置中心</h1>
-                        <p class="subtitle">选择供应商并维护模型 JSON 配置，再将模型编排到 Role Routes。</p>
-                        <p id="sidebar-model-hint" class="ceo-model-panel-hint"
-                            style="margin-top: 8px; color: var(--brand-primary);">正在加载模型配置...</p>
+                <header class="content-header resource-header model-page-header model-actions-only-header">
+                    <div class="resource-header-title">
+                        <h1>模型配置</h1>
                     </div>
                     <div class="resource-header-actions model-page-actions">
                         <button id="model-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
                         <button id="llm-memory-settings-btn" class="toolbar-btn ghost" type="button">记忆模型设置</button>
-                        <button id="llm-config-create-btn" class="toolbar-btn" type="button">新建配置</button>
+                        <button id="llm-config-create-btn" class="toolbar-btn ghost" type="button">新建配置</button>
                         <button id="model-roles-save-btn" class="toolbar-btn success" type="button">编辑模型链</button>
                         <button id="model-roles-cancel-btn" class="toolbar-btn ghost" type="button" hidden>取消</button>
                     </div>
                 </header>
+                <p id="sidebar-model-hint" class="ceo-model-panel-hint" hidden aria-live="polite">正在加载模型配置...</p>
 
                 <div class="llm-page-layout">
                     <section class="resource-detail-panel llm-bindings-panel">
@@ -423,10 +402,9 @@
                 </section>
             </section>
             <section id="view-communications" class="view-section" style="display: none;">
-                <header class="content-header resource-header">
-                    <div>
+                <header class="content-header resource-header compact-resource-header communication-compact-header">
+                    <div class="resource-header-title">
                         <h1>通信配置</h1>
-                        <p class="subtitle">统一管理 QQ Bot、钉钉、企微与飞书通信。点击具体渠道后，可编辑 JSON 配置并手动保存。</p>
                     </div>
                     <div class="resource-header-actions">
                         <button id="communication-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>

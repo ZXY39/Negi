@@ -426,6 +426,8 @@ def test_task_status_helpers_render_recreated_and_retry_in_place_states() -> Non
           task_id: "task:retried",
           status: "in_progress",
           continuation_state: "retried_in_place",
+          retry_count: 2,
+          recovery_notice: "本任务遇到异常停止，已回退到稳定步骤继续。",
         };
 
         console.log(JSON.stringify({
@@ -454,8 +456,8 @@ def test_task_status_helpers_render_recreated_and_retry_in_place_states() -> Non
     assert result["recreatedDetailLabel"] == "已续跑 · 已续跑到 task:cont-1"
     assert result["retriedStatus"] == "in_progress"
     assert result["retriedLabel"] == "Running"
-    assert result["retriedSummary"] == "原任务内续跑中"
-    assert result["retriedDetailLabel"] == "运行中 · 原任务内续跑中"
+    assert result["retriedSummary"] == "原任务内续跑中 · 第2次 · 恢复自失败快照"
+    assert result["retriedDetailLabel"] == "运行中 · 原任务内续跑中 · 第2次 · 恢复自失败快照"
     assert result["retriedPrimary"]["action"] == "pause"
 
 

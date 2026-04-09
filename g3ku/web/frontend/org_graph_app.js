@@ -224,12 +224,16 @@ const S = {
     selectedSkillFile: "",
     skillBusy: false,
     skillDirty: false,
+    skillAutosaveTimerId: null,
+    skillAutosavePending: false,
     skillPage: 1,
     skillPageSize: RESOURCE_PAGE_SIZES[0],
     tools: [],
     selectedTool: null,
     toolBusy: false,
     toolDirty: false,
+    toolAutosaveTimerId: null,
+    toolAutosavePending: false,
     toolPage: 1,
     toolPageSize: RESOURCE_PAGE_SIZES[0],
     communications: [],
@@ -3657,7 +3661,7 @@ function syncDetailSaveButton(kind) {
     }
     if (hint) {
         hint.classList.toggle("is-dirty", dirty);
-        hint.textContent = dirty ? "Changes are staged. Click Save to apply them." : "";
+        hint.textContent = dirty ? (busy ? "正在自动保存..." : "变更已暂存，将自动保存。") : "";
         hint.hidden = !dirty;
     }
 }
@@ -3802,13 +3806,7 @@ function buildResourceSelectOptionButton(select, shell, option) {
     const label = document.createElement("span");
     label.className = "resource-select-option-label";
     label.textContent = String(option.textContent || "").trim();
-
-    const check = document.createElement("span");
-    check.className = "resource-select-option-check";
-    check.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polyline points="13 5 7 11 4 8"></polyline></svg>`;
-    check.setAttribute("aria-hidden", "true");
-
-    optionButton.append(label, check);
+    optionButton.append(label);
     optionButton.addEventListener("click", () => setResourceSelectValue(select, option.value));
     optionButton.addEventListener("keydown", (e) => {
         if (e.key === "ArrowDown") {
@@ -4002,13 +4000,7 @@ function buildResourceSelect(select) {
         const label = document.createElement("span");
         label.className = "resource-select-option-label";
         label.textContent = String(option.textContent || "").trim();
-
-        const check = document.createElement("span");
-        check.className = "resource-select-option-check";
-        check.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polyline points="13 5 7 11 4 8"></polyline></svg>`;
-        check.setAttribute("aria-hidden", "true");
-
-        optionButton.append(label, check);
+        optionButton.append(label);
         optionButton.addEventListener("click", () => setResourceSelectValue(select, option.value));
         optionButton.addEventListener("keydown", (e) => {
             if (e.key === "ArrowDown") {
@@ -4439,9 +4431,7 @@ function renderModelRoleEditors() {
     U.modelRoleEditors.innerHTML = MODEL_SCOPES.map((scope) => {
         const chain = modelScopeChain(scope.key);
         const maxIterations = modelScopeIterations(scope.key);
-        const defaultText = S.modelCatalog.defaults[scope.key]
-            ? `当前首选 ${S.modelCatalog.defaults[scope.key]}`
-            : "未配置当前首选";
+        const defaultText = chain.length ? `已配置 ${chain.length} 个模型` : "尚未配置";
         const chainMarkup = chain.length
             ? chain.map((ref, index) => {
                 const item = modelRefItem(ref);
@@ -6164,6 +6154,15 @@ const taskFailureClass = (task) => String(task?.failure_class || task?.metadata?
 const taskFinalAcceptanceStatus = (task) => String(task?.final_acceptance?.status || task?.metadata?.final_acceptance?.status || "").trim().toLowerCase();
 const taskContinuationState = (task) => String(task?.continuation_state || task?.metadata?.continuation_state || "").trim().toLowerCase();
 const taskContinuedByTaskId = (task) => String(task?.continued_by_task_id || task?.metadata?.continued_by_task_id || "").trim();
+const taskRetryCount = (task) => {
+    const directCount = Number(task?.retry_count);
+    if (Number.isInteger(directCount) && directCount >= 0) return directCount;
+    const history = Array.isArray(task?.retry_history)
+        ? task.retry_history
+        : (Array.isArray(task?.metadata?.retry_history) ? task.metadata.retry_history : []);
+    return history.length;
+};
+const taskRecoveryNotice = (task) => String(task?.recovery_notice || task?.metadata?.recovery_notice || "").trim();
 const taskIsUnpassed = (task) => !!task && pStatus(task.status) === "success" && taskFinalAcceptanceStatus(task) === "failed";
 const taskIsSuperseded = (task) => !!task && taskContinuationState(task) === "recreated" && !!taskContinuedByTaskId(task);
 const taskContinuationSummary = (task) => {
@@ -6174,7 +6173,11 @@ const taskContinuationSummary = (task) => {
         return continuedByTaskId ? `已续跑到 ${continuedByTaskId}` : "已续跑到新任务";
     }
     if (continuationState === "retried_in_place") {
-        return pStatus(task.status) === "in_progress" ? "原任务内续跑中" : "原任务已按原地重试续跑";
+        const parts = [pStatus(task.status) === "in_progress" ? "原任务内续跑中" : "原任务已按原地重试续跑"];
+        const retryCount = taskRetryCount(task);
+        if (retryCount > 0) parts.push(`第${retryCount}次`);
+        if (taskRecoveryNotice(task)) parts.push("恢复自失败快照");
+        return parts.join(" · ");
     }
     return "";
 };
@@ -6438,6 +6441,11 @@ function renderCommunicationActions() {
 }
 
 function clearSkillSelection() {
+    if (S.skillAutosaveTimerId) {
+        window.clearTimeout(S.skillAutosaveTimerId);
+        S.skillAutosaveTimerId = null;
+    }
+    S.skillAutosavePending = false;
     S.selectedSkill = null;
     S.skillFiles = [];
     S.skillContents = {};
@@ -6449,6 +6457,11 @@ function clearSkillSelection() {
 }
 
 function clearToolSelection() {
+    if (S.toolAutosaveTimerId) {
+        window.clearTimeout(S.toolAutosaveTimerId);
+        S.toolAutosaveTimerId = null;
+    }
+    S.toolAutosavePending = false;
     S.selectedTool = null;
     S.toolDirty = false;
     renderTools();

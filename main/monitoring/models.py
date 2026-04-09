@@ -115,6 +115,10 @@ class TaskListItem(Model):
     status: TaskStatus = 'in_progress'
     failure_class: str = ''
     final_acceptance: dict[str, Any] = Field(default_factory=dict)
+    continuation_state: str = ''
+    continued_by_task_id: str = ''
+    retry_count: int = 0
+    recovery_notice: str = ''
     is_unread: bool = False
     is_paused: bool = False
     created_at: str = ''

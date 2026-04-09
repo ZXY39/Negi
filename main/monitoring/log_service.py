@@ -3118,14 +3118,19 @@ class TaskLogService:
 
     @staticmethod
     def _task_summary_payload(task: TaskRecord) -> dict[str, Any]:
+        metadata = dict(task.metadata or {})
         return {
             'task_id': task.task_id,
             'session_id': task.session_id,
             'title': task.title,
             'brief': task.brief_text,
             'status': task.status,
-            'failure_class': normalize_failure_class((task.metadata or {}).get('failure_class')),
-            'final_acceptance': normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance')).model_dump(mode='json'),
+            'failure_class': normalize_failure_class(metadata.get('failure_class')),
+            'final_acceptance': normalize_final_acceptance_metadata(metadata.get('final_acceptance')).model_dump(mode='json'),
+            'continuation_state': str(metadata.get('continuation_state') or '').strip(),
+            'continued_by_task_id': str(metadata.get('continued_by_task_id') or '').strip(),
+            'retry_count': len(list(metadata.get('retry_history') or [])),
+            'recovery_notice': str(metadata.get('recovery_notice') or '').strip(),
             'is_unread': bool(task.is_unread),
             'is_paused': bool(task.is_paused),
             'created_at': task.created_at,

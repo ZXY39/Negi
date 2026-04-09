@@ -38,7 +38,26 @@ def test_ceo_session_bulk_delete_css_contract() -> None:
     assert re.search(r"\.confirm-text\s*\{[^}]*overflow-y:\s*auto;", css, flags=re.MULTILINE)
     assert re.search(r"\.confirm-checkbox-details\s*\{[^}]*overflow:\s*auto;", css, flags=re.MULTILINE)
     assert ".resource-header-search" in css
-    assert re.search(r"\.ceo-session-bulk-actions\s*\{[^}]*order:\s*2;", css, flags=re.MULTILINE)
+    assert re.search(r"\.compact-resource-header-actions\s*\{[^}]*flex-wrap:\s*nowrap;", css, flags=re.MULTILINE)
+    assert re.search(r"\.compact-resource-header-actions\s*\{[^}]*overflow:\s*visible;", css, flags=re.MULTILINE)
+    assert re.search(r"\.resource-header-search\s*\{[^}]*border-radius:\s*14px;", css, flags=re.MULTILINE)
+    assert re.search(r"\.compact-resource-header-actions\s*>\s*\.toolbar-btn\s*\{[^}]*white-space:\s*nowrap;", css, flags=re.MULTILINE)
+    assert re.search(r"\.compact-resource-header-actions\s*>\s*\.toolbar-btn\s*\{[^}]*min-height:\s*42px;", css, flags=re.MULTILINE)
+    assert re.search(r"\.compact-resource-header-actions\s*>\s*\.toolbar-btn\s*\{[^}]*height:\s*42px;", css, flags=re.MULTILINE)
+    assert re.search(r"\.compact-resource-header-actions\s*>\s*\.toolbar-btn\s*\{[^}]*min-width:\s*0;", css, flags=re.MULTILINE)
+    assert re.search(r"\.compact-resource-header-actions\s*>\s*\.resource-select-shell\s+\.resource-select-trigger\s*\{[^}]*min-height:\s*42px;", css, flags=re.MULTILINE)
+    assert re.search(r"\.compact-resource-header-actions\s*>\s*\.resource-select-shell\s+\.resource-select-trigger\s*\{[^}]*height:\s*42px;", css, flags=re.MULTILINE)
+    assert re.search(r"\.compact-resource-header-actions\s*>\s*\.resource-select-shell\s+\.resource-select-trigger\s*\{[^}]*border-radius:\s*14px;", css, flags=re.MULTILINE)
+    assert re.search(r"\.compact-resource-header-actions\s*>\s*\.resource-header-search\s*\{[^}]*height:\s*42px;", css, flags=re.MULTILINE)
+    assert re.search(r"\.resource-list\s*\{[^}]*padding:\s*var\(--space-4\)\s+var\(--space-4\)\s+var\(--space-4\);", css, flags=re.MULTILINE)
+    generic_search_index = css.index(".resource-search,\n.resource-select {")
+    compact_search_override_index = css.rfind(".compact-resource-header-actions > .resource-header-search {")
+    compact_select_override_index = css.rfind(".compact-resource-header-actions > .resource-select-shell .resource-select-trigger {")
+    assert compact_search_override_index > generic_search_index
+    assert compact_select_override_index > generic_search_index
+    assert re.search(r"\.communication-compact-header\s*\{[^}]*padding-top:\s*var\(--space-4\);", css, flags=re.MULTILINE)
+    assert re.search(r"\.communication-compact-header\s*\{[^}]*padding-bottom:\s*var\(--space-4\);", css, flags=re.MULTILINE)
+    assert not re.search(r"\.communication-compact-header\s*\{[^}]*height:\s*42px;", css, flags=re.MULTILINE)
 
 
 def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
@@ -59,8 +78,7 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     skill_section = re.search(r'<section id="view-skills".*?</section>', html, flags=re.DOTALL)
     assert skill_section is not None
     skill_html = skill_section.group(0)
-    assert skill_html.index('id="skill-refresh-btn"') < skill_html.index('id="skill-save-btn"')
-    assert skill_html.index('id="skill-save-btn"') < skill_html.index('id="skill-risk-filter"')
+    assert 'id="skill-save-btn"' not in skill_html
     assert skill_html.index('id="skill-risk-filter"') < skill_html.index('id="skill-status-filter"')
     assert skill_html.index('id="skill-status-filter"') < skill_html.index('id="skill-search-input"')
     assert '>风险</option>' in skill_html
@@ -69,8 +87,7 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     tool_section = re.search(r'<section id="view-tools".*?</section>', html, flags=re.DOTALL)
     assert tool_section is not None
     tool_html = tool_section.group(0)
-    assert tool_html.index('id="tool-refresh-btn"') < tool_html.index('id="tool-save-btn"')
-    assert tool_html.index('id="tool-save-btn"') < tool_html.index('id="tool-risk-filter"')
+    assert 'id="tool-save-btn"' not in tool_html
     assert tool_html.index('id="tool-risk-filter"') < tool_html.index('id="tool-status-filter"')
     assert tool_html.index('id="tool-status-filter"') < tool_html.index('id="tool-search-input"')
     assert '>风险</option>' in tool_html
@@ -79,13 +96,23 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     model_section = re.search(r'<section id="view-models".*?</section>', html, flags=re.DOTALL)
     assert model_section is not None
     model_html = model_section.group(0)
-    assert "LLM 配置中心" not in model_html
+    assert '<h1>模型配置</h1>' in model_html
     assert 'id="model-refresh-btn"' in model_html
     assert 'id="llm-memory-settings-btn"' in model_html
     assert 'id="llm-config-create-btn" class="toolbar-btn ghost"' in model_html
     assert 'id="model-roles-save-btn"' in model_html
 
+    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    resources_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_resources.js").read_text(encoding="utf-8")
+    llm_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_llm.js").read_text(encoding="utf-8")
+    assert "当前首选" not in app_js
+    assert "当前首选" not in llm_js
+    assert "skill-modal-save" not in resources_js
+    assert "tool-modal-save" not in resources_js
+    assert "resource-select-option-check" not in app_js
+
     communication_section = re.search(r'<section id="view-communications".*?</section>', html, flags=re.DOTALL)
     assert communication_section is not None
     communication_html = communication_section.group(0)
+    assert 'communication-compact-header' in communication_html
     assert communication_html.index('<h1>通信配置</h1>') < communication_html.index('id="communication-refresh-btn"')
