@@ -874,3 +874,86 @@ async def test_message_builder_does_not_dedupe_same_text_when_turn_ids_mismatch(
     assert contents[-2:] == ["done", "repeat this"]
     assert result.trace["current_user_in_checkpoint"] is False
     assert result.trace["history_source"] == "transcript"
+
+
+@pytest.mark.asyncio
+async def test_message_builder_collects_retrieved_context_separately_from_history_injection() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="durable preference")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="remembered preference",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=None,
+        checkpoint_messages=[
+            {"role": "user", "content": "prior user"},
+            {"role": "assistant", "content": "prior answer"},
+        ],
+        user_content="remembered preference",
+    )
+
+    assert result.trace["context_collection"] == {
+        "retrieved_record_count": 1,
+        "retrieval_scope_mode": "rbac_fallback",
+        "retrieved_context_present": True,
+    }
+    assert result.trace["message_injection"] == {
+        "history_source": "checkpoint",
+        "history_message_count": 2,
+        "current_user_appended": True,
+        "retrieved_context_in_model_messages": False,
+    }
+    assert "## Retrieved Context" in str(result.turn_overlay_text or "")
+    assert result.model_messages[-3:] == [
+        {"role": "user", "content": "prior user"},
+        {"role": "assistant", "content": "prior answer"},
+        {"role": "user", "content": "remembered preference"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_message_builder_ignores_same_session_turn_memory_records_for_ceo_history_recall() -> None:
+    memory_manager = _MemoryManager(response="")
+
+    async def _retrieve_context_bundle(**kwargs):
+        memory_manager.calls.append(dict(kwargs))
+        return RetrievedContextBundle(
+            query=str(kwargs.get("query") or ""),
+            records=[
+                {
+                    "record_id": "turn-memory-1",
+                    "context_type": "memory",
+                    "l0": "turn memory",
+                    "l1": "turn memory snippet",
+                    "l2_preview": "",
+                    "source": "turn",
+                    "session_key": "web:shared",
+                    "channel": "web",
+                    "chat_id": "shared",
+                    "confidence": 1.0,
+                }
+            ],
+        )
+
+    memory_manager.retrieve_context_bundle = _retrieve_context_bundle  # type: ignore[method-assign]
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=_SplitPromptBuilder())
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="follow up question",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=None,
+        checkpoint_messages=[
+            {"role": "user", "content": "earlier question"},
+            {"role": "assistant", "content": "earlier answer"},
+        ],
+        user_content="follow up question",
+    )
+
+    assert memory_manager.calls[0]["exclude_same_session_turn_memory"] is True
+    overlay = str(result.turn_overlay_text or "")
+    assert "turn memory snippet" not in overlay
+    assert result.trace["same_session_turn_memory_filtered_count"] == 1
+    assert result.trace["retrieved_record_count"] == 0
