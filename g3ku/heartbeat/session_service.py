@@ -10,8 +10,10 @@ from loguru import logger
 
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
+from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
+from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
 from g3ku.runtime.web_ceo_sessions import (
     _extract_task_ids_from_text,
     clear_inflight_turn_snapshot,
@@ -966,6 +968,7 @@ class WebSessionHeartbeatService:
         metadata = {
             "source": "heartbeat",
             "reason": reason,
+            "history_visible": False,
             "task_ids": normalized_task_ids,
         }
         normalized_results = [dict(item) for item in list(task_results or []) if isinstance(item, dict)]
@@ -1032,12 +1035,26 @@ class WebSessionHeartbeatService:
         await self._auto_retry_engine_failure_events(events)
         reasons = sorted({str(event.reason or "").strip().lower() or "heartbeat" for event in events})
         heartbeat_reason = reasons[0] if len(reasons) == 1 else "mixed"
+        heartbeat_prompt = self._build_prompt(events)
+        stable_rules_text = str(heartbeat_prompt.partition("[SESSION EVENTS]")[0] or "").strip()
+        task_ledger_summary = build_task_ledger_summary(normalized_metadata.get("last_task_memory"))
+        heartbeat_lane = build_heartbeat_prompt_lane(
+            provider_model="",
+            stable_rules_text=stable_rules_text,
+            task_ledger_summary=task_ledger_summary,
+            events=[dict(event.payload or {}, reason=event.reason) for event in events],
+        )
         user_input = UserInputMessage(
-            content=self._build_prompt(events),
+            content=str((heartbeat_lane.request_messages[-1] if heartbeat_lane.request_messages else {}).get("content") or ""),
             metadata={
                 "heartbeat_internal": True,
                 "heartbeat_reason": heartbeat_reason,
                 "heartbeat_task_ids": [str((event.payload or {}).get("task_id") or "").strip() for event in events],
+                "heartbeat_prompt_lane": heartbeat_lane.scope,
+                "heartbeat_retrieval_query": heartbeat_lane.retrieval_query,
+                "heartbeat_stable_rules_text": stable_rules_text,
+                "heartbeat_task_ledger_summary": task_ledger_summary,
+                "history_visibility": "internal_event",
             },
         )
 

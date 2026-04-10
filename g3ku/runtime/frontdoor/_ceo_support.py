@@ -10,6 +10,8 @@ from loguru import logger
 
 from g3ku.agent.tools.base import Tool
 from g3ku.json_schema_utils import normalize_runtime_tool_arguments_dict
+from g3ku.providers.provider_factory import build_provider_from_model_key
+from g3ku.providers.registry import find_by_name
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.frontdoor.exposure_resolver import CeoExposureResolver
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
@@ -167,9 +169,35 @@ class CeoFrontDoorSupport:
                 if str(ref or "").strip()
             ]
             if refs:
+                cache_capable_refs = [
+                    ref
+                    for ref in refs
+                    if self._model_ref_supports_prompt_cache(app_config, ref)
+                ]
+                if cache_capable_refs:
+                    return cache_capable_refs
                 return refs
         default_ref = f"{getattr(self._loop, 'provider_name', '')}:{getattr(self._loop, 'model', '')}".strip(":")
         return [default_ref] if default_ref else [str(getattr(self._loop, "model", "") or "").strip()]
+
+    @staticmethod
+    def _model_ref_supports_prompt_cache(app_config: Any, model_ref: str) -> bool:
+        try:
+            target = build_provider_from_model_key(app_config, str(model_ref or "").strip())
+        except Exception:
+            return False
+        provider_id = str(getattr(target, "provider_id", "") or "").strip().lower()
+        spec = find_by_name(provider_id)
+        if spec is not None:
+            return bool(spec.supports_prompt_caching)
+        provider = getattr(target, "provider", None)
+        supports_cache_control = getattr(provider, "_supports_cache_control", None)
+        if callable(supports_cache_control):
+            try:
+                return bool(supports_cache_control(str(getattr(target, "model_id", "") or model_ref)))
+            except Exception:
+                return False
+        return False
 
     def _resolve_chat_backend(self):
         app_config = getattr(self._loop, "app_config", None)

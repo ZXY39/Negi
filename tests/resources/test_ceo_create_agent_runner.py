@@ -14,8 +14,13 @@ from g3ku.json_schema_utils import get_attached_raw_parameters_schema
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor import ceo_agent_middleware, ceo_runner
+from g3ku.runtime.frontdoor.prompt_cache_contract import (
+    DEFAULT_CACHE_FAMILY_REVISION,
+    FrontdoorPromptContract,
+)
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, initial_persistent_state
 from g3ku.runtime.session_agent import RuntimeAgentSession
+from main.runtime.chat_backend import build_prompt_cache_diagnostics
 
 
 class _FakeGraphOutput:
@@ -265,6 +270,64 @@ def test_build_ceo_agent_uses_create_agent_with_persistence(monkeypatch) -> None
     assert kwargs["context_schema"].__name__ == "CeoRuntimeContext"
     assert kwargs["state_schema"].__name__ == "CeoPersistentState"
     assert kwargs["middleware"]
+
+
+def test_create_agent_runner_resolve_ceo_model_refs_prefers_cache_capable_refs(monkeypatch) -> None:
+    from g3ku.runtime.frontdoor import _ceo_support as ceo_support
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            app_config=SimpleNamespace(
+                get_role_model_keys=lambda role: [
+                    "openai:gpt-4.1",
+                    "anthropic:claude-sonnet-4",
+                    "openrouter:claude-3.7-sonnet",
+                ]
+            ),
+            provider_name="openai",
+            model="gpt-test",
+        )
+    )
+
+    monkeypatch.setattr(ceo_support, "refresh_loop_runtime_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ceo_support,
+        "build_provider_from_model_key",
+        lambda _config, ref: SimpleNamespace(provider_id=str(ref).split(":", 1)[0]),
+    )
+    monkeypatch.setattr(
+        ceo_support,
+        "find_by_name",
+        lambda name: SimpleNamespace(
+            supports_prompt_caching=name in {"anthropic", "openrouter"}
+        ),
+    )
+
+    assert runner._resolve_ceo_model_refs() == [
+        "anthropic:claude-sonnet-4",
+        "openrouter:claude-3.7-sonnet",
+    ]
+
+
+def test_build_prompt_cache_diagnostics_surfaces_cache_capability_and_prefix_reason() -> None:
+    diagnostics = build_prompt_cache_diagnostics(
+        stable_messages=[{"role": "system", "content": "stable system"}],
+        dynamic_appendix_messages=[{"role": "assistant", "content": "dynamic appendix"}],
+        tool_schemas=[],
+        provider_model="claude-sonnet-4",
+        scope="ceo_frontdoor",
+        prompt_cache_key="cache-key",
+        cache_family_revision="exp:rev-7",
+        prompt_lane="ceo_frontdoor",
+        prefix_invalidation_reason="cache_family_revision_changed",
+    )
+
+    assert diagnostics["provider_cache_capable"] is True
+    assert diagnostics["prompt_lane"] == "ceo_frontdoor"
+    assert diagnostics["cache_family_revision"] == "exp:rev-7"
+    assert diagnostics["stable_prefix_hash"]
+    assert diagnostics["dynamic_appendix_hash"]
+    assert diagnostics["prefix_invalidation_reason"] == "cache_family_revision_changed"
 
 
 def test_ceo_runner_always_selects_create_agent_impl(monkeypatch) -> None:
@@ -1314,16 +1377,32 @@ async def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_f
 ) -> None:
     captured: dict[str, object] = {}
 
-    def _fake_build_session_prompt_cache_key(**kwargs):
-        captured["cache_key_kwargs"] = dict(kwargs)
-        return "cache-key"
+    def _fake_build_frontdoor_prompt_contract(**kwargs):
+        captured["contract_kwargs"] = dict(kwargs)
+        return FrontdoorPromptContract(
+            request_messages=[
+                {"role": "system", "content": "You are the CEO frontdoor agent."},
+                {"role": "user", "content": "hello"},
+            ],
+            prompt_cache_key="cache-key",
+            diagnostics={"stable_prompt_signature": "sig-1"},
+            stable_prefix_hash="stable-hash",
+            dynamic_appendix_hash="dynamic-hash",
+            stable_messages=[
+                {
+                    "role": "system",
+                    "content": "You are the CEO frontdoor agent.\n\nsubmit_next_stage guidance",
+                },
+                {"role": "user", "content": "hello"},
+            ],
+            dynamic_appendix_messages=[],
+            diagnostic_dynamic_messages=[
+                {"role": "assistant", "content": "submit_next_stage guidance"},
+            ],
+            cache_family_revision=DEFAULT_CACHE_FAMILY_REVISION,
+        )
 
-    def _fake_build_prompt_cache_diagnostics(**kwargs):
-        captured["diagnostics_kwargs"] = dict(kwargs)
-        return {"stable_prompt_signature": "sig-1"}
-
-    monkeypatch.setattr(ceo_agent_middleware, "build_session_prompt_cache_key", _fake_build_session_prompt_cache_key)
-    monkeypatch.setattr(ceo_agent_middleware, "build_prompt_cache_diagnostics", _fake_build_prompt_cache_diagnostics)
+    monkeypatch.setattr(create_agent_impl, "build_frontdoor_prompt_contract", _fake_build_frontdoor_prompt_contract)
 
     initial_tool_schema = {
         "name": "stale_tool",
@@ -1343,6 +1422,7 @@ async def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_f
     async def _terminal_handler(request):
         seen_request["system_message"] = request.system_message
         seen_request["tools"] = list(request.tools or [])
+        seen_request["model_settings"] = dict(request.model_settings or {})
         return ModelResponse(result=[AIMessage(content="ok")])
 
     handler = _terminal_handler
@@ -1364,6 +1444,7 @@ async def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_f
                 "messages": [{"role": "user", "content": "hello"}],
             },
             runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
+            model_settings={"temperature": 0.2},
         )
     )
 
@@ -1378,18 +1459,474 @@ async def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_f
     assert content_blocks[0] == {"type": "text", "text": "You are the CEO frontdoor agent."}
     assert "submit_next_stage" in str(content_blocks[1]["text"])
     assert seen_request["tools"] == [exposed_tool_schema]
-    assert captured["cache_key_kwargs"]["session_key"] == "web:shared"
-    assert captured["cache_key_kwargs"]["provider_model"] == "openai:gpt-4.1"
-    assert captured["cache_key_kwargs"]["scope"] == "ceo_frontdoor"
-    assert captured["cache_key_kwargs"]["tool_schemas"] == [exposed_tool_schema]
-    assert "submit_next_stage" in str(captured["cache_key_kwargs"]["stable_messages"][0]["content"])
-    assert captured["cache_key_kwargs"]["stable_messages"][1] == {"role": "user", "content": "hello"}
-    assert captured["diagnostics_kwargs"]["tool_schemas"] == [exposed_tool_schema]
-    assert captured["diagnostics_kwargs"]["provider_model"] == "openai:gpt-4.1"
-    assert captured["diagnostics_kwargs"]["scope"] == "ceo_frontdoor"
-    assert captured["diagnostics_kwargs"]["prompt_cache_key"] == "cache-key"
-    assert "submit_next_stage" in str(captured["diagnostics_kwargs"]["overlay_text"])
-    assert captured["diagnostics_kwargs"]["overlay_section_count"] == 1
+    assert seen_request["model_settings"] == {"temperature": 0.2, "prompt_cache_key": "cache-key"}
+    assert captured["contract_kwargs"]["session_key"] == "web:shared"
+    assert captured["contract_kwargs"]["provider_model"] == "openai:gpt-4.1"
+    assert captured["contract_kwargs"]["scope"] == "ceo_frontdoor"
+    assert captured["contract_kwargs"]["tool_schemas"] == [exposed_tool_schema]
+    assert captured["contract_kwargs"]["stable_messages"][0] == {
+        "role": "system",
+        "content": "You are the CEO frontdoor agent.",
+    }
+    assert captured["contract_kwargs"]["stable_messages"][1] == {"role": "user", "content": "hello"}
+    assert "submit_next_stage" in str(captured["contract_kwargs"]["overlay_text"])
+    assert captured["contract_kwargs"]["overlay_section_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_create_agent_prompt_cache_key_contract_ignores_dynamic_appendix_messages() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    runner.visible_langchain_tools = lambda **kwargs: [
+        {
+            "name": "memory_write",
+            "description": "",
+            "parameters": {"type": "object"},
+        }
+    ]
+
+    async def _invoke_with_overlay(overlay_text: str) -> dict[str, object]:
+        async def _terminal_handler(request):
+            return ModelResponse(result=[AIMessage(content="ok")])
+
+        handler = _terminal_handler
+        for middleware in reversed(runner._middleware()):
+            previous_handler = handler
+
+            async def _wrap(request, handler=previous_handler, middleware=middleware):
+                return await middleware.awrap_model_call(request, handler)
+
+            handler = _wrap
+
+        response = await handler(
+            ModelRequest(
+                model=SimpleNamespace(),
+                system_message=SystemMessage(content="You are the CEO frontdoor agent."),
+                messages=[HumanMessage(content="原始用户问题")],
+                tools=[],
+                state={
+                    "messages": [{"role": "user", "content": "原始用户问题"}],
+                    "turn_overlay_text": overlay_text,
+                },
+                runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
+            )
+        )
+
+        assert isinstance(response, ExtendedModelResponse)
+        assert isinstance(response.command, Command)
+        return dict(response.command.update or {})
+
+    first = await _invoke_with_overlay("## Retrieved Context\n- authoritative memory A")
+    second = await _invoke_with_overlay("## Retrieved Context\n- authoritative memory B")
+
+    assert first["prompt_cache_key"] == second["prompt_cache_key"]
+    assert first["prompt_cache_diagnostics"]["dynamic_appendix_hash"] != second["prompt_cache_diagnostics"]["dynamic_appendix_hash"]
+
+
+def test_create_agent_prompt_cache_key_contract_preserves_fallback_system_prompt_with_nonempty_state_messages() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    contract = runner._frontdoor_prompt_contract(
+        state={
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "working"},
+            ],
+        },
+        provider_model="openai:gpt-4.1",
+        tool_schemas=[],
+        fallback_system_message=SystemMessage(content="You are the CEO frontdoor agent."),
+        fallback_messages=[HumanMessage(content="ignored fallback")],
+        session_key="web:shared",
+    )
+
+    assert contract.stable_messages[0] == {
+        "role": "system",
+        "content": "You are the CEO frontdoor agent.",
+    }
+    assert contract.request_messages[0] == {
+        "role": "system",
+        "content": "You are the CEO frontdoor agent.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_agent_dynamic_appendix_request_preserves_live_assistant_and_tool_messages() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    runner._frontdoor_default_overlay_text = lambda state: "default overlay"
+    runner.visible_langchain_tools = lambda **kwargs: []
+    seen_request: dict[str, object] = {}
+
+    async def _terminal_handler(request):
+        seen_request["system_message"] = request.system_message
+        seen_request["messages"] = list(request.messages or [])
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    handler = _terminal_handler
+    for middleware in reversed(runner._middleware()):
+        previous_handler = handler
+
+        async def _wrap(request, handler=previous_handler, middleware=middleware):
+            return await middleware.awrap_model_call(request, handler)
+
+        handler = _wrap
+
+    response = await handler(
+        ModelRequest(
+            model=SimpleNamespace(),
+            system_message=SystemMessage(content="You are the CEO frontdoor agent."),
+            messages=[HumanMessage(content="fallback message should not define continuity")],
+            tools=[],
+            state={
+                "messages": [
+                    {"role": "system", "content": "stable system"},
+                    {"role": "user", "content": "start"},
+                    {"role": "assistant", "content": "working memory of the live turn"},
+                    {
+                        "role": "tool",
+                        "name": "demo_tool",
+                        "tool_call_id": "call-1",
+                        "content": "{\"result_text\": \"tool finished\", \"status\": \"success\"}",
+                    },
+                ],
+                "stable_messages": [
+                    {"role": "system", "content": "stable system"},
+                    {"role": "user", "content": "start"},
+                ],
+                "dynamic_appendix_messages": [
+                    {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
+                ],
+            },
+            runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
+        )
+    )
+
+    assert isinstance(response, ExtendedModelResponse)
+    rendered_messages = list(seen_request["messages"] or [])
+    contents = [str(getattr(message, "content", "") or "") for message in rendered_messages]
+
+    assert contents == [
+        "start",
+        "working memory of the live turn",
+        '{"result_text": "tool finished", "status": "success"}',
+        "## Retrieved Context\n- authoritative memory",
+    ]
+    assert "default overlay" in str(getattr(seen_request["system_message"], "content", ""))
+
+
+@pytest.mark.asyncio
+async def test_create_agent_dynamic_appendix_request_does_not_duplicate_when_state_messages_already_combined() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    runner._frontdoor_default_overlay_text = lambda state: "default overlay"
+    runner.visible_langchain_tools = lambda **kwargs: []
+    seen_request: dict[str, object] = {}
+
+    async def _terminal_handler(request):
+        seen_request["messages"] = list(request.messages or [])
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    handler = _terminal_handler
+    for middleware in reversed(runner._middleware()):
+        previous_handler = handler
+
+        async def _wrap(request, handler=previous_handler, middleware=middleware):
+            return await middleware.awrap_model_call(request, handler)
+
+        handler = _wrap
+
+    response = await handler(
+        ModelRequest(
+            model=SimpleNamespace(),
+            system_message=SystemMessage(content="You are the CEO frontdoor agent."),
+            messages=[HumanMessage(content="fallback")],
+            tools=[],
+            state={
+                "messages": [
+                    {"role": "system", "content": "stable system"},
+                    {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+                    {"role": "user", "content": "start"},
+                    {"role": "assistant", "content": "working memory of the live turn"},
+                ],
+                "stable_messages": [
+                    {"role": "system", "content": "stable system"},
+                    {"role": "user", "content": "start"},
+                ],
+                "dynamic_appendix_messages": [
+                    {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
+                ],
+            },
+            runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
+        )
+    )
+
+    assert isinstance(response, ExtendedModelResponse)
+    contents = [str(getattr(message, "content", "") or "") for message in list(seen_request["messages"] or [])]
+    assert contents == [
+        "start",
+        "working memory of the live turn",
+        "## Retrieved Context\n- authoritative memory",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_agent_stable_prefix_request_coherent_after_dynamic_appendix_drift_path() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    runner._frontdoor_default_overlay_text = lambda state: ""
+    runner.visible_langchain_tools = lambda **kwargs: []
+    seen_requests: list[dict[str, object]] = []
+
+    async def _invoke(messages: list[dict[str, object]]) -> dict[str, object]:
+        async def _terminal_handler(request):
+            seen_requests.append(
+                {
+                    "system_message": request.system_message,
+                    "messages": list(request.messages or []),
+                }
+            )
+            return ModelResponse(result=[AIMessage(content="ok")])
+
+        handler = _terminal_handler
+        for middleware in reversed(runner._middleware()):
+            previous_handler = handler
+
+            async def _wrap(request, handler=previous_handler, middleware=middleware):
+                return await middleware.awrap_model_call(request, handler)
+
+            handler = _wrap
+
+        response = await handler(
+            ModelRequest(
+                model=SimpleNamespace(),
+                system_message=SystemMessage(content="You are the CEO frontdoor agent."),
+                messages=[HumanMessage(content="fallback")],
+                tools=[],
+                state={
+                    "messages": messages,
+                    "stable_messages": [
+                        {"role": "system", "content": "stable system"},
+                        {"role": "user", "content": "start"},
+                    ],
+                    "dynamic_appendix_messages": [
+                        {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
+                    ],
+                },
+                runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
+            )
+        )
+        assert isinstance(response, ExtendedModelResponse)
+        return dict(getattr(response.command, "update", {}) or {})
+
+    first = await _invoke(
+        [
+            {"role": "system", "content": "stable system"},
+            {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+            {"role": "user", "content": "start"},
+            {"role": "assistant", "content": "assistant drift A"},
+        ]
+    )
+    second = await _invoke(
+        [
+            {"role": "system", "content": "stable system"},
+            {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+            {"role": "user", "content": "start"},
+            {"role": "assistant", "content": "assistant drift B"},
+            {
+                "role": "tool",
+                "name": "demo_tool",
+                "tool_call_id": "call-1",
+                "content": "{\"result_text\": \"done\", \"status\": \"success\"}",
+            },
+        ]
+    )
+
+    assert first["prompt_cache_key"] == second["prompt_cache_key"]
+    assert [
+        str(getattr(message, "content", "") or "")
+        for message in list(seen_requests[0]["messages"] or [])
+    ] == [
+        "start",
+        "assistant drift A",
+        "## Retrieved Context\n- authoritative memory",
+    ]
+    assert [
+        str(getattr(message, "content", "") or "")
+        for message in list(seen_requests[1]["messages"] or [])
+    ] == [
+        "start",
+        "assistant drift B",
+        '{"result_text": "done", "status": "success"}',
+        "## Retrieved Context\n- authoritative memory",
+    ]
+    first_blocks = list(getattr(seen_requests[0]["system_message"], "content_blocks", []))
+    second_blocks = list(getattr(seen_requests[1]["system_message"], "content_blocks", []))
+    assert first_blocks[0] == {"type": "text", "text": "stable system"}
+    assert second_blocks[0] == {"type": "text", "text": "stable system"}
+
+
+def test_create_agent_prompt_contract_avoids_duplicate_history_when_live_messages_are_compacted() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    contract = runner._frontdoor_prompt_contract(
+        state={
+            "messages": [
+                {"role": "system", "content": "stable system"},
+                {
+                    "role": "system",
+                    "content": "COMPACT BOUNDARY: summarized 3 earlier conversation messages.",
+                },
+                {
+                    "role": "assistant",
+                    "content": "Conversation summary: user: q1 | assistant: a1 | user: q2",
+                },
+                {"role": "assistant", "content": "latest assistant"},
+                {"role": "user", "content": "latest user"},
+            ],
+            "stable_messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "q2"},
+                {"role": "assistant", "content": "latest assistant"},
+                {"role": "user", "content": "latest user"},
+            ],
+            "dynamic_appendix_messages": [
+                {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
+            ],
+        },
+        provider_model="openai:gpt-4.1",
+        tool_schemas=[],
+        session_key="web:shared",
+    )
+
+    assert contract.request_messages == [
+        {"role": "system", "content": "stable system"},
+        {
+            "role": "system",
+            "content": "COMPACT BOUNDARY: summarized 3 earlier conversation messages.",
+        },
+        {
+            "role": "assistant",
+            "content": "Conversation summary: user: q1 | assistant: a1 | user: q2",
+        },
+        {"role": "assistant", "content": "latest assistant"},
+        {"role": "user", "content": "latest user"},
+        {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+    ]
+    assert contract.stable_messages == [
+        {"role": "system", "content": "stable system"},
+        {
+            "role": "system",
+            "content": "COMPACT BOUNDARY: summarized 3 earlier conversation messages.",
+        },
+        {
+            "role": "assistant",
+            "content": "Conversation summary: user: q1 | assistant: a1 | user: q2",
+        },
+        {"role": "assistant", "content": "latest assistant"},
+        {"role": "user", "content": "latest user"},
+    ]
+
+
+def test_create_agent_prompt_contract_does_not_treat_plain_conversation_summary_text_as_compaction() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    contract = runner._frontdoor_prompt_contract(
+        state={
+            "messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "assistant", "content": "Conversation summary: here's the answer you asked for."},
+                {"role": "user", "content": "latest user"},
+            ],
+            "stable_messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "latest user"},
+            ],
+            "dynamic_appendix_messages": [
+                {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
+            ],
+        },
+        provider_model="openai:gpt-4.1",
+        tool_schemas=[],
+        session_key="web:shared",
+    )
+
+    assert contract.stable_messages == [
+        {"role": "system", "content": "stable system"},
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "latest user"},
+    ]
+    assert contract.request_messages == [
+        {"role": "system", "content": "stable system"},
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "assistant", "content": "Conversation summary: here's the answer you asked for."},
+        {"role": "user", "content": "latest user"},
+        {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_agent_prompt_cache_diagnostics_hash_tracks_actual_dynamic_appendix_and_overlay() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    runner._frontdoor_default_overlay_text = lambda state: "default overlay"
+    runner.visible_langchain_tools = lambda **kwargs: []
+
+    async def _invoke(repair_overlay_text: str) -> dict[str, object]:
+        async def _terminal_handler(request):
+            return ModelResponse(result=[AIMessage(content="ok")])
+
+        handler = _terminal_handler
+        for middleware in reversed(runner._middleware()):
+            previous_handler = handler
+
+            async def _wrap(request, handler=previous_handler, middleware=middleware):
+                return await middleware.awrap_model_call(request, handler)
+
+            handler = _wrap
+
+        response = await handler(
+            ModelRequest(
+                model=SimpleNamespace(),
+                system_message=SystemMessage(content="You are the CEO frontdoor agent."),
+                messages=[HumanMessage(content="fallback")],
+                tools=[],
+                state={
+                    "messages": [
+                        {"role": "system", "content": "stable system"},
+                        {"role": "user", "content": "start"},
+                    ],
+                    "stable_messages": [
+                        {"role": "system", "content": "stable system"},
+                        {"role": "user", "content": "start"},
+                    ],
+                    "dynamic_appendix_messages": [
+                        {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
+                    ],
+                    "repair_overlay_text": repair_overlay_text,
+                    "cache_family_revision": DEFAULT_CACHE_FAMILY_REVISION,
+                },
+                runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
+            )
+        )
+
+        assert isinstance(response, ExtendedModelResponse)
+        return dict(getattr(response.command, "update", {}) or {})
+
+    first = await _invoke("repair overlay A")
+    second = await _invoke("repair overlay B")
+
+    assert first["prompt_cache_key"] == second["prompt_cache_key"]
+    assert (
+        first["prompt_cache_diagnostics"]["dynamic_appendix_hash"]
+        != second["prompt_cache_diagnostics"]["dynamic_appendix_hash"]
+    )
 
 
 @pytest.mark.asyncio

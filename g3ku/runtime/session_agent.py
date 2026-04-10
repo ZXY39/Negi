@@ -898,6 +898,9 @@ class RuntimeAgentSession:
             if legacy_tool_events:
                 assistant_payload["tool_events"] = legacy_tool_events
             metadata_payload = dict(assistant_metadata or {})
+            if internal_source is not None:
+                metadata_payload.setdefault("source", internal_source)
+                metadata_payload["history_visible"] = False
             verified_task_ids = self._normalize_verified_task_ids(self._last_verified_task_ids)
             if verified_task_ids:
                 metadata_payload["task_ids"] = verified_task_ids

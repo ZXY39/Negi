@@ -10,9 +10,18 @@ from g3ku.agent.rag_memory import DashScopeTextReranker
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.llm_config.runtime_resolver import resolve_memory_rerank_target
 from g3ku.providers.chatmodels import build_chat_model
+from g3ku.runtime.context.frontdoor_query_rewriter import (
+    REWRITE_PROMPT_REVISION,
+    FrontdoorRewriteResult,
+    build_query_rewrite_cache_key,
+    build_query_rewrite_exposure_revision,
+    build_query_rewrite_runtime_identity,
+    canonicalize_visible_ids,
+)
 
 
 CATALOG_NAMESPACE: tuple[str, ...] = ("catalog", "global")
+_FRONTDOOR_QUERY_REWRITE_CACHE: dict[str, FrontdoorRewriteResult] = {}
 
 
 def _item_value(item: Any, key: str) -> Any:
@@ -255,13 +264,25 @@ async def _invoke_frontdoor_catalog_rewrite_model(
     *,
     loop: Any,
     memory_manager: Any | None,
-    query_text: str,
-    visible_skill_ids: list[str],
-    visible_tool_ids: list[str],
+    query_text: str | None = None,
+    visible_skill_ids: list[str] | None = None,
+    visible_tool_ids: list[str] | None = None,
+    exposure_revision: str | None = None,
+    request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    _ = loop, memory_manager
     config, _revision, _changed = get_runtime_config(force=False)
     model_key = str(config.resolve_role_model_key("ceo") or "").strip()
     model = build_chat_model(config, role="ceo")
+    effective_request = dict(request or {})
+    if not effective_request:
+        effective_request = _build_frontdoor_query_rewrite_request(
+            raw_query=_normalized_text(query_text),
+            visible_skill_ids=list(visible_skill_ids or []),
+            visible_tool_ids=list(visible_tool_ids or []),
+        )
+    if exposure_revision is not None and _normalized_text(exposure_revision):
+        effective_request["exposure_revision"] = _normalized_text(exposure_revision)
     prompt = (
         "You rewrite internal retrieval queries for a frontdoor catalog selector.\n"
         "Return strict JSON only with keys skill_query and tool_query.\n"
@@ -272,9 +293,10 @@ async def _invoke_frontdoor_catalog_rewrite_model(
     )
     body = json.dumps(
         {
-            "query": _truncate_chars(query_text, 220),
-            "visible_skill_ids": list(visible_skill_ids[:12]),
-            "visible_tool_ids": list(visible_tool_ids[:12]),
+            "raw_query": _truncate_chars(_normalized_text(effective_request.get("raw_query")), 220),
+            "visible_skill_ids": list(effective_request.get("visible_skill_ids") or [])[:12],
+            "visible_tool_ids": list(effective_request.get("visible_tool_ids") or [])[:12],
+            "exposure_revision": _normalized_text(effective_request.get("exposure_revision")),
         },
         ensure_ascii=False,
     )
@@ -290,6 +312,163 @@ async def _invoke_frontdoor_catalog_rewrite_model(
         "tool_query": _truncate_chars(str(parsed.get("tool_query") or "")),
         "model": model_key,
     }
+
+
+def _query_rewrite_cache_for(memory_manager: Any | None) -> dict[str, FrontdoorRewriteResult]:
+    if memory_manager is None:
+        return _FRONTDOOR_QUERY_REWRITE_CACHE
+    current = getattr(memory_manager, "_frontdoor_query_rewrite_cache", None)
+    if isinstance(current, dict):
+        return current
+    try:
+        cache: dict[str, FrontdoorRewriteResult] = {}
+        setattr(memory_manager, "_frontdoor_query_rewrite_cache", cache)
+        return cache
+    except Exception:
+        return _FRONTDOOR_QUERY_REWRITE_CACHE
+
+
+def _resolve_query_rewrite_runtime_identity() -> str:
+    try:
+        config, revision, _changed = get_runtime_config(force=False)
+    except Exception:
+        return build_query_rewrite_runtime_identity(model_key="", runtime_revision="")
+    model_key = ""
+    try:
+        model_key = str(config.resolve_role_model_key("ceo") or "").strip()
+    except Exception:
+        model_key = ""
+    return build_query_rewrite_runtime_identity(
+        model_key=model_key,
+        runtime_revision=revision,
+    )
+
+
+def _build_frontdoor_query_rewrite_request(
+    *,
+    raw_query: str,
+    visible_skill_ids: list[str],
+    visible_tool_ids: list[str],
+) -> dict[str, Any]:
+    canonical_skill_ids = canonicalize_visible_ids(visible_skill_ids)
+    canonical_tool_ids = canonicalize_visible_ids(visible_tool_ids)
+    return {
+        "raw_query": _normalized_text(raw_query),
+        "visible_skill_ids": list(canonical_skill_ids),
+        "visible_tool_ids": list(canonical_tool_ids),
+        "exposure_revision": build_query_rewrite_exposure_revision(
+            visible_skill_ids=list(canonical_skill_ids),
+            visible_tool_ids=list(canonical_tool_ids),
+        ),
+    }
+
+
+def _rewrite_result_to_public_dict(result: FrontdoorRewriteResult | dict[str, Any]) -> dict[str, str]:
+    if isinstance(result, dict):
+        return {
+            "raw_query": _normalized_text(result.get("raw_query")),
+            "skill_query": _normalized_text(result.get("skill_query")),
+            "tool_query": _normalized_text(result.get("tool_query")),
+            "status": _normalized_text(result.get("status")),
+            "model": _normalized_text(result.get("model")),
+        }
+    return {
+        "raw_query": _normalized_text(result.raw_query),
+        "skill_query": _normalized_text(result.skill_query),
+        "tool_query": _normalized_text(result.tool_query),
+        "status": _normalized_text(result.status),
+        "model": _normalized_text(result.model),
+    }
+
+
+async def _rewrite_frontdoor_catalog_queries_sidecar(
+    *,
+    loop: Any,
+    memory_manager: Any | None,
+    query_text: str,
+    visible_skills: list[Any],
+    visible_families: list[Any],
+) -> FrontdoorRewriteResult:
+    query = _normalized_text(query_text)
+    skill_ids = _visible_ids(visible_skills, key="skill_id")
+    tool_ids = _visible_ids(visible_families, key="tool_id")
+    request = _build_frontdoor_query_rewrite_request(
+        raw_query=query,
+        visible_skill_ids=skill_ids,
+        visible_tool_ids=tool_ids,
+    )
+    exposure_revision = _normalized_text(request.get("exposure_revision"))
+    cache_key = build_query_rewrite_cache_key(
+        raw_query=query,
+        exposure_revision=exposure_revision,
+        rewrite_prompt_revision=REWRITE_PROMPT_REVISION,
+    )
+    runtime_identity = _resolve_query_rewrite_runtime_identity()
+    scoped_cache_key = f"{runtime_identity}:{cache_key}"
+    rewrite_cache = _query_rewrite_cache_for(memory_manager)
+    dense_enabled = bool(getattr(getattr(memory_manager, "store", None), "_dense_enabled", False))
+
+    fallback_skill_query = _compose_rewritten_query(raw_query=query, kind="skill", visible_ids=skill_ids) or query
+    fallback_tool_query = _compose_rewritten_query(raw_query=query, kind="tool", visible_ids=tool_ids) or query
+
+    if not query:
+        return FrontdoorRewriteResult(
+            raw_query="",
+            skill_query="",
+            tool_query="",
+            status="empty",
+            model="",
+            exposure_revision=exposure_revision,
+            cache_key=cache_key,
+        )
+
+    cached = rewrite_cache.get(scoped_cache_key)
+    if cached is not None:
+        return cached
+
+    if dense_enabled and (skill_ids or tool_ids):
+        try:
+            model_result = await _invoke_frontdoor_catalog_rewrite_model(
+                loop=loop,
+                memory_manager=memory_manager,
+                query_text=query,
+                visible_skill_ids=skill_ids,
+                visible_tool_ids=tool_ids,
+                exposure_revision=exposure_revision,
+                request=request,
+            )
+        except Exception:
+            model_result = {}
+        raw_skill_query = _normalized_text((model_result or {}).get("skill_query"))
+        raw_tool_query = _normalized_text((model_result or {}).get("tool_query"))
+        model = _normalized_text((model_result or {}).get("model"))
+        skill_query = raw_skill_query or fallback_skill_query
+        tool_query = raw_tool_query or fallback_tool_query
+        if model and (raw_skill_query or raw_tool_query):
+            status = "rewritten"
+        else:
+            status = "fallback"
+            skill_query = fallback_skill_query
+            tool_query = fallback_tool_query
+            model = ""
+    else:
+        status = "passthrough"
+        skill_query = query
+        tool_query = query
+        model = ""
+
+    result = FrontdoorRewriteResult(
+        raw_query=query,
+        skill_query=skill_query,
+        tool_query=tool_query,
+        status=status,
+        model=model,
+        exposure_revision=exposure_revision,
+        cache_key=cache_key,
+    )
+    if result.status == "rewritten":
+        rewrite_cache[scoped_cache_key] = result
+    return result
 
 
 def _resolve_frontdoor_catalog_reranker(memory_manager: Any | None) -> tuple[Any | None, str, str]:
@@ -332,55 +511,16 @@ async def rewrite_frontdoor_catalog_queries(
     query_text: str,
     visible_skills: list[Any],
     visible_families: list[Any],
-) -> dict[str, Any]:
-    query = _normalized_text(query_text)
-    skill_ids = _visible_ids(visible_skills, key="skill_id")
-    tool_ids = _visible_ids(visible_families, key="tool_id")
-    dense_enabled = bool(getattr(getattr(memory_manager, "store", None), "_dense_enabled", False))
-
-    fallback_skill_query = _compose_rewritten_query(raw_query=query, kind="skill", visible_ids=skill_ids) or query
-    fallback_tool_query = _compose_rewritten_query(raw_query=query, kind="tool", visible_ids=tool_ids) or query
-
-    if not query:
-        status = "empty"
-        skill_query = ""
-        tool_query = ""
-        model = ""
-    elif dense_enabled and (skill_ids or tool_ids):
-        try:
-            model_result = await _invoke_frontdoor_catalog_rewrite_model(
-                loop=loop,
-                memory_manager=memory_manager,
-                query_text=query,
-                visible_skill_ids=skill_ids,
-                visible_tool_ids=tool_ids,
-            )
-        except Exception:
-            model_result = {}
-        raw_skill_query = _normalized_text((model_result or {}).get("skill_query"))
-        raw_tool_query = _normalized_text((model_result or {}).get("tool_query"))
-        model = _normalized_text((model_result or {}).get("model"))
-        skill_query = raw_skill_query or fallback_skill_query
-        tool_query = raw_tool_query or fallback_tool_query
-        if model and (raw_skill_query or raw_tool_query):
-            status = "rewritten"
-        else:
-            status = "fallback"
-            skill_query = fallback_skill_query
-            tool_query = fallback_tool_query
-            model = ""
-    else:
-        status = "passthrough"
-        skill_query = query
-        tool_query = query
-        model = ""
-    return {
-        "raw_query": query,
-        "skill_query": skill_query,
-        "tool_query": tool_query,
-        "status": status,
-        "model": model,
-    }
+) -> dict[str, str]:
+    return _rewrite_result_to_public_dict(
+        await _rewrite_frontdoor_catalog_queries_sidecar(
+            loop=loop,
+            memory_manager=memory_manager,
+            query_text=query_text,
+            visible_skills=visible_skills,
+            visible_families=visible_families,
+        )
+    )
 
 
 async def rerank_frontdoor_catalog_records(
@@ -487,12 +627,13 @@ async def build_frontdoor_catalog_selection(
             "status": "error",
             "model": "",
         }
+    rewrite_public = _rewrite_result_to_public_dict(rewrites)
     query_trace = {
-        "raw_query": _normalized_text((rewrites or {}).get("raw_query")) or query,
-        "skill_query": _normalized_text((rewrites or {}).get("skill_query")) or query,
-        "tool_query": _normalized_text((rewrites or {}).get("tool_query")) or query,
-        "status": _normalized_text((rewrites or {}).get("status")) or ("passthrough" if query else "empty"),
-        "model": _normalized_text((rewrites or {}).get("model")),
+        "raw_query": _normalized_text(rewrite_public.get("raw_query")) or query,
+        "skill_query": _normalized_text(rewrite_public.get("skill_query")) or query,
+        "tool_query": _normalized_text(rewrite_public.get("tool_query")) or query,
+        "status": _normalized_text(rewrite_public.get("status")) or ("passthrough" if query else "empty"),
+        "model": _normalized_text(rewrite_public.get("model")),
     }
     skill_query = query_trace["skill_query"]
     tool_query = query_trace["tool_query"]
