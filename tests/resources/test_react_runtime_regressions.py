@@ -229,6 +229,65 @@ def test_tool_model_visible_schema_falls_back_to_authoritative_schema() -> None:
     assert tool.to_model_schema() == tool.to_schema()
 
 
+def test_tool_model_visible_schema_uses_override_without_changing_validation_contract() -> None:
+    class _OverrideTool(Tool):
+        @property
+        def name(self) -> str:
+            return "override_tool"
+
+        @property
+        def description(self) -> str:
+            return "Authoritative execution contract."
+
+        @property
+        def parameters(self) -> dict[str, Any]:
+            return {
+                "type": "object",
+                "properties": {
+                    "full_value": {
+                        "type": "string",
+                        "description": "Authoritative parameter used for validation.",
+                    }
+                },
+                "required": ["full_value"],
+            }
+
+        @property
+        def model_description(self) -> str:
+            return "Compact model-facing contract."
+
+        @property
+        def model_parameters(self) -> dict[str, Any]:
+            return {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Compact model-visible field.",
+                    }
+                },
+                "required": ["summary"],
+            }
+
+        async def execute(self, **kwargs: Any) -> Any:
+            return kwargs
+
+    tool = _OverrideTool()
+
+    assert tool.to_schema()["function"]["description"] == "Authoritative execution contract."
+    assert tool.to_schema()["function"]["parameters"]["required"] == ["full_value"]
+    assert tool.to_model_schema()["function"]["description"] == "Compact model-facing contract."
+    assert tool.to_model_schema()["function"]["parameters"]["required"] == ["summary"]
+    assert tool.validate_params({"summary": "preview"}) == ["missing required full_value"]
+
+
+def test_tool_model_visible_schema_api_docs_call_out_non_authoritative_contract() -> None:
+    assert Tool.parameters.__doc__ is not None
+    assert Tool.model_parameters.__doc__ is not None
+    assert "authoritative" in Tool.parameters.__doc__.lower()
+    assert "not used for validation" in Tool.model_parameters.__doc__.lower()
+
+
 def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_window() -> None:
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
     loop._log_service._store._node = SimpleNamespace(

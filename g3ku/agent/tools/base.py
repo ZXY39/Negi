@@ -10,6 +10,10 @@ class Tool(ABC):
 
     Tools are capabilities that the agent can use to interact with
     the environment, such as reading files, executing commands, etc.
+
+    `parameters` is the authoritative validation contract for execution.
+    `model_parameters` is a separate model-visible callable schema surface
+    and must not be treated as the runtime validation contract.
     """
 
     _TYPE_MAP = {
@@ -36,7 +40,7 @@ class Tool(ABC):
     @property
     @abstractmethod
     def parameters(self) -> dict[str, Any]:
-        """JSON Schema for tool parameters."""
+        """Authoritative JSON Schema used for runtime validation and execution."""
         pass
 
     @property
@@ -46,7 +50,7 @@ class Tool(ABC):
 
     @property
     def model_parameters(self) -> dict[str, Any]:
-        """Model-visible parameter schema for callable schema exposure."""
+        """Model-visible schema only; not used for validation or execution contract checks."""
         return self.parameters
 
     @abstractmethod
@@ -144,7 +148,7 @@ class Tool(ABC):
         return union_errors
 
     def to_schema(self) -> dict[str, Any]:
-        """Convert tool to OpenAI function schema format."""
+        """Convert tool to the authoritative function schema used for runtime contracts."""
         return {
             "type": "function",
             "function": {
@@ -155,7 +159,7 @@ class Tool(ABC):
         }
 
     def to_model_schema(self) -> dict[str, Any]:
-        """Convert tool to model-visible OpenAI function schema format."""
+        """Convert tool to a model-visible function schema separate from validation."""
         return {
             "type": "function",
             "function": {
