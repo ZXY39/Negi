@@ -910,6 +910,7 @@ class MainRuntimeService:
             token_usage=TokenUsageSummary(tracked=True),
             metadata=task_metadata,
         )
+        root_goal = str(task_metadata.get('core_requirement') or prompt).strip() or prompt
         root = NodeRecord(
             node_id=root_node_id,
             task_id=task_id,
@@ -918,7 +919,7 @@ class MainRuntimeService:
             depth=0,
             node_kind='execution',
             status='in_progress',
-            goal=prompt,
+            goal=root_goal,
             prompt=prompt,
             input=prompt,
             output=[],

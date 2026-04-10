@@ -2728,6 +2728,7 @@ def test_failed_node_ids_follow_projection_tree_for_failed_acceptance(tmp_path: 
 @pytest.mark.asyncio
 async def test_execution_policy_focus_propagates_to_task_payload_child_and_acceptance_prompt(tmp_path: Path):
     expected_core_requirement = "瀹屾垚涓€鐗堝彲鐩存帴浜や粯鐨勫彂甯冨叕鍛婂垵绋?"
+    task_prompt = "甯垜鍐欎竴鐗堝彂甯冨叕鍛婂垵绋?"
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -2740,7 +2741,7 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
 
     try:
         record = await service.create_task(
-            "甯垜鍐欎竴鐗堝彂甯冨叕鍛婂垵绋?",
+            task_prompt,
             session_id="web:shared",
             metadata={
                 "core_requirement": expected_core_requirement,
@@ -2754,6 +2755,8 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
         assert root is not None
         assert task.metadata["execution_policy"] == {"mode": "focus"}
         assert root.metadata["execution_policy"] == {"mode": "focus"}
+        assert root.goal == expected_core_requirement
+        assert root.prompt == task_prompt
 
         messages = await service.node_runner._build_messages(task=task, node=root)
         payload = json.loads(messages[1]["content"])
@@ -4734,6 +4737,85 @@ async def test_continue_task_retry_in_place_allows_second_engine_failure_retry(t
 
 
 @pytest.mark.asyncio
+async def test_runtime_frame_persists_model_visible_tool_selection_fields(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task(
+            "persist model visible tool selection fields",
+            session_id="web:shared",
+        )
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "messages": [
+                    {"role": "system", "content": "system prompt"},
+                    {"role": "user", "content": "user prompt"},
+                ],
+                "model_visible_tool_names": [
+                    "submit_next_stage",
+                    "submit_final_result",
+                    "spawn_child_nodes",
+                    "web_fetch",
+                ],
+                "hydrated_executor_names": [
+                    "web_fetch",
+                ],
+                "lightweight_tool_ids": [
+                    "web_fetch",
+                    "agent_browser",
+                ],
+                "model_visible_tool_selection_trace": {
+                    "mode": "execution_tool_selection",
+                    "budget": 8000,
+                    "final_schema_chars": 4096,
+                },
+            },
+            publish_snapshot=False,
+        )
+
+        runtime_frame = service.log_service.read_runtime_frame(record.task_id, root.node_id)
+
+        assert runtime_frame is not None
+        assert runtime_frame.get("model_visible_tool_names") == [
+            "submit_next_stage",
+            "submit_final_result",
+            "spawn_child_nodes",
+            "web_fetch",
+        ]
+        assert runtime_frame.get("hydrated_executor_names") == [
+            "web_fetch",
+        ]
+        assert runtime_frame.get("lightweight_tool_ids") == [
+            "web_fetch",
+            "agent_browser",
+        ]
+        assert runtime_frame.get("model_visible_tool_selection_trace") == {
+            "mode": "execution_tool_selection",
+            "budget": 8000,
+            "final_schema_chars": 4096,
+        }
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_continue_task_retry_in_place_rejects_business_unpassed(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -5045,6 +5127,48 @@ def test_view_progress_nodes_are_compact_summaries(tmp_path: Path):
     assert "input" not in root_progress_node
     assert "metadata" not in root_progress_node
     assert "root" not in progress.model_dump(mode="json")
+
+
+def test_task_progress_and_tree_root_title_use_core_requirement(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    expected_core_requirement = "输出稳定的任务树根节点标题"
+    task_prompt = "请整理任务树与进度展示的标题来源"
+    _mark_worker_online(service)
+    record = asyncio.run(
+        service.create_task(
+            task_prompt,
+            session_id="web:shared",
+            metadata={"core_requirement": expected_core_requirement},
+        )
+    )
+    root = service.get_node(record.root_node_id)
+    progress = service.query_service.view_progress(record.task_id, mark_read=False)
+    subtree = service.get_task_tree_subtree_payload(record.task_id, record.root_node_id)
+
+    assert root is not None
+    assert progress is not None
+    assert subtree is not None
+
+    root_progress_node = next(
+        item for item in progress.nodes if item["node_id"] == record.root_node_id
+    )
+    subtree_root = subtree["nodes_by_id"][record.root_node_id]
+
+    assert root.goal == expected_core_requirement
+    assert root.prompt == task_prompt
+    assert root_progress_node["goal"] == expected_core_requirement
+    assert root_progress_node["title"] == expected_core_requirement
+    assert subtree_root["title"] == expected_core_requirement
 
 
 @pytest.mark.asyncio

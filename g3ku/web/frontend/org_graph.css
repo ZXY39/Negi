@@ -3092,11 +3092,9 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    scrollbar-gutter: stable;
-    padding-left: 6px;
-    padding-right: 6px;
+    overflow: visible;
+    padding-left: 0;
+    padding-right: 0;
 }
 
 .task-trace-step {
@@ -7103,10 +7101,8 @@ textarea {
     flex-direction: column;
     gap: var(--space-2);
     margin-bottom: var(--space-3);
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    scrollbar-gutter: stable;
-    padding-right: 6px;
+    overflow: visible;
+    padding-right: 0;
 }
 
 .artifact-item {

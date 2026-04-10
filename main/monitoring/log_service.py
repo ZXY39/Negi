@@ -2662,6 +2662,22 @@ class TaskLogService:
                 'partial_child_results': [dict(item) for item in list(next_frame.get('partial_child_results') or []) if isinstance(item, dict)],
                 'tool_calls': [dict(item) for item in list(next_frame.get('tool_calls') or []) if isinstance(item, dict)],
                 'child_pipelines': [dict(item) for item in list(next_frame.get('child_pipelines') or []) if isinstance(item, dict)],
+                'model_visible_tool_names': [
+                    str(item or '').strip()
+                    for item in list(next_frame.get('model_visible_tool_names') or [])
+                    if str(item or '').strip()
+                ],
+                'hydrated_executor_names': [
+                    str(item or '').strip()
+                    for item in list(next_frame.get('hydrated_executor_names') or [])
+                    if str(item or '').strip()
+                ],
+                'lightweight_tool_ids': [
+                    str(item or '').strip()
+                    for item in list(next_frame.get('lightweight_tool_ids') or [])
+                    if str(item or '').strip()
+                ],
+                'model_visible_tool_selection_trace': dict(next_frame.get('model_visible_tool_selection_trace') or {}),
                 'last_error': str(next_frame.get('last_error') or ''),
                 'messages_ref': str(next_frame.get('messages_ref') or ''),
                 'messages_count': int(next_frame.get('messages_count') or 0),
@@ -2719,6 +2735,22 @@ class TaskLogService:
             'partial_child_results': [dict(item) for item in list(payload.get('partial_child_results') or []) if isinstance(item, dict)],
             'tool_calls': [dict(item) for item in list(payload.get('tool_calls') or []) if isinstance(item, dict)],
             'child_pipelines': [dict(item) for item in list(payload.get('child_pipelines') or []) if isinstance(item, dict)],
+            'model_visible_tool_names': [
+                str(item or '').strip()
+                for item in list(payload.get('model_visible_tool_names') or [])
+                if str(item or '').strip()
+            ],
+            'hydrated_executor_names': [
+                str(item or '').strip()
+                for item in list(payload.get('hydrated_executor_names') or [])
+                if str(item or '').strip()
+            ],
+            'lightweight_tool_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('lightweight_tool_ids') or [])
+                if str(item or '').strip()
+            ],
+            'model_visible_tool_selection_trace': dict(payload.get('model_visible_tool_selection_trace') or {}),
             'last_error': str(payload.get('last_error') or ''),
         }
 
@@ -3211,6 +3243,22 @@ class TaskLogService:
             'partial_child_results': [dict(item) for item in list(payload.get('partial_child_results') or []) if isinstance(item, dict)],
             'tool_calls': [dict(item) for item in list(payload.get('tool_calls') or []) if isinstance(item, dict)],
             'child_pipelines': [dict(item) for item in list(payload.get('child_pipelines') or []) if isinstance(item, dict)],
+            'model_visible_tool_names': [
+                str(item or '').strip()
+                for item in list(payload.get('model_visible_tool_names') or [])
+                if str(item or '').strip()
+            ],
+            'hydrated_executor_names': [
+                str(item or '').strip()
+                for item in list(payload.get('hydrated_executor_names') or [])
+                if str(item or '').strip()
+            ],
+            'lightweight_tool_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('lightweight_tool_ids') or [])
+                if str(item or '').strip()
+            ],
+            'model_visible_tool_selection_trace': dict(payload.get('model_visible_tool_selection_trace') or {}),
             'last_error': str(payload.get('last_error') or ''),
         }
 
@@ -3228,6 +3276,22 @@ class TaskLogService:
             'stage_total_steps': int(payload.get('stage_total_steps') or 0),
             'tool_calls': [dict(item) for item in list(payload.get('tool_calls') or []) if isinstance(item, dict)],
             'child_pipelines': [dict(item) for item in list(payload.get('child_pipelines') or []) if isinstance(item, dict)],
+            'model_visible_tool_names': [
+                str(item or '').strip()
+                for item in list(payload.get('model_visible_tool_names') or [])
+                if str(item or '').strip()
+            ],
+            'hydrated_executor_names': [
+                str(item or '').strip()
+                for item in list(payload.get('hydrated_executor_names') or [])
+                if str(item or '').strip()
+            ],
+            'lightweight_tool_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('lightweight_tool_ids') or [])
+                if str(item or '').strip()
+            ],
+            'model_visible_tool_selection_trace': dict(payload.get('model_visible_tool_selection_trace') or {}),
         }
 
     def _notify_task_terminal(self, task: TaskRecord, *, previous_status: str) -> None:

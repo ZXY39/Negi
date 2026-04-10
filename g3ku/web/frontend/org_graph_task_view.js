@@ -1428,81 +1428,21 @@ function renderSpawnReviewTrace(node, { viewState = null } = {}) {
     return shouldReplace;
 }
 
-function toPixels(value) {
-    const parsed = Number.parseFloat(String(value || ""));
-    return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function setScrollViewportLimit(container, itemSelector, visibleCount, measureItem = null, fillToVisibleCount = false) {
-    if (!(container instanceof HTMLElement)) return;
-    container.style.height = "";
-    container.style.maxHeight = "";
-    const items = Array.from(container.querySelectorAll(itemSelector)).filter((item) => item instanceof HTMLElement);
-    if (!items.length || visibleCount <= 0) return;
-    const styles = window.getComputedStyle(container);
-    const gap = toPixels(styles.rowGap || styles.gap);
-    const targetCount = Math.min(visibleCount, items.length);
-    const measuredHeights = [];
-    let height = 0;
-    for (let index = 0; index < targetCount; index += 1) {
-        const item = items[index];
-        const measured = measureItem ? Number(measureItem(item, index)) : item.getBoundingClientRect().height;
-        const resolvedHeight = measured > 0 ? measured : 0;
-        measuredHeights.push(resolvedHeight);
-        height += resolvedHeight;
-        if (index < targetCount - 1) height += gap;
-    }
-    if (fillToVisibleCount && measuredHeights.length) {
-        const averageHeight = measuredHeights.reduce((sum, value) => sum + value, 0) / measuredHeights.length;
-        const remainingCount = Math.max(0, visibleCount - measuredHeights.length);
-        if (remainingCount > 0) {
-            height += averageHeight * remainingCount;
-            height += gap * remainingCount;
-        }
-    }
-    if (height > 0) {
-        const resolvedHeight = `${Math.ceil(height)}px`;
-        if (fillToVisibleCount) container.style.height = resolvedHeight;
-        container.style.maxHeight = resolvedHeight;
-    }
-}
-
-function traceStepSummaryHeight(step) {
-    if (!(step instanceof HTMLElement)) return 0;
-    const summary = step.querySelector(".task-trace-summary");
-    const summaryHeight = summary instanceof HTMLElement ? summary.getBoundingClientRect().height : step.getBoundingClientRect().height;
-    const styles = window.getComputedStyle(step);
-    return summaryHeight
-        + toPixels(styles.paddingTop)
-        + toPixels(styles.paddingBottom)
-        + toPixels(styles.borderTopWidth)
-        + toPixels(styles.borderBottomWidth);
-}
-
 function refreshTaskDetailScrollRegions() {
     const traceList = U.adFlow?.querySelector(".task-trace-list");
     const spawnReviewList = U.adSpawnReviews?.querySelector(".task-trace-list");
-    const preservedDetailScrollTop = U.detail instanceof HTMLElement ? U.detail.scrollTop : null;
-    const preservedTraceScrollTop = traceList instanceof HTMLElement ? traceList.scrollTop : null;
-    const preservedSpawnReviewScrollTop = spawnReviewList instanceof HTMLElement ? spawnReviewList.scrollTop : null;
-    const preservedArtifactListScrollTop = U.artifactList instanceof HTMLElement ? U.artifactList.scrollTop : null;
     if (traceList instanceof HTMLElement) {
-        setScrollViewportLimit(traceList, ".task-trace-step", 10, traceStepSummaryHeight, true);
+        traceList.style.height = "";
+        traceList.style.maxHeight = "";
     }
     if (spawnReviewList instanceof HTMLElement) {
-        setScrollViewportLimit(spawnReviewList, ".task-trace-step", 6, traceStepSummaryHeight, true);
+        spawnReviewList.style.height = "";
+        spawnReviewList.style.maxHeight = "";
     }
     if (U.artifactList instanceof HTMLElement) {
-        setScrollViewportLimit(U.artifactList, ".artifact-item", 5);
+        U.artifactList.style.height = "";
+        U.artifactList.style.maxHeight = "";
     }
-    const restoreScrollPositions = () => {
-        if (preservedDetailScrollTop !== null) setElementScrollTop(U.detail, preservedDetailScrollTop);
-        if (preservedTraceScrollTop !== null) setElementScrollTop(traceList, preservedTraceScrollTop);
-        if (preservedSpawnReviewScrollTop !== null) setElementScrollTop(spawnReviewList, preservedSpawnReviewScrollTop);
-        if (preservedArtifactListScrollTop !== null) setElementScrollTop(U.artifactList, preservedArtifactListScrollTop);
-    };
-    restoreScrollPositions();
-    window.requestAnimationFrame(restoreScrollPositions);
 }
 
 function renderExecutionTrace(node) {
@@ -2018,7 +1958,20 @@ function renderNodeContextPlaceholder(text = "展开后查看节点完整上下�
     const viewState = preserveViewState && typeof captureTaskDetailViewState === "function"
         ? captureTaskDetailViewState()
         : null;
-    if (U.artifactContent) U.artifactContent.textContent = String(text || "").trim();
+    if (U.artifactContent) {
+        const decodedText = readableText(text, {
+            decodeEscapes: true,
+            emptyText: "展开后查看节点完整上下文。",
+        });
+        U.artifactContent.textContent = String(decodedText || "")
+            .replace(/\\r\\n/g, "\n")
+            .replace(/\\n/g, "\n")
+            .replace(/\\r/g, "\n")
+            .replace(/\\t/g, "\t")
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, "\\")
+            .trim();
+    }
     if (viewState && typeof restoreTaskDetailViewState === "function") {
         restoreTaskDetailViewState(viewState, {
             detail: true,
