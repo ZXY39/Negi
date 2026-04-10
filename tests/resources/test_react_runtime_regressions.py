@@ -679,15 +679,14 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
         'submit_final_result',
         'spawn_child_nodes',
         'filesystem',
+        'memory_write',
     ]
-    assert 'memory_write' not in emitted_tool_names
-    assert len(emitted_tool_names) < 7
     filesystem_schema = next(item for item in emitted_tools if item['function']['name'] == 'filesystem')
     assert filesystem_schema['function']['description'] == 'filesystem compact model schema'
 
 
 @pytest.mark.asyncio
-async def test_execution_root_replay_schema_budget_stays_below_threshold(tmp_path) -> None:
+async def test_execution_root_replay_semantic_selection_includes_split_tools_without_budget_gate(tmp_path) -> None:
     requests: list[dict[str, object]] = []
 
     class _Backend:
@@ -846,11 +845,6 @@ async def test_execution_root_replay_schema_budget_stays_below_threshold(tmp_pat
     assert requests
     emitted_tools = list(requests[0].get('tools') or [])
     emitted_tool_names = [item['function']['name'] for item in emitted_tools]
-    emitted_schema_chars = sum(
-        len(json.dumps(item, ensure_ascii=False, sort_keys=True))
-        for item in emitted_tools
-    )
-
     assert emitted_tool_names[:5] == [
         'wait_tool_execution',
         'stop_tool_execution',
@@ -861,13 +855,15 @@ async def test_execution_root_replay_schema_budget_stays_below_threshold(tmp_pat
     assert 'filesystem' not in emitted_tool_names
     assert 'content' not in emitted_tool_names
     assert 'filesystem_describe' in emitted_tool_names
+    assert 'filesystem_search' in emitted_tool_names
+    assert 'filesystem_open' in emitted_tool_names
     assert 'content_describe' in emitted_tool_names
-    assert 'memory_write' not in emitted_tool_names
-    assert emitted_schema_chars <= runtime_service_module._EXECUTION_MODEL_VISIBLE_SCHEMA_BUDGET_CHARS
+    assert 'content_search' in emitted_tool_names
+    assert 'content_open' in emitted_tool_names
+    assert 'memory_write' in emitted_tool_names
 
 
 def test_execution_selector_uses_stable_visible_tool_order_independent_of_family_iteration_order(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     visible_tools = {
         'filesystem': _ModelSchemaRecordingTool(
@@ -884,21 +880,6 @@ def test_execution_selector_uses_stable_visible_tool_order_independent_of_family
         'submit_final_result': _submit_final_result_tool(),
         'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
     }
-    always_callable_tools = [
-        visible_tools['submit_next_stage'],
-        visible_tools['submit_final_result'],
-        visible_tools['spawn_child_nodes'],
-    ]
-    budget = sum(
-        len(json.dumps(tool.to_model_schema(), ensure_ascii=False, sort_keys=True))
-        for tool in always_callable_tools
-    ) + len(json.dumps(visible_tools['filesystem'].to_model_schema(), ensure_ascii=False, sort_keys=True))
-    monkeypatch.setattr(
-        runtime_service_module,
-        '_EXECUTION_MODEL_VISIBLE_SCHEMA_BUDGET_CHARS',
-        budget,
-    )
-
     def _service_for(families: list[dict[str, object]]) -> MainRuntimeService:
         service = object.__new__(MainRuntimeService)
         service.store = SimpleNamespace(
@@ -989,8 +970,8 @@ def test_execution_selector_uses_stable_visible_tool_order_independent_of_family
         'submit_final_result',
         'spawn_child_nodes',
         'filesystem',
+        'memory_write',
     ]
-    assert 'memory_write' not in filesystem_first_selection['tool_names']
 
 
 def test_execution_stage_gate_allows_spawn_child_nodes_without_active_stage() -> None:
@@ -1014,9 +995,7 @@ def test_execution_stage_gate_allows_spawn_child_nodes_without_active_stage() ->
     assert error == ''
 
 
-def test_execution_selector_preserves_prior_model_visible_tool_order_across_turns(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_execution_selector_preserves_prior_model_visible_tool_order_across_turns() -> None:
     visible_tools = {
         'filesystem': _ModelSchemaRecordingTool(
             name='filesystem',
@@ -1027,21 +1006,6 @@ def test_execution_selector_preserves_prior_model_visible_tool_order_across_turn
         'submit_final_result': _submit_final_result_tool(),
         'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
     }
-    always_callable_tools = [
-        visible_tools['spawn_child_nodes'],
-        visible_tools['submit_final_result'],
-        visible_tools['submit_next_stage'],
-    ]
-    budget = sum(
-        len(json.dumps(tool.to_model_schema(), ensure_ascii=False, sort_keys=True))
-        for tool in always_callable_tools
-    ) + len(json.dumps(visible_tools['filesystem'].to_model_schema(), ensure_ascii=False, sort_keys=True))
-    monkeypatch.setattr(
-        runtime_service_module,
-        '_EXECUTION_MODEL_VISIBLE_SCHEMA_BUDGET_CHARS',
-        budget,
-    )
-
     log_service = _FakeLogService()
     log_service.upsert_frame(
         'task-prior-order',
@@ -1102,9 +1066,7 @@ def test_execution_selector_preserves_prior_model_visible_tool_order_across_turn
     ]
 
 
-def test_execution_selector_appends_missing_tools_after_prior_stable_prefix(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_execution_selector_appends_missing_tools_after_prior_stable_prefix() -> None:
     visible_tools = {
         'filesystem': _ModelSchemaRecordingTool(
             name='filesystem',
@@ -1115,21 +1077,6 @@ def test_execution_selector_appends_missing_tools_after_prior_stable_prefix(
         'submit_final_result': _submit_final_result_tool(),
         'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
     }
-    always_callable_tools = [
-        visible_tools['spawn_child_nodes'],
-        visible_tools['submit_final_result'],
-        visible_tools['submit_next_stage'],
-    ]
-    budget = sum(
-        len(json.dumps(tool.to_model_schema(), ensure_ascii=False, sort_keys=True))
-        for tool in always_callable_tools
-    ) + len(json.dumps(visible_tools['filesystem'].to_model_schema(), ensure_ascii=False, sort_keys=True))
-    monkeypatch.setattr(
-        runtime_service_module,
-        '_EXECUTION_MODEL_VISIBLE_SCHEMA_BUDGET_CHARS',
-        budget,
-    )
-
     log_service = _FakeLogService()
     log_service.upsert_frame(
         'task-partial-prior-order',
@@ -1473,6 +1420,89 @@ def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> N
     assert 'filesystem_describe' in hydrated_selection['tool_names']
     assert 'content_describe' in hydrated_selection['tool_names']
     assert hydrated_selection['hydrated_executor_names'] == ['filesystem_describe', 'content_describe']
+
+
+def test_execution_selector_web_research_query_includes_web_fetch_before_memory_search() -> None:
+    visible_tools = {
+        'web_fetch': _ModelSchemaRecordingTool(
+            name='web_fetch',
+            authoritative_description='web_fetch authoritative schema',
+            model_description='web_fetch compact model schema',
+        ),
+        'memory_search': _ModelSchemaRecordingTool(
+            name='memory_search',
+            authoritative_description='memory_search authoritative schema',
+            model_description='memory_search compact model schema',
+        ),
+        'agent_browser': _ModelSchemaRecordingTool(
+            name='agent_browser',
+            authoritative_description='agent_browser authoritative schema',
+            model_description='agent_browser compact model schema',
+        ),
+        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
+        'submit_final_result': _submit_final_result_tool(),
+        'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
+    }
+
+    service = object.__new__(MainRuntimeService)
+    service.log_service = _FakeLogService()
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(
+            task_id=task_id,
+            session_id='web:shared',
+            metadata={'core_requirement': 'collect public web sources and URLs for ranking research'},
+        ),
+        get_node=lambda node_id: SimpleNamespace(
+            node_id=node_id,
+            prompt='search the web for official source URLs and ranking pages',
+            goal='collect public web sources for character rankings',
+            node_kind='execution',
+        ),
+    )
+    service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
+        {
+            'tool_id': 'memory',
+            'display_name': 'Memory',
+            'description': 'Search prior memory',
+            'l0': 'Search prior memory',
+            'l1': 'Search prior memory',
+            'actions': [{'action_id': 'search', 'executor_names': ['memory_search']}],
+        },
+        {
+            'tool_id': 'web_fetch',
+            'display_name': 'Web Fetch',
+            'description': 'Fetch public web pages',
+            'l0': 'Fetch public web pages',
+            'l1': 'Fetch public web pages',
+            'actions': [{'action_id': 'fetch', 'executor_names': ['web_fetch']}],
+        },
+        {
+            'tool_id': 'agent_browser',
+            'display_name': 'Agent Browser',
+            'description': 'Browse public web pages',
+            'l0': 'Browse public web pages',
+            'l1': 'Browse public web pages',
+            'actions': [{'action_id': 'browse', 'executor_names': ['agent_browser']}],
+        },
+    ]
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-web-research',
+        node_id='node-web-research',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-web-research',
+            'node_id': 'node-web-research',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert 'web_fetch' in selection['tool_names']
+    assert 'memory_search' in selection['tool_names']
+    assert selection['tool_names'].index('web_fetch') < selection['tool_names'].index('memory_search')
+
 
 def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_window() -> None:
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)

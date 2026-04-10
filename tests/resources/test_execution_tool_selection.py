@@ -38,19 +38,11 @@ def test_selector_keeps_internal_protocol_tools_always_callable() -> None:
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        schema_size_by_executor={
-            "filesystem": 2900,
-            "content": 1700,
-            "submit_next_stage": 1473,
-            "submit_final_result": 1547,
-            "spawn_child_nodes": 1630,
-        },
         always_callable_tool_names=[
             "submit_next_stage",
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        max_schema_chars=8000,
     )
 
     assert result.hydrated_tool_names[:3] == [
@@ -60,42 +52,42 @@ def test_selector_keeps_internal_protocol_tools_always_callable() -> None:
     ]
 
 
-def test_selector_does_not_hydrate_all_visible_tools_when_budget_would_overflow() -> None:
+def test_selector_semantic_frontload_prefers_web_fetch_over_memory_search_for_web_research_query() -> None:
     result = build_execution_tool_selection(
-        prompt="search frontend skills",
-        goal="search frontend skills",
-        core_requirement="search frontend skills",
+        prompt="search the web for official source URLs and ranking pages",
+        goal="collect public web sources for character rankings",
+        core_requirement="use public web pages and source URLs for ranking research",
         visible_tool_families=[
-            _family("filesystem"),
-            _family("content_navigation", executors=["content"]),
-            _family("memory", executors=["memory_write"]),
+            _family("memory", executors=["memory_search"]),
+            _family("web_fetch"),
+            _family("agent_browser"),
         ],
         visible_tool_names=[
-            "filesystem",
-            "content",
-            "memory_write",
+            "memory_search",
+            "web_fetch",
+            "agent_browser",
             "submit_next_stage",
             "submit_final_result",
             "spawn_child_nodes",
         ],
         schema_size_by_executor={
-            "filesystem": 2900,
-            "content": 1700,
-            "memory_write": 2265,
-            "submit_next_stage": 1473,
-            "submit_final_result": 1547,
-            "spawn_child_nodes": 1630,
+            "memory_search": 100,
+            "web_fetch": 100,
+            "agent_browser": 100,
         },
         always_callable_tool_names=[
             "submit_next_stage",
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        max_schema_chars=8000,
     )
 
-    assert "memory_write" not in result.hydrated_tool_names
-    assert result.schema_chars <= 8000
+    assert result.hydrated_tool_names[:3] == [
+        "submit_next_stage",
+        "submit_final_result",
+        "spawn_child_nodes",
+    ]
+    assert result.hydrated_tool_names.index("web_fetch") < result.hydrated_tool_names.index("memory_search")
 
 
 def test_selector_accepts_runtime_helper_dict_shape_families() -> None:
@@ -138,71 +130,64 @@ def test_selector_accepts_runtime_helper_dict_shape_families() -> None:
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        schema_size_by_executor={
-            "filesystem": 2900,
-            "content": 1700,
-            "submit_next_stage": 1473,
-            "submit_final_result": 1547,
-            "spawn_child_nodes": 1630,
-        },
         always_callable_tool_names=[
             "submit_next_stage",
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        max_schema_chars=8000,
     )
 
     assert result.lightweight_tool_ids == ["filesystem", "content_navigation"]
-    assert result.hydrated_tool_names == [
+    assert result.hydrated_tool_names[:3] == [
         "submit_next_stage",
         "submit_final_result",
         "spawn_child_nodes",
-        "filesystem",
     ]
+    assert "filesystem" in result.hydrated_tool_names
+    assert "content" in result.hydrated_tool_names
 
 
-def test_selector_zero_schema_budget_disables_optional_hydration() -> None:
+def test_selector_multi_per_family_exposes_multiple_related_executors() -> None:
     result = build_execution_tool_selection(
-        prompt="search frontend skills",
-        goal="search frontend skills",
-        core_requirement="search frontend skills",
+        prompt="open content and search content for official source pages",
+        goal="inspect and search content",
+        core_requirement="collect source pages from public web content",
         visible_tool_families=[
-            _family("filesystem"),
-            _family("content_navigation", executors=["content"]),
+            {
+                "tool_id": "content_navigation",
+                "display_name": "content_navigation",
+                "description": "content navigation",
+                "l0": "content navigation",
+                "l1": "content navigation",
+                "actions": [
+                    {
+                        "action_id": "describe",
+                        "executor_names": ["content_describe", "content_search", "content_open"],
+                    }
+                ],
+            }
         ],
         visible_tool_names=[
-            "filesystem",
-            "content",
+            "content_describe",
+            "content_search",
+            "content_open",
             "submit_next_stage",
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        schema_size_by_executor={
-            "filesystem": 10,
-            "content": 10,
-            "submit_next_stage": 1,
-            "submit_final_result": 1,
-            "spawn_child_nodes": 1,
-        },
         always_callable_tool_names=[
             "submit_next_stage",
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        max_schema_chars=0,
     )
 
-    assert result.hydrated_tool_names == [
-        "submit_next_stage",
-        "submit_final_result",
-        "spawn_child_nodes",
-    ]
-    assert result.schema_chars == 3
-    assert result.trace["budget"] == 0
+    assert "content_describe" in result.hydrated_tool_names
+    assert "content_search" in result.hydrated_tool_names
+    assert "content_open" in result.hydrated_tool_names
 
 
-def test_selector_prefers_split_filesystem_and_content_executors_within_budget() -> None:
+def test_selector_prefers_split_filesystem_and_content_executors() -> None:
     result = build_execution_tool_selection(
         prompt="inspect project files and read docs",
         goal="inspect project files and read docs",
@@ -252,37 +237,21 @@ def test_selector_prefers_split_filesystem_and_content_executors_within_budget()
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        schema_size_by_executor={
-            "filesystem": 3600,
-            "filesystem_describe": 1300,
-            "filesystem_search": 1900,
-            "filesystem_open": 1800,
-            "content": 3200,
-            "content_describe": 1100,
-            "content_search": 1700,
-            "content_open": 1600,
-            "submit_next_stage": 1473,
-            "submit_final_result": 1547,
-            "spawn_child_nodes": 1630,
-        },
         always_callable_tool_names=[
             "submit_next_stage",
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        max_schema_chars=8000,
     )
 
-    assert result.hydrated_tool_names == [
-        "submit_next_stage",
-        "submit_final_result",
-        "spawn_child_nodes",
-        "filesystem_describe",
-        "content_describe",
-    ]
     assert "filesystem" not in result.hydrated_tool_names
     assert "content" not in result.hydrated_tool_names
-    assert result.schema_chars <= 8000
+    assert "filesystem_describe" in result.hydrated_tool_names
+    assert "filesystem_search" in result.hydrated_tool_names
+    assert "filesystem_open" in result.hydrated_tool_names
+    assert "content_describe" in result.hydrated_tool_names
+    assert "content_search" in result.hydrated_tool_names
+    assert "content_open" in result.hydrated_tool_names
 
 
 def test_selector_replay_promotions_prefer_split_over_legacy_monoliths() -> None:
@@ -335,36 +304,23 @@ def test_selector_replay_promotions_prefer_split_over_legacy_monoliths() -> None
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        schema_size_by_executor={
-            "filesystem": 3600,
-            "filesystem_describe": 1300,
-            "filesystem_search": 1900,
-            "filesystem_open": 1800,
-            "content": 3200,
-            "content_describe": 1100,
-            "content_search": 1700,
-            "content_open": 1600,
-            "submit_next_stage": 1473,
-            "submit_final_result": 1547,
-            "spawn_child_nodes": 1630,
-        },
         always_callable_tool_names=[
             "submit_next_stage",
             "submit_final_result",
             "spawn_child_nodes",
         ],
         promoted_tool_names=["filesystem", "content"],
-        max_schema_chars=8000,
     )
 
-    assert result.trace["selected_promoted_tool_names"] == ["filesystem_describe"]
+    assert result.trace["selected_promoted_tool_names"] == ["filesystem_describe", "content_describe"]
     assert "content_describe" in result.hydrated_tool_names
+    assert "filesystem_search" in result.hydrated_tool_names
+    assert "content_search" in result.hydrated_tool_names
     assert "filesystem" not in result.hydrated_tool_names
     assert "content" not in result.hydrated_tool_names
-    assert result.schema_chars <= 8000
 
 
-def test_selector_replay_promotions_skip_when_budget_exceeded() -> None:
+def test_selector_promoted_tools_are_not_skipped_without_budget() -> None:
     result = build_execution_tool_selection(
         prompt="inspect project files and read docs",
         goal="inspect project files and read docs",
@@ -380,26 +336,17 @@ def test_selector_replay_promotions_skip_when_budget_exceeded() -> None:
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        schema_size_by_executor={
-            "filesystem_describe": 1300,
-            "content_describe": 1100,
-            "submit_next_stage": 1473,
-            "submit_final_result": 1547,
-            "spawn_child_nodes": 1630,
-        },
         always_callable_tool_names=[
             "submit_next_stage",
             "submit_final_result",
             "spawn_child_nodes",
         ],
         promoted_tool_names=["filesystem_describe", "content_describe"],
-        max_schema_chars=5000,
     )
 
-    assert result.hydrated_tool_names == [
-        "submit_next_stage",
-        "submit_final_result",
-        "spawn_child_nodes",
+    assert result.trace["selected_promoted_tool_names"] == [
+        "filesystem_describe",
+        "content_describe",
     ]
-    assert result.trace["selected_promoted_tool_names"] == []
-    assert result.schema_chars == 4650
+    assert "filesystem_describe" in result.hydrated_tool_names
+    assert "content_describe" in result.hydrated_tool_names

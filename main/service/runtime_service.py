@@ -153,9 +153,6 @@ _WORKER_STATUS_TERMINAL_STATES = frozenset({'stopped', 'offline', 'dead'})
 _TASK_RECOVERY_NOTICE_KEY = 'recovery_notice'
 _TASK_RECOVERY_NOTICE_TEXT = '本任务遇到异常停止，已回退到稳定步骤继续。'
 _CONTINUATION_TASK_CREATED_BY_SOURCES = frozenset({'heartbeat_auto_continue', 'ceo_user_rebuild'})
-_EXECUTION_MODEL_VISIBLE_SCHEMA_BUDGET_CHARS = 8000
-
-
 _TASK_RUNTIME_V3_MARKER = '.task-runtime-v3'
 
 
@@ -3818,16 +3815,12 @@ class MainRuntimeService:
             self.execution_visible_tool_lightweight_items(actor_role=actor_role, session_id=session_id) or []
         )
         filtered_lightweight_items = self._filter_execution_model_visible_lightweight_items(items=lightweight_items)
-        schema_size_by_executor: dict[str, int] = {}
         ordered_visible_tool_names: list[str] = []
         for raw_name, tool in dict(visible_tools or {}).items():
             name = str(raw_name or '').strip()
             if not name:
                 continue
             ordered_visible_tool_names.append(name)
-            schema_size_by_executor[name] = len(
-                json.dumps(tool.to_model_schema(), ensure_ascii=False, sort_keys=True)
-            )
         stable_lightweight_items = self._stable_execution_visible_tool_families(
             items=filtered_lightweight_items,
             visible_tool_names=ordered_visible_tool_names,
@@ -3862,10 +3855,8 @@ class MainRuntimeService:
             core_requirement=core_requirement,
             visible_tool_families=stable_lightweight_items,
             visible_tool_names=ordered_visible_tool_names,
-            schema_size_by_executor=schema_size_by_executor,
             always_callable_tool_names=always_callable_tool_names,
             promoted_tool_names=promoted_hydrated_executor_names,
-            max_schema_chars=_EXECUTION_MODEL_VISIBLE_SCHEMA_BUDGET_CHARS,
         )
         trace_payload = dict(selection.trace or {})
         has_selected_promoted = 'selected_promoted_tool_names' in trace_payload
@@ -3896,8 +3887,9 @@ class MainRuntimeService:
             if name in selected_tool_name_set and name not in selected_tool_names:
                 selected_tool_names.append(name)
         final_schema_chars = sum(
-            max(0, int(schema_size_by_executor.get(name, 0) or 0))
+            len(json.dumps(visible_tools[name].to_model_schema(), ensure_ascii=False, sort_keys=True))
             for name in selected_tool_names
+            if name in visible_tools
         )
         return {
             'tool_names': selected_tool_names,
