@@ -1818,6 +1818,46 @@ def test_externalize_for_message_keeps_direct_load_context_inline(tmp_path: Path
 
 
 @pytest.mark.parametrize(
+    ('source_kind', 'uri'),
+    [
+        ('tool_result:load_skill_context', 'g3ku://skill/full_body_skill'),
+        ('tool_result:load_tool_context', 'g3ku://resource/tool/content'),
+    ],
+)
+def test_direct_load_tools_remain_inline_without_manifest_flag(tmp_path: Path, source_kind: str, uri: str):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    payload = _large_direct_load_payload(uri=uri, body_label=source_kind.replace(':', '_'))
+
+    assert (
+        navigator.maybe_externalize_text(
+            json.dumps(payload, ensure_ascii=False),
+            runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+            display_name='load-context',
+            source_kind=source_kind,
+        )
+        is None
+    )
+    assert (
+        navigator.maybe_externalize_text(
+            json.dumps(payload, ensure_ascii=False),
+            runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+            display_name='load-context',
+            source_kind=source_kind,
+            delivery_metadata={'tool_result_inline_full': False},
+        )
+        is None
+    )
+
+    store.close()
+
+
+@pytest.mark.parametrize(
     'source_kind',
     [
         'tool_result:memory_search',

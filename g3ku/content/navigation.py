@@ -19,6 +19,9 @@ _HEAD_PREVIEW_LINES = 6
 _TAIL_PREVIEW_LINES = 6
 _PREVIEW_CHAR_LIMIT = 220
 _MAX_WRAPPER_DEPTH = 8
+# Internal runtime tools that are intentionally always inlined even when their
+# payloads are large. Keep this list explicit here instead of manifest-driven
+# so these delivery exceptions stay auditable and tightly scoped.
 _ALWAYS_INLINE_TOOL_RESULT_SOURCES = frozenset(
     {
         "tool_result:memory_search",
@@ -28,6 +31,15 @@ _ALWAYS_INLINE_TOOL_RESULT_SOURCES = frozenset(
         "tool_result:task_node_detail_cn",
         "tool_result:task_progress_cn",
         "tool_result:task_summary_cn",
+    }
+)
+# Direct-load context tools return the final body the agent should read in the
+# same turn. They stay on explicit hardcoded rules and must not depend on the
+# manifest-level tool_result_inline_full flag.
+_DIRECT_LOAD_INLINE_TOOL_RESULT_SOURCES = frozenset(
+    {
+        "tool_result:load_skill_context",
+        "tool_result:load_tool_context",
     }
 )
 
@@ -219,7 +231,7 @@ def _structured_ref_payload(value: Any) -> tuple[str, str]:
 
 def _should_keep_inline_direct_load_tool_result(value: Any, *, source_kind: str) -> bool:
     normalized = str(source_kind or "").strip().lower()
-    if not normalized.startswith("tool_result:"):
+    if normalized not in _DIRECT_LOAD_INLINE_TOOL_RESULT_SOURCES:
         return False
     payload = _parsed_json_payload(value)
     if not isinstance(payload, dict):
