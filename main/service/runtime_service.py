@@ -3574,6 +3574,36 @@ class MainRuntimeService:
                 families.append(family.model_copy(update={'actions': actions, 'metadata': metadata}))
         return families
 
+    def execution_visible_tool_lightweight_items(self, *, actor_role: str, session_id: str) -> list[dict[str, Any]]:
+        families = list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_id) or [])
+        items: list[dict[str, Any]] = []
+        for family in families:
+            tool_id = str(getattr(family, "tool_id", "") or "").strip()
+            if not tool_id:
+                continue
+            metadata = dict(getattr(family, "metadata", {}) or {})
+            items.append(
+                {
+                    "tool_id": tool_id,
+                    "display_name": str(getattr(family, "display_name", "") or tool_id).strip() or tool_id,
+                    "description": str(getattr(family, "description", "") or "").strip(),
+                    "l0": str(metadata.get("l0") or getattr(family, "l0", "") or "").strip(),
+                    "l1": str(metadata.get("l1") or getattr(family, "l1", "") or "").strip(),
+                    "actions": [
+                        {
+                            "action_id": str(getattr(action, "action_id", "") or "").strip(),
+                            "executor_names": [
+                                str(name or "").strip()
+                                for name in list(getattr(action, "executor_names", []) or [])
+                                if str(name or "").strip()
+                            ],
+                        }
+                        for action in list(getattr(family, "actions", []) or [])
+                    ],
+                }
+            )
+        return items
+
     @staticmethod
     def _should_expose_unavailable_tool_action(*, actor_role: str, family: Any, action: Any) -> bool:
         if bool(getattr(family, 'available', True)):
