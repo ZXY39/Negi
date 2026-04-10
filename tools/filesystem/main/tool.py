@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.content import ContentNavigationService
-from g3ku.resources.tool_settings import FilesystemToolSettings, runtime_tool_settings
+from g3ku.resources.tool_settings import FilesystemToolSettings, load_tool_settings_from_manifest, runtime_tool_settings
 
 _METADATA_START = '### G3KU_PATCH_METADATA ###'
 _DIFF_START = '### G3KU_PATCH_DIFF ###'
@@ -1048,8 +1048,34 @@ class FilesystemTool:
             return
 
 
-def build(runtime):
-    settings = runtime_tool_settings(runtime, FilesystemToolSettings, tool_name='filesystem')
+class FilesystemActionTool:
+    def __init__(self, delegate: FilesystemTool, *, action: str, fixed_kwargs: dict[str, Any] | None = None) -> None:
+        self._delegate = delegate
+        self._action = str(action or '').strip().lower()
+        self._fixed_kwargs = dict(fixed_kwargs or {})
+
+    async def execute(self, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
+        call_kwargs = dict(self._fixed_kwargs)
+        call_kwargs.update(kwargs)
+        call_kwargs.pop('action', None)
+        return await self._delegate.execute(
+            action=self._action,
+            __g3ku_runtime=__g3ku_runtime,
+            **call_kwargs,
+        )
+
+
+def build_filesystem_tool(runtime, *, tool_name: str | None = None) -> FilesystemTool:
+    resolved_tool_name = str(tool_name or getattr(getattr(runtime, 'resource_descriptor', None), 'name', '') or 'filesystem')
+    descriptor_name = str(getattr(getattr(runtime, 'resource_descriptor', None), 'name', '') or '').strip()
+    if resolved_tool_name and resolved_tool_name != descriptor_name:
+        settings = load_tool_settings_from_manifest(runtime.workspace, resolved_tool_name, FilesystemToolSettings)
+    else:
+        settings = runtime_tool_settings(
+            runtime,
+            FilesystemToolSettings,
+            tool_name=resolved_tool_name,
+        )
     service = getattr(runtime.services, 'main_task_service', None)
     artifact_store = getattr(service, 'artifact_store', None) if service is not None else None
     allowed_dir = runtime.workspace if settings.restrict_to_workspace else None
@@ -1060,3 +1086,15 @@ def build(runtime):
         main_task_service=service,
         settings=settings,
     )
+
+
+def build_single_purpose_filesystem_tool(runtime, *, action: str, fixed_kwargs: dict[str, Any] | None = None) -> FilesystemActionTool:
+    return FilesystemActionTool(
+        build_filesystem_tool(runtime, tool_name='filesystem'),
+        action=action,
+        fixed_kwargs=fixed_kwargs,
+    )
+
+
+def build(runtime):
+    return build_filesystem_tool(runtime, tool_name='filesystem')

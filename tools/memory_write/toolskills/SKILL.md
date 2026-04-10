@@ -30,6 +30,17 @@ Write structured long-term memory facts immediately.
 
 - Pass a top-level `facts` array.
 - Each `facts[*]` entry should include: `category`, `scope`, `entity`, `attribute`, `value`, `observed_at`, `time_semantics`, and `source_excerpt`.
+- In the compact callable schema, always pass `facts[*].value` as a string.
+- Serialize object/array values as JSON strings. Plain strings stay plain strings. Numbers, booleans, and null should be stringified only when the caller is constrained to the compact callable schema.
+
+## Fact Semantics
+
+- Choose `time_semantics` intentionally.
+- Use `current_state` for facts that describe what is true now and may change later.
+- Use `durable_until_replaced` for stable preferences, defaults, rules, and identities that should stay in force until overwritten.
+- Use `historical_observation` for dated past facts that should remain historical records.
+- Use `merge_mode="merge"` only for `preference` facts that should accumulate values instead of replacing the previous value.
+- Use `qualifier` only for lightweight disambiguation metadata such as project or environment context.
 
 ## Example
 

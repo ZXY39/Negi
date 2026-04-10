@@ -1,0 +1,45 @@
+schema_version: 1
+kind: tool
+name: filesystem_write
+display_name: Filesystem Write
+description: Write file content to disk.
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+    - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Absolute file path to write.
+    content:
+      type: string
+      description: Full file content to write.
+  required:
+    - path
+    - content
+governance:
+  family: filesystem
+  display_name: Filesystem
+  description: Describe, search, open, list, write, edit, delete, and patch local files.
+  actions:
+    - id: write
+      label: Write File
+      risk_level: high
+      destructive: true
+      allowed_roles:
+        - ceo
+        - execution
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

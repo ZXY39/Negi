@@ -7,6 +7,20 @@ DEFAULT_ALLOWED_ROLES = ['ceo', 'execution', 'inspection']
 READ_ALLOWED_ROLES = ['ceo', 'execution', 'inspection']
 WRITE_ALLOWED_ROLES = ['ceo', 'execution']
 
+TOOL_FAMILY_ALIASES: dict[str, str] = {
+    'filesystem_describe': 'filesystem',
+    'filesystem_search': 'filesystem',
+    'filesystem_open': 'filesystem',
+    'filesystem_list': 'filesystem',
+    'filesystem_write': 'filesystem',
+    'filesystem_edit': 'filesystem',
+    'filesystem_delete': 'filesystem',
+    'filesystem_propose_patch': 'filesystem',
+    'content_describe': 'content',
+    'content_search': 'content',
+    'content_open': 'content',
+}
+
 
 DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
     'filesystem': {
@@ -133,4 +147,14 @@ DEFAULT_FAMILY_ORDER = ['filesystem', 'content_navigation', 'memory', 'messaging
 
 
 def get_default_tool_governance(tool_name: str) -> dict[str, Any] | None:
-    return DEFAULT_TOOL_FAMILIES.get(tool_name)
+    key = str(tool_name or '').strip()
+    if not key:
+        return None
+    return DEFAULT_TOOL_FAMILIES.get(key) or DEFAULT_TOOL_FAMILIES.get(TOOL_FAMILY_ALIASES.get(key, ''))
+
+
+def get_governance_tool_id(tool_name: str) -> str:
+    payload = get_default_tool_governance(tool_name)
+    if not isinstance(payload, dict):
+        return ''
+    return str(payload.get('tool_id') or '').strip()

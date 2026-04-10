@@ -21,6 +21,7 @@ from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.registry import ResourceRegistry
 from g3ku.resources.tool_settings import FilesystemToolSettings
 from main.api import rest as api_rest
+from main.governance.resource_bridge import build_tool_families
 from main.models import TaskArtifactRecord
 from main.service.runtime_service import MainRuntimeService
 from main.storage.sqlite_store import SQLiteTaskStore
@@ -517,6 +518,172 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
     finally:
         manager.close()
         store.close()
+
+
+def test_filesystem_split_tools_are_discoverable_and_merge_into_filesystem_family(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    for tool_name in (
+        'filesystem_describe',
+        'filesystem_search',
+        'filesystem_open',
+        'filesystem_list',
+        'filesystem_write',
+        'filesystem_edit',
+        'filesystem_delete',
+        'filesystem_propose_patch',
+    ):
+        shutil.copytree(REPO_ROOT / 'tools' / tool_name, workspace / 'tools' / tool_name)
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    snapshot = registry.discover()
+
+    for tool_name in (
+        'filesystem',
+        'filesystem_describe',
+        'filesystem_search',
+        'filesystem_open',
+        'filesystem_list',
+        'filesystem_write',
+        'filesystem_edit',
+        'filesystem_delete',
+        'filesystem_propose_patch',
+    ):
+        assert tool_name in snapshot.tools
+
+    families = {item.tool_id: item for item in build_tool_families(list(snapshot.tools.values()))}
+    family = families['filesystem']
+    action_map = {action.action_id: action for action in family.actions}
+
+    assert family.primary_executor_name == 'filesystem_describe'
+    assert set(family.metadata['sources']) == {
+        'filesystem',
+        'filesystem_describe',
+        'filesystem_search',
+        'filesystem_open',
+        'filesystem_list',
+        'filesystem_write',
+        'filesystem_edit',
+        'filesystem_delete',
+        'filesystem_propose_patch',
+    }
+    assert 'filesystem_describe' in action_map['describe'].executor_names
+    assert 'filesystem_search' in action_map['search'].executor_names
+    assert 'filesystem_open' in action_map['open'].executor_names
+    assert 'filesystem_list' in action_map['list'].executor_names
+    assert 'filesystem_write' in action_map['write'].executor_names
+    assert 'filesystem_edit' in action_map['edit'].executor_names
+    assert 'filesystem_delete' in action_map['delete'].executor_names
+    assert 'filesystem_propose_patch' in action_map['propose_patch'].executor_names
+
+
+@pytest.mark.asyncio
+async def test_filesystem_split_tool_executes_with_legacy_filesystem_settings(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    outside_dir = tmp_path / 'outside-dir'
+    inside_dir = workspace / 'allowed-dir'
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    inside_dir.mkdir(parents=True, exist_ok=True)
+    (inside_dir / 'inside.txt').write_text('inside\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem_list', workspace / 'tools' / 'filesystem_list')
+
+    legacy_manifest = workspace / 'tools' / 'filesystem' / 'resource.yaml'
+    legacy_manifest.write_text(
+        legacy_manifest.read_text(encoding='utf-8').replace('restrict_to_workspace: false', 'restrict_to_workspace: true'),
+        encoding='utf-8',
+    )
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem_list')
+        assert tool is not None
+
+        listed = await tool.execute(path=str(inside_dir))
+        assert 'inside.txt' in listed
+
+        blocked = await tool.execute(path=str(outside_dir))
+        assert 'outside allowed directory' in blocked
+    finally:
+        manager.close()
+
+
+def test_content_split_tools_are_discoverable_and_merge_into_content_navigation_family(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    for tool_name in (
+        'content_describe',
+        'content_search',
+        'content_open',
+    ):
+        shutil.copytree(REPO_ROOT / 'tools' / tool_name, workspace / 'tools' / tool_name)
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    snapshot = registry.discover()
+
+    for tool_name in (
+        'content',
+        'content_describe',
+        'content_search',
+        'content_open',
+    ):
+        assert tool_name in snapshot.tools
+
+    families = {item.tool_id: item for item in build_tool_families(list(snapshot.tools.values()))}
+    family = families['content_navigation']
+    action_map = {action.action_id: action for action in family.actions}
+
+    assert set(family.metadata['sources']) == {
+        'content',
+        'content_describe',
+        'content_search',
+        'content_open',
+    }
+    assert 'content_describe' in action_map['describe'].executor_names
+    assert 'content_search' in action_map['search'].executor_names
+    assert 'content_open' in action_map['open'].executor_names
+
+
+@pytest.mark.asyncio
+async def test_content_split_tool_executes_with_legacy_content_settings(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    inside_file = workspace / 'allowed-dir' / 'inside.txt'
+    outside_file = tmp_path / 'outside.txt'
+    inside_file.parent.mkdir(parents=True, exist_ok=True)
+    inside_file.write_text('inside\n', encoding='utf-8')
+    outside_file.write_text('outside\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    shutil.copytree(REPO_ROOT / 'tools' / 'content_open', workspace / 'tools' / 'content_open')
+
+    legacy_manifest = workspace / 'tools' / 'content' / 'resource.yaml'
+    legacy_manifest.write_text(
+        legacy_manifest.read_text(encoding='utf-8').replace('restrict_to_workspace: false', 'restrict_to_workspace: true'),
+        encoding='utf-8',
+    )
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content_open')
+        assert tool is not None
+
+        opened = json.loads(await tool.execute(path=str(inside_file), start_line=1, end_line=5))
+        assert opened['ok'] is True
+        assert opened['excerpt'] == 'inside'
+
+        blocked = await tool.execute(path=str(outside_file), start_line=1, end_line=5)
+        assert 'outside workspace' in blocked
+    finally:
+        manager.close()
 
 
 @pytest.mark.asyncio

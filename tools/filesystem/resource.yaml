@@ -2,15 +2,15 @@ schema_version: 1
 kind: tool
 name: filesystem
 display_name: Filesystem
-description: Read and search local files, recursively search directories, list directories, plus write, edit, delete, and patch actions.
+description: Compatibility wrapper for the legacy multi-action filesystem tool.
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: 当前版本表示仓库内置实现；更新时需同步代码、参数契约和资源描述。
-  compare_rule: 以 main/ 实现、parameters、permissions、settings 或返回结构变化为准；仅修改 toolskills 文案不单独视为版本升级。
-  source_of_truth: 以当前目录下的 resource.yaml 与 main/ 实现为准；如存在 toolskills/，其内容用于补充使用说明。
+  summary: "Current version is defined by this manifest plus the Python implementation in `main/`."
+  compare_rule: "Bump the version when behavior, parameters, permissions, settings, or return contracts change."
+  source_of_truth: "`resource.yaml` and `main/` are authoritative; `toolskills/` adds usage guidance only."
 protocol: mcp
 mcp:
   transport: embedded
@@ -60,56 +60,56 @@ parameters:
       description: Filesystem action to execute.
     path:
       type: string
-      description: Target absolute path. `describe`/`open`/`head`/`tail`/`write`/`edit`/`delete`/`propose_patch` require a file path, `list` requires a directory path, and `search` accepts either a file or directory path. Temporary scratch files, generated scripts, fetch outputs, caches, and debug files should default to `runtime_environment.task_temp_dir` when that runtime field is available; otherwise fall back to workspace `temp/`. When restrict_to_workspace is enabled, the path must stay inside the workspace.
+      description: Absolute target path.
     query:
       type: string
-      description: Required when action=search on a file or directory.
+      description: Search query for `action=search`.
     limit:
       type: integer
-      description: Optional max hits when action=search.
+      description: Max hits for `action=search`.
     before:
       type: integer
-      description: Optional context lines before each hit when action=search on a single file.
+      description: Context lines before each file hit for `action=search`.
     after:
       type: integer
-      description: Optional context lines after each hit when action=search on a single file.
+      description: Context lines after each file hit for `action=search`.
     start_line:
       type: integer
-      description: Optional start line when action=open, or required start line when action=edit in line-range mode.
+      description: Start line for `action=open` or line-range `action=edit`.
     end_line:
       type: integer
-      description: Optional end line when action=open, or required end line when action=edit in line-range mode.
+      description: End line for `action=open` or line-range `action=edit`.
     around_line:
       type: integer
-      description: Optional center line when action=open.
+      description: Center line for `action=open`.
     window:
       type: integer
-      description: Optional window size when action=open with around_line.
+      description: Window size for `action=open` with `around_line`.
     lines:
       type: integer
-      description: Optional line count when action=head or action=tail.
+      description: Line count for `action=head` or `action=tail`.
     content:
       type: string
-      description: Required when action=write. If this write is creating temporary scratch content, the target path should normally live under `runtime_environment.task_temp_dir` when available, or workspace `temp/` as fallback.
+      description: File content for `action=write`.
     old_text:
       type: string
-      description: Required when action=edit in text-replace mode or action=propose_patch. Must match exactly once. Mutually exclusive with start_line/end_line/replacement.
+      description: Existing text for text-replace `action=edit` or `action=propose_patch`.
     new_text:
       type: string
-      description: Replacement text for action=edit in text-replace mode or action=propose_patch. Mutually exclusive with start_line/end_line/replacement.
+      description: Replacement text for text-replace `action=edit` or `action=propose_patch`.
     replacement:
       type: string
-      description: Replacement text for action=edit in line-range mode. Mutually exclusive with old_text/new_text.
+      description: Replacement text for line-range `action=edit`.
     summary:
       type: string
-      description: Optional patch summary when action=propose_patch.
+      description: Optional patch summary for `action=propose_patch`.
   required:
     - action
     - path
 governance:
   family: filesystem
   display_name: Filesystem
-  description: Read and search local files, recursively search directories, list directories, plus write, edit, delete, and patch actions.
+  description: Describe, search, open, list, write, edit, delete, and patch local files.
   actions:
     - id: describe
       label: Describe File
@@ -186,8 +186,11 @@ governance:
       allowed_roles:
         - ceo
         - execution
+compatibility:
+  legacy_wrapper: true
+  preferred_direct_tool: false
 exposure:
-  agent: true
+  agent: false
   main_runtime: true
 toolskill:
   enabled: true

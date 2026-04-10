@@ -1,0 +1,56 @@
+schema_version: 1
+kind: tool
+name: filesystem_edit
+display_name: Filesystem Edit
+description: Edit one file in text-replace or line-range mode.
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+    - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Absolute file path to edit.
+    old_text:
+      type: string
+      description: Existing text for text-replace mode.
+    new_text:
+      type: string
+      description: Replacement text for text-replace mode.
+    start_line:
+      type: integer
+      description: Start line for line-range mode.
+    end_line:
+      type: integer
+      description: End line for line-range mode.
+    replacement:
+      type: string
+      description: Replacement text for line-range mode.
+  required:
+    - path
+governance:
+  family: filesystem
+  display_name: Filesystem
+  description: Describe, search, open, list, write, edit, delete, and patch local files.
+  actions:
+    - id: edit
+      label: Edit File
+      risk_level: high
+      destructive: true
+      allowed_roles:
+        - ceo
+        - execution
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

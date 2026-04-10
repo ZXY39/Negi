@@ -1,0 +1,52 @@
+schema_version: 1
+kind: tool
+name: filesystem_propose_patch
+display_name: Filesystem Propose Patch
+description: Create a patch artifact without modifying the file.
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+    - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Absolute file path to patch.
+    old_text:
+      type: string
+      description: Existing text to replace.
+    new_text:
+      type: string
+      description: Proposed replacement text.
+    summary:
+      type: string
+      description: Optional patch summary.
+  required:
+    - path
+    - old_text
+    - new_text
+governance:
+  family: filesystem
+  display_name: Filesystem
+  description: Describe, search, open, list, write, edit, delete, and patch local files.
+  actions:
+    - id: propose_patch
+      label: Propose Patch
+      risk_level: medium
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

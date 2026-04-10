@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager
 from g3ku.agent.tools.base import Tool
 from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.providers.base import LLMResponse, ToolCallRequest
+from g3ku.resources.loader import ResourceLoader
+from g3ku.resources.loader import ManifestBackedTool
+from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
+from g3ku.resources.registry import ResourceRegistry
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
 import main.service.runtime_service as runtime_service_module
-from main.runtime.internal_tools import SubmitFinalResultTool
+from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool, SpawnChildNodesTool
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.tool_call_repair import extract_tool_calls_from_xml_pseudo_content
 from main.service.runtime_service import MainRuntimeService
@@ -271,6 +277,138 @@ class _LargeModelSchemaTool(_ModelSchemaRecordingTool):
         )
 
 
+def test_compact_schema_internal_execution_tools_expose_shorter_model_visible_contracts() -> None:
+    async def _submit_stage(*args, **kwargs):
+        _ = args, kwargs
+        return {"ok": True}
+
+    async def _spawn_children(*args, **kwargs):
+        _ = args, kwargs
+        return []
+
+    async def _submit_final(payload: dict[str, object]) -> dict[str, object]:
+        return dict(payload)
+
+    tools = [
+        SubmitNextStageTool(_submit_stage),
+        SpawnChildNodesTool(_spawn_children),
+        SubmitFinalResultTool(_submit_final, node_kind="execution"),
+    ]
+
+    for tool in tools:
+        authoritative = tool.to_schema()["function"]
+        compact = tool.to_model_schema()["function"]
+
+        assert compact["name"] == authoritative["name"]
+        assert len(compact["description"]) < len(authoritative["description"])
+        assert len(json.dumps(compact["parameters"], ensure_ascii=False, sort_keys=True)) < len(
+            json.dumps(authoritative["parameters"], ensure_ascii=False, sort_keys=True)
+        )
+
+    assert tools[0].validate_params({"stage_goal": "investigate"}) == ["missing required tool_round_budget"]
+    assert tools[1].validate_params({"children": [{"goal": "a", "prompt": "b"}]}) == [
+        "missing required children[0].execution_policy"
+    ]
+    assert tools[2].validate_params({"status": "success"}) == [
+        "missing required delivery_status",
+        "missing required summary",
+        "missing required answer",
+        "missing required evidence",
+        "missing required remaining_work",
+        "missing required blocking_reason",
+    ]
+
+
+def test_compact_schema_memory_write_manifest_keeps_authoritative_schema_and_moves_guidance_to_toolskill() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = yaml.safe_load((repo_root / "tools" / "memory_write" / "resource.yaml").read_text(encoding="utf-8")) or {}
+    toolskill = (repo_root / "tools" / "memory_write" / "toolskills" / "SKILL.md").read_text(encoding="utf-8")
+
+    authoritative_value_schema = (
+        manifest.get("parameters", {})
+        .get("properties", {})
+        .get("facts", {})
+        .get("items", {})
+        .get("properties", {})
+        .get("value", {})
+    )
+    compact_value_schema = (
+        manifest.get("model_parameters", {})
+        .get("properties", {})
+        .get("facts", {})
+        .get("items", {})
+        .get("properties", {})
+        .get("value", {})
+    )
+
+    assert authoritative_value_schema["type"] == ["string", "number", "boolean", "object", "array", "null"]
+    assert compact_value_schema["type"] == "string"
+    assert "JSON-serialized string" in str(compact_value_schema.get("description") or "")
+    assert "time_semantics" not in str(compact_value_schema.get("description") or "")
+    assert "Serialize object/array values as JSON strings" in toolskill
+    assert "Choose `time_semantics` intentionally" in toolskill
+
+
+def test_compact_schema_resource_tool_uses_manifest_model_visible_overrides(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "skills").mkdir(parents=True, exist_ok=True)
+    (workspace / "tools").mkdir(parents=True, exist_ok=True)
+    source_root = Path(__file__).resolve().parents[2] / "tools" / "memory_write"
+    target_root = workspace / "tools" / "memory_write"
+    import shutil
+    shutil.copytree(source_root, target_root)
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / "skills", tools_dir=workspace / "tools")
+    snapshot = registry.discover()
+    descriptor = snapshot.tools["memory_write"]
+    tool = ResourceLoader(workspace).load_tool(
+        descriptor,
+        services={"memory_manager": SimpleNamespace()},
+    )
+
+    assert tool is not None
+    schema = tool.to_model_schema()["function"]
+    value_schema = schema["parameters"]["properties"]["facts"]["items"]["properties"]["value"]
+
+    assert schema["description"] == "Write durable memory facts. Use string values in the callable schema."
+    assert value_schema["type"] == "string"
+    assert "JSON-serialized string" in str(value_schema.get("description") or "")
+
+
+def test_compact_schema_manifest_backed_tool_uses_normalized_model_visible_overrides(tmp_path: Path) -> None:
+    descriptor = ToolResourceDescriptor(
+        kind=ResourceKind.TOOL,
+        name="manifest_backed_fake",
+        description="Authoritative description.",
+        root=tmp_path,
+        manifest_path=tmp_path / "resource.yaml",
+        fingerprint="fake",
+        parameters={
+            "type": "object",
+            "properties": {
+                "bad-name": {"type": "string"},
+            },
+            "required": ["bad-name"],
+        },
+        metadata={
+            "model_description": "Compact manifest-backed description.",
+            "model_parameters": {
+                "properties": {
+                    "summary": {"type": "string"},
+                },
+                "required": ["summary"],
+            },
+        },
+    )
+    tool = ManifestBackedTool(descriptor, handler=lambda **kwargs: kwargs)
+    schema = tool.to_model_schema()["function"]
+
+    assert schema["description"] == "Compact manifest-backed description."
+    assert schema["parameters"]["type"] == "object"
+    assert schema["parameters"]["required"] == ["summary"]
+    assert schema["parameters"]["properties"]["summary"]["type"] == "string"
+
+
 def test_tool_model_visible_schema_falls_back_to_authoritative_schema() -> None:
     class _FakeTool(Tool):
         @property
@@ -484,6 +622,186 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
     assert filesystem_schema['function']['description'] == 'filesystem compact model schema'
 
 
+@pytest.mark.asyncio
+async def test_execution_root_replay_schema_budget_stays_below_threshold(tmp_path) -> None:
+    requests: list[dict[str, object]] = []
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            requests.append(dict(kwargs))
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='call:final',
+                        name='submit_final_result',
+                        arguments={
+                            'status': 'success',
+                            'delivery_status': 'final',
+                            'summary': 'done',
+                            'answer': 'done',
+                            'evidence': [],
+                            'remaining_work': [],
+                            'blocking_reason': '',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    service = MainRuntimeService(
+        chat_backend=_Backend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_model_refs=['fake'],
+        acceptance_model_refs=['fake'],
+    )
+    fake_log_service = _FakeLogService()
+    fake_log_service.upsert_frame(
+        'task-root-replay-budget',
+        {
+            'node_id': 'node-root-replay-budget',
+            'model_visible_tool_names': [
+                'wait_tool_execution',
+                'stop_tool_execution',
+                'submit_next_stage',
+                'submit_final_result',
+                'spawn_child_nodes',
+                'load_tool_context_v2',
+            ],
+            'hydrated_executor_names': ['filesystem', 'content'],
+        },
+    )
+    service.log_service = fake_log_service
+    service._react_loop._log_service = fake_log_service
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(
+            task_id=task_id,
+            session_id='web:shared',
+            metadata={'core_requirement': 'inspect files and open relevant content for a React runtime issue'},
+        ),
+        get_node=lambda node_id: SimpleNamespace(
+            node_id=node_id,
+            prompt='inspect files and open relevant content for a React runtime issue',
+            goal='inspect files and open relevant content for a React runtime issue',
+            node_kind='execution',
+        ),
+    )
+    service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
+        {
+            'tool_id': 'filesystem',
+            'display_name': 'Filesystem',
+            'description': 'Inspect files',
+            'primary_executor_name': 'filesystem_describe',
+            'l0': 'Inspect files',
+            'l1': 'Inspect files',
+            'actions': [
+                {'action_id': 'legacy', 'executor_names': ['filesystem']},
+                {
+                    'action_id': 'describe',
+                    'executor_names': ['filesystem_describe', 'filesystem_search', 'filesystem_open'],
+                },
+            ],
+        },
+        {
+            'tool_id': 'content_navigation',
+            'display_name': 'Content',
+            'description': 'Inspect content',
+            'primary_executor_name': 'content_describe',
+            'l0': 'Inspect content',
+            'l1': 'Inspect content',
+            'actions': [
+                {'action_id': 'legacy', 'executor_names': ['content']},
+                {
+                    'action_id': 'describe',
+                    'executor_names': ['content_describe', 'content_search', 'content_open'],
+                },
+            ],
+        },
+        {
+            'tool_id': 'memory',
+            'display_name': 'Memory',
+            'description': 'Write memory facts',
+            'primary_executor_name': 'memory_write',
+            'l0': 'Write memory facts',
+            'l1': 'Write memory facts',
+            'actions': [{'action_id': 'write', 'executor_names': ['memory_write']}],
+        },
+    ]
+
+    result = await service._react_loop.run(
+        task=SimpleNamespace(task_id='task-root-replay-budget'),
+        node=SimpleNamespace(node_id='node-root-replay-budget', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-root-replay-budget","goal":"demo"}'},
+        ],
+        tools={
+            'filesystem': _LargeModelSchemaTool(name='filesystem'),
+            'filesystem_describe': _ModelSchemaRecordingTool(
+                name='filesystem_describe',
+                authoritative_description='filesystem describe authoritative schema',
+                model_description='filesystem describe compact model schema',
+            ),
+            'filesystem_search': _LargeModelSchemaTool(name='filesystem_search'),
+            'filesystem_open': _LargeModelSchemaTool(name='filesystem_open'),
+            'content': _LargeModelSchemaTool(name='content'),
+            'content_describe': _ModelSchemaRecordingTool(
+                name='content_describe',
+                authoritative_description='content describe authoritative schema',
+                model_description='content describe compact model schema',
+            ),
+            'content_search': _LargeModelSchemaTool(name='content_search'),
+            'content_open': _LargeModelSchemaTool(name='content_open'),
+            'memory_write': _LargeModelSchemaTool(name='memory_write'),
+            'load_tool_context_v2': _ModelSchemaRecordingTool(
+                name='load_tool_context_v2',
+                authoritative_description='load tool context authoritative schema',
+                model_description='load tool context compact model schema',
+            ),
+            'wait_tool_execution': _StageProtocolNoopTool('wait_tool_execution'),
+            'stop_tool_execution': _StageProtocolNoopTool('stop_tool_execution'),
+            'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
+            'submit_final_result': _submit_final_result_tool(),
+            'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
+        },
+        model_refs=['fake'],
+        runtime_context={
+            'task_id': 'task-root-replay-budget',
+            'node_id': 'node-root-replay-budget',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+        max_iterations=2,
+    )
+
+    assert result.status == 'success'
+    assert requests
+    emitted_tools = list(requests[0].get('tools') or [])
+    emitted_tool_names = [item['function']['name'] for item in emitted_tools]
+    emitted_schema_chars = sum(
+        len(json.dumps(item, ensure_ascii=False, sort_keys=True))
+        for item in emitted_tools
+    )
+
+    assert emitted_tool_names[:5] == [
+        'wait_tool_execution',
+        'stop_tool_execution',
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+    ]
+    assert 'filesystem' not in emitted_tool_names
+    assert 'content' not in emitted_tool_names
+    assert 'filesystem_describe' in emitted_tool_names
+    assert 'content_describe' in emitted_tool_names
+    assert 'memory_write' not in emitted_tool_names
+    assert emitted_schema_chars <= runtime_service_module._EXECUTION_MODEL_VISIBLE_SCHEMA_BUDGET_CHARS
+
+
 def test_execution_selector_uses_stable_visible_tool_order_independent_of_family_iteration_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -609,6 +927,488 @@ def test_execution_selector_uses_stable_visible_tool_order_independent_of_family
         'filesystem',
     ]
     assert 'memory_write' not in filesystem_first_selection['tool_names']
+
+
+def test_execution_stage_gate_allows_spawn_child_nodes_without_active_stage() -> None:
+    log_service = _FakeLogService()
+    log_service.execution_stage_gate_snapshot = lambda task_id, node_id: {
+        'has_active_stage': False,
+        'transition_required': False,
+        'active_stage': None,
+    }
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+
+    error = loop._execution_tool_gate_error(
+        tool_name='spawn_child_nodes',
+        runtime_context={
+            'task_id': 'task-spawn-gate',
+            'node_id': 'node-spawn-gate',
+            'node_kind': 'execution',
+        },
+    )
+
+    assert error == ''
+
+
+def test_execution_selector_preserves_prior_model_visible_tool_order_across_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    visible_tools = {
+        'filesystem': _ModelSchemaRecordingTool(
+            name='filesystem',
+            authoritative_description='filesystem authoritative schema',
+            model_description='filesystem compact model schema ' + ('F' * 1200),
+        ),
+        'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
+        'submit_final_result': _submit_final_result_tool(),
+        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
+    }
+    always_callable_tools = [
+        visible_tools['spawn_child_nodes'],
+        visible_tools['submit_final_result'],
+        visible_tools['submit_next_stage'],
+    ]
+    budget = sum(
+        len(json.dumps(tool.to_model_schema(), ensure_ascii=False, sort_keys=True))
+        for tool in always_callable_tools
+    ) + len(json.dumps(visible_tools['filesystem'].to_model_schema(), ensure_ascii=False, sort_keys=True))
+    monkeypatch.setattr(
+        runtime_service_module,
+        '_EXECUTION_MODEL_VISIBLE_SCHEMA_BUDGET_CHARS',
+        budget,
+    )
+
+    log_service = _FakeLogService()
+    log_service.upsert_frame(
+        'task-prior-order',
+        {
+            'node_id': 'node-prior-order',
+            'model_visible_tool_names': [
+                'submit_next_stage',
+                'submit_final_result',
+                'spawn_child_nodes',
+                'filesystem',
+            ],
+        },
+    )
+    service = object.__new__(MainRuntimeService)
+    service.log_service = log_service
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(
+            task_id=task_id,
+            session_id='web:shared',
+            metadata={'core_requirement': 'find terminal workflow skills'},
+        ),
+        get_node=lambda node_id: SimpleNamespace(
+            node_id=node_id,
+            prompt='find terminal workflow skills',
+            goal='find terminal workflow skills',
+            node_kind='execution',
+        ),
+    )
+    service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
+        {
+            'tool_id': 'filesystem',
+            'display_name': 'Filesystem',
+            'description': 'Inspect files',
+            'l0': 'Inspect files',
+            'l1': 'Inspect files',
+            'actions': [{'action_id': 'inspect', 'executor_names': ['filesystem']}],
+        }
+    ]
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-prior-order',
+        node_id='node-prior-order',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-prior-order',
+            'node_id': 'node-prior-order',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert selection['tool_names'] == [
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+        'filesystem',
+    ]
+
+
+def test_execution_selector_appends_missing_tools_after_prior_stable_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    visible_tools = {
+        'filesystem': _ModelSchemaRecordingTool(
+            name='filesystem',
+            authoritative_description='filesystem authoritative schema',
+            model_description='filesystem compact model schema ' + ('F' * 1200),
+        ),
+        'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
+        'submit_final_result': _submit_final_result_tool(),
+        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
+    }
+    always_callable_tools = [
+        visible_tools['spawn_child_nodes'],
+        visible_tools['submit_final_result'],
+        visible_tools['submit_next_stage'],
+    ]
+    budget = sum(
+        len(json.dumps(tool.to_model_schema(), ensure_ascii=False, sort_keys=True))
+        for tool in always_callable_tools
+    ) + len(json.dumps(visible_tools['filesystem'].to_model_schema(), ensure_ascii=False, sort_keys=True))
+    monkeypatch.setattr(
+        runtime_service_module,
+        '_EXECUTION_MODEL_VISIBLE_SCHEMA_BUDGET_CHARS',
+        budget,
+    )
+
+    log_service = _FakeLogService()
+    log_service.upsert_frame(
+        'task-partial-prior-order',
+        {
+            'node_id': 'node-partial-prior-order',
+            'model_visible_tool_names': ['submit_next_stage'],
+        },
+    )
+    service = object.__new__(MainRuntimeService)
+    service.log_service = log_service
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(
+            task_id=task_id,
+            session_id='web:shared',
+            metadata={'core_requirement': 'find terminal workflow skills'},
+        ),
+        get_node=lambda node_id: SimpleNamespace(
+            node_id=node_id,
+            prompt='find terminal workflow skills',
+            goal='find terminal workflow skills',
+            node_kind='execution',
+        ),
+    )
+    service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
+        {
+            'tool_id': 'filesystem',
+            'display_name': 'Filesystem',
+            'description': 'Inspect files',
+            'l0': 'Inspect files',
+            'l1': 'Inspect files',
+            'actions': [{'action_id': 'inspect', 'executor_names': ['filesystem']}],
+        }
+    ]
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-partial-prior-order',
+        node_id='node-partial-prior-order',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-partial-prior-order',
+            'node_id': 'node-partial-prior-order',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert selection['tool_names'] == [
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+        'filesystem',
+    ]
+
+
+@pytest.mark.parametrize('loader_tool_name', ['load_tool_context', 'load_tool_context_v2'])
+def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
+    monkeypatch: pytest.MonkeyPatch,
+    loader_tool_name: str,
+) -> None:
+    visible_tools = {
+        'load_tool_context': _ModelSchemaRecordingTool(
+            name='load_tool_context',
+            authoritative_description='load tool context authoritative schema',
+            model_description='load tool context compact schema',
+        ),
+        'load_tool_context_v2': _ModelSchemaRecordingTool(
+            name='load_tool_context_v2',
+            authoritative_description='load tool context v2 authoritative schema',
+            model_description='load tool context v2 compact schema',
+        ),
+        'filesystem': _ModelSchemaRecordingTool(
+            name='filesystem',
+            authoritative_description='filesystem authoritative schema',
+            model_description='filesystem compact model schema ' + ('F' * 1200),
+        ),
+        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
+        'submit_final_result': _submit_final_result_tool(),
+        'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
+    }
+    monkeypatch.setattr(
+        runtime_service_module,
+        'build_execution_tool_selection',
+        lambda **kwargs: SimpleNamespace(
+            hydrated_tool_names=[
+                'submit_next_stage',
+                'submit_final_result',
+                'spawn_child_nodes',
+                loader_tool_name,
+            ],
+            lightweight_tool_ids=['filesystem'],
+            schema_chars=321,
+            trace={'mode': 'test'},
+        ),
+    )
+
+    log_service = _FakeLogService()
+    service = object.__new__(MainRuntimeService)
+    service.log_service = log_service
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(
+            task_id=task_id,
+            session_id='web:shared',
+            metadata={'core_requirement': 'inspect project files'},
+        ),
+        get_node=lambda node_id: SimpleNamespace(
+            node_id=node_id,
+            prompt='inspect project files',
+            goal='inspect project files',
+            node_kind='execution',
+        ),
+    )
+    service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
+        {
+            'tool_id': 'filesystem',
+            'display_name': 'Filesystem',
+            'description': 'Inspect files',
+            'l0': 'Inspect files',
+            'l1': 'Inspect files',
+            'actions': [{'action_id': 'inspect', 'executor_names': ['filesystem']}],
+        }
+    ]
+    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+        SimpleNamespace(
+            tool_id='filesystem',
+            actions=[SimpleNamespace(executor_names=['filesystem'])],
+        )
+    ]
+
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+    loop._tool_context_hydration_promoter = service._promote_tool_context_hydration
+
+    first_selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-tool-hydration',
+        node_id='node-tool-hydration',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-tool-hydration',
+            'node_id': 'node-tool-hydration',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert first_selection['lightweight_tool_ids'] == ['filesystem']
+    assert loader_tool_name in first_selection['tool_names']
+    assert 'filesystem' not in first_selection['tool_names']
+    assert first_selection['trace']['base_schema_chars'] == 321
+    assert first_selection['trace']['final_schema_chars'] == first_selection['schema_chars']
+
+    log_service.upsert_frame(
+        'task-tool-hydration',
+        {
+            'node_id': 'node-tool-hydration',
+            'model_visible_tool_names': list(first_selection['tool_names']),
+            'hydrated_executor_names': [],
+        },
+    )
+
+    loop._promote_tool_context_hydration_after_results(
+        task_id='task-tool-hydration',
+        node_id='node-tool-hydration',
+        response_tool_calls=[
+            ToolCallRequest(
+                id='call-load-tool-context',
+                name=loader_tool_name,
+                arguments={'tool_id': 'filesystem'},
+            )
+        ],
+        results=[
+            {
+                'live_state': {
+                    'tool_call_id': 'call-load-tool-context',
+                    'tool_name': loader_tool_name,
+                    'status': 'success',
+                },
+                'tool_message': {
+                    'role': 'tool',
+                    'tool_call_id': 'call-load-tool-context',
+                    'name': loader_tool_name,
+                    'content': json.dumps({'ok': True, 'tool_id': 'filesystem'}, ensure_ascii=False),
+                },
+                'raw_result': {
+                    'ok': True,
+                    'tool_id': 'filesystem',
+                },
+            }
+        ],
+        runtime_context={
+            'task_id': 'task-tool-hydration',
+            'node_id': 'node-tool-hydration',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    promoted_frame = log_service.read_runtime_frame('task-tool-hydration', 'node-tool-hydration')
+    assert promoted_frame['hydrated_executor_names'] == ['filesystem']
+
+    next_selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-tool-hydration',
+        node_id='node-tool-hydration',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-tool-hydration',
+            'node_id': 'node-tool-hydration',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert next_selection['tool_names'] == [
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+        loader_tool_name,
+        'filesystem',
+    ]
+    assert next_selection['schema_chars'] == first_selection['schema_chars'] + len(
+        json.dumps(visible_tools['filesystem'].to_model_schema(), ensure_ascii=False, sort_keys=True)
+    )
+    assert next_selection['trace']['base_schema_chars'] == 321
+    assert next_selection['trace']['final_schema_chars'] == next_selection['schema_chars']
+    assert next_selection['trace']['promoted_hydrated_executor_names'] == ['filesystem']
+
+
+def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> None:
+    visible_tools = {
+        'filesystem': _ModelSchemaRecordingTool(
+            name='filesystem',
+            authoritative_description='filesystem authoritative schema',
+            model_description='filesystem compact model schema',
+        ),
+        'filesystem_describe': _ModelSchemaRecordingTool(
+            name='filesystem_describe',
+            authoritative_description='filesystem describe authoritative schema',
+            model_description='filesystem describe compact model schema',
+        ),
+        'content': _ModelSchemaRecordingTool(
+            name='content',
+            authoritative_description='content authoritative schema',
+            model_description='content compact model schema',
+        ),
+        'content_describe': _ModelSchemaRecordingTool(
+            name='content_describe',
+            authoritative_description='content describe authoritative schema',
+            model_description='content describe compact model schema',
+        ),
+        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
+        'submit_final_result': _submit_final_result_tool(),
+        'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
+    }
+
+    log_service = _FakeLogService()
+    service = object.__new__(MainRuntimeService)
+    service.log_service = log_service
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(
+            task_id=task_id,
+            session_id='web:shared',
+            metadata={'core_requirement': 'inspect files and content for a regression'},
+        ),
+        get_node=lambda node_id: SimpleNamespace(
+            node_id=node_id,
+            prompt='inspect files and content for a regression',
+            goal='inspect files and content for a regression',
+            node_kind='execution',
+        ),
+    )
+    service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
+        {
+            'tool_id': 'filesystem',
+            'display_name': 'Filesystem',
+            'description': 'Inspect files',
+            'primary_executor_name': 'filesystem_describe',
+            'l0': 'Inspect files',
+            'l1': 'Inspect files',
+            'actions': [
+                {'action_id': 'legacy', 'executor_names': ['filesystem']},
+                {'action_id': 'describe', 'executor_names': ['filesystem_describe']},
+            ],
+        },
+        {
+            'tool_id': 'content_navigation',
+            'display_name': 'Content',
+            'description': 'Inspect content',
+            'primary_executor_name': 'content_describe',
+            'l0': 'Inspect content',
+            'l1': 'Inspect content',
+            'actions': [
+                {'action_id': 'legacy', 'executor_names': ['content']},
+                {'action_id': 'describe', 'executor_names': ['content_describe']},
+            ],
+        },
+    ]
+
+    first_selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-split-preference',
+        node_id='node-split-preference',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-split-preference',
+            'node_id': 'node-split-preference',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert 'filesystem' not in first_selection['tool_names']
+    assert 'content' not in first_selection['tool_names']
+    assert 'filesystem_describe' in first_selection['tool_names']
+    assert 'content_describe' in first_selection['tool_names']
+
+    log_service.upsert_frame(
+        'task-split-preference',
+        {
+            'node_id': 'node-split-preference',
+            'model_visible_tool_names': list(first_selection['tool_names']),
+            'hydrated_executor_names': ['filesystem', 'content'],
+        },
+    )
+
+    hydrated_selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-split-preference',
+        node_id='node-split-preference',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-split-preference',
+            'node_id': 'node-split-preference',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert 'filesystem' not in hydrated_selection['tool_names']
+    assert 'content' not in hydrated_selection['tool_names']
+    assert 'filesystem_describe' in hydrated_selection['tool_names']
+    assert 'content_describe' in hydrated_selection['tool_names']
+    assert hydrated_selection['hydrated_executor_names'] == ['filesystem_describe', 'content_describe']
 
 
 def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_window() -> None:

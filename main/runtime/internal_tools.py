@@ -33,6 +33,10 @@ class SubmitNextStageTool(Tool):
         return 'Create or switch to the next stage for the current node. You must create a stage before ordinary work, and again when the current stage budget is exhausted.'
 
     @property
+    def model_description(self) -> str:
+        return 'Start the next stage for the current node.'
+
+    @property
     def parameters(self) -> dict[str, Any]:
         return {
             'type': 'object',
@@ -77,6 +81,39 @@ class SubmitNextStageTool(Tool):
                                 'description': 'Stage-local note explaining why this ref mattered in the completed stage.',
                                 'minLength': 1,
                             },
+                        },
+                        'required': ['ref', 'note'],
+                    },
+                },
+            },
+            'required': ['stage_goal', 'tool_round_budget'],
+        }
+
+    @property
+    def model_parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'stage_goal': {
+                    'type': 'string',
+                    'description': 'Goal for the next stage.',
+                },
+                'tool_round_budget': {
+                    'type': 'integer',
+                    'description': 'Allowed ordinary tool calls for this stage.',
+                },
+                'completed_stage_summary': {
+                    'type': 'string',
+                    'description': 'Optional summary of the stage ending now.',
+                },
+                'key_refs': {
+                    'type': 'array',
+                    'description': 'Optional refs from the stage ending now.',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'ref': {'type': 'string'},
+                            'note': {'type': 'string'},
                         },
                         'required': ['ref', 'note'],
                     },
@@ -131,6 +168,10 @@ class SpawnChildNodesTool(Tool):
         return 'Create child nodes and run them with runtime-controlled concurrency.'
 
     @property
+    def model_description(self) -> str:
+        return 'Create child nodes for delegated work.'
+
+    @property
     def parameters(self) -> dict[str, Any]:
         child_schema = {
             'type': 'object',
@@ -174,6 +215,32 @@ class SpawnChildNodesTool(Tool):
                     'type': 'array',
                     'items': child_schema,
                     'minItems': 1,
+                },
+            },
+            'required': ['children'],
+        }
+
+    @property
+    def model_parameters(self) -> dict[str, Any]:
+        child_schema = {
+            'type': 'object',
+            'properties': {
+                'goal': {'type': 'string'},
+                'prompt': {'type': 'string'},
+                'execution_policy': build_execution_policy_schema(
+                    description='How broadly the child should explore the task.',
+                ),
+                'requires_acceptance': {'type': 'boolean'},
+                'acceptance_prompt': {'type': 'string'},
+            },
+            'required': ['goal', 'prompt', 'execution_policy'],
+        }
+        return {
+            'type': 'object',
+            'properties': {
+                'children': {
+                    'type': 'array',
+                    'items': child_schema,
                 },
             },
             'required': ['children'],
@@ -227,6 +294,12 @@ class SubmitFinalResultTool(Tool):
         )
 
     @property
+    def model_description(self) -> str:
+        if self._node_kind == 'acceptance':
+            return 'End the node with the final acceptance result.'
+        return 'End the node with the final result.'
+
+    @property
     def parameters(self) -> dict[str, Any]:
         return {
             'type': 'object',
@@ -275,6 +348,53 @@ class SubmitFinalResultTool(Tool):
                     'type': 'string',
                     'description': 'Blocking reason. Must be empty on success.',
                 },
+            },
+            'required': [
+                'status',
+                'delivery_status',
+                'summary',
+                'answer',
+                'evidence',
+                'remaining_work',
+                'blocking_reason',
+            ],
+        }
+
+    @property
+    def model_parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'status': {
+                    'type': 'string',
+                    'enum': ['success', 'failed'],
+                },
+                'delivery_status': {
+                    'type': 'string',
+                    'enum': ['final', 'blocked'],
+                },
+                'summary': {'type': 'string'},
+                'answer': {'type': 'string'},
+                'evidence': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'kind': {'type': 'string', 'enum': ['file', 'artifact', 'url']},
+                            'path': {'type': 'string'},
+                            'ref': {'type': 'string'},
+                            'start_line': {'type': 'integer'},
+                            'end_line': {'type': 'integer'},
+                            'note': {'type': 'string'},
+                        },
+                        'required': ['kind'],
+                    },
+                },
+                'remaining_work': {
+                    'type': 'array',
+                    'items': {'type': 'string'},
+                },
+                'blocking_reason': {'type': 'string'},
             },
             'required': [
                 'status',

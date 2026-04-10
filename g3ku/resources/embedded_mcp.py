@@ -137,8 +137,20 @@ class EmbeddedMCPTool(Tool):
         return self._descriptor.description
 
     @property
+    def model_description(self) -> str:
+        configured = str((self._descriptor.metadata or {}).get("model_description") or "").strip()
+        return configured or self.description
+
+    @property
     def parameters(self) -> dict[str, Any]:
         return self._parameters
+
+    @property
+    def model_parameters(self) -> dict[str, Any]:
+        configured = (self._descriptor.metadata or {}).get("model_parameters")
+        if isinstance(configured, dict):
+            return _normalize_parameters(configured)
+        return self.parameters
 
     def set_context(self, *args: Any, **kwargs: Any) -> Any:
         if hasattr(self._handler, "set_context"):

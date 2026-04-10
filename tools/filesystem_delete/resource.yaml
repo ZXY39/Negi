@@ -1,0 +1,40 @@
+schema_version: 1
+kind: tool
+name: filesystem_delete
+display_name: Filesystem Delete
+description: Delete one file or directory path.
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+    - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Absolute path to delete.
+  required:
+    - path
+governance:
+  family: filesystem
+  display_name: Filesystem
+  description: Describe, search, open, list, write, edit, delete, and patch local files.
+  actions:
+    - id: delete
+      label: Delete File
+      risk_level: high
+      destructive: true
+      allowed_roles:
+        - ceo
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

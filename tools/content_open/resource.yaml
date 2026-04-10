@@ -1,0 +1,62 @@
+schema_version: 1
+kind: tool
+name: content_open
+display_name: Content Open
+description: Open one excerpt from a content ref or absolute file path.
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+    - workspace
+parameters:
+  type: object
+  properties:
+    ref:
+      type: string
+      description: Externalized content ref such as artifact:artifact_xxx.
+    path:
+      type: string
+      description: Absolute file path for path mode.
+    view:
+      type: string
+      enum:
+        - canonical
+        - raw
+      description: Content view mode. canonical resolves wrapped refs before reading.
+    start_line:
+      type: integer
+      description: Optional start line.
+    end_line:
+      type: integer
+      description: Optional end line.
+    around_line:
+      type: integer
+      description: Optional center line.
+    window:
+      type: integer
+      description: Optional window size when around_line is set.
+  required: []
+governance:
+  family: content_navigation
+  display_name: Content
+  description: Describe, search, and open large externalized content by reference or absolute path.
+  actions:
+    - id: open
+      label: Open Content Excerpt
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - inspection
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true
