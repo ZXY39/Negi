@@ -148,15 +148,16 @@ def build_execution_trace(
                     }
                 round_tools.append(step)
                 stage_tool_calls.append(step)
-            rounds.append(
-                {
-                    'round_id': str(round_item.round_id or ''),
-                    'round_index': int(round_item.round_index or 0),
-                    'created_at': str(round_item.created_at or ''),
-                    'budget_counted': bool(round_item.budget_counted),
-                    'tools': round_tools,
-                }
-            )
+            if round_tools:
+                rounds.append(
+                    {
+                        'round_id': str(round_item.round_id or ''),
+                        'round_index': int(round_item.round_index or 0),
+                        'created_at': str(round_item.created_at or ''),
+                        'budget_counted': bool(round_item.budget_counted),
+                        'tools': round_tools,
+                    }
+                )
         stages.append(
             {
                 'stage_id': str(stage.stage_id or ''),
