@@ -39,6 +39,16 @@ class Tool(ABC):
         """JSON Schema for tool parameters."""
         pass
 
+    @property
+    def model_description(self) -> str:
+        """Model-visible description for callable schema exposure."""
+        return self.description
+
+    @property
+    def model_parameters(self) -> dict[str, Any]:
+        """Model-visible parameter schema for callable schema exposure."""
+        return self.parameters
+
     @abstractmethod
     async def execute(self, **kwargs: Any) -> Any:
         """
@@ -141,5 +151,16 @@ class Tool(ABC):
                 "name": self.name,
                 "description": self.description,
                 "parameters": self.parameters,
+            },
+        }
+
+    def to_model_schema(self) -> dict[str, Any]:
+        """Convert tool to model-visible OpenAI function schema format."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.model_description,
+                "parameters": self.model_parameters,
             },
         }

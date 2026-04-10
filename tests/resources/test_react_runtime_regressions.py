@@ -194,6 +194,41 @@ class _TypedSchemaTool(Tool):
         return json.dumps(kwargs, ensure_ascii=False)
 
 
+def test_tool_model_visible_schema_falls_back_to_authoritative_schema() -> None:
+    class _FakeTool(Tool):
+        @property
+        def name(self) -> str:
+            return "fake_tool"
+
+        @property
+        def description(self) -> str:
+            return "Full schema description."
+
+        @property
+        def parameters(self) -> dict[str, Any]:
+            return {
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "type": "string",
+                        "description": "Full contract description.",
+                    }
+                },
+                "required": ["value"],
+            }
+
+        async def execute(self, **kwargs: Any) -> Any:
+            return kwargs
+
+    tool = _FakeTool()
+
+    assert (
+        tool.to_schema()["function"]["parameters"]["properties"]["value"]["description"]
+        == "Full contract description."
+    )
+    assert tool.to_model_schema() == tool.to_schema()
+
+
 def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_window() -> None:
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
     loop._log_service._store._node = SimpleNamespace(
