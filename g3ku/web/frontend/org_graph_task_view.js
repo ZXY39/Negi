@@ -871,7 +871,7 @@ function normalizeSummaryExecutionTrace(summary) {
                 budget_counted: !!round?.budget_counted,
                 tools,
             };
-        });
+        }).filter((round) => Array.isArray(round?.tools) && round.tools.length);
         return {
             stage_id: String(stage?.stage_id || `summary-stage-${stageIndex + 1}`),
             stage_index: toInt(stage?.stage_index, stageIndex + 1),
@@ -1002,7 +1002,7 @@ function normalizeExecutionStageTrace(stage, index = 0) {
                 evidence: Array.isArray(step?.evidence) ? step.evidence.filter((item) => item && typeof item === "object") : [],
                 lost_result_summary: String(step?.lost_result_summary || ""),
             })),
-        })),
+        })).filter((round) => Array.isArray(round?.tools) && round.tools.length),
     };
 }
 

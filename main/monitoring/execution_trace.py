@@ -148,15 +148,16 @@ def build_execution_trace(
                     }
                 round_tools.append(step)
                 stage_tool_calls.append(step)
-            rounds.append(
-                {
-                    'round_id': str(round_item.round_id or ''),
-                    'round_index': int(round_item.round_index or 0),
-                    'created_at': str(round_item.created_at or ''),
-                    'budget_counted': bool(round_item.budget_counted),
-                    'tools': round_tools,
-                }
-            )
+            if round_tools:
+                rounds.append(
+                    {
+                        'round_id': str(round_item.round_id or ''),
+                        'round_index': int(round_item.round_index or 0),
+                        'created_at': str(round_item.created_at or ''),
+                        'budget_counted': bool(round_item.budget_counted),
+                        'tools': round_tools,
+                    }
+                )
         stages.append(
             {
                 'stage_id': str(stage.stage_id or ''),
@@ -224,7 +225,8 @@ def _execution_trace_output_ref(record: TaskProjectionToolResultRecord) -> str:
             return wrapper_ref
     if isinstance(parsed_payload, dict):
         wrapper_ref = str(
-            parsed_payload.get('wrapper_ref')
+            parsed_payload.get('output_ref')
+            or parsed_payload.get('wrapper_ref')
             or parsed_payload.get('requested_ref')
             or parsed_payload.get('ref')
             or ''
@@ -232,6 +234,11 @@ def _execution_trace_output_ref(record: TaskProjectionToolResultRecord) -> str:
         resolved_ref = str(parsed_payload.get('resolved_ref') or '').strip()
         if wrapper_ref and wrapper_ref != resolved_ref:
             return wrapper_ref
+        nested = parse_content_envelope(parsed_payload.get('content_ref'))
+        if nested is not None:
+            nested_ref = str(nested.ref or nested.wrapper_ref or nested.resolved_ref or '').strip()
+            if nested_ref:
+                return nested_ref
     return output_ref
 
 

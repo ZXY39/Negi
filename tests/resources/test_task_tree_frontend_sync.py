@@ -6,6 +6,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+from main.monitoring.query_service import TaskQueryService
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -1460,6 +1462,127 @@ def test_summary_execution_trace_round_with_tool_names_only_renders_placeholder_
 
     assert result["showsEmptyRoundPlaceholder"] is False
     assert result["hasToolChip"] is True
+
+
+def test_execution_trace_summary_drops_empty_round_shells_before_ui() -> None:
+    summary = TaskQueryService._execution_trace_summary(
+        {
+            "stages": [
+                {
+                    "stage_id": "stage:1",
+                    "stage_goal": "remember preference",
+                    "tool_rounds_used": 2,
+                    "rounds": [
+                        {
+                            "round_id": "round:phantom",
+                            "round_index": 1,
+                            "tool_names": ["memory_write"],
+                            "tool_call_ids": ["call-phantom"],
+                            "tools": [],
+                        },
+                        {
+                            "round_id": "round:real",
+                            "round_index": 2,
+                            "tools": [
+                                {
+                                    "tool_call_id": "call-real",
+                                    "tool_name": "filesystem",
+                                    "arguments_text": "{\"path\":\".\"}",
+                                    "output_text": "repo listing",
+                                    "status": "success",
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        }
+    )
+
+    rounds = summary["stages"][0]["rounds"]
+
+    assert [round_item["round_id"] for round_item in rounds] == ["round:real"]
+    assert summary["stages"][0]["tool_calls"] == [
+        {
+            "tool_call_id": "call-real",
+            "tool_name": "filesystem",
+            "arguments_text": "{\"path\":\".\"}",
+            "output_text": "repo listing",
+            "output_ref": "",
+            "status": "success",
+            "started_at": "",
+            "finished_at": "",
+            "elapsed_seconds": None,
+            "recovery_decision": "",
+            "related_tool_call_ids": [],
+            "attempted_tools": [],
+            "evidence": [],
+            "lost_result_summary": "",
+        }
+    ]
+
+
+def test_summary_execution_trace_no_tool_records_skips_empty_round_shells() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = { liveFrameMap: {} };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const trace = buildNodeExecutionTrace(
+          { node_id: "node:test", goal: "remember preference" },
+          {
+            execution_trace: {
+              stages: [
+                {
+                  stage_id: "stage:1",
+                  stage_goal: "remember preference",
+                  mode: "鑷富鎵ц",
+                  status: "active",
+                  rounds: [
+                    {
+                      round_id: "round:phantom",
+                      round_index: 1,
+                      tool_names: ["memory_write"],
+                      tool_call_ids: ["call-phantom"],
+                      tools: [],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        );
+        const html = renderExecutionStageRounds(trace.stages[0]);
+
+        console.log(JSON.stringify({
+          roundCount: trace.stages[0]?.rounds?.length || 0,
+          showsEmptyRoundPlaceholder: html.includes("鏈疆鏆傛棤宸ュ叿璁板綍"),
+          hasToolChip: html.includes("宸ュ叿 路 memory_write"),
+        }));
+        """
+    )
+
+    assert result["roundCount"] == 0
+    assert result["showsEmptyRoundPlaceholder"] is False
+    assert result["hasToolChip"] is False
 
 
 def test_execution_trace_round_status_supports_warning_and_interrupted() -> None:

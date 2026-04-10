@@ -401,6 +401,23 @@ class CeoFrontDoorSupport:
         return "error" if text.startswith("Error") else "success"
 
     @staticmethod
+    def _tool_result_payload_ref(payload: dict[str, Any]) -> str:
+        output_ref = str(
+            payload.get("output_ref")
+            or payload.get("wrapper_ref")
+            or payload.get("requested_ref")
+            or payload.get("ref")
+            or payload.get("resolved_ref")
+            or ""
+        ).strip()
+        if output_ref:
+            return output_ref
+        nested = parse_content_envelope(payload.get("content_ref"))
+        if nested is not None:
+            return str(nested.ref or nested.wrapper_ref or nested.resolved_ref or "").strip()
+        return ""
+
+    @staticmethod
     def _tool_result_progress_event_data(
         *,
         tool_name: str,
@@ -431,13 +448,7 @@ class CeoFrontDoorSupport:
             return payload
         if not isinstance(parsed, dict):
             return payload
-        output_ref = str(
-            parsed.get("wrapper_ref")
-            or parsed.get("requested_ref")
-            or parsed.get("ref")
-            or parsed.get("resolved_ref")
-            or ""
-        ).strip()
+        output_ref = CeoFrontDoorSupport._tool_result_payload_ref(parsed)
         if output_ref:
             payload["output_ref"] = output_ref
         preview = str(parsed.get("summary") or "").strip()

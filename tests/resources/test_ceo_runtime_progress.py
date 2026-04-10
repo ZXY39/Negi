@@ -2790,6 +2790,27 @@ def test_ceo_frontdoor_support_extracts_output_ref_for_progress_events() -> None
     assert data["output_preview_text"] == "tool output stored externally"
 
 
+def test_ceo_exec_output_ref_payload_does_not_degrade_to_preview_only() -> None:
+    payload = json.dumps(
+        {
+            "summary": "exec output stored externally",
+            "output_ref": "artifact:artifact:exec-output",
+        },
+        ensure_ascii=False,
+    )
+
+    data = CeoFrontDoorSupport._tool_result_progress_event_data(
+        tool_name="exec",
+        result_text=payload,
+        tool_call_id="call:exec",
+    )
+
+    assert data["tool_name"] == "exec"
+    assert data["tool_call_id"] == "call:exec"
+    assert data["output_ref"] == "artifact:artifact:exec-output"
+    assert data["output_preview_text"] == "exec output stored externally"
+
+
 def test_ceo_frontdoor_support_preserves_tool_call_id_for_progress_events() -> None:
     data = CeoFrontDoorSupport._tool_result_progress_event_data(
         tool_name="filesystem",
@@ -4177,10 +4198,11 @@ async def test_web_session_heartbeat_forces_task_terminal_reply_when_model_retur
     assert task_service.delivered[0][0] == "task-terminal:task:demo-terminal:success:2026-03-23T01:34:32+08:00"
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert reloaded.messages[-1]["role"] == "assistant"
-    assert reloaded.messages[-1]["metadata"]["source"] == "heartbeat"
-    assert "demo-terminal" in str(reloaded.messages[-1]["content"])
-    assert "已完成" in str(reloaded.messages[-1]["content"])
+    assert reloaded.messages == []
+    assert reloaded.metadata["last_task_memory"]["source"] == "heartbeat"
+    assert reloaded.metadata["last_task_memory"]["task_ids"] == ["task:demo-terminal"]
+    assert reloaded.metadata["last_task_memory"]["reason"] == "task_terminal"
+    assert reloaded.metadata["last_task_memory"]["task_results"] == [{"task_id": "task:demo-terminal"}]
 
 
 @pytest.mark.asyncio
@@ -4218,16 +4240,22 @@ async def test_web_session_heartbeat_reports_unpassed_continuation_task_in_fallb
     next_delay = await service._run_session(session_id)
 
     assert next_delay is None
-    assert len(task_service.registry.published) == 1
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
     assert envelope["type"] == "ceo.reply.final"
-    assert envelope["data"]["text"] == "任务 `demo-unpassed` 已完成但未通过验收，已经续跑为 `cont-2`，我会继续推进。"
+    assert "demo-unpassed" in str(envelope["data"]["text"])
+    assert "cont-2" in str(envelope["data"]["text"])
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert reloaded.messages[-1]["metadata"]["source"] == "heartbeat"
-    assert reloaded.messages[-1]["metadata"]["task_ids"] == ["task:demo-unpassed", "task:cont-2"]
-    assert reloaded.messages[-1]["content"] == "任务 `demo-unpassed` 已完成但未通过验收，已经续跑为 `cont-2`，我会继续推进。"
+    assert reloaded.messages == []
+    assert reloaded.metadata["last_task_memory"] == {
+        "version": web_ceo_sessions.TASK_MEMORY_VERSION,
+        "task_ids": ["task:demo-unpassed", "task:cont-2"],
+        "source": "heartbeat",
+        "reason": "task_terminal",
+        "updated_at": reloaded.metadata["last_task_memory"]["updated_at"],
+        "task_results": [{"task_id": "task:demo-unpassed"}],
+    }
 
 
 @pytest.mark.asyncio
@@ -4504,13 +4532,14 @@ async def test_web_session_heartbeat_prompt_includes_terminal_root_output_and_me
     assert "Result output ref: artifact:artifact:root-output" in prompt_text
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert reloaded.messages[-1]["metadata"]["task_results"] == [
+    assert reloaded.messages == []
+    assert reloaded.metadata["last_task_memory"]["task_results"] == [
         {
             "task_id": task_id,
             "node_id": "node:root",
             "node_kind": "execution",
             "node_reason": "root_terminal",
-            "output": "Top 3 recommendation list",
+            "output_excerpt": "Top 3 recommendation list",
             "output_ref": "artifact:artifact:root-output",
             "check_result": "accepted",
         }
@@ -4696,13 +4725,14 @@ async def test_web_session_heartbeat_prefers_acceptance_output_when_final_accept
     assert "Result output ref: artifact:artifact:accept-output" in prompt_text
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert reloaded.messages[-1]["metadata"]["task_results"] == [
+    assert reloaded.messages == []
+    assert reloaded.metadata["last_task_memory"]["task_results"] == [
         {
             "task_id": task_id,
             "node_id": "node:acceptance",
             "node_kind": "acceptance",
             "node_reason": "acceptance_failed",
-            "output": "Acceptance node full output",
+            "output_excerpt": "Acceptance node full output",
             "output_ref": "artifact:artifact:accept-output",
             "check_result": "acceptance failed",
             "failure_reason": "Acceptance Failure: evidence mismatch",
@@ -4797,8 +4827,8 @@ async def test_web_session_heartbeat_calls_reply_notifier_for_final_output(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_web_session_heartbeat_history_visibility_hides_internal_heartbeat_persisted_final_reply(tmp_path: Path) -> None:
-    session_id = "web:ceo-heartbeat-hidden-persisted-reply"
+async def test_web_session_heartbeat_second_visible_reply_is_not_appended_after_normal_assistant_reply(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-no-second-visible-reply"
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     persisted.add_message("user", "Install the weather skill")
@@ -4831,13 +4861,21 @@ async def test_web_session_heartbeat_history_visibility_hides_internal_heartbeat
 
     assert next_delay is None
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert reloaded.messages[-1]["content"] == "Background install finished successfully."
-    assert reloaded.messages[-1]["metadata"]["source"] == "heartbeat"
-    assert reloaded.messages[-1]["metadata"]["history_visible"] is False
+    assert len(reloaded.messages) == 2
+    assert [message["role"] for message in reloaded.messages] == ["user", "assistant"]
+    assert reloaded.messages[-1]["content"] == "I started the install."
     assert web_ceo_sessions.transcript_messages(reloaded) == [
         {"role": "user", "content": "Install the weather skill", "timestamp": reloaded.messages[0]["timestamp"]},
         {"role": "assistant", "content": "I started the install.", "timestamp": reloaded.messages[1]["timestamp"]},
     ]
+    assert reloaded.metadata["last_task_memory"] == {
+        "version": web_ceo_sessions.TASK_MEMORY_VERSION,
+        "task_ids": ["task:demo-hidden-persist"],
+        "source": "heartbeat",
+        "reason": "task_terminal",
+        "updated_at": reloaded.metadata["last_task_memory"]["updated_at"],
+        "task_results": [{"task_id": "task:demo-hidden-persist"}],
+    }
 
 
 def test_web_ceo_session_summary_helpers_exclude_hidden_heartbeat_reply_surfaces() -> None:

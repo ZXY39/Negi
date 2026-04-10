@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from g3ku.resources.loader import ManifestBackedTool
 from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
 from g3ku.resources.registry import ResourceRegistry
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
+from g3ku.runtime.tool_watchdog import ToolExecutionManager
 import main.service.runtime_service as runtime_service_module
 from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool, SpawnChildNodesTool
 from main.runtime.react_loop import ReActToolLoop
@@ -71,6 +73,37 @@ class _FakeLogService:
 
     def read_runtime_frame(self, task_id: str, node_id: str):
         return dict(self._frames.get((str(task_id), str(node_id))) or {})
+
+
+class _HeartbeatRecorder:
+    def __init__(self) -> None:
+        self.terminal_calls: list[tuple[str, dict[str, object]]] = []
+
+    def enqueue_tool_terminal(self, *, session_id: str, payload: dict[str, object]) -> None:
+        self.terminal_calls.append((str(session_id or ""), dict(payload or {})))
+
+
+class _SlowCompleteTool(Tool):
+    @property
+    def name(self) -> str:
+        return "slow_complete"
+
+    @property
+    def description(self) -> str:
+        return "Complete after a short delay."
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        _ = kwargs
+        await asyncio.sleep(0.08)
+        return "done"
 
 
 def _submit_final_result_tool(*, node_kind: str = "execution") -> SubmitFinalResultTool:
@@ -1773,6 +1806,52 @@ async def test_react_loop_execute_tool_keeps_direct_load_payload_inline(tmp_path
         payload = json.loads(rendered)
         assert payload["uri"] == "g3ku://resource/tool/content"
         assert payload["content"].startswith("tool line 001")
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_react_loop_execution_role_bypasses_watchdog_handoff(tmp_path) -> None:
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    log_service = _FakeLogService()
+    log_service._content_store = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    heartbeat = _HeartbeatRecorder()
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+    loop._tool_execution_manager = ToolExecutionManager()
+
+    try:
+        rendered = await loop._execute_tool(
+            tools={"slow_complete": _SlowCompleteTool()},
+            tool_name="slow_complete",
+            arguments={},
+            runtime_context={
+                "task_id": "task-1",
+                "node_id": "node-1",
+                "actor_role": "execution",
+                "session_key": "web:test-execution-node",
+                "tool_watchdog": {
+                    "poll_interval_seconds": 0.01,
+                    "handoff_after_seconds": 0.02,
+                },
+                "tool_snapshot_supplier": lambda: {"status": "running"},
+                "loop": SimpleNamespace(web_session_heartbeat=heartbeat),
+            },
+        )
+
+        wait_payload = await loop._tool_execution_manager.wait_execution(
+            "tool-exec:1",
+            wait_seconds=0.05,
+            poll_interval_seconds=0.01,
+        )
+
+        assert rendered == "done"
+        assert wait_payload["status"] == "not_found"
+        assert heartbeat.terminal_calls == []
     finally:
         store.close()
 

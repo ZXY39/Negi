@@ -249,6 +249,7 @@ class TaskQueryService:
             if isinstance(payload.get('execution_trace_summary'), dict)
             else {}
         )
+        execution_trace_summary = self._sanitize_execution_trace_summary(execution_trace_summary)
         execution_trace_ref = str(payload.get('execution_trace_ref') or detail_record.execution_trace_ref or '').strip()
         if not execution_trace_ref and runtime_node is not None:
             refreshed = self._log_service.sync_node_read_model(task.task_id, node_id, externalize_execution_trace=True)
@@ -260,6 +261,7 @@ class TaskQueryService:
                     if isinstance(payload.get('execution_trace_summary'), dict)
                     else {}
                 )
+                execution_trace_summary = self._sanitize_execution_trace_summary(execution_trace_summary)
                 execution_trace_ref = str(payload.get('execution_trace_ref') or detail_record.execution_trace_ref or '').strip()
         execution_trace = {}
         if normalized_detail_level == 'full':
@@ -270,6 +272,7 @@ class TaskQueryService:
             )
             if not execution_trace_summary:
                 execution_trace_summary = self._execution_trace_summary(execution_trace)
+            execution_trace = self._hydrate_execution_trace_output_texts(execution_trace)
         elif not execution_trace_summary or not self._execution_trace_summary_has_rounds(execution_trace_summary):
             execution_trace = self._resolve_execution_trace(
                 detail_record=detail_record,
@@ -419,6 +422,33 @@ class TaskQueryService:
                     return resolved
         return str(text or '')
 
+    def _hydrate_execution_trace_output_texts(self, execution_trace: dict[str, Any] | None) -> dict[str, Any]:
+        trace = dict(execution_trace or {}) if isinstance(execution_trace, dict) else {}
+
+        def _hydrate_step(step: Any) -> None:
+            if not isinstance(step, dict):
+                return
+            hydrated = self._resolve_detail_text(
+                str(step.get('output_text') or ''),
+                str(step.get('output_ref') or ''),
+            )
+            if hydrated:
+                step['output_text'] = hydrated
+
+        for step in list(trace.get('tool_steps') or []):
+            _hydrate_step(step)
+        for stage in list(trace.get('stages') or []):
+            if not isinstance(stage, dict):
+                continue
+            for step in list(stage.get('tool_calls') or []):
+                _hydrate_step(step)
+            for round_item in list(stage.get('rounds') or []):
+                if not isinstance(round_item, dict):
+                    continue
+                for step in list(round_item.get('tools') or []):
+                    _hydrate_step(step)
+        return trace
+
     @staticmethod
     def _preview_text(value: str, *, max_chars: int = 400) -> str:
         text = str(value or '').strip()
@@ -511,7 +541,7 @@ class TaskQueryService:
                 }
             )
         if stages_payload:
-            return {'stages': stages_payload}
+            return TaskQueryService._sanitize_execution_trace_summary({'stages': stages_payload})
         fallback_tool_calls: list[dict[str, str]] = []
         for step in list(trace.get('tool_steps') or []):
             compact_step = TaskQueryService._compact_execution_trace_tool_call(step)
@@ -534,6 +564,68 @@ class TaskQueryService:
         return {'stages': []}
 
     @staticmethod
+    def _sanitize_execution_trace_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
+        payload = summary if isinstance(summary, dict) else {}
+        stages_payload: list[dict[str, Any]] = []
+        for stage in list(payload.get('stages') or []):
+            if not isinstance(stage, dict):
+                continue
+            rounds_payload: list[dict[str, Any]] = []
+            tool_calls: list[dict[str, Any]] = []
+            for round_item in list(stage.get('rounds') or []):
+                if not isinstance(round_item, dict):
+                    continue
+                compact_tools = [
+                    compact_step
+                    for compact_step in (
+                        TaskQueryService._compact_execution_trace_tool_call(step)
+                        for step in list(round_item.get('tools') or [])
+                    )
+                    if compact_step is not None
+                ]
+                if not compact_tools:
+                    continue
+                rounds_payload.append(
+                    {
+                        'round_id': str(round_item.get('round_id') or ''),
+                        'round_index': int(round_item.get('round_index') or 0),
+                        'created_at': str(round_item.get('created_at') or ''),
+                        'budget_counted': bool(round_item.get('budget_counted')),
+                        'tools': compact_tools,
+                    }
+                )
+                tool_calls.extend(compact_tools)
+            fallback_tool_calls = [
+                compact_step
+                for compact_step in (
+                    TaskQueryService._compact_execution_trace_tool_call(step)
+                    for step in list(stage.get('tool_calls') or [])
+                )
+                if compact_step is not None
+            ]
+            tool_rounds_used = int(stage.get('tool_rounds_used') or 0)
+            if rounds_payload:
+                tool_rounds_used = len(rounds_payload)
+            elif fallback_tool_calls and tool_rounds_used <= 0:
+                tool_rounds_used = 1
+            stages_payload.append(
+                {
+                    'stage_id': str(stage.get('stage_id') or ''),
+                    'stage_index': int(stage.get('stage_index') or 0),
+                    'mode': str(stage.get('mode') or ''),
+                    'status': str(stage.get('status') or ''),
+                    'stage_goal': str(stage.get('stage_goal') or ''),
+                    'tool_round_budget': int(stage.get('tool_round_budget') or 0),
+                    'tool_rounds_used': tool_rounds_used,
+                    'created_at': str(stage.get('created_at') or ''),
+                    'finished_at': str(stage.get('finished_at') or ''),
+                    'rounds': rounds_payload,
+                    'tool_calls': tool_calls if rounds_payload else fallback_tool_calls,
+                }
+            )
+        return {'stages': stages_payload}
+
+    @staticmethod
     def _execution_trace_summary_has_rounds(summary: dict[str, Any] | None) -> bool:
         payload = summary if isinstance(summary, dict) else {}
         for stage in list(payload.get('stages') or []):
@@ -548,12 +640,19 @@ class TaskQueryService:
     def _compact_execution_trace_tool_call(step: Any) -> dict[str, Any] | None:
         if not isinstance(step, dict):
             return None
+        output_ref = str(step.get('output_ref') or '').strip()
+        preview_text = str(step.get('output_preview') or step.get('output_preview_text') or '').strip()
+        output_text = preview_text
+        if not output_text and not output_ref:
+            output_text = str(step.get('output_text') or '').strip()
+        elif not output_text and output_ref:
+            output_text = 'output captured in ref'
         return {
             'tool_call_id': str(step.get('tool_call_id') or '').strip(),
             'tool_name': str(step.get('tool_name') or '').strip() or 'tool',
             'arguments_text': str(step.get('arguments_text') or ''),
-            'output_text': str(step.get('output_text') or ''),
-            'output_ref': str(step.get('output_ref') or ''),
+            'output_text': output_text,
+            'output_ref': output_ref,
             'status': str(step.get('status') or '').strip(),
             'started_at': str(step.get('started_at') or ''),
             'finished_at': str(step.get('finished_at') or ''),

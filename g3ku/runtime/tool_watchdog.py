@@ -269,6 +269,9 @@ def runtime_context_value(runtime_context: Any, key: str, default: Any = None) -
 
 def actor_role_allows_watchdog(runtime_context: Any) -> bool:
     role = str(runtime_context_value(runtime_context, "actor_role", "") or "").strip().lower()
+    # Detached watchdog handoff is intentionally limited to the CEO session path.
+    # Execution/inspection nodes must keep long-running tools inline so they do not
+    # drift into a second logical reply cycle or require heartbeat wakeups.
     return role == "ceo"
 
 

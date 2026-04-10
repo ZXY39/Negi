@@ -18,7 +18,7 @@ from g3ku.runtime.web_ceo_sessions import (
     _extract_task_ids_from_text,
     clear_inflight_turn_snapshot,
     normalize_ceo_metadata,
-    update_ceo_session_after_turn,
+    update_ceo_session_after_heartbeat,
 )
 from main.models import TaskRecord
 from main.protocol import build_envelope, now_iso
@@ -965,21 +965,14 @@ class WebSessionHeartbeatService:
             if not task_id_text or not task_id_text.startswith("task:") or task_id_text in normalized_task_ids:
                 continue
             normalized_task_ids.append(task_id_text)
-        metadata = {
-            "source": "heartbeat",
-            "reason": reason,
-            "history_visible": False,
-            "task_ids": normalized_task_ids,
-        }
         normalized_results = [dict(item) for item in list(task_results or []) if isinstance(item, dict)]
-        if normalized_results:
-            metadata['task_results'] = normalized_results
-        session.add_message(
-            "assistant",
-            text,
-            metadata=metadata,
+        update_ceo_session_after_heartbeat(
+            session,
+            task_ids=normalized_task_ids,
+            reason=reason,
+            task_results=normalized_results,
+            updated_at=now_iso(),
         )
-        update_ceo_session_after_turn(session, user_text="", assistant_text=text)
         self._session_manager.save(session)
 
     async def _run_session(self, session_id: str) -> float | None:
