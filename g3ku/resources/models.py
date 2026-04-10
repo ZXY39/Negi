@@ -72,6 +72,7 @@ class ToolResourceDescriptor(BaseResourceDescriptor):
     requires_paths: list[str] = field(default_factory=list)
     requires_env: list[str] = field(default_factory=list)
     toolskill_enabled: bool = True
+    tool_result_inline_full: bool = False
 
 
 @dataclass(slots=True)

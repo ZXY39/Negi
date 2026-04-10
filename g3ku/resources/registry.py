@@ -154,6 +154,9 @@ class ResourceRegistry:
 
     def _build_tool(self, root: Path, manifest_path: Path) -> ToolResourceDescriptor:
         data = self._safe_manifest(manifest_path)
+        tool_result_inline_full = bool(data.get("tool_result_inline_full", False))
+        metadata = dict(data)
+        metadata["tool_result_inline_full"] = tool_result_inline_full
         main_root = root / "main"
         entrypoint = main_root / "tool.py"
         toolskills_root = root / "toolskills"
@@ -187,7 +190,8 @@ class ResourceRegistry:
             requires_paths=[str(item) for item in ((data.get("requires") or {}).get("paths") or [])],
             requires_env=[str(item) for item in ((data.get("requires") or {}).get("env") or [])],
             toolskill_enabled=bool((data.get("toolskill") or {}).get("enabled", True)),
-            metadata=data,
+            tool_result_inline_full=tool_result_inline_full,
+            metadata=metadata,
             exposure={
                 "agent": bool((data.get("exposure") or {}).get("agent", True)),
                 "main_runtime": bool((data.get("exposure") or {}).get("main_runtime", True)),

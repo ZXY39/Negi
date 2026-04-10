@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import yaml
 
+from g3ku.resources.registry import ResourceRegistry
 from main.governance.action_mapper import DEFAULT_TOOL_FAMILIES
 
 
@@ -154,3 +155,34 @@ def test_skill_installer_method_description_matches_runtime_strategy():
     method_description = manifest['parameters']['properties']['method']['description']
     assert 'auto_prefer' in method_description
     assert 'git sparse checkout' in method_description
+
+
+def test_tool_result_inline_full_flag_defaults_false_and_mirrors_manifest_metadata(tmp_path):
+    registry = ResourceRegistry(workspace=tmp_path, skills_dir=tmp_path / 'skills', tools_dir=tmp_path / 'tools')
+    tool_root = tmp_path / 'tools' / 'demo_tool'
+    main_root = tool_root / 'main'
+    main_root.mkdir(parents=True)
+    (main_root / 'tool.py').write_text('def build(runtime):\n    return None\n', encoding='utf-8')
+
+    manifest = {
+        'schema_version': 1,
+        'kind': 'tool',
+        'name': 'demo_tool',
+        'description': 'Demo tool',
+    }
+    (tool_root / 'resource.yaml').write_text(yaml.safe_dump(manifest, sort_keys=False), encoding='utf-8')
+
+    descriptor = registry.build_tool_descriptor(tool_root)
+
+    assert descriptor is not None
+    assert descriptor.tool_result_inline_full is False
+    assert descriptor.metadata['tool_result_inline_full'] is False
+
+    manifest['tool_result_inline_full'] = True
+    (tool_root / 'resource.yaml').write_text(yaml.safe_dump(manifest, sort_keys=False), encoding='utf-8')
+
+    descriptor = registry.build_tool_descriptor(tool_root)
+
+    assert descriptor is not None
+    assert descriptor.tool_result_inline_full is True
+    assert descriptor.metadata['tool_result_inline_full'] is True
