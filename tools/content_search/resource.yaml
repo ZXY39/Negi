@@ -1,0 +1,63 @@
+schema_version: 1
+kind: tool
+name: content_search
+display_name: Content Search
+description: Search one content ref or absolute file path for text.
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+    - workspace
+parameters:
+  type: object
+  properties:
+    ref:
+      type: string
+      description: Externalized content ref such as artifact:artifact_xxx.
+    path:
+      type: string
+      description: Absolute file path for path mode.
+    query:
+      type: string
+      description: Search query.
+    view:
+      type: string
+      enum:
+        - canonical
+        - raw
+      description: Content view mode. canonical resolves wrapped refs before reading.
+    limit:
+      type: integer
+      description: Optional max hits.
+    before:
+      type: integer
+      description: Optional context lines before each hit.
+    after:
+      type: integer
+      description: Optional context lines after each hit.
+  required:
+    - query
+governance:
+  family: content_navigation
+  display_name: Content
+  description: Describe, search, and open large externalized content by reference or absolute path.
+  actions:
+    - id: search
+      label: Search Content
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - inspection
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

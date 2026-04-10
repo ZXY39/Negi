@@ -12,9 +12,21 @@ from main.governance.roles import to_public_allowed_roles
 ALL_ROLES = list(DEFAULT_ALLOWED_ROLES)
 
 
-def _primary_executor_name(actions: list[ToolActionRecord]) -> str:
-    preferred = [action for action in actions if bool(getattr(action, 'agent_visible', True))]
-    for action in preferred or actions:
+def _primary_executor_name(actions: list[ToolActionRecord], *, preferred_executor_name: str = '') -> str:
+    preferred = str(preferred_executor_name or '').strip()
+    visible_actions = [action for action in actions if bool(getattr(action, 'agent_visible', True))]
+    for action in visible_actions or actions:
+        for executor_name in action.executor_names or []:
+            name = str(executor_name or '').strip()
+            if name and name != preferred:
+                return name
+    if preferred:
+        for action in visible_actions or actions:
+            for executor_name in action.executor_names or []:
+                name = str(executor_name or '').strip()
+                if name == preferred:
+                    return name
+    for action in visible_actions or actions:
         for executor_name in action.executor_names or []:
             name = str(executor_name or '').strip()
             if name:
@@ -140,7 +152,7 @@ def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[
                 tool_id=payload['tool_id'],
                 display_name=payload['display_name'],
                 description=payload['description'],
-                primary_executor_name=_primary_executor_name(actions),
+                primary_executor_name=_primary_executor_name(actions, preferred_executor_name=payload['tool_id']),
                 enabled=payload['enabled'],
                 available=payload['available'],
                 tool_type=payload['tool_type'],

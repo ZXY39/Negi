@@ -1,0 +1,42 @@
+schema_version: 1
+kind: tool
+name: filesystem_list
+display_name: Filesystem List
+description: List one directory.
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+    - workspace
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Absolute directory path to list.
+  required:
+    - path
+governance:
+  family: filesystem
+  display_name: Filesystem
+  description: Describe, search, open, list, write, edit, delete, and patch local files.
+  actions:
+    - id: list
+      label: List Directory
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - inspection
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

@@ -96,6 +96,67 @@ parameters:
           - source_excerpt
   required:
     - facts
+model_description: Write durable memory facts. Use string values in the callable schema.
+model_parameters:
+  type: object
+  properties:
+    facts:
+      type: array
+      description: One to five memory facts to write.
+      items:
+        type: object
+        properties:
+          category:
+            type: string
+            enum:
+              - constraint
+              - default_setting
+              - historical_fact
+              - identity
+              - preference
+              - relationship
+              - stateful_fact
+              - workflow_rule
+          scope:
+            type: string
+          entity:
+            type: string
+          attribute:
+            type: string
+          value:
+            type: string
+            description: Canonical fact value. Serialize object/array values as a JSON-serialized string.
+          observed_at:
+            type: string
+          time_semantics:
+            type: string
+            enum:
+              - current_state
+              - durable_until_replaced
+              - historical_observation
+          source_excerpt:
+            type: string
+          qualifier:
+            type: object
+          merge_mode:
+            type: string
+            enum:
+              - merge
+          expires_at:
+            type:
+              - string
+              - 'null'
+        required:
+          - category
+          - scope
+          - entity
+          - attribute
+          - value
+          - observed_at
+          - time_semantics
+          - source_excerpt
+  required:
+    - facts
 exposure:
   agent: true
   main_runtime: true

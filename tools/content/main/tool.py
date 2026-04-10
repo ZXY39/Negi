@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.content import ContentNavigationService, parse_content_envelope
-from g3ku.resources.tool_settings import ContentToolSettings, runtime_tool_settings
+from g3ku.resources.tool_settings import ContentToolSettings, load_tool_settings_from_manifest, runtime_tool_settings
 
 
 class ContentTool:
@@ -124,9 +124,31 @@ class ContentTool:
             return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
 
 
-def build(runtime):
+class ContentActionTool:
+    def __init__(self, delegate: ContentTool, *, action: str, fixed_kwargs: dict[str, Any] | None = None) -> None:
+        self._delegate = delegate
+        self._action = str(action or '').strip().lower()
+        self._fixed_kwargs = dict(fixed_kwargs or {})
+
+    async def execute(self, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
+        call_kwargs = dict(self._fixed_kwargs)
+        call_kwargs.update(kwargs)
+        call_kwargs.pop('action', None)
+        return await self._delegate.execute(
+            action=self._action,
+            __g3ku_runtime=__g3ku_runtime,
+            **call_kwargs,
+        )
+
+
+def build_content_tool(runtime, *, tool_name: str | None = None) -> ContentTool:
+    resolved_tool_name = str(tool_name or getattr(getattr(runtime, 'resource_descriptor', None), 'name', '') or 'content')
+    descriptor_name = str(getattr(getattr(runtime, 'resource_descriptor', None), 'name', '') or '').strip()
+    if resolved_tool_name and resolved_tool_name != descriptor_name:
+        settings = load_tool_settings_from_manifest(runtime.workspace, resolved_tool_name, ContentToolSettings)
+    else:
+        settings = runtime_tool_settings(runtime, ContentToolSettings, tool_name=resolved_tool_name)
     service = getattr(runtime.services, "main_task_service", None)
-    settings = runtime_tool_settings(runtime, ContentToolSettings, tool_name='content')
     shared_store = getattr(service, "content_store", None) if service is not None else None
     artifact_store = getattr(shared_store, "_artifact_store", None)
     artifact_lookup = getattr(shared_store, "_artifact_lookup", None)
@@ -141,3 +163,15 @@ def build(runtime):
         artifact_lookup=artifact_lookup,
     )
     return ContentTool(workspace=runtime.workspace, content_store=content_store)
+
+
+def build_single_purpose_content_tool(runtime, *, action: str, fixed_kwargs: dict[str, Any] | None = None) -> ContentActionTool:
+    return ContentActionTool(
+        build_content_tool(runtime, tool_name='content'),
+        action=action,
+        fixed_kwargs=fixed_kwargs,
+    )
+
+
+def build(runtime):
+    return build_content_tool(runtime, tool_name='content')

@@ -1,8 +1,8 @@
 schema_version: 1
 kind: tool
 name: content
-display_name: Content
-description: Describe, search, and open large content by ref or absolute file path without loading the full body into model context.
+display_name: Content (Legacy)
+description: Legacy compatibility wrapper for describe, search, and open operations over large content by ref or absolute file path.
 source:
   type: ''
   url: ''
@@ -78,14 +78,15 @@ parameters:
   required:
     - action
 governance:
-  family: content
+  family: content_navigation
   display_name: Content
-  description: Navigate large content by summary, search, and local open operations.
+  description: Describe, search, and open large externalized content by reference or absolute path.
   actions:
     - id: inspect
-      label: Inspect Content
+      label: Inspect Content (Legacy)
       risk_level: low
       destructive: false
+      agent_visible: true
       allowed_roles:
         - ceo
         - execution

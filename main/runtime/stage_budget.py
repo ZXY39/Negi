@@ -6,8 +6,11 @@ from typing import Any
 
 STAGE_TOOL_NAME = "submit_next_stage"
 FINAL_RESULT_TOOL_NAME = "submit_final_result"
+SPAWN_CHILD_NODES_TOOL_NAME = "spawn_child_nodes"
 CONTROL_STAGE_TOOL_NAMES = frozenset({"wait_tool_execution", "stop_tool_execution"})
-DEFAULT_NON_BUDGET_STAGE_TOOLS = frozenset({STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, *CONTROL_STAGE_TOOL_NAMES})
+DEFAULT_NON_BUDGET_STAGE_TOOLS = frozenset(
+    {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, SPAWN_CHILD_NODES_TOOL_NAME, *CONTROL_STAGE_TOOL_NAMES}
+)
 
 
 def normalize_non_budget_stage_tools(extra_non_budget_tools: Iterable[str] | None = None) -> set[str]:

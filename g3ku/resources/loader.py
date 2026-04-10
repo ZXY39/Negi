@@ -32,8 +32,20 @@ class ManifestBackedTool(Tool):
         return self._descriptor.description
 
     @property
+    def model_description(self) -> str:
+        configured = str((self._descriptor.metadata or {}).get("model_description") or "").strip()
+        return configured or self.description
+
+    @property
     def parameters(self) -> dict[str, Any]:
         return self._descriptor.parameters or {"type": "object", "properties": {}, "required": []}
+
+    @property
+    def model_parameters(self) -> dict[str, Any]:
+        configured = (self._descriptor.metadata or {}).get("model_parameters")
+        if isinstance(configured, dict):
+            return _normalize_manifest_schema(configured)
+        return self.parameters
 
     def set_context(self, *args: Any, **kwargs: Any) -> Any:
         if hasattr(self._handler, "set_context"):
@@ -133,3 +145,14 @@ class ResourceLoader:
             if not text.isidentifier():
                 return True
         return False
+
+
+def _normalize_manifest_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}, "required": []}
+    return {
+        **schema,
+        "type": "object",
+        "properties": dict(schema.get("properties") or {}),
+        "required": list(schema.get("required") or []),
+    }

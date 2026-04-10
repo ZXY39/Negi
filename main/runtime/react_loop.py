@@ -80,6 +80,7 @@ class RepeatedActionCircuitBreaker:
 
 class ReActToolLoop:
     _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
+    _ORDERED_CONTROL_TOOL_NAMES = ('wait_tool_execution', 'stop_tool_execution')
     _EXCLUSIVE_TOOL_TURN_NAMES = {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}
     _BUDGET_BYPASS_TOOL_NAMES = _CONTROL_TOOL_NAMES | {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, _STAGE_SPAWN_TOOL_NAME}
 
@@ -180,7 +181,14 @@ class ReActToolLoop:
                 node_kind=node.node_kind,
                 stage_gate=stage_gate,
             )
-            tool_schemas = [tool.to_schema() for tool in visible_tools.values()]
+            model_visible_tools, tool_schema_selection = self._model_visible_tools_for_iteration(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                node_kind=node.node_kind,
+                visible_tools=visible_tools,
+                runtime_context=runtime_context,
+            )
+            tool_schemas = [tool.to_model_schema() for tool in model_visible_tools.values()]
             model_messages = self._prepare_messages(message_history, runtime_context=runtime_context)
             overlay_parts = [
                 build_execution_stage_overlay(node_kind=node.node_kind, stage_gate=stage_gate),
@@ -214,6 +222,10 @@ class ReActToolLoop:
                     'partial_child_results': [],
                     'tool_calls': [],
                     'child_pipelines': [],
+                    'lightweight_tool_ids': list(tool_schema_selection.get('lightweight_tool_ids') or []),
+                    'hydrated_executor_names': list(tool_schema_selection.get('hydrated_executor_names') or []),
+                    'model_visible_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
+                    'model_visible_tool_selection_trace': dict(tool_schema_selection.get('trace') or {}),
                     **self._execution_stage_frame_payload(node_kind=node.node_kind, stage_gate=stage_gate),
                     'last_error': '',
                 },
@@ -598,6 +610,13 @@ class ReActToolLoop:
                     },
                     prior_overflow_signatures=self._overflowed_search_signatures(message_history),
                     max_parallel_tool_calls=max_parallel_tool_calls,
+                )
+                self._promote_tool_context_hydration_after_results(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    response_tool_calls=response_tool_calls,
+                    results=results,
+                    runtime_context=runtime_context,
                 )
                 assistant_message = {
                     'role': 'assistant',
@@ -1473,6 +1492,131 @@ class ReActToolLoop:
             stage_tool_name=STAGE_TOOL_NAME,
         )
 
+    def _model_visible_tools_for_iteration(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        node_kind: str,
+        visible_tools: dict[str, Tool],
+        runtime_context: dict[str, Any],
+    ) -> tuple[dict[str, Tool], dict[str, Any]]:
+        selected_tools = dict(visible_tools or {})
+        selection_payload: dict[str, Any] = {
+            'tool_names': list(selected_tools.keys()),
+            'lightweight_tool_ids': [],
+            'hydrated_executor_names': [],
+            'trace': {},
+        }
+        if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
+            return selected_tools, selection_payload
+        selector = getattr(self, '_model_visible_tool_schema_selector', None)
+        if not callable(selector):
+            return selected_tools, selection_payload
+        raw_selection = selector(
+            task_id=str(task_id or '').strip(),
+            node_id=str(node_id or '').strip(),
+            node_kind=str(node_kind or '').strip(),
+            visible_tools=dict(visible_tools or {}),
+            runtime_context=dict(runtime_context or {}),
+        )
+        if not isinstance(raw_selection, dict):
+            return selected_tools, selection_payload
+        requested_names: list[str] = []
+        seen_requested_names: set[str] = set()
+        for item in list(raw_selection.get('tool_names') or []):
+            normalized = str(item or '').strip()
+            if not normalized or normalized in seen_requested_names or normalized not in visible_tools:
+                continue
+            seen_requested_names.add(normalized)
+            requested_names.append(normalized)
+        if requested_names:
+            selected_tools = {name: visible_tools[name] for name in requested_names}
+            selection_payload['tool_names'] = list(requested_names)
+        selection_payload['lightweight_tool_ids'] = [
+            str(item or '').strip()
+            for item in list(raw_selection.get('lightweight_tool_ids') or [])
+            if str(item or '').strip()
+        ]
+        selection_payload['hydrated_executor_names'] = [
+            str(item or '').strip()
+            for item in list(raw_selection.get('hydrated_executor_names') or [])
+            if str(item or '').strip()
+        ]
+        selection_payload['trace'] = dict(raw_selection.get('trace') or {})
+        return selected_tools, selection_payload
+
+    def _promote_tool_context_hydration_after_results(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        response_tool_calls: list[Any],
+        results: list[dict[str, Any]],
+        runtime_context: dict[str, Any],
+    ) -> None:
+        promoter = getattr(self, '_tool_context_hydration_promoter', None)
+        if not callable(promoter):
+            return
+        calls_by_id = {
+            str(getattr(call, 'id', '') or '').strip(): call
+            for call in list(response_tool_calls or [])
+            if str(getattr(call, 'id', '') or '').strip()
+        }
+        for result in list(results or []):
+            if not isinstance(result, dict):
+                continue
+            live_state = dict(result.get('live_state') or {}) if isinstance(result.get('live_state'), dict) else {}
+            if str(live_state.get('status') or '').strip().lower() != 'success':
+                continue
+            raw_result = result.get('raw_result')
+            if not isinstance(raw_result, dict):
+                continue
+            tool_message = dict(result.get('tool_message') or {}) if isinstance(result.get('tool_message'), dict) else {}
+            tool_call_id = str(tool_message.get('tool_call_id') or live_state.get('tool_call_id') or '').strip()
+            if not tool_call_id:
+                continue
+            call = calls_by_id.get(tool_call_id)
+            if call is None:
+                continue
+            promoter(
+                task_id=str(task_id or '').strip(),
+                node_id=str(node_id or '').strip(),
+                tool_call=call,
+                raw_result=dict(raw_result),
+                runtime_context=dict(runtime_context or {}),
+            )
+
+    @classmethod
+    def model_visible_always_callable_tool_names(
+        cls,
+        *,
+        visible_tool_names: list[str] | None = None,
+    ) -> list[str]:
+        visible_name_set = {
+            str(item or '').strip()
+            for item in list(visible_tool_names or [])
+            if str(item or '').strip()
+        }
+        return [
+            name
+            for name in cls._ordered_budget_bypass_tool_names()
+            if not visible_name_set or name in visible_name_set
+        ]
+
+    @classmethod
+    def _ordered_budget_bypass_tool_names(cls) -> tuple[str, ...]:
+        ordered: list[str] = []
+        for name in (*cls._ORDERED_CONTROL_TOOL_NAMES, STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, _STAGE_SPAWN_TOOL_NAME):
+            if name not in cls._BUDGET_BYPASS_TOOL_NAMES or name in ordered:
+                continue
+            ordered.append(name)
+        for name in sorted(cls._BUDGET_BYPASS_TOOL_NAMES):
+            if name in ordered:
+                continue
+            ordered.append(name)
+        return tuple(ordered)
+
     @staticmethod
     def _execution_stage_frame_payload(*, node_kind: str, stage_gate: dict[str, Any]) -> dict[str, Any]:
         if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
@@ -1644,6 +1788,7 @@ class ReActToolLoop:
                 )
                 return {
                     'index': index,
+                    'raw_result': raw_result,
                     'live_state': {
                         'tool_call_id': str(call.id or ''),
                         'tool_name': str(call.name or 'tool'),
