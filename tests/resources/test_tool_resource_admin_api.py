@@ -333,16 +333,19 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
         assert 'tool_handler_unavailable' in toolskill['errors']
         assert '# memory_write' in toolskill['content']
         assert '# memory_search' not in toolskill['content']
-        assert toolskill['required_parameters'] == ['items']
-        assert toolskill['parameters_schema']['properties']['items']['items']['required'] == [
-            'kind',
-            'key',
+        assert toolskill['required_parameters'] == ['facts']
+        assert toolskill['parameters_schema']['properties']['facts']['items']['required'] == [
+            'category',
+            'scope',
+            'entity',
+            'attribute',
             'value',
-            'statement',
+            'observed_at',
+            'time_semantics',
             'source_excerpt',
         ]
-        assert 'items[*].kind' in str(toolskill['parameter_contract_markdown'])
-        assert dict(toolskill['example_arguments']).get('items')
+        assert 'facts[*].category' in str(toolskill['parameter_contract_markdown'])
+        assert dict(toolskill['example_arguments']).get('facts')
 
         payload = service.load_tool_context(
             actor_role='ceo',
@@ -359,16 +362,19 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
             session_id='web:shared',
             tool_id='memory_write',
         )
-        assert payload_v2['required_parameters'] == ['items']
-        assert payload_v2['parameters_schema']['properties']['items']['items']['required'] == [
-            'kind',
-            'key',
+        assert payload_v2['required_parameters'] == ['facts']
+        assert payload_v2['parameters_schema']['properties']['facts']['items']['required'] == [
+            'category',
+            'scope',
+            'entity',
+            'attribute',
             'value',
-            'statement',
+            'observed_at',
+            'time_semantics',
             'source_excerpt',
         ]
-        assert 'items[*].kind' in str(payload_v2['parameter_contract_markdown'])
-        assert dict(payload_v2['example_arguments']).get('items')
+        assert 'facts[*].category' in str(payload_v2['parameter_contract_markdown'])
+        assert dict(payload_v2['example_arguments']).get('facts')
     finally:
         await service.close()
         manager.close()
