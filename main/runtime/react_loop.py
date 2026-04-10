@@ -1609,6 +1609,10 @@ class ReActToolLoop:
                         raw_result,
                         runtime_context=runtime_context,
                         tool_name=str(call.name or ''),
+                        delivery_metadata=self._tool_result_delivery_metadata(
+                            tools=tools,
+                            tool_name=str(call.name or ''),
+                        ),
                     )
                 except TaskPausedError:
                     raise
@@ -1850,13 +1854,21 @@ class ReActToolLoop:
         )
         return outcome.value
 
-    def _render_tool_message_content(self, result: Any, *, runtime_context: dict[str, Any], tool_name: str) -> str:
+    def _render_tool_message_content(
+        self,
+        result: Any,
+        *,
+        runtime_context: dict[str, Any],
+        tool_name: str,
+        delivery_metadata: dict[str, Any] | None = None,
+    ) -> str:
         rendered = result if isinstance(result, str) else self._render_tool_result(result)
         return self._externalize_message_content(
             rendered,
             runtime_context=runtime_context,
             display_name=f'tool:{tool_name}',
             source_kind=f'tool_result:{tool_name}',
+            delivery_metadata=delivery_metadata,
         )
 
     async def _execute_tool(self, *, tools: dict[str, Tool], tool_name: str, arguments: dict[str, Any], runtime_context: dict[str, Any]) -> str:
@@ -1870,7 +1882,20 @@ class ReActToolLoop:
             result,
             runtime_context=runtime_context,
             tool_name=tool_name,
+            delivery_metadata=self._tool_result_delivery_metadata(tools=tools, tool_name=tool_name),
         )
+
+    @staticmethod
+    def _tool_result_delivery_metadata(*, tools: dict[str, Tool], tool_name: str) -> dict[str, Any]:
+        tool = (tools or {}).get(str(tool_name or '').strip())
+        descriptor = getattr(tool, '_descriptor', None)
+        metadata = getattr(descriptor, 'metadata', None) or {}
+        return {
+            'tool_result_inline_full': bool(
+                getattr(descriptor, 'tool_result_inline_full', False)
+                or metadata.get('tool_result_inline_full', False)
+            ),
+        }
 
     def _execution_tool_gate_error(self, *, tool_name: str, runtime_context: dict[str, Any]) -> str:
         node_kind = str(runtime_context.get('node_kind') or '').strip().lower()
@@ -2405,6 +2430,10 @@ class ReActToolLoop:
             raw_result,
             runtime_context=runtime_context,
             tool_name=tool_payload['name'],
+            delivery_metadata=self._tool_result_delivery_metadata(
+                tools=tools,
+                tool_name=tool_payload['name'],
+            ),
         )
         finished_at = now_iso()
         elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
@@ -3731,6 +3760,7 @@ class ReActToolLoop:
         runtime_context: dict[str, Any],
         display_name: str,
         source_kind: str,
+        delivery_metadata: dict[str, Any] | None = None,
     ) -> Any:
         store = getattr(self._log_service, '_content_store', None)
         if store is None:
@@ -3741,4 +3771,5 @@ class ReActToolLoop:
             display_name=display_name,
             source_kind=source_kind,
             compact=True,
+            delivery_metadata=delivery_metadata,
         )

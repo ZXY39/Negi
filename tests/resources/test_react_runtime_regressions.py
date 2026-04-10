@@ -9,6 +9,8 @@ from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager
 from g3ku.agent.tools.base import Tool
 from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.providers.base import LLMResponse, ToolCallRequest
+from g3ku.resources.loader import ManifestBackedTool
+from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
 import main.service.runtime_service as runtime_service_module
 from main.runtime.internal_tools import SubmitFinalResultTool
@@ -77,7 +79,7 @@ def _submit_final_result_tool(*, node_kind: str = "execution") -> SubmitFinalRes
 class _DirectLoadTool(Tool):
     @property
     def name(self) -> str:
-        return "direct_load_tool"
+        return "load_tool_context"
 
     @property
     def description(self) -> str:
@@ -97,6 +99,28 @@ class _DirectLoadTool(Tool):
             "l1": "tool structured overview",
             "path": "/virtual/content-tool.md",
             "uri": "g3ku://resource/tool/content",
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+
+class _LargeInlineManifestTool(Tool):
+    @property
+    def name(self) -> str:
+        return "inline_manifest_tool"
+
+    @property
+    def description(self) -> str:
+        return "Return a large payload that should stay inline when opted in."
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {"type": "object", "properties": {}, "required": []}
+
+    async def execute(self, **kwargs):
+        _ = kwargs
+        payload = {
+            "ok": True,
+            "stdout": "\n".join(f"inline line {index:03d}" for index in range(240)),
         }
         return json.dumps(payload, ensure_ascii=False)
 
@@ -192,6 +216,46 @@ class _TypedSchemaTool(Tool):
 
     async def execute(self, **kwargs):
         return json.dumps(kwargs, ensure_ascii=False)
+
+
+def test_tool_model_visible_schema_falls_back_to_runtime_schema_when_unset() -> None:
+    class _ModelVisibleSchemaFallbackTool(Tool):
+        @property
+        def name(self) -> str:
+            return "model_visible_schema_tool"
+
+        @property
+        def description(self) -> str:
+            return "Use the runtime schema when no model-only schema override is defined."
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "task"},
+                },
+                "required": ["task"],
+            }
+
+        async def execute(self, **kwargs):
+            return json.dumps(kwargs, ensure_ascii=False)
+
+    tool = _ModelVisibleSchemaFallbackTool()
+
+    assert tool.model_description == tool.description
+    assert tool.model_parameters == tool.parameters
+    assert tool.to_model_schema() == {
+        "name": "model_visible_schema_tool",
+        "description": "Use the runtime schema when no model-only schema override is defined.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "task"},
+            },
+            "required": ["task"],
+        },
+    }
 
 
 def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_window() -> None:
@@ -453,8 +517,8 @@ async def test_react_loop_execute_tool_keeps_direct_load_payload_inline(tmp_path
 
     try:
         rendered = await loop._execute_tool(
-            tools={"direct_load_tool": _DirectLoadTool()},
-            tool_name="direct_load_tool",
+            tools={"load_tool_context": _DirectLoadTool()},
+            tool_name="load_tool_context",
             arguments={},
             runtime_context={"task_id": "task-1", "node_id": "node-1", "actor_role": "execution"},
         )
@@ -522,6 +586,45 @@ async def test_react_loop_externalizes_tool_messages_with_canonical_ref(tmp_path
         assert payload.ref.startswith("artifact:")
         assert payload.ref != inner.ref
         assert payload.resolved_ref == inner.ref
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_inline_even_when_large_for_manifest_backed_tool_result(tmp_path) -> None:
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    log_service = _FakeLogService()
+    log_service._content_store = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+    descriptor = ToolResourceDescriptor(
+        kind=ResourceKind.TOOL,
+        name="inline_manifest_tool",
+        description="Inline large tool results when manifest opt-in is enabled.",
+        root=tmp_path,
+        manifest_path=tmp_path / "resource.yaml",
+        fingerprint="test-fingerprint",
+        tool_result_inline_full=True,
+        metadata={"tool_result_inline_full": True},
+    )
+    tool = ManifestBackedTool(descriptor, _LargeInlineManifestTool())
+
+    try:
+        rendered = await loop._execute_tool(
+            tools={"inline_manifest_tool": tool},
+            tool_name="inline_manifest_tool",
+            arguments={},
+            runtime_context={"task_id": "task-1", "node_id": "node-1", "actor_role": "execution"},
+        )
+
+        assert parse_content_envelope(rendered) is None
+        payload = json.loads(rendered)
+        assert payload["stdout"].startswith("inline line 000")
+        assert len(payload["stdout"]) > 1200
     finally:
         store.close()
 

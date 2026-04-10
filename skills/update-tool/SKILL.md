@@ -110,3 +110,12 @@
 - Keep `resource.yaml -> parameters`, runtime behavior, and `toolskills/SKILL.md` aligned in the same change.
 - When nested object or array parameters change, update the toolskill example payload at the same time.
 - Required fields, enum values, and shape changes must never live only in prose or only in code.
+
+## Result Delivery Flag
+
+- Re-check `tool_result_inline_full` whenever the tool's output size, output shape, truncation behavior, or result-delivery contract changes.
+- Typical triggers: switching between preview text and full text, adding or removing `output_ref`, changing whether results are chunked, or changing the default verbosity of the tool response.
+- Avoid unsupported gray states. The tool should clearly behave as one of these contracts:
+  - preview-only inline text plus `output_ref` for full data
+  - full inline delivery with `tool_result_inline_full: true`
+- If the delivery contract changes, update both `resource.yaml` and `toolskills/SKILL.md` in the same change so callers do not infer the wrong follow-up behavior.

@@ -39,6 +39,16 @@ class Tool(ABC):
         """JSON Schema for tool parameters."""
         pass
 
+    @property
+    def model_description(self) -> str:
+        """Model-visible description, falling back to the runtime description."""
+        return self.description
+
+    @property
+    def model_parameters(self) -> dict[str, Any]:
+        """Model-visible parameter schema, falling back to the runtime schema."""
+        return self.parameters
+
     @abstractmethod
     async def execute(self, **kwargs: Any) -> Any:
         """
@@ -142,4 +152,12 @@ class Tool(ABC):
                 "description": self.description,
                 "parameters": self.parameters,
             },
+        }
+
+    def to_model_schema(self) -> dict[str, Any]:
+        """Convert tool to the flattened model-visible schema format."""
+        return {
+            "name": self.name,
+            "description": self.model_description,
+            "parameters": self.model_parameters,
         }

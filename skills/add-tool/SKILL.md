@@ -216,3 +216,10 @@ externaltools/
 - Every top-level and nested parameter should have a precise `description`.
 - If the tool uses nested objects or arrays, `toolskills/SKILL.md` must include at least one complete JSON example call.
 - Do not rely on prose-only toolskill text to communicate required fields or enum values.
+
+## Result Delivery Flag
+
+- Add `tool_result_inline_full` to the manifest when deciding how tool output is delivered back to the model.
+- Default it to `false`. That is the safe baseline for tools that should return preview text plus structured `output_ref` access to full results.
+- Opt in to `tool_result_inline_full: true` only when the tool's full result is intentionally small, stable, and should be delivered inline instead of forcing preview-only or follow-up fetch behavior.
+- Document the expected delivery mode in `toolskills/SKILL.md` so callers know whether they should expect preview text, full inline text, or an `output_ref` to inspect later.

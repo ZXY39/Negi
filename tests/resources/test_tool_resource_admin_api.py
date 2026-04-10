@@ -3426,6 +3426,50 @@ async def test_write_skill_file_async_triggers_targeted_catalog_sync(tmp_path: P
     assert item['catalog']['updated'] == 1
 
 
+def test_tool_result_inline_full_flag_is_documented_in_tool_authoring_skills():
+    docs = {
+        'add-tool': REPO_ROOT / 'skills' / 'add-tool' / 'SKILL.md',
+        'repair-tool': REPO_ROOT / 'skills' / 'repair-tool' / 'SKILL.md',
+        'update-tool': REPO_ROOT / 'skills' / 'update-tool' / 'SKILL.md',
+    }
+    content = {
+        name: ' '.join(path.read_text(encoding='utf-8').lower().split())
+        for name, path in docs.items()
+    }
+
+    missing_details: list[str] = []
+
+    def require_groups(doc_name: str, facet: str, *groups: tuple[str, ...]) -> None:
+        text = content[doc_name]
+        missing = []
+        for group in groups:
+            missing_tokens = [token for token in group if token.lower() not in text]
+            if missing_tokens:
+                missing.append(' + '.join(missing_tokens))
+        if missing:
+            missing_details.append(f"{doc_name} {facet}: missing {', '.join(missing)}")
+
+    require_groups('add-tool', 'default false behavior', ('tool_result_inline_full', 'default', 'false'))
+    require_groups('add-tool', 'preview plus output_ref path', ('preview', 'output_ref'))
+    require_groups('add-tool', 'true inline-full path', ('tool_result_inline_full', 'true'), ('full', 'inline'))
+
+    require_groups('repair-tool', 'contract troubleshooting anchor', ('tool_result_inline_full',))
+    require_groups('repair-tool', 'default false behavior', ('tool_result_inline_full', 'false'), ('preview', 'output_ref'))
+    require_groups('repair-tool', 'preview expectation mismatch guidance', ('preview', 'expected'))
+    require_groups('repair-tool', 'output_ref repair guidance', ('output_ref', 'missing', 'stale'))
+    require_groups('repair-tool', 'true inline-full path', ('tool_result_inline_full', 'true'), ('full', 'inline'))
+
+    require_groups('update-tool', 'contract re-check trigger', ('tool_result_inline_full', 'result-delivery', 'changes'))
+    require_groups('update-tool', 'default false behavior', ('preview', 'output_ref'))
+    require_groups('update-tool', 'true inline-full path', ('tool_result_inline_full', 'true'), ('full', 'inline'))
+    require_groups('update-tool', 'repair guidance remains aligned with same split', ('adding', 'removing', 'output_ref'), ('avoid', 'gray', 'states'))
+
+    assert missing_details == [], (
+        'Expected tool authoring skills to cover the tool result delivery contract facets across add/repair/update guidance: '
+        + '; '.join(missing_details)
+    )
+
+
 @pytest.mark.asyncio
 async def test_admin_skill_delete_endpoint_removes_files_and_syncs_catalog(tmp_path: Path):
     workspace = tmp_path / 'workspace'

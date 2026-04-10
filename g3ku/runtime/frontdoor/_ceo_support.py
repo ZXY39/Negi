@@ -344,14 +344,73 @@ class CeoFrontDoorSupport:
         except Exception:
             return str(result)
 
+    def _externalize_message_content(
+        self,
+        value: Any,
+        *,
+        runtime_context: dict[str, Any],
+        display_name: str,
+        source_kind: str,
+        delivery_metadata: dict[str, Any] | None = None,
+    ) -> Any:
+        service = getattr(self._loop, "main_task_service", None)
+        content_store = getattr(service, "content_store", None) if service is not None else None
+        externalize = getattr(content_store, "externalize_for_message", None) if content_store is not None else None
+        if not callable(externalize):
+            return value
+        return externalize(
+            value,
+            runtime=runtime_context,
+            display_name=display_name,
+            source_kind=source_kind,
+            compact=True,
+            delivery_metadata=delivery_metadata,
+        )
+
+    @staticmethod
+    def _tool_result_delivery_metadata(*, tool: Tool | None) -> dict[str, Any]:
+        descriptor = getattr(tool, "_descriptor", None)
+        metadata = getattr(descriptor, "metadata", None) or {}
+        return {
+            "tool_result_inline_full": bool(
+                getattr(descriptor, "tool_result_inline_full", False)
+                or metadata.get("tool_result_inline_full", False)
+            ),
+        }
+
+    def _render_tool_message_content(
+        self,
+        result: Any,
+        *,
+        runtime_context: dict[str, Any],
+        tool_name: str,
+        tool: Tool | None = None,
+    ) -> str:
+        rendered = result if isinstance(result, str) else self._render_tool_result(result)
+        return self._externalize_message_content(
+            rendered,
+            runtime_context=runtime_context,
+            display_name=f"tool:{tool_name}",
+            source_kind=f"tool_result:{tool_name}",
+            delivery_metadata=self._tool_result_delivery_metadata(tool=tool),
+        )
+
     @staticmethod
     def _tool_status(result_text: str) -> str:
         text = str(result_text or "").strip()
         return "error" if text.startswith("Error") else "success"
 
     @staticmethod
-    def _tool_result_progress_event_data(*, tool_name: str, result_text: str) -> dict[str, Any]:
+    def _tool_result_progress_event_data(
+        *,
+        tool_name: str,
+        result_text: str,
+        tool_call_id: str | None = None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {"tool_name": str(tool_name or "tool").strip() or "tool"}
+        normalized_tool_call_id = str(tool_call_id or "").strip()
+        if normalized_tool_call_id:
+            payload["tool_call_id"] = normalized_tool_call_id
         text = str(result_text or "").strip()
         if not text:
             return payload
@@ -438,8 +497,10 @@ class CeoFrontDoorSupport:
         arguments: dict[str, Any],
         runtime_context: dict[str, Any],
         on_progress,
+        tool_call_id: str | None = None,
     ) -> tuple[str, str, str, str, float | None]:
         normalized_arguments = normalize_runtime_tool_arguments_dict(arguments)
+        normalized_tool_call_id = str(tool_call_id or "").strip()
         try:
             errors = tool.validate_params(normalized_arguments)
         except Exception as exc:
@@ -457,6 +518,7 @@ class CeoFrontDoorSupport:
             event_data={
                 "tool_name": tool_name,
                 "arguments_text": self._tool_invocation_hint(tool_name, normalized_arguments),
+                **({"tool_call_id": normalized_tool_call_id} if normalized_tool_call_id else {}),
             },
         )
 
@@ -464,6 +526,7 @@ class CeoFrontDoorSupport:
         per_call_runtime = {
             **runtime_context,
             "tool_name": tool_name,
+            **({"tool_call_id": normalized_tool_call_id} if normalized_tool_call_id else {}),
         }
         if self._accepts_runtime_context(tool):
             execute_kwargs["__g3ku_runtime"] = per_call_runtime
@@ -504,13 +567,21 @@ class CeoFrontDoorSupport:
                 on_progress,
                 error_text,
                 event_kind="tool_error",
-                event_data={"tool_name": tool_name},
+                event_data={
+                    "tool_name": tool_name,
+                    **({"tool_call_id": normalized_tool_call_id} if normalized_tool_call_id else {}),
+                },
             )
             return error_text, "error", started_at, finished_at, elapsed_seconds
         finally:
             self._loop.tools.pop_runtime_context(token)
 
-        rendered = self._render_tool_result(result)
+        rendered = self._render_tool_message_content(
+            result,
+            runtime_context=runtime_context,
+            tool_name=tool_name,
+            tool=tool,
+        )
         finished_at = now_iso()
         elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
         status = self._tool_status(rendered)

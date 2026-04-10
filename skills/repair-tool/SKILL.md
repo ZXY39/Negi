@@ -150,3 +150,14 @@
 
 - If the repair touches tool arguments, update `resource.yaml -> parameters` first, then keep runtime validation and toolskill examples in sync.
 - If the tool has nested object or array arguments, verify `load_tool_context` exposes the full shape and add or refresh a complete JSON example in `toolskills/SKILL.md`.
+
+## Result Delivery Debugging
+
+- When a tool has result-delivery bugs, inspect `tool_result_inline_full` first before assuming the runtime is truncating incorrectly.
+- Debug the observed path explicitly:
+  - preview-only text returned inline when full text was expected
+  - full text returned inline when the caller should have been using `output_ref`
+  - missing or stale `output_ref` even though the manifest expects preview-only delivery
+- If the tool should return only a preview inline, keep `tool_result_inline_full: false` and verify the runtime still persists the full result behind `output_ref`.
+- If the tool should return the full body inline, set `tool_result_inline_full: true` and confirm the caller is no longer depending on preview-only assumptions.
+- Keep `resource.yaml`, runtime behavior, and `toolskills/SKILL.md` aligned so preview-only, full text, and `output_ref` do not drift into contradictory states.

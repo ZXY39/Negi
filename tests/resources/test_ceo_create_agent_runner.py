@@ -446,12 +446,12 @@ async def test_create_agent_langchain_tool_emits_tool_result_progress(monkeypatc
     monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"demo_tool": _DemoTool()})
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _on_progress})
 
-    async def _fake_execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress):
+    async def _fake_execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
         _ = tool, arguments, runtime_context
         await on_progress(
             f"{tool_name} started",
             event_kind="tool_start",
-            event_data={"tool_name": tool_name},
+            event_data={"tool_name": tool_name, "tool_call_id": tool_call_id},
         )
         return "done", "success", "2026-04-05T11:00:00", "2026-04-05T11:00:01", 1.0
 
@@ -482,12 +482,83 @@ async def test_create_agent_langchain_tool_emits_tool_result_progress(monkeypatc
         runtime=SimpleNamespace(context=SimpleNamespace()),
     )
 
-    result = await tools[0].ainvoke({"value": "alpha"})
+    result = await tools[0].ainvoke(
+        {
+            "type": "tool_call",
+            "id": "call-demo-tool-1",
+            "name": "demo_tool",
+            "args": {"value": "alpha"},
+        }
+    )
 
-    assert result["status"] == "success"
+    assert getattr(result, "tool_call_id", "") == "call-demo-tool-1"
+    assert getattr(result, "status", "") == "success"
     assert [item[1] for item in progress_calls] == ["tool_start", "tool_result"]
     assert progress_calls[-1][0] == "done"
-    assert progress_calls[-1][2] == {"tool_name": "demo_tool"}
+    assert progress_calls[0][2] == {"tool_name": "demo_tool", "tool_call_id": "call-demo-tool-1"}
+    assert progress_calls[-1][2] == {"tool_name": "demo_tool", "tool_call_id": "call-demo-tool-1"}
+
+
+@pytest.mark.asyncio
+async def test_create_agent_graph_execute_tools_preserves_parallel_same_name_tool_call_ids(monkeypatch) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    progress_calls: list[tuple[str, str | None, dict[str, object]]] = []
+
+    async def _on_progress(content: str, *, event_kind=None, event_data=None, **kwargs):
+        _ = kwargs
+        progress_calls.append((str(content), event_kind, dict(event_data or {})))
+
+    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"demo_tool": _DemoTool()})
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _on_progress})
+    async def _fake_summarize_messages(*, messages, state):
+        _ = state
+        return {"messages": list(messages)}
+
+    monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
+
+    async def _fake_execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
+        _ = tool, runtime_context
+        await on_progress(
+            f"{tool_name} started for {arguments['value']}",
+            event_kind="tool_start",
+            event_data={"tool_name": tool_name, "tool_call_id": tool_call_id},
+        )
+        return (
+            json.dumps({"value": arguments["value"]}),
+            "success",
+            "2026-04-05T11:00:00",
+            "2026-04-05T11:00:01",
+            1.0,
+        )
+
+    monkeypatch.setattr(runner, "_execute_tool_call", _fake_execute_tool_call)
+
+    result = await runner._graph_execute_tools(
+        {
+            "tool_call_payloads": [
+                {"id": "call-demo-tool-1", "name": "demo_tool", "arguments": {"value": "alpha"}},
+                {"id": "call-demo-tool-2", "name": "demo_tool", "arguments": {"value": "beta"}},
+            ],
+            "messages": [],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "parallel_enabled": True,
+            "max_parallel_tool_calls": 2,
+            "synthetic_tool_calls_used": False,
+            "response_payload": {"content": "", "tool_calls": []},
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    assert result["next_step"] == "call_model"
+    assert [(item[1], item[2]["tool_call_id"]) for item in progress_calls if item[1] == "tool_start"] == [
+        ("tool_start", "call-demo-tool-1"),
+        ("tool_start", "call-demo-tool-2"),
+    ]
+    assert sorted(item[2]["tool_call_id"] for item in progress_calls if item[1] == "tool_result") == [
+        "call-demo-tool-1",
+        "call-demo-tool-2",
+    ]
 
 
 @pytest.mark.asyncio
@@ -505,8 +576,8 @@ async def test_create_agent_langchain_tool_normalizes_create_async_task_executio
     )
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _on_progress})
 
-    async def _fake_execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress):
-        _ = tool, tool_name, runtime_context, on_progress
+    async def _fake_execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
+        _ = tool, tool_name, runtime_context, on_progress, tool_call_id
         captured["arguments"] = dict(arguments or {})
         return "created", "success", "2026-04-05T12:00:00", "2026-04-05T12:00:01", 1.0
 

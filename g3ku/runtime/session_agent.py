@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import uuid
+from collections import deque
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Awaitable, Callable
@@ -54,7 +55,8 @@ class RuntimeAgentSession:
         self._listeners: set[Callable[[AgentEvent], Awaitable[None] | None]] = set()
         self._last_prompt: str | UserInputMessage = ""
         self._event_log: list[dict] = []
-        self._pending_tool_names: dict[str, str] = {}
+        self._pending_tool_call_names: dict[str, str] = {}
+        self._pending_tool_name_calls: dict[str, deque[str]] = {}
         self._background_tool_targets: dict[str, dict[str, str]] = {}
         self._tool_seq: int = 0
         self._active_cancel_token: ToolCancellationToken | None = None
@@ -696,12 +698,14 @@ class RuntimeAgentSession:
 
     def _resolve_progress_tool_target(self, data: dict[str, Any]) -> tuple[str, str]:
         tool_name = str(data.get("tool_name") or "").strip()
-        tool_call_id = str(data.get("tool_call_id") or "").strip()
+        tool_call_id = self._event_tool_call_id(data)
+        if tool_call_id:
+            tool_name = self._pending_tool_call_names.get(tool_call_id, "") or tool_name
         if tool_name and not tool_call_id:
-            tool_call_id = self._pending_tool_names.get(tool_name, "")
-        if not tool_name and len(self._pending_tool_names) == 1:
-            tool_name, tool_call_id = next(iter(self._pending_tool_names.items()))
-        return tool_name or "tool", tool_call_id
+            tool_call_id = self._peek_pending_tool_call_id(tool_name)
+        if not tool_name and len(self._pending_tool_call_names) == 1:
+            tool_call_id, tool_name = next(iter(self._pending_tool_call_names.items()))
+        return self._normalize_tool_name(tool_name), tool_call_id
 
     def _remember_background_tool_target(self, *, execution_id: str, tool_name: str, tool_call_id: str) -> None:
         key = str(execution_id or "").strip()
@@ -728,9 +732,9 @@ class RuntimeAgentSession:
         if not target_tool_name:
             target_tool_name = str((payload or {}).get("tool_name") or "").strip()
         if not target_tool_call_id and target_tool_name:
-            target_tool_call_id = str(self._pending_tool_names.get(target_tool_name) or "").strip()
+            target_tool_call_id = self._peek_pending_tool_call_id(target_tool_name)
         return (
-            target_tool_name or str(tool_name or "tool").strip() or "tool",
+            self._normalize_tool_name(target_tool_name or tool_name),
             target_tool_call_id,
             execution_id,
         )
@@ -814,16 +818,34 @@ class RuntimeAgentSession:
             return None
         return parsed if isinstance(parsed, dict) else None
 
-    def _allocate_tool_call_id(self, tool_name: str) -> str:
-        normalized = str(tool_name or "tool").strip() or "tool"
-        self._tool_seq += 1
-        call_id = f"{normalized}:{self._tool_seq}"
-        self._pending_tool_names[normalized] = call_id
+    def _register_pending_tool_call(self, tool_name: str, data: dict[str, Any] | None = None) -> str:
+        normalized = self._normalize_tool_name(tool_name)
+        call_id = self._event_tool_call_id(data)
+        if not call_id:
+            self._tool_seq += 1
+            call_id = f"{normalized}:{self._tool_seq}"
+        else:
+            self._discard_pending_tool_call(call_id)
+        self._pending_tool_call_names[call_id] = normalized
+        self._pending_tool_name_calls.setdefault(normalized, deque()).append(call_id)
         return call_id
 
-    def _pop_tool_call_id(self, tool_name: str) -> str:
-        normalized = str(tool_name or "tool").strip() or "tool"
-        return self._pending_tool_names.pop(normalized, f"{normalized}:{self._tool_seq + 1}")
+    def _resolve_completed_tool_call(self, tool_name: str, data: dict[str, Any] | None = None) -> tuple[str, str]:
+        normalized = self._normalize_tool_name(tool_name)
+        explicit_call_id = self._event_tool_call_id(data)
+        if explicit_call_id:
+            resolved_name = self._pending_tool_call_names.get(explicit_call_id, normalized)
+            self._discard_pending_tool_call(explicit_call_id)
+            return resolved_name or normalized, explicit_call_id
+        fallback_call_id = self._peek_pending_tool_call_id(normalized)
+        if fallback_call_id:
+            self._discard_pending_tool_call(fallback_call_id)
+            return normalized, fallback_call_id
+        if not tool_name and len(self._pending_tool_call_names) == 1:
+            only_call_id, only_tool_name = next(iter(self._pending_tool_call_names.items()))
+            self._discard_pending_tool_call(only_call_id)
+            return only_tool_name, only_call_id
+        return normalized, f"{normalized}:{self._tool_seq + 1}"
 
     async def _emit(self, event_type: str, **payload):
         event = AgentEvent(type=event_type, timestamp=self._now(), payload=payload)
@@ -985,7 +1007,7 @@ class RuntimeAgentSession:
         if kind == "tool_start":
             if tool_name in _CONTROL_TOOL_NAMES:
                 return
-            call_id = self._allocate_tool_call_id(tool_name)
+            call_id = self._register_pending_tool_call(tool_name, data)
             self._state.pending_tool_calls.add(call_id)
             await self._emit(
                 "tool_execution_start",
@@ -1050,7 +1072,7 @@ class RuntimeAgentSession:
                 )
                 await self._emit_state_snapshot()
                 return
-            call_id = self._pop_tool_call_id(tool_name)
+            tool_name, call_id = self._resolve_completed_tool_call(tool_name, data)
             self._state.pending_tool_calls.discard(call_id)
             await self._emit(
                 "tool_execution_end",
@@ -1104,7 +1126,7 @@ class RuntimeAgentSession:
                 )
                 await self._emit_state_snapshot()
                 return
-            call_id = self._pop_tool_call_id(tool_name)
+            tool_name, call_id = self._resolve_completed_tool_call(tool_name, data)
             self._state.pending_tool_calls.discard(call_id)
             error = StructuredError(
                 code="tool_error",
@@ -1215,7 +1237,9 @@ class RuntimeAgentSession:
         self._state.latest_message = ""
         self._state.last_error = None
         self._state.pending_tool_calls.clear()
-        self._pending_tool_names.clear()
+        self._pending_tool_call_names.clear()
+        self._pending_tool_name_calls.clear()
+        self._background_tool_targets.clear()
         self._state.pending_interrupts = serialized_interrupts
         self._set_paused_execution_context(
             {
@@ -1260,7 +1284,9 @@ class RuntimeAgentSession:
                 self._ensure_user_turn_id(user_input)
                 self._last_prompt = user_input
                 self._event_log = []
-                self._pending_tool_names.clear()
+                self._pending_tool_call_names.clear()
+                self._pending_tool_name_calls.clear()
+                self._background_tool_targets.clear()
                 if internal_source is None:
                     # Fresh user turns should never inherit previous turn stage/compression snapshots.
                     self._frontdoor_stage_state = {}
@@ -1427,7 +1453,9 @@ class RuntimeAgentSession:
             self._active_cancel_token.cancel(reason="用户已请求暂停，正在安全停止...")
         await self._loop.cancel_session_tasks(self._state.session_key)
         self._state.pending_tool_calls.clear()
-        self._pending_tool_names.clear()
+        self._pending_tool_call_names.clear()
+        self._pending_tool_name_calls.clear()
+        self._background_tool_targets.clear()
         self._preserved_inflight_turn = None
         if manual:
             heartbeat = getattr(self._loop, "web_session_heartbeat", None)
@@ -1483,7 +1511,9 @@ class RuntimeAgentSession:
             self._state.latest_message = ""
             self._state.last_error = None
             self._state.pending_tool_calls.clear()
-            self._pending_tool_names.clear()
+            self._pending_tool_call_names.clear()
+            self._pending_tool_name_calls.clear()
+            self._background_tool_targets.clear()
             self._state.pending_interrupts = []
             await self._emit("control_ack", action="resume_interrupt", accepted=True)
             await self._emit_state_snapshot()
@@ -1516,14 +1546,17 @@ class RuntimeAgentSession:
         self._state.paused = False
         self._state.status = "idle"
         self._state.pending_tool_calls.clear()
+        self._pending_tool_call_names.clear()
+        self._pending_tool_name_calls.clear()
+        self._background_tool_targets.clear()
         self._state.pending_interrupts = []
         await self._emit("control_ack", action="cancel", accepted=True, reason=reason)
         await self._emit_state_snapshot()
 
     async def _emit_safe_stop_notice(self, action: str) -> None:
         message = "用户已请求暂停，正在安全停止..." if action == "pause" else "用户已请求停止，正在安全停止..."
-        if self._pending_tool_names:
-            for tool_name, call_id in list(self._pending_tool_names.items()):
+        if self._pending_tool_call_names:
+            for call_id, tool_name in list(self._pending_tool_call_names.items()):
                 await self._handle_progress(
                     message,
                     event_kind="tool",
@@ -1544,3 +1577,38 @@ class RuntimeAgentSession:
     def set_reasoning_effort(self, level: str | None) -> None:
         self._state.reasoning_effort = level
 
+    @staticmethod
+    def _event_tool_call_id(data: dict[str, Any] | None) -> str:
+        return str((data or {}).get("tool_call_id") or "").strip()
+
+    @staticmethod
+    def _normalize_tool_name(tool_name: str) -> str:
+        return str(tool_name or "tool").strip() or "tool"
+
+    def _peek_pending_tool_call_id(self, tool_name: str) -> str:
+        normalized = self._normalize_tool_name(tool_name)
+        pending = self._pending_tool_name_calls.get(normalized)
+        while pending:
+            call_id = str(pending[0] or "").strip()
+            if call_id and self._pending_tool_call_names.get(call_id) == normalized:
+                return call_id
+            pending.popleft()
+        if pending is not None and not pending:
+            self._pending_tool_name_calls.pop(normalized, None)
+        return ""
+
+    def _discard_pending_tool_call(self, tool_call_id: str) -> None:
+        call_id = str(tool_call_id or "").strip()
+        if not call_id:
+            return
+        tool_name = self._pending_tool_call_names.pop(call_id, "")
+        if not tool_name:
+            return
+        pending = self._pending_tool_name_calls.get(tool_name)
+        if pending is None:
+            return
+        filtered = deque(item for item in pending if str(item or "").strip() != call_id)
+        if filtered:
+            self._pending_tool_name_calls[tool_name] = filtered
+        else:
+            self._pending_tool_name_calls.pop(tool_name, None)

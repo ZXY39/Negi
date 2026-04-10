@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
 import re
 from dataclasses import dataclass
@@ -50,7 +51,7 @@ from .state_models import (
     CeoRuntimeContext,
 )
 
-ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
+ToolExecutor = Callable[..., Awaitable[Any]]
 CeoGraphState = CeoPersistentState
 
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
@@ -64,6 +65,14 @@ class VisibleToolBundle:
     native_tools: dict[str, Tool]
     langchain_tools: list[BaseTool]
     langchain_tool_map: dict[str, BaseTool]
+
+
+class _CeoStructuredTool(StructuredTool):
+    def _to_args_and_kwargs(self, tool_input: str | dict, tool_call_id: str | None) -> tuple[tuple, dict]:
+        args, kwargs = super()._to_args_and_kwargs(tool_input, tool_call_id)
+        if tool_call_id is not None:
+            kwargs["tool_call_id"] = tool_call_id
+        return args, kwargs
 
 
 def _positive_int(value: Any, default: int) -> int:
@@ -177,18 +186,31 @@ def _ceo_model_compatible_parameters_schema(tool_name: str, schema: dict[str, An
 
 
 def _build_langchain_tool(tool: Tool, executor: ToolExecutor) -> BaseTool:
-    async def _invoke(**kwargs: Any) -> Any:
+    executor_params = inspect.signature(executor).parameters
+    executor_accepts_tool_call_id = "tool_call_id" in executor_params or any(
+        param.kind is inspect.Parameter.VAR_KEYWORD
+        for param in executor_params.values()
+    )
+
+    async def _invoke(*, tool_call_id: str | None = None, **kwargs: Any) -> Any:
         filtered_kwargs = {
             str(key): value
             for key, value in dict(kwargs or {}).items()
             if value is not None
         }
-        return await executor(tool.name, normalize_runtime_tool_arguments_dict(filtered_kwargs))
+        normalized_kwargs = normalize_runtime_tool_arguments_dict(filtered_kwargs)
+        if executor_accepts_tool_call_id:
+            return await executor(
+                tool.name,
+                normalized_kwargs,
+                tool_call_id=str(tool_call_id or "").strip() or None,
+            )
+        return await executor(tool.name, normalized_kwargs)
 
     model_description, model_parameters = _model_visible_tool_contract(tool)
     compatible_model_parameters = _ceo_model_compatible_parameters_schema(tool.name, model_parameters)
     return attach_raw_parameters_schema(
-        StructuredTool.from_function(
+        _CeoStructuredTool.from_function(
             coroutine=_invoke,
             name=tool.name,
             description=model_description,
@@ -210,6 +232,21 @@ def _build_visible_tool_bundle(*, tools: dict[str, Tool], executor: ToolExecutor
         langchain_tools=list(langchain_tool_map.values()),
         langchain_tool_map=dict(langchain_tool_map),
     )
+
+
+async def _invoke_execute_tool_call_compat(execute_tool_call: ToolExecutor, /, **kwargs: Any) -> Any:
+    try:
+        parameters = inspect.signature(execute_tool_call).parameters
+    except (TypeError, ValueError):
+        return await execute_tool_call(**kwargs)
+    if "tool_call_id" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        return await execute_tool_call(**kwargs)
+    legacy_kwargs = dict(kwargs)
+    legacy_kwargs.pop("tool_call_id", None)
+    return await execute_tool_call(**legacy_kwargs)
 
 
 def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
@@ -1040,7 +1077,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         runtime_context = self._build_tool_runtime_context(state=state, runtime=runtime)
         on_progress = runtime_context.get("on_progress")
 
-        async def _tool_executor(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        async def _tool_executor(
+            tool_name: str,
+            arguments: dict[str, Any],
+            tool_call_id: str | None = None,
+        ) -> dict[str, Any]:
             tool = visible_tools.get(tool_name)
             if tool is None:
                 return {
@@ -1060,18 +1101,24 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "elapsed_seconds": None,
                 }
             normalized_arguments = _normalize_frontdoor_tool_arguments(tool_name, arguments)
-            result_text, status, started_at, finished_at, elapsed_seconds = await self._execute_tool_call(
+            result_text, status, started_at, finished_at, elapsed_seconds = await _invoke_execute_tool_call_compat(
+                self._execute_tool_call,
                 tool=tool,
                 tool_name=tool_name,
                 arguments=normalized_arguments,
                 runtime_context=runtime_context,
                 on_progress=on_progress,
+                tool_call_id=tool_call_id,
             )
             await self._emit_progress(
                 on_progress,
                 result_text,
                 event_kind="tool_result" if status == "success" else "tool_error",
-                event_data=self._tool_result_progress_event_data(tool_name=tool_name, result_text=result_text),
+                event_data=self._tool_result_progress_event_data(
+                    tool_name=tool_name,
+                    result_text=result_text,
+                    tool_call_id=tool_call_id,
+                ),
             )
             return {
                 "result_text": result_text,
@@ -1841,12 +1888,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 }
             else:
                 async with semaphore:
-                    result_text, status, started_at, finished_at, elapsed_seconds = await self._execute_tool_call(
+                    result_text, status, started_at, finished_at, elapsed_seconds = await _invoke_execute_tool_call_compat(
+                        self._execute_tool_call,
                         tool=tool,
                         tool_name=tool_name,
                         arguments=dict(payload.get("arguments") or {}),
                         runtime_context=runtime_context,
                         on_progress=on_progress,
+                        tool_call_id=str(payload.get("id") or "").strip() or None,
                     )
                 result_payload = {
                     "result_text": result_text,
@@ -1861,7 +1910,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 on_progress,
                 result_text,
                 event_kind="tool_result" if status == "success" else "tool_error",
-                event_data=self._tool_result_progress_event_data(tool_name=tool_name, result_text=result_text),
+                event_data=self._tool_result_progress_event_data(
+                    tool_name=tool_name,
+                    result_text=result_text,
+                    tool_call_id=str(payload.get("id") or "").strip() or None,
+                ),
             )
             return {
                 "tool_name": tool_name,

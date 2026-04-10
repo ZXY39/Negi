@@ -19,6 +19,9 @@ _HEAD_PREVIEW_LINES = 6
 _TAIL_PREVIEW_LINES = 6
 _PREVIEW_CHAR_LIMIT = 220
 _MAX_WRAPPER_DEPTH = 8
+# Internal runtime tools that are intentionally always inlined even when their
+# payloads are large. Keep this list explicit here instead of manifest-driven
+# so these delivery exceptions stay auditable and tightly scoped.
 _ALWAYS_INLINE_TOOL_RESULT_SOURCES = frozenset(
     {
         "tool_result:memory_search",
@@ -28,6 +31,15 @@ _ALWAYS_INLINE_TOOL_RESULT_SOURCES = frozenset(
         "tool_result:task_node_detail_cn",
         "tool_result:task_progress_cn",
         "tool_result:task_summary_cn",
+    }
+)
+# Direct-load context tools return the final body the agent should read in the
+# same turn. They stay on explicit hardcoded rules and must not depend on the
+# manifest-level tool_result_inline_full flag.
+_DIRECT_LOAD_INLINE_TOOL_RESULT_SOURCES = frozenset(
+    {
+        "tool_result:load_skill_context",
+        "tool_result:load_tool_context",
     }
 )
 
@@ -219,7 +231,7 @@ def _structured_ref_payload(value: Any) -> tuple[str, str]:
 
 def _should_keep_inline_direct_load_tool_result(value: Any, *, source_kind: str) -> bool:
     normalized = str(source_kind or "").strip().lower()
-    if not normalized.startswith("tool_result:"):
+    if normalized not in _DIRECT_LOAD_INLINE_TOOL_RESULT_SOURCES:
         return False
     payload = _parsed_json_payload(value)
     if not isinstance(payload, dict):
@@ -283,6 +295,24 @@ def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
     if excerpt and payload.get("start_line") not in {None, ""} and payload.get("end_line") not in {None, ""}:
         return _inline_tool_payload_fits_limits(payload) and _line_count(excerpt) <= MAX_OPEN_LINES
     return _should_keep_inline_search_tool_result(payload)
+
+
+def tool_result_delivery_policy(
+    value: Any,
+    *,
+    source_kind: str,
+    tool_result_inline_full: bool = False,
+) -> str:
+    normalized = str(source_kind or "").strip().lower()
+    text = _stringify(value)
+    if normalized.startswith("tool_result:"):
+        if bool(tool_result_inline_full):
+            return "inline_full"
+        if _should_keep_inline_tool_result(value, source_kind=source_kind):
+            return "inline_small"
+    if len(text) <= INLINE_CHAR_LIMIT and _line_count(text) <= INLINE_LINE_LIMIT:
+        return "inline_small"
+    return "summary_with_ref"
 
 
 def _looks_like_react_node_payload(value: Any, *, runtime: dict[str, Any] | None = None) -> bool:
@@ -411,6 +441,7 @@ class ContentNavigationService:
         source_kind: str = "text",
         mime_type: str = "text/plain",
         force: bool = False,
+        delivery_metadata: dict[str, Any] | None = None,
     ) -> ContentEnvelope | None:
         envelope = parse_content_envelope(value)
         if envelope is not None and not force:
@@ -418,9 +449,11 @@ class ContentNavigationService:
         text = _stringify(value)
         if not text:
             return None
-        if not force and _should_keep_inline_tool_result(value, source_kind=source_kind):
-            return None
-        if not force and len(text) <= INLINE_CHAR_LIMIT and _line_count(text) <= INLINE_LINE_LIMIT:
+        if not force and tool_result_delivery_policy(
+            value,
+            source_kind=source_kind,
+            tool_result_inline_full=bool((delivery_metadata or {}).get("tool_result_inline_full", False)),
+        ) != "summary_with_ref":
             return None
         display = _display_name(display_name, source_kind=source_kind, fallback=source_kind)
         origin_ref = _extract_origin_ref(value)
@@ -458,6 +491,7 @@ class ContentNavigationService:
         source_kind: str = "message",
         force: bool = False,
         compact: bool = False,
+        delivery_metadata: dict[str, Any] | None = None,
     ) -> Any:
         envelope = self.maybe_externalize_text(
             value,
@@ -465,6 +499,7 @@ class ContentNavigationService:
             display_name=display_name,
             source_kind=source_kind,
             force=force,
+            delivery_metadata=delivery_metadata,
         )
         if envelope is None:
             return value
@@ -483,6 +518,7 @@ class ContentNavigationService:
         display_name: str = "",
         source_kind: str = "content",
         force: bool = False,
+        delivery_metadata: dict[str, Any] | None = None,
     ) -> tuple[str, str]:
         envelope = self.maybe_externalize_text(
             value,
@@ -490,6 +526,7 @@ class ContentNavigationService:
             display_name=display_name,
             source_kind=source_kind,
             force=force,
+            delivery_metadata=delivery_metadata,
         )
         if envelope is not None:
             return envelope.summary, envelope.ref
