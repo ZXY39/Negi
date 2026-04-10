@@ -4979,6 +4979,19 @@ class MainRuntimeService:
             window=window,
         )
 
+    def read_content(
+        self,
+        *,
+        ref: str | None = None,
+        path: str | None = None,
+        view: str = 'canonical',
+    ) -> dict[str, Any]:
+        return self.content_store.read(
+            ref=ref,
+            path=path,
+            view=view,
+        )
+
     async def apply_patch_artifact(self, task_id: str, artifact_id: str) -> dict[str, Any] | None:
         task_id = self.normalize_task_id(task_id)
         artifact = self.get_artifact(artifact_id)

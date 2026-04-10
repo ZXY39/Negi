@@ -912,7 +912,6 @@ async def test_message_builder_collects_retrieved_context_separately_from_histor
         {"role": "user", "content": "remembered preference"},
     ]
 
-
 @pytest.mark.asyncio
 async def test_message_builder_ignores_same_session_turn_memory_records_for_ceo_history_recall() -> None:
     memory_manager = _MemoryManager(response="")

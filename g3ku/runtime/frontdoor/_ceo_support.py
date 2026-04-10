@@ -9,6 +9,7 @@ from typing import Any
 from loguru import logger
 
 from g3ku.agent.tools.base import Tool
+from g3ku.content import parse_content_envelope
 from g3ku.json_schema_utils import normalize_runtime_tool_arguments_dict
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.frontdoor.exposure_resolver import CeoExposureResolver
@@ -319,6 +320,43 @@ class CeoFrontDoorSupport:
     def _tool_status(result_text: str) -> str:
         text = str(result_text or "").strip()
         return "error" if text.startswith("Error") else "success"
+
+    @staticmethod
+    def _tool_result_progress_event_data(*, tool_name: str, result_text: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {"tool_name": str(tool_name or "tool").strip() or "tool"}
+        text = str(result_text or "").strip()
+        if not text:
+            return payload
+        envelope = parse_content_envelope(text)
+        if envelope is not None:
+            output_ref = str(envelope.ref or envelope.wrapper_ref or envelope.resolved_ref or "").strip()
+            if output_ref:
+                payload["output_ref"] = output_ref
+            summary = str(envelope.summary or "").strip()
+            if summary:
+                payload["output_preview_text"] = summary
+            return payload
+        if text[:1] not in {"{", "["}:
+            return payload
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return payload
+        if not isinstance(parsed, dict):
+            return payload
+        output_ref = str(
+            parsed.get("wrapper_ref")
+            or parsed.get("requested_ref")
+            or parsed.get("ref")
+            or parsed.get("resolved_ref")
+            or ""
+        ).strip()
+        if output_ref:
+            payload["output_ref"] = output_ref
+        preview = str(parsed.get("summary") or "").strip()
+        if preview:
+            payload["output_preview_text"] = preview
+        return payload
 
     async def _emit_watchdog_progress(self, *, on_progress, tool_name: str, poll: dict[str, Any]) -> None:
         snapshot = poll.get("snapshot") if isinstance(poll, dict) else None

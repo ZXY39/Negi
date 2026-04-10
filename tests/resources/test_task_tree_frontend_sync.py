@@ -2157,6 +2157,77 @@ def test_execution_trace_round_panel_is_full_width_block() -> None:
     assert "display: grid;" in block
 
 
+def test_set_trace_round_active_tool_prefetches_full_output_for_active_panel() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        class HTMLElementStub {
+          constructor() {
+            this.dataset = {};
+            this.hidden = false;
+            this.textContent = "";
+            this._selectors = {};
+            this._selectorLists = {};
+            this.classList = { toggle() {}, add() {}, remove() {} };
+          }
+          querySelector(selector) { return this._selectors[selector] || null; }
+          querySelectorAll(selector) { return this._selectorLists[selector] || []; }
+          setAttribute() {}
+        }
+        global.HTMLElement = HTMLElementStub;
+        const calls = [];
+        global.ensureTraceOutputCodeBlockContent = async (element) => {
+          calls.push({ ref: element.dataset.outputRef || "", before: element.textContent || "" });
+          element.textContent = "FULL OUTPUT";
+          return element.textContent;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const chip = new HTMLElementStub();
+        chip.dataset.toolKey = "round:tool:1";
+
+        const output = new HTMLElementStub();
+        output.dataset.outputRef = "artifact:artifact:tool-output";
+        output.textContent = "preview";
+
+        const panel = new HTMLElementStub();
+        panel.dataset.toolKey = "round:tool:1";
+        panel.hidden = true;
+        panel._selectors[".task-trace-output-value[data-output-ref]"] = output;
+
+        const placeholder = new HTMLElementStub();
+        placeholder.hidden = false;
+
+        const roundHost = new HTMLElementStub();
+        roundHost._selectorLists[".task-trace-round-chip"] = [chip];
+        roundHost._selectorLists[".task-trace-round-panel"] = [panel];
+        roundHost._selectors[".task-trace-round-panel-placeholder"] = placeholder;
+
+        setTraceRoundActiveTool(roundHost, "round:tool:1");
+        setTimeout(() => {
+          console.log(JSON.stringify({
+            callCount: calls.length,
+            firstRef: calls[0]?.ref || "",
+            text: output.textContent,
+            activeToolKey: roundHost.dataset.activeToolKey || "",
+            panelHidden: panel.hidden,
+            placeholderHidden: placeholder.hidden,
+          }));
+        }, 0);
+        """
+    )
+
+    assert result["callCount"] == 1
+    assert result["firstRef"] == "artifact:artifact:tool-output"
+    assert result["text"] == "FULL OUTPUT"
+    assert result["activeToolKey"] == "round:tool:1"
+    assert result["panelHidden"] is False
+    assert result["placeholderHidden"] is True
+
+
 def test_ceo_composer_html_includes_local_compression_toast() -> None:
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
 
