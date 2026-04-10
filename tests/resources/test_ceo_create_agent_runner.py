@@ -131,6 +131,53 @@ class _MemoryWriteLikeTool(Tool):
         return kwargs
 
 
+class _ModelVisibleSchemaOverrideTool(Tool):
+    @property
+    def name(self) -> str:
+        return "model_visible_schema_override_tool"
+
+    @property
+    def description(self) -> str:
+        return "runtime-only description"
+
+    @property
+    def model_description(self) -> str:
+        return "model-visible description"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "runtime_only": {"type": "string", "description": "runtime-only field"},
+            },
+            "required": ["runtime_only"],
+        }
+
+    @property
+    def model_parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "model_only": {"type": "integer", "description": "model-only field"},
+            },
+            "required": ["model_only"],
+        }
+
+    def to_model_schema(self) -> dict[str, object]:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.model_description,
+                "parameters": self.model_parameters,
+            },
+        }
+
+    async def execute(self, **kwargs):
+        return kwargs
+
+
 class _BrokenValidationTool(Tool):
     @property
     def name(self) -> str:
@@ -1015,7 +1062,7 @@ async def test_create_agent_lifecycle_abefore_model_syncs_only_postprocessed_sta
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runner_rejects_unverified_dispatch_text_from_model() -> None:
+async def test_create_agent_runner_preserves_unverified_dispatch_text_from_model() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))
     )
@@ -1037,8 +1084,7 @@ async def test_create_agent_runner_rejects_unverified_dispatch_text_from_model()
     )
 
     assert result["next_step"] == "finalize"
-    assert "未确认成功创建后台任务" in result["final_output"]
-    assert "task:fake-123" in result["final_output"]
+    assert result["final_output"] == "Claude Code Haha 项目分析任务已在后台成功续跑。新任务 ID: `task:fake-123`。"
     assert "summary_text" not in result
     assert "summary_payload" not in result
     assert "summary_model_key" not in result
@@ -1107,7 +1153,7 @@ async def test_create_agent_runner_does_not_treat_continue_task_as_task_dispatch
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runner_rejects_dispatch_text_for_unverified_task_id_even_when_verified_task_exists() -> None:
+async def test_create_agent_runner_preserves_dispatch_text_for_unverified_task_id_even_when_verified_task_exists() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))
     )
@@ -1130,8 +1176,7 @@ async def test_create_agent_runner_rejects_dispatch_text_for_unverified_task_id_
     )
 
     assert result["next_step"] == "finalize"
-    assert "未确认成功创建后台任务" in result["final_output"]
-    assert "task:fake-123" in result["final_output"]
+    assert result["final_output"] == "后台修复任务已经建立，任务号 `task:fake-123`。我先继续排查。"
 
 
 @pytest.mark.asyncio
@@ -1174,7 +1219,7 @@ async def test_create_agent_runner_preserves_heartbeat_success_reply_for_current
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runner_rejects_heartbeat_dispatch_claim_for_unknown_task_id() -> None:
+async def test_create_agent_runner_preserves_heartbeat_dispatch_claim_for_unknown_task_id() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))
     )
@@ -1205,12 +1250,11 @@ async def test_create_agent_runner_rejects_heartbeat_dispatch_claim_for_unknown_
     )
 
     assert result["next_step"] == "finalize"
-    assert "未确认成功创建后台任务" in result["final_output"]
-    assert "task:new-123" in result["final_output"]
+    assert result["final_output"] == "任务 `demo-old` 已完成但未通过验收，已续跑为 `task:new-123`。"
 
 
 @pytest.mark.asyncio
-async def test_create_agent_postprocess_requires_persisted_task_for_dispatch_reply(monkeypatch) -> None:
+async def test_create_agent_postprocess_allows_unverified_task_dispatch_reply(monkeypatch) -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))
     )
@@ -1251,9 +1295,10 @@ async def test_create_agent_postprocess_requires_persisted_task_for_dispatch_rep
     )
 
     assert result is not None
-    assert result["jump_to"] == "end"
-    assert "未确认成功创建后台任务" in result["final_output"]
-    assert "task:fake-123" in result["final_output"]
+    assert "jump_to" not in result
+    assert result["route_kind"] == "task_dispatch"
+    assert result["verified_task_ids"] == []
+    assert "repair_overlay_text" not in result
 
 
 @pytest.mark.asyncio
@@ -1953,6 +1998,31 @@ async def test_create_agent_frontdoor_exposes_memory_write_with_stringified_valu
 
     original_fact_properties = tool.parameters["properties"]["facts"]["items"]["properties"]
     assert original_fact_properties["value"]["type"] == ["string", "number", "boolean", "object", "array", "null"]
+
+
+@pytest.mark.asyncio
+async def test_create_agent_frontdoor_exposes_model_visible_schema_overrides() -> None:
+    tool = _ModelVisibleSchemaOverrideTool()
+
+    async def _executor(_tool_name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        return {"result_text": "ok", "status": "success"}
+
+    langchain_tool = ceo_runtime_ops._build_langchain_tool(tool, _executor)
+
+    assert langchain_tool.description == "model-visible description"
+
+    raw_schema = get_attached_raw_parameters_schema(langchain_tool)
+    assert raw_schema == tool.model_parameters
+
+    prompt_schema = ceo_agent_middleware._tool_schema(langchain_tool)
+    assert prompt_schema == {
+        "name": tool.name,
+        "description": tool.model_description,
+        "parameters": tool.model_parameters,
+    }
+
+    assert "runtime_only" not in raw_schema["properties"]
+    assert "model_only" in raw_schema["properties"]
 
 
 @pytest.mark.asyncio

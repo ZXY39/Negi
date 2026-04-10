@@ -124,6 +124,26 @@ def _build_args_schema(tool: Tool):
     return build_args_schema_model(tool.name, tool.parameters)
 
 
+def _model_visible_tool_contract(tool: Tool) -> tuple[str, dict[str, Any] | None]:
+    to_model_schema = getattr(tool, "to_model_schema", None)
+    if callable(to_model_schema):
+        model_schema = to_model_schema()
+        if isinstance(model_schema, dict):
+            function_payload = model_schema.get("function")
+            function_schema = function_payload if isinstance(function_payload, dict) else model_schema
+            description = str(
+                function_schema.get("description")
+                or getattr(tool, "model_description", "")
+                or tool.description
+            )
+            parameters = function_schema.get("parameters")
+            if isinstance(parameters, dict):
+                return description, parameters
+    model_description = str(getattr(tool, "model_description", "") or tool.description)
+    model_parameters = getattr(tool, "model_parameters", None)
+    return model_description, model_parameters if isinstance(model_parameters, dict) else tool.parameters
+
+
 def _ceo_model_compatible_parameters_schema(tool_name: str, schema: dict[str, Any] | None) -> dict[str, Any] | None:
     normalized = copy.deepcopy(schema) if isinstance(schema, dict) else schema
     if str(tool_name or "").strip() != "memory_write" or not isinstance(normalized, dict):
@@ -165,15 +185,17 @@ def _build_langchain_tool(tool: Tool, executor: ToolExecutor) -> BaseTool:
         }
         return await executor(tool.name, normalize_runtime_tool_arguments_dict(filtered_kwargs))
 
+    model_description, model_parameters = _model_visible_tool_contract(tool)
+    compatible_model_parameters = _ceo_model_compatible_parameters_schema(tool.name, model_parameters)
     return attach_raw_parameters_schema(
         StructuredTool.from_function(
             coroutine=_invoke,
             name=tool.name,
-            description=tool.description,
-            args_schema=_build_args_schema(tool),
+            description=model_description,
+            args_schema=build_args_schema_model(tool.name, compatible_model_parameters),
             infer_schema=False,
         ),
-        _ceo_model_compatible_parameters_schema(tool.name, tool.parameters),
+        compatible_model_parameters,
     )
 
 
@@ -1216,46 +1238,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         task_ids = self._verified_task_ids_from_text(text)
         return task_ids[0] if task_ids else ""
 
-    @staticmethod
-    def _verified_task_ids_from_state(state: CeoGraphState) -> list[str]:
-        return CeoFrontDoorRuntimeOps._normalize_task_ids(state.get("verified_task_ids"))
-
-    @staticmethod
-    def _heartbeat_task_ids_from_state(state: CeoGraphState) -> list[str]:
-        metadata = _user_input_metadata(state.get("user_input"))
-        return CeoFrontDoorRuntimeOps._normalize_task_ids(metadata.get("heartbeat_task_ids"))
-
-    def _allowed_dispatch_task_ids_from_state(self, state: CeoGraphState) -> list[str]:
-        allowed: list[str] = []
-        for task_id in self._verified_task_ids_from_state(state):
-            if task_id not in allowed:
-                allowed.append(task_id)
-        metadata = _user_input_metadata(state.get("user_input"))
-        heartbeat_internal = bool(state.get("heartbeat_internal", metadata.get("heartbeat_internal")))
-        if heartbeat_internal:
-            for task_id in self._heartbeat_task_ids_from_state(state):
-                if task_id not in allowed:
-                    allowed.append(task_id)
-        return allowed
-
-    def _dispatch_claim_uses_allowed_task_ids(
-        self,
-        *,
-        text: str,
-        state: CeoGraphState,
-    ) -> bool:
-        referenced_task_ids = self._normalize_task_ids(_TASK_ID_PATTERN.findall(str(text or "")))
-        if not referenced_task_ids:
-            return False
-        allowed_task_ids = set(self._allowed_dispatch_task_ids_from_state(state))
-        if not allowed_task_ids:
-            return False
-        return set(referenced_task_ids).issubset(allowed_task_ids)
-
-    def _unverified_task_dispatch_reply(self, *, task_id: str = "") -> str:
-        detail = f"：`{task_id}`" if str(task_id or "").strip() else ""
-        return f"未确认成功创建后台任务{detail}。当前回合没有可验证的真实任务派发结果。"
-
     def _task_dispatch_reply(self, *, result_text: str) -> str:
         text = str(result_text or "").strip()
         task_id = self._extract_task_id(text)
@@ -1775,18 +1757,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         text = self._content_text(response_view.content)
         if text.strip():
-            if (
-                self._looks_like_task_dispatch_claim(text)
-                and not self._dispatch_claim_uses_allowed_task_ids(text=text, state=state)
-            ):
-                return {
-                    "final_output": self._unverified_task_dispatch_reply(
-                        task_id=self._extract_task_id(text)
-                    ),
-                    "route_kind": "direct_reply",
-                    "verified_task_ids": [],
-                    "next_step": "finalize",
-                }
             return {
                 "final_output": text.strip(),
                 "route_kind": self._route_kind_for_turn(used_tools=used_tools, default=current_route_kind),
@@ -1966,34 +1936,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             verified_task_id = self._verified_dispatch_task_id(
                 str(successful_dispatch.get("result_text") or "")
             )
-            if not verified_task_id:
-                return {
-                    "messages": messages,
-                    "used_tools": used_tools,
-                    "route_kind": "direct_reply",
-                    "analysis_text": "",
-                    "tool_call_payloads": [],
-                    "verified_task_ids": [],
-                    "synthetic_tool_calls_used": False,
-                    "final_output": self._unverified_task_dispatch_reply(
-                        task_id=self._extract_task_id(
-                            str(successful_dispatch.get("result_text") or "")
-                        )
-                    ),
-                    "next_step": "finalize",
-                }
-            return {
+            result = {
                 "messages": messages,
                 "used_tools": used_tools,
                 "route_kind": route_kind,
                 "analysis_text": "",
                 "tool_names": [],
                 "tool_call_payloads": [],
-                "verified_task_ids": [verified_task_id],
-                "repair_overlay_text": self._verified_dispatch_reply_overlay(task_id=verified_task_id),
+                "verified_task_ids": [verified_task_id] if verified_task_id else [],
                 "synthetic_tool_calls_used": False,
                 "next_step": "call_model",
             }
+            if verified_task_id:
+                result["repair_overlay_text"] = self._verified_dispatch_reply_overlay(task_id=verified_task_id)
+            return result
         if successful_continuation is not None and set(substantive_tool_names) == {"continue_task"}:
             verified = self._verified_continuation_result(successful_continuation)
             if not verified:

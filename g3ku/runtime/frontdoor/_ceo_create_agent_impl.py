@@ -474,19 +474,11 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             verified_task_id = self._verified_dispatch_task_id(
                 str(successful_dispatch.get("result_text") or "")
             )
-            if not verified_task_id:
-                result["final_output"] = self._unverified_task_dispatch_reply(
-                    task_id=self._extract_task_id(
-                        str(successful_dispatch.get("result_text") or "")
-                    )
-                )
-                result["route_kind"] = "direct_reply"
-                result["jump_to"] = "end"
-                return result
-            result["verified_task_ids"] = [verified_task_id]
-            result["route_kind"] = "task_dispatch"
-            result["tool_names"] = []
-            result["repair_overlay_text"] = self._verified_dispatch_reply_overlay(task_id=verified_task_id)
+            if verified_task_id:
+                result["verified_task_ids"] = [verified_task_id]
+                result["route_kind"] = "task_dispatch"
+                result["tool_names"] = []
+                result["repair_overlay_text"] = self._verified_dispatch_reply_overlay(task_id=verified_task_id)
         if successful_continuation is not None and set(substantive_tool_names) == {"continue_task"}:
             verified = self._verified_continuation_result(successful_continuation)
             if not verified:
