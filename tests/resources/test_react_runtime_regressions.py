@@ -194,6 +194,46 @@ class _TypedSchemaTool(Tool):
         return json.dumps(kwargs, ensure_ascii=False)
 
 
+def test_tool_model_visible_schema_falls_back_to_runtime_schema_when_unset() -> None:
+    class _ModelVisibleSchemaFallbackTool(Tool):
+        @property
+        def name(self) -> str:
+            return "model_visible_schema_tool"
+
+        @property
+        def description(self) -> str:
+            return "Use the runtime schema when no model-only schema override is defined."
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "task"},
+                },
+                "required": ["task"],
+            }
+
+        async def execute(self, **kwargs):
+            return json.dumps(kwargs, ensure_ascii=False)
+
+    tool = _ModelVisibleSchemaFallbackTool()
+
+    assert tool.model_description == tool.description
+    assert tool.model_parameters == tool.parameters
+    assert tool.to_model_schema() == {
+        "name": "model_visible_schema_tool",
+        "description": "Use the runtime schema when no model-only schema override is defined.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "task"},
+            },
+            "required": ["task"],
+        },
+    }
+
+
 def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_window() -> None:
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
     loop._log_service._store._node = SimpleNamespace(
