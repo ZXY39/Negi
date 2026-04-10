@@ -2027,6 +2027,59 @@ async def test_create_agent_frontdoor_exposes_memory_write_with_stringified_valu
 
 
 @pytest.mark.asyncio
+async def test_create_agent_frontdoor_exposes_model_visible_tool_schema() -> None:
+    class _ModelVisibleTool(Tool):
+        @property
+        def name(self) -> str:
+            return "model_visible_tool"
+
+        @property
+        def description(self) -> str:
+            return "runtime description"
+
+        @property
+        def model_description(self) -> str:
+            return "model-visible description"
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {
+                "type": "object",
+                "properties": {"runtime_only": {"type": "string"}},
+                "required": ["runtime_only"],
+            }
+
+        @property
+        def model_parameters(self) -> dict[str, object]:
+            return {
+                "type": "object",
+                "properties": {"model_only": {"type": "string"}},
+                "required": ["model_only"],
+            }
+
+        async def execute(self, **kwargs):
+            _ = kwargs
+            return {"ok": True}
+
+    async def _executor(_tool_name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        return {"result_text": "ok", "status": "success"}
+
+    langchain_tool = ceo_runtime_ops._build_langchain_tool(_ModelVisibleTool(), _executor)
+
+    assert str(getattr(langchain_tool, "description", "") or "") == "model-visible description"
+    raw_schema = get_attached_raw_parameters_schema(langchain_tool)
+    assert isinstance(raw_schema, dict)
+    assert "model_only" in dict(raw_schema.get("properties") or {})
+    assert "runtime_only" not in dict(raw_schema.get("properties") or {})
+
+    prompt_schema = ceo_agent_middleware._tool_schema(langchain_tool)
+    assert isinstance(prompt_schema, dict)
+    assert prompt_schema["description"] == "model-visible description"
+    assert "model_only" in dict((prompt_schema.get("parameters") or {}).get("properties") or {})
+    assert "runtime_only" not in dict((prompt_schema.get("parameters") or {}).get("properties") or {})
+
+
+@pytest.mark.asyncio
 async def test_create_agent_frontdoor_execute_tool_call_normalizes_nested_array_object_arguments() -> None:
     tool = _MemoryWriteLikeTool()
     captured: dict[str, object] = {}

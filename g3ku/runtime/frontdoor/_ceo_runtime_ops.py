@@ -191,11 +191,11 @@ def _build_langchain_tool(tool: Tool, executor: ToolExecutor) -> BaseTool:
         _CeoStructuredTool.from_function(
             coroutine=_invoke,
             name=tool.name,
-            description=tool.description,
+            description=tool.model_description,
             args_schema=_build_args_schema(tool),
             infer_schema=False,
         ),
-        _ceo_model_compatible_parameters_schema(tool.name, tool.parameters),
+        _ceo_model_compatible_parameters_schema(tool.name, tool.model_parameters),
     )
 
 
