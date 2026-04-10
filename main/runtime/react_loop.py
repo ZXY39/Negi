@@ -82,13 +82,6 @@ class ReActToolLoop:
     _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
     _EXCLUSIVE_TOOL_TURN_NAMES = {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}
     _BUDGET_BYPASS_TOOL_NAMES = _CONTROL_TOOL_NAMES | {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, _STAGE_SPAWN_TOOL_NAME}
-    _MODEL_VISIBLE_ALWAYS_CALLABLE_TOOL_NAMES = (
-        'wait_tool_execution',
-        'stop_tool_execution',
-        STAGE_TOOL_NAME,
-        FINAL_RESULT_TOOL_NAME,
-        _STAGE_SPAWN_TOOL_NAME,
-    )
 
     def __init__(
         self,
@@ -1552,16 +1545,30 @@ class ReActToolLoop:
             if str(item or '').strip()
         ]
         for name in visible_order:
-            if name not in cls._MODEL_VISIBLE_ALWAYS_CALLABLE_TOOL_NAMES or name in seen:
+            if name not in cls._BUDGET_BYPASS_TOOL_NAMES or name in seen:
                 continue
             seen.add(name)
             ordered.append(name)
-        for name in cls._MODEL_VISIBLE_ALWAYS_CALLABLE_TOOL_NAMES:
+        for name in cls._ordered_budget_bypass_tool_names():
             if name in seen:
                 continue
             seen.add(name)
             ordered.append(name)
         return ordered
+
+    @classmethod
+    def _ordered_budget_bypass_tool_names(cls) -> tuple[str, ...]:
+        control_names = tuple(sorted(cls._CONTROL_TOOL_NAMES))
+        ordered: list[str] = []
+        for name in (*control_names, STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, _STAGE_SPAWN_TOOL_NAME):
+            if name not in cls._BUDGET_BYPASS_TOOL_NAMES or name in ordered:
+                continue
+            ordered.append(name)
+        for name in sorted(cls._BUDGET_BYPASS_TOOL_NAMES):
+            if name in ordered:
+                continue
+            ordered.append(name)
+        return tuple(ordered)
 
     @staticmethod
     def _execution_stage_frame_payload(*, node_kind: str, stage_gate: dict[str, Any]) -> dict[str, Any]:
