@@ -449,6 +449,8 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
                 model_description='filesystem compact model schema',
             ),
             'memory_write': _LargeModelSchemaTool(name='memory_write'),
+            'wait_tool_execution': _StageProtocolNoopTool('wait_tool_execution'),
+            'stop_tool_execution': _StageProtocolNoopTool('stop_tool_execution'),
             'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
             'submit_final_result': _submit_final_result_tool(),
             'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
@@ -469,15 +471,144 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
     emitted_tool_names = [item['function']['name'] for item in emitted_tools]
 
     assert emitted_tool_names == [
+        'wait_tool_execution',
+        'stop_tool_execution',
         'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
         'filesystem',
     ]
     assert 'memory_write' not in emitted_tool_names
-    assert len(emitted_tool_names) < 5
+    assert len(emitted_tool_names) < 7
     filesystem_schema = next(item for item in emitted_tools if item['function']['name'] == 'filesystem')
     assert filesystem_schema['function']['description'] == 'filesystem compact model schema'
+
+
+def test_execution_selector_uses_stable_visible_tool_order_independent_of_family_iteration_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    visible_tools = {
+        'filesystem': _ModelSchemaRecordingTool(
+            name='filesystem',
+            authoritative_description='filesystem authoritative schema',
+            model_description='filesystem compact model schema ' + ('F' * 1200),
+        ),
+        'memory_write': _ModelSchemaRecordingTool(
+            name='memory_write',
+            authoritative_description='memory authoritative schema',
+            model_description='memory compact model schema ' + ('M' * 800),
+        ),
+        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
+        'submit_final_result': _submit_final_result_tool(),
+        'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
+    }
+    always_callable_tools = [
+        visible_tools['submit_next_stage'],
+        visible_tools['submit_final_result'],
+        visible_tools['spawn_child_nodes'],
+    ]
+    budget = sum(
+        len(json.dumps(tool.to_model_schema(), ensure_ascii=False, sort_keys=True))
+        for tool in always_callable_tools
+    ) + len(json.dumps(visible_tools['filesystem'].to_model_schema(), ensure_ascii=False, sort_keys=True))
+    monkeypatch.setattr(
+        runtime_service_module,
+        '_EXECUTION_MODEL_VISIBLE_SCHEMA_BUDGET_CHARS',
+        budget,
+    )
+
+    def _service_for(families: list[dict[str, object]]) -> MainRuntimeService:
+        service = object.__new__(MainRuntimeService)
+        service.store = SimpleNamespace(
+            get_task=lambda task_id: SimpleNamespace(
+                task_id=task_id,
+                session_id='web:shared',
+                metadata={'core_requirement': 'find terminal workflow skills'},
+            ),
+            get_node=lambda node_id: SimpleNamespace(
+                node_id=node_id,
+                prompt='find terminal workflow skills',
+                goal='find terminal workflow skills',
+                node_kind='execution',
+            ),
+        )
+        service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: families
+        return service
+
+    filesystem_first = _service_for(
+        [
+            {
+                'tool_id': 'filesystem',
+                'display_name': 'Filesystem',
+                'description': 'Inspect files',
+                'l0': 'Inspect files',
+                'l1': 'Inspect files',
+                'actions': [{'action_id': 'inspect', 'executor_names': ['filesystem']}],
+            },
+            {
+                'tool_id': 'memory',
+                'display_name': 'Memory',
+                'description': 'Write memory facts',
+                'l0': 'Write memory facts',
+                'l1': 'Write memory facts',
+                'actions': [{'action_id': 'write', 'executor_names': ['memory_write']}],
+            },
+        ]
+    )
+    memory_first = _service_for(
+        [
+            {
+                'tool_id': 'memory',
+                'display_name': 'Memory',
+                'description': 'Write memory facts',
+                'l0': 'Write memory facts',
+                'l1': 'Write memory facts',
+                'actions': [{'action_id': 'write', 'executor_names': ['memory_write']}],
+            },
+            {
+                'tool_id': 'filesystem',
+                'display_name': 'Filesystem',
+                'description': 'Inspect files',
+                'l0': 'Inspect files',
+                'l1': 'Inspect files',
+                'actions': [{'action_id': 'inspect', 'executor_names': ['filesystem']}],
+            },
+        ]
+    )
+
+    filesystem_first_selection = filesystem_first._select_model_visible_tool_schema_payload(
+        task_id='task-order-stable',
+        node_id='node-order-stable',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-order-stable',
+            'node_id': 'node-order-stable',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+    memory_first_selection = memory_first._select_model_visible_tool_schema_payload(
+        task_id='task-order-stable',
+        node_id='node-order-stable',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-order-stable',
+            'node_id': 'node-order-stable',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert filesystem_first_selection['tool_names'] == memory_first_selection['tool_names']
+    assert filesystem_first_selection['tool_names'] == [
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+        'filesystem',
+    ]
+    assert 'memory_write' not in filesystem_first_selection['tool_names']
 
 
 def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_window() -> None:

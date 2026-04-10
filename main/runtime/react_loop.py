@@ -82,6 +82,13 @@ class ReActToolLoop:
     _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
     _EXCLUSIVE_TOOL_TURN_NAMES = {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}
     _BUDGET_BYPASS_TOOL_NAMES = _CONTROL_TOOL_NAMES | {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, _STAGE_SPAWN_TOOL_NAME}
+    _MODEL_VISIBLE_ALWAYS_CALLABLE_TOOL_NAMES = (
+        'wait_tool_execution',
+        'stop_tool_execution',
+        STAGE_TOOL_NAME,
+        FINAL_RESULT_TOOL_NAME,
+        _STAGE_SPAWN_TOOL_NAME,
+    )
 
     def __init__(
         self,
@@ -1530,6 +1537,31 @@ class ReActToolLoop:
         ]
         selection_payload['trace'] = dict(raw_selection.get('trace') or {})
         return selected_tools, selection_payload
+
+    @classmethod
+    def model_visible_always_callable_tool_names(
+        cls,
+        *,
+        visible_tool_names: list[str] | None = None,
+    ) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        visible_order = [
+            str(item or '').strip()
+            for item in list(visible_tool_names or [])
+            if str(item or '').strip()
+        ]
+        for name in visible_order:
+            if name not in cls._MODEL_VISIBLE_ALWAYS_CALLABLE_TOOL_NAMES or name in seen:
+                continue
+            seen.add(name)
+            ordered.append(name)
+        for name in cls._MODEL_VISIBLE_ALWAYS_CALLABLE_TOOL_NAMES:
+            if name in seen:
+                continue
+            seen.add(name)
+            ordered.append(name)
+        return ordered
 
     @staticmethod
     def _execution_stage_frame_payload(*, node_kind: str, stage_gate: dict[str, Any]) -> dict[str, Any]:

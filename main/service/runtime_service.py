@@ -153,11 +153,6 @@ _TASK_RECOVERY_NOTICE_KEY = 'recovery_notice'
 _TASK_RECOVERY_NOTICE_TEXT = '本任务遇到异常停止，已回退到稳定步骤继续。'
 _CONTINUATION_TASK_CREATED_BY_SOURCES = frozenset({'heartbeat_auto_continue', 'ceo_user_rebuild'})
 _EXECUTION_MODEL_VISIBLE_SCHEMA_BUDGET_CHARS = 8000
-_ALWAYS_CALLABLE_RUNTIME_PROTOCOL_TOOL_NAMES = (
-    'submit_next_stage',
-    'submit_final_result',
-    'spawn_child_nodes',
-)
 
 
 _TASK_RUNTIME_V3_MARKER = '.task-runtime-v3'
@@ -3612,6 +3607,68 @@ class MainRuntimeService:
             )
         return items
 
+    @staticmethod
+    def _stable_execution_visible_tool_families(
+        *,
+        items: list[dict[str, Any]],
+        visible_tool_names: list[str],
+    ) -> list[dict[str, Any]]:
+        visible_index = {
+            str(name or '').strip(): index
+            for index, name in enumerate(list(visible_tool_names or []))
+            if str(name or '').strip()
+        }
+        fallback_index = len(visible_index) + 10_000
+
+        def _executor_sort_key(name: Any) -> tuple[int, str]:
+            normalized = str(name or '').strip()
+            return (visible_index.get(normalized, fallback_index), normalized)
+
+        def _action_sort_key(action: dict[str, Any]) -> tuple[int, str]:
+            executors = [
+                str(name or '').strip()
+                for name in list((action or {}).get('executor_names') or [])
+                if str(name or '').strip()
+            ]
+            if executors:
+                return min(_executor_sort_key(name) for name in executors)
+            return (fallback_index, str((action or {}).get('action_id') or '').strip())
+
+        normalized_items: list[dict[str, Any]] = []
+        for raw_item in list(items or []):
+            item = dict(raw_item or {})
+            normalized_actions: list[dict[str, Any]] = []
+            for raw_action in list(item.get('actions') or []):
+                action = dict(raw_action or {})
+                action['executor_names'] = [
+                    name
+                    for name in sorted(
+                        [
+                            str(executor_name or '').strip()
+                            for executor_name in list(action.get('executor_names') or [])
+                            if str(executor_name or '').strip()
+                        ],
+                        key=_executor_sort_key,
+                    )
+                ]
+                normalized_actions.append(action)
+            item['actions'] = sorted(normalized_actions, key=_action_sort_key)
+            normalized_items.append(item)
+
+        def _family_sort_key(item: dict[str, Any]) -> tuple[int, str]:
+            tool_id = str(item.get('tool_id') or '').strip()
+            candidates: list[tuple[int, str]] = []
+            if tool_id:
+                candidates.append((visible_index.get(tool_id, fallback_index), tool_id))
+            for action in list(item.get('actions') or []):
+                for executor_name in list(action.get('executor_names') or []):
+                    candidates.append(_executor_sort_key(executor_name))
+            if candidates:
+                return min(candidates)
+            return (fallback_index, tool_id)
+
+        return sorted(normalized_items, key=_family_sort_key)
+
     def _select_model_visible_tool_schema_payload(
         self,
         *,
@@ -3661,21 +3718,35 @@ class MainRuntimeService:
             schema_size_by_executor[name] = len(
                 json.dumps(tool.to_model_schema(), ensure_ascii=False, sort_keys=True)
             )
+        stable_lightweight_items = self._stable_execution_visible_tool_families(
+            items=lightweight_items,
+            visible_tool_names=ordered_visible_tool_names,
+        )
+        always_callable_tool_names = ReActToolLoop.model_visible_always_callable_tool_names(
+            visible_tool_names=ordered_visible_tool_names,
+        )
         selection = build_execution_tool_selection(
             prompt=prompt,
             goal=goal,
             core_requirement=core_requirement,
-            visible_tool_families=lightweight_items,
+            visible_tool_families=stable_lightweight_items,
             visible_tool_names=ordered_visible_tool_names,
             schema_size_by_executor=schema_size_by_executor,
-            always_callable_tool_names=list(_ALWAYS_CALLABLE_RUNTIME_PROTOCOL_TOOL_NAMES),
+            always_callable_tool_names=always_callable_tool_names,
             max_schema_chars=_EXECUTION_MODEL_VISIBLE_SCHEMA_BUDGET_CHARS,
         )
-        selected_tool_names = [
+        selected_tool_name_set = {
             name
             for name in list(selection.hydrated_tool_names or [])
             if name in visible_tools
-        ]
+        }
+        selected_tool_names: list[str] = []
+        for name in always_callable_tool_names:
+            if name in selected_tool_name_set and name not in selected_tool_names:
+                selected_tool_names.append(name)
+        for name in ordered_visible_tool_names:
+            if name in selected_tool_name_set and name not in selected_tool_names:
+                selected_tool_names.append(name)
         return {
             'tool_names': selected_tool_names,
             'lightweight_tool_ids': list(selection.lightweight_tool_ids or []),
