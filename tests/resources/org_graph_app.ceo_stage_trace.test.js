@@ -15,30 +15,58 @@ class StubHTMLElement extends StubElement {
         super();
         this.hidden = false;
         this.textContent = "";
-        this.innerHTML = "";
+        this._innerHTML = "";
         this.className = "";
         this.dataset = {};
         this.style = {};
         this.attributes = {};
         this._selectors = {};
         this._selectorLists = {};
+        this.children = [];
+        this.parentElement = null;
         this.classList = {
-            add() {},
-            remove() {},
-            contains() { return false; },
-            toggle() { return false; },
+            add: (...tokens) => {
+                const classes = new Set(String(this.className || "").split(/\s+/).filter(Boolean));
+                tokens.forEach((token) => classes.add(token));
+                this.className = [...classes].join(" ");
+            },
+            remove: (...tokens) => {
+                const classes = new Set(String(this.className || "").split(/\s+/).filter(Boolean));
+                tokens.forEach((token) => classes.delete(token));
+                this.className = [...classes].join(" ");
+            },
+            contains: (token) => String(this.className || "").split(/\s+/).includes(token),
+            toggle: (token, force) => {
+                const hasToken = String(this.className || "").split(/\s+/).includes(token);
+                const shouldAdd = force == null ? !hasToken : !!force;
+                if (shouldAdd) this.classList.add(token);
+                else this.classList.remove(token);
+                return shouldAdd;
+            },
         };
     }
 
     querySelector(selector) {
+        if (selector === ".interaction-step") {
+            return this.children.find((child) => child.classList.contains("interaction-step")) || null;
+        }
         return this._selectors[selector] || null;
     }
 
     querySelectorAll(selector) {
+        if (selector === ".interaction-step") {
+            return this.children.filter((child) => child.classList.contains("interaction-step"));
+        }
         return this._selectorLists[selector] || [];
     }
 
     addEventListener() {}
+
+    appendChild(child) {
+        child.parentElement = this;
+        this.children.push(child);
+        return child;
+    }
 
     setAttribute(name, value) {
         this.attributes[name] = String(value);
@@ -46,6 +74,22 @@ class StubHTMLElement extends StubElement {
 
     removeAttribute(name) {
         delete this.attributes[name];
+    }
+
+    get innerHTML() {
+        return this._innerHTML;
+    }
+
+    set innerHTML(value) {
+        this._innerHTML = String(value);
+        if (!this._innerHTML.includes("interaction-step-header")) return;
+        this._selectors[".interaction-step-title"] = new StubHTMLElement();
+        this._selectors[".interaction-step-started"] = new StubHTMLElement();
+        this._selectors[".interaction-step-status"] = new StubHTMLElement();
+        this._selectors[".interaction-step-icon"] = new StubHTMLElement();
+        this._selectors[".interaction-step-preview"] = new StubHTMLElement();
+        this._selectors[".interaction-step-detail"] = new StubHTMLElement();
+        this._selectors[".interaction-step-disclosure"] = new StubHTMLButtonElement();
     }
 }
 class StubHTMLButtonElement extends StubHTMLElement {}
@@ -78,7 +122,7 @@ function makeTurn({ text = "" } = {}) {
         textEl: { textContent: text, innerHTML: text, classList: { add() {}, remove() {} } },
         flowEl: { hidden: true, open: false },
         metaEl: { textContent: "" },
-        listEl: { innerHTML: "", querySelectorAll: () => [] },
+        listEl: new StubHTMLElement(),
         footerEl: { hidden: true },
         toggleEl: { textContent: "", setAttribute() {} },
     };
@@ -125,7 +169,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, S, U };`,
         context
     );
     context.__testExports.U.ceoCompressionToast = new StubHTMLElement();
@@ -282,6 +326,60 @@ test("ceo snapshot tool normalization preserves distinct tool_call_id values for
     ]);
 
     assert.deepEqual(events.map((item) => item.tool_call_id), ["filesystem:1", "filesystem:2"]);
+});
+
+test("ceo tool rows stay distinct for same-name events with different tool_call_id values", () => {
+    const { renderCeoToolEventsIntoTurn } = loadApp();
+    const turn = makeTurn({ text: "" });
+
+    const rendered = renderCeoToolEventsIntoTurn(turn, [
+        {
+            tool_name: "filesystem",
+            status: "running",
+            text: "{\"path\": \"alpha\"}",
+            tool_call_id: "filesystem:1",
+            source: "user",
+        },
+        {
+            tool_name: "filesystem",
+            status: "running",
+            text: "{\"path\": \"beta\"}",
+            tool_call_id: "filesystem:2",
+            source: "user",
+        },
+    ], { source: "user" });
+
+    assert.equal(rendered, 2);
+    assert.equal(turn.listEl.children.length, 2);
+    assert.deepEqual(
+        turn.listEl.children.map((item) => item.dataset.toolCallId),
+        ["filesystem:1", "filesystem:2"]
+    );
+    assert.deepEqual(
+        turn.listEl.children.map((item) => item.dataset.detailText),
+        ['{"path": "alpha"}', '{"path": "beta"}']
+    );
+});
+
+test("ceo tool_start running rows stay empty until a result arrives", () => {
+    const { applyCeoToolEventToTurn } = loadApp();
+    const turn = makeTurn({ text: "" });
+
+    const item = applyCeoToolEventToTurn(turn, {
+        tool_name: "filesystem",
+        status: "running",
+        kind: "tool_start",
+        text: "{\"path\": \"alpha\"}",
+        tool_call_id: "filesystem:start-1",
+        source: "user",
+    });
+
+    assert.equal(turn.listEl.children.length, 1);
+    assert.equal(item.dataset.toolCallId, "filesystem:start-1");
+    assert.equal(item.dataset.detailText, "");
+    assert.equal(item.querySelector(".interaction-step-preview").textContent, "");
+    assert.equal(item.querySelector(".interaction-step-detail").textContent, "");
+    assert.equal(item.querySelector(".interaction-step-status").textContent.length > 0, true);
 });
 
 test("ceo composer shows session-local compression toast only for active compressing session", () => {

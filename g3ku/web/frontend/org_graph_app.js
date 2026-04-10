@@ -3154,6 +3154,7 @@ function findCeoToolStep(turn, { toolCallId = "", toolName = "" } = {}) {
             const item = items[index];
             if (String(item?.dataset?.toolCallId || "").trim() === toolCallId) return item;
         }
+        return null;
     }
     if (toolName) {
         for (let index = items.length - 1; index >= 0; index -= 1) {
@@ -3452,7 +3453,7 @@ function toggleCeoToolHistory(turn) {
     }, { scrollMode: "preserve" });
 }
 
-function applyCeoToolStepState(item, { status = "running", toolName = "tool", detail = "", toolCallId = "", kind = "", stage = null } = {}) {
+function applyCeoToolStepState(item, { status = "running", toolName = "tool", detail = "", toolCallId = "", kind = "", stage = null, allowEmptyOutput = false } = {}) {
     if (!(item instanceof HTMLElement)) return;
     const statusLabel = ({ running: "进行中", success: "完成", error: "出错" })[status] || "更新";
     const resolvedStage = stage || ceoToolStage(toolName, detail, status);
@@ -3474,7 +3475,7 @@ function applyCeoToolStepState(item, { status = "running", toolName = "tool", de
         else startedEl.removeAttribute("title");
     }
     if (statusEl) statusEl.textContent = statusLabel;
-    setCeoToolStepOutput(item, detail || `${ceoFriendlyToolName(toolName)}${statusLabel}`);
+    setCeoToolStepOutput(item, allowEmptyOutput ? detail : (detail || `${ceoFriendlyToolName(toolName)}${statusLabel}`));
     if (iconWrap) {
         iconWrap.classList.toggle("is-spinning", !!resolvedStage.spinning);
         renderCeoToolIcon(iconWrap, resolvedStage.icon === "loader" ? "loader-circle" : resolvedStage.icon);
@@ -3566,7 +3567,10 @@ function applyCeoToolEventToTurn(turn, event = {}) {
     const status = resolveCeoToolEventStatus(event);
     const toolName = String(event.tool_name || "tool").trim() || "tool";
     const rawText = String(event.text || "").trim();
-    const detail = ceoFriendlyToolDetail(toolName, rawText, status, event.kind);
+    const eventKind = String(event.kind || "").trim().toLowerCase();
+    const detail = status === "running" && eventKind === "tool_start"
+        ? ""
+        : ceoFriendlyToolDetail(toolName, rawText, status, event.kind);
     const outputRef = normalizeTraceOutputRef(event.output_ref || "");
     const toolCallId = String(event.tool_call_id || "").trim();
     let item = findCeoToolStep(turn, { toolCallId, toolName });
@@ -3618,8 +3622,9 @@ function applyCeoToolEventToTurn(turn, event = {}) {
         toolName,
         detail,
         toolCallId,
-        kind: event.kind,
+        kind: eventKind,
         stage,
+        allowEmptyOutput: status === "running" && eventKind === "tool_start",
     });
     if (outputRef) item.dataset.outputRef = outputRef;
     else delete item.dataset.outputRef;
