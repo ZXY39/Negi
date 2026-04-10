@@ -194,6 +194,83 @@ class _TypedSchemaTool(Tool):
         return json.dumps(kwargs, ensure_ascii=False)
 
 
+class _StageProtocolNoopTool(Tool):
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return f"protocol helper {self._name}"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {"type": "object", "properties": {}, "required": []}
+
+    async def execute(self, **kwargs):
+        return json.dumps({"ok": True, "tool": self._name, "args": kwargs}, ensure_ascii=False)
+
+
+class _ModelSchemaRecordingTool(Tool):
+    def __init__(self, *, name: str, authoritative_description: str, model_description: str) -> None:
+        self._name = name
+        self._authoritative_description = authoritative_description
+        self._model_description = model_description
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return self._authoritative_description
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "value": {
+                    "type": "string",
+                    "description": "authoritative value contract",
+                }
+            },
+            "required": ["value"],
+        }
+
+    @property
+    def model_description(self) -> str:
+        return self._model_description
+
+    @property
+    def model_parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "compact model-visible contract",
+                }
+            },
+            "required": ["summary"],
+        }
+
+    async def execute(self, **kwargs):
+        return json.dumps(kwargs, ensure_ascii=False)
+
+
+class _LargeModelSchemaTool(_ModelSchemaRecordingTool):
+    def __init__(self, *, name: str) -> None:
+        super().__init__(
+            name=name,
+            authoritative_description="authoritative oversized tool contract",
+            model_description="oversized model-visible contract " + ("X" * 12000),
+        )
+
+
 def test_tool_model_visible_schema_falls_back_to_authoritative_schema() -> None:
     class _FakeTool(Tool):
         @property
@@ -286,6 +363,121 @@ def test_tool_model_visible_schema_api_docs_call_out_non_authoritative_contract(
     assert Tool.model_parameters.__doc__ is not None
     assert "authoritative" in Tool.parameters.__doc__.lower()
     assert "not used for validation" in Tool.model_parameters.__doc__.lower()
+
+
+@pytest.mark.asyncio
+async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_path) -> None:
+    requests: list[dict[str, object]] = []
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            requests.append(dict(kwargs))
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='call:final',
+                        name='submit_final_result',
+                        arguments={
+                            'status': 'success',
+                            'delivery_status': 'final',
+                            'summary': 'done',
+                            'answer': 'done',
+                            'evidence': [],
+                            'remaining_work': [],
+                            'blocking_reason': '',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    service = MainRuntimeService(
+        chat_backend=_Backend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_model_refs=['fake'],
+        acceptance_model_refs=['fake'],
+    )
+    service._react_loop._log_service = _FakeLogService()
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(
+            task_id=task_id,
+            session_id='web:shared',
+            metadata={'core_requirement': 'find terminal workflow skills'},
+        ),
+        get_node=lambda node_id: SimpleNamespace(
+            node_id=node_id,
+            prompt='find terminal workflow skills',
+            goal='find terminal workflow skills',
+            node_kind='execution',
+        ),
+    )
+    service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
+        {
+            'tool_id': 'filesystem',
+            'display_name': 'Filesystem',
+            'description': 'Inspect files',
+            'l0': 'Inspect files',
+            'l1': 'Inspect files',
+            'actions': [{'action_id': 'inspect', 'executor_names': ['filesystem']}],
+        },
+        {
+            'tool_id': 'memory',
+            'display_name': 'Memory',
+            'description': 'Write memory facts',
+            'l0': 'Write memory facts',
+            'l1': 'Write memory facts',
+            'actions': [{'action_id': 'write', 'executor_names': ['memory_write']}],
+        },
+    ]
+
+    result = await service._react_loop.run(
+        task=SimpleNamespace(task_id='task-first-turn-schemas'),
+        node=SimpleNamespace(node_id='node-first-turn-schemas', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-first-turn-schemas","goal":"demo"}'},
+        ],
+        tools={
+            'filesystem': _ModelSchemaRecordingTool(
+                name='filesystem',
+                authoritative_description='filesystem authoritative schema',
+                model_description='filesystem compact model schema',
+            ),
+            'memory_write': _LargeModelSchemaTool(name='memory_write'),
+            'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
+            'submit_final_result': _submit_final_result_tool(),
+            'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
+        },
+        model_refs=['fake'],
+        runtime_context={
+            'task_id': 'task-first-turn-schemas',
+            'node_id': 'node-first-turn-schemas',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+        max_iterations=2,
+    )
+
+    assert result.status == 'success'
+    assert requests
+    emitted_tools = list(requests[0].get('tools') or [])
+    emitted_tool_names = [item['function']['name'] for item in emitted_tools]
+
+    assert emitted_tool_names == [
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+        'filesystem',
+    ]
+    assert 'memory_write' not in emitted_tool_names
+    assert len(emitted_tool_names) < 5
+    filesystem_schema = next(item for item in emitted_tools if item['function']['name'] == 'filesystem')
+    assert filesystem_schema['function']['description'] == 'filesystem compact model schema'
 
 
 def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_window() -> None:

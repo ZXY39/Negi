@@ -180,7 +180,14 @@ class ReActToolLoop:
                 node_kind=node.node_kind,
                 stage_gate=stage_gate,
             )
-            tool_schemas = [tool.to_schema() for tool in visible_tools.values()]
+            model_visible_tools, tool_schema_selection = self._model_visible_tools_for_iteration(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                node_kind=node.node_kind,
+                visible_tools=visible_tools,
+                runtime_context=runtime_context,
+            )
+            tool_schemas = [tool.to_model_schema() for tool in model_visible_tools.values()]
             model_messages = self._prepare_messages(message_history, runtime_context=runtime_context)
             overlay_parts = [
                 build_execution_stage_overlay(node_kind=node.node_kind, stage_gate=stage_gate),
@@ -214,6 +221,9 @@ class ReActToolLoop:
                     'partial_child_results': [],
                     'tool_calls': [],
                     'child_pipelines': [],
+                    'lightweight_tool_ids': list(tool_schema_selection.get('lightweight_tool_ids') or []),
+                    'model_visible_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
+                    'model_visible_tool_selection_trace': dict(tool_schema_selection.get('trace') or {}),
                     **self._execution_stage_frame_payload(node_kind=node.node_kind, stage_gate=stage_gate),
                     'last_error': '',
                 },
@@ -1472,6 +1482,54 @@ class ReActToolLoop:
             transition_required=bool(stage_gate.get('transition_required')),
             stage_tool_name=STAGE_TOOL_NAME,
         )
+
+    def _model_visible_tools_for_iteration(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        node_kind: str,
+        visible_tools: dict[str, Tool],
+        runtime_context: dict[str, Any],
+    ) -> tuple[dict[str, Tool], dict[str, Any]]:
+        selected_tools = dict(visible_tools or {})
+        selection_payload: dict[str, Any] = {
+            'tool_names': list(selected_tools.keys()),
+            'lightweight_tool_ids': [],
+            'trace': {},
+        }
+        if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
+            return selected_tools, selection_payload
+        selector = getattr(self, '_model_visible_tool_schema_selector', None)
+        if not callable(selector):
+            return selected_tools, selection_payload
+        raw_selection = selector(
+            task_id=str(task_id or '').strip(),
+            node_id=str(node_id or '').strip(),
+            node_kind=str(node_kind or '').strip(),
+            visible_tools=dict(visible_tools or {}),
+            runtime_context=dict(runtime_context or {}),
+        )
+        if not isinstance(raw_selection, dict):
+            return selected_tools, selection_payload
+        requested_names: list[str] = []
+        seen_requested_names: set[str] = set()
+        for item in list(raw_selection.get('tool_names') or []):
+            normalized = str(item or '').strip()
+            if not normalized or normalized in seen_requested_names or normalized not in visible_tools:
+                continue
+            seen_requested_names.add(normalized)
+            requested_names.append(normalized)
+        if requested_names:
+            selected_tools = {name: visible_tools[name] for name in requested_names}
+            selection_payload['tool_names'] = list(requested_names)
+        selection_payload['lightweight_tool_ids'] = [
+            str(item or '').strip()
+            for item in list(raw_selection.get('lightweight_tool_ids') or [])
+            if str(item or '').strip()
+        ]
+        selection_payload['trace'] = dict(raw_selection.get('trace') or {})
+        return selected_tools, selection_payload
 
     @staticmethod
     def _execution_stage_frame_payload(*, node_kind: str, stage_gate: dict[str, Any]) -> dict[str, Any]:

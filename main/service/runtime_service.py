@@ -28,6 +28,7 @@ from g3ku.resources.tool_settings import (
     raw_tool_settings_from_descriptor,
     validate_tool_settings,
 )
+from g3ku.runtime.context.execution_tool_selection import build_execution_tool_selection
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult, build_node_context_selection
 from g3ku.runtime.context.summarizer import layered_body_payload, score_query
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
@@ -151,6 +152,12 @@ _WORKER_STATUS_TERMINAL_STATES = frozenset({'stopped', 'offline', 'dead'})
 _TASK_RECOVERY_NOTICE_KEY = 'recovery_notice'
 _TASK_RECOVERY_NOTICE_TEXT = '本任务遇到异常停止，已回退到稳定步骤继续。'
 _CONTINUATION_TASK_CREATED_BY_SOURCES = frozenset({'heartbeat_auto_continue', 'ceo_user_rebuild'})
+_EXECUTION_MODEL_VISIBLE_SCHEMA_BUDGET_CHARS = 8000
+_ALWAYS_CALLABLE_RUNTIME_PROTOCOL_TOOL_NAMES = (
+    'submit_next_stage',
+    'submit_final_result',
+    'spawn_child_nodes',
+)
 
 
 _TASK_RUNTIME_V3_MARKER = '.task-runtime-v3'
@@ -366,6 +373,7 @@ class MainRuntimeService:
             step_up=int(adaptive_budget_settings['step_up']),
         ) if adaptive_budget_enabled else None
         react_loop._adaptive_tool_budget_controller = self.adaptive_tool_budget_controller
+        react_loop._model_visible_tool_schema_selector = self._select_model_visible_tool_schema_payload
         self._pending_task_delete_confirmations: dict[str, dict[str, Any]] = {}
         self._react_loop = react_loop
         self.node_runner = NodeRunner(
@@ -3603,6 +3611,83 @@ class MainRuntimeService:
                 }
             )
         return items
+
+    def _select_model_visible_tool_schema_payload(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        node_kind: str,
+        visible_tools: dict[str, Tool],
+        runtime_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized_node_kind = str(node_kind or '').strip().lower()
+        if normalized_node_kind not in {'execution', 'acceptance'}:
+            return {
+                'tool_names': list(dict(visible_tools or {}).keys()),
+                'lightweight_tool_ids': [],
+                'schema_chars': 0,
+                'trace': {'mode': 'all_visible'},
+            }
+        runtime_payload = dict(runtime_context or {})
+        store = getattr(self, 'store', None)
+        get_task = getattr(store, 'get_task', None) if store is not None else None
+        get_node = getattr(store, 'get_node', None) if store is not None else None
+        task = get_task(str(task_id or '').strip()) if callable(get_task) else None
+        node = get_node(str(node_id or '').strip()) if callable(get_node) else None
+        session_id = str(
+            runtime_payload.get('session_key')
+            or getattr(task, 'session_id', '')
+            or 'web:shared'
+        ).strip() or 'web:shared'
+        actor_role = str(
+            runtime_payload.get('actor_role')
+            or ('inspection' if normalized_node_kind == 'acceptance' else 'execution')
+        ).strip() or ('inspection' if normalized_node_kind == 'acceptance' else 'execution')
+        task_metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}
+        prompt = str(getattr(node, 'prompt', '') or '').strip()
+        goal = str(getattr(node, 'goal', '') or '').strip()
+        core_requirement = str(task_metadata.get('core_requirement') or prompt or goal).strip()
+        lightweight_items = list(
+            self.execution_visible_tool_lightweight_items(actor_role=actor_role, session_id=session_id) or []
+        )
+        schema_size_by_executor: dict[str, int] = {}
+        ordered_visible_tool_names: list[str] = []
+        for raw_name, tool in dict(visible_tools or {}).items():
+            name = str(raw_name or '').strip()
+            if not name:
+                continue
+            ordered_visible_tool_names.append(name)
+            schema_size_by_executor[name] = len(
+                json.dumps(tool.to_model_schema(), ensure_ascii=False, sort_keys=True)
+            )
+        selection = build_execution_tool_selection(
+            prompt=prompt,
+            goal=goal,
+            core_requirement=core_requirement,
+            visible_tool_families=lightweight_items,
+            visible_tool_names=ordered_visible_tool_names,
+            schema_size_by_executor=schema_size_by_executor,
+            always_callable_tool_names=list(_ALWAYS_CALLABLE_RUNTIME_PROTOCOL_TOOL_NAMES),
+            max_schema_chars=_EXECUTION_MODEL_VISIBLE_SCHEMA_BUDGET_CHARS,
+        )
+        selected_tool_names = [
+            name
+            for name in list(selection.hydrated_tool_names or [])
+            if name in visible_tools
+        ]
+        return {
+            'tool_names': selected_tool_names,
+            'lightweight_tool_ids': list(selection.lightweight_tool_ids or []),
+            'schema_chars': int(selection.schema_chars or 0),
+            'trace': {
+                **dict(selection.trace or {}),
+                'mode': 'execution_tool_selection',
+                'node_kind': normalized_node_kind,
+                'session_id': session_id,
+                'actor_role': actor_role,
+            },
+        }
 
     @staticmethod
     def _should_expose_unavailable_tool_action(*, actor_role: str, family: Any, action: Any) -> bool:
