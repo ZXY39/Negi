@@ -1899,6 +1899,63 @@ def test_externalize_for_message_still_externalizes_large_non_direct_load_search
     store.close()
 
 
+def test_externalizes_to_summary_and_ref_for_large_non_opt_in_tool_result(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    payload = {
+        'ok': True,
+        'stdout': '\n'.join(f'line {index:03d} ' + ('x' * 32) for index in range(180)),
+    }
+
+    rendered = navigator.externalize_for_message(
+        json.dumps(payload, ensure_ascii=False),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='large-tool-result',
+        source_kind='tool_result:exec',
+        compact=True,
+    )
+
+    envelope = parse_content_envelope(rendered)
+    assert envelope is not None
+    assert envelope.ref.startswith('artifact:')
+    assert 'Use content.search/open with ref=' in envelope.summary
+
+    store.close()
+
+
+def test_small_non_opt_in_tool_result_stays_inline(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    navigator = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    payload = {
+        'ok': True,
+        'stdout': 'short output',
+        'exit_code': 0,
+    }
+
+    rendered = navigator.externalize_for_message(
+        json.dumps(payload, ensure_ascii=False),
+        runtime={'task_id': 'task:test', 'node_id': 'node:test'},
+        display_name='small-tool-result',
+        source_kind='tool_result:exec',
+        compact=True,
+    )
+
+    assert parse_content_envelope(rendered) is None
+    assert json.loads(rendered) == payload
+
+    store.close()
+
+
 def test_content_navigation_search_uses_canonical_ref_for_wrapped_content(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
