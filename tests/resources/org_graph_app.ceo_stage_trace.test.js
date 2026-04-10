@@ -20,6 +20,8 @@ class StubHTMLElement extends StubElement {
         this.dataset = {};
         this.style = {};
         this.attributes = {};
+        this._selectors = {};
+        this._selectorLists = {};
         this.classList = {
             add() {},
             remove() {},
@@ -27,6 +29,16 @@ class StubHTMLElement extends StubElement {
             toggle() { return false; },
         };
     }
+
+    querySelector(selector) {
+        return this._selectors[selector] || null;
+    }
+
+    querySelectorAll(selector) {
+        return this._selectorLists[selector] || [];
+    }
+
+    addEventListener() {}
 
     setAttribute(name, value) {
         this.attributes[name] = String(value);
@@ -113,11 +125,12 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, S, U };`,
         context
     );
     context.__testExports.U.ceoCompressionToast = new StubHTMLElement();
     context.__testExports.U.ceoCompressionToastText = new StubHTMLElement();
+    context.__testExports.__context = context;
     return context.__testExports;
 }
 
@@ -298,4 +311,30 @@ test("shared stage status maps active to running semantics", () => {
 
     assert.equal(stageTraceStatus({ status: "active" }), "running");
     assert.equal(displayTaskStageStatus("active"), displayTaskStageStatus("running"));
+});
+
+test("ceo tool output expansion prefetches full content when output_ref is present", async () => {
+    const { toggleCeoToolStepOutput, __context } = loadApp();
+    let callCount = 0;
+    __context.ensureCeoToolStepFullOutput = async (item) => {
+        callCount += 1;
+        item.dataset.detailText = "FULL OUTPUT";
+    };
+
+    const previewEl = new StubHTMLElement();
+    const detailEl = new StubHTMLElement();
+    const disclosureEl = new StubHTMLButtonElement();
+    const item = new StubHTMLElement();
+    item.dataset.detailText = "line 1\nline 2\nline 3";
+    item.dataset.outputRef = "artifact:artifact:tool-output";
+    item.dataset.outputExpanded = "false";
+    item._selectors[".interaction-step-preview"] = previewEl;
+    item._selectors[".interaction-step-detail"] = detailEl;
+    item._selectors[".interaction-step-disclosure"] = disclosureEl;
+
+    toggleCeoToolStepOutput(item);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(item.dataset.outputExpanded, "true");
+    assert.equal(callCount, 1);
 });

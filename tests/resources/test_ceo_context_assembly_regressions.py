@@ -1167,7 +1167,6 @@ async def test_message_builder_collects_retrieved_context_separately_from_histor
         {"role": "user", "content": "remembered preference"},
     ]
 
-
 @pytest.mark.asyncio
 async def test_message_builder_task_ledger_preserves_continuity_when_history_visibility_filters_internal_status_turns() -> None:
     prompt_builder = _SplitPromptBuilder()

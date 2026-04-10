@@ -363,6 +363,24 @@ async def open_content(
     }
 
 
+@router.get('/content/read')
+async def read_content(
+    ref: str | None = Query(None),
+    path: str | None = Query(None),
+    view: str = Query('canonical'),
+):
+    service = _service()
+    await service.startup()
+    return {
+        'ok': True,
+        **service.read_content(
+            ref=ref,
+            path=path,
+            view=view,
+        ),
+    }
+
+
 @router.post('/tasks/{task_id}/artifacts/{artifact_id}/apply')
 async def apply_patch_artifact(task_id: str, artifact_id: str):
     task_id = _ensure_task_route_id(task_id)

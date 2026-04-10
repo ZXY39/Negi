@@ -581,6 +581,25 @@ class ContentNavigationService:
             finish = start + MAX_OPEN_LINES - 1
         return self._excerpt(ref=ref, path=path, start_line=start, end_line=finish, view=view)
 
+    def read(
+        self,
+        *,
+        ref: str | None = None,
+        path: str | None = None,
+        view: str = "canonical",
+    ) -> dict[str, Any]:
+        text, handle = self._resolve(ref=ref, path=path, view=view)
+        return {
+            "ok": True,
+            "ref": handle.ref,
+            "requested_ref": handle.requested_ref,
+            "resolved_ref": handle.resolved_ref or handle.ref,
+            "wrapper_ref": handle.wrapper_ref,
+            "wrapper_depth": handle.wrapper_depth,
+            "handle": handle.to_dict(),
+            "content": text,
+        }
+
     def search(
         self,
         *,

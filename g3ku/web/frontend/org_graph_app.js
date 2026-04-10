@@ -152,6 +152,8 @@ const S = {
     taskArtifacts: [],
     selectedArtifactId: "",
     artifactContent: "",
+    traceOutputContentByKey: {},
+    traceOutputRequestsByKey: {},
     selectedTaskIds: new Set(),
     multiSelectMode: false,
     taskFilterMenuOpen: false,
@@ -850,6 +852,130 @@ function artifactDisplayText(artifact, content) {
     return formatArtifactDisplayValue(decodeEscapedDisplayText(raw));
 }
 
+function normalizeTraceOutputRef(outputRef = "") {
+    return String(outputRef || "").trim();
+}
+
+function ensureTraceOutputContentState() {
+    if (!S.traceOutputContentByKey || typeof S.traceOutputContentByKey !== "object") {
+        S.traceOutputContentByKey = {};
+    }
+    if (!S.traceOutputRequestsByKey || typeof S.traceOutputRequestsByKey !== "object") {
+        S.traceOutputRequestsByKey = {};
+    }
+}
+
+function traceOutputContentCacheKey(outputRef = "", view = "canonical") {
+    const normalizedRef = normalizeTraceOutputRef(outputRef);
+    const normalizedView = String(view || "canonical").trim().toLowerCase() || "canonical";
+    return normalizedRef ? `${normalizedView}:${normalizedRef}` : "";
+}
+
+function extractTraceOutputContentText(payload = null) {
+    const raw = String(payload?.content || payload?.excerpt || "");
+    return String(formatArtifactDisplayValue(raw) || "").trim();
+}
+
+async function getTraceOutputContentByRef(outputRef = "", { view = "canonical" } = {}) {
+    const normalizedRef = normalizeTraceOutputRef(outputRef);
+    if (!normalizedRef) return "";
+    ensureTraceOutputContentState();
+    const cacheKey = traceOutputContentCacheKey(normalizedRef, view);
+    if (!cacheKey) return "";
+    if (Object.prototype.hasOwnProperty.call(S.traceOutputContentByKey, cacheKey)) {
+        return String(S.traceOutputContentByKey[cacheKey] || "");
+    }
+    if (S.traceOutputRequestsByKey[cacheKey]) {
+        return S.traceOutputRequestsByKey[cacheKey];
+    }
+    const request = (async () => {
+        const payload = typeof ApiClient?.readContent === "function"
+            ? await ApiClient.readContent({ ref: normalizedRef, view })
+            : await ApiClient.openContent({ ref: normalizedRef, view, startLine: 1, endLine: 200 });
+        const text = extractTraceOutputContentText(payload);
+        S.traceOutputContentByKey[cacheKey] = text;
+        return text;
+    })();
+    S.traceOutputRequestsByKey[cacheKey] = request;
+    try {
+        return await request;
+    } finally {
+        delete S.traceOutputRequestsByKey[cacheKey];
+    }
+}
+
+async function ensureTraceOutputCodeBlockContent(
+    element,
+    {
+        loadingText = "正在加载完整输出...",
+        errorPrefix = "加载完整输出失败：",
+        view = "canonical",
+    } = {},
+) {
+    if (!(element instanceof HTMLElement)) return "";
+    const outputRef = normalizeTraceOutputRef(element.dataset.outputRef || "");
+    if (!outputRef) return String(element.textContent || "");
+    if (element.dataset.outputHydrated === "true") {
+        return String(element.textContent || "");
+    }
+    const previewText = String(element.dataset.previewText || element.textContent || "");
+    const emptyText = String(element.dataset.emptyText || "").trim();
+    element.dataset.previewText = previewText;
+    element.dataset.outputHydrating = "true";
+    element.textContent = loadingText;
+    try {
+        const fullText = await getTraceOutputContentByRef(outputRef, { view });
+        const nextText = String(fullText || previewText || emptyText).trim() || emptyText;
+        element.textContent = nextText;
+        element.dataset.outputHydrated = "true";
+        return nextText;
+    } catch (error) {
+        const message = typeof ApiClient?.friendlyErrorMessage === "function"
+            ? ApiClient.friendlyErrorMessage(error, error?.message || "未知错误")
+            : String(error?.message || error || "未知错误");
+        const fallbackText = String(previewText || emptyText).trim();
+        element.textContent = fallbackText
+            ? `${fallbackText}\n\n${errorPrefix}${message}`
+            : `${errorPrefix}${message}`;
+        element.dataset.outputHydrated = "error";
+        return fallbackText;
+    } finally {
+        delete element.dataset.outputHydrating;
+    }
+}
+
+async function ensureCeoToolStepFullOutput(item, { view = "canonical" } = {}) {
+    if (!(item instanceof HTMLElement)) return "";
+    const outputRef = normalizeTraceOutputRef(item.dataset.outputRef || "");
+    if (!outputRef) return normalizeInteractionDetailText(item.dataset.detailText || "");
+    if (item.dataset.outputHydrated === "true") {
+        return normalizeInteractionDetailText(item.dataset.detailText || "");
+    }
+    const previewText = normalizeInteractionDetailText(item.dataset.previewDetailText || item.dataset.detailText || "");
+    item.dataset.previewDetailText = previewText;
+    item.dataset.outputHydrating = "true";
+    setCeoToolStepOutput(item, "正在加载完整输出...");
+    try {
+        const fullText = await getTraceOutputContentByRef(outputRef, { view });
+        const nextText = normalizeInteractionDetailText(fullText) || previewText;
+        setCeoToolStepOutput(item, nextText);
+        item.dataset.outputHydrated = "true";
+        return nextText;
+    } catch (error) {
+        const message = typeof ApiClient?.friendlyErrorMessage === "function"
+            ? ApiClient.friendlyErrorMessage(error, error?.message || "未知错误")
+            : String(error?.message || error || "未知错误");
+        const fallbackText = previewText
+            ? `${previewText}\n\n加载完整输出失败：${message}`
+            : `加载完整输出失败：${message}`;
+        setCeoToolStepOutput(item, fallbackText);
+        item.dataset.outputHydrated = "error";
+        return previewText;
+    } finally {
+        delete item.dataset.outputHydrating;
+    }
+}
+
 function setElementScrollTop(element, value) {
     if (!(element instanceof HTMLElement)) return;
     const numericValue = Number(value);
@@ -1064,7 +1190,7 @@ function normalizeCeoSnapshotToolEvent(event = {}) {
     const toolName = String(event?.tool_name || "").trim().toLowerCase();
     if (toolName === "submit_next_stage") return null;
     const next = {};
-    ["status", "tool_name", "text", "timestamp", "tool_call_id", "kind", "source"].forEach((key) => {
+    ["status", "tool_name", "text", "timestamp", "tool_call_id", "kind", "source", "output_ref"].forEach((key) => {
         const value = String(event?.[key] || "").trim();
         if (value) next[key] = value;
     });
@@ -2751,6 +2877,12 @@ function renderCeoStageTraceIntoTurn(turn, executionTraceSummary = null) {
     turn.flowEl.hidden = false;
     turn.flowEl.open = true;
     updateCeoTurnMeta(turn, `${stageCount} 个阶段 · ${roundCount} 轮工具`);
+    if (typeof bindTraceOutputAutoLoad === "function") bindTraceOutputAutoLoad(turn.listEl);
+    if (typeof hydrateTraceOutputBlocks === "function") {
+        Array.from(turn.listEl.querySelectorAll?.(".task-trace-step[open]") || []).forEach((item) => {
+            if (item instanceof HTMLElement) hydrateTraceOutputBlocks(item);
+        });
+    }
     return turn.steps;
 }
 
@@ -3279,6 +3411,9 @@ function toggleCeoToolStepOutput(item) {
     if (!isInteractionDetailCollapsible(item.dataset.detailText || "")) return;
     item.dataset.outputExpanded = item.dataset.outputExpanded === "true" ? "false" : "true";
     syncCeoToolStepOutput(item);
+    if (item.dataset.outputExpanded === "true") {
+        void ensureCeoToolStepFullOutput(item);
+    }
 }
 
 function trimCeoToolSteps(turn) {
@@ -3432,6 +3567,7 @@ function applyCeoToolEventToTurn(turn, event = {}) {
     const toolName = String(event.tool_name || "tool").trim() || "tool";
     const rawText = String(event.text || "").trim();
     const detail = ceoFriendlyToolDetail(toolName, rawText, status, event.kind);
+    const outputRef = normalizeTraceOutputRef(event.output_ref || "");
     const toolCallId = String(event.tool_call_id || "").trim();
     let item = findCeoToolStep(turn, { toolCallId, toolName });
     const stage = ceoToolStage(toolName, rawText, status);
@@ -3485,6 +3621,10 @@ function applyCeoToolEventToTurn(turn, event = {}) {
         kind: event.kind,
         stage,
     });
+    if (outputRef) item.dataset.outputRef = outputRef;
+    else delete item.dataset.outputRef;
+    item.dataset.outputHydrated = "false";
+    item.dataset.previewDetailText = normalizeInteractionDetailText(detail);
     syncCeoBackgroundDetailState(item, { rawDetail: rawText });
     turn.flowEl.hidden = false;
     turn.flowEl.open = true;

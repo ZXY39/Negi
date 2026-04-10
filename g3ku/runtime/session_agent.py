@@ -446,6 +446,7 @@ class RuntimeAgentSession:
                     "tool_call_id": str(item.get("tool_call_id") or "").strip(),
                     "status": str(item.get("status") or "").strip(),
                     "text": str(item.get("text") or "").strip(),
+                    "output_ref": str(item.get("output_ref") or "").strip(),
                     "timestamp": str(item.get("timestamp") or "").strip(),
                     "kind": str(item.get("kind") or "").strip(),
                     "source": str(item.get("source") or "").strip().lower() or "user",
@@ -460,6 +461,9 @@ class RuntimeAgentSession:
             text = str(item.get("text") or "").strip()
             if text:
                 current["text"] = text
+            output_ref = str(item.get("output_ref") or "").strip()
+            if output_ref:
+                current["output_ref"] = output_ref
             kind = str(item.get("kind") or "").strip()
             if kind:
                 current["kind"] = kind

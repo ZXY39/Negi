@@ -495,6 +495,10 @@ class ApiClient {
         });
     }
 
+    static async readContent({ ref = "", path = "", view = "canonical" } = {}) {
+        return this.get("/api/content/read", { ref, path, view });
+    }
+
     static async applyTaskArtifact(taskId, artifactId) {
         return this.post(`/api/tasks/${taskId}/artifacts/${artifactId}/apply`);
     }

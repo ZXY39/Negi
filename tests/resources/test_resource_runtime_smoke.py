@@ -2110,7 +2110,12 @@ def test_content_rest_routes_use_runtime_service_methods_and_preserve_legacy_art
             excerpt = "wrapper body" if view == "raw" else "canonical body"
             return {"ok": True, "ref": ref, "requested_ref": ref, "resolved_ref": ref if view == "raw" else "artifact:artifact:inner", "wrapper_ref": "" if view == "raw" else ref, "wrapper_depth": 0 if view == "raw" else 1, "start_line": 1, "end_line": 1, "excerpt": excerpt}
 
+        def read_content(self, *, ref=None, path=None, view="canonical"):
+            self.read_calls.append({"ref": ref, "path": path, "view": view})
+            return {"ok": True, "ref": ref, "requested_ref": ref, "resolved_ref": "artifact:artifact:inner", "wrapper_ref": ref, "wrapper_depth": 1, "content": "canonical full body"}
+
     service = _StubService()
+    service.read_calls = []
     monkeypatch.setattr(api_rest, "_service", lambda: service)
 
     app = FastAPI()
@@ -2128,11 +2133,15 @@ def test_content_rest_routes_use_runtime_service_methods_and_preserve_legacy_art
     open_response = client.get("/api/content/open", params={"ref": "artifact:artifact:wrapper"})
     assert open_response.status_code == 200
     assert open_response.json()["excerpt"] == "canonical body"
+    read_response = client.get("/api/content/read", params={"ref": "artifact:artifact:wrapper"})
+    assert read_response.status_code == 200
+    assert read_response.json()["content"] == "canonical full body"
 
     assert service.open_calls[0]["view"] == "raw"
     assert service.describe_calls == [{"ref": "artifact:artifact:wrapper", "path": None, "view": "canonical"}]
     assert service.search_calls == [{"query": "needle", "ref": "artifact:artifact:wrapper", "path": None, "view": "canonical", "limit": 10, "before": 2, "after": 2}]
     assert service.open_calls[1]["view"] == "canonical"
+    assert service.read_calls == [{"ref": "artifact:artifact:wrapper", "path": None, "view": "canonical"}]
 
 
 @pytest.mark.asyncio

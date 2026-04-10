@@ -26,6 +26,7 @@ from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.api import ceo_sessions, websocket_ceo
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import ceo_agent_middleware
+from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPendingInterrupt
@@ -1240,7 +1241,6 @@ async def test_runtime_agent_session_hides_cron_internal_prompt_but_persists_rep
     message_end = next(event for event in events if event.type == "message_end")
     assert message_end.payload["source"] == "cron"
     assert message_end.payload["heartbeat_internal"] is False
-
 
 @pytest.mark.asyncio
 async def test_runtime_agent_session_history_visibility_hides_internal_heartbeat_reply(
@@ -2580,6 +2580,26 @@ def test_ceo_snapshot_summary_falls_back_to_tool_result_text_when_output_text_mi
     assert tool["arguments_preview"] == "load_skill_context (skill_id=find-skills)"
     assert "output_preview" in tool, tool
     assert tool["output_preview"] == '{"result_text":"loade...'
+
+
+def test_ceo_frontdoor_support_extracts_output_ref_for_progress_events() -> None:
+    payload = json.dumps(
+        {
+            "summary": "tool output stored externally",
+            "ref": "artifact:artifact:tool-output",
+            "resolved_ref": "artifact:artifact:tool-output",
+        },
+        ensure_ascii=False,
+    )
+
+    data = CeoFrontDoorSupport._tool_result_progress_event_data(
+        tool_name="filesystem",
+        result_text=payload,
+    )
+
+    assert data["tool_name"] == "filesystem"
+    assert data["output_ref"] == "artifact:artifact:tool-output"
+    assert data["output_preview_text"] == "tool output stored externally"
 
 
 def test_stage_trace_name_fallback_does_not_reuse_same_tool_result_across_rounds() -> None:

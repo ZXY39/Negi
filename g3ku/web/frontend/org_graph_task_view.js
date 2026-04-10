@@ -946,6 +946,7 @@ function buildNodeExecutionTrace(node, detail, liveFrame = null) {
             tool_name: String(step?.tool_name || "tool"),
             arguments_text: String(step?.arguments_text || step?.arguments_preview || ""),
             output_text: String(step?.output_text || step?.output_preview || step?.text || ""),
+            output_ref: String(step?.output_ref || ""),
             started_at: String(step?.started_at || ""),
             finished_at: String(step?.finished_at || ""),
             elapsed_seconds: Number.isFinite(Number(step?.elapsed_seconds)) ? Number(step.elapsed_seconds) : null,
@@ -988,6 +989,7 @@ function normalizeExecutionStageTrace(stage, index = 0) {
                 tool_name: String(step?.tool_name || "tool"),
                 arguments_text: String(step?.arguments_text || step?.arguments_preview || ""),
                 output_text: String(step?.output_text || step?.output_preview || step?.text || ""),
+                output_ref: String(step?.output_ref || ""),
                 started_at: String(step?.started_at || ""),
                 finished_at: String(step?.finished_at || ""),
                 elapsed_seconds: Number.isFinite(Number(step?.elapsed_seconds)) ? Number(step.elapsed_seconds) : null,
@@ -1127,9 +1129,10 @@ function renderExecutionRoundToolPanel(round, step, toolIndex) {
             <div class="task-trace-round-panel-title">${esc(`工具 · ${step?.tool_name || "tool"}`)}</div>
             ${[
                 renderTraceField("参数", step?.arguments_text, "无参数"),
-                renderTraceField(
+                renderTraceOutputField(
                     "工具输出",
                     step?.output_text,
+                    step?.output_ref,
                     String(step?.status || "") === "running" ? "等待工具输出..." : "暂无工具输出",
                     { decodeEscapes: true },
                 ),
@@ -1173,6 +1176,7 @@ function setTraceRoundActiveTool(roundHost, nextToolKey = "") {
         const isActive = normalizedToolKey && String(panel.dataset.toolKey || "").trim() === normalizedToolKey;
         panel.hidden = !isActive;
         panel.classList.toggle("is-active", !!isActive);
+        if (isActive) hydrateTraceOutputBlocks(panel);
     });
     if (placeholder instanceof HTMLElement) {
         placeholder.hidden = !!normalizedToolKey;
@@ -1192,6 +1196,16 @@ function bindTraceRoundToolStrips(traceList) {
         setTraceRoundActiveTool(roundHost, currentToolKey === toolKey ? "" : toolKey);
         if (typeof scheduleTaskDetailSessionPersist === "function") scheduleTaskDetailSessionPersist();
     });
+}
+
+function bindTraceOutputAutoLoad(traceList) {
+    if (!(traceList instanceof HTMLElement) || traceList.dataset.traceOutputBindings === "true") return;
+    traceList.dataset.traceOutputBindings = "true";
+    traceList.addEventListener("toggle", (event) => {
+        const traceStep = event.target instanceof Element ? event.target.closest(".task-trace-step") : null;
+        if (!(traceStep instanceof HTMLElement) || !traceList.contains(traceStep) || !traceStep.open) return;
+        hydrateTraceOutputBlocks(traceStep);
+    }, true);
 }
 
 function resolveExecutionStageRoundLabel(stage, round) {
@@ -1278,9 +1292,10 @@ function buildExecutionTraceSteps(trace, node) {
             open: false,
             bodyHtml: [
                 renderTraceField("Arguments", step.arguments_text, "No arguments"),
-                renderTraceField(
+                renderTraceOutputField(
                     "Output",
                     step.output_text,
+                    step.output_ref,
                     step.status === "running" ? "Waiting for tool output..." : "No tool output",
                     { decodeEscapes: true },
                 ),
@@ -1558,6 +1573,35 @@ function renderTraceField(label, value, emptyText = "暂无内容", { decodeEsca
     `;
 }
 
+function renderTraceOutputField(label, value, outputRef = "", emptyText = "暂无内容", { decodeEscapes = false } = {}) {
+    const text = readableText(value, { decodeEscapes, emptyText });
+    const normalizedRef = String(outputRef || "").trim();
+    const refAttrs = normalizedRef
+        ? ` data-output-ref="${esc(normalizedRef)}" data-empty-text="${esc(String(emptyText || ""))}"`
+        : "";
+    return `
+        <div class="task-trace-field">
+            <div class="task-trace-label">${esc(label)}</div>
+            <div class="code-block task-trace-code task-trace-output-value"${refAttrs}>${esc(text)}</div>
+        </div>
+    `;
+}
+
+function hydrateTraceOutputBlocks(root) {
+    if (!(root instanceof HTMLElement)) return;
+    if (typeof ensureTraceOutputCodeBlockContent !== "function") return;
+    const selector = ".task-trace-output-value[data-output-ref]";
+    const outputBlocks = Array.from(root.querySelectorAll(selector));
+    if (!outputBlocks.length) {
+        const single = root.querySelector(selector);
+        if (single instanceof HTMLElement) outputBlocks.push(single);
+    }
+    outputBlocks.forEach((block) => {
+        if (!(block instanceof HTMLElement)) return;
+        void ensureTraceOutputCodeBlockContent(block);
+    });
+}
+
 function renderLiveToolFields(toolCalls) {
     return toolCalls.map((step, index) => [
         renderTraceField(`Tool ${index + 1}`, `${step.tool_name || "tool"} [${step.status}]`, "No tool name"),
@@ -1632,6 +1676,8 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
         if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
     });
     bindTraceRoundToolStrips(traceList);
+    bindTraceOutputAutoLoad(traceList);
+    traceItems.filter((item) => item instanceof HTMLElement && item.open).forEach((item) => hydrateTraceOutputBlocks(item));
     refreshTaskDetailScrollRegions();
     if (effectiveViewState && shouldReplace) {
         const restoreTraceScroll = () => {

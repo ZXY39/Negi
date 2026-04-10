@@ -1049,7 +1049,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 on_progress,
                 result_text,
                 event_kind="tool_result" if status == "success" else "tool_error",
-                event_data={"tool_name": tool_name},
+                event_data=self._tool_result_progress_event_data(tool_name=tool_name, result_text=result_text),
             )
             return {
                 "result_text": result_text,
@@ -1891,7 +1891,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 on_progress,
                 result_text,
                 event_kind="tool_result" if status == "success" else "tool_error",
-                event_data={"tool_name": tool_name},
+                event_data=self._tool_result_progress_event_data(tool_name=tool_name, result_text=result_text),
             )
             return {
                 "tool_name": tool_name,
