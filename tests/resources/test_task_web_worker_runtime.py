@@ -26,6 +26,7 @@ from main.models import (
     normalize_execution_stage_metadata,
     normalize_final_acceptance_metadata,
 )
+from main.monitoring.query_service import TaskQueryService
 from main.protocol import now_iso
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 from main.service.runtime_service import MainRuntimeService
@@ -5011,6 +5012,156 @@ def test_running_node_output_does_not_pollute_final_output_in_projection(tmp_pat
         item for item in progress.nodes if item["node_id"] == record.root_node_id
     )
     assert root_progress_node["execution_trace"]["final_output"] == ""
+
+
+def test_exec_output_ref_is_persisted_and_full_detail_hydrates_tool_output(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+    assert service.content_store is not None
+
+    envelope = service.content_store.maybe_externalize_text(
+        "\n".join(f"exec line {index:03d}" for index in range(220)),
+        runtime={"task_id": record.task_id, "node_id": root.node_id},
+        display_name="exec-output",
+        source_kind="tool_result:exec",
+        force=True,
+    )
+
+    assert envelope is not None
+    assert envelope.ref
+
+    service.log_service.submit_next_stage(
+        record.task_id,
+        root.node_id,
+        stage_goal="capture exec output",
+        tool_round_budget=1,
+    )
+    service.log_service.record_execution_stage_round(
+        record.task_id,
+        root.node_id,
+        tool_calls=[
+            {
+                "id": "call:exec-output-ref",
+                "name": "exec",
+                "arguments": {"command": "git status"},
+            }
+        ],
+        created_at=now_iso(),
+    )
+    service.log_service.append_node_output(
+        record.task_id,
+        root.node_id,
+        content="exec turn completed",
+        tool_calls=[
+            {
+                "id": "call:exec-output-ref",
+                "name": "exec",
+                "arguments": {"command": "git status"},
+            }
+        ],
+    )
+    service.log_service.record_tool_result_batch(
+        task_id=record.task_id,
+        node_id=root.node_id,
+        response_tool_calls=[
+            ToolCallRequest(
+                id="call:exec-output-ref",
+                name="exec",
+                arguments={"command": "git status"},
+            )
+        ],
+        results=[
+            {
+                "tool_message": {
+                    "tool_call_id": "call:exec-output-ref",
+                    "name": "exec",
+                    "content": json.dumps(
+                        {
+                            "summary": "exec output stored externally",
+                            "output_ref": envelope.ref,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "status": "success",
+                    "started_at": "2026-04-08T12:00:00+08:00",
+                    "finished_at": "2026-04-08T12:00:05+08:00",
+                    "elapsed_seconds": 5.0,
+                },
+                "live_state": {
+                    "tool_call_id": "call:exec-output-ref",
+                    "tool_name": "exec",
+                    "status": "success",
+                    "started_at": "2026-04-08T12:00:00+08:00",
+                    "finished_at": "2026-04-08T12:00:05+08:00",
+                    "elapsed_seconds": 5.0,
+                },
+            }
+        ],
+    )
+
+    tool_results = service.store.list_task_node_tool_results(record.task_id, root.node_id)
+    persisted = next(item for item in tool_results if item.tool_call_id == "call:exec-output-ref")
+    assert persisted.output_preview_text == "exec output stored externally"
+    assert persisted.output_ref == envelope.ref
+
+    summary_detail = service.get_node_detail_payload(record.task_id, root.node_id, detail_level="summary")
+    full_detail = service.get_node_detail_payload(record.task_id, root.node_id, detail_level="full")
+
+    assert summary_detail is not None
+    assert full_detail is not None
+
+    summary_tool = summary_detail["item"]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
+    full_tool = full_detail["item"]["execution_trace"]["stages"][0]["rounds"][0]["tools"][0]
+
+    assert summary_tool["output_ref"] == envelope.ref
+    assert summary_tool["output_text"] == "output captured in ref"
+    assert full_tool["output_ref"] == envelope.ref
+    assert full_tool["output_text"] == "\n".join(f"exec line {index:03d}" for index in range(220))
+
+
+def test_execution_trace_summary_does_not_inline_hydrated_full_text_when_output_ref_exists() -> None:
+    hydrated_trace = {
+        "stages": [
+            {
+                "stage_id": "stage:1",
+                "stage_index": 1,
+                "rounds": [
+                    {
+                        "round_id": "round:1",
+                        "round_index": 1,
+                        "tools": [
+                            {
+                                "tool_call_id": "call:exec-output-ref",
+                                "tool_name": "exec",
+                                "output_text": "\n".join(f"exec line {index:03d}" for index in range(220)),
+                                "output_ref": "artifact:artifact:exec-output",
+                                "status": "success",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    summary = TaskQueryService._execution_trace_summary(hydrated_trace)
+
+    summary_tool = summary["stages"][0]["rounds"][0]["tools"][0]
+    assert summary_tool["output_ref"] == "artifact:artifact:exec-output"
+    assert summary_tool["output_text"] == "output captured in ref"
 
 
 def test_view_progress_nodes_are_compact_summaries(tmp_path: Path):

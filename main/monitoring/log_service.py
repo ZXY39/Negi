@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from g3ku.content import ContentNavigationService, content_summary_and_ref
+from g3ku.content import ContentNavigationService, content_summary_and_ref, parse_content_envelope
 from g3ku.content.navigation import INLINE_CHAR_LIMIT, INLINE_LINE_LIMIT
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
@@ -475,7 +475,7 @@ class TaskLogService:
                 arguments = self._normalize_tool_call_arguments(getattr(call, 'arguments', {}))
                 arguments_text = json.dumps(arguments, ensure_ascii=False, indent=2) if arguments else ''
                 content = tool_message.get('content')
-                preview_text, output_ref = content_summary_and_ref(content)
+                preview_text, output_ref = self._tool_result_summary_and_ref(content)
                 record = TaskProjectionToolResultRecord(
                     task_id=task_id,
                     node_id=node_id,
@@ -504,7 +504,49 @@ class TaskLogService:
                 self._store.upsert_task_node_tool_result(record)
                 persisted.append(record)
 
+            if persisted:
+                self._sync_node_read_models_locked(node)
+                self._publish_task_node_patch_locked(task=task, node=node)
+                self.refresh_task_view(task_id, mark_unread=True)
             return persisted
+
+    @staticmethod
+    def _tool_result_payload_ref(payload: dict[str, Any]) -> str:
+        output_ref = str(
+            payload.get('output_ref')
+            or payload.get('wrapper_ref')
+            or payload.get('requested_ref')
+            or payload.get('ref')
+            or payload.get('resolved_ref')
+            or ''
+        ).strip()
+        if output_ref:
+            return output_ref
+        nested = parse_content_envelope(payload.get('content_ref'))
+        if nested is not None:
+            return str(nested.ref or nested.wrapper_ref or nested.resolved_ref or '').strip()
+        return ''
+
+    @classmethod
+    def _tool_result_summary_and_ref(cls, value: Any) -> tuple[str, str]:
+        summary, output_ref = content_summary_and_ref(value)
+        envelope = parse_content_envelope(value)
+        if envelope is not None:
+            resolved_ref = str(envelope.ref or envelope.wrapper_ref or envelope.resolved_ref or '').strip()
+            if resolved_ref:
+                output_ref = resolved_ref
+            if str(envelope.summary or '').strip():
+                summary = str(envelope.summary or '').strip()
+            return summary, output_ref
+        parsed_payload = cls._parse_tool_result_payload(value)
+        if isinstance(parsed_payload, dict):
+            payload_ref = cls._tool_result_payload_ref(parsed_payload)
+            if payload_ref:
+                output_ref = payload_ref
+            payload_summary = str(parsed_payload.get('summary') or '').strip()
+            if payload_summary:
+                summary = payload_summary
+        return summary, output_ref
 
     def upsert_synthetic_tool_result(
         self,

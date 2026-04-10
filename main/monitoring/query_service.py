@@ -272,6 +272,7 @@ class TaskQueryService:
             )
             if not execution_trace_summary:
                 execution_trace_summary = self._execution_trace_summary(execution_trace)
+            execution_trace = self._hydrate_execution_trace_output_texts(execution_trace)
         elif not execution_trace_summary or not self._execution_trace_summary_has_rounds(execution_trace_summary):
             execution_trace = self._resolve_execution_trace(
                 detail_record=detail_record,
@@ -420,6 +421,33 @@ class TaskQueryService:
                 if resolved:
                     return resolved
         return str(text or '')
+
+    def _hydrate_execution_trace_output_texts(self, execution_trace: dict[str, Any] | None) -> dict[str, Any]:
+        trace = dict(execution_trace or {}) if isinstance(execution_trace, dict) else {}
+
+        def _hydrate_step(step: Any) -> None:
+            if not isinstance(step, dict):
+                return
+            hydrated = self._resolve_detail_text(
+                str(step.get('output_text') or ''),
+                str(step.get('output_ref') or ''),
+            )
+            if hydrated:
+                step['output_text'] = hydrated
+
+        for step in list(trace.get('tool_steps') or []):
+            _hydrate_step(step)
+        for stage in list(trace.get('stages') or []):
+            if not isinstance(stage, dict):
+                continue
+            for step in list(stage.get('tool_calls') or []):
+                _hydrate_step(step)
+            for round_item in list(stage.get('rounds') or []):
+                if not isinstance(round_item, dict):
+                    continue
+                for step in list(round_item.get('tools') or []):
+                    _hydrate_step(step)
+        return trace
 
     @staticmethod
     def _preview_text(value: str, *, max_chars: int = 400) -> str:
@@ -612,12 +640,19 @@ class TaskQueryService:
     def _compact_execution_trace_tool_call(step: Any) -> dict[str, Any] | None:
         if not isinstance(step, dict):
             return None
+        output_ref = str(step.get('output_ref') or '').strip()
+        preview_text = str(step.get('output_preview') or step.get('output_preview_text') or '').strip()
+        output_text = preview_text
+        if not output_text and not output_ref:
+            output_text = str(step.get('output_text') or '').strip()
+        elif not output_text and output_ref:
+            output_text = 'output captured in ref'
         return {
             'tool_call_id': str(step.get('tool_call_id') or '').strip(),
             'tool_name': str(step.get('tool_name') or '').strip() or 'tool',
             'arguments_text': str(step.get('arguments_text') or ''),
-            'output_text': str(step.get('output_text') or ''),
-            'output_ref': str(step.get('output_ref') or ''),
+            'output_text': output_text,
+            'output_ref': output_ref,
             'status': str(step.get('status') or '').strip(),
             'started_at': str(step.get('started_at') or ''),
             'finished_at': str(step.get('finished_at') or ''),

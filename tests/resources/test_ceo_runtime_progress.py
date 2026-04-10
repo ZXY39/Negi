@@ -2790,6 +2790,27 @@ def test_ceo_frontdoor_support_extracts_output_ref_for_progress_events() -> None
     assert data["output_preview_text"] == "tool output stored externally"
 
 
+def test_ceo_exec_output_ref_payload_does_not_degrade_to_preview_only() -> None:
+    payload = json.dumps(
+        {
+            "summary": "exec output stored externally",
+            "output_ref": "artifact:artifact:exec-output",
+        },
+        ensure_ascii=False,
+    )
+
+    data = CeoFrontDoorSupport._tool_result_progress_event_data(
+        tool_name="exec",
+        result_text=payload,
+        tool_call_id="call:exec",
+    )
+
+    assert data["tool_name"] == "exec"
+    assert data["tool_call_id"] == "call:exec"
+    assert data["output_ref"] == "artifact:artifact:exec-output"
+    assert data["output_preview_text"] == "exec output stored externally"
+
+
 def test_ceo_frontdoor_support_preserves_tool_call_id_for_progress_events() -> None:
     data = CeoFrontDoorSupport._tool_result_progress_event_data(
         tool_name="filesystem",

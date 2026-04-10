@@ -225,7 +225,8 @@ def _execution_trace_output_ref(record: TaskProjectionToolResultRecord) -> str:
             return wrapper_ref
     if isinstance(parsed_payload, dict):
         wrapper_ref = str(
-            parsed_payload.get('wrapper_ref')
+            parsed_payload.get('output_ref')
+            or parsed_payload.get('wrapper_ref')
             or parsed_payload.get('requested_ref')
             or parsed_payload.get('ref')
             or ''
@@ -233,6 +234,11 @@ def _execution_trace_output_ref(record: TaskProjectionToolResultRecord) -> str:
         resolved_ref = str(parsed_payload.get('resolved_ref') or '').strip()
         if wrapper_ref and wrapper_ref != resolved_ref:
             return wrapper_ref
+        nested = parse_content_envelope(parsed_payload.get('content_ref'))
+        if nested is not None:
+            nested_ref = str(nested.ref or nested.wrapper_ref or nested.resolved_ref or '').strip()
+            if nested_ref:
+                return nested_ref
     return output_ref
 
 
