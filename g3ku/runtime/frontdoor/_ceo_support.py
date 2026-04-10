@@ -350,8 +350,16 @@ class CeoFrontDoorSupport:
         return "error" if text.startswith("Error") else "success"
 
     @staticmethod
-    def _tool_result_progress_event_data(*, tool_name: str, result_text: str) -> dict[str, Any]:
+    def _tool_result_progress_event_data(
+        *,
+        tool_name: str,
+        result_text: str,
+        tool_call_id: str | None = None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {"tool_name": str(tool_name or "tool").strip() or "tool"}
+        normalized_tool_call_id = str(tool_call_id or "").strip()
+        if normalized_tool_call_id:
+            payload["tool_call_id"] = normalized_tool_call_id
         text = str(result_text or "").strip()
         if not text:
             return payload
@@ -438,8 +446,10 @@ class CeoFrontDoorSupport:
         arguments: dict[str, Any],
         runtime_context: dict[str, Any],
         on_progress,
+        tool_call_id: str | None = None,
     ) -> tuple[str, str, str, str, float | None]:
         normalized_arguments = normalize_runtime_tool_arguments_dict(arguments)
+        normalized_tool_call_id = str(tool_call_id or "").strip()
         try:
             errors = tool.validate_params(normalized_arguments)
         except Exception as exc:
@@ -457,6 +467,7 @@ class CeoFrontDoorSupport:
             event_data={
                 "tool_name": tool_name,
                 "arguments_text": self._tool_invocation_hint(tool_name, normalized_arguments),
+                **({"tool_call_id": normalized_tool_call_id} if normalized_tool_call_id else {}),
             },
         )
 
@@ -464,6 +475,7 @@ class CeoFrontDoorSupport:
         per_call_runtime = {
             **runtime_context,
             "tool_name": tool_name,
+            **({"tool_call_id": normalized_tool_call_id} if normalized_tool_call_id else {}),
         }
         if self._accepts_runtime_context(tool):
             execute_kwargs["__g3ku_runtime"] = per_call_runtime
@@ -504,7 +516,10 @@ class CeoFrontDoorSupport:
                 on_progress,
                 error_text,
                 event_kind="tool_error",
-                event_data={"tool_name": tool_name},
+                event_data={
+                    "tool_name": tool_name,
+                    **({"tool_call_id": normalized_tool_call_id} if normalized_tool_call_id else {}),
+                },
             )
             return error_text, "error", started_at, finished_at, elapsed_seconds
         finally:

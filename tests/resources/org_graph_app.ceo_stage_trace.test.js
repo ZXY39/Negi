@@ -261,6 +261,29 @@ test("ceo legacy tool flow hides submit_next_stage events until stage trace arri
     assert.deepEqual(events, []);
 });
 
+test("ceo snapshot tool normalization preserves distinct tool_call_id values for same-name events", () => {
+    const { normalizeCeoSnapshotToolEvents } = loadApp();
+
+    const events = normalizeCeoSnapshotToolEvents([
+        {
+            tool_name: "filesystem",
+            status: "running",
+            text: "alpha",
+            tool_call_id: "filesystem:1",
+            source: "user",
+        },
+        {
+            tool_name: "filesystem",
+            status: "running",
+            text: "beta",
+            tool_call_id: "filesystem:2",
+            source: "user",
+        },
+    ]);
+
+    assert.deepEqual(events.map((item) => item.tool_call_id), ["filesystem:1", "filesystem:2"]);
+});
+
 test("ceo composer shows session-local compression toast only for active compressing session", () => {
     const { syncCeoCompressionToast, S, U } = loadApp();
 

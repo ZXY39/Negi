@@ -2602,6 +2602,17 @@ def test_ceo_frontdoor_support_extracts_output_ref_for_progress_events() -> None
     assert data["output_preview_text"] == "tool output stored externally"
 
 
+def test_ceo_frontdoor_support_preserves_tool_call_id_for_progress_events() -> None:
+    data = CeoFrontDoorSupport._tool_result_progress_event_data(
+        tool_name="filesystem",
+        result_text='{"summary":"ok"}',
+        tool_call_id="filesystem-call-2",
+    )
+
+    assert data["tool_name"] == "filesystem"
+    assert data["tool_call_id"] == "filesystem-call-2"
+
+
 def test_stage_trace_name_fallback_does_not_reuse_same_tool_result_across_rounds() -> None:
     session = RuntimeAgentSession(
         SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
