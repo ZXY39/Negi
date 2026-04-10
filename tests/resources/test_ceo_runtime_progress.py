@@ -517,6 +517,190 @@ async def test_runtime_agent_session_merges_wait_tool_execution_back_into_origin
 
 
 @pytest.mark.asyncio
+async def test_runtime_agent_session_parallel_same_name_tools_distinct_call_ids() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="gpt-test", reasoning_effort=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._frontdoor_stage_state = {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_kind": "normal",
+                "stage_goal": "fetch references",
+                "tool_round_budget": 2,
+                "tool_rounds_used": 1,
+                "status": "active",
+                "rounds": [
+                    {
+                        "round_index": 1,
+                        "tool_call_ids": ["web_fetch-call-1", "web_fetch-call-2"],
+                        "tool_names": ["web_fetch", "web_fetch"],
+                    }
+                ],
+            }
+        ],
+    }
+
+    await session._handle_progress(
+        "first fetch started",
+        event_kind="tool_start",
+        event_data={"tool_name": "web_fetch", "tool_call_id": "web_fetch-call-1"},
+    )
+    await session._handle_progress(
+        "second fetch started",
+        event_kind="tool_start",
+        event_data={"tool_name": "web_fetch", "tool_call_id": "web_fetch-call-2"},
+    )
+    await session._handle_progress(
+        '{"summary":"first done"}',
+        event_kind="tool_result",
+        event_data={"tool_name": "web_fetch", "tool_call_id": "web_fetch-call-1"},
+    )
+    await session._handle_progress(
+        '{"summary":"second done"}',
+        event_kind="tool_result",
+        event_data={"tool_name": "web_fetch", "tool_call_id": "web_fetch-call-2"},
+    )
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert snapshot is not None
+    tools = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+    assert [tool["tool_call_id"] for tool in tools] == ["web_fetch-call-1", "web_fetch-call-2"]
+    assert [tool["status"] for tool in tools] == ["success", "success"]
+    tool_end_events = [event for event in session._event_log if event["type"] == "tool_execution_end"]
+    assert [event["payload"]["tool_call_id"] for event in tool_end_events] == [
+        "web_fetch-call-1",
+        "web_fetch-call-2",
+    ]
+    assert session.state.pending_tool_calls == set()
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_session_progress_resolution_precedence_prefers_tool_call_id_over_conflicting_name() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="gpt-test", reasoning_effort=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    events: list[AgentEvent] = []
+
+    async def _listener(event: AgentEvent) -> None:
+        events.append(event)
+
+    session.subscribe(_listener)
+    await session._handle_progress(
+        "install started",
+        event_kind="tool_start",
+        event_data={"tool_name": "skill-installer", "tool_call_id": "skill-installer:1"},
+    )
+    await session._handle_progress(
+        "fetch started",
+        event_kind="tool_start",
+        event_data={"tool_name": "web_fetch", "tool_call_id": "web_fetch:1"},
+    )
+
+    await session._handle_progress(
+        "install still running",
+        event_kind="tool",
+        event_data={"tool_name": "web_fetch", "tool_call_id": "skill-installer:1"},
+    )
+
+    tool_events = [event for event in events if event.type.startswith("tool_execution")]
+    assert [event.type for event in tool_events] == [
+        "tool_execution_start",
+        "tool_execution_start",
+        "tool_execution_update",
+    ]
+    assert tool_events[-1].payload["tool_name"] == "skill-installer"
+    assert tool_events[-1].payload["tool_call_id"] == "skill-installer:1"
+    assert session._resolve_progress_tool_target({"tool_name": "web_fetch", "tool_call_id": "skill-installer:1"}) == (
+        "skill-installer",
+        "skill-installer:1",
+    )
+    assert session._resolve_progress_tool_target({"tool_name": "web_fetch"}) == ("web_fetch", "web_fetch:1")
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_session_cancel_clears_pending_and_background_tool_indexes() -> None:
+    async def _cancel_session_tasks(session_key: str) -> int:
+        _ = session_key
+        return 0
+
+    session = RuntimeAgentSession(
+        SimpleNamespace(
+            model="gpt-test",
+            reasoning_effort=None,
+            cancel_session_tasks=_cancel_session_tasks,
+        ),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+
+    await session._handle_progress(
+        "first fetch started",
+        event_kind="tool_start",
+        event_data={"tool_name": "web_fetch", "tool_call_id": "web_fetch-call-1"},
+    )
+    await session._handle_progress(
+        "second fetch started",
+        event_kind="tool_start",
+        event_data={"tool_name": "web_fetch", "tool_call_id": "web_fetch-call-2"},
+    )
+
+    assert session.state.pending_tool_calls == {"web_fetch-call-1", "web_fetch-call-2"}
+    assert session._pending_tool_call_names == {
+        "web_fetch-call-1": "web_fetch",
+        "web_fetch-call-2": "web_fetch",
+    }
+    assert list(session._pending_tool_name_calls["web_fetch"]) == [
+        "web_fetch-call-1",
+        "web_fetch-call-2",
+    ]
+    session._remember_background_tool_target(
+        execution_id="tool-exec:2",
+        tool_name="web_fetch",
+        tool_call_id="web_fetch-call-2",
+    )
+
+    resolved_tool_name, resolved_call_id, resolved_execution_id = session._resolve_control_tool_target(
+        tool_name="wait_tool_execution",
+        payload={"execution_id": "tool-exec:2"},
+    )
+
+    assert (resolved_tool_name, resolved_call_id, resolved_execution_id) == (
+        "web_fetch",
+        "web_fetch-call-2",
+        "tool-exec:2",
+    )
+
+    await session.cancel()
+
+    assert session.state.pending_tool_calls == set()
+    assert session._pending_tool_call_names == {}
+    assert session._pending_tool_name_calls == {}
+    assert session._background_tool_targets == {}
+    assert session._resolve_control_tool_target(
+        tool_name="wait_tool_execution",
+        payload={"execution_id": "tool-exec:2"},
+    ) == ("wait_tool_execution", "", "tool-exec:2")
+
+
+@pytest.mark.asyncio
 async def test_runtime_agent_session_analysis_progress_updates_inflight_snapshot() -> None:
     loop = SimpleNamespace(model="gpt-test", reasoning_effort=None)
     session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
