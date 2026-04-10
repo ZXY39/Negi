@@ -857,6 +857,39 @@ def update_ceo_session_after_turn(
     return changed
 
 
+def update_ceo_session_after_heartbeat(
+    session: Any,
+    *,
+    task_ids: list[str],
+    reason: str,
+    task_results: list[dict[str, Any]] | None = None,
+    updated_at: str,
+) -> bool:
+    changed = ensure_ceo_session_metadata(session)
+    metadata = dict(getattr(session, "metadata", {}) or {})
+    normalized_task_ids = _normalize_task_ids(list(task_ids or []))
+    normalized_results = _normalize_task_results(task_results)
+    if not normalized_task_ids:
+        normalized_task_ids = _normalize_task_ids(
+            [item.get("task_id") for item in normalized_results if isinstance(item, dict)]
+        )
+    next_task_memory = normalize_task_memory(
+        {
+            "task_ids": normalized_task_ids,
+            "source": "heartbeat",
+            "reason": str(reason or "").strip(),
+            "updated_at": str(updated_at or "").strip(),
+            "task_results": normalized_results,
+        }
+    )
+    if metadata.get("last_task_memory") != next_task_memory:
+        metadata["last_task_memory"] = next_task_memory
+        changed = True
+    if changed:
+        session.metadata = metadata
+    return changed
+
+
 def upload_dir_for_session(session_id: str, *, create: bool = True) -> Path:
     safe_session = safe_filename(str(session_id or "web_shared").replace(":", "_")) or "web_shared"
     path = workspace_path() / WEB_CEO_UPLOAD_ROOT / safe_session
