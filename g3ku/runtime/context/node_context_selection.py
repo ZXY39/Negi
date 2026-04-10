@@ -40,6 +40,28 @@ def _tool_names(items: list[str]) -> list[str]:
     return ordered
 
 
+def _family_ids_for_executor_names(*, visible_tool_families: list[Any], executor_names: list[str]) -> list[str]:
+    executor_set = {
+        _normalized_text(item)
+        for item in list(executor_names or [])
+        if _normalized_text(item)
+    }
+    selected: list[str] = []
+    for family in list(visible_tool_families or []):
+        tool_id = _normalized_text(_item_value(family, "tool_id"))
+        if not tool_id:
+            continue
+        family_executor_names = {
+            _normalized_text(executor_name)
+            for action in list(_item_value(family, "actions") or [])
+            for executor_name in list(_item_value(action, "executor_names") or [])
+            if _normalized_text(executor_name)
+        }
+        if family_executor_names & executor_set and tool_id not in selected:
+            selected.append(tool_id)
+    return selected
+
+
 def _build_memory_query(*, prompt: str, goal: str, core_requirement: str) -> str:
     return "\n".join(
         [
@@ -160,16 +182,21 @@ async def build_node_context_selection(
     visible_tool_name_set = set(normalized_tool_names)
     visible_tool_id_set = set(visible_tool_ids)
     selected_skill_ids = _tool_names(list((dense_selection or {}).get("skill_ids") or []))
-    selected_tool_family_ids = [
-        tool_id
-        for tool_id in _tool_names(list((dense_selection or {}).get("tool_ids") or []))
-        if tool_id in visible_tool_id_set
-    ]
     selected_tool_names = [
         tool_name
         for tool_name in list((dense_selection or {}).get("tool_ids") or [])
         if tool_name in visible_tool_name_set
     ]
+    selected_tool_family_ids = _family_ids_for_executor_names(
+        visible_tool_families=visible_tool_families,
+        executor_names=selected_tool_names,
+    )
+    if not selected_tool_family_ids:
+        selected_tool_family_ids = [
+            tool_id
+            for tool_id in _tool_names(list((dense_selection or {}).get("tool_ids") or []))
+            if tool_id in visible_tool_id_set
+        ]
     return NodeContextSelectionResult(
         mode="dense_rerank",
         memory_search_visible=memory_search_visible,

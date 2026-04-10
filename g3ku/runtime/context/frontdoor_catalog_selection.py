@@ -57,6 +57,30 @@ def _catalog_record_suffix(record_id: str, *, prefix: str) -> str:
     return text[len(prefix) :].strip()
 
 
+def _resource_record_executor_name(record: Any) -> str:
+    record_id = _record_id(record)
+    suffix = _catalog_record_suffix(record_id, prefix="tool:")
+    if not suffix:
+        return ""
+    return suffix.split("::", 1)[-1].strip()
+
+
+def _visible_family_executor_map(visible_families: list[Any]) -> dict[str, list[str]]:
+    family_map: dict[str, list[str]] = {}
+    for family in list(visible_families or []):
+        tool_id = _normalized_text(_item_value(family, "tool_id"))
+        if not tool_id or tool_id in family_map:
+            continue
+        executor_names: list[str] = []
+        for action in list(_item_value(family, "actions") or []):
+            for raw_name in list(_item_value(action, "executor_names") or []):
+                name = _normalized_text(raw_name)
+                if name and name not in executor_names:
+                    executor_names.append(name)
+        family_map[tool_id] = executor_names
+    return family_map
+
+
 def _record_text(record: Any) -> str:
     for key in ("l1", "l0", "text", "content", "description", "display_name", "record_id"):
         value = _normalized_text(_item_value(record, key))
@@ -131,6 +155,47 @@ def _selected_catalog_ids(
     return selected_ids, trace
 
 
+def _selected_executor_ids(
+    records: list[Any],
+    *,
+    limit: int,
+    visible_families: list[Any],
+    dense_rank_by_record_id: dict[str, int],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    selected_ids: list[str] = []
+    trace: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    capped_limit = max(int(limit or 0), 0)
+    family_executor_map = _visible_family_executor_map(visible_families)
+    for rerank_rank, record in enumerate(list(records or []), start=1):
+        record_id = _record_id(record)
+        family_id = _catalog_record_suffix(record_id, prefix="tool:")
+        executor_names = family_executor_map.get(family_id, [])
+        if not executor_names:
+            executor_name = _resource_record_executor_name(record)
+            executor_names = [executor_name] if executor_name else []
+        for executor_name in executor_names:
+            if not executor_name or executor_name in seen:
+                continue
+            seen.add(executor_name)
+            selected_ids.append(executor_name)
+            trace.append(
+                {
+                    "record_id": record_id,
+                    "tool_id": executor_name,
+                    "executor_name": executor_name,
+                    "family_id": family_id,
+                    "dense_rank": dense_rank_by_record_id.get(record_id),
+                    "rerank_rank": rerank_rank,
+                }
+            )
+            if capped_limit and len(selected_ids) >= capped_limit:
+                break
+        if capped_limit and len(selected_ids) >= capped_limit:
+            break
+    return selected_ids, trace
+
+
 def _dense_trace(
     records: list[Any],
     *,
@@ -151,6 +216,36 @@ def _dense_trace(
                 "dense_rank": dense_rank_by_record_id.get(record_id),
             }
         )
+    return trace
+
+
+def _dense_executor_trace(
+    records: list[Any],
+    *,
+    visible_families: list[Any],
+    dense_rank_by_record_id: dict[str, int],
+) -> list[dict[str, Any]]:
+    trace: list[dict[str, Any]] = []
+    family_executor_map = _visible_family_executor_map(visible_families)
+    for record in list(records or []):
+        record_id = _record_id(record)
+        family_id = _catalog_record_suffix(record_id, prefix="tool:")
+        executor_names = family_executor_map.get(family_id, [])
+        if not executor_names:
+            executor_name = _resource_record_executor_name(record)
+            executor_names = [executor_name] if executor_name else []
+        if not executor_names:
+            continue
+        for executor_name in executor_names:
+            trace.append(
+                {
+                    "record_id": record_id,
+                    "tool_id": executor_name,
+                    "executor_name": executor_name,
+                    "family_id": family_id,
+                    "dense_rank": dense_rank_by_record_id.get(record_id),
+                }
+            )
     return trace
 
 
@@ -708,11 +803,10 @@ async def build_frontdoor_catalog_selection(
         id_key="skill_id",
         dense_rank_by_record_id=skill_dense_rank,
     )
-    tool_ids, tool_trace = _selected_catalog_ids(
+    tool_ids, tool_trace = _selected_executor_ids(
         reranked_tool_hits,
         limit=tool_limit,
-        prefix="tool:",
-        id_key="tool_id",
+        visible_families=visible_families,
         dense_rank_by_record_id=tool_dense_rank,
     )
 
@@ -729,10 +823,9 @@ async def build_frontdoor_catalog_selection(
                     id_key="skill_id",
                     dense_rank_by_record_id=skill_dense_rank,
                 ),
-                "tools": _dense_trace(
+                "tools": _dense_executor_trace(
                     visible_tool_hits,
-                    prefix="tool:",
-                    id_key="tool_id",
+                    visible_families=visible_families,
                     dense_rank_by_record_id=tool_dense_rank,
                 ),
             },

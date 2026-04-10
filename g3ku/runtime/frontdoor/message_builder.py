@@ -541,34 +541,18 @@ class CeoMessageBuilder:
             return ordered, {'reserved': reserved, 'core': sorted(selected), 'extension': []}
 
         if ranked_tool_ids is not None:
-            family_map = {
-                str(getattr(family, 'tool_id', '') or '').strip(): family
-                for family in list(visible_families or [])
-                if str(getattr(family, 'tool_id', '') or '').strip()
-            }
             picked_extension: list[str] = []
-            for tool_id in list(ranked_tool_ids or []):
-                family = family_map.get(str(tool_id or '').strip())
-                if family is None:
+            for executor_name in list(ranked_tool_ids or []):
+                normalized = str(executor_name or '').strip()
+                if (
+                    not normalized
+                    or normalized not in visible_set
+                    or normalized in selected
+                    or normalized in picked_extension
+                    or normalized in reserved_set
+                ):
                     continue
-                family_names = []
-                for action in list(getattr(family, 'actions', []) or []):
-                    for executor_name in list(getattr(action, 'executor_names', []) or []):
-                        name = str(executor_name or '').strip()
-                        if (
-                            name
-                            and name in visible_set
-                            and name not in core_resolution.executor_names
-                            and name not in raw_core_entries
-                            and name not in reserved_set
-                        ):
-                            family_names.append(name)
-                for name in sorted(set(family_names)):
-                    if name in selected or name in picked_extension:
-                        continue
-                    picked_extension.append(name)
-                    if len(picked_extension) >= extension_top_k:
-                        break
+                picked_extension.append(normalized)
                 if len(picked_extension) >= extension_top_k:
                     break
 

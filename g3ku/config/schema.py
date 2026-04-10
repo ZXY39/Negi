@@ -651,7 +651,8 @@ class MemoryAssemblyConfig(Base):
     """Frontdoor dynamic tool and skill selection controls."""
 
     skill_inventory_top_k: int = 8
-    extension_tool_top_k: int = 6
+    extension_tool_top_k: int = 8
+    node_tool_top_k: int = 8
     frontdoor_recent_message_count: int = Field(default=20, ge=1)
     frontdoor_summary_trigger_message_count: int = Field(default=10, ge=1)
     frontdoor_interrupt_approval_enabled: bool = False

@@ -147,6 +147,7 @@ def build_execution_tool_selection(
     promoted_tool_names: list[str] | None = None,
     schema_size_by_executor: dict[str, int] | None = None,
     max_schema_chars: int | None = None,
+    top_k: int = 8,
 ) -> ExecutionToolSelectionResult:
     normalized_visible_names = [
         str(name or "").strip()
@@ -265,7 +266,10 @@ def build_execution_tool_selection(
         ),
     )
     selected_executor_scores: list[dict[str, Any]] = []
+    capped_top_k = max(1, int(top_k or 1))
     for item in scored_candidates:
+        if len(selected_executor_scores) >= capped_top_k:
+            break
         executor = str(item.get("executor_name") or "").strip()
         if not executor or executor in seen:
             continue
@@ -298,5 +302,6 @@ def build_execution_tool_selection(
             "candidate_executor_scores": candidate_executor_scores,
             "selected_executor_scores": selected_executor_scores,
             "stable_tiebreak_order": stable_tiebreak_order,
+            "top_k": capped_top_k,
         },
     )

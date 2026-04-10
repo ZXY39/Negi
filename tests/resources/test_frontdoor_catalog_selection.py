@@ -426,7 +426,13 @@ async def test_build_frontdoor_catalog_selection_reranks_visible_dense_hits_and_
         {"record_id": "skill:visible-alpha", "skill_id": "visible-alpha", "dense_rank": 1}
     ]
     assert result["trace"]["dense"]["tools"] == [
-        {"record_id": "tool:visible-browser", "tool_id": "visible-browser", "dense_rank": 1}
+        {
+            "record_id": "tool:visible-browser",
+            "tool_id": "visible-browser",
+            "executor_name": "visible-browser",
+            "family_id": "visible-browser",
+            "dense_rank": 1,
+        }
     ]
     assert result["trace"]["rerank"]["skills"]["model"] == "dashscope:qwen3-vl-rerank"
     assert result["trace"]["rerank"]["tools"]["status"] == "configured"

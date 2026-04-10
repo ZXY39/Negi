@@ -3849,6 +3849,7 @@ class MainRuntimeService:
             tool_names=promoted_hydrated_executor_names,
             visible_tool_families=stable_lightweight_items,
         )
+        node_tool_top_k = max(1, int(getattr(MemoryRuntimeSettings().assembly, 'node_tool_top_k', 8) or 8))
         selection = build_execution_tool_selection(
             prompt=prompt,
             goal=goal,
@@ -3857,6 +3858,7 @@ class MainRuntimeService:
             visible_tool_names=ordered_visible_tool_names,
             always_callable_tool_names=always_callable_tool_names,
             promoted_tool_names=promoted_hydrated_executor_names,
+            top_k=node_tool_top_k,
         )
         trace_payload = dict(selection.trace or {})
         has_selected_promoted = 'selected_promoted_tool_names' in trace_payload
@@ -3903,6 +3905,7 @@ class MainRuntimeService:
                 'session_id': session_id,
                 'actor_role': actor_role,
                 'base_schema_chars': int(selection.schema_chars or 0),
+                'top_k': int(node_tool_top_k),
                 'requested_promoted_hydrated_executor_names': list(promoted_hydrated_executor_names),
                 'promoted_hydrated_executor_names': list(selected_promoted_hydrated_executor_names),
                 'final_schema_chars': int(final_schema_chars),
