@@ -79,7 +79,7 @@ def _submit_final_result_tool(*, node_kind: str = "execution") -> SubmitFinalRes
 class _DirectLoadTool(Tool):
     @property
     def name(self) -> str:
-        return "direct_load_tool"
+        return "load_tool_context"
 
     @property
     def description(self) -> str:
@@ -517,8 +517,8 @@ async def test_react_loop_execute_tool_keeps_direct_load_payload_inline(tmp_path
 
     try:
         rendered = await loop._execute_tool(
-            tools={"direct_load_tool": _DirectLoadTool()},
-            tool_name="direct_load_tool",
+            tools={"load_tool_context": _DirectLoadTool()},
+            tool_name="load_tool_context",
             arguments={},
             runtime_context={"task_id": "task-1", "node_id": "node-1", "actor_role": "execution"},
         )

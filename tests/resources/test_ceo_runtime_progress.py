@@ -18,10 +18,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from g3ku.agent.tools.base import Tool
+from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.session_service import HEARTBEAT_OK, WebSessionHeartbeatService
 from g3ku.providers.base import LLMResponse, ToolCallRequest
+from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.api import ceo_sessions, websocket_ceo
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
@@ -33,6 +35,8 @@ from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPend
 from g3ku.runtime.manager import SessionRuntimeManager
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import SessionManager
+from main.storage.artifact_store import TaskArtifactStore
+from main.storage.sqlite_store import SQLiteTaskStore
 
 
 class _Registry:
@@ -2795,6 +2799,250 @@ def test_ceo_frontdoor_support_preserves_tool_call_id_for_progress_events() -> N
 
     assert data["tool_name"] == "filesystem"
     assert data["tool_call_id"] == "filesystem-call-2"
+
+
+@pytest.mark.asyncio
+async def test_ceo_large_non_inline_tool_result_emits_output_ref(tmp_path: Path) -> None:
+    class _LargeTool(Tool):
+        @property
+        def name(self) -> str:
+            return "large_tool"
+
+        @property
+        def description(self) -> str:
+            return "Return a large payload that should be externalized."
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {"type": "object", "properties": {}, "required": []}
+
+        async def execute(self, **kwargs: object) -> object:
+            _ = kwargs
+            return {
+                "ok": True,
+                "stdout": "\n".join(f"line {index:03d} " + ("x" * 32) for index in range(180)),
+            }
+
+    class _ToolRuntimeStack:
+        def push_runtime_context(self, runtime_context: dict[str, object]) -> None:
+            _ = runtime_context
+            return None
+
+        def pop_runtime_context(self, token: object) -> None:
+            _ = token
+
+        def get(self, name: str) -> None:
+            _ = name
+            return None
+
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    content_store = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    tool = _LargeTool()
+    tool._descriptor = ToolResourceDescriptor(
+        kind=ResourceKind.TOOL,
+        name=tool.name,
+        description=tool.description,
+        root=tmp_path,
+        manifest_path=tmp_path / "large_tool.yaml",
+        fingerprint="large-tool",
+        metadata={"tool_result_inline_full": False},
+        tool_result_inline_full=False,
+    )
+    loop = SimpleNamespace(
+        tools=_ToolRuntimeStack(),
+        resource_manager=None,
+        tool_execution_manager=None,
+        main_task_service=SimpleNamespace(content_store=content_store),
+    )
+    support = CeoFrontDoorSupport(loop=loop)
+
+    try:
+        result_text, status, _started_at, _finished_at, _elapsed_seconds = await support._execute_tool_call(
+            tool=tool,
+            tool_name=tool.name,
+            arguments={},
+            runtime_context={"task_id": "task-1", "node_id": "node-1", "actor_role": "ceo"},
+            on_progress=None,
+            tool_call_id="call-large-1",
+        )
+    finally:
+        store.close()
+
+    envelope = parse_content_envelope(result_text)
+
+    assert status == "success"
+    assert envelope is not None
+    assert envelope.ref.startswith("artifact:")
+    progress_data = support._tool_result_progress_event_data(
+        tool_name=tool.name,
+        result_text=result_text,
+        tool_call_id="call-large-1",
+    )
+    assert progress_data["tool_name"] == tool.name
+    assert progress_data["tool_call_id"] == "call-large-1"
+    assert progress_data["output_ref"] == envelope.ref
+    assert progress_data["output_preview_text"]
+
+
+@pytest.mark.asyncio
+async def test_ceo_direct_load_tool_result_stays_inline_even_when_large(tmp_path: Path) -> None:
+    class _LargeDirectLoadTool(Tool):
+        @property
+        def name(self) -> str:
+            return "load_tool_context"
+
+        @property
+        def description(self) -> str:
+            return "Return a large direct-load context body that must stay inline."
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {"type": "object", "properties": {}, "required": []}
+
+        async def execute(self, **kwargs: object) -> object:
+            _ = kwargs
+            return {
+                "ok": True,
+                "level": "l2",
+                "uri": "g3ku://resource/tool/filesystem",
+                "l0": "Filesystem tool context",
+                "l1": "Full tool instructions for filesystem operations.",
+                "content": "\n".join(f"context line {index:03d} " + ("x" * 40) for index in range(180)),
+            }
+
+    class _ToolRuntimeStack:
+        def push_runtime_context(self, runtime_context: dict[str, object]) -> None:
+            _ = runtime_context
+            return None
+
+        def pop_runtime_context(self, token: object) -> None:
+            _ = token
+
+        def get(self, name: str) -> None:
+            _ = name
+            return None
+
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    content_store = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    tool = _LargeDirectLoadTool()
+    loop = SimpleNamespace(
+        tools=_ToolRuntimeStack(),
+        resource_manager=None,
+        tool_execution_manager=None,
+        main_task_service=SimpleNamespace(content_store=content_store),
+    )
+    support = CeoFrontDoorSupport(loop=loop)
+
+    try:
+        result_text, status, _started_at, _finished_at, _elapsed_seconds = await support._execute_tool_call(
+            tool=tool,
+            tool_name=tool.name,
+            arguments={},
+            runtime_context={"task_id": "task-1", "node_id": "node-1", "actor_role": "ceo"},
+            on_progress=None,
+            tool_call_id="call-direct-load-1",
+        )
+    finally:
+        store.close()
+
+    assert status == "success"
+    assert parse_content_envelope(result_text) is None
+    payload = json.loads(result_text)
+    assert payload["ok"] is True
+    assert payload["level"] == "l2"
+    assert payload["uri"] == "g3ku://resource/tool/filesystem"
+    assert payload["content"].startswith("context line 000")
+    assert len(payload["content"]) > 1200
+
+
+@pytest.mark.asyncio
+async def test_ceo_manifest_tool_result_inline_full_stays_inline_even_when_large(tmp_path: Path) -> None:
+    class _LargeInlineManifestTool(Tool):
+        @property
+        def name(self) -> str:
+            return "inline_manifest_tool"
+
+        @property
+        def description(self) -> str:
+            return "Return a large manifest-backed payload that must stay inline."
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {"type": "object", "properties": {}, "required": []}
+
+        async def execute(self, **kwargs: object) -> object:
+            _ = kwargs
+            return {
+                "ok": True,
+                "stdout": "\n".join(f"inline line {index:03d} " + ("x" * 40) for index in range(180)),
+            }
+
+    class _ToolRuntimeStack:
+        def push_runtime_context(self, runtime_context: dict[str, object]) -> None:
+            _ = runtime_context
+            return None
+
+        def pop_runtime_context(self, token: object) -> None:
+            _ = token
+
+        def get(self, name: str) -> None:
+            _ = name
+            return None
+
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    content_store = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    tool = _LargeInlineManifestTool()
+    tool._descriptor = ToolResourceDescriptor(
+        kind=ResourceKind.TOOL,
+        name=tool.name,
+        description=tool.description,
+        root=tmp_path,
+        manifest_path=tmp_path / "inline_manifest_tool.yaml",
+        fingerprint="inline-manifest-tool",
+        metadata={"tool_result_inline_full": True},
+        tool_result_inline_full=True,
+    )
+    loop = SimpleNamespace(
+        tools=_ToolRuntimeStack(),
+        resource_manager=None,
+        tool_execution_manager=None,
+        main_task_service=SimpleNamespace(content_store=content_store),
+    )
+    support = CeoFrontDoorSupport(loop=loop)
+
+    try:
+        result_text, status, _started_at, _finished_at, _elapsed_seconds = await support._execute_tool_call(
+            tool=tool,
+            tool_name=tool.name,
+            arguments={},
+            runtime_context={"task_id": "task-1", "node_id": "node-1", "actor_role": "ceo"},
+            on_progress=None,
+            tool_call_id="call-inline-full-1",
+        )
+    finally:
+        store.close()
+
+    assert status == "success"
+    assert parse_content_envelope(result_text) is None
+    payload = json.loads(result_text)
+    assert payload["ok"] is True
+    assert payload["stdout"].startswith("inline line 000")
+    assert len(payload["stdout"]) > 1200
 
 
 def test_stage_trace_name_fallback_does_not_reuse_same_tool_result_across_rounds() -> None:
