@@ -98,6 +98,7 @@ def _write_demo_tool(root: Path, *, name: str = 'demo_echo', guide: str = 'Demo 
             kind: tool
             name: {name}
             description: Echo a short string for resource smoke tests.
+            tool_result_delivery_contract: runtime_managed
             protocol: mcp
             mcp:
               transport: embedded

@@ -45,6 +45,7 @@ def _write_repairable_tool(workspace: Path) -> None:
             kind: tool
             name: demo_repair
             description: Demo repairable tool.
+            tool_result_delivery_contract: runtime_managed
             tool_type: internal
             protocol: mcp
             mcp:

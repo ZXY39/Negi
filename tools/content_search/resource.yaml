@@ -1,8 +1,9 @@
-schema_version: 1
+﻿schema_version: 1
 kind: tool
 name: content_search
 display_name: Content Search
 description: Search one content ref or absolute file path for text.
+tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:
   transport: embedded
@@ -61,3 +62,4 @@ exposure:
   main_runtime: true
 toolskill:
   enabled: true
+

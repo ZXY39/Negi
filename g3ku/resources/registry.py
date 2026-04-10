@@ -30,6 +30,12 @@ class ResourceRegistry:
         ".pytest_cache",
         ".ruff_cache",
     })
+    _TOOL_RESULT_DELIVERY_CONTRACTS = frozenset({
+        "runtime_managed",
+        "direct_load_inline",
+        "inline_full",
+        "preview_with_ref",
+    })
 
     def __init__(self, workspace: Path, *, skills_dir: Path, tools_dir: Path, manifest_name: str = "resource.yaml"):
         self.workspace = Path(workspace)
@@ -155,8 +161,16 @@ class ResourceRegistry:
     def _build_tool(self, root: Path, manifest_path: Path) -> ToolResourceDescriptor:
         data = self._safe_manifest(manifest_path)
         tool_result_inline_full = bool(data.get("tool_result_inline_full", False))
+        tool_result_delivery_contract = str(data.get("tool_result_delivery_contract") or "").strip().lower()
+        tool_result_output_ref_paths = [
+            str(item or "").strip()
+            for item in list(data.get("tool_result_output_ref_paths") or [])
+            if str(item or "").strip()
+        ]
         metadata = dict(data)
         metadata["tool_result_inline_full"] = tool_result_inline_full
+        metadata["tool_result_delivery_contract"] = tool_result_delivery_contract
+        metadata["tool_result_output_ref_paths"] = list(tool_result_output_ref_paths)
         main_root = root / "main"
         entrypoint = main_root / "tool.py"
         toolskills_root = root / "toolskills"
@@ -191,6 +205,8 @@ class ResourceRegistry:
             requires_env=[str(item) for item in ((data.get("requires") or {}).get("env") or [])],
             toolskill_enabled=bool((data.get("toolskill") or {}).get("enabled", True)),
             tool_result_inline_full=tool_result_inline_full,
+            tool_result_delivery_contract=tool_result_delivery_contract,
+            tool_result_output_ref_paths=tool_result_output_ref_paths,
             metadata=metadata,
             exposure={
                 "agent": bool((data.get("exposure") or {}).get("agent", True)),
@@ -254,7 +270,47 @@ class ResourceRegistry:
             descriptor.errors.append(f"external tool missing toolskills/SKILL.md: {root}")
         elif descriptor.toolskill_enabled and descriptor.toolskills_main_path is None:
             descriptor.warnings.append(f"missing toolskills/SKILL.md: {root}")
+        self._apply_tool_result_delivery_contract_requirements(descriptor)
         return descriptor
+
+    def _apply_tool_result_delivery_contract_requirements(self, descriptor: ToolResourceDescriptor) -> None:
+        if not bool(descriptor.callable):
+            return
+        contract = str(descriptor.tool_result_delivery_contract or "").strip().lower()
+        if descriptor.tool_result_inline_full:
+            if contract and contract != "inline_full":
+                descriptor.available = False
+                descriptor.errors.append(
+                    "tool_result_delivery_contract must be 'inline_full' when tool_result_inline_full=true"
+                )
+            else:
+                descriptor.tool_result_delivery_contract = "inline_full"
+                descriptor.metadata["tool_result_delivery_contract"] = "inline_full"
+            return
+        if not contract:
+            descriptor.available = False
+            descriptor.errors.append(
+                "missing tool_result_delivery_contract for callable tool; declare runtime_managed, direct_load_inline, inline_full, or preview_with_ref"
+            )
+            return
+        if contract not in self._TOOL_RESULT_DELIVERY_CONTRACTS:
+            descriptor.available = False
+            descriptor.errors.append(
+                "unsupported tool_result_delivery_contract "
+                f"'{contract}': expected one of {', '.join(sorted(self._TOOL_RESULT_DELIVERY_CONTRACTS))}"
+            )
+            return
+        if contract == "inline_full":
+            descriptor.available = False
+            descriptor.errors.append(
+                "tool_result_delivery_contract=inline_full requires tool_result_inline_full=true"
+            )
+            return
+        if contract == "preview_with_ref" and not list(descriptor.tool_result_output_ref_paths or []):
+            descriptor.available = False
+            descriptor.errors.append(
+                "tool_result_delivery_contract=preview_with_ref requires non-empty tool_result_output_ref_paths"
+            )
 
     def _apply_tool_runtime_requirements(self, descriptor: ToolResourceDescriptor) -> None:
         if any(shutil.which(name) is None for name in descriptor.requires_bins):

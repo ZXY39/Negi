@@ -186,3 +186,66 @@ def test_tool_result_inline_full_flag_defaults_false_and_mirrors_manifest_metada
     assert descriptor is not None
     assert descriptor.tool_result_inline_full is True
     assert descriptor.metadata['tool_result_inline_full'] is True
+
+
+def test_callable_tool_requires_explicit_result_delivery_contract_when_not_inline_full(tmp_path):
+    registry = ResourceRegistry(workspace=tmp_path, skills_dir=tmp_path / 'skills', tools_dir=tmp_path / 'tools')
+    tool_root = tmp_path / 'tools' / 'demo_tool'
+    main_root = tool_root / 'main'
+    main_root.mkdir(parents=True)
+    (main_root / 'tool.py').write_text('def build(runtime):\n    return None\n', encoding='utf-8')
+
+    manifest = {
+        'schema_version': 1,
+        'kind': 'tool',
+        'name': 'demo_tool',
+        'description': 'Demo tool',
+    }
+    (tool_root / 'resource.yaml').write_text(yaml.safe_dump(manifest, sort_keys=False), encoding='utf-8')
+
+    descriptor = registry.build_tool_descriptor(tool_root)
+
+    assert descriptor is not None
+    assert descriptor.available is False
+    assert any('tool_result_delivery_contract' in str(item or '') for item in descriptor.errors)
+
+    manifest['tool_result_delivery_contract'] = 'runtime_managed'
+    (tool_root / 'resource.yaml').write_text(yaml.safe_dump(manifest, sort_keys=False), encoding='utf-8')
+
+    descriptor = registry.build_tool_descriptor(tool_root)
+
+    assert descriptor is not None
+    assert descriptor.available is True
+    assert descriptor.metadata['tool_result_delivery_contract'] == 'runtime_managed'
+
+
+def test_preview_with_ref_contract_requires_output_ref_paths(tmp_path):
+    registry = ResourceRegistry(workspace=tmp_path, skills_dir=tmp_path / 'skills', tools_dir=tmp_path / 'tools')
+    tool_root = tmp_path / 'tools' / 'demo_tool'
+    main_root = tool_root / 'main'
+    main_root.mkdir(parents=True)
+    (main_root / 'tool.py').write_text('def build(runtime):\n    return None\n', encoding='utf-8')
+
+    manifest = {
+        'schema_version': 1,
+        'kind': 'tool',
+        'name': 'demo_tool',
+        'description': 'Demo tool',
+        'tool_result_delivery_contract': 'preview_with_ref',
+    }
+    (tool_root / 'resource.yaml').write_text(yaml.safe_dump(manifest, sort_keys=False), encoding='utf-8')
+
+    descriptor = registry.build_tool_descriptor(tool_root)
+
+    assert descriptor is not None
+    assert descriptor.available is False
+    assert any('tool_result_output_ref_paths' in str(item or '') for item in descriptor.errors)
+
+    manifest['tool_result_output_ref_paths'] = ['output_ref']
+    (tool_root / 'resource.yaml').write_text(yaml.safe_dump(manifest, sort_keys=False), encoding='utf-8')
+
+    descriptor = registry.build_tool_descriptor(tool_root)
+
+    assert descriptor is not None
+    assert descriptor.available is True
+    assert descriptor.metadata['tool_result_output_ref_paths'] == ['output_ref']

@@ -1,8 +1,9 @@
-schema_version: 1
+﻿schema_version: 1
 kind: tool
-display_name: "续跑任务"
+display_name: "缁窇浠诲姟"
 name: continue_task
 description: Continue an existing task in exactly one controlled mode.
+tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
@@ -24,6 +25,7 @@ parameters:
     mode:
       type: string
       enum: [recreate, retry_in_place]
+      description: Choose `recreate` to start a new continuation task or `retry_in_place` to resume the current task in place.
     target_task_id:
       type: string
       description: Existing task id to continue. Must use `task:...`.
@@ -68,3 +70,4 @@ exposure:
   main_runtime: false
 toolskill:
   enabled: true
+

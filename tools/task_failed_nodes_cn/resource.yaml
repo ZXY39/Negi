@@ -1,8 +1,9 @@
-schema_version: 1
+﻿schema_version: 1
 kind: tool
-display_name: "查询失败节点"
+display_name: "鏌ヨ澶辫触鑺傜偣"
 name: task_failed_nodes
 description: List failed node ids inside a task tree.
+tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
@@ -21,10 +22,10 @@ permissions:
 parameters:
   type: object
   properties:
-    任务id:
+    浠诲姟id:
       type: string
       description: Target task id.
-  required: [任务id]
+  required: [浠诲姟id]
 governance:
   family: task_runtime
   display_name: Task Runtime
@@ -41,3 +42,4 @@ exposure:
   main_runtime: false
 toolskill:
   enabled: true
+

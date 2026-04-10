@@ -1,8 +1,9 @@
-schema_version: 1
+﻿schema_version: 1
 kind: tool
-display_name: "查询节点详情"
+display_name: "鏌ヨ鑺傜偣璇︽儏"
 name: task_node_detail
 description: View task node detail and related artifacts.
+tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
@@ -21,17 +22,17 @@ permissions:
 parameters:
   type: object
   properties:
-    任务id:
+    浠诲姟id:
       type: string
       description: Target task id.
-    节点id:
+    鑺傜偣id:
       type: string
       description: Target node id.
     detail_level:
       type: string
       enum: [summary, full]
       description: "`summary` returns the light detail view; `full` returns the full execution trace and artifact list."
-  required: [任务id, 节点id]
+  required: [浠诲姟id, 鑺傜偣id]
 governance:
   family: task_runtime
   display_name: Task Runtime
@@ -48,3 +49,4 @@ exposure:
   main_runtime: false
 toolskill:
   enabled: true
+

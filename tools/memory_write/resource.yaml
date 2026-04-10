@@ -1,7 +1,8 @@
-schema_version: 1
+﻿schema_version: 1
 kind: tool
 name: memory_write
 description: Write explicit permanent memory items and make them searchable for future retrieval.
+tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
@@ -162,3 +163,4 @@ exposure:
   main_runtime: true
 toolskill:
   enabled: true
+

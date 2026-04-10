@@ -1,8 +1,9 @@
-schema_version: 1
+﻿schema_version: 1
 kind: tool
 display_name: "任务汇总工具"
 name: task_summary
 description: Summarize total, in-progress, and failed task counts.
+tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
@@ -37,3 +38,4 @@ exposure:
   main_runtime: false
 toolskill:
   enabled: true
+

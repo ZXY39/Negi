@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -375,6 +376,94 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
         ]
         assert 'facts[*].category' in str(payload_v2['parameter_contract_markdown'])
         assert dict(payload_v2['example_arguments']).get('facts')
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_load_tool_context_marks_result_delivery_contract_violation_as_repair_required(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+
+    tool_root = workspace / 'tools' / 'demo_contract'
+    (tool_root / 'main').mkdir(parents=True, exist_ok=True)
+    (tool_root / 'toolskills').mkdir(parents=True, exist_ok=True)
+    (tool_root / 'main' / 'tool.py').write_text(
+        'from g3ku.agent.tools.base import Tool\n'
+        'class DemoContractTool(Tool):\n'
+        '    @property\n'
+        '    def name(self):\n'
+        '        return "demo_contract"\n'
+        '    @property\n'
+        '    def description(self):\n'
+        '        return "demo contract tool"\n'
+        '    @property\n'
+        '    def parameters(self):\n'
+        '        return {"type":"object","properties":{},"required":[]}\n'
+        '    async def execute(self, **kwargs):\n'
+        '        return "ok"\n'
+        'def build(runtime):\n'
+        '    return DemoContractTool()\n',
+        encoding='utf-8',
+    )
+    (tool_root / 'toolskills' / 'SKILL.md').write_text('# demo_contract\n\nRepair me.\n', encoding='utf-8')
+    (tool_root / 'resource.yaml').write_text(
+        yaml.safe_dump(
+                {
+                    'schema_version': 1,
+                    'kind': 'tool',
+                    'name': 'demo_contract',
+                    'description': 'Demo contract tool',
+                    'governance': {
+                        'family': 'demo_contract',
+                        'display_name': 'Demo Contract',
+                        'description': 'Demo contract tool',
+                        'actions': [
+                            {
+                                'id': 'run',
+                                'label': 'Run Demo Contract Tool',
+                                'risk_level': 'medium',
+                                'destructive': False,
+                                'allowed_roles': ['ceo'],
+                            }
+                        ],
+                    },
+                },
+                sort_keys=False,
+            ),
+        encoding='utf-8',
+    )
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-contract-violation')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-contract-violation-bind')
+    service.bind_resource_manager(manager)
+
+    try:
+        await service.startup()
+
+        payload = service.load_tool_context(
+            actor_role='ceo',
+            session_id='web:shared',
+            tool_id='demo_contract',
+        )
+
+        assert payload['ok'] is True
+        assert payload['available'] is False
+        assert payload['repair_required'] is True
+        assert any('tool_result_delivery_contract' in str(item or '') for item in list(payload['errors'] or []))
     finally:
         await service.close()
         manager.close()

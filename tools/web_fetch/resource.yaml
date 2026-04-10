@@ -1,8 +1,9 @@
-schema_version: 1
+﻿schema_version: 1
 kind: tool
 name: web_fetch
 display_name: Web Fetch
 description: Lightweight HTTP fetch for reading public web pages and extracting readable text without a browser runtime.
+tool_result_delivery_contract: runtime_managed
 source:
   type: local_adapted
   url: file:///E:/Program/openclaw-2026.3.13-1/src/agents/tools/web-fetch.ts
@@ -22,7 +23,7 @@ requires: []
 permissions:
   network:
     outbound: true
-    notes: 仅允许访问公开 http(s) 目标；默认阻断私网、回环、链路本地与 localhost。
+    notes: 浠呭厑璁歌闂叕寮€ http(s) 鐩爣锛涢粯璁ら樆鏂缃戙€佸洖鐜€侀摼璺湰鍦颁笌 localhost銆?
   filesystem:
     read: false
     write: false
@@ -92,10 +93,10 @@ returns:
       type: string
 behavior_contract:
   summary:
-    - 仅允许抓取公网 http/https 资源。
-    - 默认抽取可读文本并截断到 max_chars。
-    - 非法 URL、私网目标或不支持的 scheme 将直接报错。
-    - 超时、网络异常、解码异常按工具错误返回。
+    - 浠呭厑璁告姄鍙栧叕缃?http/https 璧勬簮銆?
+    - 榛樿鎶藉彇鍙鏂囨湰骞舵埅鏂埌 max_chars銆?
+    - 闈炴硶 URL銆佺缃戠洰鏍囨垨涓嶆敮鎸佺殑 scheme 灏嗙洿鎺ユ姤閿欍€?
+    - 瓒呮椂銆佺綉缁滃紓甯搞€佽В鐮佸紓甯告寜宸ュ叿閿欒杩斿洖銆?
 governance:
   family: web_fetch
   display_name: Web Fetch
@@ -114,3 +115,4 @@ exposure:
   main_runtime: true
 toolskill:
   enabled: true
+

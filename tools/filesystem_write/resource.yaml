@@ -1,8 +1,9 @@
-schema_version: 1
+﻿schema_version: 1
 kind: tool
 name: filesystem_write
 display_name: Filesystem Write
 description: Write file content to disk.
+tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:
   transport: embedded
@@ -43,3 +44,4 @@ exposure:
   main_runtime: true
 toolskill:
   enabled: true
+

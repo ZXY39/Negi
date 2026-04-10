@@ -1,7 +1,8 @@
-schema_version: 1
+﻿schema_version: 1
 kind: tool
 name: memory_delete
 description: Delete structured memory facts precisely by fact_id and/or canonical_key.
+tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
@@ -39,4 +40,5 @@ exposure:
   main_runtime: true
 toolskill:
   enabled: true
+
 

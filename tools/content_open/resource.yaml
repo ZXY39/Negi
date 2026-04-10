@@ -1,8 +1,9 @@
-schema_version: 1
+﻿schema_version: 1
 kind: tool
 name: content_open
 display_name: Content Open
 description: Open one excerpt from a content ref or absolute file path.
+tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:
   transport: embedded
@@ -60,3 +61,4 @@ exposure:
   main_runtime: true
 toolskill:
   enabled: true
+

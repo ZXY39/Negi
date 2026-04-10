@@ -1,15 +1,16 @@
-schema_version: 1
+﻿schema_version: 1
 kind: tool
 name: cron
-description: 安排提醒和周期任务。动作：add、list、remove。循环任务创建时必须提供 `stop_condition`，写成“此任务的具体退出条件+或用户要求取消”。
+description: 瀹夋帓鎻愰啋鍜屽懆鏈熶换鍔°€傚姩浣滐細add銆乴ist銆乺emove銆傚惊鐜换鍔″垱寤烘椂蹇呴』鎻愪緵 `stop_condition`锛屽啓鎴愨€滄浠诲姟鐨勫叿浣撻€€鍑烘潯浠?鎴栫敤鎴疯姹傚彇娑堚€濄€?
+tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: 当前版本表示仓库内置实现；更新时需要同步代码、参数契约和资源描述。
-  compare_rule: 以 main/ 实现、parameters、permissions、settings 或返回结构变化为准；仅修改 toolskills 文档不单独视为版本升级。
-  source_of_truth: 以当前目录下的 resource.yaml 与 main/ 实现为准；如存在 toolskills/，其内容用于补充使用说明。
+  summary: 褰撳墠鐗堟湰琛ㄧず浠撳簱鍐呯疆瀹炵幇锛涙洿鏂版椂闇€瑕佸悓姝ヤ唬鐮併€佸弬鏁板绾﹀拰璧勬簮鎻忚堪銆?
+  compare_rule: 浠?main/ 瀹炵幇銆乸arameters銆乸ermissions銆乻ettings 鎴栬繑鍥炵粨鏋勫彉鍖栦负鍑嗭紱浠呬慨鏀?toolskills 鏂囨。涓嶅崟鐙涓虹増鏈崌绾с€?
+  source_of_truth: 浠ュ綋鍓嶇洰褰曚笅鐨?resource.yaml 涓?main/ 瀹炵幇涓哄噯锛涘瀛樺湪 toolskills/锛屽叾鍐呭鐢ㄤ簬琛ュ厖浣跨敤璇存槑銆?
 requires:
   tools: []
   bins: []
@@ -26,28 +27,28 @@ parameters:
       - add
       - list
       - remove
-      description: 要执行的动作。
+      description: 瑕佹墽琛岀殑鍔ㄤ綔銆?
     message:
       type: string
-      description: 提醒或任务内容，仅填写用户可见文本。
+      description: 鎻愰啋鎴栦换鍔″唴瀹癸紝浠呭～鍐欑敤鎴峰彲瑙佹枃鏈€?
     stop_condition:
       type: string
-      description: 循环任务必填。写成“此任务的具体退出条件+或用户要求取消”。
+      description: 寰幆浠诲姟蹇呭～銆傚啓鎴愨€滄浠诲姟鐨勫叿浣撻€€鍑烘潯浠?鎴栫敤鎴疯姹傚彇娑堚€濄€?
     every_seconds:
       type: integer
-      description: 周期任务的间隔秒数。
+      description: 鍛ㄦ湡浠诲姟鐨勯棿闅旂鏁般€?
     cron_expr:
       type: string
-      description: Cron 表达式，例如 '0 9 * * *'。
+      description: Cron 琛ㄨ揪寮忥紝渚嬪 '0 9 * * *'銆?
     tz:
       type: string
-      description: Cron 表达式的 IANA 时区，例如 'America/Vancouver'。
+      description: Cron 琛ㄨ揪寮忕殑 IANA 鏃跺尯锛屼緥濡?'America/Vancouver'銆?
     at:
       type: string
-      description: 一次性执行的 ISO datetime，例如 '2026-02-12T10:30:00'。
+      description: 涓€娆℃€ф墽琛岀殑 ISO datetime锛屼緥濡?'2026-02-12T10:30:00'銆?
     job_id:
       type: string
-      description: 任务 ID，用于 remove。
+      description: 浠诲姟 ID锛岀敤浜?remove銆?
   required:
   - action
 exposure:
@@ -55,3 +56,4 @@ exposure:
   org_graph: true
 toolskill:
   enabled: true
+

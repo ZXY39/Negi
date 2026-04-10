@@ -1,8 +1,9 @@
-schema_version: 1
+﻿schema_version: 1
 kind: tool
 name: filesystem_search
 display_name: Filesystem Search
 description: Search a file or directory subtree for text.
+tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:
   transport: embedded
@@ -53,3 +54,4 @@ exposure:
   main_runtime: true
 toolskill:
   enabled: true
+

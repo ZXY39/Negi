@@ -1,8 +1,9 @@
-schema_version: 1
+﻿schema_version: 1
 kind: tool
 name: content_describe
 display_name: Content Describe
 description: Describe one content ref or absolute file path without loading the full body.
+tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:
   transport: embedded
@@ -48,3 +49,4 @@ exposure:
   main_runtime: true
 toolskill:
   enabled: true
+

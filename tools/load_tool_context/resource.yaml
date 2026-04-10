@@ -1,7 +1,8 @@
-schema_version: 1
+﻿schema_version: 1
 kind: tool
 name: load_tool_context
 description: Load full context for a visible tool or registered external tool, or search visible tool candidates with natural-language search_query.
+tool_result_delivery_contract: direct_load_inline
 source:
   type: ''
   url: ''
@@ -35,3 +36,4 @@ exposure:
   org_graph: true
 toolskill:
   enabled: true
+
