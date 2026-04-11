@@ -130,6 +130,18 @@ class NodeRunner:
         )
 
     @staticmethod
+    def _governance_refusal_result(goal: str, reason_text: str) -> SpawnChildResult:
+        text = str(reason_text or '派生已被拦截').strip() or '派生已被拦截'
+        return SpawnChildResult(
+            goal=goal,
+            check_result=_SPAWN_REVIEW_BLOCKED_CHECK_RESULT,
+            node_output=text,
+            node_output_summary=text,
+            node_output_ref='',
+            failure_info=None,
+        )
+
+    @staticmethod
     def _spawn_operation_lock_key(parent_node_id: str) -> str:
         return str(parent_node_id or '').strip()
 
@@ -603,6 +615,16 @@ class NodeRunner:
         parent = self._store.get_node(parent_node_id)
         if task is None or parent is None:
             raise ValueError('parent task or node missing')
+        refusal_supplier = self.governance_spawn_refusal_supplier
+        if callable(refusal_supplier):
+            try:
+                refusal_text = str(
+                    refusal_supplier(task_id=task_id, parent_node_id=parent_node_id, specs=list(specs or [])) or ''
+                ).strip()
+            except Exception:
+                refusal_text = ''
+            if refusal_text:
+                return [self._governance_refusal_result(spec.goal, refusal_text) for spec in list(specs or [])]
         if not parent.can_spawn_children:
             raise ValueError('spawn_child_nodes is not available for this node')
         self._log_service.mark_execution_stage_contains_spawn(task.task_id, parent.node_id)

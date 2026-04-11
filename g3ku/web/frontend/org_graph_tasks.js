@@ -1339,6 +1339,15 @@ function handleTaskEvent(payload) {
                 .forEach((item) => { void reconcileTaskTreeForNode(item); });
             if (typeof scheduleRenderedTreeNodeStatusRefresh === "function") scheduleRenderedTreeNodeStatusRefresh();
         }
+        if (runtimeSummary?.governance) {
+            S.taskGovernance = normalizeTaskGovernance(runtimeSummary.governance);
+            renderTaskGovernancePanel();
+        }
+        return;
+    }
+    if (payload.type === "task.governance.patch") {
+        S.taskGovernance = normalizeTaskGovernance(payload.data?.governance || {});
+        renderTaskGovernancePanel();
         return;
     }
     if (payload.type === "task.node.patch") {

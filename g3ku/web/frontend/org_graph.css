@@ -886,6 +886,103 @@ textarea {
     box-shadow: 0 18px 36px -24px color-mix(in srgb, var(--brand-primary) 44%, transparent);
 }
 
+.task-tree-floating-governance {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 6;
+    width: min(360px, calc(100% - 24px));
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+    border-radius: 16px;
+    background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg-app) 6%);
+    box-shadow: 0 18px 32px -24px color-mix(in srgb, var(--brand-primary) 26%, transparent);
+}
+
+.task-tree-floating-governance.is-breathing {
+    animation: task-governance-breathe 1.8s ease-in-out infinite;
+}
+
+.task-governance-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-primary);
+    text-align: left;
+    cursor: pointer;
+}
+
+.task-governance-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+}
+
+.task-governance-chip {
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-app) 78%, transparent);
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+}
+
+.task-governance-history {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    max-height: 260px;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.task-governance-entry {
+    display: grid;
+    gap: var(--space-1);
+    padding: var(--space-2);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--bg-app) 74%, transparent);
+}
+
+.task-governance-entry-head {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-2);
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+
+.task-governance-entry-body {
+    display: grid;
+    gap: var(--space-1);
+    max-height: 160px;
+    overflow-y: auto;
+}
+
+.task-governance-line {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.78rem;
+    color: var(--text-primary);
+}
+
+@keyframes task-governance-breathe {
+    0%, 100% {
+        box-shadow: 0 18px 32px -24px color-mix(in srgb, var(--brand-primary) 26%, transparent);
+        transform: scale(1);
+    }
+    50% {
+        box-shadow: 0 24px 40px -22px color-mix(in srgb, var(--brand-primary) 42%, transparent);
+        transform: scale(1.01);
+    }
+}
+
 .panel {
     min-height: 0;
     display: flex;

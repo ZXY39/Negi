@@ -6525,7 +6525,7 @@ async def test_spawn_review_retries_invalid_output_and_defaults_to_block_on_exce
 
 
 @pytest.mark.asyncio
-async def test_task_snapshot_excludes_governance_and_node_detail_includes_spawn_review_rounds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_task_snapshot_includes_governance_and_node_detail_includes_spawn_review_rounds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     backend = _SpawnReviewToolCallChatBackend(
         arguments={
             "allowed_indexes": [1],
@@ -6585,8 +6585,8 @@ async def test_task_snapshot_excludes_governance_and_node_detail_includes_spawn_
 
         assert task_payload is not None
         assert node_payload is not None
-        assert "governance" not in task_payload
-        assert "governance" not in task_payload["task"]
+        assert "governance" in task_payload
+        assert isinstance(task_payload["governance"], dict)
         assert "spawn_review_rounds" in node_payload["item"]
         assert len(node_payload["item"]["spawn_review_rounds"]) == 1
         assert node_payload["item"]["spawn_review_rounds"][0]["round_id"] == "detail-review"

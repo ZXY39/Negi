@@ -88,6 +88,20 @@ _NON_SUBSTANTIVE_EXECUTION_PROGRESS_TOOLS = {
 }
 _LATEST_SPAWN_STAGE_KEY_REF_NOTE = '最近一次 spawn_child_nodes 返回结果'
 
+
+def _default_governance_state(*, node_count_baseline: int = 1) -> dict[str, Any]:
+    return {
+        'enabled': True,
+        'frozen': False,
+        'review_inflight': False,
+        'depth_baseline': 1,
+        'node_count_baseline': max(1, int(node_count_baseline or 1)),
+        'hard_limited_depth': None,
+        'latest_limit_reason': '',
+        'supervision_disabled_after_limit': False,
+        'history': [],
+    }
+
 class TaskLogService:
     def __init__(
         self,
@@ -371,6 +385,49 @@ class TaskLogService:
             'dispatch_queued': {'execution': 0, 'inspection': 0},
             'summary_fingerprint': '',
             'summary_last_published_at': '',
+            'governance': _default_governance_state(),
+        }
+
+    @classmethod
+    def _sanitize_governance_state(cls, payload: Any) -> dict[str, Any]:
+        current = dict(payload or {}) if isinstance(payload, dict) else {}
+        history_payload: list[dict[str, Any]] = []
+        for item in list(current.get('history') or []):
+            if not isinstance(item, dict):
+                continue
+            snapshot = dict(item.get('trigger_snapshot') or {}) if isinstance(item.get('trigger_snapshot'), dict) else {}
+            history_payload.append(
+                {
+                    'triggered_at': str(item.get('triggered_at') or '').strip(),
+                    'trigger_reason': str(item.get('trigger_reason') or '').strip(),
+                    'trigger_snapshot': {
+                        'max_depth': max(0, int(snapshot.get('max_depth') or 0)),
+                        'total_nodes': max(0, int(snapshot.get('total_nodes') or 0)),
+                    },
+                    'decision': str(item.get('decision') or '').strip(),
+                    'decision_reason': str(item.get('decision_reason') or '').strip(),
+                    'decision_evidence': [
+                        str(line).strip()
+                        for line in list(item.get('decision_evidence') or [])
+                        if str(line).strip()
+                    ],
+                    'limited_depth': (
+                        None if item.get('limited_depth') in {None, ''} else max(0, int(item.get('limited_depth') or 0))
+                    ),
+                    'error_text': str(item.get('error_text') or '').strip(),
+                }
+            )
+        hard_limited_depth = current.get('hard_limited_depth')
+        return {
+            'enabled': bool(current.get('enabled', True)),
+            'frozen': bool(current.get('frozen')),
+            'review_inflight': bool(current.get('review_inflight')),
+            'depth_baseline': max(1, int(current.get('depth_baseline') or 1)),
+            'node_count_baseline': max(1, int(current.get('node_count_baseline') or 1)),
+            'hard_limited_depth': None if hard_limited_depth in {None, ''} else max(0, int(hard_limited_depth or 0)),
+            'latest_limit_reason': str(current.get('latest_limit_reason') or '').strip(),
+            'supervision_disabled_after_limit': bool(current.get('supervision_disabled_after_limit')),
+            'history': history_payload,
         }
 
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
@@ -1804,6 +1861,8 @@ class TaskLogService:
                 current['dispatch_running'] = self._sanitize_dispatch_counters(payload.get('dispatch_running'))
             if 'dispatch_queued' in payload:
                 current['dispatch_queued'] = self._sanitize_dispatch_counters(payload.get('dispatch_queued'))
+            if 'governance' in payload:
+                current['governance'] = self._sanitize_governance_state(payload.get('governance'))
             current['updated_at'] = now_iso()
             self._store.upsert_task_runtime_meta(
                 task_id=task.task_id,
@@ -1811,6 +1870,23 @@ class TaskLogService:
                 payload=current,
             )
             return self.read_task_runtime_meta(task.task_id) or current
+
+    def update_task_governance(self, task_id: str, governance: dict[str, Any], *, publish_patch: bool = True) -> dict[str, Any]:
+        with self._task_lock(task_id):
+            task = self._require_task(task_id)
+            current = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
+            current['governance'] = self._sanitize_governance_state(governance)
+            current['updated_at'] = now_iso()
+            self._store.upsert_task_runtime_meta(
+                task_id=task.task_id,
+                updated_at=str(current.get('updated_at') or now_iso()),
+                payload=current,
+            )
+            sanitized = self.read_task_runtime_meta(task.task_id) or current
+            if publish_patch:
+                self._publish_task_governance_patch_locked(task=task, governance=dict(sanitized.get('governance') or {}))
+                self._publish_task_live_patch_locked(task=task)
+            return sanitized
 
     def capture_retry_resume_snapshot(self, task_id: str, node_id: str, *, failure_reason: str = '') -> dict[str, Any] | None:
         with self._task_lock(task_id):
@@ -1903,6 +1979,7 @@ class TaskLogService:
         current.setdefault('dispatch_queued', {'execution': 0, 'inspection': 0})
         current.setdefault('summary_fingerprint', '')
         current.setdefault('summary_last_published_at', '')
+        current['governance'] = self._sanitize_governance_state(current.get('governance'))
         current['task_temp_dir'] = self._normalize_task_temp_dir(current.get('task_temp_dir'))
         try:
             current['last_stall_notice_bucket_minutes'] = max(0, int(current.get('last_stall_notice_bucket_minutes') or 0))
@@ -1980,6 +2057,7 @@ class TaskLogService:
             'cancel_requested': bool(task.cancel_requested),
             'last_visible_output_at': str(meta.get('last_visible_output_at') or '').strip(),
             'last_stall_notice_bucket_minutes': max(0, int(meta.get('last_stall_notice_bucket_minutes') or 0)),
+            'governance': self._sanitize_governance_state(meta.get('governance')),
             'frames': frames,
             'active_node_ids': [record.node_id for record in frame_records if bool(record.active)],
             'runnable_node_ids': [record.node_id for record in frame_records if bool(record.runnable)],
@@ -2930,6 +3008,14 @@ class TaskLogService:
         self._buffer_task_live_patch_locked(task=task, payload=payload)
         self._dispatch_live_event_locked(task=task, event_type='task.live.patch', data=payload)
 
+    def _publish_task_governance_patch_locked(self, *, task: TaskRecord, governance: dict[str, Any]) -> None:
+        payload = {
+            'task_id': task.task_id,
+            'governance': self._sanitize_governance_state(governance),
+            'history': list((governance or {}).get('history') or []),
+        }
+        self._dispatch_live_event_locked(task=task, event_type='task.governance.patch', data=payload)
+
     def _publish_task_terminal_locked(self, *, task: TaskRecord) -> None:
         payload = {'task': self._task_summary_payload(task)}
         self._append_task_event(task=task, event_type='task.terminal', data=payload)
@@ -3235,6 +3321,7 @@ class TaskLogService:
             'dispatch_limits': self._sanitize_dispatch_counters(state.get('dispatch_limits')),
             'dispatch_running': self._sanitize_dispatch_counters(state.get('dispatch_running')),
             'dispatch_queued': self._sanitize_dispatch_counters(state.get('dispatch_queued')),
+            'governance': self._sanitize_governance_state(state.get('governance')),
             'frames': [self._public_runtime_frame(item) for item in list(state.get('frames') or []) if isinstance(item, dict)],
         }
 
@@ -3249,6 +3336,7 @@ class TaskLogService:
         state['dispatch_limits'] = cls._sanitize_dispatch_counters(state.get('dispatch_limits'))
         state['dispatch_running'] = cls._sanitize_dispatch_counters(state.get('dispatch_running'))
         state['dispatch_queued'] = cls._sanitize_dispatch_counters(state.get('dispatch_queued'))
+        state['governance'] = cls._sanitize_governance_state(state.get('governance'))
         state['frames'] = [cls._sanitize_runtime_frame(frame) for frame in list(state.get('frames') or []) if isinstance(frame, dict)]
         return state
 

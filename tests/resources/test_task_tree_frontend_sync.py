@@ -2037,11 +2037,11 @@ def test_ensure_task_node_detail_upgrades_summary_cache_to_full_detail() -> None
     assert result["cachedDetailLevel"] == "full"
 
 
-def test_task_detail_html_does_not_render_governance_panel() -> None:
+def test_task_detail_html_renders_governance_panel() -> None:
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
 
-    assert "task-governance-panel" not in html
-    assert "task-tree-floating-governance" not in html
+    assert "task-governance-panel" in html
+    assert "task-tree-floating-governance" in html
 
 
 def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() -> None:

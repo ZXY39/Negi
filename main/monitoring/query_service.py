@@ -220,6 +220,7 @@ class TaskQueryService:
                 **counts,
             },
             'runtime_summary': runtime_summary,
+            'governance': dict((self._log_service.read_task_runtime_meta(task.task_id) or {}).get('governance') or {}),
             'root_node': root_node.model_dump(mode='json') if root_node is not None else None,
             'frontier': frontier,
             'counts': counts,

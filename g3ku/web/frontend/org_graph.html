@@ -451,6 +451,15 @@
 
                 <div class="project-dashboard">
                     <div class="org-tree-panel panel">
+                        <div id="task-governance-panel" class="task-tree-floating-governance" hidden>
+                            <button id="task-governance-toggle" type="button" class="task-governance-toggle">
+                                <span class="task-governance-title">监管</span>
+                                <span id="task-governance-status" class="task-governance-chip">空闲</span>
+                                <span id="task-governance-decision" class="task-governance-chip">无记录</span>
+                                <span id="task-governance-count" class="task-governance-chip">0次</span>
+                            </button>
+                            <div id="task-governance-history" class="task-governance-history" hidden></div>
+                        </div>
                         <div class="task-tree-floating-tools" aria-live="polite">
                             <button id="task-tree-reset-rounds-btn" class="toolbar-btn ghost small task-tree-floating-reset"
                                 type="button" hidden disabled>回到最新树</button>
