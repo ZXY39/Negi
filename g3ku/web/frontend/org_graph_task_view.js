@@ -218,6 +218,42 @@ function normalizeTaskGovernance(value = {}) {
     };
 }
 
+function mergeTaskGovernance(nextValue = {}, previousValue = {}) {
+    const next = normalizeTaskGovernance(nextValue);
+    const previous = normalizeTaskGovernance(previousValue);
+    if (!next.enabled && previous.enabled) return previous;
+    const nextHistory = Array.isArray(next.history) ? next.history : [];
+    const previousHistory = Array.isArray(previous.history) ? previous.history : [];
+    const looksLikeEmptyFallback = !next.frozen
+        && !next.review_inflight
+        && !next.latest_limit_reason
+        && next.hard_limited_depth == null
+        && !next.supervision_disabled_after_limit
+        && nextHistory.length === 0;
+    if (looksLikeEmptyFallback && previousHistory.length) {
+        return {
+            ...next,
+            enabled: previous.enabled,
+            history: previousHistory,
+            latest_limit_reason: previous.latest_limit_reason,
+            hard_limited_depth: previous.hard_limited_depth,
+            supervision_disabled_after_limit: previous.supervision_disabled_after_limit,
+            depth_baseline: Math.max(next.depth_baseline, previous.depth_baseline),
+            node_count_baseline: Math.max(next.node_count_baseline, previous.node_count_baseline),
+        };
+    }
+    if (previousHistory.length > nextHistory.length && !next.review_inflight && !next.frozen) {
+        return {
+            ...next,
+            history: previousHistory,
+            latest_limit_reason: next.latest_limit_reason || previous.latest_limit_reason,
+            hard_limited_depth: next.hard_limited_depth == null ? previous.hard_limited_depth : next.hard_limited_depth,
+            supervision_disabled_after_limit: next.supervision_disabled_after_limit || previous.supervision_disabled_after_limit,
+        };
+    }
+    return next;
+}
+
 function renderTaskGovernancePanel() {
     if (!U.taskGovernancePanel) return;
     const governance = normalizeTaskGovernance(S.taskGovernance || {});
