@@ -44,7 +44,7 @@ class CeoMessageBuilder:
         'cron': ('remind', 'schedule', 'cron', 'timer', 'recurring'),
         'load_skill_context': ('skill', 'workflow', 'procedure', 'steps', 'context', 'details'),
         'load_tool_context': ('tool', 'api', 'parameters', 'usage', 'context', 'details'),
-        'filesystem': ('file', 'path', 'read', 'write', 'edit', 'list', 'open'),
+        'filesystem': ('file', 'path', 'write', 'edit', 'delete', 'patch'),
         'exec': ('shell', 'command', 'bash', 'powershell', 'terminal', 'run'),
         'model_config': ('model', 'provider', 'config', 'token', 'temperature'),
     }

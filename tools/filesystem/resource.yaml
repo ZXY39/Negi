@@ -2,7 +2,7 @@
 kind: tool
 name: filesystem
 display_name: Filesystem
-description: Compatibility wrapper for the legacy multi-action filesystem tool.
+description: Compatibility wrapper for mutation-only filesystem operations.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -48,12 +48,6 @@ parameters:
     action:
       type: string
       enum:
-        - describe
-        - search
-        - open
-        - head
-        - tail
-        - list
         - write
         - edit
         - delete
@@ -62,36 +56,15 @@ parameters:
     path:
       type: string
       description: Absolute target path.
-    query:
-      type: string
-      description: Search query for `action=search`.
-    limit:
-      type: integer
-      description: Max hits for `action=search`.
-    before:
-      type: integer
-      description: Context lines before each file hit for `action=search`.
-    after:
-      type: integer
-      description: Context lines after each file hit for `action=search`.
-    start_line:
-      type: integer
-      description: Start line for `action=open` or line-range `action=edit`.
-    end_line:
-      type: integer
-      description: End line for `action=open` or line-range `action=edit`.
-    around_line:
-      type: integer
-      description: Center line for `action=open`.
-    window:
-      type: integer
-      description: Window size for `action=open` with `around_line`.
-    lines:
-      type: integer
-      description: Line count for `action=head` or `action=tail`.
     content:
       type: string
       description: File content for `action=write`.
+    start_line:
+      type: integer
+      description: Start line for line-range `action=edit`.
+    end_line:
+      type: integer
+      description: End line for line-range `action=edit`.
     old_text:
       type: string
       description: Existing text for text-replace `action=edit` or `action=propose_patch`.
@@ -110,56 +83,8 @@ parameters:
 governance:
   family: filesystem
   display_name: Filesystem
-  description: Describe, search, open, list, write, edit, delete, and patch local files.
+  description: Write, edit, delete, and propose patches for local files.
   actions:
-    - id: describe
-      label: Describe File
-      risk_level: low
-      destructive: false
-      allowed_roles:
-        - ceo
-        - execution
-        - inspection
-    - id: search
-      label: Search Path
-      risk_level: low
-      destructive: false
-      allowed_roles:
-        - ceo
-        - execution
-        - inspection
-    - id: open
-      label: Open File Excerpt
-      risk_level: low
-      destructive: false
-      allowed_roles:
-        - ceo
-        - execution
-        - inspection
-    - id: head
-      label: Open File Head
-      risk_level: low
-      destructive: false
-      allowed_roles:
-        - ceo
-        - execution
-        - inspection
-    - id: tail
-      label: Open File Tail
-      risk_level: low
-      destructive: false
-      allowed_roles:
-        - ceo
-        - execution
-        - inspection
-    - id: list
-      label: List Directory
-      risk_level: low
-      destructive: false
-      allowed_roles:
-        - ceo
-        - execution
-        - inspection
     - id: write
       label: Write File
       risk_level: high

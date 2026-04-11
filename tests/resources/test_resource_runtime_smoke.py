@@ -158,25 +158,13 @@ def test_tool_resource_current_version_text_has_no_replacement_question_marks():
             assert '?' not in value, f'{manifest_path}:{key} contains replacement question marks: {value}'
 
 
-def test_describe_tool_docs_match_file_only_path_mode_contract() -> None:
-    filesystem_manifest = yaml.safe_load(
-        (REPO_ROOT / 'tools' / 'filesystem_describe' / 'resource.yaml').read_text(encoding='utf-8')
-    ) or {}
-    filesystem_toolskill = (
-        REPO_ROOT / 'tools' / 'filesystem_describe' / 'toolskills' / 'SKILL.md'
-    ).read_text(encoding='utf-8')
+def test_content_describe_docs_do_not_reference_removed_filesystem_read_tools() -> None:
     content_manifest = yaml.safe_load(
         (REPO_ROOT / 'tools' / 'content_describe' / 'resource.yaml').read_text(encoding='utf-8')
     ) or {}
     content_toolskill = (
         REPO_ROOT / 'tools' / 'content_describe' / 'toolskills' / 'SKILL.md'
     ).read_text(encoding='utf-8')
-
-    assert 'Describe one file path.' == str(filesystem_manifest.get('description') or '').strip()
-    assert 'absolute file or directory path' not in filesystem_toolskill
-    assert 'directories are not supported' in filesystem_toolskill.lower()
-    assert '`filesystem_list`' in filesystem_toolskill
-
     path_description = (
         (
             ((content_manifest.get('parameters') or {}).get('properties') or {}).get('path') or {}
@@ -185,7 +173,7 @@ def test_describe_tool_docs_match_file_only_path_mode_contract() -> None:
     )
     assert 'directory' not in str(path_description).lower()
     assert 'directories are not supported' in content_toolskill.lower()
-    assert '`filesystem_list`' in content_toolskill
+    assert '`filesystem_list`' not in content_toolskill
 
 
 def _write_demo_external_tool(
@@ -502,23 +490,13 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
     try:
         tool = manager.get_tool('filesystem')
         assert tool is not None
-        assert 'target.txt' in await tool.execute(action='list', path=str(target_file.parent))
-        described = json.loads(await tool.execute(action='describe', path=str(target_file)))
-        assert described['handle']['line_count'] == 1
-        opened = json.loads(await tool.execute(action='open', path=str(target_file), start_line=1, end_line=5))
-        assert opened['excerpt'] == 'before value'
         assert 'Successfully wrote' in await tool.execute(action='write', path=str(written_file), content='hello\n')
-        written = json.loads(await tool.execute(action='head', path=str(written_file), lines=5))
-        assert written['excerpt'] == 'hello'
         assert 'Successfully edited' in await tool.execute(
             action='edit',
             path=str(target_file),
             old_text='before value',
             new_text='after value',
         )
-        searched = json.loads(await tool.execute(action='search', path=str(target_file), query='after'))
-        assert searched['scope_type'] == 'file'
-        assert searched['hits'][0]['line'] == 1
 
         result = json.loads(
             await tool.execute(
@@ -557,10 +535,6 @@ def test_filesystem_split_tools_are_discoverable_and_merge_into_filesystem_famil
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
     for tool_name in (
-        'filesystem_describe',
-        'filesystem_search',
-        'filesystem_open',
-        'filesystem_list',
         'filesystem_write',
         'filesystem_edit',
         'filesystem_delete',
@@ -573,10 +547,6 @@ def test_filesystem_split_tools_are_discoverable_and_merge_into_filesystem_famil
 
     for tool_name in (
         'filesystem',
-        'filesystem_describe',
-        'filesystem_search',
-        'filesystem_open',
-        'filesystem_list',
         'filesystem_write',
         'filesystem_edit',
         'filesystem_delete',
@@ -588,60 +558,18 @@ def test_filesystem_split_tools_are_discoverable_and_merge_into_filesystem_famil
     family = families['filesystem']
     action_map = {action.action_id: action for action in family.actions}
 
-    assert family.primary_executor_name == 'filesystem_describe'
+    assert family.primary_executor_name == 'filesystem_write'
     assert set(family.metadata['sources']) == {
         'filesystem',
-        'filesystem_describe',
-        'filesystem_search',
-        'filesystem_open',
-        'filesystem_list',
         'filesystem_write',
         'filesystem_edit',
         'filesystem_delete',
         'filesystem_propose_patch',
     }
-    assert 'filesystem_describe' in action_map['describe'].executor_names
-    assert 'filesystem_search' in action_map['search'].executor_names
-    assert 'filesystem_open' in action_map['open'].executor_names
-    assert 'filesystem_list' in action_map['list'].executor_names
     assert 'filesystem_write' in action_map['write'].executor_names
     assert 'filesystem_edit' in action_map['edit'].executor_names
     assert 'filesystem_delete' in action_map['delete'].executor_names
     assert 'filesystem_propose_patch' in action_map['propose_patch'].executor_names
-
-
-@pytest.mark.asyncio
-async def test_filesystem_split_tool_executes_with_legacy_filesystem_settings(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    outside_dir = tmp_path / 'outside-dir'
-    inside_dir = workspace / 'allowed-dir'
-    outside_dir.mkdir(parents=True, exist_ok=True)
-    inside_dir.mkdir(parents=True, exist_ok=True)
-    (inside_dir / 'inside.txt').write_text('inside\n', encoding='utf-8')
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem_list', workspace / 'tools' / 'filesystem_list')
-
-    legacy_manifest = workspace / 'tools' / 'filesystem' / 'resource.yaml'
-    legacy_manifest.write_text(
-        legacy_manifest.read_text(encoding='utf-8').replace('restrict_to_workspace: false', 'restrict_to_workspace: true'),
-        encoding='utf-8',
-    )
-
-    manager = ResourceManager(workspace, app_config=_resource_app_config())
-    manager.reload_now(trigger='test-bind')
-    try:
-        tool = manager.get_tool('filesystem_list')
-        assert tool is not None
-
-        listed = await tool.execute(path=str(inside_dir))
-        assert 'inside.txt' in listed
-
-        blocked = await tool.execute(path=str(outside_dir))
-        assert 'outside allowed directory' in blocked
-    finally:
-        manager.close()
 
 
 def test_content_split_tools_are_discoverable_and_merge_into_content_navigation_family(tmp_path: Path):
@@ -732,7 +660,7 @@ async def test_filesystem_tool_rejects_relative_paths(tmp_path: Path):
     try:
         tool = manager.get_tool('filesystem')
         assert tool is not None
-        result = await tool.execute(action='head', path='target.txt', lines=5)
+        result = await tool.execute(action='write', path='target.txt', content='hello\n')
         assert 'relative path is not allowed; provide absolute path' in result
     finally:
         manager.close()
@@ -819,96 +747,11 @@ async def test_filesystem_tool_rejects_artifact_refs_with_content_guidance(tmp_p
     try:
         tool = manager.get_tool('filesystem')
         assert tool is not None
-        result = await tool.execute(action='head', path='artifact:artifact:demo123', lines=5)
+        result = await tool.execute(action='write', path='artifact:artifact:demo123', content='demo')
         assert 'content ref is not a filesystem path' in result
         assert 'use the content tool with ref=artifact:artifact:demo123' in result
     finally:
         manager.close()
-
-
-@pytest.mark.asyncio
-async def test_filesystem_search_overflow_requires_refine(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    target_dir = workspace / 'src'
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target_file = target_dir / 'target.txt'
-    target_file.write_text('\n'.join(['needle'] * 20) + '\n', encoding='utf-8')
-    for index in range(6):
-        (target_dir / f'module_{index}.txt').write_text('needle\n', encoding='utf-8')
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
-
-    manager = ResourceManager(workspace, app_config=_resource_app_config())
-    manager.reload_now(trigger='test-bind')
-    try:
-        tool = manager.get_tool('filesystem')
-        assert tool is not None
-        file_payload = json.loads(await tool.execute(action='search', path=str(target_file), query='needle', limit=5))
-        assert file_payload['ok'] is True
-        assert file_payload['overflow'] is True
-        assert file_payload['requires_refine'] is True
-        assert file_payload['hits'] == []
-        assert file_payload['count'] == 0
-        assert file_payload['overflow_lower_bound'] == 6
-        assert file_payload['scope_type'] == 'file'
-
-        dir_payload = json.loads(await tool.execute(action='search', path=str(target_dir), query='needle', limit=5))
-        assert dir_payload['ok'] is True
-        assert dir_payload['scope_type'] == 'directory'
-        if shutil.which('rg'):
-            assert dir_payload['overflow'] is True
-            assert dir_payload['requires_refine'] is True
-            assert dir_payload['hits'] == []
-            assert dir_payload['count'] == 0
-            assert dir_payload['overflow_lower_bound'] == 6
-            assert dir_payload['backend'] == 'rg'
-        else:
-            assert dir_payload['requires_refine'] is True
-            assert dir_payload['backend'] == 'unavailable'
-    finally:
-        manager.close()
-
-
-@pytest.mark.asyncio
-async def test_filesystem_search_refines_when_directory_backend_is_unavailable(tmp_path: Path, monkeypatch):
-    workspace = tmp_path / 'workspace'
-    target_dir = workspace / 'src'
-    target_dir.mkdir(parents=True, exist_ok=True)
-    for index in range(5):
-        (target_dir / f'module_{index}.txt').write_text('needle\n', encoding='utf-8')
-    tool = FilesystemTool(
-        workspace=workspace,
-        settings=FilesystemToolSettings(
-            search_max_files=2,
-            search_timeout_seconds=10.0,
-        ),
-    )
-    monkeypatch.setattr(shutil, 'which', lambda _name: None)
-
-    payload = json.loads(await tool.execute(action='search', path=str(target_dir), query='needle', limit=10))
-
-    assert payload['ok'] is True
-    assert payload['requires_refine'] is True
-    assert payload['timed_out'] is False
-    assert payload['scope_type'] == 'directory'
-    assert payload['backend'] == 'unavailable'
-    assert 'backend is unavailable' in str(payload['message']).lower()
-
-
-@pytest.mark.asyncio
-async def test_filesystem_search_file_includes_search_diagnostics(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    target_file = workspace / 'target.txt'
-    target_file.parent.mkdir(parents=True, exist_ok=True)
-    target_file.write_text('needle\n', encoding='utf-8')
-    tool = FilesystemTool(workspace=workspace, settings=FilesystemToolSettings())
-    payload = json.loads(await tool.execute(action='search', path=str(target_file), query='needle', limit=5))
-    assert payload['ok'] is True
-    assert payload['backend'] == 'file'
-    assert payload['timed_out'] is False
-    assert int(payload['scanned_files']) == 1
-    assert int(payload['scanned_bytes']) >= len('needle\n'.encode('utf-8'))
 
 
 @pytest.mark.asyncio
@@ -1087,34 +930,6 @@ async def test_filesystem_write_validation_failure_restores_existing_file(tmp_pa
         manager.close()
 
 
-@pytest.mark.asyncio
-async def test_filesystem_search_recurses_directories(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    search_root = workspace / 'search-root'
-    nested = search_root / 'nested'
-    nested.mkdir(parents=True, exist_ok=True)
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
-
-    (search_root / 'alpha.txt').write_text('first hit\n', encoding='utf-8')
-    (nested / 'beta.txt').write_text('second HIT\n', encoding='utf-8')
-    (nested / 'binary.bin').write_bytes(b'\x00\xffhit')
-
-    manager = ResourceManager(workspace, app_config=_resource_app_config())
-    manager.reload_now(trigger='test-bind')
-    try:
-        tool = manager.get_tool('filesystem')
-        assert tool is not None
-        payload = json.loads(await tool.execute(action='search', path=str(search_root), query='hit', limit=10))
-        assert payload['ok'] is True
-        assert payload['scope_type'] == 'directory'
-        assert payload['path'] == str(search_root.resolve())
-        assert payload['count'] == 2
-        assert all(item['path'].endswith('.txt') for item in payload['hits'])
-        assert all('hit' in item['preview'].lower() for item in payload['hits'])
-    finally:
-        manager.close()
 
 
 def test_external_tool_is_discovered_but_not_loaded_as_callable_instance(tmp_path: Path):
@@ -1312,7 +1127,7 @@ async def test_filesystem_tool_auto_refreshes_new_skill_without_full_reload(tmp_
 
 
 @pytest.mark.asyncio
-async def test_exec_tool_auto_refreshes_new_skill_without_full_reload(tmp_path: Path):
+async def test_exec_tool_blocks_skill_file_creation_side_effects(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -1324,11 +1139,6 @@ async def test_exec_tool_auto_refreshes_new_skill_without_full_reload(tmp_path: 
     manager.bind_service_getter(lambda: {'main_task_service': service})
     manager.reload_now(trigger='test-bind')
     manager.start()
-
-    def _fail_reload(self, *, trigger: str = 'manual'):
-        raise AssertionError(f'full reload should not run during targeted refresh: {trigger}')
-
-    manager.reload_now = MethodType(_fail_reload, manager)
 
     try:
         tool = manager.get_tool('exec')
@@ -1360,18 +1170,11 @@ async def test_exec_tool_auto_refreshes_new_skill_without_full_reload(tmp_path: 
             f"(root/'resource.yaml').write_text({manifest!r}, encoding='utf-8');"
             f"(root/'SKILL.md').write_text({body!r}, encoding='utf-8')"
         )
-        payload = json.loads(
-            await tool.execute(
-                command=f'{_python_launcher()} -c "{script}"',
-                __g3ku_runtime={'session_key': 'web:shared'},
-            )
-        )
+        payload = json.loads(await tool.execute(command=f'{_python_launcher()} -c "{script}"', __g3ku_runtime={'session_key': 'web:shared'}))
 
-        assert payload['status'] == 'success'
-        skill = manager.get_skill('exec_skill')
-        assert skill is not None
-        assert skill.available is True
-        assert 'Exec skill guide' in manager.load_skill_body('exec_skill')
+        assert payload['status'] == 'error'
+        assert 'read-only' in str(payload.get('error') or '').lower()
+        assert manager.get_skill('exec_skill') is None
     finally:
         manager.close()
 
@@ -1476,6 +1279,44 @@ async def test_exec_tool_allows_paths_outside_workspace_by_default(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_exec_tool_blocks_mutating_commands_on_windows_and_posix(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'exec', workspace / 'tools' / 'exec')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('exec')
+        assert tool is not None
+
+        blocked_commands = [
+            "Set-Content foo.txt 'x'",
+            "Add-Content foo.txt 'x'",
+            "Remove-Item foo.txt",
+            "New-Item foo.txt -ItemType File",
+            "cmd /c echo hi > foo.txt",
+            "python -c \"open('foo.txt','w').write('x')\"",
+            "touch foo.txt",
+            "rm -f foo.txt",
+            "mv a.txt b.txt",
+            "cp a.txt b.txt",
+            "mkdir out",
+            "echo hi > foo.txt",
+            "node -e \"require('fs').writeFileSync('foo.txt','x')\"",
+            "sed -i 's/a/b/' foo.txt",
+        ]
+
+        for command in blocked_commands:
+            payload = json.loads(await tool.execute(command=command, __g3ku_runtime={'session_key': 'web:shared'}))
+            assert payload['status'] == 'error'
+            assert 'read-only' in (payload.get('error') or '').lower()
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_exec_tool_blocks_paths_outside_workspace_when_restricted(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     outside_dir = tmp_path / 'outside'
@@ -1517,6 +1358,29 @@ async def test_exec_tool_blocks_paths_outside_workspace_when_restricted(tmp_path
         )
         assert blocked_path['status'] == 'error'
         assert 'path outside workspace' in blocked_path['error']
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_tool_rejects_removed_read_actions(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem')
+        assert tool is not None
+        target = workspace / 'temp' / 'target.txt'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('hello\n', encoding='utf-8')
+
+        for action in ('describe', 'search', 'open', 'head', 'tail', 'list'):
+            result = await tool.execute(action=action, path=str(target))
+            assert 'Unsupported filesystem action' in result
     finally:
         manager.close()
 
@@ -2899,7 +2763,7 @@ def test_resource_loader_injects_tool_secrets(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_filesystem_tool_reads_absolute_paths_outside_workspace_by_default(tmp_path: Path):
+async def test_filesystem_tool_blocks_writes_to_system_temp_outside_workspace_defaults(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     outside_file = tmp_path / 'outside.txt'
     outside_file.write_text('allowed\n', encoding='utf-8')
@@ -2912,15 +2776,15 @@ async def test_filesystem_tool_reads_absolute_paths_outside_workspace_by_default
     try:
         tool = manager.get_tool('filesystem')
         assert tool is not None
-        result = json.loads(await tool.execute(action='head', path=str(outside_file), lines=5))
-        assert result['ok'] is True
-        assert result['excerpt'] == 'allowed'
+        result = await tool.execute(action='write', path=str(outside_file), content='updated\n')
+        assert 'system temp directory' in result
+        assert outside_file.read_text(encoding='utf-8') == 'allowed\n'
     finally:
         manager.close()
 
 
 @pytest.mark.asyncio
-async def test_filesystem_tool_blocks_paths_outside_workspace_when_restricted(tmp_path: Path):
+async def test_filesystem_tool_blocks_writes_outside_workspace_when_restricted(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     outside_file = tmp_path / 'outside.txt'
     outside_file.write_text('blocked\n', encoding='utf-8')
@@ -2939,8 +2803,8 @@ async def test_filesystem_tool_blocks_paths_outside_workspace_when_restricted(tm
     try:
         tool = manager.get_tool('filesystem')
         assert tool is not None
-        result = await tool.execute(action='head', path=str(outside_file), lines=5)
-        assert 'outside workspace' in result
+        result = await tool.execute(action='write', path=str(outside_file), content='blocked-again\n')
+        assert 'outside workspace' in result or 'outside allowed directory' in result
     finally:
         manager.close()
 

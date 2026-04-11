@@ -1,7 +1,7 @@
 ﻿schema_version: 1
 kind: tool
 name: exec
-description: Execute shell commands with structured summaries plus content refs. Commands run in the host shell and default to the task-scoped temp directory when the runtime provides `task_temp_dir`, unless an explicit working_dir is provided.
+description: Execute read-only shell commands with structured summaries plus content refs. Commands run in the host shell and default to the task-scoped temp directory when the runtime provides `task_temp_dir`, unless an explicit working_dir is provided.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -32,7 +32,7 @@ parameters:
   properties:
     command:
       type: string
-      description: Shell command to execute. When the node runtime provides `runtime_environment.task_temp_dir`, downloads, scratch files, one-off scripts, caches, and other temporary outputs should default to that task-scoped temp directory unless the task explicitly requires another absolute path.
+      description: Read-only shell command to execute. Use this for local inspection and searching only; any filesystem creation, modification, deletion, rename, move, or patch workflow must use filesystem_write/edit/delete/propose_patch instead.
     working_dir:
       type: string
       description: Optional working directory override. Provide an absolute path when you need a specific directory. If omitted, exec defaults to `runtime_environment.task_temp_dir` when that runtime field is available; otherwise it falls back to the process default cwd. When restrict_to_workspace is enabled, working_dir must stay inside the workspace.

@@ -119,18 +119,6 @@ class FilesystemTool:
         if denied is not None:
             return denied
         try:
-            if operation == 'describe':
-                return self._describe(path)
-            if operation == 'search':
-                return await self._search(path, kwargs.get('query'), kwargs.get('limit'), kwargs.get('before'), kwargs.get('after'))
-            if operation == 'open':
-                return self._open(path, kwargs.get('start_line'), kwargs.get('end_line'), kwargs.get('around_line'), kwargs.get('window'))
-            if operation == 'head':
-                return self._head(path, kwargs.get('lines'))
-            if operation == 'tail':
-                return self._tail(path, kwargs.get('lines'))
-            if operation == 'list':
-                return self._list(path)
             if operation == 'write':
                 return await self._write(path, content, runtime=runtime)
             if operation == 'edit':

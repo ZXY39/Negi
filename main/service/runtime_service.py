@@ -4054,7 +4054,7 @@ class MainRuntimeService:
         if requested_name in family_executors:
             return [requested_name]
         default_family_targets: dict[str, list[str]] = {
-            'filesystem': ['filesystem_list', 'filesystem_open', 'filesystem_search'],
+            'filesystem': ['filesystem_write', 'filesystem_edit', 'filesystem_propose_patch'],
             'content_navigation': ['content_open', 'content_search'],
             'content': ['content_open', 'content_search'],
         }

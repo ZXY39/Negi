@@ -789,14 +789,14 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
             'tool_id': 'filesystem',
             'display_name': 'Filesystem',
             'description': 'Inspect files',
-            'primary_executor_name': 'filesystem_describe',
+            'primary_executor_name': 'filesystem_write',
             'l0': 'Inspect files',
             'l1': 'Inspect files',
             'actions': [
                 {'action_id': 'legacy', 'executor_names': ['filesystem']},
                 {
                     'action_id': 'describe',
-                    'executor_names': ['filesystem_describe', 'filesystem_search', 'filesystem_open'],
+                    'executor_names': ['filesystem_write', 'filesystem_edit', 'filesystem_propose_patch'],
                 },
             ],
         },
@@ -835,13 +835,13 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
         ],
         tools={
             'filesystem': _LargeModelSchemaTool(name='filesystem'),
-            'filesystem_describe': _ModelSchemaRecordingTool(
-                name='filesystem_describe',
-                authoritative_description='filesystem describe authoritative schema',
-                model_description='filesystem describe compact model schema',
+            'filesystem_write': _ModelSchemaRecordingTool(
+                name='filesystem_write',
+                authoritative_description='filesystem write authoritative schema',
+                model_description='filesystem write compact model schema',
             ),
-            'filesystem_search': _LargeModelSchemaTool(name='filesystem_search'),
-            'filesystem_open': _LargeModelSchemaTool(name='filesystem_open'),
+            'filesystem_edit': _LargeModelSchemaTool(name='filesystem_edit'),
+            'filesystem_propose_patch': _LargeModelSchemaTool(name='filesystem_propose_patch'),
             'content': _LargeModelSchemaTool(name='content'),
             'content_describe': _ModelSchemaRecordingTool(
                 name='content_describe',
@@ -883,9 +883,9 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
     ]
     assert 'filesystem' not in emitted_tool_names
     assert 'content' not in emitted_tool_names
-    assert 'filesystem_describe' in emitted_tool_names
-    assert 'filesystem_search' in emitted_tool_names
-    assert 'filesystem_open' in emitted_tool_names
+    assert 'filesystem_write' in emitted_tool_names
+    assert 'filesystem_edit' in emitted_tool_names
+    assert 'filesystem_propose_patch' in emitted_tool_names
     assert 'content_describe' in emitted_tool_names
     assert 'content_search' in emitted_tool_names
     assert 'content_open' in emitted_tool_names
@@ -1413,7 +1413,7 @@ def test_promote_tool_context_hydration_keeps_executor_requests_precise() -> Non
             tool_id='filesystem',
             actions=[
                 SimpleNamespace(
-                    executor_names=['filesystem_describe', 'filesystem_list', 'filesystem_open', 'filesystem_search']
+                    executor_names=['filesystem_write', 'filesystem_edit', 'filesystem_propose_patch']
                 )
             ],
         )
@@ -1423,13 +1423,13 @@ def test_promote_tool_context_hydration_keeps_executor_requests_precise() -> Non
     service._promote_tool_context_hydration(
         task_id='task-hydration-precise',
         node_id='node-hydration-precise',
-        tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': 'filesystem_list'}),
-        raw_result={'ok': True, 'tool_id': 'filesystem_list'},
+        tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': 'filesystem_write'}),
+        raw_result={'ok': True, 'tool_id': 'filesystem_write'},
         runtime_context={'session_key': 'web:shared', 'actor_role': 'execution'},
     )
 
     promoted_frame = log_service.read_runtime_frame('task-hydration-precise', 'node-hydration-precise')
-    assert promoted_frame['hydrated_executor_names'] == ['filesystem_list']
+    assert promoted_frame['hydrated_executor_names'] == ['filesystem_write']
 
 
 def test_promote_tool_context_hydration_expands_family_to_default_read_set() -> None:
@@ -1446,10 +1446,9 @@ def test_promote_tool_context_hydration_expands_family_to_default_read_set() -> 
             actions=[
                 SimpleNamespace(
                     executor_names=[
-                        'filesystem_describe',
-                        'filesystem_list',
-                        'filesystem_open',
-                        'filesystem_search',
+                        'filesystem_write',
+                        'filesystem_edit',
+                        'filesystem_propose_patch',
                         'filesystem_write',
                     ]
                 )
@@ -1468,9 +1467,9 @@ def test_promote_tool_context_hydration_expands_family_to_default_read_set() -> 
 
     promoted_frame = log_service.read_runtime_frame('task-hydration-family', 'node-hydration-family')
     assert promoted_frame['hydrated_executor_names'] == [
-        'filesystem_list',
-        'filesystem_open',
-        'filesystem_search',
+        'filesystem_write',
+        'filesystem_edit',
+        'filesystem_propose_patch',
     ]
 
 
@@ -1484,14 +1483,14 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
         get_node=lambda node_id: SimpleNamespace(node_id=node_id, node_kind='execution'),
     )
     service.list_visible_tool_families = lambda *, actor_role, session_id: [
-        SimpleNamespace(tool_id='filesystem', actions=[SimpleNamespace(executor_names=['filesystem_list'])]),
+        SimpleNamespace(tool_id='filesystem', actions=[SimpleNamespace(executor_names=['filesystem_write'])]),
         SimpleNamespace(tool_id='content_navigation', actions=[SimpleNamespace(executor_names=['content_open'])]),
         SimpleNamespace(tool_id='memory', actions=[SimpleNamespace(executor_names=['memory_search'])]),
         SimpleNamespace(tool_id='web_fetch', actions=[SimpleNamespace(executor_names=['web_fetch'])]),
     ]
     log_service.upsert_frame('task-hydration-lru', {'node_id': 'node-hydration-lru'})
 
-    for tool_id in ['filesystem_list', 'content_open', 'memory_search', 'web_fetch']:
+    for tool_id in ['filesystem_write', 'content_open', 'memory_search', 'web_fetch']:
         service._promote_tool_context_hydration(
             task_id='task-hydration-lru',
             node_id='node-hydration-lru',
@@ -1535,7 +1534,7 @@ def test_promote_tool_context_hydration_uses_successful_result_without_matching_
             ToolCallRequest(
                 id='call-original',
                 name='load_tool_context',
-                arguments={'tool_id': 'filesystem_list'},
+                arguments={'tool_id': 'filesystem_write'},
             )
         ],
         results=[
@@ -1549,11 +1548,11 @@ def test_promote_tool_context_hydration_uses_successful_result_without_matching_
                     'role': 'tool',
                     'tool_call_id': 'call-original|fc_extra_suffix',
                     'name': 'load_tool_context',
-                    'content': json.dumps({'ok': True, 'tool_id': 'filesystem_list'}, ensure_ascii=False),
+                    'content': json.dumps({'ok': True, 'tool_id': 'filesystem_write'}, ensure_ascii=False),
                 },
                 'raw_result': {
                     'ok': True,
-                    'tool_id': 'filesystem_list',
+                    'tool_id': 'filesystem_write',
                 },
             }
         ],
@@ -1568,8 +1567,8 @@ def test_promote_tool_context_hydration_uses_successful_result_without_matching_
     assert len(promoted_calls) == 1
     promoted = promoted_calls[0]
     assert getattr(promoted['tool_call'], 'name') == 'load_tool_context'
-    assert getattr(promoted['tool_call'], 'arguments') == {'tool_id': 'filesystem_list'}
-    assert promoted['raw_result'] == {'ok': True, 'tool_id': 'filesystem_list'}
+    assert getattr(promoted['tool_call'], 'arguments') == {'tool_id': 'filesystem_write'}
+    assert promoted['raw_result'] == {'ok': True, 'tool_id': 'filesystem_write'}
 
 
 @pytest.mark.asyncio
@@ -1589,7 +1588,7 @@ async def test_execute_tool_calls_promotes_tool_context_hydration_immediately() 
 
         async def execute(self, **kwargs):
             _ = kwargs
-            return {'ok': True, 'tool_id': 'filesystem_list'}
+            return {'ok': True, 'tool_id': 'filesystem_write'}
 
     promoted_calls: list[dict[str, object]] = []
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
@@ -1601,7 +1600,7 @@ async def test_execute_tool_calls_promotes_tool_context_hydration_immediately() 
         ToolCallRequest(
             id='call-inline-load-tool-context',
             name='load_tool_context',
-            arguments={'tool_id': 'filesystem_list'},
+            arguments={'tool_id': 'filesystem_write'},
         )
     ]
     tools = {'load_tool_context': _InlineLoadTool()}
@@ -1618,8 +1617,8 @@ async def test_execute_tool_calls_promotes_tool_context_hydration_immediately() 
     assert len(promoted_calls) == 1
     promoted = promoted_calls[0]
     assert getattr(promoted['tool_call'], 'name') == 'load_tool_context'
-    assert getattr(promoted['tool_call'], 'arguments') == {'tool_id': 'filesystem_list'}
-    assert promoted['raw_result']['tool_id'] == 'filesystem_list'
+    assert getattr(promoted['tool_call'], 'arguments') == {'tool_id': 'filesystem_write'}
+    assert promoted['raw_result']['tool_id'] == 'filesystem_write'
 
 
 def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> None:
@@ -1629,10 +1628,10 @@ def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> N
             authoritative_description='filesystem authoritative schema',
             model_description='filesystem compact model schema',
         ),
-        'filesystem_describe': _ModelSchemaRecordingTool(
-            name='filesystem_describe',
-            authoritative_description='filesystem describe authoritative schema',
-            model_description='filesystem describe compact model schema',
+        'filesystem_write': _ModelSchemaRecordingTool(
+            name='filesystem_write',
+            authoritative_description='filesystem write authoritative schema',
+            model_description='filesystem write compact model schema',
         ),
         'content': _ModelSchemaRecordingTool(
             name='content',
@@ -1670,12 +1669,12 @@ def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> N
             'tool_id': 'filesystem',
             'display_name': 'Filesystem',
             'description': 'Inspect files',
-            'primary_executor_name': 'filesystem_describe',
+            'primary_executor_name': 'filesystem_write',
             'l0': 'Inspect files',
             'l1': 'Inspect files',
             'actions': [
                 {'action_id': 'legacy', 'executor_names': ['filesystem']},
-                {'action_id': 'describe', 'executor_names': ['filesystem_describe']},
+                {'action_id': 'write', 'executor_names': ['filesystem_write']},
             ],
         },
         {
@@ -1707,7 +1706,7 @@ def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> N
 
     assert 'filesystem' not in first_selection['tool_names']
     assert 'content' not in first_selection['tool_names']
-    assert 'filesystem_describe' in first_selection['tool_names']
+    assert 'filesystem_write' in first_selection['tool_names']
     assert 'content_describe' in first_selection['tool_names']
 
     log_service.upsert_frame(
@@ -1734,9 +1733,9 @@ def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> N
 
     assert 'filesystem' not in hydrated_selection['tool_names']
     assert 'content' not in hydrated_selection['tool_names']
-    assert 'filesystem_describe' in hydrated_selection['tool_names']
+    assert 'filesystem_write' in hydrated_selection['tool_names']
     assert 'content_describe' in hydrated_selection['tool_names']
-    assert hydrated_selection['hydrated_executor_names'] == ['filesystem_describe', 'content_describe']
+    assert hydrated_selection['hydrated_executor_names'] == ['filesystem_write', 'content_describe']
 
 
 def test_execution_selector_web_research_query_includes_web_fetch_before_memory_search() -> None:

@@ -2,17 +2,13 @@
 
 Legacy compatibility wrapper for the original multi-action filesystem tool.
 
-Prefer the narrow tools for new calls:
-- `filesystem_describe`
-- `filesystem_search`
-- `filesystem_open`
-- `filesystem_list`
+Only use the mutation-oriented filesystem tools for new calls:
 - `filesystem_write`
 - `filesystem_edit`
 - `filesystem_delete`
 - `filesystem_propose_patch`
 
-Use this legacy wrapper only when an older prompt or runtime already expects the single `action` contract, or when `head` / `tail` are specifically needed.
+Use this legacy wrapper only when an older prompt or runtime already expects the single `action` contract for mutation operations.
 
 Rules that still apply:
 - `path` must be absolute.

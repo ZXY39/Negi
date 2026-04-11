@@ -59,7 +59,7 @@ class ExecTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Execute a shell command and return its output. Use with caution."
+        return "Execute a read-only shell command and return its output."
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -81,6 +81,15 @@ class ExecTool(Tool):
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
         runtime = kwargs.pop("__g3ku_runtime", None) or {}
         cwd = self._resolve_cwd(working_dir, runtime=runtime)
+        readonly_error = self._enforce_read_only_command(command)
+        if readonly_error:
+            return self._build_payload(
+                status="error",
+                exit_code=None,
+                stdout_text="",
+                stderr_text=readonly_error,
+                error=readonly_error,
+            )
         policy_error = self._enforce_command_path_policy(command, cwd, runtime=runtime)
         if policy_error:
             return self._build_payload(
@@ -169,6 +178,62 @@ class ExecTool(Tool):
             )
         finally:
             self._notify_resource_change(resource_state, runtime=runtime, trigger="tool:exec")
+
+    def _enforce_read_only_command(self, command: str) -> str | None:
+        normalized = str(command or "").strip()
+        lower = normalized.lower()
+        if not lower:
+            return None
+
+        mutating_patterns = [
+            r"(^|[;&|]\s*)set-content\b",
+            r"(^|[;&|]\s*)add-content\b",
+            r"(^|[;&|]\s*)clear-content\b",
+            r"(^|[;&|]\s*)new-item\b",
+            r"(^|[;&|]\s*)remove-item\b",
+            r"(^|[;&|]\s*)move-item\b",
+            r"(^|[;&|]\s*)copy-item\b",
+            r"(^|[;&|]\s*)rename-item\b",
+            r"(^|[;&|]\s*)touch\b",
+            r"(^|[;&|]\s*)rm\b",
+            r"(^|[;&|]\s*)mv\b",
+            r"(^|[;&|]\s*)cp\b",
+            r"(^|[;&|]\s*)mkdir\b",
+            r"(^|[;&|]\s*)install\b",
+            r"(^|[;&|]\s*)tee\b",
+            r"\bsed\s+-i\b",
+            r"<<\s*['\"]?\w+['\"]?\s*>",
+            r"(^|[^<])>>?",
+            r"\bwritefilesync\b",
+            r"\bappendfilesync\b",
+            r"\bwritefile\b",
+            r"\bappendfile\b",
+            r"\bwrite_text\b",
+            r"\bwrite_bytes\b",
+            r"\bmkdir\(",
+            r"\bmakedirs\(",
+            r"\bunlink\(",
+            r"\bdelete\b",
+            r"\bremove\(",
+            r"open\([^)]*,\s*['\"][wa+]",
+        ]
+        for pattern in mutating_patterns:
+            if re.search(pattern, lower):
+                return self._readonly_error(command)
+        return None
+
+    @staticmethod
+    def _readonly_error(command: str) -> str:
+        text = str(command or "").lower()
+        if any(token in text for token in ("remove-item", " rm", "rm ", "unlink", "delete", " del ", "rmdir", "rm -", "remove(")):
+            tool_name = "filesystem_delete"
+        elif any(token in text for token in ("diff", "patch", "replace", "sed -i")):
+            tool_name = "filesystem_propose_patch"
+        elif any(token in text for token in ("new-item", "set-content", "add-content", "touch", "mkdir", "write_text", "write_bytes", "writefile", "open(", "echo ", "tee", ">")):
+            tool_name = "filesystem_write"
+        else:
+            tool_name = "filesystem_edit"
+        return f"Error: exec is read-only. Use `{tool_name}` for filesystem side effects."
 
     def _enforce_command_path_policy(self, command: str, cwd: str, *, runtime: dict[str, Any] | None = None) -> str | None:
         workspace_root = self._workspace_root()

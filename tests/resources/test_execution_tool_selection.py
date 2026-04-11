@@ -187,7 +187,7 @@ def test_selector_multi_per_family_exposes_multiple_related_executors() -> None:
     assert "content_open" in result.hydrated_tool_names
 
 
-def test_selector_prefers_split_filesystem_and_content_executors() -> None:
+def test_selector_prefers_mutation_only_filesystem_and_content_executors() -> None:
     result = build_execution_tool_selection(
         prompt="inspect project files and read docs",
         goal="inspect project files and read docs",
@@ -197,13 +197,13 @@ def test_selector_prefers_split_filesystem_and_content_executors() -> None:
                 tool_id="filesystem",
                 display_name="filesystem",
                 description="filesystem",
-                primary_executor_name="filesystem_describe",
+                primary_executor_name="filesystem_write",
                 metadata={"l0": "filesystem", "l1": "filesystem"},
                 actions=[
                     SimpleNamespace(action_id="legacy", executor_names=["filesystem"], agent_visible=True),
                     SimpleNamespace(
-                        action_id="describe",
-                        executor_names=["filesystem_describe", "filesystem_search", "filesystem_open"],
+                        action_id="write",
+                        executor_names=["filesystem_write", "filesystem_edit", "filesystem_propose_patch"],
                         agent_visible=True,
                     ),
                 ],
@@ -226,9 +226,9 @@ def test_selector_prefers_split_filesystem_and_content_executors() -> None:
         ],
         visible_tool_names=[
             "filesystem",
-            "filesystem_describe",
-            "filesystem_search",
-            "filesystem_open",
+            "filesystem_write",
+            "filesystem_edit",
+            "filesystem_propose_patch",
             "content",
             "content_describe",
             "content_search",
@@ -246,15 +246,15 @@ def test_selector_prefers_split_filesystem_and_content_executors() -> None:
 
     assert "filesystem" not in result.hydrated_tool_names
     assert "content" not in result.hydrated_tool_names
-    assert "filesystem_describe" in result.hydrated_tool_names
-    assert "filesystem_search" in result.hydrated_tool_names
-    assert "filesystem_open" in result.hydrated_tool_names
+    assert "filesystem_write" in result.hydrated_tool_names
+    assert "filesystem_edit" in result.hydrated_tool_names
+    assert "filesystem_propose_patch" in result.hydrated_tool_names
     assert "content_describe" in result.hydrated_tool_names
     assert "content_search" in result.hydrated_tool_names
     assert "content_open" in result.hydrated_tool_names
 
 
-def test_selector_replay_promotions_prefer_split_over_legacy_monoliths() -> None:
+def test_selector_replay_promotions_prefer_mutation_only_split_over_legacy_monoliths() -> None:
     result = build_execution_tool_selection(
         prompt="inspect project files and read docs",
         goal="inspect project files and read docs",
@@ -264,13 +264,13 @@ def test_selector_replay_promotions_prefer_split_over_legacy_monoliths() -> None
                 tool_id="filesystem",
                 display_name="filesystem",
                 description="filesystem",
-                primary_executor_name="filesystem_describe",
+                primary_executor_name="filesystem_write",
                 metadata={"l0": "filesystem", "l1": "filesystem"},
                 actions=[
                     SimpleNamespace(action_id="legacy", executor_names=["filesystem"], agent_visible=True),
                     SimpleNamespace(
-                        action_id="describe",
-                        executor_names=["filesystem_describe", "filesystem_search", "filesystem_open"],
+                        action_id="write",
+                        executor_names=["filesystem_write", "filesystem_edit", "filesystem_propose_patch"],
                         agent_visible=True,
                     ),
                 ],
@@ -293,9 +293,9 @@ def test_selector_replay_promotions_prefer_split_over_legacy_monoliths() -> None
         ],
         visible_tool_names=[
             "filesystem",
-            "filesystem_describe",
-            "filesystem_search",
-            "filesystem_open",
+            "filesystem_write",
+            "filesystem_edit",
+            "filesystem_propose_patch",
             "content",
             "content_describe",
             "content_search",
@@ -312,9 +312,9 @@ def test_selector_replay_promotions_prefer_split_over_legacy_monoliths() -> None
         promoted_tool_names=["filesystem", "content"],
     )
 
-    assert result.trace["selected_promoted_tool_names"] == ["filesystem_describe", "content_describe"]
+    assert result.trace["selected_promoted_tool_names"] == ["filesystem_write", "content_describe"]
     assert "content_describe" in result.hydrated_tool_names
-    assert "filesystem_search" in result.hydrated_tool_names
+    assert "filesystem_edit" in result.hydrated_tool_names
     assert "content_search" in result.hydrated_tool_names
     assert "filesystem" not in result.hydrated_tool_names
     assert "content" not in result.hydrated_tool_names
@@ -326,11 +326,11 @@ def test_selector_promoted_tools_are_not_skipped_without_budget() -> None:
         goal="inspect project files and read docs",
         core_requirement="inspect project files and read docs",
         visible_tool_families=[
-            _family("filesystem", executors=["filesystem_describe"]),
+            _family("filesystem", executors=["filesystem_write"]),
             _family("content_navigation", executors=["content_describe"]),
         ],
         visible_tool_names=[
-            "filesystem_describe",
+            "filesystem_write",
             "content_describe",
             "submit_next_stage",
             "submit_final_result",
@@ -341,14 +341,14 @@ def test_selector_promoted_tools_are_not_skipped_without_budget() -> None:
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        promoted_tool_names=["filesystem_describe", "content_describe"],
+        promoted_tool_names=["filesystem_write", "content_describe"],
     )
 
     assert result.trace["selected_promoted_tool_names"] == [
-        "filesystem_describe",
+        "filesystem_write",
         "content_describe",
     ]
-    assert "filesystem_describe" in result.hydrated_tool_names
+    assert "filesystem_write" in result.hydrated_tool_names
     assert "content_describe" in result.hydrated_tool_names
 
 
@@ -358,13 +358,13 @@ def test_selector_promoted_tools_do_not_consume_top_k_budget() -> None:
         goal="inspect project files and read docs",
         core_requirement="inspect project files and read docs",
         visible_tool_families=[
-            _family("filesystem", executors=["filesystem_open"]),
+            _family("filesystem", executors=["filesystem_propose_patch"]),
             _family("content_navigation", executors=["content_open"]),
             _family("memory", executors=["memory_search"]),
             _family("web_fetch", executors=["web_fetch"]),
         ],
         visible_tool_names=[
-            "filesystem_open",
+            "filesystem_propose_patch",
             "content_open",
             "memory_search",
             "web_fetch",
@@ -377,11 +377,11 @@ def test_selector_promoted_tools_do_not_consume_top_k_budget() -> None:
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        promoted_tool_names=["filesystem_open", "content_open"],
+        promoted_tool_names=["filesystem_propose_patch", "content_open"],
         top_k=1,
     )
 
-    assert result.trace["selected_promoted_tool_names"] == ["filesystem_open", "content_open"]
-    assert "filesystem_open" in result.hydrated_tool_names
+    assert result.trace["selected_promoted_tool_names"] == ["filesystem_propose_patch", "content_open"]
+    assert "filesystem_propose_patch" in result.hydrated_tool_names
     assert "content_open" in result.hydrated_tool_names
     assert len(result.trace["selected_executor_scores"]) == 1

@@ -8,10 +8,6 @@ READ_ALLOWED_ROLES = ['ceo', 'execution', 'inspection']
 WRITE_ALLOWED_ROLES = ['ceo', 'execution']
 
 TOOL_FAMILY_ALIASES: dict[str, str] = {
-    'filesystem_describe': 'filesystem',
-    'filesystem_search': 'filesystem',
-    'filesystem_open': 'filesystem',
-    'filesystem_list': 'filesystem',
     'filesystem_write': 'filesystem',
     'filesystem_edit': 'filesystem',
     'filesystem_delete': 'filesystem',
@@ -26,14 +22,8 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
     'filesystem': {
         'tool_id': 'filesystem',
         'display_name': 'Filesystem',
-        'description': 'Describe, search, and open workspace files by local excerpt, plus write, edit, delete, and patch actions.',
+        'description': 'Write, edit, delete, and propose patches for workspace files.',
         'actions': [
-            {'id': 'describe', 'label': 'Describe File', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
-            {'id': 'search', 'label': 'Search File', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
-            {'id': 'open', 'label': 'Open File Excerpt', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
-            {'id': 'head', 'label': 'Open File Head', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
-            {'id': 'tail', 'label': 'Open File Tail', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
-            {'id': 'list', 'label': 'List Directory', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES},
             {'id': 'write', 'label': 'Write File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': WRITE_ALLOWED_ROLES},
             {'id': 'edit', 'label': 'Edit File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': WRITE_ALLOWED_ROLES},
             {'id': 'delete', 'label': 'Delete File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': ['ceo']},
