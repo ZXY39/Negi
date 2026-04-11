@@ -350,3 +350,38 @@ def test_selector_promoted_tools_are_not_skipped_without_budget() -> None:
     ]
     assert "filesystem_describe" in result.hydrated_tool_names
     assert "content_describe" in result.hydrated_tool_names
+
+
+def test_selector_promoted_tools_do_not_consume_top_k_budget() -> None:
+    result = build_execution_tool_selection(
+        prompt="inspect project files and read docs",
+        goal="inspect project files and read docs",
+        core_requirement="inspect project files and read docs",
+        visible_tool_families=[
+            _family("filesystem", executors=["filesystem_open"]),
+            _family("content_navigation", executors=["content_open"]),
+            _family("memory", executors=["memory_search"]),
+            _family("web_fetch", executors=["web_fetch"]),
+        ],
+        visible_tool_names=[
+            "filesystem_open",
+            "content_open",
+            "memory_search",
+            "web_fetch",
+            "submit_next_stage",
+            "submit_final_result",
+            "spawn_child_nodes",
+        ],
+        always_callable_tool_names=[
+            "submit_next_stage",
+            "submit_final_result",
+            "spawn_child_nodes",
+        ],
+        promoted_tool_names=["filesystem_open", "content_open"],
+        top_k=1,
+    )
+
+    assert result.trace["selected_promoted_tool_names"] == ["filesystem_open", "content_open"]
+    assert "filesystem_open" in result.hydrated_tool_names
+    assert "content_open" in result.hydrated_tool_names
+    assert len(result.trace["selected_executor_scores"]) == 1

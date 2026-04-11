@@ -4009,6 +4009,90 @@ class MainRuntimeService:
                     executor_names.append(name)
         return executor_names
 
+    @staticmethod
+    def _normalized_hydrated_executor_names(raw_names: Any) -> list[str]:
+        normalized: list[str] = []
+        for raw_name in list(raw_names or []):
+            name = str(raw_name or '').strip()
+            if name and name not in normalized:
+                normalized.append(name)
+        return normalized
+
+    def _hydrated_tool_limit_value(self) -> int:
+        try:
+            value = int(getattr(self, '_hydrated_tool_limit', 8) or 8)
+        except Exception:
+            value = 8
+        return max(1, value)
+
+    def _tool_context_hydration_targets(self, *, requested_tool_id: str, visible_family: Any) -> list[str]:
+        requested_name = str(requested_tool_id or '').strip()
+        if not requested_name:
+            return []
+        family_tool_id = str(getattr(visible_family, 'tool_id', '') or '').strip()
+        family_executors = self._family_executor_names(visible_family)
+        if requested_name in family_executors:
+            return [requested_name]
+        default_family_targets: dict[str, list[str]] = {
+            'filesystem': ['filesystem_list', 'filesystem_open', 'filesystem_search'],
+            'content_navigation': ['content_open', 'content_search'],
+            'content': ['content_open', 'content_search'],
+        }
+        target_names = default_family_targets.get(requested_name) or default_family_targets.get(family_tool_id) or []
+        selected = [name for name in target_names if name in family_executors]
+        if selected:
+            return selected
+        return [requested_name] if requested_name in family_executors else []
+
+    def _apply_hydrated_executor_lru(
+        self,
+        *,
+        frame: dict[str, Any],
+        incoming_executor_names: list[str],
+    ) -> tuple[list[str], list[str]]:
+        existing = self._normalized_hydrated_executor_names(
+            list(frame.get('hydrated_executor_state') or []) or list(frame.get('hydrated_executor_names') or [])
+        )
+        incoming = self._normalized_hydrated_executor_names(incoming_executor_names)
+        if not incoming:
+            return existing, []
+        next_state = [name for name in existing if name not in incoming]
+        next_state.extend(incoming)
+        limit = self._hydrated_tool_limit_value()
+        evicted: list[str] = []
+        if len(next_state) > limit:
+            evicted = list(next_state[:-limit])
+            next_state = next_state[-limit:]
+        return next_state, evicted
+
+    def _tool_context_contract_payload(
+        self,
+        *,
+        actor_role: str,
+        session_id: str,
+        requested_tool_id: str,
+        resolved_tool_id: str,
+        callable_value: Any,
+        available_value: Any,
+    ) -> dict[str, Any]:
+        visible_family = self._visible_tool_family_map(actor_role=actor_role, session_id=session_id).get(
+            str(requested_tool_id or '').strip() or str(resolved_tool_id or '').strip()
+        )
+        hydration_targets = (
+            self._tool_context_hydration_targets(
+                requested_tool_id=str(requested_tool_id or '').strip() or str(resolved_tool_id or '').strip(),
+                visible_family=visible_family,
+            )
+            if visible_family is not None
+            else []
+        )
+        callable_now = bool(callable_value) and bool(available_value)
+        return {
+            'callable_now': callable_now,
+            'will_be_hydrated_next_turn': callable_now and bool(hydration_targets),
+            'hydration_targets': list(hydration_targets),
+        }
+
     def _promote_tool_context_hydration(
         self,
         *,
@@ -4044,7 +4128,10 @@ class MainRuntimeService:
         visible_family = self._visible_tool_family_map(actor_role=actor_role, session_id=session_id).get(requested_tool_id)
         if visible_family is None:
             return
-        promoted_executor_names = self._family_executor_names(visible_family)
+        promoted_executor_names = self._tool_context_hydration_targets(
+            requested_tool_id=requested_tool_id,
+            visible_family=visible_family,
+        )
         if not promoted_executor_names:
             return
         log_service = getattr(self, 'log_service', None)
@@ -4054,15 +4141,13 @@ class MainRuntimeService:
 
         def _mutate(frame: dict[str, Any]) -> dict[str, Any]:
             next_frame = dict(frame or {})
-            existing = [
-                str(item or '').strip()
-                for item in list(next_frame.get('hydrated_executor_names') or [])
-                if str(item or '').strip()
-            ]
-            for name in promoted_executor_names:
-                if name not in existing:
-                    existing.append(name)
-            next_frame['hydrated_executor_names'] = existing
+            hydrated_state, evicted = self._apply_hydrated_executor_lru(
+                frame=next_frame,
+                incoming_executor_names=promoted_executor_names,
+            )
+            next_frame['hydrated_executor_state'] = list(hydrated_state)
+            next_frame['hydrated_executor_names'] = list(hydrated_state)
+            next_frame['hydration_evicted_executor_names'] = list(evicted)
             return next_frame
 
         update_frame(str(task_id or '').strip(), str(node_id or '').strip(), _mutate, publish_snapshot=True)
@@ -4319,6 +4404,14 @@ class MainRuntimeService:
         toolskill = self.get_tool_toolskill(tool_name) or {}
         content = str(toolskill.get('content') or '')
         resolved_tool_id = str(toolskill.get('tool_id') or tool_name)
+        contract_payload = self._tool_context_contract_payload(
+            actor_role=actor_role,
+            session_id=session_id,
+            requested_tool_id=tool_name,
+            resolved_tool_id=resolved_tool_id,
+            callable_value=toolskill.get('callable'),
+            available_value=toolskill.get('available'),
+        )
         return {
             'ok': True,
             'tool_id': resolved_tool_id,
@@ -4334,6 +4427,7 @@ class MainRuntimeService:
             'example_arguments': toolskill.get('example_arguments') or {},
             'warnings': list(toolskill.get('warnings') or []),
             'errors': list(toolskill.get('errors') or []),
+            **contract_payload,
         }
 
     def load_tool_context_v2(
@@ -4364,6 +4458,14 @@ class MainRuntimeService:
         toolskill = self.get_tool_toolskill(tool_name) or {}
         content = str(toolskill.get('content') or '')
         resolved_tool_id = str(toolskill.get('tool_id') or tool_name)
+        contract_payload = self._tool_context_contract_payload(
+            actor_role=actor_role,
+            session_id=session_id,
+            requested_tool_id=tool_name,
+            resolved_tool_id=resolved_tool_id,
+            callable_value=toolskill.get('callable'),
+            available_value=toolskill.get('available'),
+        )
         payload = layered_body_payload(
             body=content,
             title=str(toolskill.get('tool_id') or tool_name),
@@ -4390,6 +4492,7 @@ class MainRuntimeService:
             'example_arguments': toolskill.get('example_arguments') or {},
             'warnings': list(toolskill.get('warnings') or []),
             'errors': list(toolskill.get('errors') or []),
+            **contract_payload,
         }
 
     def list_skill_resources(self) -> list[Any]:

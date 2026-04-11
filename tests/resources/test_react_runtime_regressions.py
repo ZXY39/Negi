@@ -1338,6 +1338,129 @@ def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
     assert next_selection['trace']['promoted_hydrated_executor_names'] == ['filesystem']
 
 
+def test_promote_tool_context_hydration_keeps_executor_requests_precise() -> None:
+    log_service = _FakeLogService()
+    service = object.__new__(MainRuntimeService)
+    service.log_service = log_service
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
+        get_node=lambda node_id: SimpleNamespace(node_id=node_id, node_kind='execution'),
+    )
+    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+        SimpleNamespace(
+            tool_id='filesystem',
+            actions=[
+                SimpleNamespace(
+                    executor_names=['filesystem_describe', 'filesystem_list', 'filesystem_open', 'filesystem_search']
+                )
+            ],
+        )
+    ]
+    log_service.upsert_frame('task-hydration-precise', {'node_id': 'node-hydration-precise'})
+
+    service._promote_tool_context_hydration(
+        task_id='task-hydration-precise',
+        node_id='node-hydration-precise',
+        tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': 'filesystem_list'}),
+        raw_result={'ok': True, 'tool_id': 'filesystem_list'},
+        runtime_context={'session_key': 'web:shared', 'actor_role': 'execution'},
+    )
+
+    promoted_frame = log_service.read_runtime_frame('task-hydration-precise', 'node-hydration-precise')
+    assert promoted_frame['hydrated_executor_names'] == ['filesystem_list']
+
+
+def test_promote_tool_context_hydration_expands_family_to_default_read_set() -> None:
+    log_service = _FakeLogService()
+    service = object.__new__(MainRuntimeService)
+    service.log_service = log_service
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
+        get_node=lambda node_id: SimpleNamespace(node_id=node_id, node_kind='execution'),
+    )
+    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+        SimpleNamespace(
+            tool_id='filesystem',
+            actions=[
+                SimpleNamespace(
+                    executor_names=[
+                        'filesystem_describe',
+                        'filesystem_list',
+                        'filesystem_open',
+                        'filesystem_search',
+                        'filesystem_write',
+                    ]
+                )
+            ],
+        )
+    ]
+    log_service.upsert_frame('task-hydration-family', {'node_id': 'node-hydration-family'})
+
+    service._promote_tool_context_hydration(
+        task_id='task-hydration-family',
+        node_id='node-hydration-family',
+        tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': 'filesystem'}),
+        raw_result={'ok': True, 'tool_id': 'filesystem'},
+        runtime_context={'session_key': 'web:shared', 'actor_role': 'execution'},
+    )
+
+    promoted_frame = log_service.read_runtime_frame('task-hydration-family', 'node-hydration-family')
+    assert promoted_frame['hydrated_executor_names'] == [
+        'filesystem_list',
+        'filesystem_open',
+        'filesystem_search',
+    ]
+
+
+def test_promote_tool_context_hydration_applies_lru_limit() -> None:
+    log_service = _FakeLogService()
+    service = object.__new__(MainRuntimeService)
+    service.log_service = log_service
+    service._hydrated_tool_limit = 3
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
+        get_node=lambda node_id: SimpleNamespace(node_id=node_id, node_kind='execution'),
+    )
+    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='filesystem', actions=[SimpleNamespace(executor_names=['filesystem_list'])]),
+        SimpleNamespace(tool_id='content_navigation', actions=[SimpleNamespace(executor_names=['content_open'])]),
+        SimpleNamespace(tool_id='memory', actions=[SimpleNamespace(executor_names=['memory_search'])]),
+        SimpleNamespace(tool_id='web_fetch', actions=[SimpleNamespace(executor_names=['web_fetch'])]),
+    ]
+    log_service.upsert_frame('task-hydration-lru', {'node_id': 'node-hydration-lru'})
+
+    for tool_id in ['filesystem_list', 'content_open', 'memory_search', 'web_fetch']:
+        service._promote_tool_context_hydration(
+            task_id='task-hydration-lru',
+            node_id='node-hydration-lru',
+            tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': tool_id}),
+            raw_result={'ok': True, 'tool_id': tool_id},
+            runtime_context={'session_key': 'web:shared', 'actor_role': 'execution'},
+        )
+
+    promoted_frame = log_service.read_runtime_frame('task-hydration-lru', 'node-hydration-lru')
+    assert promoted_frame['hydrated_executor_names'] == [
+        'content_open',
+        'memory_search',
+        'web_fetch',
+    ]
+
+    service._promote_tool_context_hydration(
+        task_id='task-hydration-lru',
+        node_id='node-hydration-lru',
+        tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': 'content_open'}),
+        raw_result={'ok': True, 'tool_id': 'content_open'},
+        runtime_context={'session_key': 'web:shared', 'actor_role': 'execution'},
+    )
+
+    promoted_frame = log_service.read_runtime_frame('task-hydration-lru', 'node-hydration-lru')
+    assert promoted_frame['hydrated_executor_names'] == [
+        'memory_search',
+        'web_fetch',
+        'content_open',
+    ]
+
+
 def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> None:
     visible_tools = {
         'filesystem': _ModelSchemaRecordingTool(

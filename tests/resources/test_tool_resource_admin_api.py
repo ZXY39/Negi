@@ -4001,6 +4001,9 @@ async def test_load_tool_context_v2_returns_full_tool_body_by_default(tmp_path: 
         assert 'path' in payload['parameters_schema']['properties']
         assert dict(payload['example_arguments']).get('action')
         assert '## Parameter Contract' in str(payload['parameter_contract_markdown'])
+        assert payload['callable_now'] is True
+        assert payload['will_be_hydrated_next_turn'] is True
+        assert payload['hydration_targets'] == ['content']
     finally:
         await service.close()
         manager.close()
