@@ -8,3 +8,5 @@ Provide:
 - `view`: optional `canonical` or `raw`; prefer `canonical`
 
 Use it to get metadata, line counts, wrapper resolution details, and summary information without pulling the full body into context.
+
+Directories are not supported in path mode. Use `filesystem_list` for directory contents and `filesystem_search` for directory subtree search.

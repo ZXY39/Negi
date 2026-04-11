@@ -158,6 +158,36 @@ def test_tool_resource_current_version_text_has_no_replacement_question_marks():
             assert '?' not in value, f'{manifest_path}:{key} contains replacement question marks: {value}'
 
 
+def test_describe_tool_docs_match_file_only_path_mode_contract() -> None:
+    filesystem_manifest = yaml.safe_load(
+        (REPO_ROOT / 'tools' / 'filesystem_describe' / 'resource.yaml').read_text(encoding='utf-8')
+    ) or {}
+    filesystem_toolskill = (
+        REPO_ROOT / 'tools' / 'filesystem_describe' / 'toolskills' / 'SKILL.md'
+    ).read_text(encoding='utf-8')
+    content_manifest = yaml.safe_load(
+        (REPO_ROOT / 'tools' / 'content_describe' / 'resource.yaml').read_text(encoding='utf-8')
+    ) or {}
+    content_toolskill = (
+        REPO_ROOT / 'tools' / 'content_describe' / 'toolskills' / 'SKILL.md'
+    ).read_text(encoding='utf-8')
+
+    assert 'Describe one file path.' == str(filesystem_manifest.get('description') or '').strip()
+    assert 'absolute file or directory path' not in filesystem_toolskill
+    assert 'directories are not supported' in filesystem_toolskill.lower()
+    assert '`filesystem_list`' in filesystem_toolskill
+
+    path_description = (
+        (
+            ((content_manifest.get('parameters') or {}).get('properties') or {}).get('path') or {}
+        ).get('description')
+        or ''
+    )
+    assert 'directory' not in str(path_description).lower()
+    assert 'directories are not supported' in content_toolskill.lower()
+    assert '`filesystem_list`' in content_toolskill
+
+
 def _write_demo_external_tool(
     root: Path,
     *,

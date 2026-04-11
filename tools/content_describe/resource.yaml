@@ -23,7 +23,7 @@ parameters:
       description: Externalized content ref such as artifact:artifact_xxx.
     path:
       type: string
-      description: Absolute file path for path mode.
+      description: Absolute file path for path mode. Directories are not supported.
     view:
       type: string
       enum:

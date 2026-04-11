@@ -13,6 +13,7 @@
 - 默认所有文件都放在 `runtime_environment.task_temp_dir`。只有为了满足任务要求且只能写到其他目录时，才允许例外；例外时必须显式使用绝对路径，不得隐式落到项目根目录。
 - 如果需要新建脚本、抓取结果、缓存、调试输出或其他中间文件，默认都写到 `runtime_environment.task_temp_dir`。
 - 如果真实目标项目不在当前 `runtime_environment.workspace_root` 内，使用绝对路径直达目标位置，不要先在当前仓库里做大范围兜底搜索。
+- 目录探查优先使用 `filesystem_list`；目录树文本匹配优先使用 `filesystem_search`；单个文件元信息才使用 `filesystem_describe` 或 `content_describe`；不要把目录路径传给 `*_describe`。
 - 只允许使用输入里明确给出的 `visible_skills`；不得把 `load_skill_context` 当成 skill 发现或试探工具。
 - 如果需要 skill 正文，只能对 `visible_skills` 中已经出现的 `skill_id` 调用 `load_skill_context(skill_id="...")`。
 - `visible_skills` 是当前节点唯一允许加载的 skill 白名单；未出现在其中的 skill 一律禁止使用、加载或猜测。

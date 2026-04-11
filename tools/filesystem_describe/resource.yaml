@@ -2,7 +2,7 @@
 kind: tool
 name: filesystem_describe
 display_name: Filesystem Describe
-description: Describe one filesystem path.
+description: Describe one file path.
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:
@@ -20,7 +20,7 @@ parameters:
   properties:
     path:
       type: string
-      description: Absolute path to describe.
+      description: Absolute file path to describe. Directories are not supported.
   required:
     - path
 governance:
