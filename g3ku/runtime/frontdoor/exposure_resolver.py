@@ -6,7 +6,7 @@ from .capability_snapshot import build_capability_snapshot
 
 
 class CeoExposureResolver:
-    _ALWAYS_ALLOWED_INTERNAL_TOOLS = {"wait_tool_execution", "stop_tool_execution"}
+    _ALWAYS_ALLOWED_INTERNAL_TOOLS = {"stop_tool_execution"}
 
     def __init__(self, *, loop) -> None:
         self._loop = loop

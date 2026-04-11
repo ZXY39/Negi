@@ -34,6 +34,11 @@ def _normalized_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _frontdoor_query_rewrite_enabled() -> bool:
+    raw = _normalized_text(os.getenv("G3KU_ENABLE_FRONTDOOR_QUERY_REWRITE"))
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
 def _visible_ids(items: list[Any], *, key: str) -> list[str]:
     ordered: list[str] = []
     seen: set[str] = set()
@@ -512,6 +517,17 @@ async def _rewrite_frontdoor_catalog_queries_sidecar(
             skill_query="",
             tool_query="",
             status="empty",
+            model="",
+            exposure_revision=exposure_revision,
+            cache_key=cache_key,
+        )
+
+    if not _frontdoor_query_rewrite_enabled():
+        return FrontdoorRewriteResult(
+            raw_query=query,
+            skill_query=query,
+            tool_query=query,
+            status="passthrough",
             model="",
             exposure_revision=exposure_revision,
             cache_key=cache_key,

@@ -1650,14 +1650,14 @@ async def test_runtime_agent_session_manual_pause_freezes_heartbeat_and_persists
         if event.type == "state_snapshot"
         and str((event.payload.get("state") or {}).get("status") or "") == "paused"
     )
-    assert pause_ack.payload["manual_pause_waiting_reason"] is True
     assert pause_ack.payload["source"] == "user"
-    assert paused_state.payload["state"]["manual_pause_waiting_reason"] is True
     assert all(event.type != "message_end" for event in events)
-    assert heartbeat.clear_calls == ["web:pause-manual"]
-    assert session.manual_pause_waiting_reason() is True
-    assert session.inflight_turn_snapshot() is None
-    assert web_ceo_sessions.read_inflight_turn_snapshot("web:pause-manual") is None
+    assert heartbeat.clear_calls == []
+    assert session.manual_pause_waiting_reason() is False
+    inflight = session.inflight_turn_snapshot()
+    assert inflight is not None
+    assert inflight["status"] == "paused"
+    assert web_ceo_sessions.read_inflight_turn_snapshot("web:pause-manual") is not None
     paused_snapshot = session.paused_execution_context_snapshot()
     assert paused_snapshot is not None
     assert paused_snapshot["status"] == "paused"
@@ -1668,7 +1668,7 @@ async def test_runtime_agent_session_manual_pause_freezes_heartbeat_and_persists
     assert [message["role"] for message in reloaded.messages] == ["user"]
     assert reloaded.messages[0]["content"] == "Pause and wait"
     normalized_metadata = web_ceo_sessions.normalize_ceo_metadata(reloaded.metadata, session_key="web:pause-manual")
-    assert normalized_metadata["manual_pause_waiting_reason"] is True
+    assert "manual_pause_waiting_reason" not in normalized_metadata
 
 
 @pytest.mark.asyncio
@@ -1848,7 +1848,7 @@ async def test_runtime_agent_session_new_user_turn_clears_persisted_manual_pause
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     persisted.metadata = web_ceo_sessions.normalize_ceo_metadata(
-        {"manual_pause_waiting_reason": True},
+        {},
         session_key=session_id,
     )
     session_manager.save(persisted)
@@ -1874,10 +1874,10 @@ async def test_runtime_agent_session_new_user_turn_clears_persisted_manual_pause
     result = await session.prompt("User resumed the conversation")
 
     assert result.output == "Manual pause state was cleared before this turn."
-    assert heartbeat.replay_calls == [session_id]
+    assert heartbeat.replay_calls == []
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
     normalized_metadata = web_ceo_sessions.normalize_ceo_metadata(reloaded.metadata, session_key=session_id)
-    assert normalized_metadata["manual_pause_waiting_reason"] is False
+    assert "manual_pause_waiting_reason" not in normalized_metadata
 
 
 def test_runtime_agent_session_can_clear_preserved_inflight_snapshot(tmp_path: Path, monkeypatch) -> None:
@@ -3066,6 +3066,92 @@ async def test_ceo_manifest_tool_result_inline_full_stays_inline_even_when_large
     assert len(payload["stdout"]) > 1200
 
 
+@pytest.mark.asyncio
+async def test_ceo_slow_generic_tool_stays_inline_and_never_detaches() -> None:
+    class _SlowExecTool(Tool):
+        @property
+        def name(self) -> str:
+            return "exec"
+
+        @property
+        def description(self) -> str:
+            return "Return a slow but inline CEO tool result."
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {"type": "object", "properties": {}, "required": []}
+
+        async def execute(self, **kwargs: object) -> object:
+            _ = kwargs
+            await asyncio.sleep(0.16)
+            return {"ok": True, "stdout": "done"}
+
+    class _ToolRuntimeStack:
+        def push_runtime_context(self, runtime_context: dict[str, object]) -> None:
+            _ = runtime_context
+            return None
+
+        def pop_runtime_context(self, token: object) -> None:
+            _ = token
+
+        def get(self, name: str) -> None:
+            _ = name
+            return None
+
+    class _HeartbeatTerminalRecorder:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def enqueue_tool_terminal(self, *, session_id: str, payload: dict[str, object]) -> None:
+            self.calls.append((str(session_id or ""), dict(payload)))
+
+    heartbeat = _HeartbeatTerminalRecorder()
+    loop = SimpleNamespace(
+        tools=_ToolRuntimeStack(),
+        resource_manager=None,
+        tool_execution_manager=None,
+        web_session_heartbeat=heartbeat,
+        main_task_service=SimpleNamespace(content_store=None),
+    )
+    support = CeoFrontDoorSupport(loop=loop)
+    progress_events: list[tuple[str, str, dict[str, object] | None]] = []
+
+    async def _on_progress(
+        text: str,
+        *,
+        tool_hint: bool = False,
+        event_kind: str | None = None,
+        event_data: dict[str, object] | None = None,
+    ) -> None:
+        _ = tool_hint
+        progress_events.append((str(event_kind or ""), str(text or ""), dict(event_data or {}) if isinstance(event_data, dict) else None))
+
+    result_text, status, _started_at, _finished_at, elapsed_seconds = await support._execute_tool_call(
+        tool=_SlowExecTool(),
+        tool_name="exec",
+        arguments={},
+        runtime_context={
+            "actor_role": "ceo",
+            "session_key": "web:shared",
+            "tool_watchdog": {
+                "enabled": True,
+                "poll_interval_seconds": 0.05,
+                "handoff_after_seconds": 0.1,
+            },
+        },
+        on_progress=_on_progress,
+        tool_call_id="call-slow-exec-1",
+    )
+
+    assert status == "success"
+    assert json.loads(result_text) == {"ok": True, "stdout": "done"}
+    assert "background_running" not in result_text
+    assert "execution_id" not in result_text
+    assert heartbeat.calls == []
+    assert any(event_kind == "tool_start" for event_kind, _text, _data in progress_events)
+    assert elapsed_seconds is not None and elapsed_seconds >= 0.1
+
+
 def test_stage_trace_name_fallback_does_not_reuse_same_tool_result_across_rounds() -> None:
     session = RuntimeAgentSession(
         SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
@@ -3707,9 +3793,7 @@ def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_
             and str(payload.get("data", {}).get("state", {}).get("status") or "") == "paused",
         )
         pause_ack = next(item for item in seen if item.get("type") == "ceo.control_ack")
-        assert pause_ack["data"]["manual_pause_waiting_reason"] is True
         assert pause_ack["data"]["source"] == "user"
-        assert paused_state["data"]["state"]["manual_pause_waiting_reason"] is True
         assert all(item.get("type") != "ceo.reply.final" for item in seen)
 
     holder.manager = SessionRuntimeManager(agent)
@@ -3728,7 +3812,7 @@ def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_
     persisted = SessionManager(tmp_path).get_or_create(session_id)
     assert [message["role"] for message in persisted.messages] == ["user"]
     assert persisted.messages[0]["content"] == "Pause and restore me"
-    assert agent.web_session_heartbeat.clear_calls == [session_id]
+    assert agent.web_session_heartbeat.clear_calls == []
 
 
 def test_ceo_websocket_does_not_restore_terminal_error_inflight_snapshot_from_disk(tmp_path: Path, monkeypatch) -> None:
@@ -3981,7 +4065,7 @@ async def test_web_session_heartbeat_delays_background_tool_prompt(tmp_path: Pat
     assert isinstance(prompt, UserInputMessage)
     assert "tool-exec:1" in str(prompt.content)
     assert "already been refreshed" in str(prompt.content)
-    assert "Do not call wait_tool_execution" in str(prompt.content)
+    assert "Do not start a new tool chain" in str(prompt.content)
     assert "任务终结结果意味着任务已达到最终状态" in str(prompt.content)
     assert manager.calls == [("tool-exec:1", 0.1)]
     published_types = [envelope["type"] for _session_id, envelope in task_service.registry.published]
@@ -3993,12 +4077,12 @@ async def test_web_session_heartbeat_delays_background_tool_prompt(tmp_path: Pat
     assert manager.calls[:2] == [("tool-exec:1", 0.1), ("tool-exec:1", 0.1)]
 
 
-def test_web_session_heartbeat_skips_enqueues_while_waiting_for_manual_pause_reason(tmp_path: Path) -> None:
+def test_web_session_heartbeat_accepts_enqueues_without_manual_pause_reason_gate(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-manual-pause"
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     persisted.metadata = web_ceo_sessions.normalize_ceo_metadata(
-        {"manual_pause_waiting_reason": True},
+        {},
         session_key=session_id,
     )
     session_manager.save(persisted)
@@ -4044,9 +4128,9 @@ def test_web_session_heartbeat_skips_enqueues_while_waiting_for_manual_pause_rea
         },
     )
 
-    assert accepted_terminal is False
+    assert accepted_terminal is True
     assert accepted_stall is False
-    assert service._events.peek(session_id) == []
+    assert len(service._events.peek(session_id)) == 2
 
 
 def test_web_session_heartbeat_replays_pending_terminal_outbox_and_records_enqueue_result(tmp_path: Path) -> None:
@@ -4153,6 +4237,57 @@ async def test_web_session_heartbeat_runs_immediately_when_background_tool_turns
     assert "reached a terminal state" in str(prompt.content)
     assert "still running" not in str(prompt.content)
     assert service._events.peek(session_id) == []
+
+
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_tool_only_terminal_does_not_call_reply_notifier(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-tool-terminal-no-notify"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(output="tool terminal internal note")
+    task_service = _TaskService()
+    notified: list[tuple[str, str]] = []
+
+    async def _notify(current_session_id: str, text: str) -> None:
+        notified.append((current_session_id, text))
+
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+        reply_notifier=_notify,
+    )
+    service.enqueue_tool_background(
+        session_id=session_id,
+        payload={
+            "status": "background_running",
+            "tool_name": "skill-installer",
+            "execution_id": "tool-exec:no-notify",
+            "elapsed_seconds": 30.0,
+            "recommended_wait_seconds": 600.0,
+            "runtime_snapshot": {"summary_text": "still fetching remote repository"},
+        },
+    )
+    service.enqueue_tool_terminal(
+        session_id=session_id,
+        payload={
+            "status": "completed",
+            "tool_name": "skill-installer",
+            "execution_id": "tool-exec:no-notify",
+            "message": "skill installation finished",
+            "final_result": "installed",
+        },
+    )
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    assert notified == []
+    assert [envelope["type"] for _session, envelope in task_service.registry.published] == ["ceo.turn.discard"]
 
 
 @pytest.mark.asyncio
@@ -4965,7 +5100,6 @@ def test_context_assembly_always_keeps_tool_execution_control_tools_visible() ->
             "create_async_task",
             "skill-installer",
             "stop_tool_execution",
-            "wait_tool_execution",
         ],
         visible_families=[],
         core_tools={"create_async_task"},
@@ -4973,6 +5107,6 @@ def test_context_assembly_always_keeps_tool_execution_control_tools_visible() ->
     )
 
     assert "stop_tool_execution" in selected
-    assert "wait_tool_execution" in selected
+    assert "wait_tool_execution" not in selected
     assert "create_async_task" in selected
-    assert trace["reserved"] == ["stop_tool_execution", "wait_tool_execution"]
+    assert trace["reserved"] == ["stop_tool_execution"]

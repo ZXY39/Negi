@@ -1340,13 +1340,13 @@ function handleTaskEvent(payload) {
             if (typeof scheduleRenderedTreeNodeStatusRefresh === "function") scheduleRenderedTreeNodeStatusRefresh();
         }
         if (runtimeSummary?.governance) {
-            S.taskGovernance = normalizeTaskGovernance(runtimeSummary.governance);
+            S.taskGovernance = mergeTaskGovernance(runtimeSummary.governance, S.taskGovernance || {});
             renderTaskGovernancePanel();
         }
         return;
     }
     if (payload.type === "task.governance.patch") {
-        S.taskGovernance = normalizeTaskGovernance(payload.data?.governance || {});
+        S.taskGovernance = mergeTaskGovernance(payload.data?.governance || {}, S.taskGovernance || {});
         renderTaskGovernancePanel();
         return;
     }

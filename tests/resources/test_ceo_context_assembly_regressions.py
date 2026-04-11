@@ -267,6 +267,7 @@ async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_ava
         }
 
     monkeypatch.setattr(selection_module, "_invoke_frontdoor_catalog_rewrite_model", _invoke_model_rewrite)
+    monkeypatch.setattr(selection_module, "_frontdoor_query_rewrite_enabled", lambda: True)
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
 
     result = await builder.build_for_ceo(
@@ -464,7 +465,6 @@ async def test_message_builder_keeps_control_tools_visible_in_tool_selection() -
             "create_async_task",
             "skill-installer",
             "stop_tool_execution",
-            "wait_tool_execution",
         ],
         visible_families=[],
         core_tools={"create_async_task"},
@@ -472,8 +472,8 @@ async def test_message_builder_keeps_control_tools_visible_in_tool_selection() -
     )
 
     assert "stop_tool_execution" in selected
-    assert "wait_tool_execution" in selected
-    assert trace["reserved"] == ["stop_tool_execution", "wait_tool_execution"]
+    assert "wait_tool_execution" not in selected
+    assert trace["reserved"] == ["stop_tool_execution"]
 
 
 @pytest.mark.asyncio
@@ -1166,6 +1166,42 @@ async def test_message_builder_collects_retrieved_context_separately_from_histor
         {"role": "assistant", "content": "prior answer"},
         {"role": "user", "content": "remembered preference"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_message_builder_trace_includes_frontdoor_context_span_timings() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="durable preference")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="remembered preference",
+        exposure={
+            "skills": [_skill("focused-skill", "Primary workflow")],
+            "tool_families": [_family("agent_browser", "Browser automation")],
+            "tool_names": ["filesystem", "agent_browser"],
+        },
+        persisted_session=None,
+        checkpoint_messages=[
+            {"role": "user", "content": "prior user"},
+            {"role": "assistant", "content": "prior answer"},
+        ],
+        user_content="remembered preference",
+    )
+
+    spans = dict(result.trace.get("frontdoor_spans_ms") or {})
+
+    assert set(spans) == {
+        "collect_context_sources",
+        "semantic_catalog_rankings",
+        "retrieve_context_bundle",
+        "resolve_history_injection",
+        "inject_turn_context",
+    }
+    for value in spans.values():
+        assert isinstance(value, (int, float))
+        assert float(value) >= 0.0
 
 @pytest.mark.asyncio
 async def test_message_builder_task_ledger_preserves_continuity_when_history_visibility_filters_internal_status_turns() -> None:

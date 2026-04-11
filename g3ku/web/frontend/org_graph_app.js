@@ -2603,7 +2603,6 @@ function handleCeoControlAck(payload = {}) {
     const action = String(payload?.action || "").trim().toLowerCase();
     if (action !== "pause") return;
     const source = String(payload?.source || "").trim().toLowerCase();
-    const manualPauseWaitingReason = !!payload?.manual_pause_waiting_reason;
     S.ceoPauseBusy = false;
     if (payload?.accepted === false) {
         syncCeoPrimaryButton();
@@ -2612,32 +2611,6 @@ function handleCeoControlAck(payload = {}) {
     }
     S.ceoTurnActive = false;
     if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
-    if (manualPauseWaitingReason) {
-        patchCeoSessionSnapshotCache(activeSessionId(), (entry) => {
-            const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
-            const messages = trimCeoSessionSnapshotMessages(entry?.messages);
-            const normalizedSource = source ? normalizeCeoTurnSource(source) : "";
-            const inflightSource = String(inflightTurn?.source || "").trim().toLowerCase();
-            const inflightMatchesSource = !normalizedSource
-                || !inflightTurn
-                || !inflightSource
-                || normalizeCeoTurnSource(inflightSource) === normalizedSource;
-            return {
-                ...(entry || {}),
-                messages,
-                inflight_turn: inflightMatchesSource
-                    ? {
-                        ...inflightTurn,
-                        status: "paused",
-                    }
-                    : inflightTurn,
-            };
-        });
-        finalizePausedCeoTurn("已暂停", { source });
-        syncCeoSessionActions();
-        syncCeoPrimaryButton();
-        return;
-    }
     finalizePausedCeoTurn("已暂停", { source });
     syncCeoSessionActions();
     syncCeoPrimaryButton();

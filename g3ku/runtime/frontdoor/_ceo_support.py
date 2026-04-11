@@ -58,7 +58,7 @@ class _DirectProviderChatBackend:
 
 
 class CeoFrontDoorSupport:
-    _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
+    _CONTROL_TOOL_NAMES = {"stop_tool_execution"}
 
     def __init__(self, *, loop) -> None:
         self._loop = loop
@@ -560,14 +560,14 @@ class CeoFrontDoorSupport:
 
         token = self._loop.tools.push_runtime_context(per_call_runtime)
         try:
-            if actor_role_allows_watchdog(per_call_runtime):
+            if actor_role_allows_watchdog(per_call_runtime) and str(tool_name or "").strip() != "continue_task":
                 outcome = await run_tool_with_watchdog(
                     _invoke(),
                     tool_name=tool_name,
                     arguments=normalized_arguments,
                     runtime_context=per_call_runtime,
                     snapshot_supplier=runtime_context.get("tool_snapshot_supplier"),
-                    manager=getattr(self._loop, "tool_execution_manager", None),
+                    manager=None,
                     on_poll=(
                         (lambda poll: self._emit_watchdog_progress(on_progress=on_progress, tool_name=tool_name, poll=poll))
                         if on_progress

@@ -903,7 +903,7 @@ textarea {
 }
 
 .task-tree-floating-governance.is-expanded {
-    bottom: 12px;
+    max-height: calc(50% - 12px);
     width: min(420px, calc(100% - 24px));
 }
 
@@ -949,7 +949,7 @@ textarea {
 
 .task-governance-history.is-expanded {
     flex: 1 1 auto;
-    max-height: none;
+    max-height: calc(50vh - 96px);
     min-height: 0;
 }
 

@@ -2352,7 +2352,10 @@ function applyTaskPayload(payload) {
     const recentModelCalls = Array.isArray(payload.recent_model_calls) ? payload.recent_model_calls : [];
     S.currentTask = payload.task;
     S.taskSummary = payload.summary || null;
-    S.taskGovernance = normalizeTaskGovernance(payload.governance || payload.runtime_summary?.governance || {});
+    S.taskGovernance = mergeTaskGovernance(
+        payload.governance || payload.runtime_summary?.governance || {},
+        S.taskGovernance || {},
+    );
     if (previousTaskId !== nextTaskId) S.taskGovernanceExpanded = false;
     S.rootNode = rootNode;
     S.frontier = frontier;

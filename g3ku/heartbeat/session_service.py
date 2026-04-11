@@ -119,9 +119,6 @@ class WebSessionHeartbeatService:
         if not session_id or not task_id or status not in {"success", "failed"}:
             self._set_task_terminal_rejection_reason(dedupe_key, "invalid_payload")
             return False
-        if self._session_manual_pause_waiting_reason(session_id):
-            self._set_task_terminal_rejection_reason(dedupe_key, "manual_pause_waiting_reason")
-            return False
         event = self._events.enqueue(
             session_id=session_id,
             source="main_runtime",
@@ -148,9 +145,6 @@ class WebSessionHeartbeatService:
             or f"task-stall:{task_id}:{bucket_minutes}:{normalized_payload.get('last_visible_output_at') or ''}"
         ).strip()
         if not session_id or not task_id or bucket_minutes <= 0:
-            return False
-        if self._session_manual_pause_waiting_reason(session_id):
-            self._ack_task_stall_dedupe_key(dedupe_key)
             return False
         service = self._main_task_service
         classify_reason = getattr(service, "classify_task_stall_reason", None) if service is not None else None
@@ -182,8 +176,6 @@ class WebSessionHeartbeatService:
         raw_payload = dict(payload or {})
         execution_id = str(raw_payload.get("execution_id") or "").strip()
         if not key or not execution_id:
-            return
-        if self._session_manual_pause_waiting_reason(key):
             return
         tool_name = str(raw_payload.get("tool_name") or "tool").strip() or "tool"
         delay_s = self._tool_background_delay_seconds(raw_payload)
@@ -219,8 +211,6 @@ class WebSessionHeartbeatService:
         raw_payload = dict(payload or {})
         execution_id = str(raw_payload.get("execution_id") or "").strip()
         if not key or not execution_id:
-            return
-        if self._session_manual_pause_waiting_reason(key):
             return
         tool_name = str(raw_payload.get("tool_name") or "tool").strip() or "tool"
         status = str(raw_payload.get("status") or "completed").strip().lower() or "completed"
@@ -514,31 +504,8 @@ class WebSessionHeartbeatService:
         runtime_session: Any | None = None,
         persisted_session: Any | None = None,
     ) -> bool:
-        key = str(session_id or "").strip()
-        if not key or not self._session_exists(key):
-            return False
-        current_runtime_session = runtime_session
-        if current_runtime_session is None and self._runtime_manager is not None and hasattr(self._runtime_manager, "get"):
-            try:
-                current_runtime_session = self._runtime_manager.get(key)
-            except Exception:
-                current_runtime_session = None
-        if current_runtime_session is not None:
-            state = getattr(current_runtime_session, "state", None)
-            if bool(getattr(state, "manual_pause_waiting_reason", False)):
-                return True
-            getter = getattr(current_runtime_session, "manual_pause_waiting_reason", None)
-            if callable(getter):
-                try:
-                    if bool(getter()):
-                        return True
-                except Exception:
-                    logger.debug("manual pause runtime check skipped for {}", key)
-        current_persisted_session = persisted_session
-        if current_persisted_session is None:
-            current_persisted_session = self._session_manager.get_or_create(key)
-        metadata = normalize_ceo_metadata(getattr(current_persisted_session, "metadata", None), session_key=key)
-        return bool(metadata.get("manual_pause_waiting_reason"))
+        _ = session_id, runtime_session, persisted_session
+        return False
 
     def _session_exists(self, session_id: str) -> bool:
         get_path = getattr(self._session_manager, "get_path", None)
@@ -561,7 +528,7 @@ class WebSessionHeartbeatService:
             lines.extend(
                 [
                     "For tool_background events, the payload below has already been refreshed just now.",
-                    "Do not call wait_tool_execution in this heartbeat turn.",
+                    "Do not start a new tool chain in this heartbeat turn.",
                     "Only call stop_tool_execution if you are certain the background execution should be terminated.",
                     f"If the tool is still running and no user-visible update is needed, reply with exactly {HEARTBEAT_OK}.",
                 ]
@@ -1082,6 +1049,19 @@ class WebSessionHeartbeatService:
 
         output = str(getattr(result, "output", "") or "").strip()
         task_terminal_events = self._task_terminal_events(events)
+        event_reasons = {str(event.reason or "").strip().lower() for event in events}
+        tool_only_events = bool(event_reasons) and event_reasons.issubset({"tool_background", "tool_terminal"})
+        if tool_only_events:
+            for event in events:
+                if str(event.reason or "").strip().lower() != "tool_terminal":
+                    continue
+                execution_id = str((event.payload or {}).get("execution_id") or "").strip()
+                clear_blocking = getattr(session, "clear_blocking_tool_execution", None)
+                if execution_id and callable(clear_blocking):
+                    try:
+                        clear_blocking(execution_id)
+                    except Exception:
+                        logger.debug("blocking tool execution clear skipped for {}", execution_id)
         if (not output or output == HEARTBEAT_OK) and task_terminal_events:
             output = self._build_task_terminal_fallback_reply(task_terminal_events)
 
@@ -1092,6 +1072,14 @@ class WebSessionHeartbeatService:
             self._ack_task_stall_events(popped)
             self.clear_session(key)
             return None
+        if tool_only_events:
+            event_ids = {event.event_id for event in events}
+            popped = self._events.pop_many(key, event_ids=event_ids)
+            self._requeue_running_background_events(key, events)
+            self._ack_task_stall_events(popped)
+            next_delay = self._events.next_delay(key)
+            self._publish_ceo(key, "ceo.turn.discard", {"source": "heartbeat"})
+            return next_delay
         if not output or output == HEARTBEAT_OK:
             event_ids = {event.event_id for event in events}
             popped = self._events.pop_many(key, event_ids=event_ids)

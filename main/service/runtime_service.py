@@ -1322,6 +1322,8 @@ class MainRuntimeService:
                 'message': 'task_already_recreated',
             }
         if (
+            normalized_mode == CONTINUATION_MODE_RETRY_IN_PLACE
+            and
             continuation['continuation_state'] == CONTINUATION_STATE_RETRIED_IN_PLACE
             and str(task.status or '').strip().lower() != 'failed'
         ):
@@ -1356,7 +1358,25 @@ class MainRuntimeService:
         )
 
         latest = self.get_task(task.task_id) or task
-        if str(latest.status or '').strip().lower() == 'in_progress':
+        latest_status = str(latest.status or '').strip().lower()
+        if normalized_mode == CONTINUATION_MODE_RECREATE and latest_status == 'in_progress':
+            if bool(latest.is_paused) or bool(latest.pause_requested) or bool(latest.cancel_requested):
+                self._update_task_continuation_metadata(
+                    task.task_id,
+                    continuation_state=CONTINUATION_STATE_TAKEOVER_PENDING,
+                )
+            else:
+                self._update_task_continuation_metadata(
+                    task.task_id,
+                    continuation_state=CONTINUATION_STATE_TERMINALIZING,
+                )
+                await self.cancel_task(task.task_id)
+                latest = self.get_task(task.task_id) or latest
+                self._update_task_continuation_metadata(
+                    task.task_id,
+                    continuation_state=CONTINUATION_STATE_TAKEOVER_PENDING,
+                )
+        elif latest_status == 'in_progress':
             self._update_task_continuation_metadata(task.task_id, continuation_state=CONTINUATION_STATE_TERMINALIZING)
             await self.cancel_task(task.task_id)
             latest = await self._wait_for_task_terminal(task.task_id)
@@ -1367,7 +1387,7 @@ class MainRuntimeService:
                 'message': 'task_not_found',
                 'target_task_id': task.task_id,
             }
-        if str(latest.status or '').strip().lower() == 'in_progress':
+        if normalized_mode != CONTINUATION_MODE_RECREATE and str(latest.status or '').strip().lower() == 'in_progress':
             return {
                 'status': 'blocked',
                 'mode': normalized_mode,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -47,7 +48,7 @@ class CeoMessageBuilder:
         'exec': ('shell', 'command', 'bash', 'powershell', 'terminal', 'run'),
         'model_config': ('model', 'provider', 'config', 'token', 'temperature'),
     }
-    RESERVED_INTERNAL_TOOLS: tuple[str, ...] = ("wait_tool_execution", "stop_tool_execution")
+    RESERVED_INTERNAL_TOOLS: tuple[str, ...] = ("stop_tool_execution",)
 
     def __init__(self, *, loop, prompt_builder) -> None:
         self._loop = loop
@@ -204,6 +205,10 @@ class CeoMessageBuilder:
             else:
                 lines.append(f'- `{skill_id}` ({label})')
         return '\n'.join(lines)
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> float:
+        return round(max(0.0, (time.perf_counter() - float(started_at))) * 1000.0, 3)
 
     @staticmethod
     def _content_text(value: Any) -> str:
@@ -681,6 +686,10 @@ class CeoMessageBuilder:
         exposure: dict[str, Any],
         user_content: Any | None,
     ) -> dict[str, Any]:
+        semantic_started_at = 0.0
+        semantic_elapsed_ms = 0.0
+        retrieval_started_at = 0.0
+        retrieval_elapsed_ms = 0.0
         main_service = getattr(self._loop, 'main_task_service', None)
         memory_manager = getattr(self._loop, 'memory_manager', None)
         assembly_cfg = getattr(getattr(self._loop, '_memory_runtime_settings', None), 'assembly', None)
@@ -702,6 +711,7 @@ class CeoMessageBuilder:
         visible_skills = list(exposure.get('skills') or [])
         visible_families = list(exposure.get('tool_families') or [])
         capability_snapshot = self._capability_snapshot(exposure)
+        semantic_started_at = time.perf_counter()
         semantic_frontdoor = await semantic_catalog_rankings(
             loop=self._loop,
             memory_manager=memory_manager,
@@ -711,6 +721,7 @@ class CeoMessageBuilder:
             skill_limit=max(inventory_top_k * 4, len(visible_skills), inventory_top_k, 8),
             tool_limit=max(extension_top_k * 4, len(visible_families), extension_top_k, 8),
         )
+        semantic_elapsed_ms = self._elapsed_ms(semantic_started_at)
         semantic_trace = {
             'mode': str(semantic_frontdoor.get('mode') or '').strip(),
             'available': bool(semantic_frontdoor.get('available', False)),
@@ -815,6 +826,7 @@ class CeoMessageBuilder:
         chat_id = str(getattr(session, '_memory_chat_id', getattr(session, '_chat_id', session_key)) or session_key)
         retrieved_bundle = RetrievedContextBundle(query=query_text)
         if memory_manager is not None and query_text:
+            retrieval_started_at = time.perf_counter()
             try:
                 retrieved_bundle = await memory_manager.retrieve_context_bundle(
                     query=query_text,
@@ -829,6 +841,7 @@ class CeoMessageBuilder:
                 )
             except Exception:
                 retrieved_bundle = RetrievedContextBundle(query=query_text)
+            retrieval_elapsed_ms = self._elapsed_ms(retrieval_started_at)
 
         retrieved_bundle, same_session_turn_memory_filtered_count = self._filter_same_session_turn_memory_records(
             retrieved_bundle,
@@ -863,6 +876,10 @@ class CeoMessageBuilder:
             'system_prompt': system_prompt,
             'same_session_turn_memory_filtered_count': same_session_turn_memory_filtered_count,
             'user_content': user_content if user_content is not None else query_text,
+            'span_timings_ms': {
+                'semantic_catalog_rankings': semantic_elapsed_ms,
+                'retrieve_context_bundle': retrieval_elapsed_ms,
+            },
         }
 
     def _resolve_history_injection(
@@ -947,18 +964,22 @@ class CeoMessageBuilder:
         user_content: Any | None = None,
         user_metadata: dict[str, Any] | None = None,
     ) -> ContextAssemblyResult:
+        collect_started_at = time.perf_counter()
         context_sources = await self._collect_turn_context_sources(
             session=session,
             query_text=query_text,
             exposure=exposure,
             user_content=user_content,
         )
+        collect_elapsed_ms = self._elapsed_ms(collect_started_at)
+        history_started_at = time.perf_counter()
         history_state = self._resolve_history_injection(
             persisted_session=persisted_session,
             checkpoint_messages=checkpoint_messages,
             query_text=query_text,
             user_metadata=user_metadata,
         )
+        history_elapsed_ms = self._elapsed_ms(history_started_at)
         task_ledger_state = self._task_ledger_state(persisted_session)
         task_ledger_text = build_task_ledger_summary(task_ledger_state)
         turn_overlay_parts = list(context_sources['turn_overlay_parts'])
@@ -967,6 +988,7 @@ class CeoMessageBuilder:
             if str(context_sources['retrieved_markdown'] or '').strip():
                 insert_index = max(0, insert_index - 1)
             turn_overlay_parts.insert(insert_index, task_ledger_text)
+        inject_started_at = time.perf_counter()
         model_messages, stable_messages, dynamic_appendix_messages, turn_overlay_text = self._inject_turn_context(
             system_prompt=str(context_sources['system_prompt'] or ''),
             history_messages=list(history_state['history_messages']),
@@ -975,6 +997,14 @@ class CeoMessageBuilder:
             turn_overlay_parts=turn_overlay_parts,
             current_user_in_history=bool(history_state['current_user_in_history']),
         )
+        inject_elapsed_ms = self._elapsed_ms(inject_started_at)
+        frontdoor_spans_ms = {
+            'collect_context_sources': collect_elapsed_ms,
+            'semantic_catalog_rankings': float((context_sources.get('span_timings_ms') or {}).get('semantic_catalog_rankings', 0.0) or 0.0),
+            'retrieve_context_bundle': float((context_sources.get('span_timings_ms') or {}).get('retrieve_context_bundle', 0.0) or 0.0),
+            'resolve_history_injection': history_elapsed_ms,
+            'inject_turn_context': inject_elapsed_ms,
+        }
 
         trace = {
             'selected_skills': list(context_sources['skill_trace']),
@@ -1034,6 +1064,7 @@ class CeoMessageBuilder:
                     context_sources['retrieved_markdown'] and not context_sources['split_prompt_builder']
                 ),
             },
+            'frontdoor_spans_ms': frontdoor_spans_ms,
         }
         return ContextAssemblyResult(
             model_messages=model_messages,

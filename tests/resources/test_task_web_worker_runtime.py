@@ -345,7 +345,7 @@ def test_internal_task_terminal_callback_persists_pending_outbox_and_dedupes(tmp
     assert len(heartbeat.payloads) == 1
 
 
-def test_internal_task_terminal_callback_records_rejected_enqueue_reason(tmp_path: Path, monkeypatch):
+def test_internal_task_terminal_callback_records_heartbeat_rejection_reason(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -354,7 +354,7 @@ def test_internal_task_terminal_callback_records_rejected_enqueue_reason(tmp_pat
         governance_store_path=tmp_path / "governance.sqlite3",
         execution_mode="web",
     )
-    heartbeat = _HeartbeatRecorder(reject_task_terminal_reason="manual_pause_waiting_reason")
+    heartbeat = _HeartbeatRecorder(reject_task_terminal_reason="synthetic_rejection")
     payload = normalize_task_terminal_payload(
         {
             "task_id": "task:demo-rejected",
@@ -382,12 +382,12 @@ def test_internal_task_terminal_callback_records_rejected_enqueue_reason(tmp_pat
     )
     assert response.status_code == 200
     assert response.json()["accepted"] is False
-    assert response.json()["rejected_reason"] == "manual_pause_waiting_reason"
+    assert response.json()["rejected_reason"] == "synthetic_rejection"
 
     entry = service.store.get_task_terminal_outbox(str(payload.get("dedupe_key") or ""))
     assert entry is not None
     assert entry["accepted"] is False
-    assert entry["rejected_reason"] == "manual_pause_waiting_reason"
+    assert entry["rejected_reason"] == "synthetic_rejection"
     assert heartbeat.payloads == []
 
 
@@ -4493,6 +4493,45 @@ async def test_continue_task_recreate_cancels_old_task_then_creates_new_task(tmp
         assert continuation is not None
         assert continuation.task_id != record.task_id
         assert continuation.metadata.get("continuation_of_task_id") == record.task_id
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_continue_task_recreate_creates_replacement_for_paused_task_without_waiting_terminal(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task("continue paused task by recreating", session_id="web:shared")
+        service.log_service.set_pause_state(record.task_id, pause_requested=True, is_paused=True)
+
+        result = await service.continue_task(
+            mode="recreate",
+            target_task_id=record.task_id,
+            continuation_instruction="create a replacement for the paused task",
+            reason="manual_retry",
+            source="ceo",
+        )
+
+        original = service.get_task(record.task_id)
+        continuation = result.get("continuation_task")
+
+        assert result["status"] == "completed"
+        assert result["mode"] == "recreate"
+        assert continuation is not None
+        assert continuation.task_id != record.task_id
+        assert original is not None
+        assert original.is_paused is True
+        assert original.metadata.get("continuation_state") == "recreated"
+        assert original.metadata.get("continued_by_task_id") == continuation.task_id
     finally:
         await service.close()
 

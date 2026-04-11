@@ -1075,7 +1075,7 @@ def test_build_prompt_context_keeps_dispatch_overlay_and_exhausted_stage_instruc
 
     result = runner.build_prompt_context(
         state={
-            "repair_overlay_text": runner._verified_dispatch_reply_overlay(task_id="task:demo-123"),
+            "repair_overlay_text": "Dispatch result is already available. Reply naturally based on the verified task id task:demo-123.",
             "frontdoor_stage_state": {
                 "active_stage_id": "stage-1",
                 "transition_required": True,
@@ -1108,8 +1108,7 @@ def test_build_prompt_context_keeps_dispatch_overlay_and_exhausted_stage_instruc
     )
 
     overlay = str(result["system_overlay"])
-    assert "A real async task has already been created and verified." in overlay
-    assert "The verified task id is `task:demo-123`." in overlay
+    assert "verified task id task:demo-123" in overlay
     assert "Current CEO stage budget is exhausted: 1/1." in overlay
     assert "First summarize the completed progress for this stage and call `submit_next_stage`" in overlay
 

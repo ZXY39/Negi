@@ -44,6 +44,7 @@ def test_rewrite_frontdoor_catalog_queries_uses_sidecar_request_shape_and_cache(
 
     selection._FRONTDOOR_QUERY_REWRITE_CACHE.clear()
     observed_requests: list[dict[str, object]] = []
+    monkeypatch.setattr(selection, "_frontdoor_query_rewrite_enabled", lambda: True)
 
     async def fake_invoke_frontdoor_catalog_rewrite_model(**kwargs) -> dict[str, str]:
         observed_requests.append(dict(kwargs))
@@ -97,6 +98,7 @@ def test_rewrite_frontdoor_catalog_queries_does_not_cache_fallback_or_passthroug
 
     selection._FRONTDOOR_QUERY_REWRITE_CACHE.clear()
     calls: list[dict[str, object]] = []
+    monkeypatch.setattr(selection, "_frontdoor_query_rewrite_enabled", lambda: True)
 
     async def flaky_invoke(**kwargs) -> dict[str, str]:
         calls.append(dict(kwargs))
@@ -157,6 +159,7 @@ def test_rewrite_sidecar_request_payload_is_canonical_for_same_visible_id_set(mo
 
     selection._FRONTDOOR_QUERY_REWRITE_CACHE.clear()
     observed_requests: list[dict[str, object]] = []
+    monkeypatch.setattr(selection, "_frontdoor_query_rewrite_enabled", lambda: True)
 
     async def fake_invoke(**kwargs) -> dict[str, str]:
         observed_requests.append(dict(kwargs.get("request") or {}))
@@ -209,6 +212,7 @@ def test_rewrite_sidecar_cache_invalidates_when_runtime_identity_changes(monkeyp
     selection._FRONTDOOR_QUERY_REWRITE_CACHE.clear()
     runtime_state = {"model": "responses:gpt-5.1-mini", "revision": 11}
     calls: list[dict[str, object]] = []
+    monkeypatch.setattr(selection, "_frontdoor_query_rewrite_enabled", lambda: True)
 
     async def fake_invoke(**kwargs) -> dict[str, str]:
         calls.append(dict(kwargs))
@@ -249,3 +253,36 @@ def test_rewrite_sidecar_cache_invalidates_when_runtime_identity_changes(monkeyp
     assert first["model"] == "responses:gpt-5.1-mini"
     assert third["model"] == "responses:gpt-5.1-nano"
     assert len(calls) == 2
+
+
+def test_rewrite_frontdoor_catalog_queries_defaults_to_passthrough_when_temporarily_disabled(monkeypatch) -> None:
+    from g3ku.runtime.context import frontdoor_catalog_selection as selection
+
+    selection._FRONTDOOR_QUERY_REWRITE_CACHE.clear()
+    calls: list[dict[str, object]] = []
+
+    async def fake_invoke(**kwargs) -> dict[str, str]:
+        calls.append(dict(kwargs))
+        return {
+            "skill_query": "browser skill rewrite",
+            "tool_query": "filesystem tool rewrite",
+            "model": "stub-model",
+        }
+
+    monkeypatch.setattr(selection, "_invoke_frontdoor_catalog_rewrite_model", fake_invoke)
+    monkeypatch.setattr(selection, "_frontdoor_query_rewrite_enabled", lambda: False)
+
+    result = asyncio.run(
+        selection.rewrite_frontdoor_catalog_queries(
+            loop=None,
+            memory_manager=SimpleNamespace(store=SimpleNamespace(_dense_enabled=True)),
+            query_text="find the right browser workflow",
+            visible_skills=[{"skill_id": "browser.search"}],
+            visible_families=[{"tool_id": "filesystem"}],
+        )
+    )
+
+    assert result["status"] == "passthrough"
+    assert result["skill_query"] == "find the right browser workflow"
+    assert result["tool_query"] == "find the right browser workflow"
+    assert calls == []

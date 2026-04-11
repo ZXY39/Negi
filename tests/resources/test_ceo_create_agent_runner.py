@@ -1482,9 +1482,9 @@ async def test_create_agent_postprocess_verifies_continue_task_recreate_before_r
     assert "jump_to" not in result
     assert result["route_kind"] == "task_continuation"
     assert result["tool_call_payloads"] == []
-    assert result["tool_names"] == []
-    assert "task:demo-old" in str(result["repair_overlay_text"] or "")
-    assert "task:demo-new" in str(result["repair_overlay_text"] or "")
+    assert result.get("tool_names") in (None, [])
+    assert result.get("repair_overlay_text") in {None, ""}
+    assert result["verified_task_ids"] == []
 
 
 @pytest.mark.asyncio

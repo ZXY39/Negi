@@ -865,6 +865,19 @@ async def ceo_websocket(websocket: WebSocket):
                 continue
             if not text.strip() and not uploads:
                 continue
+            if bool(getattr(session, "has_blocking_tool_execution", lambda: False)()):
+                await _safe_send(
+                    build_envelope(
+                        channel='ceo',
+                        session_id=session_id,
+                        type='error',
+                        data={
+                            'code': 'ceo_blocked_by_running_tool',
+                            'message': '当前会话仍在等待长工具结束，暂不接收新的用户输入。',
+                        },
+                    )
+                )
+                continue
             if _current_session_is_running() or (current_turn_task is not None and not current_turn_task.done()):
                 await _safe_send(
                     build_envelope(

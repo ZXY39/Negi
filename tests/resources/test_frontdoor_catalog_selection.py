@@ -76,6 +76,7 @@ async def test_rewrite_frontdoor_catalog_queries_uses_model_backed_rewrite_when_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(selection_module, "_frontdoor_query_rewrite_enabled", lambda: True)
 
     async def _invoke_model_rewrite(**kwargs) -> dict[str, Any]:
         calls.append(dict(kwargs))
@@ -117,6 +118,8 @@ async def test_rewrite_frontdoor_catalog_queries_uses_model_backed_rewrite_when_
 async def test_rewrite_frontdoor_catalog_queries_fallback_does_not_claim_model_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(selection_module, "_frontdoor_query_rewrite_enabled", lambda: True)
+
     async def _invoke_model_rewrite(**kwargs) -> dict[str, Any]:
         raise RuntimeError("rewrite model unavailable")
 
@@ -141,6 +144,8 @@ async def test_rewrite_frontdoor_catalog_queries_fallback_does_not_claim_model_i
 async def test_rewrite_frontdoor_catalog_queries_keeps_valid_skill_side_when_tool_side_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(selection_module, "_frontdoor_query_rewrite_enabled", lambda: True)
+
     async def _invoke_model_rewrite(**kwargs) -> dict[str, Any]:
         _ = kwargs
         return {
@@ -169,6 +174,8 @@ async def test_rewrite_frontdoor_catalog_queries_keeps_valid_skill_side_when_too
 async def test_rewrite_frontdoor_catalog_queries_keeps_valid_tool_side_when_skill_side_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(selection_module, "_frontdoor_query_rewrite_enabled", lambda: True)
+
     async def _invoke_model_rewrite(**kwargs) -> dict[str, Any]:
         _ = kwargs
         return {
@@ -197,6 +204,8 @@ async def test_rewrite_frontdoor_catalog_queries_keeps_valid_tool_side_when_skil
 async def test_rewrite_frontdoor_catalog_queries_accepts_same_rewritten_query_on_both_sides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(selection_module, "_frontdoor_query_rewrite_enabled", lambda: True)
+
     async def _invoke_model_rewrite(**kwargs) -> dict[str, Any]:
         _ = kwargs
         return {

@@ -62,6 +62,7 @@ def _tool_background_lines(event: dict[str, Any], retrieval_parts: list[str]) ->
         f"  Elapsed: {elapsed_seconds:.1f}s",
         f"  Next scheduled heartbeat: {wait_seconds:.1f}s",
         f"  Snapshot: {summary}",
+        "  Current rule: keep waiting in the same turn unless you decide to stop it.",
         "  Allowed tool: stop_tool_execution",
     ]
 

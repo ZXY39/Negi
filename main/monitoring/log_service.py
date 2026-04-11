@@ -3351,6 +3351,7 @@ class TaskLogService:
                 'dispatch_limits': dict(runtime_meta.get('dispatch_limits') or {}),
                 'dispatch_running': dict(runtime_meta.get('dispatch_running') or {}),
                 'dispatch_queued': dict(runtime_meta.get('dispatch_queued') or {}),
+                'governance': dict(runtime_meta.get('governance') or {}),
                 'frames': [dict(record.payload or {}) for record in frame_records],
             }
         return {

@@ -20,7 +20,8 @@ from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
 from g3ku.runtime.cancellation import ToolCancellationToken
 from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
 
-_CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
+_CONTROL_TOOL_NAMES = {"stop_tool_execution"}
+_LEGACY_CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
 _TRANSCRIPT_TURN_ID_KEY = "_transcript_turn_id"
 _TRANSCRIPT_STATE_KEY = "_transcript_state"
 _TRANSCRIPT_STATE_PENDING = "pending"
@@ -647,54 +648,16 @@ class RuntimeAgentSession:
         return snapshot
 
     def manual_pause_waiting_reason(self) -> bool:
-        return bool(getattr(self._state, "manual_pause_waiting_reason", False))
+        return False
 
     def _set_manual_pause_waiting_reason(self, enabled: bool) -> None:
-        flag = bool(enabled)
-        self._state.manual_pause_waiting_reason = flag
-        session_key = str(self._state.session_key or "").strip()
-        if not session_key.startswith("web:"):
-            return
-        try:
-            from g3ku.runtime.web_ceo_sessions import normalize_ceo_metadata
-
-            persisted_session = self._loop.sessions.get_or_create(session_key)
-            metadata = normalize_ceo_metadata(getattr(persisted_session, "metadata", None), session_key=session_key)
-            if bool(metadata.get("manual_pause_waiting_reason")) == flag:
-                return
-            metadata["manual_pause_waiting_reason"] = flag
-            persisted_session.metadata = metadata
-            self._loop.sessions.save(persisted_session)
-        except Exception:
-            logger.debug("manual pause metadata sync skipped for {}", session_key)
+        _ = enabled
 
     def _persisted_manual_pause_waiting_reason(self) -> bool:
-        session_key = str(self._state.session_key or "").strip()
-        if not session_key.startswith("web:"):
-            return False
-        try:
-            from g3ku.runtime.web_ceo_sessions import normalize_ceo_metadata
-
-            persisted_session = self._loop.sessions.get_or_create(session_key)
-            metadata = normalize_ceo_metadata(getattr(persisted_session, "metadata", None), session_key=session_key)
-        except Exception:
-            logger.debug("manual pause persisted metadata read skipped for {}", session_key)
-            return False
-        return bool(metadata.get("manual_pause_waiting_reason"))
+        return False
 
     def _clear_manual_pause_waiting_reason_for_user_turn(self) -> None:
-        session_key = str(self._state.session_key or "").strip()
-        if not (self.manual_pause_waiting_reason() or self._persisted_manual_pause_waiting_reason()):
-            return
-        self._set_manual_pause_waiting_reason(False)
-        heartbeat = getattr(self._loop, "web_session_heartbeat", None)
-        replay = getattr(heartbeat, "replay_pending_outbox", None) if heartbeat is not None else None
-        if not callable(replay):
-            return
-        try:
-            replay(session_id=session_key)
-        except Exception:
-            logger.debug("heartbeat pending outbox replay skipped for {}", session_key)
+        return
 
     def _resolve_progress_tool_target(self, data: dict[str, Any]) -> tuple[str, str]:
         tool_name = str(data.get("tool_name") or "").strip()
@@ -804,6 +767,12 @@ class RuntimeAgentSession:
             return
         self._preserved_inflight_turn = None
         self._sync_persisted_inflight_turn()
+
+    def has_blocking_tool_execution(self) -> bool:
+        return bool(self._background_tool_targets)
+
+    def clear_blocking_tool_execution(self, execution_id: str) -> None:
+        self._forget_background_tool_target(execution_id)
 
     @staticmethod
     def _parse_progress_payload(content: Any) -> dict[str, Any] | None:
@@ -1005,7 +974,7 @@ class RuntimeAgentSession:
         source = self._internal_prompt_source() or "user"
 
         if kind == "tool_start":
-            if tool_name in _CONTROL_TOOL_NAMES:
+            if tool_name in _LEGACY_CONTROL_TOOL_NAMES:
                 return
             call_id = self._register_pending_tool_call(tool_name, data)
             self._state.pending_tool_calls.add(call_id)
@@ -1025,7 +994,7 @@ class RuntimeAgentSession:
             payload = self._parse_progress_payload(content)
             payload_status = str((payload or {}).get("status") or "").strip().lower()
             if payload_status == "background_running":
-                if tool_name in _CONTROL_TOOL_NAMES:
+                if tool_name in _LEGACY_CONTROL_TOOL_NAMES:
                     resolved_tool_name, call_id, execution_id = self._resolve_control_tool_target(
                         tool_name=tool_name,
                         payload=payload,
@@ -1051,7 +1020,7 @@ class RuntimeAgentSession:
                 )
                 await self._emit_state_snapshot()
                 return
-            if tool_name in _CONTROL_TOOL_NAMES:
+            if tool_name in _LEGACY_CONTROL_TOOL_NAMES:
                 resolved_tool_name, call_id, execution_id = self._resolve_control_tool_target(
                     tool_name=tool_name,
                     payload=payload,
@@ -1088,7 +1057,7 @@ class RuntimeAgentSession:
             return
 
         if kind == "tool_error":
-            if tool_name in _CONTROL_TOOL_NAMES:
+            if tool_name in _LEGACY_CONTROL_TOOL_NAMES:
                 payload = self._parse_progress_payload(content)
                 resolved_tool_name, call_id, execution_id = self._resolve_control_tool_target(
                     tool_name=tool_name,
@@ -1437,6 +1406,17 @@ class RuntimeAgentSession:
         self._state.queued_follow_up_messages.append(UserInputMessage(content=content))
 
     async def pause(self, *, manual: bool = False) -> None:
+        if self._background_tool_targets:
+            manager = getattr(self._loop, "tool_execution_manager", None)
+            if manager is not None and hasattr(manager, "stop_execution"):
+                for execution_id in list(self._background_tool_targets.keys()):
+                    try:
+                        await manager.stop_execution(
+                            execution_id,
+                            reason="session_pause_requested",
+                        )
+                    except Exception:
+                        logger.debug("background tool stop skipped for {}", execution_id)
         self._state.paused = True
         self._state.is_running = False
         self._state.status = "paused"
@@ -1447,7 +1427,6 @@ class RuntimeAgentSession:
         )
         if manual:
             self._set_paused_execution_context(paused_snapshot)
-        self._set_manual_pause_waiting_reason(manual)
         await self._emit_safe_stop_notice("pause")
         if self._active_cancel_token is not None:
             self._active_cancel_token.cancel(reason="用户已请求暂停，正在安全停止...")
@@ -1458,12 +1437,6 @@ class RuntimeAgentSession:
         self._background_tool_targets.clear()
         self._preserved_inflight_turn = None
         if manual:
-            heartbeat = getattr(self._loop, "web_session_heartbeat", None)
-            if heartbeat is not None and hasattr(heartbeat, "clear_session"):
-                try:
-                    heartbeat.clear_session(self._state.session_key)
-                except Exception:
-                    logger.debug("manual pause heartbeat clear skipped for {}", self._state.session_key)
             await self._persist_manual_pause_user_message()
             # Manual pause persists the current prompt's transcript state using the
             # existing turn id so the pending user message can be updated in place.
@@ -1476,7 +1449,6 @@ class RuntimeAgentSession:
             action="pause",
             accepted=True,
             source=self._internal_prompt_source() or "user",
-            manual_pause_waiting_reason=manual,
         )
         await self._emit_state_snapshot()
 

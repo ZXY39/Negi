@@ -104,16 +104,20 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, dedupeInflightUserMessageAgainstMessages, S };`,
+        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, dedupeInflightUserMessageAgainstMessages, S, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
         context
     );
     vm.runInContext(
         `
+        globalThis.__patchSnapshotCalls = 0;
         renderCeoSessions = () => {};
         syncCeoPrimaryButton = () => {};
         syncCeoSessionActions = () => {};
         patchCeoSessionRuntimeState = () => false;
-        patchCeoSessionSnapshotCache = () => ({});
+        patchCeoSessionSnapshotCache = () => {
+            globalThis.__patchSnapshotCalls += 1;
+            return {};
+        };
         setCeoSessionSnapshotCache = () => ({});
         renderCeoToolEventsIntoTurn = (turn, toolEvents) => {
             const count = Array.isArray(toolEvents) ? toolEvents.length : 0;
@@ -140,7 +144,6 @@ test("manual pause ack replaces pending label with paused label and keeps tool f
         action: "pause",
         accepted: true,
         source: "user",
-        manual_pause_waiting_reason: true,
     });
 
     assert.equal(turn.textEl.textContent, PAUSED_LABEL);
@@ -149,6 +152,34 @@ test("manual pause ack replaces pending label with paused label and keeps tool f
     assert.equal(turn.flowEl.open, false);
     assert.equal(turn.finalized, true);
     assert.equal(S.ceoPendingTurns.length, 0);
+});
+
+test("manual pause ack ignores legacy waiting-reason flag", () => {
+    const baseline = loadApp();
+    const baselineTurn = makeTurn({ steps: 1 });
+    baseline.S.ceoPendingTurns = [baselineTurn];
+    baseline.S.ceoTurnActive = true;
+    baseline.handleCeoControlAck({
+        action: "pause",
+        accepted: true,
+        source: "user",
+    });
+
+    const legacy = loadApp();
+    const legacyTurn = makeTurn({ steps: 1 });
+    legacy.S.ceoPendingTurns = [legacyTurn];
+    legacy.S.ceoTurnActive = true;
+    legacy.handleCeoControlAck({
+        action: "pause",
+        accepted: true,
+        source: "user",
+        manual_pause_waiting_reason: true,
+    });
+
+    assert.equal(legacyTurn.textEl.textContent, PAUSED_LABEL);
+    assert.equal(legacyTurn.finalized, true);
+    assert.equal(legacy.S.ceoPendingTurns.length, 0);
+    assert.equal(legacy.getPatchSnapshotCalls(), baseline.getPatchSnapshotCalls());
 });
 
 test("paused inflight snapshot does not fall back to processing placeholder", () => {
