@@ -1,6 +1,6 @@
-﻿schema_version: 1
+schema_version: 1
 kind: tool
-display_name: "鑾峰彇浠诲姟"
+display_name: "获取任务"
 name: task_list
 description: List task ids for a requested task category.
 tool_result_delivery_contract: runtime_managed
@@ -22,11 +22,11 @@ permissions:
 parameters:
   type: object
   properties:
-    浠诲姟绫诲瀷:
+    任务类型:
       type: integer
       enum: [1, 2, 3, 4]
       description: "1=all tasks, 2=in progress, 3=failed, 4=unread."
-  required: [浠诲姟绫诲瀷]
+  required: [任务类型]
 governance:
   family: task_runtime
   display_name: Task Runtime
@@ -43,4 +43,3 @@ exposure:
   main_runtime: false
 toolskill:
   enabled: true
-

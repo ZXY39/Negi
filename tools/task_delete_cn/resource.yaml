@@ -1,6 +1,6 @@
-﻿schema_version: 1
+schema_version: 1
 kind: tool
-display_name: "浠诲姟鍒犻櫎宸ュ叿"
+display_name: "任务删除工具"
 name: task_delete
 description: Preview and delete one or more saved tasks.
 tool_result_delivery_contract: runtime_managed
@@ -26,7 +26,7 @@ parameters:
       type: string
       enum: [preview, confirm]
       description: "`preview` returns candidates and a confirmation token; `confirm` performs deletion."
-    浠诲姟id鍒楄〃:
+    任务id列表:
       type: array
       items:
         type: string
@@ -34,7 +34,7 @@ parameters:
     confirmation_token:
       type: string
       description: Required in `confirm` mode. Must come from a prior preview of the same batch.
-  required: [mode, 浠诲姟id鍒楄〃]
+  required: [mode, 任务id列表]
 governance:
   family: task_runtime
   display_name: Task Runtime
@@ -51,4 +51,3 @@ exposure:
   main_runtime: false
 toolskill:
   enabled: true
-

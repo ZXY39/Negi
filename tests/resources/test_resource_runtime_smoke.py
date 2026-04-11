@@ -1670,7 +1670,7 @@ def test_content_navigation_reuses_identical_artifacts_and_tracks_origin_ref(tmp
         artifact_lookup=artifact_store,
     )
 
-    text = ('line-001\n' * 200).strip()
+    text = ('line-001\n' * 800).strip()
     first = navigator.maybe_externalize_text(
         text,
         runtime={'task_id': 'task:test', 'node_id': 'node:one'},

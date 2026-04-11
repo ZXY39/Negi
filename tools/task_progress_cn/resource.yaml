@@ -1,6 +1,6 @@
-﻿schema_version: 1
+schema_version: 1
 kind: tool
-display_name: "鏌ョ湅浠诲姟杩涘害宸ュ叿"
+display_name: "查看任务进度工具"
 name: task_progress
 description: View task status and stage-aware progress text.
 tool_result_delivery_contract: runtime_managed
@@ -22,10 +22,10 @@ permissions:
 parameters:
   type: object
   properties:
-    浠诲姟id:
+    任务id:
       type: string
       description: Target task id.
-  required: [浠诲姟id]
+  required: [任务id]
 governance:
   family: task_runtime
   display_name: Task Runtime
@@ -42,4 +42,3 @@ exposure:
   main_runtime: false
 toolskill:
   enabled: true
-

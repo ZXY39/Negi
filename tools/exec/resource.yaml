@@ -1,16 +1,21 @@
-﻿schema_version: 1
+schema_version: 1
 kind: tool
 name: exec
-description: Execute read-only shell commands with structured summaries plus content refs. Commands run in the host shell and default to the task-scoped temp directory when the runtime provides `task_temp_dir`, unless an explicit working_dir is provided.
+description: Execute read-only shell commands with structured summaries plus content
+  refs. Commands run in the host shell and default to the task-scoped temp directory
+  when the runtime provides `task_temp_dir`, unless an explicit working_dir is provided.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: 褰撳墠鐗堟湰琛ㄧず浠撳簱鍐呯疆瀹炵幇锛涙洿鏂版椂闇€鍚屾浠ｇ爜銆佸弬鏁板绾﹀拰璧勬簮鎻忚堪銆?
-  compare_rule: 浠?main/ 瀹炵幇銆乸arameters銆乸ermissions銆乻ettings 鎴栬繑鍥炵粨鏋勫彉鍖栦负鍑嗭紱浠呬慨鏀?toolskills 鏂囨涓嶅崟鐙涓虹増鏈崌绾с€?
-  source_of_truth: 浠ュ綋鍓嶇洰褰曚笅鐨?resource.yaml 涓?main/ 瀹炵幇涓哄噯锛涘瀛樺湪 toolskills/锛屽叾鍐呭鐢ㄤ簬琛ュ厖浣跨敤璇存槑銆?
+  summary: Resource-local exec tool. The manifest, handler, and read-only execution
+    contract together define the current behavior.
+  compare_rule: Treat manifest, main/, parameter contract, permissions, settings,
+    and returned payload changes as version-relevant.
+  source_of_truth: resource.yaml, main/, and toolskills together define the effective
+    behavior.
 protocol: mcp
 mcp:
   transport: embedded
@@ -21,7 +26,7 @@ requires:
 permissions:
   network: false
   filesystem:
-    - workspace
+  - workspace
 settings:
   timeout: 60
   path_append: ''
@@ -32,15 +37,21 @@ parameters:
   properties:
     command:
       type: string
-      description: Read-only shell command to execute. Use this for local inspection and searching only; any filesystem creation, modification, deletion, rename, move, or patch workflow must use filesystem_write/edit/delete/propose_patch instead.
+      description: Read-only shell command to execute. Use this for local inspection
+        and searching only; any filesystem creation, modification, deletion, rename,
+        move, or patch workflow must use filesystem_write/edit/delete/propose_patch
+        instead.
     working_dir:
       type: string
-      description: Optional working directory override. Provide an absolute path when you need a specific directory. If omitted, exec defaults to `runtime_environment.task_temp_dir` when that runtime field is available; otherwise it falls back to the process default cwd. When restrict_to_workspace is enabled, working_dir must stay inside the workspace.
+      description: Optional working directory override. Provide an absolute path when
+        you need a specific directory. If omitted, exec defaults to `runtime_environment.task_temp_dir`
+        when that runtime field is available; otherwise it falls back to the process
+        default cwd. When restrict_to_workspace is enabled, working_dir must stay
+        inside the workspace.
   required:
-    - command
+  - command
 exposure:
   agent: true
   main_runtime: true
 toolskill:
   enabled: true
-

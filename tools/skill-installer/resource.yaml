@@ -1,17 +1,22 @@
-﻿schema_version: 1
+schema_version: 1
 kind: tool
 name: skill-installer
 display_name: Skill Installer
-description: Install or import a skill from a GitHub repo/path into the current workspace skills directory, generating a minimal G3KU resource manifest when the upstream skill only ships SKILL.md.
+description: Install or import a skill from a GitHub repo/path into the current workspace
+  skills directory, generating a minimal G3KU resource manifest when the upstream
+  skill only ships SKILL.md.
 tool_result_delivery_contract: runtime_managed
 source:
   type: builtin-wrapper
   url: https://github.com/openai/skills/tree/main/skills/.system/skill-installer
   ref: main
 current_version:
-  summary: 褰撳墠鐗堟湰鏄粨搴撳唴缃皝瑁咃紱瀹炵幇 GitHub 涓嬭浇銆乬it 绋€鐤忔鍑恒€佸伐浣滃尯瀹夎涓庣己澶?resource.yaml 鐨勮嚜鍔ㄨˉ榻愶紝骞堕拡瀵?Windows 閿佹枃浠跺満鏅敼涓哄垎绂?clone 鐩綍涓斿拷鐣ヤ复鏃剁洰褰曟竻鐞嗘畫鐣欓敊璇紝鍚屾椂鎺ュ叆缁熶竴寮哄彇娑堣兘鍔涖€?
-  compare_rule: 浠?main/ 瀹炵幇銆佸弬鏁板绾︺€佺洰鏍囩洰褰曡鍒欐垨鑷姩鐢熸垚 resource.yaml 鐨勮涓哄彉鍖栦负鍑嗭紱浠呬慨鏀?toolskills 鏂囨涓嶅崟鐙涓虹増鏈崌绾с€?
-  source_of_truth: 浠ュ綋鍓嶇洰褰曚笅鐨?resource.yaml 涓?main/ 瀹炵幇涓哄噯锛泃oolskills/ 鐢ㄤ簬琛ュ厖鏉ユ簮銆佸弬鏁扮害鏉熷拰澶辫触澶勭悊銆?
+  summary: Resource-local skill installer. The manifest, handler, installation workflow,
+    and cancellation behavior together define the current behavior.
+  compare_rule: Treat changes in main/, parameter contract, target directory rules,
+    generated resource.yaml behavior, or cancellation handling as version-relevant.
+  source_of_truth: resource.yaml, main/, and toolskills together define the effective
+    behavior.
 protocol: mcp
 mcp:
   transport: embedded
@@ -22,7 +27,7 @@ requires:
 permissions:
   network: true
   filesystem:
-    - workspace
+  - workspace
 settings:
   download_timeout: 30
   git_timeout: 120
@@ -38,39 +43,42 @@ parameters:
       description: GitHub repo in owner/repo form. Use together with path.
     path:
       type: string
-      description: Relative path to the skill directory inside the repo. Required when repo is used.
+      description: Relative path to the skill directory inside the repo. Required
+        when repo is used.
     ref:
       type: string
       description: Optional git ref. Defaults to main.
     dest:
       type: string
-      description: Optional destination directory. Relative paths resolve from workspace. Defaults to skills/<basename>.
+      description: Optional destination directory. Relative paths resolve from workspace.
+        Defaults to skills/<basename>.
     name:
       type: string
-      description: Optional local skill id used when generating a missing resource.yaml. Existing upstream resource.yaml names are preserved.
+      description: Optional local skill id used when generating a missing resource.yaml.
+        Existing upstream resource.yaml names are preserved.
     method:
       type: string
       enum:
-        - auto
-        - download
-        - git
-      description: 涓嬭浇绛栫暐銆俛uto 浼氶伒寰?settings.auto_prefer锛涘綋鍓嶉粯璁や紭鍏?git sparse checkout锛屽け璐ュ悗鍥為€€鍒?GitHub codeload zip銆?
+      - auto
+      - download
+      - git
+      description: 涓嬭浇绛栫暐銆俛uto 浼氶伒寰?settings.auto_prefer锛涘綋鍓嶉粯璁や紭鍏?git sparse checkout锛屽け璐ュ悗鍥為€€鍒?GitHub
+        codeload zip銆?
   required: []
 governance:
   family: skill-installer
   display_name: Skill Installer
   description: Install an existing skill from GitHub into the current workspace.
   actions:
-    - id: install
-      label: Install Skill
-      risk_level: medium
-      destructive: true
-      allowed_roles:
-        - ceo
-        - execution
+  - id: install
+    label: Install Skill
+    risk_level: medium
+    destructive: true
+    allowed_roles:
+    - ceo
+    - execution
 exposure:
   agent: true
   main_runtime: true
 toolskill:
   enabled: true
-
