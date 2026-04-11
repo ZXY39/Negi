@@ -535,6 +535,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "stage_kind": str(raw_stage.get("stage_kind") or "normal").strip() or "normal",
                     "system_generated": bool(raw_stage.get("system_generated", False)),
                     "completed_stage_summary": str(raw_stage.get("completed_stage_summary") or "").strip(),
+                    "final_stage": bool(raw_stage.get("final_stage", False)),
                     "key_refs": [
                         dict(item)
                         for item in list(raw_stage.get("key_refs") or [])
@@ -616,6 +617,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         tool_round_budget: int,
         completed_stage_summary: str = "",
         key_refs: list[dict[str, Any]] | None = None,
+        final: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
         normalized_goal = str(stage_goal or "").strip()
@@ -673,6 +675,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "status": "active",
             "stage_goal": normalized_goal,
             "completed_stage_summary": "",
+            "final_stage": bool(final),
             "key_refs": [],
             "tool_round_budget": normalized_budget,
             "tool_rounds_used": 0,
@@ -753,6 +756,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "active_stage_id": active_stage_id,
             "transition_required": bool(
                 latest_active is not None
+                and not bool(latest_active.get("final_stage"))
                 and int(latest_active.get("tool_round_budget") or 0) > 0
                 and int(latest_active.get("tool_rounds_used") or 0) >= int(latest_active.get("tool_round_budget") or 0)
             ),
@@ -890,6 +894,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                             for item in list(dict(payload.get("arguments") or {}).get("key_refs") or [])
                             if isinstance(item, dict)
                         ],
+                        final=bool(dict(payload.get("arguments") or {}).get("final")),
                     )
                 continue
             ordinary_calls.append(dict(payload))
@@ -1051,6 +1056,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             tool_round_budget: int,
             completed_stage_summary: str = "",
             key_refs: list[dict[str, Any]] | None = None,
+            final: bool = False,
         ) -> dict[str, Any]:
             next_stage_state, stage_payload = self._submit_frontdoor_next_stage_state(
                 mutable_stage_state,
@@ -1058,6 +1064,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 tool_round_budget=tool_round_budget,
                 completed_stage_summary=completed_stage_summary,
                 key_refs=key_refs,
+                final=final,
             )
             mutable_stage_state.clear()
             mutable_stage_state.update(next_stage_state)

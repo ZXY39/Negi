@@ -69,6 +69,8 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
     used = int(active.get('tool_rounds_used') or 0)
     budget = int(active.get('tool_round_budget') or 0)
     goal = str(active.get('stage_goal') or '').strip() or '(empty)'
+    final_note = ' Current stage is the final convergence stage. It will not be forced to switch only because the budget is exhausted, and it must not call `spawn_child_nodes`.' if bool(active.get('final_stage')) else ''
+    final_note = ' 褰撳墠宸茶繘鍏ユ渶缁堟敹鏁涢樁娈碉紝涓嶄細鍥犻绠楀己鍒跺垏鎹紝涓嶈鍐嶈皟鐢?`spawn_child_nodes`銆?' if bool(active.get('final_stage')) else ''
     if bool(gate.get('transition_required')):
         return (
             f'Current CEO stage budget is exhausted: {used}/{budget}. '
@@ -123,6 +125,7 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
     used = int(active.get('tool_rounds_used') or 0)
     budget = int(active.get('tool_round_budget') or 0)
     goal = str(active.get('stage_goal') or '').strip() or '(empty)'
+    final_note = ' Current stage is the final convergence stage. It will not be forced to switch only because the budget is exhausted, and it must not call `spawn_child_nodes`.' if bool(active.get('final_stage')) else ''
     mode = str(active.get('mode') or '').strip() or '自主执行'
     status = str(active.get('status') or '').strip() or '进行中'
     if bool(stage_gate.get('transition_required')):
@@ -146,6 +149,7 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
             '如果上一阶段仍未收敛，应根据剩余工作适当放大预算，但不能超过 10；'
             '在此之前不能继续使用普通工具，也不能继续派生子节点。'
             f'{_execution_stage_budget_accounting_note(active)}'
+            f'{final_note}'
         )
     if normalized_kind == 'acceptance':
         return (
@@ -165,6 +169,7 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
         f'当前普通工具轮次使用 {used}/{budget}。'
         '除创建新阶段外，其余所有思考、工具调用和派生行为都必须只服务于当前阶段目标。'
         f'{_execution_stage_budget_accounting_note(active)}'
+        f'{final_note}'
         f'{reminder}'
     )
 

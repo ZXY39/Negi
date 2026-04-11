@@ -378,6 +378,14 @@ class CeoFrontDoorSupport:
             ),
         }
 
+    @staticmethod
+    def _tool_invocation_text(tool_name: str, arguments: dict[str, Any]) -> str:
+        normalized_name = str(tool_name or "").strip() or "tool"
+        normalized_arguments = dict(arguments or {})
+        if not normalized_arguments:
+            return normalized_name
+        return f"{normalized_name}({json.dumps(normalized_arguments, ensure_ascii=False, sort_keys=True)})"
+
     def _render_tool_message_content(
         self,
         result: Any,
@@ -385,6 +393,7 @@ class CeoFrontDoorSupport:
         runtime_context: dict[str, Any],
         tool_name: str,
         tool: Tool | None = None,
+        delivery_metadata: dict[str, Any] | None = None,
     ) -> str:
         rendered = result if isinstance(result, str) else self._render_tool_result(result)
         return self._externalize_message_content(
@@ -392,7 +401,7 @@ class CeoFrontDoorSupport:
             runtime_context=runtime_context,
             display_name=f"tool:{tool_name}",
             source_kind=f"tool_result:{tool_name}",
-            delivery_metadata=self._tool_result_delivery_metadata(tool=tool),
+            delivery_metadata=delivery_metadata or self._tool_result_delivery_metadata(tool=tool),
         )
 
     @staticmethod
@@ -404,10 +413,10 @@ class CeoFrontDoorSupport:
     def _tool_result_payload_ref(payload: dict[str, Any]) -> str:
         output_ref = str(
             payload.get("output_ref")
+            or payload.get("resolved_ref")
             or payload.get("wrapper_ref")
             or payload.get("requested_ref")
             or payload.get("ref")
-            or payload.get("resolved_ref")
             or ""
         ).strip()
         if output_ref:
@@ -433,7 +442,7 @@ class CeoFrontDoorSupport:
             return payload
         envelope = parse_content_envelope(text)
         if envelope is not None:
-            output_ref = str(envelope.ref or envelope.wrapper_ref or envelope.resolved_ref or "").strip()
+            output_ref = str(envelope.resolved_ref or envelope.ref or envelope.wrapper_ref or "").strip()
             if output_ref:
                 payload["output_ref"] = output_ref
             summary = str(envelope.summary or "").strip()
@@ -592,6 +601,10 @@ class CeoFrontDoorSupport:
             runtime_context=runtime_context,
             tool_name=tool_name,
             tool=tool,
+            delivery_metadata={
+                **self._tool_result_delivery_metadata(tool=tool),
+                "invocation_text": self._tool_invocation_text(tool_name, normalized_arguments),
+            },
         )
         finished_at = now_iso()
         elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)

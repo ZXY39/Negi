@@ -156,6 +156,7 @@ class ExecutionStageRecord(Model):
     status: Literal['进行中', '完成', '失败'] = '进行中'
     stage_goal: str = ''
     completed_stage_summary: str = ''
+    final_stage: bool = False
     key_refs: list[ExecutionStageKeyRef] = Field(default_factory=list)
     archive_ref: str = ''
     archive_stage_index_start: int = 0

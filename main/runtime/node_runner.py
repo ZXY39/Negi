@@ -346,13 +346,14 @@ class NodeRunner:
         tools = dict(self._tool_provider(node) or {})
         if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
             tools['submit_next_stage'] = SubmitNextStageTool(
-                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs: self._submit_next_stage(
+                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs, final: self._submit_next_stage(
                     task_id=task.task_id,
                     node_id=node.node_id,
                     stage_goal=stage_goal,
                     tool_round_budget=tool_round_budget,
                     completed_stage_summary=completed_stage_summary,
                     key_refs=key_refs,
+                    final=final,
                 )
             )
             tools['submit_final_result'] = SubmitFinalResultTool(
@@ -2362,6 +2363,7 @@ class NodeRunner:
         tool_round_budget: int,
         completed_stage_summary: str,
         key_refs: list[dict[str, Any]],
+        final: bool,
     ) -> dict[str, Any]:
         stage = self._log_service.submit_next_stage(
             task_id,
@@ -2370,6 +2372,7 @@ class NodeRunner:
             tool_round_budget=int(tool_round_budget or 0),
             completed_stage_summary=str(completed_stage_summary or '').strip(),
             key_refs=[dict(item) for item in list(key_refs or []) if isinstance(item, dict)],
+            final=bool(final),
         )
         return {
             'stage_id': str(stage.get('stage_id') or ''),
@@ -2380,6 +2383,7 @@ class NodeRunner:
             'stage_goal': str(stage.get('stage_goal') or ''),
             'tool_round_budget': int(stage.get('tool_round_budget') or 0),
             'tool_rounds_used': int(stage.get('tool_rounds_used') or 0),
+            'final_stage': bool(stage.get('final_stage') or False),
         }
 
     @staticmethod

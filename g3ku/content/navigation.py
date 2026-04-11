@@ -130,6 +130,10 @@ def _content_summary(handle: ContentHandle, *, include_preview: bool = True) -> 
         f"({int(handle.line_count or 0)} lines, {int(handle.char_count or 0)} chars). "
         f"Use content.search/open with ref={content_ref}. Do not pass this ref as filesystem path."
     )
+    if str(handle.invocation_text or "").strip():
+        summary = f"{summary}\nInvocation: {str(handle.invocation_text or '').strip()}"
+    if str(handle.canonical_summary or "").strip():
+        return f"{summary}\nCanonical summary: {str(handle.canonical_summary or '').strip()}"
     if handle.origin_ref and handle.origin_ref != handle.ref:
         summary = f"{summary}\nOrigin ref: {handle.origin_ref}"
     if include_preview and handle.head_preview:
@@ -278,6 +282,23 @@ def _should_keep_inline_search_tool_result(payload: dict[str, Any]) -> bool:
     return _inline_tool_payload_fits_limits(payload)
 
 
+def _looks_like_search_tool_result(payload: dict[str, Any]) -> bool:
+    if payload.get("ok") is not True:
+        return False
+    hits = payload.get("hits")
+    if not isinstance(hits, list):
+        return False
+    if payload.get("count") in {None, ""}:
+        return False
+    if "query" not in payload or "overflow" not in payload or "requires_refine" not in payload or "cap" not in payload:
+        return False
+    if any(not isinstance(item, dict) for item in hits):
+        return False
+    if any("line" not in item or "preview" not in item for item in hits):
+        return False
+    return True
+
+
 def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
     normalized = str(source_kind or "").strip().lower()
     if normalized in _ALWAYS_INLINE_TOOL_RESULT_SOURCES:
@@ -287,6 +308,11 @@ def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
     payload = _parsed_json_payload(value)
     if not isinstance(payload, dict):
         return False
+    if normalized == "tool_result:content_open":
+        excerpt = str(payload.get("excerpt") or "").strip()
+        return bool(excerpt) and payload.get("start_line") not in {None, ""} and payload.get("end_line") not in {None, ""}
+    if normalized == "tool_result:content_search":
+        return _looks_like_search_tool_result(payload)
     if normalized == "tool_result:spawn_child_nodes":
         return _should_keep_inline_spawn_child_tool_result(payload)
     if normalized not in {"tool_result:content", "tool_result:filesystem"}:
@@ -389,6 +415,8 @@ def parse_content_envelope(value: Any) -> ContentEnvelope | None:
             resolved_ref=str(raw_handle.get("resolved_ref") or "").strip(),
             wrapper_ref=str(raw_handle.get("wrapper_ref") or "").strip(),
             wrapper_depth=int(raw_handle.get("wrapper_depth") or 0),
+            invocation_text=str(raw_handle.get("invocation_text") or "").strip(),
+            canonical_summary=str(raw_handle.get("canonical_summary") or "").strip(),
         )
     return ContentEnvelope(
         type="content_ref",
@@ -464,6 +492,7 @@ class ContentNavigationService:
             source_kind=source_kind,
             mime_type=mime_type,
             origin_ref=origin_ref,
+            invocation_text=str((delivery_metadata or {}).get("invocation_text") or "").strip(),
         )
         resolved_ref, nested_depth = self._resolved_ref_and_depth_from_value(value)
         handle = self._apply_handle_refs(
@@ -473,6 +502,7 @@ class ContentNavigationService:
             wrapper_ref=handle.ref if resolved_ref and resolved_ref != handle.ref else "",
             wrapper_depth=(1 + nested_depth) if resolved_ref and resolved_ref != handle.ref else 0,
         )
+        handle.canonical_summary = self._canonical_summary_for_handle(handle)
         summary = _content_summary(handle)
         return ContentEnvelope(
             summary=summary,
@@ -745,6 +775,7 @@ class ContentNavigationService:
                 display_name=file_path.name,
                 mime_type="text/plain",
                 origin_ref="",
+                invocation_text="",
                 text=text,
             )
             handle = self._apply_handle_refs(
@@ -786,6 +817,7 @@ class ContentNavigationService:
             display_name=str(getattr(artifact, "title", "") or artifact_path.name),
             mime_type=str(getattr(artifact, "mime_type", "") or "text/plain"),
             origin_ref="",
+            invocation_text="",
             text=text,
         )
         requested_ref = _requested_ref or normalized_ref
@@ -885,6 +917,7 @@ class ContentNavigationService:
         source_kind: str,
         mime_type: str,
         origin_ref: str,
+        invocation_text: str,
     ) -> ContentHandle:
         artifact = None
         if self._artifact_store is not None:
@@ -920,6 +953,7 @@ class ContentNavigationService:
             display_name=display_name,
             mime_type=mime_type,
             origin_ref=(origin_ref if origin_ref != ref else ""),
+            invocation_text=invocation_text,
             text=text,
         )
 
@@ -940,6 +974,17 @@ class ContentNavigationService:
                 raise PermissionError(f"path outside allowed directory: {path}") from exc
         return resolved
 
+    def _canonical_summary_for_handle(self, handle: ContentHandle) -> str:
+        resolved_ref = str(getattr(handle, "resolved_ref", "") or "").strip()
+        current_ref = str(getattr(handle, "ref", "") or "").strip()
+        if not resolved_ref or resolved_ref == current_ref:
+            return ""
+        try:
+            payload = self.describe(ref=resolved_ref, view="canonical")
+        except Exception:
+            return ""
+        return _compact_summary_text(str((payload or {}).get("summary") or "").strip())
+
     @staticmethod
     def _build_handle(
         *,
@@ -950,6 +995,7 @@ class ContentNavigationService:
         display_name: str,
         mime_type: str,
         origin_ref: str,
+        invocation_text: str,
         text: str,
     ) -> ContentHandle:
         encoded = text.encode("utf-8")
@@ -966,4 +1012,5 @@ class ContentNavigationService:
             char_count=len(text),
             head_preview=_preview_text(text, lines=_HEAD_PREVIEW_LINES),
             tail_preview=_tail_preview_text(text, lines=_TAIL_PREVIEW_LINES),
+            invocation_text=invocation_text,
         )

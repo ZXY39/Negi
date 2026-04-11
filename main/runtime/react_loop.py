@@ -1756,6 +1756,7 @@ class ReActToolLoop:
                         delivery_metadata=self._tool_result_delivery_metadata(
                             tools=tools,
                             tool_name=str(call.name or ''),
+                            arguments=dict(getattr(call, 'arguments', {}) or {}),
                         ),
                     )
                 except TaskPausedError:
@@ -2027,19 +2028,31 @@ class ReActToolLoop:
             result,
             runtime_context=runtime_context,
             tool_name=tool_name,
-            delivery_metadata=self._tool_result_delivery_metadata(tools=tools, tool_name=tool_name),
+            delivery_metadata=self._tool_result_delivery_metadata(
+                tools=tools,
+                tool_name=tool_name,
+                arguments=arguments,
+            ),
         )
 
     @staticmethod
-    def _tool_result_delivery_metadata(*, tools: dict[str, Tool], tool_name: str) -> dict[str, Any]:
+    def _tool_result_delivery_metadata(*, tools: dict[str, Tool], tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         tool = (tools or {}).get(str(tool_name or '').strip())
         descriptor = getattr(tool, '_descriptor', None)
         metadata = getattr(descriptor, 'metadata', None) or {}
+        normalized_name = str(tool_name or '').strip() or 'tool'
+        normalized_arguments = dict(arguments or {})
+        invocation_text = (
+            f"{normalized_name}({json.dumps(normalized_arguments, ensure_ascii=False, sort_keys=True)})"
+            if normalized_arguments
+            else normalized_name
+        )
         return {
             'tool_result_inline_full': bool(
                 getattr(descriptor, 'tool_result_inline_full', False)
                 or metadata.get('tool_result_inline_full', False)
             ),
+            'invocation_text': invocation_text,
         }
 
     def _execution_tool_gate_error(self, *, tool_name: str, runtime_context: dict[str, Any]) -> str:
@@ -2058,6 +2071,14 @@ class ReActToolLoop:
         )
         if not bool(stage_gate.get('enabled')):
             return ''
+        active_stage = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
+        if (
+            normalized_tool_name == _STAGE_SPAWN_TOOL_NAME
+            and bool((active_stage or {}).get('final_stage'))
+        ):
+            return 'final stage forbids spawn_child_nodes; finish synthesis with existing evidence or submit the final result'
+        if normalized_tool_name == _STAGE_SPAWN_TOOL_NAME and bool(stage_gate.get('transition_required')):
+            return f'current stage budget is exhausted; call {STAGE_TOOL_NAME} before using other tools'
         return stage_gate_error_for_tool(
             normalized_tool_name,
             has_active_stage=bool(stage_gate.get('has_active_stage')),
@@ -2578,6 +2599,7 @@ class ReActToolLoop:
             delivery_metadata=self._tool_result_delivery_metadata(
                 tools=tools,
                 tool_name=tool_payload['name'],
+                arguments=dict(tool_payload.get('arguments') or {}),
             ),
         )
         finished_at = now_iso()

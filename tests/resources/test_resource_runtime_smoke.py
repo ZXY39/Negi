@@ -2241,6 +2241,119 @@ def test_content_navigation_keeps_small_search_results_inline(tmp_path: Path):
     store.close()
 
 
+def test_content_navigation_externalized_tool_summary_uses_invocation_text_not_head_preview(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    payload = {
+        "status": "success",
+        "stdout_ref": "artifact:artifact:stdout",
+        "head_preview": "line one\nline two\nline three",
+        "stdout": "x" * 5000,
+    }
+    rendered = navigator.externalize_for_message(
+        json.dumps(payload, ensure_ascii=False),
+        runtime={"task_id": "task:test", "node_id": "node:test"},
+        display_name="tool:exec",
+        source_kind="tool_result:exec",
+        compact=True,
+        delivery_metadata={"invocation_text": "exec(command=python gather.py, working_dir=D:\\NewProjects\\G3KU)"},
+    )
+    envelope = parse_content_envelope(rendered)
+    assert envelope is not None
+    assert "Invocation: exec(command=python gather.py, working_dir=D:\\NewProjects\\G3KU)" in envelope.summary
+    assert "Head preview" not in envelope.summary
+    store.close()
+
+
+def test_content_navigation_wrapper_summary_flattens_to_canonical_summary(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    inner = navigator.maybe_externalize_text(
+        "canonical body\n" * 400,
+        runtime={"task_id": "task:test", "node_id": "node:inner"},
+        display_name="inner-body",
+        source_kind="node_output",
+        force=True,
+    )
+    assert inner is not None
+    wrapped = navigator.maybe_externalize_text(
+        json.dumps(inner.to_dict(), ensure_ascii=False),
+        runtime={"task_id": "task:test", "node_id": "node:wrapper"},
+        display_name="wrapped",
+        source_kind="tool_result:exec",
+        force=True,
+    )
+    assert wrapped is not None
+    assert "Origin ref:" not in wrapped.summary
+    assert str(inner.ref) in wrapped.summary
+    store.close()
+
+
+def test_content_navigation_keeps_large_content_open_results_inline(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    payload = {
+        "ok": True,
+        "ref": "artifact:artifact:open-wrapper",
+        "requested_ref": "artifact:artifact:open-wrapper",
+        "resolved_ref": "artifact:artifact:open-canonical",
+        "wrapper_ref": "artifact:artifact:open-wrapper",
+        "wrapper_depth": 1,
+        "start_line": 1,
+        "end_line": 200,
+        "excerpt": "\n".join(f"line {index}" for index in range(1, 201)),
+    }
+    rendered = navigator.externalize_for_message(
+        json.dumps(payload, ensure_ascii=False),
+        runtime={"task_id": "task:test", "node_id": "node:open"},
+        display_name="open-results",
+        source_kind="tool_result:content_open",
+        compact=True,
+    )
+    assert parse_content_envelope(rendered) is None
+    assert json.loads(rendered) == payload
+    store.close()
+
+
+def test_content_navigation_keeps_large_content_search_results_inline(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    payload = {
+        "ok": True,
+        "ref": "artifact:artifact:search-wrapper",
+        "requested_ref": "artifact:artifact:search-wrapper",
+        "resolved_ref": "artifact:artifact:search-canonical",
+        "wrapper_ref": "artifact:artifact:search-wrapper",
+        "wrapper_depth": 1,
+        "query": "needle",
+        "hits": [
+            {"line": index, "preview": f"needle preview {index} " + ("y" * 120)}
+            for index in range(1, 16)
+        ],
+        "count": 15,
+        "overflow": False,
+        "requires_refine": False,
+        "cap": 20,
+        "overflow_lower_bound": None,
+        "message": "",
+        "suggestions": [],
+    }
+    rendered = navigator.externalize_for_message(
+        json.dumps(payload, ensure_ascii=False),
+        runtime={"task_id": "task:test", "node_id": "node:search"},
+        display_name="search-results",
+        source_kind="tool_result:content_search",
+        compact=True,
+    )
+    assert parse_content_envelope(rendered) is None
+    assert json.loads(rendered) == payload
+    store.close()
+
+
 def test_content_navigation_open_raw_view_reads_wrapper_json(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)

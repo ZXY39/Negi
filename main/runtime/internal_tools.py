@@ -20,7 +20,7 @@ def build_detail_level_schema(*, description: str) -> dict[str, Any]:
 class SubmitNextStageTool(Tool):
     def __init__(
         self,
-        submit_callback: Callable[[str, int, str, list[dict[str, Any]]], Awaitable[dict[str, Any]]],
+        submit_callback: Callable[[str, int, str, list[dict[str, Any]], bool], Awaitable[dict[str, Any]]],
     ) -> None:
         self._submit_callback = submit_callback
 
@@ -65,7 +65,7 @@ class SubmitNextStageTool(Tool):
                 'key_refs': {
                     'type': 'array',
                     'description': (
-                        'Optional stage-local reference annotations for the stage that is ending now. '
+                        'Optional stage-local canonical reference annotations for the stage that is ending now. '
                         'Ignored when there is no active stage yet.'
                     ),
                     'items': {
@@ -84,6 +84,13 @@ class SubmitNextStageTool(Tool):
                         },
                         'required': ['ref', 'note'],
                     },
+                },
+                'final': {
+                    'type': 'boolean',
+                    'description': (
+                        'Optional final convergence stage flag. Use true only when this next stage should finish synthesis '
+                        'with the existing evidence and must not spawn child nodes.'
+                    ),
                 },
             },
             'required': ['stage_goal', 'tool_round_budget'],
@@ -118,6 +125,10 @@ class SubmitNextStageTool(Tool):
                         'required': ['ref', 'note'],
                     },
                 },
+                'final': {
+                    'type': 'boolean',
+                    'description': 'Whether the next stage is the final convergence stage.',
+                },
             },
             'required': ['stage_goal', 'tool_round_budget'],
         }
@@ -140,6 +151,7 @@ class SubmitNextStageTool(Tool):
         tool_round_budget: int,
         completed_stage_summary: str = '',
         key_refs: list[dict[str, Any]] | None = None,
+        final: bool = False,
         **kwargs: Any,
     ) -> str:
         _ = kwargs
@@ -148,6 +160,7 @@ class SubmitNextStageTool(Tool):
             int(tool_round_budget or 0),
             str(completed_stage_summary or '').strip(),
             [dict(item) for item in list(key_refs or []) if isinstance(item, dict)],
+            bool(final),
         )
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 

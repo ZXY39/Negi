@@ -441,6 +441,39 @@ def test_frontdoor_stage_state_snapshot_preserves_archive_refs() -> None:
     assert stage["archive_stage_index_end"] == 10
 
 
+def test_frontdoor_submit_next_stage_marks_final_stage() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    next_state, stage = runner._submit_frontdoor_next_stage_state(
+        {"active_stage_id": "", "transition_required": False, "stages": []},
+        stage_goal="final synthesis only",
+        tool_round_budget=1,
+        completed_stage_summary="",
+        key_refs=[],
+        final=True,
+    )
+    assert stage["final_stage"] is True
+    assert next_state["stages"][0]["final_stage"] is True
+
+
+def test_frontdoor_final_stage_does_not_require_transition_when_budget_is_exhausted() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    stage_state, _stage = runner._submit_frontdoor_next_stage_state(
+        {"active_stage_id": "", "transition_required": False, "stages": []},
+        stage_goal="final synthesis only",
+        tool_round_budget=1,
+        completed_stage_summary="",
+        key_refs=[],
+        final=True,
+    )
+    updated = runner._record_frontdoor_stage_round(
+        stage_state,
+        tool_call_payloads=[{"id": "call:record", "name": "record_tool", "arguments": {"value": "alpha"}}],
+    )
+    assert updated["transition_required"] is False
+    assert updated["stages"][0]["tool_rounds_used"] == 1
+    assert updated["stages"][0]["final_stage"] is True
+
+
 @pytest.mark.asyncio
 async def test_completed_frontdoor_stage_archives_oldest_ten_and_inserts_compression_stage(tmp_path: Path, monkeypatch) -> None:
     service = MainRuntimeService(

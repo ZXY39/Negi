@@ -89,6 +89,11 @@ _NON_SUBSTANTIVE_EXECUTION_PROGRESS_TOOLS = {
 _LATEST_SPAWN_STAGE_KEY_REF_NOTE = '最近一次 spawn_child_nodes 返回结果'
 
 
+_STAGE_GOAL_CHAR_LIMIT = 240
+_STAGE_SUMMARY_CHAR_LIMIT = 800
+_STAGE_KEY_REF_LIMIT = 4
+
+
 def _default_governance_state(*, node_count_baseline: int = 1) -> dict[str, Any]:
     return {
         'enabled': True,
@@ -571,10 +576,10 @@ class TaskLogService:
     def _tool_result_payload_ref(payload: dict[str, Any]) -> str:
         output_ref = str(
             payload.get('output_ref')
+            or payload.get('resolved_ref')
             or payload.get('wrapper_ref')
             or payload.get('requested_ref')
             or payload.get('ref')
-            or payload.get('resolved_ref')
             or ''
         ).strip()
         if output_ref:
@@ -589,7 +594,7 @@ class TaskLogService:
         summary, output_ref = content_summary_and_ref(value)
         envelope = parse_content_envelope(value)
         if envelope is not None:
-            resolved_ref = str(envelope.ref or envelope.wrapper_ref or envelope.resolved_ref or '').strip()
+            resolved_ref = str(envelope.resolved_ref or envelope.ref or envelope.wrapper_ref or '').strip()
             if resolved_ref:
                 output_ref = resolved_ref
             if str(envelope.summary or '').strip():
@@ -1297,11 +1302,42 @@ class TaskLogService:
                 key_ref.model_copy(
                     update={
                         'ref': normalized_ref,
-                        'note': normalized_note,
+                        'note': _single_line_text(normalized_note, max_chars=160),
                     }
                 )
             )
         return refs
+
+    @staticmethod
+    def _clip_stage_text(value: Any, *, limit: int) -> str:
+        text = " ".join(str(value or "").split()).strip()
+        if len(text) <= limit:
+            return text
+        return f"{text[: max(0, limit - 3)].rstrip()}..."
+
+    def _canonicalize_stage_key_refs(self, refs: list[ExecutionStageKeyRef]) -> list[ExecutionStageKeyRef]:
+        normalized: list[ExecutionStageKeyRef] = []
+        seen: set[str] = set()
+        navigator = getattr(self, '_content_store', None)
+        for item in list(refs or []):
+            current = item
+            target_ref = str(item.ref or '').strip()
+            if navigator is not None and target_ref:
+                try:
+                    described = navigator.describe(ref=target_ref, view='canonical')
+                    resolved_ref = str((described or {}).get('resolved_ref') or '').strip()
+                    if resolved_ref:
+                        current = item.model_copy(update={'ref': resolved_ref})
+                except Exception:
+                    current = item
+            dedupe_key = str(current.ref or '').strip()
+            if not dedupe_key or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            normalized.append(current)
+            if len(normalized) >= _STAGE_KEY_REF_LIMIT:
+                break
+        return normalized
 
     def _latest_spawn_stage_key_ref_locked(
         self,
@@ -1501,16 +1537,17 @@ class TaskLogService:
         tool_round_budget: int,
         completed_stage_summary: str = '',
         key_refs: list[dict[str, Any]] | None = None,
+        final: bool = False,
     ) -> dict[str, Any]:
         with self._task_lock(task_id):
             task = self._require_task(task_id)
             node = self._store.get_node(node_id)
             if node is None:
                 raise ValueError(f'node not found: {node_id}')
-            normalized_goal = str(stage_goal or '').strip()
+            normalized_goal = self._clip_stage_text(stage_goal, limit=_STAGE_GOAL_CHAR_LIMIT)
             normalized_budget = int(tool_round_budget or 0)
-            normalized_completed_summary = str(completed_stage_summary or '').strip()
-            normalized_key_refs = self._normalize_stage_key_refs(key_refs)
+            normalized_completed_summary = self._clip_stage_text(completed_stage_summary, limit=_STAGE_SUMMARY_CHAR_LIMIT)
+            normalized_key_refs = self._canonicalize_stage_key_refs(self._normalize_stage_key_refs(key_refs))
             if not normalized_goal:
                 raise ValueError('stage_goal must not be empty')
             if normalized_budget < 1 or normalized_budget > 10:
@@ -1561,6 +1598,7 @@ class TaskLogService:
                 status=_EXECUTION_STAGE_STATUS_ACTIVE,
                 stage_goal=normalized_goal,
                 completed_stage_summary='',
+                final_stage=bool(final),
                 key_refs=[],
                 archive_ref='',
                 archive_stage_index_start=0,
@@ -1637,6 +1675,7 @@ class TaskLogService:
                 active_stage_id=str(state.active_stage_id or '').strip(),
                 transition_required=bool(
                     latest_active is not None
+                    and not bool(getattr(latest_active, 'final_stage', False))
                     and int(latest_active.tool_round_budget or 0) > 0
                     and int(latest_active.tool_rounds_used or 0) >= int(latest_active.tool_round_budget or 0)
                 ),

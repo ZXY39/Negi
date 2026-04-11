@@ -22,6 +22,8 @@ class ContentHandle:
     resolved_ref: str = ""
     wrapper_ref: str = ""
     wrapper_depth: int = 0
+    invocation_text: str = ""
+    canonical_summary: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +43,8 @@ class ContentHandle:
             "resolved_ref": self.resolved_ref,
             "wrapper_ref": self.wrapper_ref,
             "wrapper_depth": int(self.wrapper_depth or 0),
+            "invocation_text": self.invocation_text,
+            "canonical_summary": self.canonical_summary,
         }
 
 
