@@ -1523,6 +1523,55 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
     ]
 
 
+def test_promote_tool_context_hydration_uses_successful_result_without_matching_call_id() -> None:
+    promoted_calls: list[dict[str, object]] = []
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    loop._tool_context_hydration_promoter = lambda **kwargs: promoted_calls.append(dict(kwargs))
+
+    loop._promote_tool_context_hydration_after_results(
+        task_id='task-result-driven-hydration',
+        node_id='node-result-driven-hydration',
+        response_tool_calls=[
+            ToolCallRequest(
+                id='call-original',
+                name='load_tool_context',
+                arguments={'tool_id': 'filesystem_list'},
+            )
+        ],
+        results=[
+            {
+                'live_state': {
+                    'tool_call_id': 'call-original|fc_extra_suffix',
+                    'tool_name': 'load_tool_context',
+                    'status': 'success',
+                },
+                'tool_message': {
+                    'role': 'tool',
+                    'tool_call_id': 'call-original|fc_extra_suffix',
+                    'name': 'load_tool_context',
+                    'content': json.dumps({'ok': True, 'tool_id': 'filesystem_list'}, ensure_ascii=False),
+                },
+                'raw_result': {
+                    'ok': True,
+                    'tool_id': 'filesystem_list',
+                },
+            }
+        ],
+        runtime_context={
+            'task_id': 'task-result-driven-hydration',
+            'node_id': 'node-result-driven-hydration',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert len(promoted_calls) == 1
+    promoted = promoted_calls[0]
+    assert getattr(promoted['tool_call'], 'name') == 'load_tool_context'
+    assert getattr(promoted['tool_call'], 'arguments') == {'tool_id': 'filesystem_list'}
+    assert promoted['raw_result'] == {'ok': True, 'tool_id': 'filesystem_list'}
+
+
 def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> None:
     visible_tools = {
         'filesystem': _ModelSchemaRecordingTool(

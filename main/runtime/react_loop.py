@@ -1562,11 +1562,6 @@ class ReActToolLoop:
         promoter = getattr(self, '_tool_context_hydration_promoter', None)
         if not callable(promoter):
             return
-        calls_by_id = {
-            str(getattr(call, 'id', '') or '').strip(): call
-            for call in list(response_tool_calls or [])
-            if str(getattr(call, 'id', '') or '').strip()
-        }
         for result in list(results or []):
             if not isinstance(result, dict):
                 continue
@@ -1574,19 +1569,22 @@ class ReActToolLoop:
             if str(live_state.get('status') or '').strip().lower() != 'success':
                 continue
             raw_result = result.get('raw_result')
-            if not isinstance(raw_result, dict):
+            if not isinstance(raw_result, dict) or not bool(raw_result.get('ok')):
                 continue
             tool_message = dict(result.get('tool_message') or {}) if isinstance(result.get('tool_message'), dict) else {}
-            tool_call_id = str(tool_message.get('tool_call_id') or live_state.get('tool_call_id') or '').strip()
-            if not tool_call_id:
+            tool_name = str(tool_message.get('name') or live_state.get('tool_name') or '').strip()
+            if tool_name not in {'load_tool_context', 'load_tool_context_v2'}:
                 continue
-            call = calls_by_id.get(tool_call_id)
-            if call is None:
+            hydrated_tool_id = str(raw_result.get('tool_id') or '').strip()
+            if not hydrated_tool_id:
                 continue
             promoter(
                 task_id=str(task_id or '').strip(),
                 node_id=str(node_id or '').strip(),
-                tool_call=call,
+                tool_call=SimpleNamespace(
+                    name=tool_name,
+                    arguments={'tool_id': hydrated_tool_id},
+                ),
                 raw_result=dict(raw_result),
                 runtime_context=dict(runtime_context or {}),
             )
