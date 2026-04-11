@@ -7,8 +7,7 @@ from typing import Any
 
 from g3ku.core.results import ContentEnvelope, ContentHandle
 
-INLINE_CHAR_LIMIT = 1200
-INLINE_LINE_LIMIT = 60
+INLINE_CHAR_LIMIT = 6000
 DEFAULT_OPEN_LINES = 80
 MAX_OPEN_LINES = 200
 INLINE_OPEN_RESULT_CHAR_LIMIT = 16000
@@ -336,7 +335,7 @@ def tool_result_delivery_policy(
             return "inline_full"
         if _should_keep_inline_tool_result(value, source_kind=source_kind):
             return "inline_small"
-    if len(text) <= INLINE_CHAR_LIMIT and _line_count(text) <= INLINE_LINE_LIMIT:
+    if len(text) <= INLINE_CHAR_LIMIT:
         return "inline_small"
     return "summary_with_ref"
 

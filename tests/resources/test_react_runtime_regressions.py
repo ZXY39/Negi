@@ -2283,7 +2283,7 @@ async def test_inline_even_when_large_for_manifest_backed_tool_result(tmp_path) 
         assert parse_content_envelope(rendered) is None
         payload = json.loads(rendered)
         assert payload["stdout"].startswith("inline line 000")
-        assert len(payload["stdout"]) > 1200
+        assert len(payload["stdout"].splitlines()) == 240
     finally:
         store.close()
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from g3ku.content import ContentNavigationService, content_summary_and_ref, parse_content_envelope
-from g3ku.content.navigation import INLINE_CHAR_LIMIT, INLINE_LINE_LIMIT
+from g3ku.content.navigation import INLINE_CHAR_LIMIT
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
     FAILURE_CLASS_BUSINESS_UNPASSED,
@@ -1783,7 +1783,7 @@ class TaskLogService:
             final_output = str(record.final_output or '')
             if not final_output or str(record.final_output_ref or '').strip():
                 return record
-            if len(final_output) <= INLINE_CHAR_LIMIT and len(final_output.splitlines()) <= INLINE_LINE_LIMIT:
+            if len(final_output) <= INLINE_CHAR_LIMIT:
                 return record
             text, ref = self._summarize_content(
                 final_output,

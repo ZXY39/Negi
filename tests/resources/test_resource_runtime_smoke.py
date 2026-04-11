@@ -1399,25 +1399,42 @@ async def test_exec_tool_externalizes_long_stdout(tmp_path: Path):
         command = f'{_python_launcher()} -c "for i in range(90): print(\'line-%03d\' % i)"'
         payload = json.loads(await exec_tool.execute(command=command, __g3ku_runtime={'session_key': 'cli:test'}))
         assert payload['status'] == 'success'
-        assert payload['stdout_ref'].startswith('artifact:')
-        assert 'line_count' not in payload
-        assert 'tail_preview' not in payload
-        assert 'next_actions' not in payload
         assert 'line-000' in payload['head_preview']
-
-        hits = json.loads(await content_tool.execute(action='search', ref=payload['stdout_ref'], query='line-044', limit=1))
-        excerpt = json.loads(
-            await content_tool.execute(
-                action='open',
-                ref=payload['stdout_ref'],
-                around_line=hits['hits'][0]['line'],
-                window=5,
-            )
-        )
-        assert 'line-044' in excerpt['excerpt']
+        assert 'command' not in payload
+        assert 'stdout_ref' not in payload
+        assert 'stderr_ref' not in payload
     finally:
         manager.close()
         store.close()
+
+
+def test_content_navigation_externalizes_only_after_6000_chars(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+
+    inline_text = "x" * 6000
+    externalized_text = "x" * 6001
+
+    inline = navigator.externalize_for_message(
+        inline_text,
+        runtime={"task_id": "task:test", "node_id": "node:inline"},
+        display_name="inline-test",
+        source_kind="tool_result:exec",
+        compact=True,
+    )
+    externalized = navigator.externalize_for_message(
+        externalized_text,
+        runtime={"task_id": "task:test", "node_id": "node:externalized"},
+        display_name="externalized-test",
+        source_kind="tool_result:exec",
+        compact=True,
+    )
+
+    assert parse_content_envelope(inline) is None
+    envelope = parse_content_envelope(externalized)
+    assert envelope is not None
+    store.close()
 
 
 @pytest.mark.asyncio
@@ -1932,7 +1949,7 @@ def test_prepare_messages_for_model_uses_compact_content_refs(tmp_path: Path):
             },
             {
                 'role': 'tool',
-                'content': 'line-001\n' * 400,
+                'content': 'line-001\n' * 800,
             },
         ],
         runtime={'task_id': 'task:test', 'node_id': 'node:test', 'node_kind': 'execution'},
@@ -2279,7 +2296,7 @@ def test_content_navigation_externalized_tool_summary_uses_invocation_text_not_h
         "status": "success",
         "stdout_ref": "artifact:artifact:stdout",
         "head_preview": "line one\nline two\nline three",
-        "stdout": "x" * 5000,
+        "stdout": "x" * 7000,
     }
     rendered = navigator.externalize_for_message(
         json.dumps(payload, ensure_ascii=False),

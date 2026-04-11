@@ -3063,7 +3063,7 @@ async def test_ceo_manifest_tool_result_inline_full_stays_inline_even_when_large
     payload = json.loads(result_text)
     assert payload["ok"] is True
     assert payload["stdout"].startswith("inline line 000")
-    assert len(payload["stdout"]) > 1200
+    assert len(payload["stdout"].splitlines()) == 180
 
 
 @pytest.mark.asyncio

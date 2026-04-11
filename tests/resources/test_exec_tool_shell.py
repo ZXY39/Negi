@@ -42,6 +42,9 @@ async def test_exec_tool_safety_guard_disabled_by_default() -> None:
     assert payload['status'] == 'success'
     assert payload['exit_code'] == 0
     assert 'shutdown' in payload['head_preview'].lower()
+    assert 'command' not in payload
+    assert 'stdout_ref' not in payload
+    assert 'stderr_ref' not in payload
 
 
 @pytest.mark.asyncio

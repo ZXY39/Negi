@@ -86,10 +86,8 @@ class ExecTool(Tool):
             return self._build_payload(
                 status="error",
                 exit_code=None,
-                command=command,
                 stdout_text="",
                 stderr_text=policy_error,
-                runtime=runtime,
                 error=policy_error,
             )
         guard_error = self._guard_command(command, cwd)
@@ -97,10 +95,8 @@ class ExecTool(Tool):
             return self._build_payload(
                 status="error",
                 exit_code=None,
-                command=command,
                 stdout_text="",
                 stderr_text=guard_error,
-                runtime=runtime,
                 error=guard_error,
             )
 
@@ -148,10 +144,8 @@ class ExecTool(Tool):
                 return self._build_payload(
                     status="error",
                     exit_code=None,
-                    command=command,
                     stdout_text="",
                     stderr_text=f"Command timed out after {self.timeout} seconds",
-                    runtime=runtime,
                     error=f"Command timed out after {self.timeout} seconds",
                 )
 
@@ -160,10 +154,8 @@ class ExecTool(Tool):
             return self._build_payload(
                 status="success" if process.returncode == 0 else "error",
                 exit_code=process.returncode,
-                command=command,
                 stdout_text=stdout_text,
                 stderr_text=stderr_text,
-                runtime=runtime,
                 error="" if process.returncode == 0 else f"Exit code: {process.returncode}",
             )
 
@@ -171,10 +163,8 @@ class ExecTool(Tool):
             return self._build_payload(
                 status="error",
                 exit_code=None,
-                command=command,
                 stdout_text="",
                 stderr_text=str(e),
-                runtime=runtime,
                 error=f"Error executing command: {str(e)}",
             )
         finally:
@@ -522,10 +512,8 @@ class ExecTool(Tool):
         *,
         status: str,
         exit_code: int | None,
-        command: str,
         stdout_text: str,
         stderr_text: str,
-        runtime: dict[str, Any],
         error: str = "",
     ) -> str:
         combined = stdout_text.strip()
@@ -534,33 +522,11 @@ class ExecTool(Tool):
         payload = {
             "status": status,
             "exit_code": exit_code,
-            "command": command,
-            "stdout_ref": self._persist_ref(stdout_text, runtime=runtime, display_name="exec stdout", source_kind="exec_stdout"),
-            "stderr_ref": self._persist_ref(stderr_text, runtime=runtime, display_name="exec stderr", source_kind="exec_stderr"),
             "head_preview": self._preview(combined, from_tail=False),
         }
         if error:
             payload["error"] = error
         return json.dumps(payload, ensure_ascii=False)
-
-    def _persist_ref(
-        self,
-        text: str,
-        *,
-        runtime: dict[str, Any],
-        display_name: str,
-        source_kind: str,
-    ) -> str:
-        if self.content_store is None or not str(text or "").strip():
-            return ""
-        envelope = self.content_store.maybe_externalize_text(
-            text,
-            runtime=runtime,
-            display_name=display_name,
-            source_kind=source_kind,
-            force=True,
-        )
-        return str(envelope.ref or "") if envelope is not None else ""
 
     def _capture_resource_tree_state(self) -> dict[str, dict[str, str]]:
         service = self.main_task_service
