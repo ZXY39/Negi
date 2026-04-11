@@ -2467,6 +2467,21 @@ def test_content_navigation_populates_path_ref_metadata(tmp_path: Path):
     store.close()
 
 
+def test_content_navigation_reads_workspace_relative_path_refs(tmp_path: Path):
+    navigator = ContentNavigationService(workspace=tmp_path, allowed_dir=tmp_path)
+    target = tmp_path / "g3ku" / "config" / "loader.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+
+    result = navigator.read(ref="path:g3ku/config/loader.py")
+
+    assert result["content"] == "VALUE = 1\n"
+    assert result["requested_ref"] == "path:g3ku/config/loader.py"
+    assert result["resolved_ref"] == "path:g3ku/config/loader.py"
+    assert result["wrapper_ref"] == ""
+    assert result["wrapper_depth"] == 0
+
+
 def test_content_summary_and_ref_uses_canonical_ref_for_content_envelopes(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)

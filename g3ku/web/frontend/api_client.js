@@ -29,7 +29,7 @@ class ApiClient {
     static _friendlyErrorMessageForCode(code) {
         switch (String(code || "").trim().toLowerCase()) {
             case "no_model_configured":
-                return "当前项目还没有配置可用模型。请先进入“模型配置”页面，新增并保存至少一个模型，并把它分配给主Agent（CEO）角色。";
+                return "当前项目还没有配置可用模型。请先进入“模型配置”页面，新增并保存至少一个模型，并把它分配给主Agent（Leader）角色。";
             case "project_locked":
                 return "项目当前已锁定，请先完成解锁后再继续。";
             case "task_service_unavailable":

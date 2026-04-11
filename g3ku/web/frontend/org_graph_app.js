@@ -2537,7 +2537,7 @@ function syncCeoPrimaryButton() {
     const icon = isPause ? "pause" : "send";
     U.ceoSend.innerHTML = `<i data-lucide="${icon}"></i> ${label}`;
     U.ceoSend.disabled = !!S.ceoUploadBusy || !!S.ceoPauseBusy || !!S.ceoSessionBusy || !!S.ceoSessionCatalogBusy || !activeSessionId();
-    U.ceoSend.setAttribute("aria-label", isPause ? "暂停当前 CEO 会话" : "发送消息");
+    U.ceoSend.setAttribute("aria-label", isPause ? "暂停当前 Leader 会话" : "发送消息");
     icons();
 }
 
@@ -2606,7 +2606,7 @@ function handleCeoControlAck(payload = {}) {
     S.ceoPauseBusy = false;
     if (payload?.accepted === false) {
         syncCeoPrimaryButton();
-        showToast({ title: "暂停失败", text: "当前没有可暂停的 CEO 回合。", kind: "error" });
+        showToast({ title: "暂停失败", text: "当前没有可暂停的 Leader 回合。", kind: "error" });
         return;
     }
     S.ceoTurnActive = false;
@@ -2653,7 +2653,7 @@ function handleCeoPrimaryAction() {
         return;
     }
     if (activeSessionIsReadonly()) {
-        showToast({ title: "渠道会话只读", text: "当前只能查看渠道历史消息，不能在 CEO 面板直接发送。", kind: "info" });
+        showToast({ title: "渠道会话只读", text: "当前只能查看渠道历史消息，不能在 Leader 面板直接发送。", kind: "info" });
         return;
     }
     sendCeoMessage();

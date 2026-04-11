@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import json
+import re
 import uuid
 from collections import deque
 from dataclasses import asdict
@@ -26,6 +27,7 @@ _TRANSCRIPT_TURN_ID_KEY = "_transcript_turn_id"
 _TRANSCRIPT_STATE_KEY = "_transcript_state"
 _TRANSCRIPT_STATE_PENDING = "pending"
 _TRANSCRIPT_STATE_COMPLETED = "completed"
+_TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
 
 
 class RuntimeAgentSession:
@@ -210,6 +212,83 @@ class RuntimeAgentSession:
                 continue
             normalized.append(task_id)
         return normalized
+
+    @classmethod
+    def _extract_task_ids_from_text(cls, value: Any) -> list[str]:
+        return cls._normalize_verified_task_ids(_TASK_ID_PATTERN.findall(str(value or "")))
+
+    def _successful_async_dispatch_task_ids(self, interaction_flow: list[dict[str, Any]]) -> list[str]:
+        task_ids: list[str] = []
+        for item in reversed(list(interaction_flow or [])):
+            if str(item.get("tool_name") or "").strip() != "create_async_task":
+                continue
+            if str(item.get("status") or "").strip().lower() != "success":
+                continue
+            for candidate in (
+                item.get("text"),
+                item.get("output_text"),
+                item.get("output_preview_text"),
+                item.get("arguments_text"),
+            ):
+                for task_id in self._extract_task_ids_from_text(candidate):
+                    if task_id not in task_ids:
+                        task_ids.append(task_id)
+        return task_ids
+
+    @classmethod
+    def _complete_active_frontdoor_stage_state(
+        cls,
+        stage_state: dict[str, Any] | None,
+        *,
+        completed_stage_summary: str = "",
+    ) -> dict[str, Any]:
+        normalized_state = dict(stage_state or {})
+        active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
+        if not active_stage_id:
+            return normalized_state
+        now = datetime.now().isoformat()
+        normalized_summary = str(completed_stage_summary or "").strip()
+        stages: list[dict[str, Any]] = []
+        completed_any = False
+        for raw_stage in list(normalized_state.get("stages") or []):
+            current = dict(raw_stage) if isinstance(raw_stage, dict) else {}
+            if (
+                str(current.get("stage_id") or "").strip() == active_stage_id
+                and str(current.get("status") or "").strip().lower() == "active"
+            ):
+                current["status"] = "completed"
+                current["finished_at"] = str(current.get("finished_at") or "").strip() or now
+                if normalized_summary and not str(current.get("completed_stage_summary") or "").strip():
+                    current["completed_stage_summary"] = normalized_summary
+                completed_any = True
+            stages.append(current)
+        return {
+            "active_stage_id": "" if completed_any else active_stage_id,
+            "transition_required": False if completed_any else bool(normalized_state.get("transition_required")),
+            "stages": stages,
+        }
+
+    def _recover_dispatched_async_runtime_error(
+        self,
+        exc: Exception,
+        *,
+        interaction_flow: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        from g3ku.providers.fallback import is_internal_runtime_model_error
+
+        if not is_internal_runtime_model_error(exc):
+            return None
+        task_ids = self._successful_async_dispatch_task_ids(interaction_flow)
+        if not task_ids:
+            return None
+        primary_task_id = task_ids[0]
+        return {
+            "text": (
+                f"后台任务已经建立，任务号 `{primary_task_id}`。"
+                "当前回写遇到暂时异常，但后台任务仍在运行，完成后会继续同步结果。"
+            ),
+            "task_ids": task_ids,
+        }
 
     def _ensure_user_turn_id(self, user_input: UserInputMessage) -> str:
         metadata = dict(user_input.metadata or {})
@@ -1293,14 +1372,67 @@ class RuntimeAgentSession:
             except CeoFrontdoorInterrupted as exc:
                 return await self._pause_for_frontdoor_interrupt(exc)
             except Exception as exc:
+                interaction_flow = self._interaction_flow_snapshot()
+                user_text = self._history_text(user_input.content)
+                recovered_dispatch = self._recover_dispatched_async_runtime_error(
+                    exc,
+                    interaction_flow=interaction_flow,
+                )
+                if recovered_dispatch is not None:
+                    output = str(recovered_dispatch.get("text") or "").strip()
+                    task_ids = self._normalize_verified_task_ids(recovered_dispatch.get("task_ids"))
+                    self._frontdoor_stage_state = self._complete_active_frontdoor_stage_state(
+                        self._frontdoor_stage_state,
+                        completed_stage_summary=output,
+                    )
+                    assistant = AssistantMessage(content=output, timestamp=self._now())
+                    self._state.messages.append(assistant)
+                    self._state.latest_message = output
+                    self._state.is_running = False
+                    self._state.status = "completed"
+                    self._state.last_error = None
+                    self._state.pending_tool_calls.clear()
+                    self._last_verified_task_ids = list(task_ids)
+                    if getattr(self._loop, "prompt_trace", False):
+                        logger.info(render_output_trace(output))
+                    if persist_transcript:
+                        assistant_metadata = {
+                            "task_ids": task_ids,
+                            "reason": "async_dispatch_runtime_recovered",
+                        }
+                        if cron_internal:
+                            assistant_metadata["source"] = "cron"
+                            assistant_metadata["cron_job_id"] = str(
+                                (user_input.metadata or {}).get("cron_job_id") or ""
+                            ).strip()
+                        await self._persist_turn_transcript(
+                            user_input=user_input,
+                            user_text=user_text,
+                            assistant_text=output,
+                            interaction_flow=interaction_flow,
+                            internal_source=internal_source,
+                            route_kind=str(getattr(self, "_last_route_kind", "") or ""),
+                            assistant_metadata=assistant_metadata,
+                        )
+                    await self._emit(
+                        "message_end",
+                        role="assistant",
+                        text=output,
+                        heartbeat_internal=heartbeat_internal,
+                        source=internal_source or "user",
+                    )
+                    if internal_source is None:
+                        self.clear_paused_execution_context()
+                    await self._emit("turn_end", session_key=self._state.session_key, status="completed")
+                    await self._emit("agent_end", session_key=self._state.session_key, status="completed")
+                    await self._emit_state_snapshot()
+                    return RunResult(output=output, events=list(self._event_log))
                 self._state.is_running = False
                 self._state.status = "error"
                 error = StructuredError(code="legacy_session_error", message=str(exc), recoverable=True)
                 self._state.last_error = error
                 error_reply = f"运行出错：{error.message}"
                 self._state.latest_message = error_reply
-                interaction_flow = self._interaction_flow_snapshot()
-                user_text = self._history_text(user_input.content)
                 if persist_transcript:
                     assistant_metadata = {
                         "source": "runtime_error",

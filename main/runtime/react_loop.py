@@ -1751,6 +1751,24 @@ class ReActToolLoop:
                             'prior_overflow_signatures': sorted(prior_overflow_signatures or set()),
                         },
                     )
+                    promoter = getattr(self, '_tool_context_hydration_promoter', None)
+                    if (
+                        callable(promoter)
+                        and str(getattr(call, 'name', '') or '').strip() in {'load_tool_context', 'load_tool_context_v2'}
+                        and isinstance(raw_result, dict)
+                        and bool(raw_result.get('ok'))
+                        and str(raw_result.get('tool_id') or '').strip()
+                    ):
+                        promoter(
+                            task_id=str(task.task_id or '').strip(),
+                            node_id=str(node.node_id or '').strip(),
+                            tool_call=SimpleNamespace(
+                                name=str(getattr(call, 'name', '') or '').strip(),
+                                arguments={'tool_id': str(raw_result.get('tool_id') or '').strip()},
+                            ),
+                            raw_result=dict(raw_result),
+                            runtime_context=dict(runtime_context or {}),
+                        )
                     tool_content = self._render_tool_message_content(
                         raw_result,
                         runtime_context=runtime_context,

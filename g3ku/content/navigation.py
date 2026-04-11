@@ -789,14 +789,35 @@ class ContentNavigationService:
 
         normalized_ref = self._normalize_ref(ref)
         if normalized_ref.startswith("path:"):
-            return self._resolve(
-                path=normalized_ref[5:],
-                view=resolved_view,
-                _requested_ref=_requested_ref or normalized_ref,
-                _wrapper_ref=_wrapper_ref,
-                _wrapper_depth=_wrapper_depth,
-                _visited_refs=_visited_refs,
+            file_path = self._resolve_ref_workspace_path(normalized_ref[5:])
+            if not file_path.exists():
+                raise FileNotFoundError(f"path not found: {normalized_ref[5:]}")
+            if not file_path.is_file():
+                raise ValueError(f"path is not a file: {normalized_ref[5:]}")
+            text = file_path.read_text(encoding="utf-8")
+            try:
+                ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
+            except ValueError:
+                ref_path = str(file_path)
+            handle = self._build_handle(
+                ref=f"path:{ref_path}",
+                artifact_id="",
+                uri=str(file_path),
+                source_kind="file_path",
+                display_name=file_path.name,
+                mime_type="text/plain",
+                origin_ref="",
+                invocation_text="",
+                text=text,
             )
+            handle = self._apply_handle_refs(
+                handle,
+                requested_ref=_requested_ref or normalized_ref,
+                resolved_ref=handle.ref,
+                wrapper_ref=_wrapper_ref,
+                wrapper_depth=_wrapper_depth,
+            )
+            return text, handle
         if not normalized_ref.startswith("artifact:"):
             raise ValueError(f"unsupported content ref: {normalized_ref or '<empty>'}")
         if normalized_ref in _visited_refs:
@@ -965,6 +986,21 @@ class ContentNavigationService:
         if not candidate.is_absolute():
             raise ValueError(f"relative path is not allowed; provide absolute path: {path}")
         resolved = candidate.resolve()
+        if self._allowed_dir is not None:
+            try:
+                resolved.relative_to(self._allowed_dir)
+            except ValueError as exc:
+                if self._allowed_dir == self._workspace:
+                    raise PermissionError(f"path outside workspace: {path}") from exc
+                raise PermissionError(f"path outside allowed directory: {path}") from exc
+        return resolved
+
+    def _resolve_ref_workspace_path(self, path: str) -> Path:
+        raw = str(path or "").strip()
+        if raw.startswith("artifact:"):
+            raise ValueError(f"content ref must be passed via ref, not path: {path}")
+        candidate = Path(raw).expanduser()
+        resolved = (self._workspace / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
         if self._allowed_dir is not None:
             try:
                 resolved.relative_to(self._allowed_dir)

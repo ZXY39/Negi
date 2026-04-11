@@ -1,6 +1,6 @@
 (() => {
   const DEFAULT_RETRY_ON = ["network", "429", "5xx"];
-  const SCOPE_LABELS = { ceo: "CEO", execution: "Execution", inspection: "Inspection" };
+  const SCOPE_LABELS = { ceo: "Leader", execution: "Execution", inspection: "Inspection" };
 
   function emptyMemorySection(label, capability) {
     return {

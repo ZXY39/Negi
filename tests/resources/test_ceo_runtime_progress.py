@@ -3406,6 +3406,83 @@ async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
     assert "运行出错：CEO frontdoor exceeded maximum iterations" in recent_history[-1]["content"]
 
 
+@pytest.mark.asyncio
+async def test_runtime_agent_session_recovers_dispatched_async_task_after_internal_runtime_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    class _FakeRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input
+            session._frontdoor_stage_state = _sample_frontdoor_stage_state()
+            await on_progress(
+                "create_async_task started",
+                event_kind="tool_start",
+                event_data={"tool_name": "create_async_task"},
+            )
+            await on_progress(
+                "创建任务成功task:demo-123",
+                event_kind="tool_result",
+                event_data={"tool_name": "create_async_task"},
+            )
+            raise RuntimeError("no active connection")
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        _ = session_key
+        return 0
+
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=_FakeRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+    )
+    session_id = "web:ceo-recover-dispatched-task"
+    session = RuntimeAgentSession(loop, session_key=session_id, channel="web", chat_id="ceo-recover-dispatched-task")
+
+    result = await session.prompt("Analyze the repository in background")
+
+    assert result.output == "后台任务已经建立，任务号 `task:demo-123`。当前回写遇到暂时异常，但后台任务仍在运行，完成后会继续同步结果。"
+    assert session.state.status == "completed"
+    assert session.state.last_error is None
+
+    reloaded_session = SessionManager(tmp_path).get_or_create(session_id)
+    assert [message["role"] for message in reloaded_session.messages] == ["user", "assistant"]
+    assert reloaded_session.messages[1]["content"] == result.output
+    assert reloaded_session.messages[1]["metadata"] == {
+        "task_ids": ["task:demo-123"],
+        "reason": "async_dispatch_runtime_recovered",
+    }
+    summary = reloaded_session.messages[1]["execution_trace_summary"]
+    assert summary["active_stage_id"] == ""
+    stage = summary["stages"][0]
+    assert stage["status"] == "completed"
+    assert stage["completed_stage_summary"] == result.output
+    assert stage["finished_at"]
+
+    recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)
+    assert recent_history[-2] == {"role": "user", "content": "Analyze the repository in background"}
+    assert recent_history[-1]["role"] == "assistant"
+    assert str(recent_history[-1]["content"]).startswith(result.output)
+
+
 def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 
