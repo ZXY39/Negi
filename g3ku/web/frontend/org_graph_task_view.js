@@ -1364,7 +1364,19 @@ function formatExecutionStageTitle(stage) {
     const stageGoal = String(stage?.stage_goal || "").trim();
     const fallbackTitle = String(stage?.mode || "自主执行").trim() || "自主执行";
     const title = stageGoal || fallbackTitle;
-    return `${title}${stage?.created_at ? ` · ${formatCompactTime(stage.created_at)}` : ""}`;
+    const progress = formatExecutionStageProgress(stage);
+    const time = stage?.created_at ? formatCompactTime(stage.created_at) : "";
+    const meta = [progress, time].filter(Boolean).join(" · ");
+    return `${title}${meta ? ` · ${meta}` : ""}`;
+}
+
+function formatExecutionStageProgress(stage) {
+    const totalRounds = normalizeInt(stage?.stage_total_steps, 0);
+    if (totalRounds <= 0) return "";
+    const explicitUsed = normalizeInt(stage?.tool_rounds_used, 0);
+    const inferredUsed = Array.isArray(stage?.rounds) ? stage.rounds.length : 0;
+    const usedRounds = Math.max(explicitUsed, inferredUsed);
+    return `${Math.min(usedRounds, totalRounds)}/${totalRounds}`;
 }
 
 function buildExecutionTraceSteps(trace, node) {
@@ -1384,10 +1396,7 @@ function buildExecutionTraceSteps(trace, node) {
                 status: stageTraceStatus(stage),
                 statusLabel: displayTaskStageStatus(stage.status),
                 open: index === trace.stages.length - 1,
-                bodyHtml: [
-                    renderTraceMessage(`本阶段最大轮数为${stage.stage_total_steps || 0}`, "本阶段最大轮数为0"),
-                    renderExecutionStageRounds(stage),
-                ].join(""),
+                bodyHtml: renderExecutionStageRounds(stage),
             })),
         ];
     }

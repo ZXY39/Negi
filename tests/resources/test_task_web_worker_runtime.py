@@ -5652,6 +5652,86 @@ async def test_pause_during_model_call_keeps_task_resumable_and_resume_finishes_
 
 
 @pytest.mark.asyncio
+async def test_resume_task_exposes_runtime_await_marker_while_context_preparer_blocks(tmp_path: Path):
+    class _PauseableChatBackend:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+            self.call_count = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.call_count += 1
+            if self.call_count == 1:
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled.set()
+                    raise
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "done",
+                            "answer": "done",
+                            "evidence": [{"kind": "artifact", "note": "resume marker completed"}],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 4},
+            )
+
+    backend = _PauseableChatBackend()
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    resume_preparer_started = asyncio.Event()
+    release_preparer = asyncio.Event()
+    preparer_calls = 0
+
+    async def _blocking_context_preparer(*, task, node):
+        nonlocal preparer_calls
+        _ = task, node
+        preparer_calls += 1
+        if preparer_calls < 2:
+            return
+        resume_preparer_started.set()
+        await release_preparer.wait()
+
+    service.node_runner._context_preparer = _blocking_context_preparer
+
+    try:
+        record = await service.create_task("pause then block during resume", session_id="web:shared")
+        await asyncio.wait_for(backend.started.wait(), timeout=1.0)
+
+        await service.pause_task(record.task_id)
+        await service.resume_task(record.task_id)
+        await asyncio.wait_for(resume_preparer_started.wait(), timeout=1.0)
+
+        frame = service.log_service.read_runtime_frame(record.task_id, record.root_node_id)
+        assert frame is not None
+        assert frame.get("await_marker") == "context_preparer"
+        assert str(frame.get("await_started_at") or "").strip()
+    finally:
+        release_preparer.set()
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_pause_requested_after_valid_result_flushes_node_output_before_task_pauses(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

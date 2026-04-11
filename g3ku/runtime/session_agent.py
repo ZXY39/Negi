@@ -1381,6 +1381,14 @@ class RuntimeAgentSession:
                 if recovered_dispatch is not None:
                     output = str(recovered_dispatch.get("text") or "").strip()
                     task_ids = self._normalize_verified_task_ids(recovered_dispatch.get("task_ids"))
+                    logger.opt(exception=exc).error(
+                        "Recovered async dispatch turn after internal runtime error "
+                        "(session_key={}, route_kind={}, internal_source={}, task_ids={})",
+                        self._state.session_key,
+                        str(getattr(self, "_last_route_kind", "") or ""),
+                        internal_source or "user",
+                        ",".join(task_ids),
+                    )
                     self._frontdoor_stage_state = self._complete_active_frontdoor_stage_state(
                         self._frontdoor_stage_state,
                         completed_stage_summary=output,
@@ -1427,6 +1435,13 @@ class RuntimeAgentSession:
                     await self._emit("agent_end", session_key=self._state.session_key, status="completed")
                     await self._emit_state_snapshot()
                     return RunResult(output=output, events=list(self._event_log))
+                logger.opt(exception=exc).error(
+                    "Runtime agent turn failed "
+                    "(session_key={}, route_kind={}, internal_source={})",
+                    self._state.session_key,
+                    str(getattr(self, "_last_route_kind", "") or ""),
+                    internal_source or "user",
+                )
                 self._state.is_running = False
                 self._state.status = "error"
                 error = StructuredError(code="legacy_session_error", message=str(exc), recoverable=True)

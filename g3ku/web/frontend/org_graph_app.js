@@ -2846,10 +2846,7 @@ function renderCeoStageTraceIntoTurn(turn, executionTraceSummary = null) {
         status: stageTraceStatus(stage),
         statusLabel: displayTaskStageStatus(stage.status),
         open: index === summary.stages.length - 1,
-        bodyHtml: [
-            renderTraceMessage(`本阶段最大轮数为${stage.stage_total_steps || 0}`, "本阶段最大轮数为0"),
-            renderExecutionStageRounds(stage),
-        ].join(""),
+        bodyHtml: renderExecutionStageRounds(stage),
     })).join("");
     if (typeof bindTraceRoundToolStrips === "function") bindTraceRoundToolStrips(turn.listEl);
     const stageCount = summary.stages.length;

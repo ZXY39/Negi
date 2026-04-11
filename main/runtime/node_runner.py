@@ -5,6 +5,7 @@ import copy
 import json
 import os
 import platform
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -277,19 +278,34 @@ class NodeRunner:
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         try:
             if self._context_preparer is not None:
-                await self._context_preparer(task=task, node=node)
+                await self._await_with_runtime_marker(
+                    task_id=task_id,
+                    node_id=node.node_id,
+                    marker='context_preparer',
+                    awaitable=self._context_preparer(task=task, node=node),
+                )
             tools = self._build_tools(task=task, node=node)
-            react_state = await self._resume_react_state(task=task, node=node)
-            result = await self._react_loop.run(
-                task=task,
-                node=node,
-                messages=list(react_state.get('messages') or []),
-                tools=tools,
-                model_refs=self._model_refs_for(node),
-                model_refs_supplier=lambda current_node=node: self._model_refs_for(current_node),
-                runtime_context=self._runtime_context(task=task, node=node),
-                max_iterations=self._max_iterations_for(node),
-                max_parallel_tool_calls=self._max_parallel_tool_calls_for(node),
+            react_state = await self._await_with_runtime_marker(
+                task_id=task_id,
+                node_id=node.node_id,
+                marker='resume_react_state',
+                awaitable=self._resume_react_state(task=task, node=node),
+            )
+            result = await self._await_with_runtime_marker(
+                task_id=task_id,
+                node_id=node.node_id,
+                marker='react_loop.run',
+                awaitable=self._react_loop.run(
+                    task=task,
+                    node=node,
+                    messages=list(react_state.get('messages') or []),
+                    tools=tools,
+                    model_refs=self._model_refs_for(node),
+                    model_refs_supplier=lambda current_node=node: self._model_refs_for(current_node),
+                    runtime_context=self._runtime_context(task=task, node=node),
+                    max_iterations=self._max_iterations_for(node),
+                    max_parallel_tool_calls=self._max_parallel_tool_calls_for(node),
+                ),
             )
             if self._pause_requested(task_id):
                 self._mark_finished(task_id, node.node_id, result)
@@ -315,6 +331,31 @@ class NodeRunner:
         finally:
             if self._context_finalizer is not None:
                 self._context_finalizer(task=task, node=node)
+
+    def _set_runtime_await_marker(self, *, task_id: str, node_id: str, marker: str, started_at: str = '') -> None:
+        normalized_marker = str(marker or '').strip()
+        normalized_started_at = str(started_at or '').strip()
+
+        def _mutate(frame: dict[str, Any]) -> dict[str, Any]:
+            next_frame = dict(frame or {})
+            next_frame['await_marker'] = normalized_marker
+            next_frame['await_started_at'] = normalized_started_at if normalized_marker else ''
+            return next_frame
+
+        self._log_service.update_frame(task_id, node_id, _mutate, publish_snapshot=True)
+
+    async def _await_with_runtime_marker(self, *, task_id: str, node_id: str, marker: str, awaitable: Any) -> Any:
+        started_at = datetime.now().isoformat()
+        self._set_runtime_await_marker(
+            task_id=task_id,
+            node_id=node_id,
+            marker=marker,
+            started_at=started_at,
+        )
+        try:
+            return await awaitable
+        finally:
+            self._set_runtime_await_marker(task_id=task_id, node_id=node_id, marker='')
 
     async def _run_nested_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         executor = self.nested_node_executor

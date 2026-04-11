@@ -3206,8 +3206,8 @@ textarea {
     flex-direction: column;
     gap: var(--space-3);
     overflow: visible;
-    padding-left: 0;
-    padding-right: 0;
+    padding-left: 6px;
+    padding-right: 6px;
 }
 
 .task-trace-step {
