@@ -108,7 +108,7 @@ async def test_tool_registry_langchain_tool_hands_off_long_tool_for_direct_ceo_p
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_bypasses_watchdog_for_non_ceo_roles() -> None:
+async def test_tool_registry_keeps_watchdog_inline_for_execution_role() -> None:
     registry = ToolRegistry()
     registry.register(_SlowCompleteTool())
     heartbeat = _HeartbeatRecorder()

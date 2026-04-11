@@ -15,7 +15,11 @@ from g3ku.agent.tools.base import Tool
 from g3ku.content import content_summary_and_ref, parse_content_envelope
 from g3ku.providers.base import ToolCallRequest
 from g3ku.runtime.tool_history import analyze_tool_call_history, extract_call_id
-from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
+from g3ku.runtime.tool_watchdog import (
+    actor_role_allows_detached_watchdog,
+    actor_role_allows_watchdog,
+    run_tool_with_watchdog,
+)
 from main.errors import TaskPausedError, describe_exception
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_stable_prompt_cache_key
@@ -79,8 +83,8 @@ class RepeatedActionCircuitBreaker:
 
 
 class ReActToolLoop:
-    _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
-    _ORDERED_CONTROL_TOOL_NAMES = ('wait_tool_execution', 'stop_tool_execution')
+    _CONTROL_TOOL_NAMES = {'stop_tool_execution'}
+    _ORDERED_CONTROL_TOOL_NAMES = ('stop_tool_execution',)
     _EXCLUSIVE_TOOL_TURN_NAMES = {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}
     _BUDGET_BYPASS_TOOL_NAMES = _CONTROL_TOOL_NAMES | {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, _STAGE_SPAWN_TOOL_NAME}
 
@@ -1995,7 +1999,11 @@ class ReActToolLoop:
             arguments=arguments,
             runtime_context=runtime_context,
             snapshot_supplier=self._snapshot_supplier(runtime_context),
-            manager=getattr(self, '_tool_execution_manager', None),
+            manager=(
+                getattr(self, '_tool_execution_manager', None)
+                if actor_role_allows_detached_watchdog(runtime_context)
+                else None
+            ),
             on_poll=lambda _poll: self._on_tool_watchdog_poll(runtime_context),
         )
         return outcome.value

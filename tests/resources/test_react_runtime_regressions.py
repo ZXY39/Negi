@@ -18,6 +18,7 @@ from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
 from g3ku.resources.registry import ResourceRegistry
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
 from g3ku.runtime.tool_watchdog import ToolExecutionManager
+from main.errors import TaskPausedError
 import main.service.runtime_service as runtime_service_module
 from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool, SpawnChildNodesTool
 from main.runtime.react_loop import ReActToolLoop
@@ -684,7 +685,6 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
                 model_description='filesystem compact model schema',
             ),
             'memory_write': _LargeModelSchemaTool(name='memory_write'),
-            'wait_tool_execution': _StageProtocolNoopTool('wait_tool_execution'),
             'stop_tool_execution': _StageProtocolNoopTool('stop_tool_execution'),
             'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
             'submit_final_result': _submit_final_result_tool(),
@@ -706,7 +706,6 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
     emitted_tool_names = [item['function']['name'] for item in emitted_tools]
 
     assert emitted_tool_names == [
-        'wait_tool_execution',
         'stop_tool_execution',
         'submit_next_stage',
         'submit_final_result',
@@ -761,7 +760,6 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
         {
             'node_id': 'node-root-replay-budget',
             'model_visible_tool_names': [
-                'wait_tool_execution',
                 'stop_tool_execution',
                 'submit_next_stage',
                 'submit_final_result',
@@ -858,7 +856,6 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
                 authoritative_description='load tool context authoritative schema',
                 model_description='load tool context compact model schema',
             ),
-            'wait_tool_execution': _StageProtocolNoopTool('wait_tool_execution'),
             'stop_tool_execution': _StageProtocolNoopTool('stop_tool_execution'),
             'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
             'submit_final_result': _submit_final_result_tool(),
@@ -878,8 +875,7 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
     assert requests
     emitted_tools = list(requests[0].get('tools') or [])
     emitted_tool_names = [item['function']['name'] for item in emitted_tools]
-    assert emitted_tool_names[:5] == [
-        'wait_tool_execution',
+    assert emitted_tool_names[:4] == [
         'stop_tool_execution',
         'submit_next_stage',
         'submit_final_result',
@@ -894,6 +890,72 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
     assert 'content_search' in emitted_tool_names
     assert 'content_open' in emitted_tool_names
     assert 'memory_write' in emitted_tool_names
+
+
+@pytest.mark.asyncio
+async def test_react_loop_execution_watchdog_keeps_long_tool_inline_with_manager_present() -> None:
+    log_service = _FakeLogService()
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service)
+    loop._tool_execution_manager = ToolExecutionManager()
+    heartbeat = _HeartbeatRecorder()
+
+    result = await loop._execute_tool_raw(
+        tools={'slow_complete': _SlowCompleteTool()},
+        tool_name='slow_complete',
+        arguments={},
+        runtime_context={
+            'task_id': 'task-inline-watchdog',
+            'node_id': 'node-inline-watchdog',
+            'node_kind': 'execution',
+            'actor_role': 'execution',
+            'session_key': 'web:inline-watchdog',
+            'loop': SimpleNamespace(web_session_heartbeat=heartbeat),
+            'tool_watchdog': {
+                'poll_interval_seconds': 0.01,
+                'handoff_after_seconds': 0.03,
+            },
+            'tool_snapshot_supplier': lambda: {
+                'status': 'running',
+                'assistant_text': 'execution long tool should stay inline',
+            },
+        },
+    )
+
+    assert result == 'done'
+    assert heartbeat.terminal_calls == []
+
+
+@pytest.mark.asyncio
+async def test_react_loop_acceptance_watchdog_keeps_long_tool_inline_with_manager_present() -> None:
+    log_service = _FakeLogService()
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service)
+    loop._tool_execution_manager = ToolExecutionManager()
+    heartbeat = _HeartbeatRecorder()
+
+    result = await loop._execute_tool_raw(
+        tools={'slow_complete': _SlowCompleteTool()},
+        tool_name='slow_complete',
+        arguments={},
+        runtime_context={
+            'task_id': 'task-inline-watchdog-acceptance',
+            'node_id': 'node-inline-watchdog-acceptance',
+            'node_kind': 'acceptance',
+            'actor_role': 'acceptance',
+            'session_key': 'web:inline-watchdog-acceptance',
+            'loop': SimpleNamespace(web_session_heartbeat=heartbeat),
+            'tool_watchdog': {
+                'poll_interval_seconds': 0.01,
+                'handoff_after_seconds': 0.03,
+            },
+            'tool_snapshot_supplier': lambda: {
+                'status': 'running',
+                'assistant_text': 'acceptance long tool should stay inline',
+            },
+        },
+    )
+
+    assert result == 'done'
+    assert heartbeat.terminal_calls == []
 
 
 def test_execution_selector_uses_stable_visible_tool_order_independent_of_family_iteration_order(
@@ -1934,7 +1996,7 @@ async def test_react_loop_execute_tool_keeps_direct_load_payload_inline(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_react_loop_execution_role_bypasses_watchdog_handoff(tmp_path) -> None:
+async def test_react_loop_execution_role_keeps_watchdog_inline_without_handoff(tmp_path) -> None:
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
     log_service = _FakeLogService()
@@ -1977,6 +2039,56 @@ async def test_react_loop_execution_role_bypasses_watchdog_handoff(tmp_path) -> 
         assert heartbeat.terminal_calls == []
     finally:
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_react_loop_execution_watchdog_poll_can_pause_long_tool_midflight() -> None:
+    class _LongRunningTool(Tool):
+        @property
+        def name(self) -> str:
+            return "long_running"
+
+        @property
+        def description(self) -> str:
+            return "Run long enough for inline watchdog polling to observe pause."
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {"type": "object", "properties": {}, "required": []}
+
+        async def execute(self, **kwargs) -> str:
+            _ = kwargs
+            await asyncio.sleep(0.5)
+            return "done"
+
+    log_service = _FakeLogService()
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+    loop._tool_execution_manager = ToolExecutionManager()
+
+    async def _request_pause() -> None:
+        await asyncio.sleep(0.03)
+        log_service._store._task.pause_requested = True
+
+    pause_task = asyncio.create_task(_request_pause())
+    with pytest.raises(TaskPausedError):
+        await loop._execute_tool_raw(
+            tools={"long_running": _LongRunningTool()},
+            tool_name="long_running",
+            arguments={},
+            runtime_context={
+                "task_id": "task-pause-inline-watchdog",
+                "node_id": "node-pause-inline-watchdog",
+                "node_kind": "execution",
+                "actor_role": "execution",
+                "session_key": "web:execution-inline-watchdog",
+                "tool_watchdog": {
+                    "poll_interval_seconds": 0.01,
+                    "handoff_after_seconds": 0.05,
+                },
+                "tool_snapshot_supplier": lambda: {"status": "running"},
+            },
+        )
+    await pause_task
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,11 @@ from g3ku.json_schema_utils import (
     build_args_schema_model,
     normalize_runtime_tool_arguments_dict,
 )
-from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
+from g3ku.runtime.tool_watchdog import (
+    actor_role_allows_detached_watchdog,
+    actor_role_allows_watchdog,
+    run_tool_with_watchdog,
+)
 
 _CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
 
@@ -275,7 +279,7 @@ class ToolRegistry:
             tool_name=tool_name,
             arguments=params,
             runtime_context=runtime_context,
-            manager=execution_manager,
+            manager=execution_manager if actor_role_allows_detached_watchdog(runtime_context) else None,
             on_poll=(
                 (lambda poll: self._emit_watchdog_progress(tool_name=tool_name, poll=poll))
                 if runtime_context.get("on_progress")

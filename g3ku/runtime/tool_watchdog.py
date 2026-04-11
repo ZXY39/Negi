@@ -269,9 +269,17 @@ def runtime_context_value(runtime_context: Any, key: str, default: Any = None) -
 
 def actor_role_allows_watchdog(runtime_context: Any) -> bool:
     role = str(runtime_context_value(runtime_context, "actor_role", "") or "").strip().lower()
-    # Detached watchdog handoff is intentionally limited to the CEO session path.
-    # Execution/inspection nodes must keep long-running tools inline so they do not
-    # drift into a second logical reply cycle or require heartbeat wakeups.
+    # CEO and execution/acceptance nodes all benefit from watchdog polling so long
+    # tools remain interruptible. Whether the poll loop is allowed to detach into a
+    # background handoff is a separate decision.
+    return role in {"ceo", "execution", "acceptance"}
+
+
+def actor_role_allows_detached_watchdog(runtime_context: Any) -> bool:
+    role = str(runtime_context_value(runtime_context, "actor_role", "") or "").strip().lower()
+    # Detached watchdog handoff stays limited to the CEO session path. Execution
+    # and acceptance nodes must keep long-running tools inline inside the same
+    # logical tool turn even when watchdog polling is enabled.
     return role == "ceo"
 
 
