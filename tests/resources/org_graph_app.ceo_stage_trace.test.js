@@ -193,6 +193,7 @@ test("ceo inflight snapshot renders stage -> round -> tool structure", () => {
                     {
                         round_id: "round-1",
                         round_index: 1,
+                        created_at: "2026-04-11T23:13:12+08:00",
                         tools: [
                             {
                                 tool_name: "filesystem",
@@ -209,6 +210,10 @@ test("ceo inflight snapshot renders stage -> round -> tool structure", () => {
 
     assert.match(turn.listEl.innerHTML, /inspect repository/);
     assert.match(turn.listEl.innerHTML, /filesystem/);
+    assert.doesNotMatch(turn.listEl.innerHTML, /第 1 轮/);
+    assert.doesNotMatch(turn.listEl.innerHTML, /工具 ·/);
+    assert.doesNotMatch(turn.listEl.innerHTML, /自主执行/);
+    assert.doesNotMatch(turn.listEl.innerHTML, /点击上方工具卡片查看该调用的参数和输出/);
 });
 
 test("ceo stage trace with no rounds still signals caller to keep stage view", () => {

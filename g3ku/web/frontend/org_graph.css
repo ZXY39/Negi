@@ -3251,6 +3251,20 @@ textarea {
     gap: var(--space-3);
 }
 
+.task-trace-round-group {
+    display: grid;
+    gap: var(--space-3);
+}
+
+.task-trace-round-meta {
+    font-family: inherit;
+    font-size: 0.85rem;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--text-tertiary);
+    letter-spacing: normal;
+}
+
 .task-trace-round-strip {
     display: flex;
     gap: var(--space-3);
@@ -3273,8 +3287,9 @@ textarea {
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
-    flex: 0 0 min(360px, calc(100% - var(--space-2)));
-    min-width: min(360px, 100%);
+    flex: 0 0 auto;
+    width: auto;
+    max-width: 100%;
     padding: var(--space-3) calc(var(--space-3) + 2px);
     text-align: left;
     transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
@@ -3300,6 +3315,8 @@ textarea {
     font-weight: 600;
     min-width: 0;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .task-trace-round-chip-status {
@@ -3340,15 +3357,6 @@ textarea {
 .task-trace-round-panels {
     display: grid;
     gap: var(--space-3);
-}
-
-.task-trace-round-panel-placeholder {
-    padding: var(--space-3);
-    border-radius: 18px;
-    border: 1px dashed color-mix(in srgb, var(--border-color) 72%, transparent);
-    color: var(--text-secondary);
-    font-size: 0.8rem;
-    background: color-mix(in srgb, var(--bg-panel) 44%, transparent);
 }
 
 .task-trace-round-panel {

@@ -1676,6 +1676,12 @@ function captureTraceSectionViewState(host) {
             title: String(step.querySelector(".interaction-step-title")?.textContent || "").trim(),
             open: !!step.open,
             activeToolKey: String(step.querySelector(".task-trace-round-chip.is-active")?.dataset.toolKey || "").trim(),
+            roundActiveToolKeys: Array.from(step.querySelectorAll(".task-trace-round-tools")).reduce((acc, roundHost) => {
+                const roundKey = String(roundHost.dataset.roundKey || "").trim();
+                const activeToolKey = String(roundHost.querySelector(".task-trace-round-chip.is-active")?.dataset.toolKey || "").trim();
+                if (roundKey && activeToolKey) acc[roundKey] = activeToolKey;
+                return acc;
+            }, {}),
         }))
         : [];
     return {
@@ -1718,8 +1724,19 @@ function applyTaskTraceItemViewState(traceList, traceItems) {
         if (typeof nextOpen === "boolean") step.open = nextOpen;
         const activeToolKey = String(traceState?.activeToolKey || "").trim();
         if (typeof setTraceRoundActiveTool === "function") {
-            const roundHost = step.querySelector(".task-trace-round-tools");
-            if (roundHost instanceof HTMLElement) setTraceRoundActiveTool(roundHost, activeToolKey);
+            const roundHosts = Array.from(step.querySelectorAll(".task-trace-round-tools"));
+            const roundActiveToolKeys = traceState?.roundActiveToolKeys && typeof traceState.roundActiveToolKeys === "object"
+                ? traceState.roundActiveToolKeys
+                : null;
+            roundHosts.forEach((roundHost, roundIndex) => {
+                if (!(roundHost instanceof HTMLElement)) return;
+                const roundKey = String(roundHost.dataset.roundKey || "").trim();
+                const persistedToolKey = roundKey && roundActiveToolKeys
+                    ? String(roundActiveToolKeys[roundKey] || "").trim()
+                    : "";
+                const fallbackToolKey = roundIndex === 0 ? activeToolKey : "";
+                setTraceRoundActiveTool(roundHost, persistedToolKey || fallbackToolKey);
+            });
         }
     });
 }

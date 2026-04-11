@@ -244,10 +244,15 @@ class ReActToolLoop:
             node_turn_controller = getattr(self, '_node_turn_controller', None)
             primary_model_ref = str(current_model_refs[0] or '').strip()
             if node_turn_controller is not None and primary_model_ref:
-                node_turn_lease = await node_turn_controller.acquire_turn(
+                node_turn_lease = await self._await_with_model_marker(
                     task_id=task.task_id,
                     node_id=node.node_id,
-                    model_ref=primary_model_ref,
+                    marker='node_turn.acquire',
+                    awaitable=node_turn_controller.acquire_turn(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        model_ref=primary_model_ref,
+                    ),
                 )
             turn_prompt_cache_key = self._execution_prompt_cache_key(
                 model_messages=model_messages,
@@ -260,6 +265,12 @@ class ReActToolLoop:
                 while True:
                     self._check_pause_or_cancel(task.task_id)
                     try:
+                        self._set_model_await_marker(
+                            task_id=task.task_id,
+                            node_id=node.node_id,
+                            marker='model.chat.dispatch',
+                            started_at=now_iso(),
+                        )
                         chat_coro = self._chat_with_optional_extensions(
                             messages=request_messages,
                             tools=tool_schemas or None,
@@ -279,9 +290,25 @@ class ReActToolLoop:
                             model_refs=current_model_refs,
                         )
                         if timeout_seconds is not None:
-                            response = await asyncio.wait_for(chat_coro, timeout=timeout_seconds)
+                            response = await self._await_with_model_marker(
+                                task_id=task.task_id,
+                                node_id=node.node_id,
+                                marker='model.chat.await_response',
+                                awaitable=asyncio.wait_for(chat_coro, timeout=timeout_seconds),
+                            )
                         else:
-                            response = await chat_coro
+                            response = await self._await_with_model_marker(
+                                task_id=task.task_id,
+                                node_id=node.node_id,
+                                marker='model.chat.await_response',
+                                awaitable=chat_coro,
+                            )
+                        self._set_model_await_marker(
+                            task_id=task.task_id,
+                            node_id=node.node_id,
+                            marker='model.chat.response_postprocess',
+                            started_at=now_iso(),
+                        )
                     except asyncio.TimeoutError:
                         timeout_message = self._model_response_timeout_message(timeout_seconds=timeout_seconds)
                         self._log_service.update_frame(
@@ -334,6 +361,7 @@ class ReActToolLoop:
                         continue
                     break
             finally:
+                self._set_model_await_marker(task_id=task.task_id, node_id=node.node_id, marker='')
                 if node_turn_lease is not None and node_turn_controller is not None:
                     node_turn_controller.release_turn(node_turn_lease)
             visible_tool_names = {
@@ -3619,6 +3647,33 @@ class ReActToolLoop:
             return json.dumps(result, ensure_ascii=False)
         except TypeError:
             return str(result)
+
+    def _set_model_await_marker(self, *, task_id: str, node_id: str, marker: str, started_at: str = '') -> None:
+        normalized_marker = str(marker or '').strip()
+        normalized_started_at = str(started_at or '').strip()
+        self._log_service.update_frame(
+            task_id,
+            node_id,
+            lambda frame: {
+                **frame,
+                'await_marker': normalized_marker,
+                'await_started_at': normalized_started_at if normalized_marker else '',
+            },
+            publish_snapshot=True,
+        )
+
+    async def _await_with_model_marker(self, *, task_id: str, node_id: str, marker: str, awaitable: Any) -> Any:
+        started_at = now_iso()
+        self._set_model_await_marker(
+            task_id=task_id,
+            node_id=node_id,
+            marker=marker,
+            started_at=started_at,
+        )
+        try:
+            return await awaitable
+        finally:
+            self._set_model_await_marker(task_id=task_id, node_id=node_id, marker='')
 
     async def _chat_with_optional_extensions(self, **kwargs) -> Any:
         chat = getattr(self._chat_backend, 'chat')

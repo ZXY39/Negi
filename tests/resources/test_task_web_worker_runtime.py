@@ -5732,6 +5732,106 @@ async def test_resume_task_exposes_runtime_await_marker_while_context_preparer_b
 
 
 @pytest.mark.asyncio
+async def test_runtime_frame_exposes_await_marker_while_waiting_for_node_turn(tmp_path: Path):
+    class _BlockingNodeTurnController:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def acquire_turn(self, *, task_id: str, node_id: str, model_ref: str):
+            _ = task_id, node_id, model_ref
+            self.started.set()
+            await self.release.wait()
+            return SimpleNamespace(lease_id=1)
+
+        def release_turn(self, lease) -> None:
+            _ = lease
+
+    backend = _DummyChatBackend()
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    controller = _BlockingNodeTurnController()
+    service.node_runner._react_loop._node_turn_controller = controller
+
+    try:
+        record = await service.create_task("block on node turn", session_id="web:shared")
+        await asyncio.wait_for(controller.started.wait(), timeout=1.0)
+
+        frame = service.log_service.read_runtime_frame(record.task_id, record.root_node_id)
+        assert frame is not None
+        assert frame.get("await_marker") == "node_turn.acquire"
+        assert str(frame.get("await_started_at") or "").strip()
+    finally:
+        controller.release.set()
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_frame_exposes_await_marker_while_waiting_for_model_response(tmp_path: Path):
+    class _BlockingChatBackend:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.started.set()
+            await self.release.wait()
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "done",
+                            "answer": "done",
+                            "evidence": [{"kind": "artifact", "note": "model wait marker completed"}],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 4},
+            )
+
+        def recommended_model_response_timeout_seconds(self, *, model_refs):
+            _ = model_refs
+            return None
+
+    backend = _BlockingChatBackend()
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+
+    try:
+        record = await service.create_task("block on model response", session_id="web:shared")
+        await asyncio.wait_for(backend.started.wait(), timeout=1.0)
+
+        frame = service.log_service.read_runtime_frame(record.task_id, record.root_node_id)
+        assert frame is not None
+        assert frame.get("await_marker") == "model.chat.await_response"
+        assert str(frame.get("await_started_at") or "").strip()
+    finally:
+        backend.release.set()
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_pause_requested_after_valid_result_flushes_node_output_before_task_pauses(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
