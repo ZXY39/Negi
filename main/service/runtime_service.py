@@ -6279,9 +6279,8 @@ class MainRuntimeService:
                                 'properties': {
                                     'decision': {'type': 'string', 'enum': ['allow', 'cap_current_depth']},
                                     'reason': {'type': 'string'},
-                                    'evidence': {'type': 'array', 'items': {'type': 'string'}},
                                 },
-                                'required': ['decision', 'reason', 'evidence'],
+                                'required': ['decision', 'reason'],
                                 'additionalProperties': False,
                             },
                         },
@@ -6327,7 +6326,7 @@ class MainRuntimeService:
             return {
                 'decision': decision,
                 'reason': str(arguments.get('reason') or '').strip(),
-                'evidence': [str(item).strip() for item in list(arguments.get('evidence') or []) if str(item).strip()],
+                'evidence': [],
                 'error_text': '',
             }
         content = str(getattr(response, 'content', '') or '').strip()
@@ -6345,7 +6344,7 @@ class MainRuntimeService:
         return {
             'decision': decision,
             'reason': str(payload.get('reason') or '').strip(),
-            'evidence': [str(item).strip() for item in list(payload.get('evidence') or []) if str(item).strip()],
+            'evidence': [],
             'error_text': '',
         }
 

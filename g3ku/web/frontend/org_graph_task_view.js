@@ -231,9 +231,11 @@ function renderTaskGovernancePanel() {
     if (U.taskGovernanceDecision) U.taskGovernanceDecision.textContent = latestDecision;
     if (U.taskGovernanceCount) U.taskGovernanceCount.textContent = `${history.length}次`;
     U.taskGovernancePanel.classList.toggle("is-breathing", !!(governance.frozen || governance.review_inflight));
+    U.taskGovernancePanel.classList.toggle("is-expanded", !!S.taskGovernanceExpanded);
     const expanded = !!S.taskGovernanceExpanded;
     if (U.taskGovernanceHistory) {
         U.taskGovernanceHistory.hidden = !expanded;
+        U.taskGovernanceHistory.classList.toggle("is-expanded", expanded);
         U.taskGovernanceHistory.innerHTML = history.length
             ? history.slice().reverse().map((item) => `
                 <div class="task-governance-entry">
