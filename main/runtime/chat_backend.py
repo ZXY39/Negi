@@ -486,11 +486,12 @@ class ConfigChatBackend:
                                     reasoning_effort=reasoning_effort,
                                 ),
                             }
+                            outer_attempt_timeout_seconds = None if bool(getattr(target.provider, 'manages_request_timeout_internally', False)) else attempt_timeout_seconds
                             response = await wait_for_model_attempt(
                                 target.provider.chat(
                                     **provider_kwargs,
                                 ),
-                                timeout_seconds=attempt_timeout_seconds,
+                                timeout_seconds=outer_attempt_timeout_seconds,
                                 model_ref=str(getattr(target, "provider_ref", ref) or ref),
                                 provider_id=str(getattr(target, "provider_id", "") or ""),
                                 provider_model=str(getattr(target, "model_id", "") or ""),

@@ -66,6 +66,11 @@ class LLMProvider(ABC):
         self.api_key = api_key
         self.api_base = api_base
 
+    @property
+    def manages_request_timeout_internally(self) -> bool:
+        """Whether the provider enforces its own streaming timeout semantics."""
+        return False
+
     @staticmethod
     def _trace_enabled() -> bool:
         raw = str(os.getenv("G3KU_PROMPT_TRACE", "")).strip().lower()

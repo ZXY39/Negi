@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
+import g3ku.providers.responses_provider as responses_provider_module
+import main.runtime.chat_backend as chat_backend_module
 from g3ku.llm_config.enums import AuthMode, Capability, ProbeStatus, ProtocolAdapter
 from g3ku.llm_config.models import NormalizedProviderConfig
 from g3ku.llm_config.probe_strategies import _build_openai_headers, probe_config, probe_config_for_concurrency
 from g3ku.providers.custom_provider import CustomProvider
+from g3ku.providers.provider_factory import ProviderTarget
 from g3ku.providers.fallback import FallbackProvider
 from g3ku.providers.base import LLMResponse
 from g3ku.providers.litellm_provider import LiteLLMProvider
@@ -278,6 +282,313 @@ async def test_responses_provider_uses_request_timeout_for_http_client(monkeypat
     assert captured["timeout"] == 7.5
 
 
+def _capture_responses_provider_logs(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    sink: list[str] = []
+
+    def _record(template, *args, **kwargs):
+        _ = kwargs
+        try:
+            rendered = str(template).format(*args)
+        except Exception:
+            rendered = str(template)
+        sink.append(rendered)
+
+    monkeypatch.setattr(
+        responses_provider_module,
+        "logger",
+        SimpleNamespace(debug=_record, warning=_record, error=_record),
+    )
+    return sink
+
+
+@pytest.mark.asyncio
+async def test_responses_provider_logs_sse_diagnostics_for_success(monkeypatch) -> None:
+    logs = _capture_responses_provider_logs(monkeypatch)
+
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+            self._lines = iter(
+                [
+                    "event: response.created",
+                    'data: {"type":"response.created"}',
+                    "",
+                    "event: response.output_text.delta",
+                    'data: {"type":"response.output_text.delta","delta":"OK"}',
+                    "",
+                    "event: response.completed",
+                    'data: {"type":"response.completed","response":{"status":"completed","usage":{}}}',
+                    "",
+                ]
+            )
+
+        async def aiter_lines(self):
+            for line in self._lines:
+                yield line
+
+    class _FakeStream:
+        async def __aenter__(self):
+            return _FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+        def stream(self, *args, **kwargs):
+            _ = args, kwargs
+            return _FakeStream()
+
+    async def _fake_consume_sse(response):
+        async for _line in response.aiter_lines():
+            pass
+        return "ok", [], "stop", {}
+
+    monkeypatch.setattr("g3ku.providers.responses_provider.httpx.AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr("g3ku.providers.responses_provider._consume_sse", _fake_consume_sse)
+
+    provider = ResponsesProvider(api_key="test-key", api_base="https://example.com/v1")
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="demo",
+        request_timeout_seconds=7.5,
+    )
+
+    assert response.content == "ok"
+    joined = "\n".join(logs)
+    assert "responses sse diagnostics" in joined
+    assert "status_code=200" in joined
+    assert "headers_received_ms=" in joined
+    assert "first_event_received_ms=" in joined
+    assert "first_text_delta_received_ms=" in joined
+    assert "stream_completed_ms=" in joined
+    assert "last_event=response.completed" in joined
+
+
+@pytest.mark.asyncio
+async def test_responses_provider_logs_sse_diagnostics_for_stream_failure(monkeypatch) -> None:
+    logs = _capture_responses_provider_logs(monkeypatch)
+
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+            self._lines = iter(
+                [
+                    "event: response.created",
+                    'data: {"type":"response.created"}',
+                    "",
+                    "event: response.output_item.added",
+                    'data: {"type":"response.output_item.added","item":{"type":"message"}}',
+                    "",
+                ]
+            )
+
+        async def aiter_lines(self):
+            for line in self._lines:
+                yield line
+
+    class _FakeStream:
+        async def __aenter__(self):
+            return _FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+        def stream(self, *args, **kwargs):
+            _ = args, kwargs
+            return _FakeStream()
+
+    async def _fake_consume_sse(response):
+        async for _line in response.aiter_lines():
+            pass
+        raise RuntimeError("stream stalled")
+
+    monkeypatch.setattr("g3ku.providers.responses_provider.httpx.AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr("g3ku.providers.responses_provider._consume_sse", _fake_consume_sse)
+
+    provider = ResponsesProvider(api_key="test-key", api_base="https://example.com/v1")
+
+    with pytest.raises(RuntimeError, match="stream stalled"):
+        await provider.chat(
+            messages=[{"role": "user", "content": "ping"}],
+            model="demo",
+            request_timeout_seconds=7.5,
+        )
+
+    joined = "\n".join(logs)
+    assert "responses sse diagnostics" in joined
+    assert "stream_failed_ms=" in joined
+    assert "last_event=response.output_item.added" in joined
+    assert "first_data_received_ms=" in joined
+
+
+@pytest.mark.asyncio
+async def test_responses_provider_allows_total_stream_time_above_timeout_when_chunks_keep_arriving(monkeypatch) -> None:
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+            self._lines = [
+                "event: response.created",
+                'data: {"type":"response.created"}',
+                "",
+                "event: response.output_text.delta",
+                'data: {"type":"response.output_text.delta","delta":"O"}',
+                "",
+                "event: response.output_text.delta",
+                'data: {"type":"response.output_text.delta","delta":"K"}',
+                "",
+                "event: response.completed",
+                'data: {"type":"response.completed","response":{"status":"completed","usage":{}}}',
+                "",
+            ]
+
+        async def aiter_lines(self):
+            for line in self._lines:
+                await asyncio.sleep(0.03)
+                yield line
+
+    class _FakeStream:
+        async def __aenter__(self):
+            return _FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+        def stream(self, *args, **kwargs):
+            _ = args, kwargs
+            return _FakeStream()
+
+    monkeypatch.setattr("g3ku.providers.responses_provider.httpx.AsyncClient", _FakeAsyncClient)
+
+    provider = ResponsesProvider(api_key="test-key", api_base="https://example.com/v1")
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="demo",
+        request_timeout_seconds=0.05,
+    )
+
+    assert response.content == "OK"
+
+
+@pytest.mark.asyncio
+async def test_responses_provider_times_out_when_first_chunk_exceeds_timeout(monkeypatch) -> None:
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+
+        async def aiter_lines(self):
+            await asyncio.sleep(0.03)
+            yield "event: response.created"
+
+    class _FakeStream:
+        async def __aenter__(self):
+            return _FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+        def stream(self, *args, **kwargs):
+            _ = args, kwargs
+            return _FakeStream()
+
+    monkeypatch.setattr("g3ku.providers.responses_provider.httpx.AsyncClient", _FakeAsyncClient)
+
+    provider = ResponsesProvider(api_key="test-key", api_base="https://example.com/v1")
+    with pytest.raises(RuntimeError, match="timeout"):
+        await provider.chat(
+            messages=[{"role": "user", "content": "ping"}],
+            model="demo",
+            request_timeout_seconds=0.01,
+        )
+
+
+@pytest.mark.asyncio
+async def test_chat_backend_skips_outer_total_timeout_for_internally_managed_stream_provider(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    class _StreamingProvider:
+        manages_request_timeout_internally = True
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            return LLMResponse(content="ok", finish_reason="stop")
+
+    async def _fake_wait_for_model_attempt(awaitable, **kwargs):
+        captured.append(dict(kwargs))
+        return await awaitable
+
+    target = ProviderTarget(
+        provider_ref="primary",
+        provider_id="responses",
+        model_id="gpt-primary",
+        provider=_StreamingProvider(),
+        retry_on=["network", "429", "5xx"],
+        retry_count=0,
+        api_key_count=1,
+        api_key_indexes=[0],
+    )
+
+    monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", lambda config, ref, api_key_index=None: target)
+    monkeypatch.setattr(chat_backend_module, "wait_for_model_attempt", _fake_wait_for_model_attempt)
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    response = await backend.chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["primary"],
+    )
+
+    assert response.content == "ok"
+    assert len(captured) == 1
+    assert captured[0]["timeout_seconds"] is None
+
+
 @pytest.mark.asyncio
 async def test_litellm_provider_forwards_request_timeout(monkeypatch) -> None:
     captured: dict[str, object] = {}
@@ -381,10 +692,10 @@ def test_probe_config_omits_empty_bearer_for_dashscope(protocol_adapter, default
 
 def test_probe_config_reports_content_type_for_non_json_model_catalog() -> None:
     config = _config(
-        provider_id="openai",
-        protocol_adapter=ProtocolAdapter.OPENAI_RESPONSES,
+        provider_id="custom",
+        protocol_adapter=ProtocolAdapter.CUSTOM_DIRECT,
         base_url="https://example.com/v1",
-        default_model="gpt-5.4",
+        default_model="custom-model",
         api_key="test-key",
     )
 
@@ -403,6 +714,38 @@ def test_probe_config_reports_content_type_for_non_json_model_catalog() -> None:
     assert "text/html" in result.message
     assert result.diagnostics["content_type"] == "text/html"
     assert "login required" in result.diagnostics["body_preview"]
+
+
+def test_probe_config_openai_responses_falls_back_when_model_catalog_returns_html() -> None:
+    config = _config(
+        provider_id="responses",
+        protocol_adapter=ProtocolAdapter.OPENAI_RESPONSES,
+        base_url="https://example.com/v1",
+        default_model="gpt-5.4",
+        api_key="test-key",
+    )
+
+    seen_paths: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        if request.url.path == "/v1/models":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                text="<html><title>Sign in</title><body>login required</body></html>",
+            )
+        assert request.url.path == "/v1/responses"
+        return httpx.Response(200, json={"id": "resp_123", "object": "response"})
+
+    result = probe_config(config, transport=httpx.MockTransport(_handler))
+
+    assert result.success is True
+    assert result.message == "Fallback request succeeded."
+    assert result.diagnostics["fallback_used"] is True
+    assert result.diagnostics["api_key_count"] == 1
+    assert result.diagnostics["api_key_attempts"] == 1
+    assert seen_paths == ["/v1/models", "/v1/responses"]
 
 
 def test_probe_config_falls_back_when_model_catalog_returns_500() -> None:

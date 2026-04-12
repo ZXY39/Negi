@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from typing import Any
 
 import httpx
@@ -16,6 +18,85 @@ from g3ku.providers.openai_codex_provider import (
     _friendly_error,
     _prompt_cache_key,
 )
+
+
+class _SSEDiagnosticsResponseProxy:
+    """Response proxy that captures coarse SSE timing without recording content."""
+
+    def __init__(self, response: httpx.Response):
+        self._response = response
+        self.status_code = response.status_code
+        self._started_at = time.perf_counter()
+        self._headers_received_at = self._started_at
+        self._first_event_received_at: float | None = None
+        self._first_data_received_at: float | None = None
+        self._first_text_delta_received_at: float | None = None
+        self._last_event_name = ""
+        self._data_line_count = 0
+        self._event_line_count = 0
+        self._first_line_timeout_seconds: float | None = None
+        self._idle_line_timeout_seconds: float | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._response, name)
+
+    async def aiter_lines(self):
+        iterator = self._response.aiter_lines().__aiter__()
+        line_index = 0
+        while True:
+            timeout_seconds = self._first_line_timeout_seconds if line_index == 0 else self._idle_line_timeout_seconds
+            try:
+                if timeout_seconds is None:
+                    line = await iterator.__anext__()
+                else:
+                    line = await asyncio.wait_for(iterator.__anext__(), timeout=timeout_seconds)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError as exc:
+                if line_index == 0:
+                    raise _ResponsesStreamTimeoutError(
+                        f"Responses stream timeout waiting for first chunk after {timeout_seconds:.3f}s"
+                    ) from exc
+                raise _ResponsesStreamTimeoutError(
+                    f"Responses stream idle timeout after {timeout_seconds:.3f}s without a new chunk"
+                ) from exc
+            now = time.perf_counter()
+            if line.startswith("event:"):
+                event_name = str(line.split(":", 1)[1].strip())
+                self._event_line_count += 1
+                self._last_event_name = event_name
+                if self._first_event_received_at is None:
+                    self._first_event_received_at = now
+                if event_name == "response.output_text.delta" and self._first_text_delta_received_at is None:
+                    self._first_text_delta_received_at = now
+            elif line.startswith("data:"):
+                self._data_line_count += 1
+                if self._first_data_received_at is None:
+                    self._first_data_received_at = now
+                if self._last_event_name == "response.output_text.delta" and self._first_text_delta_received_at is None:
+                    self._first_text_delta_received_at = now
+            line_index += 1
+            yield line
+
+    def render_summary(self, *, outcome: str) -> str:
+        now = time.perf_counter()
+        elapsed_ms = lambda ts: "" if ts is None else f"{max(0.0, (ts - self._started_at) * 1000.0):.1f}"
+        parts = [
+            f"outcome={outcome}",
+            f"status_code={self.status_code}",
+            f"headers_received_ms={elapsed_ms(self._headers_received_at)}",
+            f"first_event_received_ms={elapsed_ms(self._first_event_received_at)}",
+            f"first_data_received_ms={elapsed_ms(self._first_data_received_at)}",
+            f"first_text_delta_received_ms={elapsed_ms(self._first_text_delta_received_at)}",
+            f"last_event={self._last_event_name or '<none>'}",
+            f"event_line_count={self._event_line_count}",
+            f"data_line_count={self._data_line_count}",
+        ]
+        if outcome == "completed":
+            parts.append(f"stream_completed_ms={max(0.0, (now - self._started_at) * 1000.0):.1f}")
+        elif outcome == "failed":
+            parts.append(f"stream_failed_ms={max(0.0, (now - self._started_at) * 1000.0):.1f}")
+        return "responses sse diagnostics: " + " ".join(parts)
 
 
 class ResponsesProvider(LLMProvider):
@@ -33,6 +114,10 @@ class ResponsesProvider(LLMProvider):
         super().__init__(api_key=api_key, api_base=api_base)
         self.default_model = default_model
         self.extra_headers = dict(extra_headers or {})
+
+    @property
+    def manages_request_timeout_internally(self) -> bool:
+        return True
 
     async def chat(
         self,
@@ -117,7 +202,12 @@ class ResponsesProvider(LLMProvider):
                         if response.status_code in self.RETRYABLE_STATUS_CODES:
                             raise _RetryableResponsesError(detail)
                         raise RuntimeError(detail)
-                    content, tool_calls, finish_reason, usage = await _consume_sse(response)
+                    diagnostics = _SSEDiagnosticsResponseProxy(response)
+                    stream_timeout_seconds = float(request_timeout_seconds) if request_timeout_seconds is not None else 60.0
+                    diagnostics._first_line_timeout_seconds = stream_timeout_seconds
+                    diagnostics._idle_line_timeout_seconds = stream_timeout_seconds
+                    content, tool_calls, finish_reason, usage = await _consume_sse(diagnostics)
+                    logger.debug(diagnostics.render_summary(outcome="completed"))
                     return LLMResponse(
                         content=content,
                         tool_calls=tool_calls,
@@ -127,13 +217,21 @@ class ResponsesProvider(LLMProvider):
         except Exception as e:
             partial_content = str(getattr(e, "partial_content", "") or "").strip()
             error_text = self._format_error(e, url)
+            diagnostics_summary = ""
+            diagnostics = locals().get("diagnostics")
+            if isinstance(diagnostics, _SSEDiagnosticsResponseProxy):
+                diagnostics_summary = diagnostics.render_summary(outcome="failed")
             if partial_content:
+                if diagnostics_summary:
+                    logger.warning(diagnostics_summary)
                 logger.warning("Responses API stream failed after partial content; returning partial content for structured recovery")
                 return LLMResponse(
                     content=partial_content,
                     finish_reason="error",
                     error_text=error_text,
                 )
+            if diagnostics_summary:
+                logger.warning(diagnostics_summary)
             logger.error("Error calling Responses API: {}", error_text)
             if isinstance(e, _RetryableResponsesError):
                 raise
@@ -161,4 +259,8 @@ class ResponsesProvider(LLMProvider):
 
 class _RetryableResponsesError(RuntimeError):
     """Transient upstream failure that outer model-chain fallback may handle."""
+
+
+class _ResponsesStreamTimeoutError(TimeoutError):
+    """Raised when a streamed responses request stops producing chunks in time."""
 

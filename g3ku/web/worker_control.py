@@ -24,6 +24,7 @@ _MANAGED_WORKER_PROCESS: subprocess.Popen | None = None
 _MANAGED_WORKER_STARTED_AT_MONOTONIC: float | None = None
 _MANAGED_WORKER_STARTED_AT: str = ""
 _MANAGED_WORKER_STARTING_GRACE_SECONDS = 10.0
+_MANAGED_WORKER_LOG_RELATIVE_PATH = Path(".g3ku") / "main-runtime" / "managed-worker.log"
 
 
 def _env_enabled(name: str) -> bool:
@@ -90,6 +91,10 @@ def managed_worker_snapshot(*, starting_grace_s: float = _MANAGED_WORKER_STARTIN
     }
 
 
+def _managed_worker_log_path() -> Path:
+    return Path.cwd() / _MANAGED_WORKER_LOG_RELATIVE_PATH
+
+
 def start_managed_task_worker() -> bool:
     global _MANAGED_WORKER_PROCESS, _MANAGED_WORKER_STARTED_AT_MONOTONIC, _MANAGED_WORKER_STARTED_AT
 
@@ -117,6 +122,11 @@ def start_managed_task_worker() -> bool:
         }
         popen_kwargs["env"].pop(WEB_AUTO_WORKER_ENV, None)
         popen_kwargs["env"].pop(WEB_KEEP_WORKER_ENV, None)
+        log_path = _managed_worker_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_handle = log_path.open("a", encoding="utf-8")
+        popen_kwargs["stdout"] = log_handle
+        popen_kwargs["stderr"] = subprocess.STDOUT
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         if creationflags:
             popen_kwargs["creationflags"] = creationflags

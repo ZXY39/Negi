@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import g3ku.web.windows_job as windows_job
@@ -79,10 +80,57 @@ def test_start_managed_task_worker_binds_process_to_windows_job(monkeypatch) -> 
     monkeypatch.setattr(
         worker_control,
         "subprocess",
-        SimpleNamespace(Popen=lambda *args, **kwargs: _Process(), CREATE_NO_WINDOW=0),
+        SimpleNamespace(Popen=lambda *args, **kwargs: _Process(), CREATE_NO_WINDOW=0, STDOUT=-2),
     )
 
     started = worker_control.start_managed_task_worker()
 
     assert started is True
     assert job_assignments == [321]
+
+
+def test_start_managed_task_worker_redirects_logs_to_managed_worker_file(monkeypatch, tmp_path: Path) -> None:
+    popen_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    class _Security:
+        def active_master_key(self) -> str:
+            return "secret-key"
+
+    class _Process:
+        def __init__(self) -> None:
+            self.pid = 654
+
+        def poll(self):
+            return None
+
+    def _fake_popen(*args, **kwargs):
+        popen_calls.append((args, kwargs))
+        return _Process()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LOGURU_LEVEL", "DEBUG")
+    monkeypatch.setattr(worker_control, "_MANAGED_WORKER_PROCESS", None)
+    monkeypatch.setattr(worker_control, "auto_worker_enabled", lambda: True)
+    monkeypatch.setattr(worker_control, "get_bootstrap_security_service", lambda *_args, **_kwargs: _Security())
+    monkeypatch.setattr(worker_control, "assign_process_to_kill_on_close_job", lambda _process: True)
+    monkeypatch.setattr(
+        worker_control,
+        "os",
+        SimpleNamespace(name="posix", environ=os.environ, getenv=os.getenv),
+    )
+    monkeypatch.setattr(
+        worker_control,
+        "subprocess",
+        SimpleNamespace(Popen=_fake_popen, STDOUT=-2, CREATE_NO_WINDOW=0),
+    )
+
+    started = worker_control.start_managed_task_worker()
+
+    assert started is True
+    assert len(popen_calls) == 1
+    _, kwargs = popen_calls[0]
+    log_path = tmp_path / ".g3ku" / "main-runtime" / "managed-worker.log"
+    assert log_path.exists()
+    assert kwargs["stdout"].name == str(log_path)
+    assert kwargs["stderr"] == -2
+    assert kwargs["env"]["LOGURU_LEVEL"] == "DEBUG"

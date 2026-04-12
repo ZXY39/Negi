@@ -374,11 +374,12 @@ class FallbackProvider(LLMProvider):
                             provider_kwargs["temperature"] = effective_temperature
                         if effective_reasoning:
                             provider_kwargs["reasoning_effort"] = effective_reasoning
+                        outer_attempt_timeout_seconds = None if bool(getattr(target.provider, "manages_request_timeout_internally", False)) else request_timeout_seconds
                         response = await wait_for_model_attempt(
                             target.provider.chat(
                                 **provider_kwargs,
                             ),
-                            timeout_seconds=request_timeout_seconds,
+                            timeout_seconds=outer_attempt_timeout_seconds,
                             model_ref=str(getattr(target, "provider_ref", model_key) or model_key),
                             provider_id=str(getattr(target, "provider_id", "") or ""),
                             provider_model=str(getattr(target, "model_id", "") or ""),
