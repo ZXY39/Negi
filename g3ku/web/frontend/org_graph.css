@@ -2660,7 +2660,6 @@ textarea {
 
 .message {
     display: flex;
-    gap: var(--space-4);
     width: 100%;
     max-width: none;
     align-items: flex-end;
@@ -2675,27 +2674,6 @@ textarea {
 .message.system {
     align-self: stretch;
     justify-content: flex-start;
-}
-
-.message .avatar {
-    width: 42px;
-    height: 42px;
-    border-radius: var(--radius-full);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    color: white;
-    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
-    box-shadow: 0 14px 30px -22px rgba(15, 23, 42, 0.6);
-}
-
-.message.system .avatar {
-    background-color: var(--brand-primary);
-}
-
-.message.user .avatar {
-    background-color: var(--text-secondary);
 }
 
 .message .msg-content {
@@ -3912,11 +3890,6 @@ textarea {
         width: 100%;
         max-width: 100%;
         align-self: stretch;
-    }
-
-    .message .avatar {
-        width: 38px;
-        height: 38px;
     }
 
     .message .msg-content {

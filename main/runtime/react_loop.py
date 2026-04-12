@@ -1568,7 +1568,7 @@ class ReActToolLoop:
             live_state = dict(result.get('live_state') or {}) if isinstance(result.get('live_state'), dict) else {}
             if str(live_state.get('status') or '').strip().lower() != 'success':
                 continue
-            raw_result = result.get('raw_result')
+            raw_result = self._tool_context_hydration_payload(result.get('raw_result'))
             if not isinstance(raw_result, dict) or not bool(raw_result.get('ok')):
                 continue
             tool_message = dict(result.get('tool_message') or {}) if isinstance(result.get('tool_message'), dict) else {}
@@ -1588,6 +1588,21 @@ class ReActToolLoop:
                 raw_result=dict(raw_result),
                 runtime_context=dict(runtime_context or {}),
             )
+
+    @staticmethod
+    def _tool_context_hydration_payload(raw_result: Any) -> dict[str, Any] | None:
+        if isinstance(raw_result, dict):
+            return dict(raw_result)
+        if isinstance(raw_result, str):
+            text = str(raw_result or '').strip()
+            if not text or not text.startswith('{'):
+                return None
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return None
+            return dict(parsed) if isinstance(parsed, dict) else None
+        return None
 
     @classmethod
     def model_visible_always_callable_tool_names(
@@ -1752,21 +1767,22 @@ class ReActToolLoop:
                         },
                     )
                     promoter = getattr(self, '_tool_context_hydration_promoter', None)
+                    hydration_payload = self._tool_context_hydration_payload(raw_result)
                     if (
                         callable(promoter)
                         and str(getattr(call, 'name', '') or '').strip() in {'load_tool_context', 'load_tool_context_v2'}
-                        and isinstance(raw_result, dict)
-                        and bool(raw_result.get('ok'))
-                        and str(raw_result.get('tool_id') or '').strip()
+                        and isinstance(hydration_payload, dict)
+                        and bool(hydration_payload.get('ok'))
+                        and str(hydration_payload.get('tool_id') or '').strip()
                     ):
                         promoter(
                             task_id=str(task.task_id or '').strip(),
                             node_id=str(node.node_id or '').strip(),
                             tool_call=SimpleNamespace(
                                 name=str(getattr(call, 'name', '') or '').strip(),
-                                arguments={'tool_id': str(raw_result.get('tool_id') or '').strip()},
+                                arguments={'tool_id': str(hydration_payload.get('tool_id') or '').strip()},
                             ),
-                            raw_result=dict(raw_result),
+                            raw_result=dict(hydration_payload),
                             runtime_context=dict(runtime_context or {}),
                         )
                     tool_content = self._render_tool_message_content(

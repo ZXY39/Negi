@@ -2760,7 +2760,7 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
         const contentClass = markdown ? "msg-content markdown-content" : "msg-content";
         const content = markdown ? renderMarkdown(text) : esc(text);
         const attachmentMarkup = renderChatAttachments(attachments);
-        el.innerHTML = `<div class="avatar"><i data-lucide="${role === "system" ? "cpu" : "user"}"></i></div><div class="${contentClass}">${content}${attachmentMarkup}</div>`;
+        el.innerHTML = `<div class="${contentClass}">${content}${attachmentMarkup}</div>`;
         U.ceoFeed.appendChild(el);
         icons();
         return el;
@@ -2997,7 +2997,6 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
         const el = document.createElement("div");
         el.className = "message system ceo-turn-message";
         el.innerHTML = `
-            <div class="avatar"><i data-lucide="cpu"></i></div>
             <div class="msg-content ceo-turn-content">
                 <div class="assistant-text pending">处理中...</div>
                 <details class="interaction-flow" open hidden>

@@ -1562,6 +1562,51 @@ def test_promote_tool_context_hydration_uses_successful_result_without_matching_
     assert promoted['raw_result'] == {'ok': True, 'tool_id': 'filesystem_write'}
 
 
+def test_promote_tool_context_hydration_accepts_json_string_result_payload() -> None:
+    promoted_calls: list[dict[str, object]] = []
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    loop._tool_context_hydration_promoter = lambda **kwargs: promoted_calls.append(dict(kwargs))
+
+    loop._promote_tool_context_hydration_after_results(
+        task_id='task-result-driven-hydration-json',
+        node_id='node-result-driven-hydration-json',
+        response_tool_calls=[
+            ToolCallRequest(
+                id='call-original-json',
+                name='load_tool_context',
+                arguments={'tool_id': 'filesystem_write'},
+            )
+        ],
+        results=[
+            {
+                'live_state': {
+                    'tool_call_id': 'call-original-json|fc_extra_suffix',
+                    'tool_name': 'load_tool_context',
+                    'status': 'success',
+                },
+                'tool_message': {
+                    'role': 'tool',
+                    'tool_call_id': 'call-original-json|fc_extra_suffix',
+                    'name': 'load_tool_context',
+                    'content': json.dumps({'ok': True, 'tool_id': 'filesystem_write'}, ensure_ascii=False),
+                },
+                'raw_result': json.dumps({'ok': True, 'tool_id': 'filesystem_write'}, ensure_ascii=False),
+            }
+        ],
+        runtime_context={
+            'task_id': 'task-result-driven-hydration-json',
+            'node_id': 'node-result-driven-hydration-json',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert len(promoted_calls) == 1
+    promoted = promoted_calls[0]
+    assert getattr(promoted['tool_call'], 'arguments') == {'tool_id': 'filesystem_write'}
+    assert promoted['raw_result'] == {'ok': True, 'tool_id': 'filesystem_write'}
+
+
 @pytest.mark.asyncio
 async def test_execute_tool_calls_promotes_tool_context_hydration_immediately() -> None:
     class _InlineLoadTool(Tool):
@@ -1608,6 +1653,55 @@ async def test_execute_tool_calls_promotes_tool_context_hydration_immediately() 
     assert len(promoted_calls) == 1
     promoted = promoted_calls[0]
     assert getattr(promoted['tool_call'], 'name') == 'load_tool_context'
+    assert getattr(promoted['tool_call'], 'arguments') == {'tool_id': 'filesystem_write'}
+    assert promoted['raw_result']['tool_id'] == 'filesystem_write'
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_calls_promotes_tool_context_hydration_immediately_from_json_string() -> None:
+    class _InlineLoadTool(Tool):
+        @property
+        def name(self) -> str:
+            return 'load_tool_context'
+
+        @property
+        def description(self) -> str:
+            return 'inline load tool context'
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {'type': 'object', 'properties': {}, 'required': []}
+
+        async def execute(self, **kwargs):
+            _ = kwargs
+            return json.dumps({'ok': True, 'tool_id': 'filesystem_write'}, ensure_ascii=False)
+
+    promoted_calls: list[dict[str, object]] = []
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    loop._tool_context_hydration_promoter = lambda **kwargs: promoted_calls.append(dict(kwargs))
+
+    task = SimpleNamespace(task_id='task-inline-hydration-json')
+    node = SimpleNamespace(node_id='node-inline-hydration-json', depth=0, node_kind='execution')
+    response_tool_calls = [
+        ToolCallRequest(
+            id='call-inline-load-tool-context-json',
+            name='load_tool_context',
+            arguments={'tool_id': 'filesystem_write'},
+        )
+    ]
+    tools = {'load_tool_context': _InlineLoadTool()}
+
+    await loop._execute_tool_calls(
+        task=task,
+        node=node,
+        response_tool_calls=response_tool_calls,
+        tools=tools,
+        allowed_content_refs=[],
+        runtime_context={'task_id': task.task_id, 'node_id': node.node_id, 'actor_role': 'execution'},
+    )
+
+    assert len(promoted_calls) == 1
+    promoted = promoted_calls[0]
     assert getattr(promoted['tool_call'], 'arguments') == {'tool_id': 'filesystem_write'}
     assert promoted['raw_result']['tool_id'] == 'filesystem_write'
 
