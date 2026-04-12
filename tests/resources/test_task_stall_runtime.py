@@ -17,6 +17,7 @@ from main.service.task_stall_callback import (
     TASK_STALL_REASON_USER_PAUSED,
     TASK_STALL_REASON_WORKER_UNAVAILABLE,
 )
+from main.service.task_stall_notifier import _next_bucket_minutes, stall_bucket_minutes
 
 
 class _DummyChatBackend:
@@ -81,6 +82,17 @@ class _Registry:
         self.published.append((str(session_id or ""), dict(envelope)))
 
 
+def test_task_stall_bucket_schedule_starts_at_twenty_minutes() -> None:
+    assert stall_bucket_minutes("2026-03-24T00:00:00+00:00", now=datetime.fromisoformat("2026-03-24T00:19:59+00:00")) == 0
+    assert stall_bucket_minutes("2026-03-24T00:00:00+00:00", now=datetime.fromisoformat("2026-03-24T00:20:00+00:00")) == 20
+    assert stall_bucket_minutes("2026-03-24T00:00:00+00:00", now=datetime.fromisoformat("2026-03-24T00:29:59+00:00")) == 20
+    assert stall_bucket_minutes("2026-03-24T00:00:00+00:00", now=datetime.fromisoformat("2026-03-24T00:30:00+00:00")) == 30
+    assert stall_bucket_minutes("2026-03-24T00:00:00+00:00", now=datetime.fromisoformat("2026-03-24T00:40:00+00:00")) == 40
+    assert _next_bucket_minutes(0) == 20
+    assert _next_bucket_minutes(20) == 30
+    assert _next_bucket_minutes(30) == 40
+
+
 @pytest.mark.asyncio
 async def test_task_stall_notifier_emits_and_resets_after_visible_output(tmp_path: Path) -> None:
     service = MainRuntimeService(
@@ -112,16 +124,16 @@ async def test_task_stall_notifier_emits_and_resets_after_visible_output(tmp_pat
             occurred_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
         )
         await asyncio.wait_for(started.wait(), timeout=1.0)
-        await asyncio.sleep(0.06)
-        await asyncio.sleep(0.06)
+        await asyncio.sleep(0.21)
+        await asyncio.sleep(0.11)
 
-        assert [payload["bucket_minutes"] for payload in heartbeat.payloads[:2]] == [5, 10]
+        assert [payload["bucket_minutes"] for payload in heartbeat.payloads[:2]] == [20, 30]
 
         before_count = len(heartbeat.payloads)
         service.log_service.append_node_output(record.task_id, record.root_node_id, content="partial progress")
-        for _ in range(20):
+        for _ in range(40):
             if any(
-                int(payload.get("bucket_minutes") or 0) == 5
+                int(payload.get("bucket_minutes") or 0) == 20
                 for payload in heartbeat.payloads[before_count:]
             ):
                 break
@@ -129,7 +141,7 @@ async def test_task_stall_notifier_emits_and_resets_after_visible_output(tmp_pat
 
         assert len(heartbeat.payloads) > before_count
         new_payloads = heartbeat.payloads[before_count:]
-        assert any(int(payload.get("bucket_minutes") or 0) == 5 for payload in new_payloads)
+        assert any(int(payload.get("bucket_minutes") or 0) == 20 for payload in new_payloads)
         assert any(str(payload.get("task_id") or "") == record.task_id for payload in new_payloads)
     finally:
         blocker.set()

@@ -401,6 +401,41 @@ def test_ceo_runner_invalidate_runtime_bindings_clears_cached_agent_and_graph() 
     assert runner._impl._compiled_graph is None
 
 
+def test_create_agent_runner_invalidates_cached_bindings_when_checkpointer_generation_changes() -> None:
+    original_checkpointer = object()
+    next_checkpointer = object()
+    loop = SimpleNamespace(_checkpointer=next_checkpointer)
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=loop)
+    runner._agent = object()
+    runner._compiled_graph = object()
+    runner._agent_checkpointer_ref = original_checkpointer
+
+    changed = runner._invalidate_cached_runtime_bindings_if_stale()
+
+    assert changed is True
+    assert runner._agent is None
+    assert runner._compiled_graph is None
+    assert runner._agent_checkpointer_ref is next_checkpointer
+
+
+def test_create_agent_runner_keeps_cached_bindings_when_checkpointer_generation_is_unchanged() -> None:
+    current_checkpointer = object()
+    loop = SimpleNamespace(_checkpointer=current_checkpointer)
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=loop)
+    cached_agent = object()
+    cached_graph = object()
+    runner._agent = cached_agent
+    runner._compiled_graph = cached_graph
+    runner._agent_checkpointer_ref = current_checkpointer
+
+    changed = runner._invalidate_cached_runtime_bindings_if_stale()
+
+    assert changed is False
+    assert runner._agent is cached_agent
+    assert runner._compiled_graph is cached_graph
+    assert runner._agent_checkpointer_ref is current_checkpointer
+
+
 def test_create_agent_runner_build_prompt_context_uses_effective_turn_overlay(monkeypatch) -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     monkeypatch.setattr(runner, "_effective_turn_overlay_text", lambda state: "overlay-text")

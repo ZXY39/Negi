@@ -2044,6 +2044,141 @@ def test_task_detail_html_renders_governance_panel() -> None:
     assert "task-tree-floating-governance" in html
 
 
+def test_governance_panel_collapsed_summary_only_shows_record_title_and_count() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          taskGovernance: {
+            enabled: true,
+            frozen: true,
+            review_inflight: false,
+            hard_limited_depth: null,
+            history: [
+              {
+                triggered_at: "2026-04-12T10:00:00+08:00",
+                trigger_reason: "depth threshold",
+                trigger_snapshot: { max_depth: 4, total_nodes: 18 },
+                decision: "cap_current_depth",
+                decision_reason: "too deep",
+                decision_evidence: ["depth=4"],
+                limited_depth: 4,
+                error_text: "",
+              },
+            ],
+          },
+          taskGovernanceExpanded: false,
+        };
+        const panelClasses = new Set();
+        global.U = {
+          taskGovernancePanel: {
+            hidden: false,
+            classList: {
+              toggle(name, enabled) {
+                if (enabled) panelClasses.add(name);
+                else panelClasses.delete(name);
+              },
+            },
+          },
+          taskGovernanceSummary: { textContent: "" },
+          taskGovernanceCount: { textContent: "" },
+          taskGovernanceStatus: { textContent: "initial-status" },
+          taskGovernanceDecision: { textContent: "initial-decision" },
+          taskGovernanceHistory: {
+            hidden: false,
+            innerHTML: "",
+            classList: { toggle() {} },
+          },
+        };
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        renderTaskGovernancePanel();
+
+        console.log(JSON.stringify({
+          summary: global.U.taskGovernanceSummary.textContent,
+          count: global.U.taskGovernanceCount.textContent,
+          status: global.U.taskGovernanceStatus.textContent,
+          decision: global.U.taskGovernanceDecision.textContent,
+          historyHidden: global.U.taskGovernanceHistory.hidden,
+          isBreathing: panelClasses.has("is-breathing"),
+          isExpanded: panelClasses.has("is-expanded"),
+        }));
+        """
+    )
+
+    assert result["summary"] == "监管记录"
+    assert result["count"] == "1次"
+    assert result["status"] == ""
+    assert result["decision"] == ""
+    assert result["historyHidden"] is True
+    assert result["isBreathing"] is True
+    assert result["isExpanded"] is False
+
+
+def test_governance_panel_css_uses_edge_ring_for_collapsed_and_expanded_breathing() -> None:
+    css_text = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+
+    assert ".task-tree-floating-governance::after" in css_text
+    assert "animation: ceo-session-breathe 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;" in css_text
+    assert ".task-tree-floating-governance.is-breathing::after" in css_text
+
+
+def test_governance_panel_css_keeps_collapsed_summary_on_one_row_and_expands_wider_only_when_open() -> None:
+    css_text = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+
+    governance_match = re.search(
+        r"\.task-tree-floating-governance\s*\{(?P<body>[^}]+)\}",
+        css_text,
+        flags=re.MULTILINE,
+    )
+    expanded_match = re.search(
+        r"\.task-tree-floating-governance\.is-expanded\s*\{(?P<body>[^}]+)\}",
+        css_text,
+        flags=re.MULTILINE,
+    )
+    toggle_match = re.search(
+        r"\.task-governance-toggle\s*\{(?P<body>[^}]+)\}",
+        css_text,
+        flags=re.MULTILINE,
+    )
+
+    assert governance_match is not None
+    assert expanded_match is not None
+    assert toggle_match is not None
+
+    governance_block = governance_match.group("body")
+    expanded_block = expanded_match.group("body")
+    toggle_block = toggle_match.group("body")
+
+    assert "width: fit-content;" in governance_block
+    assert "max-width: calc(100% - 24px);" in governance_block
+    assert "width: min(420px, calc(100% - 24px));" in expanded_block
+    assert "grid-template-columns: minmax(0, 1fr) auto;" in toggle_block
+    assert "white-space: nowrap;" in toggle_block
+
+
+def test_governance_panel_css_optically_centers_count_chip_with_summary() -> None:
+    css_text = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    count_match = re.search(
+        r"\.task-governance-count\s*\{(?P<body>[^}]+)\}",
+        css_text,
+        flags=re.MULTILINE,
+    )
+
+    assert count_match is not None
+    count_block = count_match.group("body")
+    assert "align-self: center;" in count_block
+    assert "transform: translateY(1px);" in count_block
+
+
 def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() -> None:
     result = _run_node_script(
         """

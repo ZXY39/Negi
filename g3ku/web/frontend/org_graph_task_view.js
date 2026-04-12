@@ -260,15 +260,14 @@ function renderTaskGovernancePanel() {
     const history = Array.isArray(governance.history) ? governance.history : [];
     U.taskGovernancePanel.hidden = !governance.enabled;
     if (U.taskGovernancePanel.hidden) return;
-    const statusLabel = governance.review_inflight ? "审查中" : governance.frozen ? "冻结中" : governance.hard_limited_depth != null ? "已限深" : "空闲";
-    const latest = history.length ? history[history.length - 1] : null;
-    const latestDecision = latest ? (latest.decision === "cap_current_depth" ? "限制" : latest.decision === "allow" ? "放行" : latest.decision) : "无记录";
-    if (U.taskGovernanceStatus) U.taskGovernanceStatus.textContent = statusLabel;
-    if (U.taskGovernanceDecision) U.taskGovernanceDecision.textContent = latestDecision;
+    if (U.taskGovernanceSummary) U.taskGovernanceSummary.textContent = "监管记录";
     if (U.taskGovernanceCount) U.taskGovernanceCount.textContent = `${history.length}次`;
     U.taskGovernancePanel.classList.toggle("is-breathing", !!(governance.frozen || governance.review_inflight));
     U.taskGovernancePanel.classList.toggle("is-expanded", !!S.taskGovernanceExpanded);
     const expanded = !!S.taskGovernanceExpanded;
+    if (U.taskGovernanceToggle) U.taskGovernanceToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+    if (U.taskGovernanceStatus) U.taskGovernanceStatus.textContent = "";
+    if (U.taskGovernanceDecision) U.taskGovernanceDecision.textContent = "";
     if (U.taskGovernanceHistory) {
         U.taskGovernanceHistory.hidden = !expanded;
         U.taskGovernanceHistory.classList.toggle("is-expanded", expanded);

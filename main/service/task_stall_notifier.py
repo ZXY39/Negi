@@ -35,10 +35,10 @@ def stall_bucket_minutes(
     elapsed_seconds = max(0.0, (current - started_at).total_seconds())
     unit_seconds = max(0.001, float(minute_seconds or 60.0))
     elapsed_minutes = int(elapsed_seconds // unit_seconds)
-    if elapsed_minutes < 5:
+    if elapsed_minutes < 20:
         return 0
-    if elapsed_minutes < 10:
-        return 5
+    if elapsed_minutes < 30:
+        return 20
     return int(elapsed_minutes // 10) * 10
 
 
@@ -59,9 +59,7 @@ def stalled_minutes_since(
 def _next_bucket_minutes(last_bucket_minutes: int) -> int:
     bucket = max(0, int(last_bucket_minutes or 0))
     if bucket <= 0:
-        return 5
-    if bucket < 10:
-        return 10
+        return 20
     return bucket + 10
 
 

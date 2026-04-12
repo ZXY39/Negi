@@ -32,6 +32,20 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
     def __init__(self, *, loop: Any) -> None:
         super().__init__(loop=loop)
         self._agent = None
+        self._agent_checkpointer_ref = None
+
+    def _invalidate_cached_runtime_bindings_if_stale(self) -> bool:
+        current_checkpointer = getattr(self._loop, "_checkpointer", None)
+        cached_checkpointer = getattr(self, "_agent_checkpointer_ref", None)
+        if self._agent is None and self._compiled_graph is None:
+            self._agent_checkpointer_ref = current_checkpointer
+            return False
+        if cached_checkpointer is current_checkpointer:
+            return False
+        self._agent = None
+        self._compiled_graph = None
+        self._agent_checkpointer_ref = current_checkpointer
+        return True
 
     def build_prompt_context(self, *, state, runtime, tools) -> dict[str, str]:
         _ = runtime, tools
@@ -499,10 +513,12 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 context_schema=CeoRuntimeContext,
                 middleware=self._middleware(),
             )
+            self._agent_checkpointer_ref = getattr(self._loop, "_checkpointer", None)
         return self._agent
 
     async def run_turn(self, *, user_input, session, on_progress=None) -> str:
         await self._ensure_ready()
+        self._invalidate_cached_runtime_bindings_if_stale()
         setattr(session, "_last_route_kind", "direct_reply")
         session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
         runtime_context = CeoRuntimeContext(
@@ -532,6 +548,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
 
     async def resume_turn(self, *, session, resume_value, on_progress=None) -> str:
         await self._ensure_ready()
+        self._invalidate_cached_runtime_bindings_if_stale()
         session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
         graph_output = await self._get_agent().ainvoke(
             Command(resume=resume_value),
