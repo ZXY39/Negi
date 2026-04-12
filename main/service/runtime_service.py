@@ -155,6 +155,17 @@ _TASK_RECOVERY_NOTICE_KEY = 'recovery_notice'
 _TASK_RECOVERY_NOTICE_TEXT = '本任务遇到异常停止，已回退到稳定步骤继续。'
 _CONTINUATION_TASK_CREATED_BY_SOURCES = frozenset({'heartbeat_auto_continue', 'ceo_user_rebuild'})
 _TASK_RUNTIME_V3_MARKER = '.task-runtime-v3'
+_NODE_FIXED_BUILTIN_TOOL_NAMES = (
+    'submit_next_stage',
+    'submit_final_result',
+    'spawn_child_nodes',
+    'content_describe',
+    'content_open',
+    'content_search',
+    'exec',
+    'load_skill_context',
+    'load_tool_context',
+)
 
 
 def _prepare_task_runtime_v3_root(
@@ -3789,23 +3800,64 @@ class MainRuntimeService:
         tool_names: list[str],
         visible_tool_families: list[dict[str, Any]],
     ) -> list[str]:
-        family_tool_ids = {
-            str((item or {}).get('tool_id') or '').strip()
-            for item in list(visible_tool_families or [])
-            if str((item or {}).get('tool_id') or '').strip()
-        }
+        executor_name_set: set[str] = set()
+        preferred_executor_by_family: dict[str, str] = {}
+        for item in list(visible_tool_families or []):
+            tool_id = str((item or {}).get('tool_id') or '').strip()
+            split_executor_names: list[str] = []
+            fallback_executor_names: list[str] = []
+            for action in list((item or {}).get('actions') or []):
+                for raw_executor_name in list((action or {}).get('executor_names') or []):
+                    executor_name = str(raw_executor_name or '').strip()
+                    if not executor_name:
+                        continue
+                    executor_name_set.add(executor_name)
+                    fallback_executor_names.append(executor_name)
+                    if not cls._is_legacy_execution_monolith_name(tool_id=tool_id, executor_name=executor_name):
+                        split_executor_names.append(executor_name)
+            preferred_executor = ""
+            for candidate in split_executor_names + fallback_executor_names:
+                if candidate:
+                    preferred_executor = candidate
+                    break
+            if tool_id and preferred_executor:
+                preferred_executor_by_family[tool_id] = preferred_executor
+                external_tool_id = cls._external_tool_family_id(tool_id)
+                if external_tool_id:
+                    preferred_executor_by_family.setdefault(external_tool_id, preferred_executor)
         canonical_names: list[str] = []
         for raw_name in list(tool_names or []):
             name = str(raw_name or '').strip()
             if not name:
                 continue
-            canonical_name = get_governance_tool_id(name) or name
-            if canonical_name in family_tool_ids and canonical_name not in canonical_names:
-                canonical_names.append(canonical_name)
+            if name in executor_name_set and name not in canonical_names:
+                canonical_names.append(name)
+                continue
+            preferred_executor = preferred_executor_by_family.get(name)
+            if preferred_executor and preferred_executor not in canonical_names:
+                canonical_names.append(preferred_executor)
+                continue
+            canonical_family_name = get_governance_tool_id(name)
+            preferred_executor = preferred_executor_by_family.get(canonical_family_name)
+            if preferred_executor and preferred_executor not in canonical_names:
+                canonical_names.append(preferred_executor)
                 continue
             if name not in canonical_names:
                 canonical_names.append(name)
         return canonical_names
+
+    @staticmethod
+    def _execution_fixed_builtin_tool_names(*, visible_tool_names: list[str]) -> list[str]:
+        visible_name_set = {
+            str(item or '').strip()
+            for item in list(visible_tool_names or [])
+            if str(item or '').strip()
+        }
+        return [
+            name
+            for name in _NODE_FIXED_BUILTIN_TOOL_NAMES
+            if name in visible_name_set
+        ]
 
     def _select_model_visible_tool_schema_payload(
         self,
@@ -3857,8 +3909,11 @@ class MainRuntimeService:
             items=filtered_lightweight_items,
             visible_tool_names=ordered_visible_tool_names,
         )
-        always_callable_tool_names = ReActToolLoop.model_visible_always_callable_tool_names(
-            visible_tool_names=ordered_visible_tool_names,
+        always_callable_tool_names = self._normalized_tool_name_list(
+            self._execution_fixed_builtin_tool_names(visible_tool_names=ordered_visible_tool_names)
+            + ReActToolLoop.model_visible_always_callable_tool_names(
+                visible_tool_names=ordered_visible_tool_names,
+            )
         )
         promoted_hydrated_executor_names: list[str] = []
         prior_selected_tool_names: list[str] = []
@@ -5697,6 +5752,12 @@ class MainRuntimeService:
         if not callable_tool_names:
             return None
         visible_skills = [dict(item) for item in list(payload.get('visible_skills') or []) if isinstance(item, dict)]
+        candidate_skill_ids = [
+            str(item or '').strip()
+            for item in list(payload.get('candidate_skills') or [])
+            if str(item or '').strip()
+        ]
+        candidate_tool_names = self._normalized_tool_name_list(list(payload.get('candidate_tools') or []))
         selection = NodeContextSelectionResult(
             mode='dense_rerank',
             memory_search_visible='memory_search' in set(callable_tool_names),
@@ -5705,8 +5766,9 @@ class MainRuntimeService:
                 for item in visible_skills
                 if str(item.get('skill_id') or '').strip()
             ],
-            selected_tool_family_ids=[],
             selected_tool_names=callable_tool_names,
+            candidate_skill_ids=candidate_skill_ids,
+            candidate_tool_names=candidate_tool_names or callable_tool_names,
             memory_query='',
             retrieval_scope={},
             trace={'mode': 'persisted_frame_restore'},
@@ -5796,37 +5858,10 @@ class MainRuntimeService:
         if isinstance(cache, dict):
             cache.pop(cache_key, None)
 
-    def _tool_family_executor_names(self, family: Any) -> list[str]:
-        ordered: list[str] = []
-        seen: set[str] = set()
-
-        def _add(value: Any) -> None:
-            normalized = str(value or '').strip()
-            if not normalized or normalized in seen:
-                return
-            seen.add(normalized)
-            ordered.append(normalized)
-
-        _add(self._tool_family_executor_name(family))
-        for action in list(getattr(family, 'actions', []) or []):
-            for executor_name in list(getattr(action, 'executor_names', []) or []):
-                _add(executor_name)
-        tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-        if tool_id and self._resource_manager is not None:
-            descriptor = (
-                self._resource_manager.get_tool_descriptor(tool_id)
-                if hasattr(self._resource_manager, 'get_tool_descriptor')
-                else None
-            )
-            if descriptor is not None:
-                _add(tool_id)
-        return ordered
-
     def _selected_callable_tool_names(
         self,
         *,
         selection: NodeContextSelectionResult | None,
-        visible_tool_families: list[Any],
         visible_tool_names: list[str],
     ) -> list[str]:
         normalized_visible_tool_names: list[str] = []
@@ -5841,39 +5876,11 @@ class MainRuntimeService:
             return normalized_visible_tool_names
 
         visible_tool_name_set = set(normalized_visible_tool_names)
-        selected_tool_family_ids: list[str] = []
-        seen_selected_tool_family_ids: set[str] = set()
-        for item in list(getattr(selection, 'selected_tool_family_ids', []) or []):
-            normalized = str(item or '').strip()
-            if not normalized or normalized in seen_selected_tool_family_ids:
-                continue
-            seen_selected_tool_family_ids.add(normalized)
-            selected_tool_family_ids.append(normalized)
-        if not selected_tool_family_ids:
-            return [
-                name
-                for name in list(getattr(selection, 'selected_tool_names', []) or [])
-                if str(name or '').strip() in visible_tool_name_set
-            ]
-
-        family_by_id: dict[str, Any] = {}
-        for family in list(visible_tool_families or []):
-            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-            if tool_id and tool_id not in family_by_id:
-                family_by_id[tool_id] = family
-
-        selected_tool_names: list[str] = []
-        seen_selected_tool_names: set[str] = set()
-        for tool_id in selected_tool_family_ids:
-            family = family_by_id.get(tool_id)
-            if family is None:
-                continue
-            for executor_name in self._tool_family_executor_names(family):
-                if executor_name not in visible_tool_name_set or executor_name in seen_selected_tool_names:
-                    continue
-                seen_selected_tool_names.add(executor_name)
-                selected_tool_names.append(executor_name)
-        return selected_tool_names
+        return [
+            name
+            for name in list(getattr(selection, 'selected_tool_names', []) or [])
+            if str(name or '').strip() in visible_tool_name_set
+        ]
 
     def _tool_provider(self, node: NodeRecord) -> dict[str, Tool]:
         task = self.store.get_task(node.task_id)
@@ -5889,7 +5896,6 @@ class MainRuntimeService:
         selected_visible = set(
             self._selected_callable_tool_names(
                 selection=(cached.get('selection') if cached is not None else None),
-                visible_tool_families=visible_tool_families,
                 visible_tool_names=visible_tool_names,
             )
         )
@@ -5939,10 +5945,18 @@ class MainRuntimeService:
         messages: list[dict[str, Any]],
         visible_skills: list[Any],
         callable_tool_names: list[str] | None = None,
+        candidate_skill_ids: list[str] | None = None,
+        candidate_tool_names: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         enriched = list(messages or [])
         skill_items = self._visible_skill_prompt_items(visible_skills)
         normalized_callable_tool_names = self._normalized_tool_name_list(list(callable_tool_names or []))
+        normalized_candidate_skill_ids = [
+            str(item or '').strip()
+            for item in list(candidate_skill_ids or [])
+            if str(item or '').strip()
+        ]
+        normalized_candidate_tool_names = self._normalized_tool_name_list(list(candidate_tool_names or []))
         for index, message in enumerate(enriched):
             if str(message.get('role') or '').strip().lower() != 'user':
                 continue
@@ -5957,6 +5971,8 @@ class MainRuntimeService:
                 continue
             payload['visible_skills'] = skill_items
             payload['callable_tool_names'] = normalized_callable_tool_names
+            payload['candidate_skills'] = normalized_candidate_skill_ids
+            payload['candidate_tools'] = normalized_candidate_tool_names
             enriched[index] = {
                 **message,
                 'content': json.dumps(payload, ensure_ascii=False, indent=2),
@@ -5991,9 +6007,10 @@ class MainRuntimeService:
             visible_skills=selected_visible_skills,
             callable_tool_names=self._selected_callable_tool_names(
                 selection=selection,
-                visible_tool_families=list(inputs.get('visible_tool_families') or []),
                 visible_tool_names=list(inputs.get('visible_tool_names') or []),
             ),
+            candidate_skill_ids=list(getattr(selection, 'candidate_skill_ids', []) or []),
+            candidate_tool_names=list(getattr(selection, 'candidate_tool_names', []) or []),
         )
         manager = getattr(self, 'memory_manager', None)
         # Node catalog narrowing is always selector-driven; unified_context only gates memory block retrieval.

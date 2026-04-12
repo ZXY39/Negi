@@ -151,7 +151,7 @@ def _skill(skill_id: str, description: str) -> SimpleNamespace:
     return SimpleNamespace(skill_id=skill_id, display_name=skill_id, description=description)
 
 
-def _family(
+def _tool_resource_record(
     tool_id: str,
     description: str,
     *,
@@ -189,7 +189,7 @@ def test_capability_snapshot_exposure_revision_ignores_hidden_executor_names() -
     first = build_capability_snapshot(
         visible_skills=[],
         visible_families=[
-            _family(
+            _tool_resource_record(
                 "agent_browser",
                 "Browser automation via semantic shortlist.",
                 executor_names=["agent_browser"],
@@ -200,7 +200,7 @@ def test_capability_snapshot_exposure_revision_ignores_hidden_executor_names() -
     second = build_capability_snapshot(
         visible_skills=[],
         visible_families=[
-            _family(
+            _tool_resource_record(
                 "agent_browser",
                 "Browser automation via semantic shortlist.",
                 executor_names=["agent_browser", "hidden_browser_admin"],
@@ -211,13 +211,14 @@ def test_capability_snapshot_exposure_revision_ignores_hidden_executor_names() -
 
     assert first.exposure_revision == second.exposure_revision
     assert first.stable_catalog_message == second.stable_catalog_message
+    assert first.visible_tool_ids == ("agent_browser",)
 
 
 def test_capability_snapshot_exposure_revision_ignores_warning_and_install_dir_churn() -> None:
     first = build_capability_snapshot(
         visible_skills=[],
         visible_families=[
-            _family(
+            _tool_resource_record(
                 "external_docs",
                 "External docs short summary.",
                 callable=False,
@@ -231,7 +232,7 @@ def test_capability_snapshot_exposure_revision_ignores_warning_and_install_dir_c
     second = build_capability_snapshot(
         visible_skills=[],
         visible_families=[
-            _family(
+            _tool_resource_record(
                 "external_docs",
                 "External docs short summary.",
                 callable=False,
@@ -279,8 +280,8 @@ async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_ava
                 _skill("secondary-skill", "Secondary workflow"),
             ],
             "tool_families": [
-                _family("agent_browser", "Browser automation via semantic shortlist."),
-                _family("web_fetch", "HTTP fetch helper."),
+                _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
+                _tool_resource_record("web_fetch", "HTTP fetch helper."),
             ],
             "tool_names": ["filesystem", "agent_browser", "web_fetch"],
         },
@@ -306,6 +307,12 @@ async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_ava
         "allowed_resource_record_ids": ["tool:agent_browser", "tool:web_fetch"],
         "allowed_skill_record_ids": ["skill:focused-skill", "skill:secondary-skill"],
     }
+    overlay = str(result.turn_overlay_text or "")
+    assert "## Candidate Tools For This Turn" in overlay
+    assert '`agent_browser`' in overlay
+    assert '`web_fetch`' in overlay
+    assert 'load_tool_context(tool_id="agent_browser")' in overlay
+    assert result.tool_names == []
 
 
 @pytest.mark.asyncio
@@ -335,8 +342,8 @@ async def test_message_builder_dense_unavailable_exposes_all_visible_skills_and_
                 _skill("secondary-skill", "Secondary workflow"),
             ],
             "tool_families": [
-                _family("agent_browser", "Browser automation"),
-                _family("web_fetch", "HTTP fetch helper"),
+                _tool_resource_record("agent_browser", "Browser automation"),
+                _tool_resource_record("web_fetch", "HTTP fetch helper"),
             ],
             "tool_names": ["filesystem", "agent_browser", "web_fetch"],
         },
@@ -348,7 +355,8 @@ async def test_message_builder_dense_unavailable_exposes_all_visible_skills_and_
         "focused-skill",
         "secondary-skill",
     ]
-    assert result.tool_names == ["filesystem", "agent_browser", "web_fetch"]
+    assert result.tool_names == []
+    assert result.candidate_tool_names == ["filesystem", "agent_browser", "web_fetch"]
     assert result.trace["semantic_frontdoor"]["mode"] == "visible_only"
     assert result.trace["retrieval_scope"]["mode"] == "visible_only"
     assert result.trace["retrieval_scope"]["allowed_skill_record_ids"] == [
@@ -387,8 +395,8 @@ async def test_message_builder_semantic_disabled_keeps_top_k_selection_and_non_v
                 _skill("secondary-skill", "Secondary workflow"),
             ],
             "tool_families": [
-                _family("agent_browser", "Browser automation"),
-                _family("web_fetch", "HTTP fetch helper"),
+                _tool_resource_record("agent_browser", "Browser automation"),
+                _tool_resource_record("web_fetch", "HTTP fetch helper"),
             ],
             "tool_names": ["filesystem", "agent_browser", "web_fetch"],
         },
@@ -399,8 +407,9 @@ async def test_message_builder_semantic_disabled_keeps_top_k_selection_and_non_v
     assert [item["skill_id"] for item in result.trace["selected_skills"]] == ["focused-skill"]
     assert result.trace["semantic_frontdoor"]["mode"] == "disabled"
     assert result.trace["retrieval_scope"]["mode"] == "rbac_fallback"
-    assert result.trace["selected_tools"].get("mode") != "visible_only"
-    assert len(result.tool_names) == 1
+    assert result.trace["tool_selection"].get("mode") != "visible_only"
+    assert result.tool_names == []
+    assert len(result.candidate_tool_names) == 1
 
 
 @pytest.mark.asyncio
@@ -434,7 +443,7 @@ async def test_message_builder_dense_unavailable_retrieval_scope_includes_dict_v
                 },
                 _skill("object-skill", "Object workflow"),
             ],
-            "tool_families": [_family("agent_browser", "Browser automation")],
+            "tool_families": [_tool_resource_record("agent_browser", "Browser automation")],
             "tool_names": ["filesystem", "agent_browser"],
         },
         persisted_session=None,
@@ -473,7 +482,7 @@ async def test_message_builder_keeps_control_tools_visible_in_tool_selection() -
 
     assert "stop_tool_execution" in selected
     assert "wait_tool_execution" not in selected
-    assert trace["reserved"] == ["stop_tool_execution"]
+    assert trace["reserved_internal_tool_names"] == ["stop_tool_execution"]
 
 
 @pytest.mark.asyncio
@@ -510,7 +519,7 @@ async def test_message_builder_dense_unavailable_renders_l0_only_skill_and_exter
                 }
             ],
             "tool_families": [
-                _family(
+                _tool_resource_record(
                     "external_docs",
                     "L0 external tool summary. Detail sentence should not appear.",
                     callable=False,
@@ -527,7 +536,8 @@ async def test_message_builder_dense_unavailable_renders_l0_only_skill_and_exter
     system_prompt = str(result.model_messages[0].get("content") or "")
     overlay = str(getattr(result, "turn_overlay_text", "") or "")
     assert "L0 concise skill summary." in overlay
-    assert '`external_docs`' in system_prompt
+    assert '`external_docs`' not in system_prompt
+    assert "## Candidate Tools For This Turn" in overlay
     assert "Detail sentence should not appear." not in system_prompt
     assert "Detail sentence should not appear." not in overlay
 
@@ -602,7 +612,7 @@ async def test_message_builder_dense_unavailable_keeps_non_callable_external_too
         exposure={
             "skills": [],
             "tool_families": [
-                _family(
+                _tool_resource_record(
                     "external_docs",
                     "External docs short summary. Detail sentence should not appear.",
                     callable=False,
@@ -617,13 +627,13 @@ async def test_message_builder_dense_unavailable_keeps_non_callable_external_too
     )
 
     system_prompt = str(result.model_messages[0].get("content") or "")
-    assert '`external_docs`' in system_prompt
+    assert '`external_docs`' not in system_prompt
     assert "Install dir not configured" not in system_prompt
     assert [item["tool_id"] for item in result.trace["external_tools"]] == ["external_docs"]
 
 
 @pytest.mark.asyncio
-async def test_message_builder_dense_unavailable_renders_l0_only_for_unavailable_callable_tool_family() -> None:
+async def test_message_builder_dense_unavailable_renders_l0_only_for_unavailable_callable_tool_resource() -> None:
     memory_manager = _SemanticMemoryManager(response="")
     memory_manager.store = SimpleNamespace(_dense_enabled=False)
     loop = SimpleNamespace(
@@ -649,7 +659,7 @@ async def test_message_builder_dense_unavailable_renders_l0_only_for_unavailable
         exposure={
             "skills": [],
             "tool_families": [
-                _family(
+                _tool_resource_record(
                     "agent_browser",
                     "Callable fallback short summary. Later sentence should not appear.",
                     callable=True,
@@ -663,8 +673,8 @@ async def test_message_builder_dense_unavailable_renders_l0_only_for_unavailable
     )
 
     system_prompt = str(result.model_messages[0].get("content") or "")
-    assert "## Visible Tool Resources" in system_prompt
-    assert '`agent_browser`' in system_prompt
+    assert "## Visible Tool Context Ids" in system_prompt
+    assert '`agent_browser`' not in system_prompt
     assert "Later sentence should not appear." not in system_prompt
     assert "Later l0 sentence should not appear." not in system_prompt
 
@@ -681,7 +691,7 @@ async def test_message_builder_renders_external_tool_context_for_unavailable_cal
         exposure={
             "skills": [],
             "tool_families": [
-                _family(
+                _tool_resource_record(
                     "agent_browser",
                     "Browser automation via the upstream CLI.",
                     callable=True,
@@ -694,8 +704,8 @@ async def test_message_builder_renders_external_tool_context_for_unavailable_cal
         persisted_session=None,
     )
 
-    assert "## Visible Tool Resources" in result.system_prompt
-    assert '`agent_browser`' in result.system_prompt
+    assert "## Visible Tool Context Ids" in result.system_prompt
+    assert '`agent_browser`' not in result.system_prompt
     assert "missing required bins" not in result.system_prompt
     assert [item["tool_id"] for item in result.trace["external_tools"]] == ["agent_browser"]
 
@@ -715,7 +725,7 @@ async def test_message_builder_uses_memory_only_retrieval_for_memory_intent() ->
         query_text="from now on default to the focused browser workflow",
         exposure={
             "skills": [_skill("focused-skill", "Primary workflow")],
-            "tool_families": [_family("agent_browser", "Browser automation via semantic shortlist.")],
+            "tool_families": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
             "tool_names": ["filesystem", "agent_browser", "memory_write"],
         },
         persisted_session=None,
@@ -740,7 +750,7 @@ async def test_message_builder_moves_turn_specific_context_into_overlay_for_stab
         query_text="from now on default to the focused browser workflow",
         exposure={
             "skills": [_skill("focused-skill", "Primary workflow")],
-            "tool_families": [_family("agent_browser", "Browser automation via semantic shortlist.")],
+            "tool_families": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
             "tool_names": ["filesystem", "agent_browser", "memory_write"],
         },
         persisted_session=persisted_session,
@@ -786,7 +796,7 @@ async def test_message_builder_exposes_dynamic_appendix_messages_for_prompt_cach
         query_text="from now on default to the focused browser workflow",
         exposure={
             "skills": [_skill("focused-skill", "Primary workflow")],
-            "tool_families": [_family("agent_browser", "Browser automation via semantic shortlist.")],
+            "tool_families": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
             "tool_names": ["filesystem", "agent_browser", "memory_write"],
         },
         persisted_session=persisted_session,
@@ -836,8 +846,8 @@ async def test_message_builder_keeps_capability_snapshot_stable_when_semantic_sk
             _skill("secondary-skill", "Secondary workflow summary."),
         ],
         "tool_families": [
-            _family("agent_browser", "Browser automation via semantic shortlist."),
-            _family("web_fetch", "HTTP fetch helper."),
+            _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
+            _tool_resource_record("web_fetch", "HTTP fetch helper."),
         ],
         "tool_names": ["filesystem", "agent_browser", "web_fetch"],
     }
@@ -898,8 +908,8 @@ async def test_message_builder_uses_exposure_revision_when_capability_snapshot_e
             _skill("secondary-skill", "Secondary workflow summary."),
         ],
         visible_families=[
-            _family("agent_browser", "Browser automation via semantic shortlist."),
-            _family("web_fetch", "HTTP fetch helper."),
+            _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
+            _tool_resource_record("web_fetch", "HTTP fetch helper."),
         ],
         visible_tool_names=["filesystem", "agent_browser", "web_fetch"],
     )
@@ -913,8 +923,8 @@ async def test_message_builder_uses_exposure_revision_when_capability_snapshot_e
                 _skill("secondary-skill", "Secondary workflow summary."),
             ],
             "tool_families": [
-                _family("agent_browser", "Browser automation via semantic shortlist."),
-                _family("web_fetch", "HTTP fetch helper."),
+                _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
+                _tool_resource_record("web_fetch", "HTTP fetch helper."),
             ],
             "tool_names": ["filesystem", "agent_browser", "web_fetch"],
             "capability_snapshot": snapshot,
@@ -975,7 +985,8 @@ async def test_message_builder_includes_retrieval_and_full_transcript_without_du
     contents = [str(item.get("content") or "") for item in result.model_messages]
     assert contents[0].startswith("BASE PROMPT")
     assert "## Capability Exposure Snapshot" in contents[0]
-    assert "## Retrieved Context" in contents[1]
+    assert "## Candidate Tools For This Turn" in contents[1]
+    assert "## Retrieved Context" in contents[2]
     assert contents.count("follow up question") == 1
     assert contents[-1] == "follow up question"
     assert result.trace["current_user_in_transcript"] is True
@@ -1179,7 +1190,7 @@ async def test_message_builder_trace_includes_frontdoor_context_span_timings() -
         query_text="remembered preference",
         exposure={
             "skills": [_skill("focused-skill", "Primary workflow")],
-            "tool_families": [_family("agent_browser", "Browser automation")],
+            "tool_families": [_tool_resource_record("agent_browser", "Browser automation")],
             "tool_names": ["filesystem", "agent_browser"],
         },
         persisted_session=None,

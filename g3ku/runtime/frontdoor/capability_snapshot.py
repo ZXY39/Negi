@@ -28,8 +28,12 @@ def _visible_skill_ids(visible_skills: list[Any]) -> tuple[str, ...]:
     return _ordered_unique([str(_field(item, "skill_id") or "").strip() for item in list(visible_skills or [])])
 
 
-def _visible_tool_ids(visible_families: list[Any]) -> tuple[str, ...]:
-    return _ordered_unique([str(_field(item, "tool_id") or "").strip() for item in list(visible_families or [])])
+def _visible_tool_ids(
+    visible_families: list[Any],
+    visible_tool_names: list[str] | tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    del visible_families
+    return _ordered_unique(visible_tool_names)
 
 
 def _snapshot_payload(
@@ -40,7 +44,7 @@ def _snapshot_payload(
 ) -> dict[str, list[str]]:
     return {
         "visible_skill_ids": list(_visible_skill_ids(visible_skills)),
-        "visible_tool_ids": list(_visible_tool_ids(visible_families)),
+        "visible_tool_ids": list(_visible_tool_ids(visible_families, visible_tool_names)),
         "visible_tool_names": list(_ordered_unique(visible_tool_names)),
     }
 
@@ -78,8 +82,8 @@ def _stable_catalog_message(*, payload: dict[str, list[str]], exposure_revision:
         ),
         "",
         *_render_id_section(
-            heading="## Visible Tool Resources",
-            intro='- Call `load_tool_context` only with these visible tool ids.',
+            heading="## Visible Tool Context Ids",
+            intro='- Call `load_tool_context` only with these visible concrete tool ids.',
             ids=list(payload.get("visible_tool_ids") or []),
         ),
     ]

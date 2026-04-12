@@ -49,6 +49,21 @@ class CeoMessageBuilder:
         'model_config': ('model', 'provider', 'config', 'token', 'temperature'),
     }
     RESERVED_INTERNAL_TOOLS: tuple[str, ...] = ("stop_tool_execution",)
+    FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
+        "create_async_task",
+        "continue_task",
+        "message",
+        "task_summary",
+        "task_list",
+        "task_progress",
+        "load_skill_context",
+        "load_tool_context",
+        "content_open",
+        "content_search",
+        "exec",
+        "memory_search",
+        "memory_write",
+    )
 
     def __init__(self, *, loop, prompt_builder) -> None:
         self._loop = loop
@@ -205,6 +220,67 @@ class CeoMessageBuilder:
             else:
                 lines.append(f'- `{skill_id}` ({label})')
         return '\n'.join(lines)
+
+    @classmethod
+    def _build_turn_tool_overlay(
+        cls,
+        *,
+        selected_tool_names: list[str],
+        capability_snapshot: CapabilitySnapshot,
+        visible_only_mode: bool,
+    ) -> str:
+        tool_names = [
+            str(item or '').strip()
+            for item in list(selected_tool_names or [])
+            if str(item or '').strip()
+        ]
+        if not tool_names:
+            return ''
+        all_visible_tool_names = set(capability_snapshot.visible_tool_ids)
+        selected_tool_name_set = set(tool_names)
+        if visible_only_mode and selected_tool_name_set == all_visible_tool_names and len(tool_names) == len(all_visible_tool_names):
+            lines = [
+                '## Candidate Tools For This Turn',
+                '- Semantic ranking is unavailable, so the full visible concrete tool set is listed below.',
+            ]
+        else:
+            lines = [
+                '## Candidate Tools For This Turn',
+                '- These are candidate concrete tools for this turn. Non-built-in tools require `load_tool_context(tool_id="...")` before use.',
+            ]
+        for tool_name in tool_names:
+            lines.append(
+                f'- `{tool_name}`. Load with `load_tool_context(tool_id="{tool_name}")` when you need the tool contract.'
+            )
+        return '\n'.join(lines)
+
+    @classmethod
+    def _callable_tool_names(
+        cls,
+        *,
+        visible_tool_names: list[str],
+        core_tools: set[str],
+    ) -> list[str]:
+        visible = [
+            str(item or '').strip()
+            for item in list(visible_tool_names or [])
+            if str(item or '').strip()
+        ]
+        visible_set = set(visible)
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for name in [*cls.RESERVED_INTERNAL_TOOLS, *cls.FIXED_BUILTIN_TOOL_NAMES]:
+            normalized = str(name or '').strip()
+            if not normalized or normalized not in visible_set or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        for name in visible:
+            if name in seen or name not in core_tools:
+                continue
+            seen.add(name)
+            ordered.append(name)
+        return ordered
 
     @staticmethod
     def _elapsed_ms(started_at: float) -> float:
@@ -531,7 +607,12 @@ class CeoMessageBuilder:
     ) -> tuple[list[str], dict[str, Any]]:
         visible_set = {str(name).strip() for name in visible_names if str(name).strip()}
         if not visible_set:
-            return [], {'core': [], 'extension': []}
+            return [], {
+                'mode': 'disabled',
+                'reserved_internal_tool_names': [],
+                'fixed_builtin_tool_names': [],
+                'candidate_tool_names': [],
+            }
         raw_core_entries = {str(name).strip() for name in list(core_tools or []) if str(name).strip()}
         core_resolution = resolve_core_tool_targets(core_tools, visible_families)
         reserved = [name for name in visible_names if name in self.RESERVED_INTERNAL_TOOLS and name in visible_set]
@@ -543,7 +624,12 @@ class CeoMessageBuilder:
         }
         if extension_top_k <= 0:
             ordered = reserved + [name for name in visible_names if name in selected]
-            return ordered, {'reserved': reserved, 'core': sorted(selected), 'extension': []}
+            return ordered, {
+                'mode': 'core_only',
+                'reserved_internal_tool_names': reserved,
+                'fixed_builtin_tool_names': sorted(selected),
+                'candidate_tool_names': [],
+            }
 
         if ranked_tool_ids is not None:
             picked_extension: list[str] = []
@@ -580,7 +666,12 @@ class CeoMessageBuilder:
                 + [name for name in visible_names if name in selected]
                 + [name for name in visible_names if name in picked_extension]
             )
-            return ordered, {'reserved': reserved, 'core': sorted(selected), 'extension': picked_extension}
+            return ordered, {
+                'mode': 'dense_only',
+                'reserved_internal_tool_names': reserved,
+                'fixed_builtin_tool_names': sorted(selected),
+                'candidate_tool_names': picked_extension,
+            }
 
         ext_scored: list[tuple[float, list[str], str]] = []
         for family in visible_families:
@@ -636,7 +727,12 @@ class CeoMessageBuilder:
             + [name for name in visible_names if name in selected]
             + [name for name in visible_names if name in picked_extension]
         )
-        return ordered, {'reserved': reserved, 'core': sorted(selected), 'extension': picked_extension}
+        return ordered, {
+            'mode': 'rbac_fallback',
+            'reserved_internal_tool_names': reserved,
+            'fixed_builtin_tool_names': sorted(selected),
+            'candidate_tool_names': picked_extension,
+        }
 
     @staticmethod
     def _visible_only_skill_trace(visible_skills: list[Any]) -> list[dict[str, Any]]:
@@ -700,6 +796,15 @@ class CeoMessageBuilder:
             for name in list(getattr(assembly_cfg, 'core_tools', []) or [])
             if str(name).strip()
         }
+        visible_tool_names = [
+            str(name or '').strip()
+            for name in list(exposure.get('tool_names') or [])
+            if str(name or '').strip()
+        ]
+        callable_tool_names = self._callable_tool_names(
+            visible_tool_names=visible_tool_names,
+            core_tools=core_tools,
+        )
 
         if main_service is not None and memory_manager is not None:
             try:
@@ -752,12 +857,12 @@ class CeoMessageBuilder:
             system_prompt = f"{system_prompt}\n\n{capability_snapshot.stable_catalog_message}".strip()
         external_trace = self._trace_external_tool_families(
             visible_families=visible_families,
-            visible_tool_names=list(exposure.get('tool_names') or []),
+            visible_tool_names=visible_tool_names,
         )
 
         memory_write_visible = 'memory_write' in {
             str(name or '').strip()
-            for name in list(exposure.get('tool_names') or [])
+            for name in visible_tool_names
             if str(name or '').strip()
         }
         turn_overlay_parts: list[str] = []
@@ -767,7 +872,6 @@ class CeoMessageBuilder:
             turn_overlay_parts.append(self._memory_write_hint_block(memory_write_terms))
 
         if visible_only_mode:
-            visible_tool_names = list(exposure.get('tool_names') or [])
             selected_tool_names = []
             seen_tool_names: set[str] = set()
             for name in visible_tool_names:
@@ -778,19 +882,30 @@ class CeoMessageBuilder:
                 selected_tool_names.append(normalized)
             tool_trace = {
                 'mode': 'visible_only',
-                'reserved': [name for name in selected_tool_names if name in self.RESERVED_INTERNAL_TOOLS],
-                'core': [],
-                'extension': [name for name in selected_tool_names if name not in self.RESERVED_INTERNAL_TOOLS],
+                'reserved_internal_tool_names': [
+                    name for name in selected_tool_names if name in self.RESERVED_INTERNAL_TOOLS
+                ],
+                'fixed_builtin_tool_names': [],
+                'candidate_tool_names': [
+                    name for name in selected_tool_names if name not in self.RESERVED_INTERNAL_TOOLS
+                ],
             }
         else:
             selected_tool_names, tool_trace = self._select_tools(
                 query_text=query_text,
-                visible_names=list(exposure.get('tool_names') or []),
+                visible_names=visible_tool_names,
                 visible_families=visible_families,
                 core_tools=core_tools,
                 extension_top_k=extension_top_k,
                 ranked_tool_ids=list(semantic_frontdoor.get('tool_ids') or []),
             )
+        candidate_tools_block = self._build_turn_tool_overlay(
+            selected_tool_names=list(selected_tool_names),
+            capability_snapshot=capability_snapshot,
+            visible_only_mode=visible_only_mode,
+        )
+        if candidate_tools_block:
+            turn_overlay_parts.append(candidate_tools_block)
 
         retrieval_scope = plan_retrieval_scope(
             visible_skills=visible_skills,
@@ -867,6 +982,7 @@ class CeoMessageBuilder:
             'semantic_trace': semantic_trace,
             'external_trace': external_trace,
             'selected_tool_names': selected_tool_names,
+            'callable_tool_names': callable_tool_names,
             'tool_trace': tool_trace,
             'retrieval_scope': retrieval_scope,
             'retrieved_bundle': retrieved_bundle,
@@ -1008,7 +1124,7 @@ class CeoMessageBuilder:
 
         trace = {
             'selected_skills': list(context_sources['skill_trace']),
-            'selected_tools': dict(context_sources['tool_trace']),
+            'tool_selection': dict(context_sources['tool_trace']),
             'semantic_frontdoor': dict(context_sources['semantic_trace']),
             'external_tools': list(context_sources['external_trace']),
             'capability_snapshot': {
@@ -1070,7 +1186,8 @@ class CeoMessageBuilder:
             model_messages=model_messages,
             stable_messages=stable_messages,
             dynamic_appendix_messages=dynamic_appendix_messages,
-            tool_names=list(context_sources['selected_tool_names']),
+            tool_names=list(context_sources['callable_tool_names']),
+            candidate_tool_names=list(context_sources['selected_tool_names']),
             trace=trace,
             turn_overlay_text=turn_overlay_text,
             cache_family_revision=(

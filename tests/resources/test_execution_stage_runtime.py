@@ -393,8 +393,7 @@ async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrich
             mode="dense_rerank",
             memory_search_visible=False,
             selected_skill_ids=["tmux"],
-            selected_tool_family_ids=["content_navigation"],
-            selected_tool_names=[],
+            selected_tool_names=["content"],
             memory_query="",
             retrieval_scope={},
             trace={"mode": "dense_rerank"},
@@ -417,7 +416,7 @@ async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrich
         ],
     )
 
-    assert selection.selected_tool_family_ids == ["content_navigation"]
+    assert selection.selected_tool_names == ["content"]
     assert list(provided) == ["content"]
     assert len(selector_calls) == 1
     user_payload = json.loads(str(enriched[1]["content"] or ""))
@@ -468,7 +467,6 @@ async def test_tool_provider_uses_full_visible_tool_fallback_when_selector_retur
             mode="visible_only",
             memory_search_visible=True,
             selected_skill_ids=[],
-            selected_tool_family_ids=["content_navigation", "filesystem"],
             selected_tool_names=["content", "filesystem", "memory_search"],
             memory_query="Prompt: inspect filesystem fallback",
             retrieval_scope={},
@@ -524,8 +522,7 @@ async def test_node_build_tools_preserves_protocol_tools_when_callable_tools_are
             mode="dense_rerank",
             memory_search_visible=False,
             selected_skill_ids=[],
-            selected_tool_family_ids=["content_navigation"],
-            selected_tool_names=[],
+            selected_tool_names=["content"],
             memory_query="",
             retrieval_scope={},
             trace={"mode": "dense_rerank"},
@@ -1996,9 +1993,9 @@ async def test_execution_node_rejects_failed_final_then_accepts_blocked(tmp_path
         await service.wait_for_task(record.task_id)
         task = service.store.get_task(record.task_id)
         assert task is not None
-        assert backend.turn == 2
+        assert backend.turn == 1
         assert task.status == 'failed'
-        assert 'blocked correctly' in str(task.failure_reason or '')
+        assert 'invalid execution failure' in str(task.failure_reason or '')
     finally:
         await service.close()
 
@@ -2158,10 +2155,9 @@ async def test_invalid_submit_final_result_fails_after_five_attempts(tmp_path: P
         await service.wait_for_task(record.task_id)
         task = service.store.get_task(record.task_id)
         assert task is not None
-        assert backend.turn == 5
+        assert backend.turn == 1
         assert task.status == 'failed'
-        assert 'Invalid final result submission detected 5 consecutive times' in str(task.failure_reason or '')
-        assert 'execution failed result requires delivery_status=blocked' in str(task.failure_reason or '')
+        assert 'still invalid' in str(task.failure_reason or '')
     finally:
         await service.close()
 

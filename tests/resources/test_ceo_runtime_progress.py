@@ -5264,4 +5264,4 @@ def test_context_assembly_always_keeps_tool_execution_control_tools_visible() ->
     assert "stop_tool_execution" in selected
     assert "wait_tool_execution" not in selected
     assert "create_async_task" in selected
-    assert trace["reserved"] == ["stop_tool_execution"]
+    assert trace["reserved_internal_tool_names"] == ["stop_tool_execution"]

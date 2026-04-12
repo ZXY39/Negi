@@ -60,8 +60,9 @@ async def test_node_selector_dense_unavailable_returns_full_rbac_visible_sets() 
 
     assert result.mode == "visible_only"
     assert result.selected_skill_ids == ["skill-a", "skill-b"]
-    assert result.selected_tool_family_ids == ["filesystem", "exec"]
     assert result.selected_tool_names == ["filesystem", "exec"]
+    assert result.candidate_skill_ids == ["skill-a", "skill-b"]
+    assert result.candidate_tool_names == ["filesystem", "exec"]
 
 
 @pytest.mark.asyncio
@@ -104,8 +105,9 @@ async def test_node_selector_without_memory_search_permission_still_uses_dense_s
     assert result.memory_search_visible is False
     assert result.memory_query == ""
     assert result.selected_skill_ids == ["skill-b"]
-    assert result.selected_tool_family_ids == ["exec"]
     assert result.selected_tool_names == []
+    assert result.candidate_skill_ids == ["skill-b"]
+    assert result.candidate_tool_names == []
     assert result.retrieval_scope == {
         "search_context_types": [],
         "allowed_context_types": [],
@@ -152,11 +154,48 @@ async def test_node_selector_with_memory_search_permission_emits_memory_only_ret
     assert "Core requirement" in result.memory_query
     assert captured["query_text"] == result.memory_query
     assert result.selected_skill_ids == ["skill-a"]
-    assert result.selected_tool_family_ids == ["filesystem"]
     assert result.selected_tool_names == ["filesystem"]
+    assert result.candidate_skill_ids == ["skill-a"]
+    assert result.candidate_tool_names == ["filesystem"]
     assert result.retrieval_scope == {
         "search_context_types": ["memory"],
         "allowed_context_types": ["memory"],
         "allowed_resource_record_ids": [],
         "allowed_skill_record_ids": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_node_selector_dense_rerank_applies_separate_tool_and_skill_top_k(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _node_context_selection_module()
+    build_node_context_selection = _build_node_context_selection()
+    memory_manager = _DenseMemoryManager()
+
+    async def _fake_frontdoor_catalog_selection(**kwargs):
+        return {
+            "available": True,
+            "skill_ids": [f"skill-{index:02d}" for index in range(20)],
+            "tool_ids": [f"tool-{index:02d}" for index in range(20)],
+            "trace": {"queries": {"raw_query": str(kwargs.get("query_text") or "")}},
+        }
+
+    monkeypatch.setattr(module, "build_frontdoor_catalog_selection", _fake_frontdoor_catalog_selection)
+
+    visible_skills = [SimpleNamespace(skill_id=f"skill-{index:02d}") for index in range(20)]
+    visible_tools = [f"tool-{index:02d}" for index in range(20)]
+
+    result = await build_node_context_selection(
+        loop=SimpleNamespace(),
+        memory_manager=memory_manager,
+        prompt="inspect browser workflow",
+        goal="inspect browser workflow",
+        core_requirement="inspect browser workflow",
+        visible_skills=visible_skills,
+        visible_tool_families=[SimpleNamespace(tool_id=name) for name in visible_tools],
+        visible_tool_names=visible_tools,
+    )
+
+    assert len(result.candidate_skill_ids) == 16
+    assert len(result.candidate_tool_names) == 16
+    assert result.candidate_skill_ids[0] == "skill-00"
+    assert result.candidate_tool_names[0] == "tool-00"

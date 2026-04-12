@@ -1383,7 +1383,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             user_content=self._model_content(user_content),
             user_metadata=metadata,
         )
-        tool_names = list(assembly.tool_names or list(exposure.get("tool_names") or []))
+        tool_names = list(
+            getattr(assembly, "tool_names", None)
+            or getattr(assembly, "callable_tool_names", None)
+            or []
+        )
         if cron_internal:
             tool_names = ["cron"]
         cron_system_message = self._cron_internal_system_message(metadata)
@@ -1467,6 +1471,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "compression_state": dict(state.get("compression_state") or self._default_compression_state()),
             "turn_overlay_text": str(getattr(assembly, "turn_overlay_text", "") or "").strip() or None,
             "tool_names": list(tool_names),
+            "candidate_tool_names": list(getattr(assembly, "candidate_tool_names", []) or []),
             "used_tools": [],
             "route_kind": "direct_reply",
             "verified_task_ids": [],

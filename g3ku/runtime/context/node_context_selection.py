@@ -6,6 +6,10 @@ from typing import Any, Literal
 from g3ku.runtime.context.frontdoor_catalog_selection import build_frontdoor_catalog_selection
 
 
+TOOL_CANDIDATE_TOP_K = 16
+SKILL_CANDIDATE_TOP_K = 16
+
+
 def _item_value(item: Any, key: str) -> Any:
     if isinstance(item, dict):
         return item.get(key)
@@ -40,26 +44,11 @@ def _tool_names(items: list[str]) -> list[str]:
     return ordered
 
 
-def _family_ids_for_executor_names(*, visible_tool_families: list[Any], executor_names: list[str]) -> list[str]:
-    executor_set = {
-        _normalized_text(item)
-        for item in list(executor_names or [])
-        if _normalized_text(item)
-    }
-    selected: list[str] = []
-    for family in list(visible_tool_families or []):
-        tool_id = _normalized_text(_item_value(family, "tool_id"))
-        if not tool_id:
-            continue
-        family_executor_names = {
-            _normalized_text(executor_name)
-            for action in list(_item_value(family, "actions") or [])
-            for executor_name in list(_item_value(action, "executor_names") or [])
-            if _normalized_text(executor_name)
-        }
-        if family_executor_names & executor_set and tool_id not in selected:
-            selected.append(tool_id)
-    return selected
+def _cap_ordered(values: list[str], *, limit: int) -> list[str]:
+    capped_limit = max(int(limit or 0), 0)
+    if capped_limit <= 0:
+        return []
+    return list(values[:capped_limit])
 
 
 def _build_memory_query(*, prompt: str, goal: str, core_requirement: str) -> str:
@@ -87,8 +76,9 @@ class NodeContextSelectionResult:
     mode: Literal["dense_rerank", "visible_only"]
     memory_search_visible: bool
     selected_skill_ids: list[str] = field(default_factory=list)
-    selected_tool_family_ids: list[str] = field(default_factory=list)
     selected_tool_names: list[str] = field(default_factory=list)
+    candidate_skill_ids: list[str] = field(default_factory=list)
+    candidate_tool_names: list[str] = field(default_factory=list)
     memory_query: str = ""
     retrieval_scope: dict[str, Any] = field(default_factory=dict)
     trace: dict[str, Any] = field(default_factory=dict)
@@ -106,7 +96,6 @@ async def build_node_context_selection(
     visible_tool_names: list[str],
 ) -> NodeContextSelectionResult:
     visible_skill_ids = _visible_ids(visible_skills, key="skill_id")
-    visible_tool_ids = _visible_ids(visible_tool_families, key="tool_id")
     normalized_tool_names = _tool_names(visible_tool_names)
     memory_search_visible = "memory_search" in set(normalized_tool_names)
     selection_query = _build_memory_query(
@@ -132,8 +121,9 @@ async def build_node_context_selection(
             mode="visible_only",
             memory_search_visible=memory_search_visible,
             selected_skill_ids=visible_skill_ids,
-            selected_tool_family_ids=visible_tool_ids,
             selected_tool_names=normalized_tool_names,
+            candidate_skill_ids=visible_skill_ids,
+            candidate_tool_names=normalized_tool_names,
             memory_query=memory_query,
             retrieval_scope=retrieval_scope,
             trace={
@@ -143,7 +133,6 @@ async def build_node_context_selection(
                 "memory_search_visible": memory_search_visible,
                 "selection_query": selection_query,
                 "visible_skill_ids": list(visible_skill_ids),
-                "visible_tool_ids": list(visible_tool_ids),
                 "visible_tool_names": list(normalized_tool_names),
             },
         )
@@ -154,16 +143,17 @@ async def build_node_context_selection(
         query_text=selection_query,
         visible_skills=visible_skills,
         visible_families=visible_tool_families,
-        skill_limit=max(len(visible_skill_ids), 1),
-        tool_limit=max(len(visible_tool_ids), 1),
+        skill_limit=min(max(len(visible_skill_ids), 1), SKILL_CANDIDATE_TOP_K),
+        tool_limit=min(max(len(normalized_tool_names), 1), TOOL_CANDIDATE_TOP_K),
     )
     if not bool((dense_selection or {}).get("available")):
         return NodeContextSelectionResult(
             mode="visible_only",
             memory_search_visible=memory_search_visible,
             selected_skill_ids=visible_skill_ids,
-            selected_tool_family_ids=visible_tool_ids,
             selected_tool_names=normalized_tool_names,
+            candidate_skill_ids=visible_skill_ids,
+            candidate_tool_names=normalized_tool_names,
             memory_query=memory_query,
             retrieval_scope=retrieval_scope,
             trace={
@@ -174,46 +164,38 @@ async def build_node_context_selection(
                 "selection_query": selection_query,
                 "dense_selection": dict(dense_selection or {}),
                 "visible_skill_ids": list(visible_skill_ids),
-                "visible_tool_ids": list(visible_tool_ids),
                 "visible_tool_names": list(normalized_tool_names),
             },
         )
 
     visible_tool_name_set = set(normalized_tool_names)
-    visible_tool_id_set = set(visible_tool_ids)
-    selected_skill_ids = _tool_names(list((dense_selection or {}).get("skill_ids") or []))
-    selected_tool_names = [
+    selected_skill_ids = _cap_ordered(
+        _tool_names(list((dense_selection or {}).get("skill_ids") or [])),
+        limit=SKILL_CANDIDATE_TOP_K,
+    )
+    selected_tool_names = _cap_ordered([
         tool_name
         for tool_name in list((dense_selection or {}).get("tool_ids") or [])
         if tool_name in visible_tool_name_set
-    ]
-    selected_tool_family_ids = _family_ids_for_executor_names(
-        visible_tool_families=visible_tool_families,
-        executor_names=selected_tool_names,
-    )
-    if not selected_tool_family_ids:
-        selected_tool_family_ids = [
-            tool_id
-            for tool_id in _tool_names(list((dense_selection or {}).get("tool_ids") or []))
-            if tool_id in visible_tool_id_set
-        ]
+    ], limit=TOOL_CANDIDATE_TOP_K)
+    candidate_tool_names = list(selected_tool_names)
     return NodeContextSelectionResult(
         mode="dense_rerank",
         memory_search_visible=memory_search_visible,
         selected_skill_ids=selected_skill_ids,
-        selected_tool_family_ids=selected_tool_family_ids,
         selected_tool_names=selected_tool_names,
+        candidate_skill_ids=selected_skill_ids,
+        candidate_tool_names=candidate_tool_names,
         memory_query=memory_query,
         retrieval_scope=retrieval_scope,
         trace={
             "mode": "dense_rerank",
             "dense_enabled": dense_enabled,
             "dense_available": True,
-            "memory_search_visible": memory_search_visible,
-            "selection_query": selection_query,
-            "dense_selection": dict(dense_selection or {}),
-            "visible_skill_ids": list(visible_skill_ids),
-            "visible_tool_ids": list(visible_tool_ids),
-            "visible_tool_names": list(normalized_tool_names),
-        },
-    )
+                "memory_search_visible": memory_search_visible,
+                "selection_query": selection_query,
+                "dense_selection": dict(dense_selection or {}),
+                "visible_skill_ids": list(visible_skill_ids),
+                "visible_tool_names": list(normalized_tool_names),
+            },
+        )

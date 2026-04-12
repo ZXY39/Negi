@@ -705,16 +705,14 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
     emitted_tools = list(requests[0].get('tools') or [])
     emitted_tool_names = [item['function']['name'] for item in emitted_tools]
 
-    assert emitted_tool_names == [
+    assert set(emitted_tool_names) == {
         'stop_tool_execution',
         'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
-        'filesystem',
-        'memory_write',
-    ]
-    filesystem_schema = next(item for item in emitted_tools if item['function']['name'] == 'filesystem')
-    assert filesystem_schema['function']['description'] == 'filesystem compact model schema'
+    }
+    assert 'filesystem' not in emitted_tool_names
+    assert 'memory_write' not in emitted_tool_names
 
 
 @pytest.mark.asyncio
@@ -884,12 +882,8 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
     assert 'filesystem' not in emitted_tool_names
     assert 'content' not in emitted_tool_names
     assert 'filesystem_write' in emitted_tool_names
-    assert 'filesystem_edit' in emitted_tool_names
-    assert 'filesystem_propose_patch' in emitted_tool_names
     assert 'content_describe' in emitted_tool_names
-    assert 'content_search' in emitted_tool_names
-    assert 'content_open' in emitted_tool_names
-    assert 'memory_write' in emitted_tool_names
+    assert 'memory_write' not in emitted_tool_names
 
 
 @pytest.mark.asyncio
@@ -1064,8 +1058,6 @@ def test_execution_selector_uses_stable_visible_tool_order_independent_of_family
         'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
-        'filesystem',
-        'memory_write',
     ]
 
 
@@ -1157,7 +1149,6 @@ def test_execution_selector_preserves_prior_model_visible_tool_order_across_turn
         'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
-        'filesystem',
     ]
 
 
@@ -1223,7 +1214,6 @@ def test_execution_selector_appends_missing_tools_after_prior_stable_prefix() ->
         'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
-        'filesystem',
     ]
 
 
@@ -1706,7 +1696,7 @@ def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> N
 
     assert 'filesystem' not in first_selection['tool_names']
     assert 'content' not in first_selection['tool_names']
-    assert 'filesystem_write' in first_selection['tool_names']
+    assert 'filesystem_write' not in first_selection['tool_names']
     assert 'content_describe' in first_selection['tool_names']
 
     log_service.upsert_frame(
@@ -1735,10 +1725,82 @@ def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> N
     assert 'content' not in hydrated_selection['tool_names']
     assert 'filesystem_write' in hydrated_selection['tool_names']
     assert 'content_describe' in hydrated_selection['tool_names']
-    assert hydrated_selection['hydrated_executor_names'] == ['filesystem_write', 'content_describe']
+    assert hydrated_selection['hydrated_executor_names'] == ['filesystem_write']
+    assert hydrated_selection['trace']['promoted_hydrated_executor_names'] == ['filesystem_write']
 
 
-def test_execution_selector_web_research_query_includes_web_fetch_before_memory_search() -> None:
+def test_execution_selector_preserves_concrete_hydrated_tool_names_without_family_rewrite() -> None:
+    visible_tools = {
+        'task_list': _ModelSchemaRecordingTool(
+            name='task_list',
+            authoritative_description='task list authoritative schema',
+            model_description='task list compact model schema',
+        ),
+        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
+        'submit_final_result': _submit_final_result_tool(),
+        'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
+    }
+
+    log_service = _FakeLogService()
+    log_service.upsert_frame(
+        'task-concrete-hydration',
+        {
+            'node_id': 'node-concrete-hydration',
+            'hydrated_executor_names': ['task_list'],
+        },
+    )
+    service = object.__new__(MainRuntimeService)
+    service.log_service = log_service
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(
+            task_id=task_id,
+            session_id='web:shared',
+            metadata={'core_requirement': 'inspect task tree'},
+        ),
+        get_node=lambda node_id: SimpleNamespace(
+            node_id=node_id,
+            prompt='inspect task tree',
+            goal='inspect task tree',
+            node_kind='execution',
+        ),
+    )
+    service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
+        {
+            'tool_id': 'task_runtime',
+            'display_name': 'Task Runtime',
+            'description': 'Inspect task tree',
+            'l0': 'Inspect task tree',
+            'l1': 'Inspect task tree',
+            'actions': [
+                {'action_id': 'list', 'executor_names': ['task_list']},
+            ],
+        }
+    ]
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-concrete-hydration',
+        node_id='node-concrete-hydration',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-concrete-hydration',
+            'node_id': 'node-concrete-hydration',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert selection['tool_names'] == [
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+        'task_list',
+    ]
+    assert selection['hydrated_executor_names'] == ['task_list']
+    assert selection['trace']['promoted_hydrated_executor_names'] == ['task_list']
+
+
+def test_execution_selector_web_research_query_does_not_directly_promote_candidates() -> None:
     visible_tools = {
         'web_fetch': _ModelSchemaRecordingTool(
             name='web_fetch',
@@ -1815,9 +1877,11 @@ def test_execution_selector_web_research_query_includes_web_fetch_before_memory_
         },
     )
 
-    assert 'web_fetch' in selection['tool_names']
-    assert 'memory_search' in selection['tool_names']
-    assert selection['tool_names'].index('web_fetch') < selection['tool_names'].index('memory_search')
+    assert selection['tool_names'] == [
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+    ]
 
 
 def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_window() -> None:
@@ -2060,9 +2124,9 @@ async def test_react_loop_orphan_tool_result_circuit_breaker_fails_current_node(
 
     assert result.status == "failed"
     assert result.delivery_status == "blocked"
-    assert "orphan tool result" in result.summary
-    assert "call-orphan" in result.blocking_reason
-    assert len(calls) == 2
+    assert "final result submission guard triggered" in result.summary
+    assert "submit_final_result" in result.blocking_reason
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio
@@ -2493,6 +2557,8 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_onl
             memory_search_visible=True,
             selected_skill_ids=["tmux", "skill-creator"],
             selected_tool_names=["content"],
+            candidate_skill_ids=["tmux", "skill-creator"],
+            candidate_tool_names=["content", "filesystem_write"],
             memory_query="Prompt: terminal workflow\nGoal: terminal workflow\nCore requirement: terminal workflow",
             retrieval_scope={
                 "search_context_types": ["memory"],
@@ -2560,6 +2626,8 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_onl
             "description": "skill creator",
         }
     ]
+    assert user_payload["candidate_skills"] == ["tmux", "skill-creator"]
+    assert user_payload["candidate_tools"] == ["content", "filesystem_write"]
     assert "semantic block" in enriched[0]["content"]
 
 
@@ -2584,6 +2652,8 @@ async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_no
             memory_search_visible=False,
             selected_skill_ids=["tmux"],
             selected_tool_names=["filesystem"],
+            candidate_skill_ids=["tmux"],
+            candidate_tool_names=["filesystem", "exec"],
             memory_query="",
             retrieval_scope={
                 "search_context_types": [],
@@ -2636,6 +2706,8 @@ async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_no
             "description": "terminal workflow",
         }
     ]
+    assert payload["candidate_skills"] == ["tmux"]
+    assert payload["candidate_tools"] == ["filesystem", "exec"]
     assert retrieve_block_calls == []
 
 
@@ -2661,6 +2733,8 @@ async def test_enrich_node_messages_still_applies_selector_when_unified_context_
             memory_search_visible=True,
             selected_skill_ids=["tmux"],
             selected_tool_names=["content"],
+            candidate_skill_ids=["tmux"],
+            candidate_tool_names=["content", "exec"],
             memory_query="Prompt: terminal workflow\nGoal: terminal workflow\nCore requirement: terminal workflow",
             retrieval_scope={
                 "search_context_types": ["memory"],
@@ -2711,6 +2785,8 @@ async def test_enrich_node_messages_still_applies_selector_when_unified_context_
             "description": "terminal workflow",
         }
     ]
+    assert user_payload["candidate_skills"] == ["tmux"]
+    assert user_payload["candidate_tools"] == ["content", "exec"]
     assert retrieve_block_calls == []
 
 

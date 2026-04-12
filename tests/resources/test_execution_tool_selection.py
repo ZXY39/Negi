@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from g3ku.runtime.context.execution_tool_selection import build_execution_tool_selection
 
 
-def _family(tool_id: str, *, description: str = "", executors: list[str] | None = None):
+def _tool_family_record(tool_id: str, *, description: str = "", executors: list[str] | None = None):
     return SimpleNamespace(
         tool_id=tool_id,
         display_name=tool_id,
@@ -22,355 +22,90 @@ def _family(tool_id: str, *, description: str = "", executors: list[str] | None 
     )
 
 
-def test_selector_keeps_internal_protocol_tools_always_callable() -> None:
+def test_selector_keeps_only_internal_protocol_and_fixed_builtin_tools_callable() -> None:
     result = build_execution_tool_selection(
-        prompt="search frontend skills",
-        goal="search frontend skills",
-        core_requirement="search frontend skills",
+        prompt="inspect repo and summarize",
+        goal="inspect repo and summarize",
+        core_requirement="inspect repo and summarize",
         visible_tool_families=[
-            _family("filesystem"),
-            _family("content_navigation", executors=["content"]),
+            _tool_family_record("filesystem", executors=["filesystem_write"]),
+            _tool_family_record("exec_runtime", executors=["exec"]),
         ],
         visible_tool_names=[
-            "filesystem",
-            "content",
             "submit_next_stage",
             "submit_final_result",
             "spawn_child_nodes",
+            "exec",
+            "filesystem_write",
         ],
         always_callable_tool_names=[
             "submit_next_stage",
             "submit_final_result",
             "spawn_child_nodes",
+            "exec",
         ],
     )
 
-    assert result.hydrated_tool_names[:3] == [
+    assert result.hydrated_tool_names == [
         "submit_next_stage",
         "submit_final_result",
         "spawn_child_nodes",
+        "exec",
     ]
 
 
-def test_selector_semantic_frontload_prefers_web_fetch_over_memory_search_for_web_research_query() -> None:
+def test_selector_does_not_promote_non_builtin_candidates_without_hydration() -> None:
     result = build_execution_tool_selection(
-        prompt="search the web for official source URLs and ranking pages",
-        goal="collect public web sources for character rankings",
-        core_requirement="use public web pages and source URLs for ranking research",
+        prompt="write files and inspect memory",
+        goal="write files and inspect memory",
+        core_requirement="write files and inspect memory",
         visible_tool_families=[
-            _family("memory", executors=["memory_search"]),
-            _family("web_fetch"),
-            _family("agent_browser"),
+            _tool_family_record("filesystem", executors=["filesystem_write", "filesystem_edit"]),
+            _tool_family_record("memory", executors=["memory_search"]),
+            _tool_family_record("web_fetch", executors=["web_fetch"]),
         ],
         visible_tool_names=[
+            "submit_next_stage",
+            "submit_final_result",
+            "spawn_child_nodes",
+            "filesystem_write",
+            "filesystem_edit",
             "memory_search",
             "web_fetch",
-            "agent_browser",
-            "submit_next_stage",
-            "submit_final_result",
-            "spawn_child_nodes",
         ],
-        schema_size_by_executor={
-            "memory_search": 100,
-            "web_fetch": 100,
-            "agent_browser": 100,
-        },
         always_callable_tool_names=[
             "submit_next_stage",
             "submit_final_result",
             "spawn_child_nodes",
         ],
+        top_k=1,
     )
 
-    assert result.hydrated_tool_names[:3] == [
+    assert result.hydrated_tool_names == [
         "submit_next_stage",
         "submit_final_result",
         "spawn_child_nodes",
     ]
-    assert result.hydrated_tool_names.index("web_fetch") < result.hydrated_tool_names.index("memory_search")
+    assert result.trace["selected_executor_scores"] == []
 
 
-def test_selector_accepts_runtime_helper_dict_shape_families() -> None:
+def test_selector_promoted_tools_remain_concrete_and_do_not_consume_top_k_budget() -> None:
     result = build_execution_tool_selection(
-        prompt="search frontend skills",
-        goal="search frontend skills",
-        core_requirement="search frontend skills",
+        prompt="apply patch and inspect docs",
+        goal="apply patch and inspect docs",
+        core_requirement="apply patch and inspect docs",
         visible_tool_families=[
-            {
-                "tool_id": "filesystem",
-                "display_name": "filesystem",
-                "description": "filesystem",
-                "l0": "filesystem",
-                "l1": "filesystem",
-                "actions": [
-                    {
-                        "action_id": "default",
-                        "executor_names": ["filesystem"],
-                    }
-                ],
-            },
-            {
-                "tool_id": "content_navigation",
-                "display_name": "content_navigation",
-                "description": "content_navigation",
-                "l0": "content_navigation",
-                "l1": "content_navigation",
-                "actions": [
-                    {
-                        "action_id": "default",
-                        "executor_names": ["content"],
-                    }
-                ],
-            },
+            _tool_family_record("filesystem", executors=["filesystem_propose_patch"]),
+            _tool_family_record("content_navigation", executors=["content_open"]),
+            _tool_family_record("memory", executors=["memory_search"]),
         ],
         visible_tool_names=[
-            "filesystem",
-            "content",
             "submit_next_stage",
             "submit_final_result",
             "spawn_child_nodes",
-        ],
-        always_callable_tool_names=[
-            "submit_next_stage",
-            "submit_final_result",
-            "spawn_child_nodes",
-        ],
-    )
-
-    assert result.lightweight_tool_ids == ["filesystem", "content_navigation"]
-    assert result.hydrated_tool_names[:3] == [
-        "submit_next_stage",
-        "submit_final_result",
-        "spawn_child_nodes",
-    ]
-    assert "filesystem" in result.hydrated_tool_names
-    assert "content" in result.hydrated_tool_names
-
-
-def test_selector_multi_per_family_exposes_multiple_related_executors() -> None:
-    result = build_execution_tool_selection(
-        prompt="open content and search content for official source pages",
-        goal="inspect and search content",
-        core_requirement="collect source pages from public web content",
-        visible_tool_families=[
-            {
-                "tool_id": "content_navigation",
-                "display_name": "content_navigation",
-                "description": "content navigation",
-                "l0": "content navigation",
-                "l1": "content navigation",
-                "actions": [
-                    {
-                        "action_id": "describe",
-                        "executor_names": ["content_describe", "content_search", "content_open"],
-                    }
-                ],
-            }
-        ],
-        visible_tool_names=[
-            "content_describe",
-            "content_search",
-            "content_open",
-            "submit_next_stage",
-            "submit_final_result",
-            "spawn_child_nodes",
-        ],
-        always_callable_tool_names=[
-            "submit_next_stage",
-            "submit_final_result",
-            "spawn_child_nodes",
-        ],
-    )
-
-    assert "content_describe" in result.hydrated_tool_names
-    assert "content_search" in result.hydrated_tool_names
-    assert "content_open" in result.hydrated_tool_names
-
-
-def test_selector_prefers_mutation_only_filesystem_and_content_executors() -> None:
-    result = build_execution_tool_selection(
-        prompt="inspect project files and read docs",
-        goal="inspect project files and read docs",
-        core_requirement="inspect project files and read docs",
-        visible_tool_families=[
-            SimpleNamespace(
-                tool_id="filesystem",
-                display_name="filesystem",
-                description="filesystem",
-                primary_executor_name="filesystem_write",
-                metadata={"l0": "filesystem", "l1": "filesystem"},
-                actions=[
-                    SimpleNamespace(action_id="legacy", executor_names=["filesystem"], agent_visible=True),
-                    SimpleNamespace(
-                        action_id="write",
-                        executor_names=["filesystem_write", "filesystem_edit", "filesystem_propose_patch"],
-                        agent_visible=True,
-                    ),
-                ],
-            ),
-            SimpleNamespace(
-                tool_id="content_navigation",
-                display_name="content_navigation",
-                description="content_navigation",
-                primary_executor_name="content_describe",
-                metadata={"l0": "content_navigation", "l1": "content_navigation"},
-                actions=[
-                    SimpleNamespace(action_id="legacy", executor_names=["content"], agent_visible=True),
-                    SimpleNamespace(
-                        action_id="describe",
-                        executor_names=["content_describe", "content_search", "content_open"],
-                        agent_visible=True,
-                    ),
-                ],
-            ),
-        ],
-        visible_tool_names=[
-            "filesystem",
-            "filesystem_write",
-            "filesystem_edit",
-            "filesystem_propose_patch",
-            "content",
-            "content_describe",
-            "content_search",
-            "content_open",
-            "submit_next_stage",
-            "submit_final_result",
-            "spawn_child_nodes",
-        ],
-        always_callable_tool_names=[
-            "submit_next_stage",
-            "submit_final_result",
-            "spawn_child_nodes",
-        ],
-    )
-
-    assert "filesystem" not in result.hydrated_tool_names
-    assert "content" not in result.hydrated_tool_names
-    assert "filesystem_write" in result.hydrated_tool_names
-    assert "filesystem_edit" in result.hydrated_tool_names
-    assert "filesystem_propose_patch" in result.hydrated_tool_names
-    assert "content_describe" in result.hydrated_tool_names
-    assert "content_search" in result.hydrated_tool_names
-    assert "content_open" in result.hydrated_tool_names
-
-
-def test_selector_replay_promotions_prefer_mutation_only_split_over_legacy_monoliths() -> None:
-    result = build_execution_tool_selection(
-        prompt="inspect project files and read docs",
-        goal="inspect project files and read docs",
-        core_requirement="inspect project files and read docs",
-        visible_tool_families=[
-            SimpleNamespace(
-                tool_id="filesystem",
-                display_name="filesystem",
-                description="filesystem",
-                primary_executor_name="filesystem_write",
-                metadata={"l0": "filesystem", "l1": "filesystem"},
-                actions=[
-                    SimpleNamespace(action_id="legacy", executor_names=["filesystem"], agent_visible=True),
-                    SimpleNamespace(
-                        action_id="write",
-                        executor_names=["filesystem_write", "filesystem_edit", "filesystem_propose_patch"],
-                        agent_visible=True,
-                    ),
-                ],
-            ),
-            SimpleNamespace(
-                tool_id="content_navigation",
-                display_name="content_navigation",
-                description="content_navigation",
-                primary_executor_name="content_describe",
-                metadata={"l0": "content_navigation", "l1": "content_navigation"},
-                actions=[
-                    SimpleNamespace(action_id="legacy", executor_names=["content"], agent_visible=True),
-                    SimpleNamespace(
-                        action_id="describe",
-                        executor_names=["content_describe", "content_search", "content_open"],
-                        agent_visible=True,
-                    ),
-                ],
-            ),
-        ],
-        visible_tool_names=[
-            "filesystem",
-            "filesystem_write",
-            "filesystem_edit",
-            "filesystem_propose_patch",
-            "content",
-            "content_describe",
-            "content_search",
-            "content_open",
-            "submit_next_stage",
-            "submit_final_result",
-            "spawn_child_nodes",
-        ],
-        always_callable_tool_names=[
-            "submit_next_stage",
-            "submit_final_result",
-            "spawn_child_nodes",
-        ],
-        promoted_tool_names=["filesystem", "content"],
-    )
-
-    assert result.trace["selected_promoted_tool_names"] == ["filesystem_write", "content_describe"]
-    assert "content_describe" in result.hydrated_tool_names
-    assert "filesystem_edit" in result.hydrated_tool_names
-    assert "content_search" in result.hydrated_tool_names
-    assert "filesystem" not in result.hydrated_tool_names
-    assert "content" not in result.hydrated_tool_names
-
-
-def test_selector_promoted_tools_are_not_skipped_without_budget() -> None:
-    result = build_execution_tool_selection(
-        prompt="inspect project files and read docs",
-        goal="inspect project files and read docs",
-        core_requirement="inspect project files and read docs",
-        visible_tool_families=[
-            _family("filesystem", executors=["filesystem_write"]),
-            _family("content_navigation", executors=["content_describe"]),
-        ],
-        visible_tool_names=[
-            "filesystem_write",
-            "content_describe",
-            "submit_next_stage",
-            "submit_final_result",
-            "spawn_child_nodes",
-        ],
-        always_callable_tool_names=[
-            "submit_next_stage",
-            "submit_final_result",
-            "spawn_child_nodes",
-        ],
-        promoted_tool_names=["filesystem_write", "content_describe"],
-    )
-
-    assert result.trace["selected_promoted_tool_names"] == [
-        "filesystem_write",
-        "content_describe",
-    ]
-    assert "filesystem_write" in result.hydrated_tool_names
-    assert "content_describe" in result.hydrated_tool_names
-
-
-def test_selector_promoted_tools_do_not_consume_top_k_budget() -> None:
-    result = build_execution_tool_selection(
-        prompt="inspect project files and read docs",
-        goal="inspect project files and read docs",
-        core_requirement="inspect project files and read docs",
-        visible_tool_families=[
-            _family("filesystem", executors=["filesystem_propose_patch"]),
-            _family("content_navigation", executors=["content_open"]),
-            _family("memory", executors=["memory_search"]),
-            _family("web_fetch", executors=["web_fetch"]),
-        ],
-        visible_tool_names=[
             "filesystem_propose_patch",
             "content_open",
             "memory_search",
-            "web_fetch",
-            "submit_next_stage",
-            "submit_final_result",
-            "spawn_child_nodes",
         ],
         always_callable_tool_names=[
             "submit_next_stage",
@@ -381,7 +116,72 @@ def test_selector_promoted_tools_do_not_consume_top_k_budget() -> None:
         top_k=1,
     )
 
-    assert result.trace["selected_promoted_tool_names"] == ["filesystem_propose_patch", "content_open"]
-    assert "filesystem_propose_patch" in result.hydrated_tool_names
-    assert "content_open" in result.hydrated_tool_names
-    assert len(result.trace["selected_executor_scores"]) == 1
+    assert result.hydrated_tool_names == [
+        "submit_next_stage",
+        "submit_final_result",
+        "spawn_child_nodes",
+        "filesystem_propose_patch",
+        "content_open",
+    ]
+    assert result.trace["selected_promoted_tool_names"] == [
+        "filesystem_propose_patch",
+        "content_open",
+    ]
+    assert result.trace["selected_executor_scores"] == []
+
+
+def test_selector_accepts_runtime_helper_dict_shape_families() -> None:
+    result = build_execution_tool_selection(
+        prompt="inspect repo",
+        goal="inspect repo",
+        core_requirement="inspect repo",
+        visible_tool_families=[
+            {
+                "tool_id": "filesystem",
+                "display_name": "filesystem",
+                "description": "filesystem",
+                "l0": "filesystem",
+                "l1": "filesystem",
+                "actions": [
+                    {
+                        "action_id": "write",
+                        "executor_names": ["filesystem_write"],
+                    }
+                ],
+            },
+            {
+                "tool_id": "exec_runtime",
+                "display_name": "exec_runtime",
+                "description": "exec_runtime",
+                "l0": "exec_runtime",
+                "l1": "exec_runtime",
+                "actions": [
+                    {
+                        "action_id": "run",
+                        "executor_names": ["exec"],
+                    }
+                ],
+            },
+        ],
+        visible_tool_names=[
+            "submit_next_stage",
+            "submit_final_result",
+            "spawn_child_nodes",
+            "exec",
+            "filesystem_write",
+        ],
+        always_callable_tool_names=[
+            "submit_next_stage",
+            "submit_final_result",
+            "spawn_child_nodes",
+            "exec",
+        ],
+    )
+
+    assert result.lightweight_tool_ids == ["filesystem", "exec_runtime"]
+    assert result.hydrated_tool_names == [
+        "submit_next_stage",
+        "submit_final_result",
+        "spawn_child_nodes",
+        "exec",
+    ]

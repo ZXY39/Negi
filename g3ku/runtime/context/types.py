@@ -20,6 +20,7 @@ class ContextAssemblyResult:
     stable_messages: list[dict[str, Any]]
     dynamic_appendix_messages: list[dict[str, Any]]
     tool_names: list[str]
+    candidate_tool_names: list[str]
     trace: dict[str, Any]
     turn_overlay_text: str
     cache_family_revision: str
@@ -31,6 +32,7 @@ class ContextAssemblyResult:
         stable_messages: list[dict[str, Any]] | None = None,
         dynamic_appendix_messages: list[dict[str, Any]] | None = None,
         tool_names: list[str] | None = None,
+        candidate_tool_names: list[str] | None = None,
         trace: dict[str, Any] | None = None,
         turn_overlay_text: str | None = None,
         cache_family_revision: str | None = None,
@@ -55,6 +57,7 @@ class ContextAssemblyResult:
         else:
             self.model_messages = list(model_messages or [])
         self.tool_names = list(tool_names or [])
+        self.candidate_tool_names = list(candidate_tool_names or [])
         self.trace = dict(trace or {})
         self.turn_overlay_text = str(turn_overlay_text or "").strip()
         self.cache_family_revision = str(cache_family_revision or "").strip()
