@@ -123,6 +123,7 @@ const S = {
     currentNodeDetail: null,
     taskDetailRenderToken: 0,
     taskNodeDetails: {},
+    taskNodePatchSummaries: {},
     taskNodeDetailRequests: {},
     taskNodeLatestContexts: {},
     taskNodeLatestContextRequests: {},

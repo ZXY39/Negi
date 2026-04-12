@@ -996,6 +996,7 @@ function resetTaskView() {
     S.liveFrameMap = {};
     S.currentNodeDetail = null;
     S.taskNodeDetails = {};
+    S.taskNodePatchSummaries = {};
     S.taskNodeDetailRequests = {};
     S.taskNodeLatestContexts = {};
     S.taskNodeLatestContextRequests = {};
@@ -1354,6 +1355,10 @@ function handleTaskEvent(payload) {
         const nextNode = payload.data?.node && typeof payload.data.node === "object" ? payload.data.node : {};
         const nodeId = String(nextNode?.node_id || "").trim();
         if (nodeId) {
+            S.taskNodePatchSummaries = {
+                ...(S.taskNodePatchSummaries || {}),
+                [nodeId]: { ...nextNode },
+            };
             const parentNodeId = String(nextNode?.parent_node_id || "").trim();
             const rootNodeId = String(S.rootNode?.node_id || "").trim();
             if (rootNodeId && rootNodeId === nodeId) {
@@ -1410,6 +1415,18 @@ function handleTaskEvent(payload) {
         S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
         S.taskSummary = { ...(S.taskSummary || {}), ...payload.data.task };
         renderTaskTokenStats();
+        const selectedNodeId = String(S.selectedNodeId || "").trim();
+        if (selectedNodeId) {
+            const currentViewState = captureTaskDetailViewState();
+            stashTaskDetailViewState({ nodeId: selectedNodeId, viewState: currentViewState });
+            S.pendingTaskDetailRestore = { nodeId: selectedNodeId, viewState: currentViewState };
+            const selected = findTreeNode(S.treeView, selectedNodeId) || {
+                node_id: selectedNodeId,
+                title: selectedNodeId,
+                state: String(payload.data?.task?.status || S.currentTask?.status || ""),
+            };
+            void showAgent(selected, { preserveViewState: true, forceRefresh: true });
+        }
     }
 }
 

@@ -259,7 +259,6 @@ class CeoMessageBuilder:
         cls,
         *,
         visible_tool_names: list[str],
-        core_tools: set[str],
     ) -> list[str]:
         visible = [
             str(item or '').strip()
@@ -275,11 +274,6 @@ class CeoMessageBuilder:
                 continue
             seen.add(normalized)
             ordered.append(normalized)
-        for name in visible:
-            if name in seen or name not in core_tools:
-                continue
-            seen.add(name)
-            ordered.append(name)
         return ordered
 
     @staticmethod
@@ -791,11 +785,6 @@ class CeoMessageBuilder:
         assembly_cfg = getattr(getattr(self._loop, '_memory_runtime_settings', None), 'assembly', None)
         inventory_top_k = max(1, int(getattr(assembly_cfg, 'skill_inventory_top_k', 8) or 8))
         extension_top_k = max(0, int(getattr(assembly_cfg, 'extension_tool_top_k', 6) or 6))
-        core_tools = {
-            str(name).strip()
-            for name in list(getattr(assembly_cfg, 'core_tools', []) or [])
-            if str(name).strip()
-        }
         visible_tool_names = [
             str(name or '').strip()
             for name in list(exposure.get('tool_names') or [])
@@ -803,7 +792,6 @@ class CeoMessageBuilder:
         ]
         callable_tool_names = self._callable_tool_names(
             visible_tool_names=visible_tool_names,
-            core_tools=core_tools,
         )
 
         if main_service is not None and memory_manager is not None:
@@ -895,12 +883,17 @@ class CeoMessageBuilder:
                 query_text=query_text,
                 visible_names=visible_tool_names,
                 visible_families=visible_families,
-                core_tools=core_tools,
+                core_tools=set(callable_tool_names),
                 extension_top_k=extension_top_k,
                 ranked_tool_ids=list(semantic_frontdoor.get('tool_ids') or []),
             )
+        candidate_tool_names = [
+            str(name or '').strip()
+            for name in list(tool_trace.get('candidate_tool_names') or [])
+            if str(name or '').strip()
+        ]
         candidate_tools_block = self._build_turn_tool_overlay(
-            selected_tool_names=list(selected_tool_names),
+            selected_tool_names=list(candidate_tool_names),
             capability_snapshot=capability_snapshot,
             visible_only_mode=visible_only_mode,
         )
@@ -981,8 +974,8 @@ class CeoMessageBuilder:
             'skill_trace': skill_trace,
             'semantic_trace': semantic_trace,
             'external_trace': external_trace,
-            'selected_tool_names': selected_tool_names,
-            'callable_tool_names': callable_tool_names,
+                'selected_tool_names': candidate_tool_names,
+                'callable_tool_names': callable_tool_names,
             'tool_trace': tool_trace,
             'retrieval_scope': retrieval_scope,
             'retrieved_bundle': retrieved_bundle,

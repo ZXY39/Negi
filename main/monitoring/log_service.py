@@ -280,6 +280,11 @@ class TaskLogService:
             'node_kind': str(node_payload.get('node_kind') or '').strip(),
             'status': str(node_payload.get('status') or '').strip(),
             'title': str(node_payload.get('title') or '').strip(),
+            'updated_at': str(node_payload.get('updated_at') or '').strip(),
+            'final_output': str(node_payload.get('final_output') or '').strip(),
+            'final_output_ref': str(node_payload.get('final_output_ref') or '').strip(),
+            'failure_reason': str(node_payload.get('failure_reason') or '').strip(),
+            'check_result': str(node_payload.get('check_result') or '').strip(),
             'children_fingerprint': str(node_payload.get('children_fingerprint') or '').strip(),
         }
         return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
@@ -3062,6 +3067,10 @@ class TaskLogService:
                 'status': str(node.status or 'in_progress'),
                 'title': str(node.goal or node.node_id),
                 'updated_at': str(node.updated_at or ''),
+                'final_output': str(node.final_output or ''),
+                'final_output_ref': str(node.final_output_ref or ''),
+                'failure_reason': str(node.failure_reason or ''),
+                'check_result': str(node.check_result or ''),
                 'children_fingerprint': str(
                     getattr(projected, 'children_fingerprint', '')
                     or ((getattr(projected, 'payload', None) or {}).get('children_fingerprint') if projected is not None else '')

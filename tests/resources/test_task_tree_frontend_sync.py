@@ -938,6 +938,54 @@ def test_build_node_execution_trace_falls_back_to_acceptance_final_output_when_c
     assert result["finalOutput"] == "## 验收裁定：拒绝交付"
 
 
+def test_build_node_execution_trace_falls_back_to_failure_reason_when_failed_without_final_output() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          liveFrameMap: {},
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const trace = buildNodeExecutionTrace(
+          {
+            node_id: "node:failed",
+            status: "failed",
+            final_output: "",
+            failure_reason: "root failed hard",
+          },
+          {
+            status: "failed",
+            final_output: "",
+            failure_reason: "root failed hard",
+            execution_trace: {
+              final_output: "",
+              stages: [],
+            },
+          },
+        );
+
+        console.log(JSON.stringify({
+          finalOutput: trace.final_output,
+        }));
+        """
+    )
+
+    assert result["finalOutput"] == "root failed hard"
+
+
 def test_build_execution_trace_steps_use_stage_goal_as_stage_title_without_duplicate_goal_or_status_field() -> None:
     result = _run_node_script(
         """
@@ -2035,6 +2083,150 @@ def test_ensure_task_node_detail_upgrades_summary_cache_to_full_detail() -> None
     assert result["detailLevel"] == "full"
     assert result["finalOutput"] == "full deliverable\nline 2"
     assert result["cachedDetailLevel"] == "full"
+
+
+def test_ensure_task_node_detail_refreshes_terminal_cache_when_patch_summary_is_newer() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        let fetchCount = 0;
+        const cachedDetail = {
+          node_id: "node:1",
+          detail_level: "full",
+          status: "failed",
+          final_output: "",
+          failure_reason: "",
+          check_result: "",
+          updated_at: "2026-04-12T10:00:00Z",
+          execution_trace_summary: {
+            stages: [],
+          },
+        };
+        const fullDetail = {
+          node_id: "node:1",
+          detail_level: "full",
+          status: "failed",
+          final_output: "",
+          failure_reason: "root failed",
+          check_result: "",
+          updated_at: "2026-04-12T10:05:00Z",
+          execution_trace: {
+            final_output: "",
+            stages: [],
+          },
+        };
+        global.S = {
+          currentTaskId: "task:test",
+          taskNodeDetails: { "node:1": cachedDetail },
+          taskNodeDetailRequests: {},
+          taskNodePatchSummaries: {
+            "node:1": {
+              node_id: "node:1",
+              status: "failed",
+              final_output: "",
+              failure_reason: "root failed",
+              check_result: "",
+              updated_at: "2026-04-12T10:05:00Z",
+            },
+          },
+          currentNodeDetail: cachedDetail,
+        };
+        global.U = {};
+        global.ApiClient = {
+          getTaskNodeDetail: async () => {
+            fetchCount += 1;
+            return fullDetail;
+          },
+        };
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        ensureTaskNodeDetail("node:1").then((detail) => {
+          console.log(JSON.stringify({
+            fetchCount,
+            failureReason: detail?.failure_reason || "",
+            cachedFailureReason: S.taskNodeDetails["node:1"]?.failure_reason || "",
+          }));
+        });
+        """
+    )
+
+    assert result["fetchCount"] == 1
+    assert result["failureReason"] == "root failed"
+    assert result["cachedFailureReason"] == "root failed"
+
+
+def test_handle_task_terminal_refreshes_selected_node_detail() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        const showAgentCalls = [];
+        global.S = {
+          currentTaskId: "task:test",
+          currentTask: { task_id: "task:test", status: "in_progress" },
+          taskSummary: { task_id: "task:test", status: "in_progress" },
+          selectedNodeId: "node:1",
+          rootNode: { node_id: "node:1" },
+          treeView: { node_id: "node:1", children: [] },
+          taskNodeDetails: {},
+          liveFrameMap: {},
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTaskDetailHeader = () => {};
+        global.renderTaskTokenStats = () => {};
+        global.patchTaskListItem = () => {};
+        global.removeTaskListItem = () => {};
+        global.renderTaskGovernancePanel = () => {};
+        global.mergeTaskGovernance = (next) => next;
+        global.indexTaskLiveFrames = (frames) => frames || {};
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const taskViewCode = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(taskViewCode);
+        global.captureTaskDetailViewState = () => ({ scrollTop: 12 });
+        global.stashTaskDetailViewState = () => {};
+        global.findTreeNode = () => ({ node_id: "node:1", title: "Node 1", state: "failed" });
+        global.showAgent = (node, options) => {
+          showAgentCalls.push({ nodeId: String(node?.node_id || ""), forceRefresh: !!options?.forceRefresh });
+          return Promise.resolve();
+        };
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        vm.runInThisContext(tasksCode);
+
+        handleTaskEvent({
+          type: "task.terminal",
+          data: {
+            task: {
+              task_id: "task:test",
+              status: "failed",
+            },
+          },
+        });
+
+        Promise.resolve().then(() => {
+          console.log(JSON.stringify({
+            callCount: showAgentCalls.length,
+            nodeId: showAgentCalls[0]?.nodeId || "",
+            forceRefresh: !!showAgentCalls[0]?.forceRefresh,
+          }));
+        });
+        """
+    )
+
+    assert result["callCount"] == 1
+    assert result["nodeId"] == "node:1"
+    assert result["forceRefresh"] is True
 
 
 def test_task_detail_html_renders_governance_panel() -> None:

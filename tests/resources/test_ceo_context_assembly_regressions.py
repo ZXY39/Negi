@@ -737,6 +737,30 @@ async def test_message_builder_uses_memory_only_retrieval_for_memory_intent() ->
 
 
 @pytest.mark.asyncio
+async def test_message_builder_keeps_callable_and_candidate_tools_separate() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="browser workflow",
+        exposure={
+            "skills": [],
+            "tool_families": [
+                _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
+                _tool_resource_record("web_fetch", "HTTP fetch helper."),
+            ],
+            "tool_names": ["load_tool_context", "agent_browser", "web_fetch"],
+        },
+        persisted_session=None,
+    )
+
+    assert result.tool_names == ["load_tool_context"]
+    assert result.candidate_tool_names == ["agent_browser", "web_fetch"]
+
+
+@pytest.mark.asyncio
 async def test_message_builder_moves_turn_specific_context_into_overlay_for_stable_prefix() -> None:
     prompt_builder = _SplitPromptBuilder()
     memory_manager = _MemoryManager(response="authoritative preference")

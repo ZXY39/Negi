@@ -113,6 +113,7 @@ class ReActToolLoop:
         node,
         messages: list[dict[str, Any]],
         tools: dict[str, Tool],
+        tools_supplier=None,
         model_refs: list[str],
         model_refs_supplier=None,
         runtime_context: dict[str, Any],
@@ -156,11 +157,16 @@ class ReActToolLoop:
         while limit is None or attempts < limit:
             attempts += 1
             self._check_pause_or_cancel(task.task_id)
+            current_tools = dict(tools or {})
+            if callable(tools_supplier):
+                supplied_tools = tools_supplier()
+                if isinstance(supplied_tools, dict):
+                    current_tools = dict(supplied_tools)
             resumed_history = await self._resume_pending_tool_turn_if_needed(
                 task=task,
                 node=node,
                 message_history=message_history,
-                tools=tools,
+                tools=current_tools,
                 runtime_context=runtime_context,
             )
             if resumed_history is None:
@@ -168,7 +174,7 @@ class ReActToolLoop:
                     task=task,
                     node=node,
                     message_history=message_history,
-                    tools=tools,
+                    tools=current_tools,
                     runtime_context=runtime_context,
                 )
             if resumed_history is not None:
@@ -181,7 +187,7 @@ class ReActToolLoop:
                 node_kind=node.node_kind,
             )
             visible_tools = self._visible_tools_for_iteration(
-                tools=tools,
+                tools=current_tools,
                 node_kind=node.node_kind,
                 stage_gate=stage_gate,
             )
@@ -613,7 +619,7 @@ class ReActToolLoop:
                     task=task,
                     node=node,
                     response_tool_calls=response_tool_calls,
-                    tools=tools,
+                    tools=current_tools,
                     allowed_content_refs=allowed_content_refs,
                     runtime_context={
                         **runtime_context,

@@ -10,6 +10,7 @@ import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 from urllib.parse import urlparse, urlunparse
 
@@ -3891,34 +3892,25 @@ class MainRuntimeService:
             runtime_payload.get('actor_role')
             or ('inspection' if normalized_node_kind == 'acceptance' else 'execution')
         ).strip() or ('inspection' if normalized_node_kind == 'acceptance' else 'execution')
-        task_metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}
-        prompt = str(getattr(node, 'prompt', '') or '').strip()
-        goal = str(getattr(node, 'goal', '') or '').strip()
-        core_requirement = str(task_metadata.get('core_requirement') or prompt or goal).strip()
-        lightweight_items = list(
-            self.execution_visible_tool_lightweight_items(actor_role=actor_role, session_id=session_id) or []
-        )
-        filtered_lightweight_items = self._filter_execution_model_visible_lightweight_items(items=lightweight_items)
         ordered_visible_tool_names: list[str] = []
-        for raw_name, tool in dict(visible_tools or {}).items():
+        for raw_name in dict(visible_tools or {}).keys():
             name = str(raw_name or '').strip()
             if not name:
                 continue
             ordered_visible_tool_names.append(name)
-        stable_lightweight_items = self._stable_execution_visible_tool_families(
-            items=filtered_lightweight_items,
-            visible_tool_names=ordered_visible_tool_names,
+        visible_rbac_tool_names = self._normalized_tool_name_list(
+            list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
         )
-        always_callable_tool_names = self._normalized_tool_name_list(
-            self._execution_fixed_builtin_tool_names(visible_tool_names=ordered_visible_tool_names)
-            + ReActToolLoop.model_visible_always_callable_tool_names(
-                visible_tool_names=ordered_visible_tool_names,
-            )
+        hydrated_executor_names = self._node_hydrated_executor_names(
+            task_id=str(task_id or '').strip(),
+            node_id=str(node_id or '').strip(),
+            actor_role=actor_role,
+            session_id=session_id,
         )
-        promoted_hydrated_executor_names: list[str] = []
-        prior_selected_tool_names: list[str] = []
+        callable_tool_names = self._normalized_tool_name_list(ordered_visible_tool_names)
         log_service = getattr(self, 'log_service', None)
         read_runtime_frame = getattr(log_service, 'read_runtime_frame', None)
+        prior_selected_tool_names: list[str] = []
         if callable(read_runtime_frame):
             prior_frame = read_runtime_frame(str(task_id or '').strip(), str(node_id or '').strip())
             if isinstance(prior_frame, dict):
@@ -3927,53 +3919,12 @@ class MainRuntimeService:
                     for item in list(prior_frame.get('model_visible_tool_names') or [])
                     if str(item or '').strip()
                 ]
-                promoted_hydrated_executor_names = [
-                    str(item or '').strip()
-                    for item in list(prior_frame.get('hydrated_executor_names') or [])
-                    if str(item or '').strip() and str(item or '').strip() in visible_tools
-                ]
-        promoted_hydrated_executor_names = self._canonicalize_execution_promoted_tool_names(
-            tool_names=promoted_hydrated_executor_names,
-            visible_tool_families=stable_lightweight_items,
-        )
-        node_tool_top_k = max(1, int(getattr(MemoryRuntimeSettings().assembly, 'node_tool_top_k', 8) or 8))
-        selection = build_execution_tool_selection(
-            prompt=prompt,
-            goal=goal,
-            core_requirement=core_requirement,
-            visible_tool_families=stable_lightweight_items,
-            visible_tool_names=ordered_visible_tool_names,
-            always_callable_tool_names=always_callable_tool_names,
-            promoted_tool_names=promoted_hydrated_executor_names,
-            top_k=node_tool_top_k,
-        )
-        trace_payload = dict(selection.trace or {})
-        has_selected_promoted = 'selected_promoted_tool_names' in trace_payload
-        selected_promoted_hydrated_executor_names = [
-            str(item or '').strip()
-            for item in list(
-                trace_payload.get('selected_promoted_tool_names')
-                if has_selected_promoted
-                else promoted_hydrated_executor_names
-            )
-            if str(item or '').strip() in visible_tools
-        ]
-        selected_tool_name_set = {
-            name
-            for name in list(selection.hydrated_tool_names or [])
-            if name in visible_tools
-        }
-        if not has_selected_promoted:
-            selected_tool_name_set.update(selected_promoted_hydrated_executor_names)
         selected_tool_names: list[str] = []
         for name in prior_selected_tool_names:
-            if name in selected_tool_name_set and name not in selected_tool_names:
-                selected_tool_names.append(name)
-        for name in always_callable_tool_names:
-            if name in selected_tool_name_set and name not in selected_tool_names:
+            if name in callable_tool_names and name not in selected_tool_names:
                 selected_tool_names.append(name)
         for name in ordered_visible_tool_names:
-            if name in selected_tool_name_set and name not in selected_tool_names:
+            if name not in selected_tool_names:
                 selected_tool_names.append(name)
         final_schema_chars = sum(
             len(json.dumps(visible_tools[name].to_model_schema(), ensure_ascii=False, sort_keys=True))
@@ -3982,19 +3933,20 @@ class MainRuntimeService:
         )
         return {
             'tool_names': selected_tool_names,
-            'lightweight_tool_ids': list(selection.lightweight_tool_ids or []),
-            'hydrated_executor_names': list(selected_promoted_hydrated_executor_names),
+            'lightweight_tool_ids': [],
+            'hydrated_executor_names': list(hydrated_executor_names),
             'schema_chars': int(final_schema_chars),
             'trace': {
-                **dict(selection.trace or {}),
                 'mode': 'execution_tool_selection',
                 'node_kind': normalized_node_kind,
                 'session_id': session_id,
                 'actor_role': actor_role,
-                'base_schema_chars': int(selection.schema_chars or 0),
-                'top_k': int(node_tool_top_k),
-                'requested_promoted_hydrated_executor_names': list(promoted_hydrated_executor_names),
-                'promoted_hydrated_executor_names': list(selected_promoted_hydrated_executor_names),
+                'rbac_visible_tool_names': list(visible_rbac_tool_names),
+                'callable_tool_names': list(callable_tool_names),
+                'requested_promoted_hydrated_executor_names': list(hydrated_executor_names),
+                'promoted_hydrated_executor_names': list(hydrated_executor_names),
+                'base_schema_chars': 0,
+                'top_k': 0,
                 'final_schema_chars': int(final_schema_chars),
             },
         }
@@ -4104,20 +4056,10 @@ class MainRuntimeService:
         requested_name = str(requested_tool_id or '').strip()
         if not requested_name:
             return []
-        family_tool_id = str(getattr(visible_family, 'tool_id', '') or '').strip()
         family_executors = self._family_executor_names(visible_family)
         if requested_name in family_executors:
             return [requested_name]
-        default_family_targets: dict[str, list[str]] = {
-            'filesystem': ['filesystem_write', 'filesystem_edit', 'filesystem_propose_patch'],
-            'content_navigation': ['content_open', 'content_search'],
-            'content': ['content_open', 'content_search'],
-        }
-        target_names = default_family_targets.get(requested_name) or default_family_targets.get(family_tool_id) or []
-        selected = [name for name in target_names if name in family_executors]
-        if selected:
-            return selected
-        return [requested_name] if requested_name in family_executors else []
+        return []
 
     def _apply_hydrated_executor_lru(
         self,
@@ -4226,6 +4168,103 @@ class MainRuntimeService:
             return next_frame
 
         update_frame(str(task_id or '').strip(), str(node_id or '').strip(), _mutate, publish_snapshot=True)
+        self._clear_node_context_selection(task_id=str(task_id or '').strip(), node_id=str(node_id or '').strip())
+
+    @staticmethod
+    def _execution_control_tool_names(*, node_kind: str, can_spawn_children: bool) -> list[str]:
+        normalized_node_kind = str(node_kind or '').strip().lower()
+        ordered: list[str] = []
+        if normalized_node_kind in {'execution', 'acceptance'}:
+            ordered.extend(['submit_next_stage', 'submit_final_result'])
+        if normalized_node_kind == 'execution' and bool(can_spawn_children):
+            ordered.append('spawn_child_nodes')
+        return ordered
+
+    def _node_hydrated_executor_names(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        actor_role: str,
+        session_id: str,
+    ) -> list[str]:
+        log_service = getattr(self, 'log_service', None)
+        read_runtime_frame = getattr(log_service, 'read_runtime_frame', None)
+        if not callable(read_runtime_frame):
+            return []
+        frame = read_runtime_frame(str(task_id or '').strip(), str(node_id or '').strip()) or {}
+        visible_tool_names = {
+            str(name or '').strip()
+            for name in list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
+            if str(name or '').strip()
+        }
+        hydrated: list[str] = []
+        for raw_name in list(frame.get('hydrated_executor_names') or []):
+            name = str(raw_name or '').strip()
+            if name and name in visible_tool_names and name not in hydrated:
+                hydrated.append(name)
+        return hydrated
+
+    def _callable_tool_names_for_node(
+        self,
+        *,
+        task,
+        node: Any,
+        visible_tool_names: list[str] | None = None,
+    ) -> list[str]:
+        session_id = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        actor_role = self._actor_role_for_node(node)
+        visible_names = self._normalized_tool_name_list(
+            list(visible_tool_names or self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
+        )
+        visible_name_set = set(visible_names)
+        callable_names: list[str] = []
+        seen: set[str] = set()
+        for name in self._execution_control_tool_names(
+            node_kind=str(getattr(node, 'node_kind', '') or ''),
+            can_spawn_children=bool(getattr(node, 'can_spawn_children', False)),
+        ):
+            if name in visible_name_set and name not in seen:
+                callable_names.append(name)
+                seen.add(name)
+        for name in self._execution_fixed_builtin_tool_names(visible_tool_names=visible_names):
+            if name not in seen:
+                callable_names.append(name)
+                seen.add(name)
+        for name in self._node_hydrated_executor_names(
+            task_id=str(getattr(task, 'task_id', '') or getattr(node, 'task_id', '') or '').strip(),
+            node_id=str(getattr(node, 'node_id', '') or '').strip(),
+            actor_role=actor_role,
+            session_id=session_id,
+        ):
+            if name not in seen:
+                callable_names.append(name)
+                seen.add(name)
+        return callable_names
+
+    def _candidate_tool_names_for_node(
+        self,
+        *,
+        task,
+        node: Any,
+        selection: Any | None,
+        visible_tool_names: list[str] | None = None,
+    ) -> list[str]:
+        visible_names = self._normalized_tool_name_list(
+            list(visible_tool_names or self.list_effective_tool_names(
+                actor_role=self._actor_role_for_node(node),
+                session_id=str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared',
+            ) or [])
+        )
+        visible_name_set = set(visible_names)
+        callable_name_set = set(self._callable_tool_names_for_node(task=task, node=node, visible_tool_names=visible_names))
+        candidates: list[str] = []
+        for raw_name in list(getattr(selection, 'candidate_tool_names', []) or []):
+            name = str(raw_name or '').strip()
+            if not name or name not in visible_name_set or name in callable_name_set or name in candidates:
+                continue
+            candidates.append(name)
+        return candidates
 
     @staticmethod
     def _search_limit(limit: int | None, *, default: int = 5, max_limit: int = 20) -> int:
@@ -5749,8 +5788,6 @@ class MainRuntimeService:
         if not isinstance(payload, dict):
             return None
         callable_tool_names = self._normalized_tool_name_list(list(payload.get('callable_tool_names') or []))
-        if not callable_tool_names:
-            return None
         visible_skills = [dict(item) for item in list(payload.get('visible_skills') or []) if isinstance(item, dict)]
         candidate_skill_ids = [
             str(item or '').strip()
@@ -5758,6 +5795,12 @@ class MainRuntimeService:
             if str(item or '').strip()
         ]
         candidate_tool_names = self._normalized_tool_name_list(list(payload.get('candidate_tools') or []))
+        visible_tool_names = list(
+            self.list_effective_tool_names(
+                actor_role=self._actor_role_for_node(node),
+                session_id=str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared',
+            ) or []
+        )
         selection = NodeContextSelectionResult(
             mode='dense_rerank',
             memory_search_visible='memory_search' in set(callable_tool_names),
@@ -5766,7 +5809,7 @@ class MainRuntimeService:
                 for item in visible_skills
                 if str(item.get('skill_id') or '').strip()
             ],
-            selected_tool_names=callable_tool_names,
+            selected_tool_names=candidate_tool_names or callable_tool_names,
             candidate_skill_ids=candidate_skill_ids,
             candidate_tool_names=candidate_tool_names or callable_tool_names,
             memory_query='',
@@ -5778,7 +5821,7 @@ class MainRuntimeService:
             'actor_role': self._actor_role_for_node(node),
             'visible_skills': visible_skills,
             'visible_tool_families': [],
-            'visible_tool_names': callable_tool_names,
+            'visible_tool_names': visible_tool_names,
             'prompt': str(payload.get('prompt') or getattr(node, 'prompt', '') or '').strip(),
             'goal': str(payload.get('goal') or getattr(node, 'goal', '') or '').strip(),
             'core_requirement': str(payload.get('core_requirement') or '').strip(),
@@ -5858,44 +5901,15 @@ class MainRuntimeService:
         if isinstance(cache, dict):
             cache.pop(cache_key, None)
 
-    def _selected_callable_tool_names(
-        self,
-        *,
-        selection: NodeContextSelectionResult | None,
-        visible_tool_names: list[str],
-    ) -> list[str]:
-        normalized_visible_tool_names: list[str] = []
-        seen_visible_tool_names: set[str] = set()
-        for item in list(visible_tool_names or []):
-            normalized = str(item or '').strip()
-            if not normalized or normalized in seen_visible_tool_names:
-                continue
-            seen_visible_tool_names.add(normalized)
-            normalized_visible_tool_names.append(normalized)
-        if selection is None or str(getattr(selection, 'mode', '') or 'visible_only') == 'visible_only':
-            return normalized_visible_tool_names
-
-        visible_tool_name_set = set(normalized_visible_tool_names)
-        return [
-            name
-            for name in list(getattr(selection, 'selected_tool_names', []) or [])
-            if str(name or '').strip() in visible_tool_name_set
-        ]
-
     def _tool_provider(self, node: NodeRecord) -> dict[str, Tool]:
         task = self.store.get_task(node.task_id)
         session_id = task.session_id if task is not None else 'web:shared'
         actor_role = self._actor_role_for_node(node)
-        cached = self._cached_node_context_selection_entry(task=task, node=node)
-        visible_tool_families = list(cached.get('visible_tool_families') or []) if cached is not None else list(
-            self.list_visible_tool_families(actor_role=actor_role, session_id=session_id) or []
-        )
-        visible_tool_names = list(cached.get('visible_tool_names') or []) if cached is not None else list(
-            self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or []
-        )
+        visible_tool_names = list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
         selected_visible = set(
-            self._selected_callable_tool_names(
-                selection=(cached.get('selection') if cached is not None else None),
+            self._callable_tool_names_for_node(
+                task=(task or SimpleNamespace(task_id=node.task_id, session_id=session_id)),
+                node=node,
                 visible_tool_names=visible_tool_names,
             )
         )
@@ -6005,12 +6019,18 @@ class MainRuntimeService:
         enriched = self._inject_visible_skills_into_node_messages(
             messages=messages,
             visible_skills=selected_visible_skills,
-            callable_tool_names=self._selected_callable_tool_names(
-                selection=selection,
+            callable_tool_names=self._callable_tool_names_for_node(
+                task=task,
+                node=node,
                 visible_tool_names=list(inputs.get('visible_tool_names') or []),
             ),
             candidate_skill_ids=list(getattr(selection, 'candidate_skill_ids', []) or []),
-            candidate_tool_names=list(getattr(selection, 'candidate_tool_names', []) or []),
+            candidate_tool_names=self._candidate_tool_names_for_node(
+                task=task,
+                node=node,
+                selection=selection,
+                visible_tool_names=list(inputs.get('visible_tool_names') or []),
+            ),
         )
         manager = getattr(self, 'memory_manager', None)
         # Node catalog narrowing is always selector-driven; unified_context only gates memory block retrieval.

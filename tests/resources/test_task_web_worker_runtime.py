@@ -2491,7 +2491,7 @@ def test_direct_child_creation_emits_parent_node_patch_with_children_fingerprint
     assert str(parent_patches[-1].get("children_fingerprint") or "") != fingerprint_before
 
 
-def test_task_node_patch_persists_only_once_when_only_updated_at_changes(tmp_path: Path):
+def test_task_node_patch_persists_when_only_updated_at_changes(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -2516,7 +2516,7 @@ def test_task_node_patch_persists_only_once_when_only_updated_at_changes(tmp_pat
     service.log_service._publish_task_node_patch_locked(task=task, node=root)
     service.log_service._publish_task_node_patch_locked(
         task=task,
-        node=root.model_copy(update={"updated_at": now_iso()}),
+        node=root.model_copy(update={"updated_at": "2099-01-01T00:00:00Z"}),
     )
 
     node_events = [
@@ -2525,7 +2525,135 @@ def test_task_node_patch_persists_only_once_when_only_updated_at_changes(tmp_pat
         and str((((item.get("payload") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
     ]
 
-    assert len(node_events) == 1
+    assert len(node_events) == 2
+
+
+def test_task_node_patch_includes_terminal_output_summary_fields(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    existing_events = service.store.list_task_events(after_seq=0, task_id=record.task_id, limit=10_000)
+    after_seq = max((int(item.get("seq") or 0) for item in existing_events), default=0)
+
+    service.log_service.update_node_status(
+        record.task_id,
+        root.node_id,
+        status="success",
+        final_output="root done",
+    )
+
+    node_events = [
+        item for item in service.store.list_task_events(after_seq=after_seq, task_id=record.task_id, limit=10_000)
+        if item.get("event_type") == "task.node.patch"
+        and str((((item.get("payload") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
+    ]
+
+    assert node_events
+    latest_node = dict((node_events[-1].get("payload") or {}).get("node") or {})
+    assert latest_node.get("final_output") == "root done"
+    assert latest_node.get("final_output_ref") == ""
+    assert latest_node.get("failure_reason") == ""
+    assert latest_node.get("check_result") == ""
+
+
+def test_task_node_patch_includes_failure_reason_when_failed_without_final_output(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    existing_events = service.store.list_task_events(after_seq=0, task_id=record.task_id, limit=10_000)
+    after_seq = max((int(item.get("seq") or 0) for item in existing_events), default=0)
+
+    service.log_service.update_node_status(
+        record.task_id,
+        root.node_id,
+        status="failed",
+        failure_reason="root failed",
+    )
+
+    node_events = [
+        item for item in service.store.list_task_events(after_seq=after_seq, task_id=record.task_id, limit=10_000)
+        if item.get("event_type") == "task.node.patch"
+        and str((((item.get("payload") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
+    ]
+
+    assert node_events
+    latest_node = dict((node_events[-1].get("payload") or {}).get("node") or {})
+    assert latest_node.get("final_output") == ""
+    assert latest_node.get("failure_reason") == "root failed"
+
+
+def test_task_node_patch_persists_when_only_failure_summary_changes(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    existing_events = service.store.list_task_events(after_seq=0, task_id=record.task_id, limit=10_000)
+    after_seq = max((int(item.get("seq") or 0) for item in existing_events), default=0)
+
+    service.log_service._publish_task_node_patch_locked(
+        task=task,
+        node=root.model_copy(update={"failure_reason": "failure one"}),
+    )
+    service.log_service._publish_task_node_patch_locked(
+        task=task,
+        node=root.model_copy(update={"failure_reason": "failure two"}),
+    )
+
+    node_events = [
+        item for item in service.store.list_task_events(after_seq=after_seq, task_id=record.task_id, limit=10_000)
+        if item.get("event_type") == "task.node.patch"
+        and str((((item.get("payload") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
+    ]
+
+    assert len(node_events) == 2
+    assert [((item.get("payload") or {}).get("node") or {}).get("failure_reason") for item in node_events] == [
+        "failure one",
+        "failure two",
+    ]
 
 
 def test_child_status_updates_do_not_emit_parent_structure_patch(tmp_path: Path):

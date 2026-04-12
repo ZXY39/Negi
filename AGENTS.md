@@ -89,3 +89,24 @@ If you are new to this repository, do not start by reading files at random. Star
 3. Only then drill into source files
 
 When in doubt, prefer preserving and improving the architecture docs rather than leaving behavior undocumented.
+
+## Fast Onboarding Path For A New Agent
+
+If you are taking over this repository for the first time and need the shortest possible path to useful context, follow this order:
+
+1. Read `docs/architecture/README.md`
+2. Read `docs/architecture/runtime-overview.md`
+3. Read `docs/architecture/tool-and-skill-system.md`
+4. Read `docs/architecture/web-and-admin.md`
+5. If the task touches heartbeat, config/models, or China bridge, read those topic docs before opening source files
+6. After the docs pass, inspect the concrete entrypoints:
+   - `g3ku/cli/commands.py`
+   - `g3ku/shells/web.py`
+   - `g3ku/runtime/session_agent.py`
+   - `main/service/runtime_service.py`
+
+If the task is broad or the affected area is still unclear after this pass, use the project onboarding skill:
+
+- `skills/g3ku-project-onboarding/SKILL.md`
+
+Use that skill to build a quick mental model before making changes.

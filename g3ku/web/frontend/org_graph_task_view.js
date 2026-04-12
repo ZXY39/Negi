@@ -1025,6 +1025,13 @@ function buildNodeExecutionTrace(node, detail, liveFrame = null) {
     );
     const source = Object.keys(fullTrace).length ? fullTrace : summaryTrace;
     const normalizedNodeKind = String(source.node_kind ?? detail?.node_kind ?? node?.node_kind ?? "").trim().toLowerCase();
+    const normalizedStatus = String(
+        source.status
+        ?? detail?.status
+        ?? node?.status
+        ?? node?.state
+        ?? ""
+    ).trim().toLowerCase();
     const toolSteps = Array.isArray(source.tool_steps) ? source.tool_steps : [];
     const stages = (Array.isArray(source.stages) ? source.stages : []).map((stage, index) => normalizeExecutionStageTrace(stage, index));
     const initialPrompt = firstNonEmptyTraceText(
@@ -1040,6 +1047,8 @@ function buildNodeExecutionTrace(node, detail, liveFrame = null) {
         detail?.final_output,
         detail?.final_output_preview,
         node?.final_output,
+        normalizedStatus === "failed" ? detail?.failure_reason : "",
+        normalizedStatus === "failed" ? node?.failure_reason : "",
     );
     const acceptanceResult = firstNonEmptyTraceText(
         source.acceptance_result,
@@ -2169,9 +2178,44 @@ function executionTraceSummaryHasRoundBoundaries(summary) {
     return stages.some((stage) => Array.isArray(stage?.rounds) && stage.rounds.length > 0);
 }
 
-function taskNodeDetailNeedsRefresh(detail) {
+function taskNodePatchSummary(nodeId) {
+    const key = String(nodeId || "").trim();
+    return key ? ((S.taskNodePatchSummaries || {})[key] || null) : null;
+}
+
+function taskNodeTerminalSummaryIncomplete(detail) {
+    if (!detail || typeof detail !== "object") return true;
+    const normalizedStatus = String(detail?.status || detail?.state || "").trim().toLowerCase();
+    if (!["success", "failed"].includes(normalizedStatus)) return false;
+    return !String(detail?.final_output || "").trim()
+        && !String(detail?.failure_reason || "").trim()
+        && !String(detail?.check_result || "").trim();
+}
+
+function taskNodePatchSummaryIsNewer(detail, patchSummary) {
+    if (!detail || typeof detail !== "object" || !patchSummary || typeof patchSummary !== "object") return false;
+    const detailUpdatedAt = String(detail?.updated_at || "").trim();
+    const patchUpdatedAt = String(patchSummary?.updated_at || "").trim();
+    if (patchUpdatedAt && detailUpdatedAt && patchUpdatedAt !== detailUpdatedAt) return true;
+    const normalizedPatchStatus = String(patchSummary?.status || "").trim().toLowerCase();
+    const normalizedDetailStatus = String(detail?.status || detail?.state || "").trim().toLowerCase();
+    if (normalizedPatchStatus && normalizedPatchStatus !== normalizedDetailStatus) return true;
+    if (String(patchSummary?.final_output || "").trim() && String(patchSummary?.final_output || "").trim() !== String(detail?.final_output || "").trim()) {
+        return true;
+    }
+    if (String(patchSummary?.failure_reason || "").trim() && String(patchSummary?.failure_reason || "").trim() !== String(detail?.failure_reason || "").trim()) {
+        return true;
+    }
+    if (String(patchSummary?.check_result || "").trim() && String(patchSummary?.check_result || "").trim() !== String(detail?.check_result || "").trim()) {
+        return true;
+    }
+    return false;
+}
+
+function taskNodeDetailNeedsRefresh(detail, { patchSummary = null } = {}) {
     if (!detail || typeof detail !== "object") return true;
     if (String(detail?.detail_level || "").trim().toLowerCase() !== "full") return true;
+    if (taskNodeTerminalSummaryIncomplete(detail) && taskNodePatchSummaryIsNewer(detail, patchSummary)) return true;
     const summary = detail.execution_trace_summary;
     if (!summary || typeof summary !== "object") return false;
     const stages = Array.isArray(summary.stages) ? summary.stages : [];
@@ -2186,7 +2230,8 @@ async function ensureTaskNodeDetail(nodeId, { force = false } = {}) {
     const taskId = String(S.currentTaskId || "").trim();
     if (!taskId || !key) return null;
     const cachedDetail = S.taskNodeDetails[key];
-    if (!force && cachedDetail && !taskNodeDetailNeedsRefresh(cachedDetail)) return cachedDetail;
+    const patchSummary = taskNodePatchSummary(key);
+    if (!force && cachedDetail && !taskNodeDetailNeedsRefresh(cachedDetail, { patchSummary })) return cachedDetail;
     if (!force && S.taskNodeDetailRequests[key]) return S.taskNodeDetailRequests[key];
     S.taskNodeBusy = true;
     const request = (async () => {

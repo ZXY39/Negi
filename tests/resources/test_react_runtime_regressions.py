@@ -1427,7 +1427,7 @@ def test_promote_tool_context_hydration_keeps_executor_requests_precise() -> Non
     assert promoted_frame['hydrated_executor_names'] == ['filesystem_write']
 
 
-def test_promote_tool_context_hydration_expands_family_to_default_read_set() -> None:
+def test_promote_tool_context_hydration_rejects_family_names() -> None:
     log_service = _FakeLogService()
     service = object.__new__(MainRuntimeService)
     service.log_service = log_service
@@ -1461,11 +1461,7 @@ def test_promote_tool_context_hydration_expands_family_to_default_read_set() -> 
     )
 
     promoted_frame = log_service.read_runtime_frame('task-hydration-family', 'node-hydration-family')
-    assert promoted_frame['hydrated_executor_names'] == [
-        'filesystem_write',
-        'filesystem_edit',
-        'filesystem_propose_patch',
-    ]
+    assert promoted_frame.get('hydrated_executor_names') in (None, [])
 
 
 def test_promote_tool_context_hydration_applies_lru_limit() -> None:
@@ -1803,6 +1799,60 @@ def test_execution_selector_preserves_concrete_hydrated_tool_names_without_famil
     ]
     assert selection['hydrated_executor_names'] == ['task_list']
     assert selection['trace']['promoted_hydrated_executor_names'] == ['task_list']
+
+
+def test_tool_provider_includes_hydrated_tools_even_when_selection_cache_excludes_them() -> None:
+    service = object.__new__(MainRuntimeService)
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
+    )
+    service._resource_manager = SimpleNamespace(
+        tool_instances=lambda: {
+            'content_open': _ModelSchemaRecordingTool(
+                name='content_open',
+                authoritative_description='content open authoritative schema',
+                model_description='content open model schema',
+            ),
+            'filesystem_write': _ModelSchemaRecordingTool(
+                name='filesystem_write',
+                authoritative_description='filesystem write authoritative schema',
+                model_description='filesystem write model schema',
+            ),
+        }
+    )
+    service._external_tool_provider = lambda _node: {}
+    service._builtin_tool_cache = None
+    service._node_context_selection_cache = {
+        ('task-hydrated-provider', 'node-hydrated-provider'): {
+            'selection': NodeContextSelectionResult(
+                mode='dense_rerank',
+                memory_search_visible=False,
+                selected_tool_names=['content_open'],
+                candidate_tool_names=['content_open', 'filesystem_write'],
+            )
+        }
+    }
+    service.log_service = _FakeLogService()
+    service.log_service.upsert_frame(
+        'task-hydrated-provider',
+        {
+            'node_id': 'node-hydrated-provider',
+            'hydrated_executor_names': ['filesystem_write'],
+        },
+    )
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content_open', 'filesystem_write']
+    service._actor_role_for_node = lambda node: 'execution'
+
+    node = SimpleNamespace(
+        task_id='task-hydrated-provider',
+        node_id='node-hydrated-provider',
+        node_kind='execution',
+        can_spawn_children=False,
+    )
+    provided = service._tool_provider(node)
+
+    assert 'content_open' in provided
+    assert 'filesystem_write' in provided
 
 
 def test_execution_selector_web_research_query_does_not_directly_promote_candidates() -> None:
@@ -2801,6 +2851,73 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_onl
     assert user_payload["candidate_skills"] == ["tmux", "skill-creator"]
     assert user_payload["candidate_tools"] == ["content", "filesystem_write"]
     assert "semantic block" in enriched[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_from_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_build_node_context_selection(**kwargs):
+        _ = kwargs
+        return NodeContextSelectionResult(
+            mode="dense_rerank",
+            memory_search_visible=False,
+            selected_skill_ids=["tmux"],
+            selected_tool_names=["content"],
+            candidate_skill_ids=["tmux"],
+            candidate_tool_names=["content", "filesystem_write"],
+            memory_query="",
+            retrieval_scope={},
+            trace={"mode": "dense_rerank"},
+        )
+
+    monkeypatch.setattr(
+        runtime_service_module,
+        "build_node_context_selection",
+        _fake_build_node_context_selection,
+    )
+
+    service = object.__new__(MainRuntimeService)
+    service.memory_manager = SimpleNamespace(_feature_enabled=lambda _key: False)
+    service._node_context_selection_cache = {}
+    service.log_service = _FakeLogService()
+    service.log_service.upsert_frame(
+        'task-hydrated-payload',
+        {
+            'node_id': 'node-hydrated-payload',
+            'hydrated_executor_names': ['filesystem_write'],
+        },
+    )
+    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='content'),
+        SimpleNamespace(tool_id='filesystem'),
+    ]
+    service.list_visible_skill_resources = lambda *, actor_role, session_id: [
+        SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
+    ]
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content', 'filesystem_write', 'load_tool_context']
+    task = SimpleNamespace(task_id='task-hydrated-payload', session_id="web:ceo-origin", metadata={})
+    node = SimpleNamespace(
+        task_id='task-hydrated-payload',
+        node_id='node-hydrated-payload',
+        prompt="terminal workflow",
+        goal="terminal workflow",
+        node_kind="execution",
+        can_spawn_children=False,
+    )
+
+    enriched = await service._enrich_node_messages(
+        task=task,
+        node=node,
+        messages=[
+            {"role": "system", "content": "base prompt"},
+            {"role": "user", "content": '{"prompt":"terminal workflow"}'},
+        ],
+    )
+
+    user_payload = json.loads(str(enriched[1]["content"] or ""))
+    assert user_payload["callable_tool_names"] == ["load_tool_context", "filesystem_write"]
+    assert user_payload["candidate_tools"] == ["content"]
 
 
 @pytest.mark.asyncio

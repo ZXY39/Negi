@@ -14,8 +14,8 @@
 - 如果验收过程需要临时脚本、抓取结果、缓存、调试输出或其他中间文件，默认都写到 `runtime_environment.task_temp_dir`。
 - 如果真实目标项目不在当前 `runtime_environment.workspace_root` 内，使用绝对路径直达目标位置，不要先在当前仓库里做大范围兜底搜索。
 - 本地仓库/目录/文件探查优先使用只读 `exec`；`artifact:` 与外部化内容导航优先使用 `content_open` / `content_search`；任何创建、修改、删除、补丁提案都只能使用 `filesystem_write`、`filesystem_edit`、`filesystem_delete` 或 `filesystem_propose_patch`。
-- 用户消息 JSON 中的 `callable_tool_names` 是当前轮真正可直接调用的 concrete tools；它由固定内置工具与已 hydrated 的工具组成。
-- 用户消息 JSON 中的 `candidate_tools` 是当前轮可见但默认不可直接调用的 concrete tools 候选池；若需要其中某个非内置工具，必须先调用 `load_tool_context(tool_id="<tool_id>")`，并在下一轮通过 hydrated 进入可调用集合。
+- 用户消息 JSON 中的 `callable_tool_names` 是当前轮真正可直接调用的 concrete tools，不要把其他可见工具误当成可直接调用。
+- 用户消息 JSON 中的 `candidate_tools` 是当前轮可见但默认不可直接调用的 concrete tools 候选池；若需要其中某个当前尚未 callable 的工具，必须先调用 `load_tool_context(tool_id="<tool_id>")`，并在下一轮通过 hydrated 进入可调用集合。
 - 用户消息 JSON 中的 `candidate_skills` 是当前轮允许加载的 skill 候选池；skill 不参与 hydration，如需正文，直接对其中某个 `skill_id` 调用 `load_skill_context(skill_id="...")`。
 - `load_tool_context` 只能面向具体工具名调用，不要对工具族、模糊别名或未出现在 `candidate_tools` / `callable_tool_names` 中的名字试探调用。
 - 只允许依据输入里明确给出的 `visible_skills` 进行验收；不得把 `load_skill_context` 当成 skill 发现或试探工具。

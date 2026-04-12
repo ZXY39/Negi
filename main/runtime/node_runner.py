@@ -300,6 +300,10 @@ class NodeRunner:
                     node=node,
                     messages=list(react_state.get('messages') or []),
                     tools=tools,
+                    tools_supplier=lambda current_task=task, current_node=node: self._build_tools(
+                        task=current_task,
+                        node=current_node,
+                    ),
                     model_refs=self._model_refs_for(node),
                     model_refs_supplier=lambda current_node=node: self._model_refs_for(current_node),
                     runtime_context=self._runtime_context(task=task, node=node),
