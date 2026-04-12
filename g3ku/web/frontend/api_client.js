@@ -667,7 +667,10 @@ class ApiClient {
 
     static async updateLlmConfig(configId, payload) {
         const data = await this.put(`/api/llm/configs/${encodeURIComponent(configId)}`, payload || {});
-        return data.item || null;
+        return {
+            item: data.item || null,
+            runtimeRefresh: data.runtime_refresh || data.runtimeRefresh || null,
+        };
     }
 
     static async deleteLlmConfig(configId) {
@@ -686,26 +689,47 @@ class ApiClient {
 
     static async createLlmBinding(payload) {
         const data = await this.post("/api/llm/bindings", payload || {});
-        return data.item || null;
+        return {
+            item: data.item || null,
+            runtimeRefresh: data.runtime_refresh || data.runtimeRefresh || null,
+        };
     }
 
     static async updateLlmBinding(modelKey, payload) {
         const data = await this.put(`/api/llm/bindings/${encodeURIComponent(modelKey)}`, payload || {});
+        return {
+            item: data.item || null,
+            runtimeRefresh: data.runtime_refresh || data.runtimeRefresh || null,
+        };
+    }
+
+    static async getRuntimeRefreshStatus(commandId) {
+        const data = await this.get(`/api/runtime-refresh/${encodeURIComponent(commandId)}`);
         return data.item || null;
     }
 
     static async enableLlmBinding(modelKey) {
         const data = await this.post(`/api/llm/bindings/${encodeURIComponent(modelKey)}/enable`);
-        return data.item || null;
+        return {
+            item: data.item || null,
+            runtimeRefresh: data.runtime_refresh || data.runtimeRefresh || null,
+        };
     }
 
     static async disableLlmBinding(modelKey) {
         const data = await this.post(`/api/llm/bindings/${encodeURIComponent(modelKey)}/disable`);
-        return data.item || null;
+        return {
+            item: data.item || null,
+            runtimeRefresh: data.runtime_refresh || data.runtimeRefresh || null,
+        };
     }
 
     static async deleteLlmBinding(modelKey) {
-        return this.delete(`/api/llm/bindings/${encodeURIComponent(modelKey)}`);
+        const data = await this.delete(`/api/llm/bindings/${encodeURIComponent(modelKey)}`);
+        return {
+            ...data,
+            runtimeRefresh: data.runtime_refresh || data.runtimeRefresh || null,
+        };
     }
 
     static async getLlmRoutes() {

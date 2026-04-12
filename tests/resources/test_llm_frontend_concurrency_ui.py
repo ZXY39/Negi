@@ -218,6 +218,72 @@ def test_api_client_maps_duplicate_binding_name_error_code_to_clear_message() ->
     assert result["message"] == "配置名已存在，请使用其他配置名。"
 
 
+def test_api_client_update_llm_binding_returns_item_and_runtime_refresh() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.window.location = { origin: "http://localhost" };
+        global.fetch = async () => ({
+          ok: true,
+          json: async () => ({
+            item: { key: "m", retry_count: 4 },
+            runtime_refresh: {
+              worker_refresh_command_id: "command:refresh-1",
+              worker_refresh_status: "pending",
+            },
+          }),
+        });
+        const code = fs.readFileSync("g3ku/web/frontend/api_client.js", "utf8");
+        vm.runInThisContext(code);
+
+        ApiClient.updateLlmBinding("m", { retry_count: 4 }).then((value) => {
+          console.log(JSON.stringify(value));
+        });
+        """
+    )
+
+    assert result["item"] == {"key": "m", "retry_count": 4}
+    assert result["runtimeRefresh"] == {
+        "worker_refresh_command_id": "command:refresh-1",
+        "worker_refresh_status": "pending",
+    }
+
+
+def test_api_client_delete_llm_binding_returns_runtime_refresh() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.window.location = { origin: "http://localhost" };
+        global.fetch = async () => ({
+          ok: true,
+          json: async () => ({
+            ok: true,
+            runtime_refresh: {
+              worker_refresh_command_id: "command:delete-1",
+              worker_refresh_status: "pending",
+            },
+          }),
+        });
+        const code = fs.readFileSync("g3ku/web/frontend/api_client.js", "utf8");
+        vm.runInThisContext(code);
+
+        ApiClient.deleteLlmBinding("m").then((value) => {
+          console.log(JSON.stringify(value));
+        });
+        """
+    )
+
+    assert result["ok"] is True
+    assert result["runtime_refresh"] == {
+        "worker_refresh_command_id": "command:delete-1",
+        "worker_refresh_status": "pending",
+    }
+
+
 def test_llm_frontend_uses_binding_name_wording_in_create_form() -> None:
     html = (REPO_ROOT / "g3ku" / "web" / "frontend" / "org_graph.html").read_text(encoding="utf-8")
     result = _run_node_script(

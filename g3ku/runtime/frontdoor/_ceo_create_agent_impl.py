@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from typing import Any
 
@@ -46,6 +47,28 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         self._compiled_graph = None
         self._agent_checkpointer_ref = current_checkpointer
         return True
+
+    async def _ensure_runtime_bindings_ready(self) -> bool:
+        ensure_ready = getattr(self._loop, "_ensure_checkpointer_ready", None)
+        if callable(ensure_ready):
+            result = ensure_ready()
+            if inspect.isawaitable(result):
+                await result
+        changed = self._invalidate_cached_runtime_bindings_if_stale()
+        checkpointer = getattr(self._loop, "_checkpointer", None)
+        is_active = getattr(self._loop, "_sqlite_checkpointer_is_active", None)
+        if callable(is_active) and checkpointer is not None and not is_active(checkpointer):
+            if not changed:
+                self._agent = None
+                self._compiled_graph = None
+                self._agent_checkpointer_ref = checkpointer
+                changed = True
+            if callable(ensure_ready):
+                result = ensure_ready()
+                if inspect.isawaitable(result):
+                    await result
+            self._agent_checkpointer_ref = getattr(self._loop, "_checkpointer", None)
+        return changed
 
     def build_prompt_context(self, *, state, runtime, tools) -> dict[str, str]:
         _ = runtime, tools
@@ -518,7 +541,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
 
     async def run_turn(self, *, user_input, session, on_progress=None) -> str:
         await self._ensure_ready()
-        self._invalidate_cached_runtime_bindings_if_stale()
+        await self._ensure_runtime_bindings_ready()
         setattr(session, "_last_route_kind", "direct_reply")
         session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
         runtime_context = CeoRuntimeContext(
@@ -548,7 +571,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
 
     async def resume_turn(self, *, session, resume_value, on_progress=None) -> str:
         await self._ensure_ready()
-        self._invalidate_cached_runtime_bindings_if_stale()
+        await self._ensure_runtime_bindings_ready()
         session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
         graph_output = await self._get_agent().ainvoke(
             Command(resume=resume_value),

@@ -2709,6 +2709,60 @@ def test_llm_config_update_refreshes_runtime(monkeypatch):
     assert captured['reason'] == 'admin_llm_config_update'
 
 
+def test_llm_config_update_returns_async_runtime_refresh_status_after_save(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _StubFacade:
+        def update_config_record(self, config_id: str, payload: dict):
+            captured['config_id'] = config_id
+            captured['payload'] = dict(payload)
+            return {'config_id': config_id, 'provider_id': 'responses'}
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        captured['force'] = force
+        captured['reason'] = reason
+        return True
+
+    class _StubService:
+        execution_mode = 'web'
+
+        def is_worker_online(self, **kwargs):
+            _ = kwargs
+            return True
+
+        def enqueue_worker_runtime_refresh(self, *, reason: str):
+            return {
+                'worker_refresh_requested': True,
+                'worker_refresh_acked': False,
+                'worker_refresh_command_id': 'command:refresh-config-1',
+                'worker_refresh_status': 'pending',
+                'reason': reason,
+            }
+
+    monkeypatch.setattr(admin_rest.ModelManager, 'load_facade', classmethod(lambda cls: _StubFacade()))
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+    monkeypatch.setattr(admin_rest, '_service', lambda: _StubService())
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put('/api/llm/configs/cfg-1', json={'default_model': 'gpt-5.2'})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['item']['config_id'] == 'cfg-1'
+    assert payload['runtime_refresh'] == {
+        'saved': True,
+        'web_refreshed': True,
+        'worker_refresh_requested': True,
+        'worker_refresh_acked': False,
+        'worker_refresh_command_id': 'command:refresh-config-1',
+        'worker_refresh_status': 'pending',
+        'reason': 'admin_llm_config_update',
+    }
+
+
 def test_llm_draft_validate_does_not_require_loading_runtime_config(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -2765,6 +2819,204 @@ def test_llm_binding_retry_count_update_persists_without_provider_probe(tmp_path
 
     saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
     assert saved['models']['catalog'][0]['retryCount'] == 4
+
+
+def test_llm_binding_update_returns_async_runtime_refresh_status_after_save(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    captured: dict[str, object] = {}
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        captured['force'] = force
+        captured['reason'] = reason
+        return True
+
+    class _StubService:
+        execution_mode = 'web'
+
+        def is_worker_online(self, **kwargs):
+            _ = kwargs
+            return True
+
+        def enqueue_worker_runtime_refresh(self, *, reason: str):
+            return {
+                'worker_refresh_requested': True,
+                'worker_refresh_acked': False,
+                'worker_refresh_command_id': 'command:refresh-1',
+                'worker_refresh_status': 'pending',
+                'reason': reason,
+            }
+
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+    monkeypatch.setattr(admin_rest, '_service', lambda: _StubService())
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put('/api/llm/bindings/m', json={'retry_count': 4})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['ok'] is True
+    assert payload['item']['retry_count'] == 4
+    assert payload['runtime_refresh'] == {
+        'saved': True,
+        'web_refreshed': True,
+        'worker_refresh_requested': True,
+        'worker_refresh_acked': False,
+        'worker_refresh_command_id': 'command:refresh-1',
+        'worker_refresh_status': 'pending',
+        'reason': 'admin_llm_binding_update',
+    }
+    assert captured == {'force': True, 'reason': 'admin_llm_binding_update'}
+
+
+def test_llm_binding_enable_returns_async_runtime_refresh_status_after_save(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _StubManager:
+        def set_model_enabled(self, model_key: str, enabled: bool):
+            captured['model_key'] = model_key
+            captured['enabled'] = enabled
+            return {'key': model_key, 'enabled': enabled}
+
+    class _StubService:
+        execution_mode = 'web'
+
+        def is_worker_online(self, **kwargs):
+            _ = kwargs
+            return True
+
+        def enqueue_worker_runtime_refresh(self, *, reason: str):
+            return {
+                'worker_refresh_requested': True,
+                'worker_refresh_acked': False,
+                'worker_refresh_command_id': 'command:enable-1',
+                'worker_refresh_status': 'pending',
+                'reason': reason,
+            }
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        captured['force'] = force
+        captured['reason'] = reason
+        return True
+
+    monkeypatch.setattr(admin_rest.ModelManager, 'load', classmethod(lambda cls: _StubManager()))
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+    monkeypatch.setattr(admin_rest, '_service', lambda: _StubService())
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.post('/api/llm/bindings/m/enable')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['item'] == {'key': 'm', 'enabled': True}
+    assert payload['runtime_refresh']['worker_refresh_command_id'] == 'command:enable-1'
+    assert payload['runtime_refresh']['reason'] == 'admin_llm_binding_enable'
+    assert captured['model_key'] == 'm'
+    assert captured['enabled'] is True
+
+
+def test_llm_binding_disable_returns_async_runtime_refresh_status_after_save(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _StubManager:
+        def set_model_enabled(self, model_key: str, enabled: bool):
+            captured['model_key'] = model_key
+            captured['enabled'] = enabled
+            return {'key': model_key, 'enabled': enabled}
+
+    class _StubService:
+        execution_mode = 'web'
+
+        def is_worker_online(self, **kwargs):
+            _ = kwargs
+            return True
+
+        def enqueue_worker_runtime_refresh(self, *, reason: str):
+            return {
+                'worker_refresh_requested': True,
+                'worker_refresh_acked': False,
+                'worker_refresh_command_id': 'command:disable-1',
+                'worker_refresh_status': 'pending',
+                'reason': reason,
+            }
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        captured['force'] = force
+        captured['reason'] = reason
+        return True
+
+    monkeypatch.setattr(admin_rest.ModelManager, 'load', classmethod(lambda cls: _StubManager()))
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+    monkeypatch.setattr(admin_rest, '_service', lambda: _StubService())
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.post('/api/llm/bindings/m/disable')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['item'] == {'key': 'm', 'enabled': False}
+    assert payload['runtime_refresh']['worker_refresh_command_id'] == 'command:disable-1'
+    assert payload['runtime_refresh']['reason'] == 'admin_llm_binding_disable'
+    assert captured['model_key'] == 'm'
+    assert captured['enabled'] is False
+
+
+def test_llm_binding_delete_returns_async_runtime_refresh_status_after_save(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _StubManager:
+        def delete_model(self, model_key: str):
+            captured['model_key'] = model_key
+
+    class _StubService:
+        execution_mode = 'web'
+
+        def is_worker_online(self, **kwargs):
+            _ = kwargs
+            return True
+
+        def enqueue_worker_runtime_refresh(self, *, reason: str):
+            return {
+                'worker_refresh_requested': True,
+                'worker_refresh_acked': False,
+                'worker_refresh_command_id': 'command:delete-1',
+                'worker_refresh_status': 'pending',
+                'reason': reason,
+            }
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        captured['force'] = force
+        captured['reason'] = reason
+        return True
+
+    monkeypatch.setattr(admin_rest.ModelManager, 'load', classmethod(lambda cls: _StubManager()))
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+    monkeypatch.setattr(admin_rest, '_service', lambda: _StubService())
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.delete('/api/llm/bindings/m')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['ok'] is True
+    assert payload['runtime_refresh']['worker_refresh_command_id'] == 'command:delete-1'
+    assert payload['runtime_refresh']['reason'] == 'admin_llm_binding_delete'
+    assert captured['model_key'] == 'm'
 
 
 def test_llm_binding_create_returns_structured_duplicate_name_error(monkeypatch):
@@ -3270,6 +3522,39 @@ def test_model_roles_bulk_endpoint_updates_multiple_scopes_with_single_refresh(t
     saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
     assert saved['agents']['roleIterations']['execution'] == 11
     assert saved['agents']['roleConcurrency']['inspection'] == 2
+
+
+def test_runtime_refresh_status_endpoint_returns_current_command_snapshot(monkeypatch):
+    class _StubService:
+        def get_task_command_status(self, command_id: str):
+            assert command_id == 'command:refresh-1'
+            return {
+                'command_id': command_id,
+                'command_type': 'refresh_runtime_config',
+                'status': 'completed',
+                'created_at': '2026-04-12T22:35:41+08:00',
+                'claimed_at': '2026-04-12T22:36:08+08:00',
+                'finished_at': '2026-04-12T22:36:08+08:00',
+                'worker_id': 'worker:1',
+                'error_text': '',
+                'payload': {'reason': 'admin_llm_binding_update'},
+                'result': {'changed': True},
+            }
+
+    monkeypatch.setattr(admin_rest, '_service', lambda: _StubService())
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.get('/api/runtime-refresh/command:refresh-1')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['ok'] is True
+    assert payload['item']['command_id'] == 'command:refresh-1'
+    assert payload['item']['status'] == 'completed'
+    assert payload['item']['result'] == {'changed': True}
 
 
 def test_china_bridge_channels_endpoint_lists_supported_channels(tmp_path: Path, monkeypatch):

@@ -584,9 +584,10 @@
 
   async function persistMemorySectionDraft(section, draft) {
     if (!section || !draft) return null;
-    const config = trim(section.configId)
+    const configResult = trim(section.configId)
       ? await ApiClient.updateLlmConfig(section.configId, draft)
       : await ApiClient.createLlmConfig(draft);
+    const config = configResult?.item || configResult;
     section.configId = trim(config?.config_id || section.configId);
     return config;
   }
@@ -1341,6 +1342,62 @@
     });
   }
 
+  function normalizeRuntimeRefreshStatus(runtimeRefresh) {
+    return runtimeRefresh && typeof runtimeRefresh === "object" ? runtimeRefresh : {};
+  }
+
+  async function waitForRuntimeRefreshAndUpdateToast(runtimeRefresh) {
+    const refresh = normalizeRuntimeRefreshStatus(runtimeRefresh);
+    const commandId = trim(refresh.worker_refresh_command_id || refresh.workerRefreshCommandId || "");
+    const initialStatus = trim(refresh.worker_refresh_status || refresh.workerRefreshStatus || "");
+    const requested = Boolean(refresh.worker_refresh_requested ?? refresh.workerRefreshRequested);
+    const acked = Boolean(refresh.worker_refresh_acked ?? refresh.workerRefreshAcked);
+    if (!requested || acked || !commandId) {
+      if (acked || initialStatus === "completed") {
+        showToast({ title: "同步新配置完成", text: "新配置已同步到运行时。", kind: "success", durationMs: 2200 });
+        return;
+      }
+      if (initialStatus === "offline") {
+        showToast({ title: "已保存", text: "worker 当前离线，新的后台任务会在 worker 恢复后使用新配置。", kind: "warn", durationMs: 4200 });
+        return;
+      }
+      if (trim(refresh.error || "")) {
+        showToast({ title: "已保存", text: `同步新配置失败：${trim(refresh.error)}`, kind: "warn", durationMs: 4200 });
+        return;
+      }
+      showToast({ title: "已保存", text: "新配置已保存。", kind: "success", durationMs: 2200 });
+      return;
+    }
+
+    showToast({ title: "已保存", text: "同步新配置中", kind: "info", persistent: true });
+    const maxPolls = 60;
+    for (let pollIndex = 0; pollIndex < maxPolls; pollIndex += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, pollIndex === 0 ? 600 : 1000));
+      let current = null;
+      try {
+        current = await ApiClient.getRuntimeRefreshStatus(commandId);
+      } catch (error) {
+        const message = trim(error?.message || "");
+        if (pollIndex >= 4) {
+          showToast({ title: "已保存", text: message ? `同步状态查询失败：${message}` : "同步状态查询失败，请稍后检查。", kind: "warn", durationMs: 4200 });
+          return;
+        }
+        continue;
+      }
+      const status = trim(current?.status || "").toLowerCase();
+      if (status === "completed") {
+        showToast({ title: "同步新配置完成", text: "新配置已同步到 worker。", kind: "success", durationMs: 2200 });
+        return;
+      }
+      if (status === "failed") {
+        const errorText = trim(current?.error_text || current?.errorText || "");
+        showToast({ title: "已保存", text: errorText ? `同步新配置失败：${errorText}` : "同步新配置失败。", kind: "warn", durationMs: 4200 });
+        return;
+      }
+    }
+    showToast({ title: "已保存", text: "同步新配置仍在后台进行中。", kind: "warn", durationMs: 4200 });
+  }
+
     async function handleCreateSave() {
     const state = llmState();
     const bindingDraft = bindingDraftPayload({ requireModelKey: true });
@@ -1376,7 +1433,7 @@
         kind: "success",
         persistent: true,
       });
-      await ApiClient.createLlmBinding({
+      const saveResult = await ApiClient.createLlmBinding({
         binding: {
           key: modelKey,
           config_id: "",
@@ -1388,7 +1445,7 @@
         },
         draft,
       });
-      showToast({ title: "添加成功", text: `${modelKey} 已保存`, kind: "success" });
+      await waitForRuntimeRefreshAndUpdateToast(saveResult?.runtimeRefresh);
       closeEditor();
       await loadAll();
     } finally {
@@ -1448,6 +1505,7 @@
     state.saving = true;
     renderAll();
     try {
+      let runtimeRefresh = null;
       if (configChanged) {
         showToast({
           title: "Saving",
@@ -1457,7 +1515,8 @@
         });
         const ok = await probeDraft(draft);
         if (!ok) throw new Error("请先修正 JSON 配置并通过连接测试");
-        await ApiClient.updateLlmConfig(state.editor.configId, draft);
+        const configSaveResult = await ApiClient.updateLlmConfig(state.editor.configId, draft);
+        runtimeRefresh = configSaveResult?.runtimeRefresh || runtimeRefresh;
       }
       if (Object.keys(bindingPatch).length) {
         showToast({
@@ -1466,13 +1525,14 @@
           kind: "success",
           persistent: true,
         });
-        await ApiClient.updateLlmBinding(state.editor.bindingKey, bindingPatch);
+        const bindingSaveResult = await ApiClient.updateLlmBinding(state.editor.bindingKey, bindingPatch);
+        runtimeRefresh = bindingSaveResult?.runtimeRefresh || runtimeRefresh;
       }
       if (!configChanged && !Object.keys(bindingPatch).length) {
         showToast({ title: "无需保存", text: "当前没有需要应用的修改。", kind: "info" });
         return;
       }
-      showToast({ title: "修改成功", text: `${state.editor.bindingKey} 已更新`, kind: "success" });
+      await waitForRuntimeRefreshAndUpdateToast(runtimeRefresh);
       closeEditor();
       await loadAll();
     } finally {
@@ -1540,12 +1600,14 @@
         kind: "info",
         persistent: true,
       });
-      const embeddingConfig = trim(embeddingSection.configId)
+      const embeddingConfigResult = trim(embeddingSection.configId)
         ? await ApiClient.updateLlmConfig(embeddingSection.configId, embeddingDraft)
         : await ApiClient.createLlmConfig(embeddingDraft);
-      const rerankConfig = trim(rerankSection.configId)
+      const rerankConfigResult = trim(rerankSection.configId)
         ? await ApiClient.updateLlmConfig(rerankSection.configId, rerankDraft)
         : await ApiClient.createLlmConfig(rerankDraft);
+      const embeddingConfig = embeddingConfigResult?.item || embeddingConfigResult;
+      const rerankConfig = rerankConfigResult?.item || rerankConfigResult;
       embeddingSection.configId = trim(embeddingConfig?.config_id || embeddingSection.configId);
       rerankSection.configId = trim(rerankConfig?.config_id || rerankSection.configId);
       await ApiClient.updateLlmMemoryModels({
@@ -1786,8 +1848,8 @@
     llmState().saving = true;
     renderAll();
     try {
-      await ApiClient.deleteLlmBinding(binding.key);
-      showToast({ title: "删除成功", text: `${binding.key} 已删除`, kind: "success" });
+      const deleteResult = await ApiClient.deleteLlmBinding(binding.key);
+      await waitForRuntimeRefreshAndUpdateToast(deleteResult?.runtimeRefresh);
       closeEditor();
       await loadAll();
     } finally {

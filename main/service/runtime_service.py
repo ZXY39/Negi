@@ -883,6 +883,47 @@ class MainRuntimeService:
                 raise TimeoutError('worker_runtime_refresh_timeout')
             await asyncio.sleep(_WORKER_RUNTIME_REFRESH_POLL_SECONDS)
 
+    def enqueue_worker_runtime_refresh(self, *, reason: str) -> dict[str, object]:
+        normalized_reason = str(reason or '').strip() or 'runtime_refresh'
+        if self.execution_mode != 'web':
+            changed = self.ensure_runtime_config_current(force=True, reason=normalized_reason)
+            return {
+                'worker_refresh_requested': True,
+                'worker_refresh_acked': True,
+                'worker_refresh_command_id': '',
+                'worker_refresh_status': 'completed',
+                'reason': normalized_reason,
+                'changed': bool(changed),
+                'worker_id': str(self.worker_id or ''),
+                'worker_pid': int(os.getpid()),
+                'applied_config_mtime_ns': int(self._config_mtime_ns()),
+            }
+        command_id = self._enqueue_task_command(
+            command_type='refresh_runtime_config',
+            task_id=None,
+            session_id='web:shared',
+            payload={
+                'reason': normalized_reason,
+                'expected_config_mtime_ns': int(self._config_mtime_ns()),
+            },
+        )
+        return {
+            'worker_refresh_requested': True,
+            'worker_refresh_acked': False,
+            'worker_refresh_command_id': command_id,
+            'worker_refresh_status': 'pending',
+            'reason': normalized_reason,
+        }
+
+    def get_task_command_status(self, command_id: str) -> dict[str, object] | None:
+        normalized = str(command_id or '').strip()
+        if not normalized:
+            return None
+        current = self.store.get_task_command(normalized)
+        if not current:
+            return None
+        return dict(current)
+
     def _build_task_record(
         self,
         *,

@@ -436,6 +436,29 @@ def test_create_agent_runner_keeps_cached_bindings_when_checkpointer_generation_
     assert runner._agent_checkpointer_ref is current_checkpointer
 
 
+@pytest.mark.asyncio
+async def test_create_agent_runner_invalidates_cached_bindings_when_current_checkpointer_connection_is_inactive() -> None:
+    current_checkpointer = object()
+    readiness_calls: list[str] = []
+    loop = SimpleNamespace(
+        _checkpointer=current_checkpointer,
+        _ensure_checkpointer_ready=lambda: readiness_calls.append("ready"),
+        _sqlite_checkpointer_is_active=lambda value: False if value is current_checkpointer else True,
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=loop)
+    runner._agent = object()
+    runner._compiled_graph = object()
+    runner._agent_checkpointer_ref = current_checkpointer
+
+    changed = await runner._ensure_runtime_bindings_ready()
+
+    assert changed is True
+    assert readiness_calls == ["ready", "ready"]
+    assert runner._agent is None
+    assert runner._compiled_graph is None
+    assert runner._agent_checkpointer_ref is current_checkpointer
+
+
 def test_create_agent_runner_build_prompt_context_uses_effective_turn_overlay(monkeypatch) -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     monkeypatch.setattr(runner, "_effective_turn_overlay_text", lambda state: "overlay-text")

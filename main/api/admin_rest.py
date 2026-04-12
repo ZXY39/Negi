@@ -882,6 +882,60 @@ async def _refresh_runtime(reason: str) -> None:
         ) from exc
 
 
+async def _refresh_runtime_after_save(reason: str) -> dict[str, Any]:
+    status: dict[str, Any] = {
+        'saved': True,
+        'web_refreshed': False,
+        'worker_refresh_requested': False,
+        'worker_refresh_acked': False,
+        'worker_refresh_command_id': '',
+        'worker_refresh_status': 'skipped',
+        'reason': str(reason or '').strip() or 'runtime_refresh',
+    }
+    try:
+        await refresh_web_agent_runtime(force=True, reason=status['reason'])
+        status['web_refreshed'] = True
+    except Exception as exc:
+        if is_no_ceo_model_configured_error(exc) or str(exc or '').strip() == 'project is locked':
+            return status
+        status['error'] = str(exc or 'web_runtime_refresh_failed').strip() or 'web_runtime_refresh_failed'
+        status['code'] = 'web_runtime_refresh_failed'
+        return status
+    try:
+        service = _service()
+    except HTTPException as exc:
+        _ = exc
+        return status
+    except Exception:
+        return status
+    if str(getattr(service, 'execution_mode', '') or '').strip().lower() != 'web':
+        status['worker_refresh_requested'] = True
+        status['worker_refresh_acked'] = True
+        status['worker_refresh_status'] = 'completed'
+        return status
+    if not bool(getattr(service, 'is_worker_online', lambda **kwargs: False)()):
+        status['worker_refresh_status'] = 'offline'
+        return status
+    try:
+        refresh_status = dict(getattr(service, 'enqueue_worker_runtime_refresh')(reason=status['reason']) or {})
+    except Exception as exc:
+        status['worker_refresh_status'] = 'failed'
+        status['code'] = 'worker_runtime_refresh_enqueue_failed'
+        status['error'] = str(exc or 'worker_runtime_refresh_enqueue_failed').strip() or 'worker_runtime_refresh_enqueue_failed'
+        return status
+    status.update({
+        'worker_refresh_requested': bool(refresh_status.get('worker_refresh_requested', True)),
+        'worker_refresh_acked': bool(refresh_status.get('worker_refresh_acked', False)),
+        'worker_refresh_command_id': str(refresh_status.get('worker_refresh_command_id') or '').strip(),
+        'worker_refresh_status': str(refresh_status.get('worker_refresh_status') or ('completed' if refresh_status.get('worker_refresh_acked') else 'pending')).strip() or 'pending',
+    })
+    if refresh_status.get('error'):
+        status['error'] = str(refresh_status.get('error') or '').strip()
+    if refresh_status.get('code'):
+        status['code'] = str(refresh_status.get('code') or '').strip()
+    return status
+
+
 def _config_summary_probe_status(facade, config_id: str) -> str | None:
     for summary in list(getattr(facade.repository, 'list_summaries', lambda: [])() or []):
         if str(getattr(summary, 'config_id', '') or '').strip() == str(config_id or '').strip():
@@ -2022,8 +2076,8 @@ async def update_llm_config(config_id: str, payload: dict = Body(...)):
         item = _llm_facade().update_config_record(config_id, payload)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await _refresh_runtime('admin_llm_config_update')
-    return {'ok': True, 'item': item}
+    runtime_refresh = await _refresh_runtime_after_save('admin_llm_config_update')
+    return {'ok': True, 'item': item, 'runtime_refresh': runtime_refresh}
 
 
 @router.delete('/llm/configs/{config_id}')
@@ -2056,8 +2110,8 @@ async def create_llm_binding(payload: dict = Body(...)):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=_llm_binding_create_error_detail(exc)) from exc
     manager.save()
-    await _refresh_runtime('admin_llm_binding_create')
-    return {'ok': True, 'item': item}
+    runtime_refresh = await _refresh_runtime_after_save('admin_llm_binding_create')
+    return {'ok': True, 'item': item, 'runtime_refresh': runtime_refresh}
 
 
 @router.put('/llm/bindings/{model_key:path}')
@@ -2069,7 +2123,21 @@ async def update_llm_binding(model_key: str, payload: dict = Body(...)):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     manager.save()
-    await _refresh_runtime('admin_llm_binding_update')
+    runtime_refresh = await _refresh_runtime_after_save('admin_llm_binding_update')
+    return {'ok': True, 'item': item, 'runtime_refresh': runtime_refresh}
+
+
+@router.get('/runtime-refresh/{command_id:path}')
+async def get_runtime_refresh_status(command_id: str):
+    try:
+        service = _service()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    item = getattr(service, 'get_task_command_status', lambda _command_id: None)(command_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail='runtime_refresh_command_not_found')
     return {'ok': True, 'item': item}
 
 
@@ -2080,8 +2148,8 @@ async def enable_llm_binding(model_key: str):
         item = manager.set_model_enabled(model_key, True)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await _refresh_runtime('admin_llm_binding_enable')
-    return {'ok': True, 'item': item}
+    runtime_refresh = await _refresh_runtime_after_save('admin_llm_binding_enable')
+    return {'ok': True, 'item': item, 'runtime_refresh': runtime_refresh}
 
 
 @router.post('/llm/bindings/{model_key:path}/disable')
@@ -2091,8 +2159,8 @@ async def disable_llm_binding(model_key: str):
         item = manager.set_model_enabled(model_key, False)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await _refresh_runtime('admin_llm_binding_disable')
-    return {'ok': True, 'item': item}
+    runtime_refresh = await _refresh_runtime_after_save('admin_llm_binding_disable')
+    return {'ok': True, 'item': item, 'runtime_refresh': runtime_refresh}
 
 
 @router.delete('/llm/bindings/{model_key:path}')
@@ -2102,8 +2170,8 @@ async def delete_llm_binding(model_key: str):
         manager.delete_model(model_key)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await _refresh_runtime('admin_llm_binding_delete')
-    return {'ok': True}
+    runtime_refresh = await _refresh_runtime_after_save('admin_llm_binding_delete')
+    return {'ok': True, 'runtime_refresh': runtime_refresh}
 
 
 @router.get('/llm/routes')
