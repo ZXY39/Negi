@@ -19,6 +19,11 @@ from g3ku.resources.registry import ResourceRegistry
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
 from g3ku.runtime.tool_watchdog import ToolExecutionManager
 from main.errors import TaskPausedError
+from main.monitoring.log_service import (
+    _EXECUTION_STAGE_MODE_SELF,
+    _EXECUTION_STAGE_STATUS_ACTIVE,
+    _EXECUTION_STAGE_STATUS_COMPLETED,
+)
 import main.service.runtime_service as runtime_service_module
 from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool, SpawnChildNodesTool
 from main.runtime.react_loop import ReActToolLoop
@@ -1972,6 +1977,173 @@ def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_windo
     assert "archived stage history excerpt" in rendered_contents
     assert "current stage assistant detail" in rendered_contents
     assert "current stage tool output" in rendered_contents
+
+
+def test_prepare_messages_keeps_active_stage_and_latest_three_completed_stage_windows() -> None:
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    loop._log_service._store._node = SimpleNamespace(
+        metadata={
+            "execution_stages": {
+                "active_stage_id": "stage-5",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "stage-1",
+                        "stage_index": 1,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": _EXECUTION_STAGE_MODE_SELF,
+                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
+                        "stage_goal": "inspect stage one",
+                        "completed_stage_summary": "finished stage one",
+                        "key_refs": [],
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 1,
+                    },
+                    {
+                        "stage_id": "stage-2",
+                        "stage_index": 2,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": _EXECUTION_STAGE_MODE_SELF,
+                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
+                        "stage_goal": "inspect stage two",
+                        "completed_stage_summary": "finished stage two",
+                        "key_refs": [],
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 1,
+                    },
+                    {
+                        "stage_id": "stage-3",
+                        "stage_index": 3,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": _EXECUTION_STAGE_MODE_SELF,
+                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
+                        "stage_goal": "inspect stage three",
+                        "completed_stage_summary": "finished stage three",
+                        "key_refs": [],
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 1,
+                    },
+                    {
+                        "stage_id": "stage-4",
+                        "stage_index": 4,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": _EXECUTION_STAGE_MODE_SELF,
+                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
+                        "stage_goal": "inspect stage four",
+                        "completed_stage_summary": "finished stage four",
+                        "key_refs": [],
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 1,
+                    },
+                    {
+                        "stage_id": "stage-5",
+                        "stage_index": 5,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": _EXECUTION_STAGE_MODE_SELF,
+                        "status": _EXECUTION_STAGE_STATUS_ACTIVE,
+                        "stage_goal": "inspect stage five",
+                        "tool_round_budget": 3,
+                        "tool_rounds_used": 0,
+                    },
+                ],
+            }
+        }
+    )
+    original = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-1",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "stage one raw detail"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-2",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-2", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "stage two raw detail"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-3",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-3", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "stage three raw detail"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-4",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-4", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "stage four raw detail"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-5",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-5", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "current stage assistant detail"},
+        {"role": "tool", "name": "filesystem", "tool_call_id": "call-a", "content": "current stage tool output"},
+    ]
+
+    prepared = loop._prepare_messages(original, runtime_context={"task_id": "task-1", "node_id": "node-1"})
+
+    rendered_contents = [str(item.get("content") or "") for item in prepared]
+    assert "stage two raw detail" in rendered_contents
+    assert "stage three raw detail" in rendered_contents
+    assert "stage four raw detail" in rendered_contents
+    assert "current stage assistant detail" in rendered_contents
+    assert "current stage tool output" in rendered_contents
+    assert "stage one raw detail" not in rendered_contents
+
+    compact_blocks = [
+        content
+        for content in rendered_contents
+        if content.startswith("[G3KU_STAGE_COMPACT_V1]")
+    ]
+    assert len(compact_blocks) == 1
+    compact_payload = json.loads(compact_blocks[0].split("\n", 1)[1])
+    assert compact_payload["stage_index"] == 1
+    assert compact_payload["completed_stage_summary"] == "finished stage one"
 
 
 def test_prepare_messages_is_idempotent_for_compacted_stage_prompt() -> None:

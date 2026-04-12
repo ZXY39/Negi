@@ -110,7 +110,7 @@ async def _running_work_snapshot() -> dict[str, Any]:
             )
 
     has_running_work = bool(running_sessions or running_tasks)
-    parts = []
+    parts: list[str] = []
     if running_sessions:
         parts.append(f"{len(running_sessions)} 个进行中的对话")
     if running_tasks:
@@ -119,40 +119,48 @@ async def _running_work_snapshot() -> dict[str, Any]:
         "has_running_work": has_running_work,
         "running_sessions": running_sessions,
         "running_tasks": running_tasks,
-        "summary_text": "、".join(parts) if parts else "当前没有进行中的对话或任务。",
+        "summary_text": "，".join(parts) if parts else "当前没有进行中的对话或任务。",
     }
 
 
-async def _stop_running_work() -> dict[str, int]:
+async def _pause_running_work() -> dict[str, int]:
     agent = get_agent()
     runtime_manager = get_runtime_manager(agent)
     service = getattr(agent, "main_task_service", None)
     if service is not None:
         await service.startup()
 
-    stopped_sessions = 0
+    paused_sessions = 0
     for session_id in list(runtime_manager.list_sessions()):
         if not _runtime_session_is_running(runtime_manager, session_id):
             continue
-        await runtime_manager.cancel(session_id, reason="project_exit")
-        stopped_sessions += 1
+        pause = getattr(runtime_manager, "pause", None)
+        if callable(pause):
+            await pause(session_id, manual=True)
+        else:
+            session = runtime_manager.get(session_id) if hasattr(runtime_manager, "get") else None
+            if session is not None and hasattr(session, "pause"):
+                await session.pause(manual=True)
+        paused_sessions += 1
 
-    stopped_tasks = 0
+    paused_tasks = 0
     if service is not None:
         for task in list(service.store.list_tasks()):
             status = str(getattr(task, "status", "") or "").strip().lower()
             if status != "in_progress" or bool(getattr(task, "is_paused", False)):
                 continue
-            await service.cancel_task(task.task_id)
-            stopped_tasks += 1
+            await service.pause_task(task.task_id)
+            paused_tasks += 1
 
     for _ in range(20):
         await asyncio.sleep(0.1)
         snapshot = await _running_work_snapshot()
         if not snapshot["has_running_work"]:
             break
+    else:
+        raise TimeoutError("running work did not pause before exit")
 
-    return {"stopped_sessions": stopped_sessions, "stopped_tasks": stopped_tasks}
+    return {"paused_sessions": paused_sessions, "paused_tasks": paused_tasks}
 
 
 @router.get("/bootstrap/status")
@@ -211,21 +219,36 @@ async def bootstrap_exit_check():
 
 @router.post("/bootstrap/exit")
 async def bootstrap_exit(payload: dict | None = Body(default=None)):
-    stop_running_work = bool((payload or {}).get("stop_running_work") or (payload or {}).get("stopRunningWork"))
+    pause_running_work = bool(
+        (payload or {}).get("pause_running_work")
+        or (payload or {}).get("pauseRunningWork")
+        or (payload or {}).get("stop_running_work")
+        or (payload or {}).get("stopRunningWork")
+    )
     snapshot = await _running_work_snapshot()
-    if snapshot["has_running_work"] and not stop_running_work:
+    if snapshot["has_running_work"] and not pause_running_work:
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "running_work_requires_confirmation",
-                "message": "请先确认停止正在进行的对话和任务。",
+                "message": "请先确认暂停正在进行的所有对话和任务。",
                 **snapshot,
             },
         )
-    stopped = {"stopped_sessions": 0, "stopped_tasks": 0}
+    paused = {"paused_sessions": 0, "paused_tasks": 0}
     if snapshot["has_running_work"]:
         try:
-            stopped = await _stop_running_work()
+            paused = await _pause_running_work()
+        except TimeoutError:
+            latest_snapshot = await _running_work_snapshot()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "running_work_pause_incomplete",
+                    "message": "仍有对话或任务未暂停完成，项目不会退出。",
+                    **latest_snapshot,
+                },
+            ) from None
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     await shutdown_web_runtime()
@@ -236,7 +259,7 @@ async def bootstrap_exit(payload: dict | None = Body(default=None)):
         "item": {
             "shutting_down": True,
             **snapshot,
-            **stopped,
+            **paused,
         },
     }
 

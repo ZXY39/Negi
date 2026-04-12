@@ -151,6 +151,14 @@ class SessionRuntimeManager:
             await session.cancel(reason=reason)
         return await self._loop.cancel_session_tasks(key)
 
+    async def pause(self, session_key: str, *, manual: bool = False) -> int:
+        key = str(session_key or "").strip()
+        session = self._sessions.get(key)
+        if session is None:
+            return 0
+        await session.pause(manual=manual)
+        return 1
+
     def session_meta(self, session_key: str) -> tuple[str, str] | None:
         return self._meta.get(str(session_key or "").strip())
 

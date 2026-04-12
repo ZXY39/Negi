@@ -233,24 +233,27 @@ def _probe_openai_compatible(client: httpx.Client, config: NormalizedProviderCon
         try:
             payload = response.json()
         except json.JSONDecodeError:
-            return _non_json_failure(
+            if config.protocol_adapter != ProtocolAdapter.OPENAI_RESPONSES:
+                return _non_json_failure(
+                    config,
+                    response=response,
+                    latency_ms=latency_ms,
+                    label="Model catalog returned a non-JSON response",
+                )
+            payload = None
+        if payload is not None:
+            model_count = None
+            if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+                model_count = len(payload["data"])
+            elif isinstance(payload, list):
+                model_count = len(payload)
+            return _success_result(
                 config,
-                response=response,
                 latency_ms=latency_ms,
-                label="Model catalog returned a non-JSON response",
+                http_status=response.status_code,
+                message="Model catalog request succeeded.",
+                diagnostics={"model_count": model_count},
             )
-        model_count = None
-        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
-            model_count = len(payload["data"])
-        elif isinstance(payload, list):
-            model_count = len(payload)
-        return _success_result(
-            config,
-            latency_ms=latency_ms,
-            http_status=response.status_code,
-            message="Model catalog request succeeded.",
-            diagnostics={"model_count": model_count},
-        )
     endpoint, payload = _build_openai_fallback_payload(config)
     fallback = client.post(_join_url(config.base_url, endpoint), headers=headers, json=payload)
     if fallback.status_code in {401, 403}:

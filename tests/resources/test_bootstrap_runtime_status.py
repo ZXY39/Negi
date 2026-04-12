@@ -226,6 +226,118 @@ def test_bootstrap_exit_stops_runtime_before_requesting_server_shutdown(monkeypa
     assert response.status_code == 200
 
 
+def test_bootstrap_exit_pauses_running_work_before_shutdown(monkeypatch):
+    calls: list[str] = []
+
+    class _Security:
+        def is_unlocked(self) -> bool:
+            return True
+
+    class _RuntimeManager:
+        def list_sessions(self) -> list[str]:
+            return ["web:shared"]
+
+        def get(self, session_id: str):
+            if session_id != "web:shared":
+                return None
+            return SimpleNamespace(
+                state=SimpleNamespace(is_running=True, status="running"),
+            )
+
+        async def pause(self, session_id: str, *, manual: bool = False) -> int:
+            calls.append(f"pause_session:{session_id}:{manual}")
+            return 1
+
+    class _TaskService:
+        def __init__(self) -> None:
+            self.store = SimpleNamespace(
+                list_tasks=lambda: [
+                    SimpleNamespace(task_id="task:1", status="in_progress", is_paused=False),
+                ]
+            )
+
+        async def startup(self) -> None:
+            calls.append("startup")
+
+        async def pause_task(self, task_id: str):
+            calls.append(f"pause_task:{task_id}")
+            return None
+
+    agent = SimpleNamespace(
+        sessions=None,
+        main_task_service=_TaskService(),
+    )
+    runtime_manager = _RuntimeManager()
+    snapshots = iter(
+        [
+            {
+                "has_running_work": True,
+                "running_sessions": [{"session_id": "web:shared", "title": "web:shared"}],
+                "running_tasks": [{"task_id": "task:1", "title": "", "session_id": ""}],
+                "summary_text": "1 running session. 1 running task.",
+            },
+            {
+                "has_running_work": False,
+                "running_sessions": [],
+                "running_tasks": [],
+                "summary_text": "idle",
+            },
+        ]
+    )
+
+    async def _snapshot() -> dict[str, object]:
+        return next(snapshots)
+
+    async def _shutdown_runtime() -> None:
+        calls.append("shutdown_runtime")
+
+    monkeypatch.setattr(bootstrap_rest, "_service", lambda: _Security())
+    monkeypatch.setattr(bootstrap_rest, "get_agent", lambda: agent)
+    monkeypatch.setattr(bootstrap_rest, "get_runtime_manager", lambda _agent=None: runtime_manager)
+    monkeypatch.setattr(bootstrap_rest, "_running_work_snapshot", _snapshot)
+    monkeypatch.setattr(bootstrap_rest, "shutdown_web_runtime", _shutdown_runtime)
+    monkeypatch.setattr(
+        bootstrap_rest,
+        "request_server_shutdown",
+        lambda: calls.append("request_server_shutdown") or True,
+    )
+
+    client = TestClient(_build_app())
+    response = client.post("/bootstrap/exit", json={"stop_running_work": True})
+
+    assert response.status_code == 200
+    assert "pause_session:web:shared:True" in calls
+    assert "pause_task:task:1" in calls
+    assert "shutdown_runtime" in calls
+    assert response.json()["item"]["paused_sessions"] == 1
+    assert response.json()["item"]["paused_tasks"] == 1
+
+
+def test_bootstrap_exit_requires_pause_confirmation(monkeypatch):
+    class _Security:
+        def is_unlocked(self) -> bool:
+            return True
+
+    async def _snapshot() -> dict[str, object]:
+        return {
+            "has_running_work": True,
+            "running_sessions": [{"session_id": "web:shared", "title": "Demo"}],
+            "running_tasks": [],
+            "summary_text": "1 running session.",
+        }
+
+    monkeypatch.setattr(bootstrap_rest, "_service", lambda: _Security())
+    monkeypatch.setattr(bootstrap_rest, "_running_work_snapshot", _snapshot)
+
+    client = TestClient(_build_app())
+    response = client.post("/bootstrap/exit", json={})
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "running_work_requires_confirmation"
+    assert "暂停" in detail["message"]
+
+
 def test_bootstrap_unlock_succeeds_when_runtime_start_is_deferred(monkeypatch):
     calls: list[str] = []
 

@@ -4292,15 +4292,15 @@ async function requestProjectExit() {
         confirmKind: "danger",
         checkbox: hasRunning ? {
             checked: false,
-            label: "停止正在进行的对话和任务",
+            label: "暂停正在进行的所有对话和任务",
             hint: summary,
         } : null,
         returnFocus: U.projectExit,
         onConfirm: async ({ checked }) => {
             if (hasRunning && !checked) {
-                throw new Error("请先勾选“停止正在进行的对话和任务”。");
+                throw new Error("请先勾选“暂停正在进行的所有对话和任务”。");
             }
-            await ApiClient.exitBootstrap({ stop_running_work: !!checked });
+            await ApiClient.exitBootstrap({ pause_running_work: !!checked });
             finalizeProjectExit();
         },
     });
