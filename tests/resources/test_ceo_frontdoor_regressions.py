@@ -1112,6 +1112,48 @@ def test_build_prompt_context_keeps_dispatch_overlay_and_exhausted_stage_instruc
     assert "Current CEO stage budget is exhausted: 1/1." in overlay
     assert "First summarize the completed progress for this stage and call `submit_next_stage`" in overlay
 
+
+@pytest.mark.asyncio
+async def test_graph_normalize_model_output_rejects_plain_text_when_transition_required() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    result = await runner._graph_normalize_model_output(
+        {
+            "response_payload": {
+                "content": "我在。请直接告诉我你现在要我做什么。",
+                "tool_calls": [],
+                "finish_reason": "stop",
+            },
+            "route_kind": "direct_reply",
+            "used_tools": ["task_progress", "task_failed_nodes"],
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": True,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Inspect task failure history",
+                        "tool_round_budget": 4,
+                        "tool_rounds_used": 4,
+                        "status": "active",
+                        "mode": "自主执行",
+                        "completed_stage_summary": "",
+                        "key_refs": [],
+                        "rounds": [],
+                    }
+                ],
+            },
+        },
+        runtime=SimpleNamespace(),
+    )
+
+    assert result["next_step"] == "call_model"
+    assert "submit_next_stage" in str(result["repair_overlay_text"])
+    assert "Do not finish yet." in str(result["repair_overlay_text"])
+    assert str(result.get("final_output") or "") == ""
+
+
 @pytest.mark.asyncio
 async def test_graph_prepare_turn_keeps_messages_raw_and_drops_summary_state() -> None:
     loop = SimpleNamespace()

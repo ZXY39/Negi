@@ -288,7 +288,12 @@ class CeoTurnLifecycleMiddleware(AgentMiddleware):
             "final_output": str(finalized.get("final_output") or ""),
             "route_kind": str(finalized.get("route_kind") or "direct_reply"),
             "verified_task_ids": list(state.get("verified_task_ids") or []),
-            "frontdoor_stage_state": self._runner._frontdoor_stage_state_snapshot(state),
+            "frontdoor_stage_state": self._runner._frontdoor_stage_state_snapshot(
+                {
+                    **dict(state or {}),
+                    "frontdoor_stage_state": finalized.get("frontdoor_stage_state"),
+                }
+            ),
             "compression_state": dict(
                 state.get("compression_state") or self._runner._default_compression_state()
             ),

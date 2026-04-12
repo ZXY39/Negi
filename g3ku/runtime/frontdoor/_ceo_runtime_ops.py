@@ -559,9 +559,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             for stage in normalized_stages
         ):
             active_stage_id = ""
+        transition_required = bool(raw.get("transition_required"))
+        if not active_stage_id:
+            transition_required = False
         return {
             "active_stage_id": active_stage_id,
-            "transition_required": bool(raw.get("transition_required")),
+            "transition_required": transition_required,
             "stages": normalized_stages,
         }
 
@@ -1556,6 +1559,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         current_route_kind = str(state.get("route_kind") or "direct_reply")
         used_tools = list(state.get("used_tools") or [])
         xml_repair_attempt_count = int(state.get("xml_repair_attempt_count", 0) or 0)
+        stage_gate = self._frontdoor_stage_gate(state)
 
         if not response_tool_calls and visible_tool_names:
             xml_extraction = extract_tool_calls_from_xml_pseudo_content(
@@ -1666,6 +1670,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         text = self._content_text(response_view.content)
         if text.strip():
+            if (
+                bool(stage_gate.get("transition_required"))
+                and str(current_route_kind or "direct_reply") == "direct_reply"
+                and not str(state.get("repair_overlay_text") or "").strip()
+            ):
+                return {
+                    "repair_overlay_text": (
+                        build_ceo_stage_result_block_message(stage_gate)
+                        or build_ceo_stage_overlay(stage_gate)
+                    ),
+                    "final_output": "",
+                    "next_step": "call_model",
+                }
             return {
                 "final_output": text.strip(),
                 "route_kind": self._route_kind_for_turn(used_tools=used_tools, default=current_route_kind),

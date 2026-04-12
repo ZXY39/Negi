@@ -435,6 +435,22 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             tool_call_payloads=tool_call_payloads,
             tool_results=tool_results,
         )
+        verified_task_ids: list[str] = []
+        repair_overlay_text: str | None = None
+        for tool_result in tool_results:
+            tool_name = str(tool_result.get("tool_name") or "").strip()
+            result_text = str(tool_result.get("result_text") or "").strip()
+            if tool_name != "create_async_task":
+                continue
+            task_id = self._extract_task_id(result_text)
+            if not task_id or not self._task_id_exists(task_id):
+                continue
+            verified_task_ids = [task_id]
+            if route_kind == "task_dispatch":
+                repair_overlay_text = (
+                    f"Dispatch result is already available. Reply naturally based on the verified task id {task_id}."
+                )
+            break
         substantive_tool_names = [
             str(payload.get("name") or "").strip()
             for payload in tool_call_payloads
@@ -448,9 +464,11 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             "route_kind": route_kind,
             "analysis_text": "",
             "tool_call_payloads": [],
-            "verified_task_ids": [],
+            "verified_task_ids": verified_task_ids,
             "synthetic_tool_calls_used": False,
         }
+        if repair_overlay_text:
+            result["repair_overlay_text"] = repair_overlay_text
         return result
 
     def _middleware(self) -> list[Any]:

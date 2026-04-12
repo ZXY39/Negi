@@ -908,7 +908,9 @@ async def test_create_agent_runner_resume_turn_wires_frontdoor_stage_and_compres
 
     assert output == "approved"
     assert session._last_route_kind == "direct_reply"
-    assert session._frontdoor_stage_state["transition_required"] is True
+    assert session._frontdoor_stage_state["active_stage_id"] == ""
+    assert session._frontdoor_stage_state["transition_required"] is False
+    assert session._frontdoor_stage_state["stages"][0]["status"] == "completed"
     assert session._compression_state == {"status": "idle", "text": "", "source": ""}
 
 
