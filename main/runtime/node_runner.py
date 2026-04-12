@@ -249,12 +249,12 @@ class NodeRunner:
                 continue
             if any(self._normalized_status(item.get('status')) != 'success' for item in entries):
                 continue
-            raw_results = list(payload.get('results') or [])
-            if len(raw_results) != len(specs):
-                continue
-            try:
-                results = [SpawnChildResult.model_validate(item) for item in raw_results]
-            except Exception:
+            results = self._spawn_round_results_from_entries(
+                task_id=parent.task_id,
+                entries=entries,
+                specs=specs,
+            )
+            if len(results) != len(specs):
                 continue
             if any(result.failure_info is not None for result in results):
                 continue
@@ -693,7 +693,11 @@ class NodeRunner:
         parent = self._store.get_node(parent_node_id) or parent
         cached = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
         if isinstance(cached, dict) and cached.get('completed'):
-            return [SpawnChildResult.model_validate(item) for item in list(cached.get('results') or [])]
+            return self._spawn_round_results_from_entries(
+                task_id=task.task_id,
+                entries=[dict(item) for item in list(cached.get('entries') or []) if isinstance(item, dict)],
+                specs=specs,
+            )
         reused_results = self._completed_successful_spawn_results(
             parent=parent,
             specs=specs,
@@ -705,7 +709,6 @@ class NodeRunner:
         cached_payload = copy.deepcopy(cached) if isinstance(cached, dict) else {
             'specs': [item.model_dump(mode='json') for item in specs],
             'entries': [],
-            'results': [],
             'completed': False,
         }
         cached_payload['specs'] = [item.model_dump(mode='json') for item in specs]
@@ -807,11 +810,16 @@ class NodeRunner:
                     )
                     return result
 
-        results = await asyncio.gather(*[_run_spec(index, spec) for index, spec in enumerate(specs)])
-        cached_payload['results'] = [item.model_dump(mode='json', exclude_none=True) for item in results]
+        await asyncio.gather(*[_run_spec(index, spec) for index, spec in enumerate(specs)])
         cached_payload['completed'] = True
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
-        return list(results)
+        latest_parent = self._store.get_node(parent.node_id) or parent
+        latest_payload = dict((latest_parent.metadata or {}).get('spawn_operations') or {}).get(cache_key) or cached_payload
+        return self._spawn_round_results_from_entries(
+            task_id=task.task_id,
+            entries=[dict(item) for item in list(latest_payload.get('entries') or []) if isinstance(item, dict)],
+            specs=specs,
+        )
 
     async def _review_spawn_batch(
         self,
@@ -1201,6 +1209,7 @@ class NodeRunner:
                     blocked_reason='',
                     blocked_suggestion='',
                     synthetic_result_summary='',
+                    runtime_error_text='',
                 )
                 continue
             blocked_payload = blocked_by_index.get(index) or {
@@ -1226,7 +1235,7 @@ class NodeRunner:
                 blocked_reason=str(blocked_payload.get('reason') or '').strip(),
                 blocked_suggestion=str(blocked_payload.get('suggestion') or '').strip(),
                 synthetic_result_summary=str(result.node_output_summary or ''),
-                result=result.model_dump(mode='json', exclude_none=True),
+                runtime_error_text='',
             )
         cached_payload['spawn_review'] = {
             'round_id': str(cache_key or ''),
@@ -1274,6 +1283,19 @@ class NodeRunner:
         summary_text = cls._spawn_review_blocked_summary(reason=reason)
         return SpawnChildResult(
             goal=spec.goal,
+            check_result=_SPAWN_REVIEW_BLOCKED_CHECK_RESULT,
+            node_output=output_text,
+            node_output_summary=summary_text,
+            node_output_ref='',
+            failure_info=None,
+        )
+
+    @classmethod
+    def _spawn_review_blocked_result_by_goal(cls, *, goal: str, reason: str, suggestion: str) -> SpawnChildResult:
+        output_text = cls._spawn_review_blocked_text(reason=reason, suggestion=suggestion)
+        summary_text = cls._spawn_review_blocked_summary(reason=reason)
+        return SpawnChildResult(
+            goal=str(goal or '').strip(),
             check_result=_SPAWN_REVIEW_BLOCKED_CHECK_RESULT,
             node_output=output_text,
             node_output_summary=summary_text,
@@ -1423,6 +1445,20 @@ class NodeRunner:
         error_source: str = 'runtime',
     ) -> tuple[SpawnChildResult, str, str, str | None]:
         goal = str(entry.get('goal') or fallback_goal or '').strip()
+        review_decision = str(entry.get('review_decision') or '').strip().lower()
+        if review_decision == 'blocked':
+            blocked_reason = str(entry.get('blocked_reason') or '').strip()
+            blocked_suggestion = str(entry.get('blocked_suggestion') or '').strip()
+            result = self._spawn_review_blocked_result_by_goal(
+                goal=goal,
+                reason=blocked_reason,
+                suggestion=blocked_suggestion,
+            )
+            return result, 'success', 'skipped', _SPAWN_REVIEW_BLOCKED_CHECK_RESULT
+        runtime_error_text = str(entry.get('runtime_error_text') or '').strip()
+        if runtime_error_text:
+            result = self._spawn_runtime_result(goal, error_text=runtime_error_text)
+            return result, 'error', 'failed', runtime_error_text
         requires_acceptance = bool(entry.get('requires_acceptance'))
         child_node_id = str(entry.get('child_node_id') or '').strip()
         acceptance_node_id = str(entry.get('acceptance_node_id') or '').strip()
@@ -1441,10 +1477,11 @@ class NodeRunner:
 
         if requires_acceptance:
             if acceptance is not None and self._normalized_status(getattr(acceptance, 'status', '')) == STATUS_SUCCESS:
+                acceptance_record = self._result_from_record(acceptance) if acceptance is not None else None
                 check_result = str(
-                    acceptance.final_output
+                    (acceptance_record.summary if acceptance_record is not None else '')
+                    or acceptance.final_output
                     or acceptance.failure_reason
-                    or (self._result_from_record(acceptance).summary if acceptance is not None else '')
                     or SKIPPED_CHECK_RESULT
                 ).strip() or SKIPPED_CHECK_RESULT
                 return (
@@ -1460,10 +1497,11 @@ class NodeRunner:
                     check_result,
                 )
             if acceptance is not None:
+                acceptance_record = self._result_from_record(acceptance) if acceptance is not None else None
                 check_result = str(
-                    acceptance.final_output
+                    (acceptance_record.summary if acceptance_record is not None else '')
+                    or acceptance.final_output
                     or acceptance.failure_reason
-                    or (self._result_from_record(acceptance).summary if acceptance is not None else '')
                     or fallback_reason
                 ).strip() or fallback_reason
                 return (
@@ -1477,7 +1515,7 @@ class NodeRunner:
                             task_id=task_id,
                             node=acceptance,
                             fallback_output=check_result,
-                            source=error_source,
+                            source='acceptance',
                         ),
                     ),
                     'error',
@@ -1513,7 +1551,7 @@ class NodeRunner:
                         task_id=task_id,
                         node=child,
                         fallback_output=fallback_reason,
-                        source=error_source,
+                        source='execution',
                     ),
                 ),
                 'error',
@@ -1523,6 +1561,31 @@ class NodeRunner:
         fallback_error = str(fallback_reason or self._spawn_exception_text(RuntimeError('child node missing'))).strip()
         result = self._spawn_runtime_result(goal, error_text=fallback_error)
         return result, 'error', 'failed', fallback_error
+
+    def _spawn_round_results_from_entries(
+        self,
+        *,
+        task_id: str,
+        entries: list[dict[str, Any]],
+        specs: list[SpawnChildSpec] | None = None,
+    ) -> list[SpawnChildResult]:
+        specs_list = list(specs or [])
+        results: list[SpawnChildResult] = []
+        for index, entry in enumerate(list(entries or [])):
+            if not isinstance(entry, dict):
+                continue
+            fallback_goal = str(entry.get('goal') or '').strip()
+            if not fallback_goal and index < len(specs_list):
+                fallback_goal = str(specs_list[index].goal or '').strip()
+            result, _status, _check_status, _child_check_result = self._rebuild_spawn_entry_result(
+                task_id=task_id,
+                entry=entry,
+                fallback_goal=fallback_goal,
+                fallback_reason=self._spawn_exception_text(RuntimeError('child node missing')),
+                error_source='runtime',
+            )
+            results.append(result)
+        return results
 
     async def _settle_superseded_spawn_operations(
         self,
@@ -1585,7 +1648,6 @@ class NodeRunner:
                     status=status,
                     finished_at=_now(),
                     check_status=check_status,
-                    result=result.model_dump(mode='json', exclude_none=True),
                 )
             payload['completed'] = not any(
                 self._spawn_entry_is_active(item)
@@ -1606,9 +1668,21 @@ class NodeRunner:
     ) -> SpawnChildResult:
         entries = list(cached_payload.get('entries') or [])
         entry = dict(entries[index] or {})
-        existing_result = entry.get('result')
-        if isinstance(existing_result, dict) and str(entry.get('status') or '').strip().lower() in {'success', 'error'}:
-            return SpawnChildResult.model_validate(existing_result)
+        if str(entry.get('status') or '').strip().lower() in {'success', 'error'}:
+            existing_result = entry.get('result')
+            if isinstance(existing_result, dict):
+                try:
+                    return SpawnChildResult.model_validate(existing_result)
+                except Exception:
+                    pass
+            rebuilt_result, _status, _check_status, _child_check_result = self._rebuild_spawn_entry_result(
+                task_id=task.task_id,
+                entry=entry,
+                fallback_goal=spec.goal,
+                fallback_reason=self._spawn_exception_text(RuntimeError('child node missing')),
+                error_source='runtime',
+            )
+            return rebuilt_result
 
         stop_reason = self._task_terminal_reason(task.task_id, task=task) or self._node_terminal_reason(
             self._store.get_node(parent.node_id) or parent,
@@ -1687,7 +1761,7 @@ class NodeRunner:
                     status='error',
                     finished_at=_now(),
                     check_status='skipped',
-                    result=result.model_dump(mode='json', exclude_none=True),
+                    runtime_error_text='',
                 )
                 return result
 
@@ -1717,7 +1791,7 @@ class NodeRunner:
                     status='success',
                     finished_at=_now(),
                     check_status='skipped',
-                    result=result.model_dump(mode='json', exclude_none=True),
+                    runtime_error_text='',
                 )
                 return result
 
@@ -1789,7 +1863,7 @@ class NodeRunner:
                 status='success' if acceptance_result.status == STATUS_SUCCESS else 'error',
                 finished_at=_now(),
                 check_status='passed' if acceptance_result.status == STATUS_SUCCESS else 'failed',
-                result=result.model_dump(mode='json', exclude_none=True),
+                runtime_error_text='',
             )
             return result
         except TaskPausedError:
@@ -1811,7 +1885,7 @@ class NodeRunner:
                 status='error',
                 finished_at=_now(),
                 check_status='failed',
-                result=result.model_dump(mode='json', exclude_none=True),
+                runtime_error_text=error_text,
             )
             return result
         except Exception as exc:
@@ -1826,7 +1900,7 @@ class NodeRunner:
                 status='error',
                 finished_at=_now(),
                 check_status='failed',
-                result=result.model_dump(mode='json', exclude_none=True),
+                runtime_error_text=error_text,
             )
             return result
 
@@ -1838,16 +1912,13 @@ class NodeRunner:
         check_status = str(payload.get('check_status') or '').strip().lower()
         if check_status not in {'', 'pending', 'running', 'skipped', 'passed', 'failed'}:
             check_status = ''
-        result = payload.get('result')
         review_decision = str(payload.get('review_decision') or '').strip().lower()
         if review_decision not in {'', 'allowed', 'blocked'}:
             review_decision = ''
         return {
             'index': index,
             'goal': spec.goal,
-            'prompt': spec.prompt,
             'requires_acceptance': bool(payload.get('requires_acceptance')) if 'requires_acceptance' in payload else self._requires_acceptance(spec),
-            'acceptance_prompt': str(spec.acceptance_prompt or ''),
             'status': status,
             'started_at': str(payload.get('started_at') or ''),
             'finished_at': str(payload.get('finished_at') or ''),
@@ -1858,7 +1929,7 @@ class NodeRunner:
             'blocked_reason': str(payload.get('blocked_reason') or ''),
             'blocked_suggestion': str(payload.get('blocked_suggestion') or ''),
             'synthetic_result_summary': str(payload.get('synthetic_result_summary') or ''),
-            'result': copy.deepcopy(result) if isinstance(result, dict) else {},
+            'runtime_error_text': str(payload.get('runtime_error_text') or ''),
         }
 
     def _update_spawn_entry(
@@ -1881,11 +1952,6 @@ class NodeRunner:
             entry[key] = copy.deepcopy(value)
         entries[index] = entry
         cached_payload['entries'] = entries
-        cached_payload['results'] = [
-            copy.deepcopy(item.get('result'))
-            for item in entries
-            if isinstance(item, dict) and isinstance(item.get('result'), dict) and item.get('result')
-        ]
         self._save_spawn_cache(task_id, parent_node_id, cache_key, cached_payload)
         return entry
 
@@ -1943,12 +2009,19 @@ class NodeRunner:
 
         child_pipelines: list[dict[str, Any]] = []
         pending_specs: list[dict[str, Any]] = []
-        partial_results: list[dict[str, Any]] = []
 
         for operation_index, (_operation_id, payload) in enumerate(spawn_operations.items()):
             if not isinstance(payload, dict):
                 continue
-            specs = [copy.deepcopy(item) for item in list(payload.get('specs') or []) if isinstance(item, dict)]
+            specs = [
+                {
+                    'goal': str(item.get('goal') or '').strip(),
+                    'execution_policy': copy.deepcopy(item.get('execution_policy') or {}),
+                    'requires_acceptance': bool(item.get('requires_acceptance')),
+                }
+                for item in list(payload.get('specs') or [])
+                if isinstance(item, dict)
+            ]
             if not bool(payload.get('completed')):
                 pending_specs.extend(specs)
             for entry_index, entry in enumerate(list(payload.get('entries') or [])):
@@ -1974,15 +2047,12 @@ class NodeRunner:
                         ),
                     }
                 )
-                result = entry.get('result')
-                if isinstance(result, dict) and result:
-                    partial_results.append(copy.deepcopy(result))
 
         child_pipelines.sort(key=lambda item: item.get('_sort_key') or ('', 0, 0))
         for item in child_pipelines:
             item.pop('_sort_key', None)
         has_active = any(str(item.get('status') or '').strip().lower() in {'queued', 'running'} for item in child_pipelines)
-        return child_pipelines, pending_specs, partial_results, has_active
+        return child_pipelines, pending_specs, [], has_active
 
     async def _admit_spawn_batch(
         self,

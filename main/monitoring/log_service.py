@@ -2671,8 +2671,7 @@ class TaskLogService:
             )
         return rounds
 
-    @staticmethod
-    def _latest_direct_child_results_payload(node: NodeRecord) -> tuple[str, list[dict[str, Any]]]:
+    def _latest_direct_child_results_payload(self, node: NodeRecord) -> tuple[str, list[dict[str, Any]]]:
         operations = (node.metadata or {}).get('spawn_operations') if isinstance(node.metadata, dict) else {}
         if not isinstance(operations, dict):
             return '', []
@@ -2687,8 +2686,57 @@ class TaskLogService:
             return '', []
         results: list[dict[str, Any]] = []
         for item in latest_entries:
-            result = dict(item.get('result') or {}) if isinstance(item.get('result'), dict) else {}
-            failure_info = dict(result.get('failure_info') or {}) if isinstance(result.get('failure_info'), dict) else {}
+            child_node_id = str(item.get('child_node_id') or '').strip()
+            acceptance_node_id = str(item.get('acceptance_node_id') or '').strip()
+            child = self.ensure_node_output_externalized(node.task_id, child_node_id) if child_node_id else None
+            if child is not None:
+                child = self.ensure_node_result_payload_externalized(node.task_id, child.node_id) or child
+            acceptance = self.ensure_node_output_externalized(node.task_id, acceptance_node_id) if acceptance_node_id else None
+            if acceptance is not None:
+                acceptance = self.ensure_node_result_payload_externalized(node.task_id, acceptance.node_id) or acceptance
+            review_decision = str(item.get('review_decision') or '')
+            runtime_error_text = str(item.get('runtime_error_text') or '').strip()
+            failure_info: dict[str, Any] = {}
+            check_result = ''
+            node_output_summary = str(item.get('synthetic_result_summary') or '')
+            node_output_ref = ''
+
+            if review_decision == 'blocked':
+                check_result = '派生已被拦截'
+            elif runtime_error_text:
+                check_result = runtime_error_text
+                failure_info = {
+                    'source': 'runtime',
+                    'summary': runtime_error_text,
+                    'delivery_status': 'blocked',
+                    'blocking_reason': runtime_error_text,
+                    'remaining_work': [],
+                }
+            elif acceptance is not None:
+                check_result = str(acceptance.final_output or acceptance.failure_reason or '').strip()
+                if child is not None:
+                    node_output_summary = str(child.final_output or child.failure_reason or '').strip()
+                    node_output_ref = str(child.final_output_ref or '').strip()
+                if str(acceptance.status or '').strip().lower() != 'success':
+                    failure_info = {
+                        'source': 'acceptance',
+                        'summary': str(acceptance.final_output or acceptance.failure_reason or '').strip(),
+                        'delivery_status': 'blocked' if str(acceptance.failure_reason or '').strip() else 'final',
+                        'blocking_reason': str(acceptance.failure_reason or '').strip(),
+                        'remaining_work': [],
+                    }
+            elif child is not None:
+                check_result = str(child.check_result or '未检验')
+                node_output_summary = str(child.final_output or child.failure_reason or '').strip()
+                node_output_ref = str(child.final_output_ref or ((child.metadata or {}).get('result_payload_ref') or '')).strip()
+                if str(child.status or '').strip().lower() != 'success':
+                    failure_info = {
+                        'source': 'execution',
+                        'summary': str(child.final_output or child.failure_reason or '').strip(),
+                        'delivery_status': 'blocked' if str(child.failure_reason or '').strip() else 'final',
+                        'blocking_reason': str(child.failure_reason or '').strip(),
+                        'remaining_work': [],
+                    }
             results.append(
                 {
                     'index': int(item.get('index') or 0),
@@ -2700,12 +2748,12 @@ class TaskLogService:
                     'child_node_id': str(item.get('child_node_id') or ''),
                     'acceptance_node_id': str(item.get('acceptance_node_id') or ''),
                     'check_status': str(item.get('check_status') or ''),
-                    'review_decision': str(item.get('review_decision') or ''),
+                    'review_decision': review_decision,
                     'blocked_reason': str(item.get('blocked_reason') or ''),
                     'blocked_suggestion': str(item.get('blocked_suggestion') or ''),
-                    'check_result': str(result.get('check_result') or ''),
-                    'node_output_summary': str(result.get('node_output_summary') or result.get('node_output') or item.get('synthetic_result_summary') or ''),
-                    'node_output_ref': str(result.get('node_output_ref') or ''),
+                    'check_result': check_result,
+                    'node_output_summary': node_output_summary,
+                    'node_output_ref': node_output_ref,
                     'failure_info': failure_info,
                 }
             )

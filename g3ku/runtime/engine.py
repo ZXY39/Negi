@@ -230,18 +230,57 @@ class AgentRuntimeEngine:
             await asyncio.gather(*tasks, return_exceptions=True)
         return len(tasks)
 
+    @staticmethod
+    def _sqlite_checkpointer_is_active(checkpointer: Any) -> bool:
+        connection = getattr(checkpointer, "conn", None)
+        if connection is None:
+            return True
+        try:
+            _ = getattr(connection, "_conn")
+        except ValueError as exc:
+            if "no active connection" in str(exc).strip().lower():
+                return False
+            raise
+        return True
+
+    async def _reset_checkpointer_handles(self) -> None:
+        checkpointer = getattr(self, "_checkpointer", None)
+        if checkpointer is not None and hasattr(checkpointer, "close"):
+            try:
+                maybe = checkpointer.close()
+                if inspect.isawaitable(maybe):
+                    await maybe
+            except Exception:
+                logger.debug("Stale checkpointer close skipped during rebuild")
+        checkpointer_cm = getattr(self, "_checkpointer_cm", None)
+        if checkpointer_cm is not None and hasattr(checkpointer_cm, "__aexit__"):
+            try:
+                maybe = checkpointer_cm.__aexit__(None, None, None)
+                if inspect.isawaitable(maybe):
+                    await maybe
+            except Exception:
+                logger.debug("Stale checkpointer context close skipped during rebuild")
+        self._checkpointer = None
+        self._checkpointer_cm = None
+
     async def _ensure_checkpointer_ready(self) -> None:
         if not self._checkpointer_enabled:
-            return None
-        if self._checkpointer is not None:
             return None
         backend = str(getattr(self, '_checkpointer_backend', 'disabled') or 'disabled').lower()
         if backend != 'sqlite' or not self._checkpointer_path:
             return None
 
         async with self._checkpointer_lock:
-            if not self._checkpointer_enabled or self._checkpointer is not None:
+            if not self._checkpointer_enabled:
                 return None
+            if self._checkpointer is not None:
+                if self._sqlite_checkpointer_is_active(self._checkpointer):
+                    return None
+                logger.warning(
+                    'SQLite checkpointer connection inactive; rebuilding at {}',
+                    self._checkpointer_path,
+                )
+                await self._reset_checkpointer_handles()
             try:
                 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
