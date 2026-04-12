@@ -873,8 +873,9 @@ class WebSessionHeartbeatService:
             ),
         )
 
-    def _clear_preserved_inflight_turn(self, session_id: str, session: Any) -> str | None:
+    def _clear_preserved_inflight_turn(self, session_id: str, session: Any) -> tuple[str | None, str]:
         source: str | None = None
+        turn_id = ""
         getter = getattr(session, "inflight_turn_snapshot", None)
         if callable(getter):
             try:
@@ -885,6 +886,7 @@ class WebSessionHeartbeatService:
                 raw_source = str(snapshot.get("source") or "").strip().lower()
                 if raw_source != "heartbeat":
                     source = raw_source or "user"
+                    turn_id = str(snapshot.get("turn_id") or "").strip()
         clearer = getattr(session, "clear_preserved_inflight_turn", None)
         if callable(clearer):
             try:
@@ -893,7 +895,7 @@ class WebSessionHeartbeatService:
                 logger.debug("preserved inflight turn clear skipped for {}", session_id)
         else:
             clear_inflight_turn_snapshot(session_id)
-        return source
+        return source, turn_id
 
     @staticmethod
     def _task_terminal_result_metadata(events: list[SessionHeartbeatEvent]) -> list[dict[str, str]]:
@@ -1100,9 +1102,12 @@ class WebSessionHeartbeatService:
             if continuation_task_id and continuation_task_id not in task_ids:
                 task_ids.append(continuation_task_id)
         task_results = self._task_terminal_result_metadata(events)
-        preserved_source = self._clear_preserved_inflight_turn(key, session)
+        preserved_source, preserved_turn_id = self._clear_preserved_inflight_turn(key, session)
         if preserved_source:
-            self._publish_ceo(key, "ceo.turn.discard", {"source": preserved_source})
+            discard_payload = {"source": preserved_source}
+            if preserved_turn_id:
+                discard_payload["turn_id"] = preserved_turn_id
+            self._publish_ceo(key, "ceo.turn.discard", discard_payload)
         self._persist_assistant_reply(
             key,
             text=output,
@@ -1110,7 +1115,11 @@ class WebSessionHeartbeatService:
             reason=heartbeat_reason,
             task_results=task_results,
         )
-        self._publish_ceo(key, "ceo.reply.final", {"text": output, "source": "heartbeat"})
+        self._publish_ceo(
+            key,
+            "ceo.reply.final",
+            {"text": output, "source": "heartbeat", "turn_id": f"hb-{now_iso()}"},
+        )
         await self._notify_reply(key, output)
         event_ids = {event.event_id for event in events}
         popped = self._events.pop_many(key, event_ids=event_ids)

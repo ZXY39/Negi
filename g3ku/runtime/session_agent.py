@@ -301,6 +301,21 @@ class RuntimeAgentSession:
         self._active_turn_id = turn_id
         return turn_id
 
+    def _current_turn_id(self, prompt: Any | None = None) -> str:
+        current = self._last_prompt if prompt is None else prompt
+        if isinstance(current, UserInputMessage):
+            if self._internal_prompt_source(current) is None:
+                return self._ensure_user_turn_id(current)
+            metadata = dict(current.metadata or {})
+            turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or self._active_turn_id or "").strip()
+            if not turn_id:
+                turn_id = self._new_turn_id()
+                metadata[_TRANSCRIPT_TURN_ID_KEY] = turn_id
+                current.metadata = metadata
+                self._active_turn_id = turn_id
+            return turn_id
+        return str(self._active_turn_id or "").strip()
+
     @classmethod
     def _find_transcript_user_index(cls, persisted_session: Any, *, turn_id: str) -> int | None:
         normalized_turn_id = str(turn_id or "").strip()
@@ -801,6 +816,9 @@ class RuntimeAgentSession:
             "execution_trace_summary": execution_trace_summary,
             "compression": compression,
         }
+        turn_id = self._current_turn_id()
+        if turn_id:
+            snapshot["turn_id"] = turn_id
         if legacy_tool_events:
             snapshot["tool_events"] = legacy_tool_events
         prompt = self._last_prompt
@@ -1428,6 +1446,7 @@ class RuntimeAgentSession:
                         text=output,
                         heartbeat_internal=heartbeat_internal,
                         source=internal_source or "user",
+                        turn_id=self._current_turn_id(user_input),
                     )
                     if internal_source is None:
                         self.clear_paused_execution_context()
@@ -1528,6 +1547,7 @@ class RuntimeAgentSession:
                     text=output,
                     heartbeat_internal=heartbeat_internal,
                     source=internal_source or "user",
+                    turn_id=self._current_turn_id(user_input),
                 )
                 if internal_source is None:
                     self.clear_paused_execution_context()
@@ -1649,7 +1669,13 @@ class RuntimeAgentSession:
             self._state.paused = False
             self._state.status = "completed"
             self._state.latest_message = str(output or "")
-            await self._emit("message_end", role="assistant", text=str(output or ""), source="user")
+            await self._emit(
+                "message_end",
+                role="assistant",
+                text=str(output or ""),
+                source="user",
+                turn_id=self._current_turn_id(),
+            )
             await self._emit_state_snapshot()
             return RunResult(output=str(output or ""), events=list(self._event_log))
 

@@ -242,6 +242,7 @@ class _FakeHeartbeatFinalSession(_FakeHeartbeatSession):
     def __init__(self, *, output: str = "Background task finished.") -> None:
         super().__init__(output=output)
         self._preserved_snapshot: dict[str, object] | None = {
+            "turn_id": "turn-user-preserved",
             "status": "paused",
             "user_message": {"content": "Install the skill"},
             "assistant_text": "Still working on it...",
@@ -1269,6 +1270,7 @@ async def test_inflight_snapshot_preserves_paused_user_turn_across_heartbeat_pro
 
     assert before is not None
     assert before["status"] == "paused"
+    assert isinstance(before["turn_id"], str) and before["turn_id"]
     assert before["user_message"]["content"] == "Install the weather skill"
 
     await session.prompt(
@@ -1284,6 +1286,7 @@ async def test_inflight_snapshot_preserves_paused_user_turn_across_heartbeat_pro
     assert session.state.status == "completed"
     assert snapshot is not None
     assert snapshot["status"] == "paused"
+    assert snapshot["turn_id"] == before["turn_id"]
     assert snapshot["user_message"]["content"] == "Install the weather skill"
     assert snapshot["assistant_text"] == "Still installing dependencies..."
     tools = snapshot["tool_events"]
@@ -3712,6 +3715,7 @@ def test_ceo_websocket_turn_patch_carries_live_execution_trace_summary(tmp_path:
             self.state.status = "running"
             self.state.is_running = True
             self._snapshot = {
+                "turn_id": "turn-user-live",
                 "status": "running",
                 "source": "user",
                 "user_message": {"content": "Install the skill"},
@@ -3799,6 +3803,7 @@ def test_ceo_websocket_turn_patch_carries_live_execution_trace_summary(tmp_path:
             ),
         )
         inflight_turn = patch_payload["data"]["inflight_turn"]
+        assert inflight_turn["turn_id"] == "turn-user-live"
         assert inflight_turn["assistant_text"] == "Working on it..."
         tool = inflight_turn["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
         assert tool["tool_name"] == "skill-installer"
@@ -3809,6 +3814,7 @@ def test_ceo_websocket_turn_patch_carries_live_execution_trace_summary(tmp_path:
         final_payload, _seen = _recv_until(ws, lambda payload: payload.get("type") == "ceo.reply.final")
 
     assert final_payload["data"]["text"] == "Still working."
+    assert final_payload["data"]["turn_id"] == "turn-user-live"
 
 
 def test_ceo_websocket_error_payload_omits_legacy_interaction_trace(tmp_path: Path, monkeypatch) -> None:
@@ -5071,8 +5077,11 @@ async def test_web_session_heartbeat_final_reply_discards_preserved_user_turn(tm
     final_session, final_envelope = task_service.registry.published[1]
     assert discard_session == session_id
     assert discard_envelope["data"]["source"] == "user"
+    assert discard_envelope["data"]["turn_id"] == "turn-user-preserved"
     assert final_session == session_id
     assert final_envelope["data"]["source"] == "heartbeat"
+    assert isinstance(final_envelope["data"]["turn_id"], str) and final_envelope["data"]["turn_id"]
+    assert final_envelope["data"]["turn_id"] != "turn-user-preserved"
     assert "Background install finished successfully." in str(final_envelope["data"]["text"])
 
 

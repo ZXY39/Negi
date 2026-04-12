@@ -455,6 +455,9 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
         if not content and not attachments and not execution_trace_summary and not compression and not legacy_tool_events:
             continue
         item = {'role': role, 'content': content}
+        turn_id = str(raw.get('turn_id') or raw.get('metadata', {}).get('_transcript_turn_id') or '').strip() if isinstance(raw.get('metadata'), dict) else str(raw.get('turn_id') or '').strip()
+        if turn_id:
+            item['turn_id'] = turn_id
         timestamp = raw.get('timestamp')
         if isinstance(timestamp, str) and timestamp.strip():
             item['timestamp'] = timestamp.strip()
@@ -692,6 +695,7 @@ async def ceo_websocket(websocket: WebSocket):
                     'code': 'turn_failed',
                     'message': str(exc),
                     'source': str((snapshot or {}).get('source') or 'user').strip().lower() or 'user',
+                    'turn_id': str((snapshot or {}).get('turn_id') or '').strip(),
                 },
             )
             return
@@ -752,6 +756,7 @@ async def ceo_websocket(websocket: WebSocket):
                 {
                     'text': text,
                     'source': str(payload.get('source') or 'user').strip().lower() or 'user',
+                    'turn_id': str(payload.get('turn_id') or '').strip(),
                 },
             )
             persisted = transcript_store.get_or_create(session_id)

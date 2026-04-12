@@ -48,6 +48,7 @@ function makeTurn({ text = PROCESSING_LABEL, source = "user", steps = 1 } = {}) 
     return {
         finalized: false,
         source,
+        turnId: "",
         steps,
         textEl: {
             textContent: text,
@@ -104,7 +105,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, dedupeInflightUserMessageAgainstMessages, S, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
+        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, dedupeInflightUserMessageAgainstMessages, S, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
         context
     );
     vm.runInContext(
@@ -215,4 +216,44 @@ test("deduped running inflight snapshot is preserved so the assistant placeholde
 
     assert.equal(deduped?.status, "running");
     assert.equal("user_message" in (deduped || {}), false);
+});
+
+test("discard and final match the target pending turn by turn_id before source", () => {
+    const context = loadApp();
+    const { S, patchCeoInflightTurn, handleCeoControlAck, finalizeCeoTurn } = context;
+    const older = makeTurn({ text: PROCESSING_LABEL, source: "user", steps: 1 });
+    older.turnId = "turn-old";
+    const newer = makeTurn({ text: PROCESSING_LABEL, source: "user", steps: 1 });
+    newer.turnId = "turn-new";
+
+    S.ceoPendingTurns = [older, newer];
+    S.ceoTurnActive = true;
+
+    patchCeoInflightTurn({
+        turn_id: "turn-old",
+        source: "user",
+        status: "running",
+        assistant_text: "Older turn is still active",
+        tool_events: [],
+    });
+
+    assert.match(older.textEl.innerHTML, /Older turn is still active/);
+    assert.equal(newer.textEl.innerHTML, PROCESSING_LABEL);
+
+    finalizeCeoTurn("done", { source: "user", turn_id: "turn-old" });
+
+    assert.equal(older.finalized, true);
+    assert.equal(newer.finalized, false);
+    assert.equal(S.ceoPendingTurns.length, 1);
+
+    handleCeoControlAck({
+        action: "pause",
+        accepted: true,
+        source: "user",
+        turn_id: "turn-new",
+    });
+
+    assert.equal(newer.textEl.textContent, PAUSED_LABEL);
+    assert.equal(newer.finalized, true);
+    assert.equal(S.ceoPendingTurns.length, 0);
 });
