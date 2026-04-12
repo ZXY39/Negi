@@ -114,26 +114,6 @@ async def test_react_loop_survives_non_mapping_submit_final_result_arguments() -
                     finish_reason="tool_calls",
                     usage={"input_tokens": 8, "output_tokens": 3},
                 ),
-                LLMResponse(
-                    content="",
-                    tool_calls=[
-                        ToolCallRequest(
-                            id="call:final-valid",
-                            name="submit_final_result",
-                            arguments={
-                                "status": "success",
-                                "delivery_status": "final",
-                                "summary": "done",
-                                "answer": "done",
-                                "evidence": [],
-                                "remaining_work": [],
-                                "blocking_reason": "",
-                            },
-                        )
-                    ],
-                    finish_reason="tool_calls",
-                    usage={"input_tokens": 8, "output_tokens": 3},
-                ),
             ]
 
         async def chat(self, **kwargs):
@@ -154,6 +134,6 @@ async def test_react_loop_survives_non_mapping_submit_final_result_arguments() -
         max_iterations=3,
     )
 
-    assert result.status == "success"
-    assert result.answer == "done"
-    assert len(requests) == 2
+    assert result.status == "failed"
+    assert result.delivery_status == "blocked"
+    assert len(requests) == 1

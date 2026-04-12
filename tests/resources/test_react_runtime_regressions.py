@@ -3240,7 +3240,7 @@ def test_acceptance_result_contract_violation_message_uses_final_or_blocked_only
 
 
 @pytest.mark.asyncio
-async def test_react_loop_uses_system_overlay_for_execution_result_repair() -> None:
+async def test_react_loop_failed_final_payload_is_accepted_immediately_without_repair_retry() -> None:
     calls: list[list[dict[str, object]]] = []
 
     class _Backend:
@@ -3260,26 +3260,6 @@ async def test_react_loop_uses_system_overlay_for_execution_result_repair() -> N
                                 'evidence': [],
                                 'remaining_work': [],
                                 'blocking_reason': '',
-                            },
-                        )
-                    ],
-                    finish_reason='tool_calls',
-                    usage={'input_tokens': 8, 'output_tokens': 3},
-                ),
-                LLMResponse(
-                    content='',
-                    tool_calls=[
-                        ToolCallRequest(
-                            id='call:final',
-                            name='submit_final_result',
-                            arguments={
-                                'status': 'failed',
-                                'delivery_status': 'blocked',
-                                'summary': 'done',
-                                'answer': '',
-                                'evidence': [],
-                                'remaining_work': [],
-                                'blocking_reason': 'done',
                             },
                         )
                     ],
@@ -3307,13 +3287,10 @@ async def test_react_loop_uses_system_overlay_for_execution_result_repair() -> N
     )
 
     assert result.status == 'failed'
-    assert len(calls) == 2
-    second_request = calls[1]
-    assert second_request[0]['role'] == 'system'
-    assert any(item.get('role') == 'user' for item in second_request)
-    merged_user_content = '\n'.join(str(item.get('content') or '') for item in second_request if item.get('role') == 'user')
-    assert 'If you are ending the node now' in merged_user_content or 'Your last `submit_final_result` payload violated result contract' in merged_user_content
-    assert 'submit_final_result' in merged_user_content
+    assert result.delivery_status == 'final'
+    assert len(calls) == 1
+    assert result.summary == 'done'
+    assert result.blocking_reason == ''
 
 
 @pytest.mark.asyncio
@@ -3637,7 +3614,7 @@ async def test_react_loop_recovers_raw_final_result_json_after_protocol_repair()
 
 
 @pytest.mark.asyncio
-async def test_react_loop_restores_invalid_final_submission_count_from_runtime_frame() -> None:
+async def test_react_loop_ignores_persisted_invalid_final_submission_count_and_accepts_current_final_payload() -> None:
     class _Backend:
         def __init__(self) -> None:
             self.turn = 0
@@ -3666,26 +3643,7 @@ async def test_react_loop_restores_invalid_final_submission_count_from_runtime_f
                     finish_reason='tool_calls',
                     usage={'input_tokens': 8, 'output_tokens': 3},
                 )
-            return LLMResponse(
-                content='',
-                tool_calls=[
-                    ToolCallRequest(
-                        id='call:valid-final',
-                        name='submit_final_result',
-                        arguments={
-                            'status': 'failed',
-                            'delivery_status': 'blocked',
-                            'summary': 'done',
-                            'answer': '',
-                            'evidence': [],
-                            'remaining_work': [],
-                            'blocking_reason': 'done',
-                        },
-                    )
-                ],
-                finish_reason='tool_calls',
-                usage={'input_tokens': 8, 'output_tokens': 3},
-            )
+            raise AssertionError('backend should not receive a second repair attempt')
 
     backend = _Backend()
     log_service = _FakeLogService()
@@ -3714,7 +3672,9 @@ async def test_react_loop_restores_invalid_final_submission_count_from_runtime_f
     )
 
     assert result.status == 'failed'
-    assert 'Invalid final result submission detected 5 consecutive times' in result.blocking_reason
+    assert result.delivery_status == 'final'
+    assert result.summary == 'still invalid'
+    assert result.blocking_reason == ''
     assert backend.turn == 1
 
 

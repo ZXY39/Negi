@@ -544,30 +544,13 @@ class ReActToolLoop:
                     if terminal_result is not None:
                         self._log_service.remove_frame(task.task_id, node.node_id, publish_snapshot=True)
                         return terminal_result
-                    invalid_final_submission_count += 1
                     reason_parts = list(contract_violations or [])
                     if protocol_error:
                         reason_parts.append(protocol_error)
-                    last_contract_violations = list(contract_violations or [])
-                    last_invalid_final_submission_reason = '; '.join(reason_parts) or f'{FINAL_RESULT_TOOL_NAME} rejected'
-                    self._persist_invalid_final_submission_state(
-                        task_id=task.task_id,
-                        node_id=node.node_id,
-                        count=invalid_final_submission_count,
-                        reason=last_invalid_final_submission_reason,
-                        violations=last_contract_violations,
+                    return self._invalid_final_submission_failure(
+                        reason='; '.join(reason_parts) or f'{FINAL_RESULT_TOOL_NAME} rejected',
+                        count=1,
                     )
-                    if invalid_final_submission_count >= _INVALID_FINAL_SUBMISSION_LIMIT:
-                        return self._invalid_final_submission_failure(
-                            reason=last_invalid_final_submission_reason,
-                            count=invalid_final_submission_count,
-                        )
-                    repair_overlay_text = (
-                        self._result_contract_violation_message(contract_violations, node_kind=node.node_kind)
-                        if contract_violations
-                        else self._result_protocol_message(node_kind=node.node_kind)
-                    )
-                    continue
                 for call in response_tool_calls:
                     signature = f"{call.name}:{json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)}"
                     if call.name not in self._CONTROL_TOOL_NAMES and call.name not in {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}:
@@ -834,30 +817,13 @@ class ReActToolLoop:
                 if terminal_result is not None:
                     self._log_service.remove_frame(task.task_id, node.node_id, publish_snapshot=True)
                     return terminal_result
-                invalid_final_submission_count += 1
                 reason_parts = list(contract_violations or [])
                 if protocol_error:
                     reason_parts.append(protocol_error)
-                last_contract_violations = list(contract_violations or [])
-                last_invalid_final_submission_reason = '; '.join(reason_parts) or f'{FINAL_RESULT_TOOL_NAME} rejected'
-                self._persist_invalid_final_submission_state(
-                    task_id=task.task_id,
-                    node_id=node.node_id,
-                    count=invalid_final_submission_count,
-                    reason=last_invalid_final_submission_reason,
-                    violations=last_contract_violations,
+                return self._invalid_final_submission_failure(
+                    reason='; '.join(reason_parts) or f'{FINAL_RESULT_TOOL_NAME} rejected',
+                    count=1,
                 )
-                if invalid_final_submission_count >= _INVALID_FINAL_SUBMISSION_LIMIT:
-                    return self._invalid_final_submission_failure(
-                        reason=last_invalid_final_submission_reason,
-                        count=invalid_final_submission_count,
-                    )
-                repair_overlay_text = (
-                    self._result_contract_violation_message(contract_violations, node_kind=node.node_kind)
-                    if contract_violations
-                    else self._result_protocol_message(node_kind=node.node_kind)
-                )
-                continue
 
             invalid_final_submission_count += 1
             last_contract_violations = []
@@ -2287,6 +2253,7 @@ class ReActToolLoop:
         has_tool_results: bool,
         node_kind: str,
     ) -> list[str]:
+        _ = result, has_tool_results, node_kind
         violations: list[str] = []
         missing_keys = [key for key in _RESULT_REQUIRED_KEYS if key not in raw_payload]
         violations.extend([f'missing required field: {key}' for key in missing_keys])
@@ -2294,25 +2261,8 @@ class ReActToolLoop:
         raw_delivery_status = str(raw_payload.get('delivery_status') or '').strip().lower()
         if raw_delivery_status not in {'final', 'blocked'}:
             violations.append('delivery_status must be one of final|blocked')
-        if not str(result.summary or '').strip():
+        if not str(raw_payload.get('summary') or '').strip():
             violations.append('summary must not be empty')
-
-        if result.status == 'success':
-            if result.delivery_status != 'final':
-                violations.append('success requires delivery_status=final')
-            if not str(result.answer or '').strip():
-                violations.append('success requires non-empty answer')
-            if list(result.remaining_work or []):
-                violations.append('success requires remaining_work to be empty')
-            if str(result.blocking_reason or '').strip():
-                violations.append('success requires blocking_reason to be empty')
-            if has_tool_results and not list(result.evidence or []):
-                violations.append('success after tool usage requires at least one evidence item')
-        normalized_kind = str(node_kind or '').strip().lower()
-        if result.status == 'failed' and normalized_kind == 'execution' and result.delivery_status != 'blocked':
-            violations.append('execution failed result requires delivery_status=blocked')
-        if result.status == 'failed' and result.delivery_status == 'blocked' and not str(result.blocking_reason or '').strip():
-            violations.append('failed+blocked requires non-empty blocking_reason')
 
         raw_evidence = raw_payload.get('evidence')
         if not isinstance(raw_evidence, list):
