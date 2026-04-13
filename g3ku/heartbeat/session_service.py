@@ -643,60 +643,6 @@ class WebSessionHeartbeatService:
             if str(event.reason or "").strip().lower() == "task_terminal"
         ]
 
-    @staticmethod
-    def _truncate_text(text: str, *, limit: int = 180) -> str:
-        normalized = str(text or "").strip()
-        if len(normalized) <= limit:
-            return normalized
-        return f"{normalized[: max(0, limit - 3)].rstrip()}..."
-
-    def _build_task_terminal_fallback_reply(self, events: list[SessionHeartbeatEvent]) -> str:
-        task_events = self._task_terminal_events(events)
-        if not task_events:
-            return ""
-        lines: list[str] = []
-        for event in task_events[:3]:
-            payload = dict(event.payload or {})
-            task_id = str(payload.get("task_id") or "task").strip() or "task"
-            short_task_id = task_id[5:] if task_id.startswith("task:") else task_id
-            status = str(payload.get("status") or "").strip().lower()
-            summary = self._truncate_text(
-                str(payload.get("brief_text") or payload.get("failure_reason") or "").strip() or "No summary.",
-                limit=180,
-            )
-            if self._event_is_business_unpassed(event):
-                continuation_task = self._find_continuation_task_for_event(event)
-                if continuation_task is not None:
-                    continuation_task_id = str(getattr(continuation_task, "task_id", "") or "").strip()
-                    short_continuation_id = (
-                        continuation_task_id[5:]
-                        if continuation_task_id.startswith("task:")
-                        else continuation_task_id or "task"
-                    )
-                    lines.append(f"任务 `{short_task_id}` 已完成但未通过验收，已经续跑为 `{short_continuation_id}`，我会继续推进。")
-                else:
-                    lines.append(f"任务 `{short_task_id}` 已完成但未通过验收，正在评估是否需要继续推进。")
-            elif status == "success":
-                lines.append(f"任务 `{short_task_id}` 已完成：{summary}")
-            else:
-                latest_task = self._event_current_task(event)
-                recreated_continuation_task_id = self._event_recreated_continuation_task_id(event)
-                if recreated_continuation_task_id:
-                    short_continuation_id = (
-                        recreated_continuation_task_id[5:]
-                        if recreated_continuation_task_id.startswith("task:")
-                        else recreated_continuation_task_id or "task"
-                    )
-                    lines.append(f"任务 `{short_task_id}` 已续跑为 `{short_continuation_id}`，我会继续推进。")
-                elif latest_task is not None and str(getattr(latest_task, "status", "") or "").strip().lower() == "in_progress":
-                    lines.append(f"任务 `{short_task_id}` 遇到工程故障，已在原任务内继续重试。")
-                else:
-                    lines.append(f"任务 `{short_task_id}` 已失败：{summary}")
-        remaining = len(task_events) - min(3, len(task_events))
-        if remaining > 0:
-            lines.append(f"另有 {remaining} 个任务终态已处理。")
-        return "\n".join(lines).strip()
-
     def _event_current_task(self, event: SessionHeartbeatEvent):
         payload = dict(event.payload or {})
         task_id = str(payload.get("task_id") or "").strip()
@@ -726,46 +672,12 @@ class WebSessionHeartbeatService:
             or str(final_acceptance.get("status") or "").strip().lower() == "failed"
         )
 
-    def _event_recreated_continuation_task_id(self, event: SessionHeartbeatEvent) -> str:
-        latest_task = self._event_current_task(event)
-        metadata = getattr(latest_task, "metadata", None) if isinstance(getattr(latest_task, "metadata", None), dict) else {}
-        if str((metadata or {}).get("continuation_state") or "").strip().lower() != "recreated":
-            return ""
-        return str((metadata or {}).get("continued_by_task_id") or "").strip()
-
-    async def _auto_retry_engine_failure_events(self, events: list[SessionHeartbeatEvent]) -> list[str]:
-        continuer = getattr(self._main_task_service, "continue_task", None)
-        if not callable(continuer):
-            return []
-        retried_task_ids: list[str] = []
-        seen: set[str] = set()
-        for event in self._task_terminal_events(events):
-            if self._event_is_business_unpassed(event):
-                continue
-            payload = dict(event.payload or {})
-            task_id = str(payload.get("task_id") or "").strip()
-            if not task_id or task_id in seen:
-                continue
-            latest_task = self._event_current_task(event)
-            if latest_task is not None and str(getattr(latest_task, "status", "") or "").strip().lower() != "failed":
-                continue
-            if self._event_recreated_continuation_task_id(event):
-                continue
-            try:
-                retried = await continuer(
-                    mode="retry_in_place",
-                    target_task_id=task_id,
-                    continuation_instruction="Retry the same task in place after an engine failure.",
-                    reason="engine_failure",
-                    source="heartbeat_terminal",
-                )
-            except Exception:
-                continue
-            if retried is None:
-                continue
-            seen.add(task_id)
-            retried_task_ids.append(task_id)
-        return retried_task_ids
+    @staticmethod
+    def _internal_ack_label(*, source: str, reason: str) -> str:
+        normalized_source = str(source or "").strip().lower() or "heartbeat"
+        normalized_reason = str(reason or "").strip() or "heartbeat_ok"
+        suffix = "cron" if normalized_source == "cron" else "心跳"
+        return f"已接收来自类型：{normalized_reason}的{suffix}"
 
     def _find_continuation_task_for_event(self, event: SessionHeartbeatEvent) -> TaskRecord | None:
         if not self._event_is_business_unpassed(event):
@@ -1013,7 +925,6 @@ class WebSessionHeartbeatService:
             events = [event for event in events if event.event_id not in discarded_task_stall_ids]
         if not events:
             return self._events.next_delay(key)
-        await self._auto_retry_engine_failure_events(events)
         reasons = sorted({str(event.reason or "").strip().lower() or "heartbeat" for event in events})
         heartbeat_reason = reasons[0] if len(reasons) == 1 else "mixed"
         heartbeat_prompt = self._build_prompt(events)
@@ -1090,9 +1001,6 @@ class WebSessionHeartbeatService:
                         clear_blocking(execution_id)
                     except Exception:
                         logger.debug("blocking tool execution clear skipped for {}", execution_id)
-        if (not output or output == HEARTBEAT_OK) and task_terminal_events:
-            output = self._build_task_terminal_fallback_reply(task_terminal_events)
-
         if not self._session_exists(key):
             event_ids = {event.event_id for event in events}
             popped = self._events.pop_many(key, event_ids=event_ids)
@@ -1100,21 +1008,29 @@ class WebSessionHeartbeatService:
             self._ack_task_stall_events(popped)
             self.clear_session(key)
             return None
-        if tool_only_events:
-            event_ids = {event.event_id for event in events}
-            popped = self._events.pop_many(key, event_ids=event_ids)
-            self._requeue_running_background_events(key, events)
-            self._ack_task_stall_events(popped)
-            next_delay = self._events.next_delay(key)
-            self._publish_ceo(key, "ceo.turn.discard", {"source": "heartbeat"})
-            return next_delay
         if not output or output == HEARTBEAT_OK:
+            preserved_source, preserved_turn_id = self._clear_preserved_inflight_turn(key, session)
+            if preserved_source:
+                discard_payload = {"source": preserved_source}
+                if preserved_turn_id:
+                    discard_payload["turn_id"] = preserved_turn_id
+                self._publish_ceo(key, "ceo.turn.discard", discard_payload)
+            self._publish_ceo(
+                key,
+                "ceo.internal.ack",
+                {
+                    "source": "heartbeat",
+                    "reason": heartbeat_reason or "heartbeat_ok",
+                    "label": self._internal_ack_label(source="heartbeat", reason=heartbeat_reason or "heartbeat_ok"),
+                    "turn_id": heartbeat_turn_id,
+                },
+            )
             event_ids = {event.event_id for event in events}
             popped = self._events.pop_many(key, event_ids=event_ids)
             self._requeue_running_background_events(key, events)
+            self._ack_task_terminal_events(events)
             self._ack_task_stall_events(popped)
             next_delay = self._events.next_delay(key)
-            self._publish_ceo(key, "ceo.turn.discard", {"source": "heartbeat"})
             return next_delay
 
         task_ids = [

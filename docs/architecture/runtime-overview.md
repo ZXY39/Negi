@@ -309,3 +309,12 @@ When a maintainer sees a prompt continuity issue, the first questions should now
 
 - Was the relevant context still inside the retained stage workset?
 - If not, did the semantic summary coverage/cooldown/token-pressure decision allow a refresh or reuse?
+
+## Internal Turn Contract Notes
+
+Heartbeat and cron turns now share the same strict internal-turn contract.
+
+- They still execute through `RuntimeAgentSession.prompt(...)` with their own internal source metadata.
+- Service-layer code must not auto-retry tasks or synthesize fallback assistant replies on behalf of the model.
+- An internal turn that ends with `HEARTBEAT_OK` may surface a live-only UI ACK event, but it does not become transcript history.
+- Maintainers should distinguish live UI state such as inflight snapshots and internal ACK bubbles from durable assistant transcript messages.

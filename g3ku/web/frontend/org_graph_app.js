@@ -3045,6 +3045,32 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
     }, { scrollMode });
 }
 
+function defaultCeoInternalAckLabel({ source = "", reason = "" } = {}) {
+    const normalizedSource = normalizeCeoTurnSource(source || "heartbeat");
+    const normalizedReason = String(reason || "").trim() || "heartbeat_ok";
+    return `已接收来自类型：${normalizedReason}的${normalizedSource === "cron" ? "cron" : "心跳"}`;
+}
+
+function handleCeoInternalAck(payload = {}) {
+    const source = normalizeCeoTurnSource(payload?.source || "heartbeat");
+    const label = String(payload?.label || "").trim() || defaultCeoInternalAckLabel({
+        source,
+        reason: payload?.reason || "",
+    });
+    if (!label || !U.ceoFeed) return null;
+    return mutateCeoFeed(() => {
+        const el = document.createElement("div");
+        el.className = `message system ceo-internal-ack ${source === "cron" ? "is-cron" : "is-heartbeat"}`;
+        el.innerHTML = `<div class="msg-content ceo-internal-ack-content">${esc(label)}</div>`;
+        if (payload?.turn_id && typeof el.setAttribute === "function") {
+            el.setAttribute("data-turn-id", String(payload.turn_id || "").trim());
+        }
+        U.ceoFeed.appendChild(el);
+        icons();
+        return el;
+    }, { scrollMode: "preserve" });
+}
+
 function resetCeoFeed() {
     if (!U.ceoFeed) return;
     U.ceoFeed.innerHTML = "";
@@ -6627,6 +6653,9 @@ function initCeoWs() {
             }
         }
         if (payload.type === "ceo.error") handleCeoError(payload.data || {});
+        if (payload.type === "ceo.internal.ack" && effectiveSessionId === activeSessionId()) {
+            handleCeoInternalAck(payload.data || {});
+        }
         if (payload.type === "ceo.reply.final" && effectiveSessionId === activeSessionId()) {
             finalizeCeoTurn(payload.data?.text || "", payload.data || {});
         }

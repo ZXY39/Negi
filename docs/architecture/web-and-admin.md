@@ -105,3 +105,13 @@ The browser shell still receives `compression` snapshot data, but it now refers 
 - The UI should not assume there is any older message-count compaction stage behind this field.
 - `compression.status` now reflects semantic-summary lifecycle only.
 - The frontend may still display heartbeat / cron live execution and compression activity from snapshots, but later real user turns depend on the semantic summary path rather than any hidden legacy history compactor.
+
+## Heartbeat/Cron ACK Contract
+
+The browser now handles a dedicated live-only ACK event for silent internal turns.
+
+- `ceo.internal.ack` is emitted when a heartbeat or cron turn explicitly ends with `HEARTBEAT_OK`.
+- This event is not a normal assistant reply and must not reuse `ceo.reply.final` persistence or rendering rules.
+- The frontend should render it as a distinct non-conversational bubble so operators can see that the internal turn was received and intentionally stayed silent.
+- That ACK bubble is intentionally ephemeral: it should not be appended to the CEO session snapshot `messages` list and should disappear on full refresh.
+- `ceo.turn.discard` still exists only to close a specific visible pending turn by `turn_id`.

@@ -3619,6 +3619,88 @@ def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monke
     assert final_events[0]["data"]["text"] == "I will keep waiting for the install."
 
 
+def test_ceo_websocket_forwards_cron_heartbeat_ok_as_internal_ack(tmp_path: Path, monkeypatch) -> None:
+    _mock_workspace(monkeypatch, tmp_path)
+
+    async def _ensure_services(_agent) -> None:
+        return None
+
+    class _FakeCronAckSession:
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(status="idle", is_running=False)
+            self._listeners = set()
+
+        def subscribe(self, listener):
+            self._listeners.add(listener)
+
+            def _unsubscribe() -> None:
+                self._listeners.discard(listener)
+
+            return _unsubscribe
+
+        def state_dict(self) -> dict[str, object]:
+            return {"status": self.state.status, "is_running": self.state.is_running}
+
+        def inflight_turn_snapshot(self):
+            return None
+
+        async def _emit(self, event_type: str, **payload) -> None:
+            event = AgentEvent(type=event_type, timestamp="2026-03-18T12:00:00", payload=payload)
+            for listener in list(self._listeners):
+                result = listener(event)
+                if hasattr(result, "__await__"):
+                    await result
+
+        async def prompt(self, user_message) -> SimpleNamespace:
+            _ = user_message
+            self.state.status = "running"
+            self.state.is_running = True
+            await self._emit("state_snapshot", state=self.state_dict())
+            await self._emit(
+                "message_end",
+                role="assistant",
+                text=HEARTBEAT_OK,
+                source="cron",
+                turn_id="turn-cron-ack",
+            )
+            self.state.status = "completed"
+            self.state.is_running = False
+            await self._emit("state_snapshot", state=self.state_dict())
+            return SimpleNamespace(output=HEARTBEAT_OK)
+
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
+    session_id = "web:ceo-cron-ack"
+    session_manager = SessionManager(tmp_path)
+    live_session = _FakeCronAckSession()
+    agent = SimpleNamespace(
+        sessions=session_manager,
+        main_task_service=_TaskService(),
+    )
+    monkeypatch.setattr(websocket_ceo, "get_agent", lambda: agent)
+    monkeypatch.setattr(websocket_ceo, "get_runtime_manager", lambda _agent=None: _RuntimeManager(live_session))
+
+    client = TestClient(_build_app())
+    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        assert ws.receive_json()["type"] == "snapshot.ceo"
+        assert ws.receive_json()["type"] == "ceo.state"
+
+        ws.send_json({"type": "client.user_message", "text": "run cron turn"})
+
+        messages = []
+        for _ in range(6):
+            payload = ws.receive_json()
+            messages.append(payload)
+            if payload.get("type") == "ceo.internal.ack":
+                break
+
+    ack_events = [item for item in messages if item["type"] == "ceo.internal.ack"]
+    assert len(ack_events) == 1
+    assert ack_events[0]["data"]["source"] == "cron"
+    assert ack_events[0]["data"]["reason"] == "heartbeat_ok"
+    assert ack_events[0]["data"]["turn_id"] == "turn-cron-ack"
+
+
 def test_ceo_websocket_resume_interrupt_forwards_resume_payload(tmp_path, monkeypatch) -> None:
     class _ResumeSession:
         def __init__(self) -> None:
@@ -4186,6 +4268,9 @@ def test_ceo_websocket_filters_heartbeat_internal_message_end() -> None:
         {"role": "assistant", "text": HEARTBEAT_OK, "heartbeat_internal": True}
     ) is False
     assert websocket_ceo._should_forward_message_end(
+        {"role": "assistant", "text": HEARTBEAT_OK, "source": "cron"}
+    ) is True
+    assert websocket_ceo._should_forward_message_end(
         {"role": "assistant", "text": HEARTBEAT_OK}
     ) is False
 
@@ -4335,10 +4420,10 @@ async def test_web_session_heartbeat_delays_background_tool_prompt(tmp_path: Pat
     assert "tool-exec:1" in str(prompt.content)
     assert "already been refreshed" in str(prompt.content)
     assert "Do not start a new tool chain" in str(prompt.content)
-    assert "任务终结结果意味着任务已达到最终状态" in str(prompt.content)
+    assert "你正在处理内部事件，不是在处理新的用户输入" in str(prompt.content)
     assert manager.calls == [("tool-exec:1", 0.1)]
     published_types = [envelope["type"] for _session_id, envelope in task_service.registry.published]
-    assert "ceo.turn.discard" in published_types
+    assert "ceo.internal.ack" in published_types
 
     await asyncio.sleep(0.22)
 
@@ -4509,7 +4594,7 @@ async def test_web_session_heartbeat_runs_immediately_when_background_tool_turns
 
 
 @pytest.mark.asyncio
-async def test_web_session_heartbeat_tool_only_terminal_does_not_call_reply_notifier(tmp_path: Path) -> None:
+async def test_web_session_heartbeat_tool_only_terminal_uses_visible_reply_and_notifier_when_model_returns_text(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-tool-terminal-no-notify"
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
@@ -4555,12 +4640,12 @@ async def test_web_session_heartbeat_tool_only_terminal_does_not_call_reply_noti
     next_delay = await service._run_session(session_id)
 
     assert next_delay is None
-    assert notified == []
-    assert [envelope["type"] for _session, envelope in task_service.registry.published] == ["ceo.turn.discard"]
+    assert notified == [(session_id, "tool terminal internal note")]
+    assert [envelope["type"] for _session, envelope in task_service.registry.published] == ["ceo.reply.final"]
 
 
 @pytest.mark.asyncio
-async def test_web_session_heartbeat_forces_task_terminal_reply_when_model_returns_heartbeat_ok(tmp_path: Path) -> None:
+async def test_web_session_heartbeat_emits_internal_ack_when_model_returns_heartbeat_ok_for_task_terminal(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-task-terminal-fallback"
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
@@ -4595,26 +4680,23 @@ async def test_web_session_heartbeat_forces_task_terminal_reply_when_model_retur
     assert len(task_service.registry.published) == 1
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
-    assert envelope["type"] == "ceo.reply.final"
-    assert "demo-terminal" in str(envelope["data"]["text"])
-    assert "已完成" in str(envelope["data"]["text"])
+    assert envelope["type"] == "ceo.internal.ack"
+    assert envelope["data"]["source"] == "heartbeat"
+    assert envelope["data"]["reason"] == "task_terminal"
+    assert "task_terminal" in str(envelope["data"]["label"])
     assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
     assert len(task_service.delivered) == 1
     assert task_service.delivered[0][0] == "task-terminal:task:demo-terminal:success:2026-03-23T01:34:32+08:00"
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert len(reloaded.messages) == 1
-    assert reloaded.messages[0]["role"] == "assistant"
-    assert "demo-terminal" in str(reloaded.messages[0]["content"])
-    assert reloaded.messages[0]["turn_id"] == "turn-heartbeat-default"
-    assert reloaded.metadata["last_task_memory"]["source"] == "heartbeat"
-    assert reloaded.metadata["last_task_memory"]["task_ids"] == ["task:demo-terminal"]
-    assert reloaded.metadata["last_task_memory"]["reason"] == "task_terminal"
-    assert reloaded.metadata["last_task_memory"]["task_results"] == [{"task_id": "task:demo-terminal"}]
+    assert reloaded.messages == []
+    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == []
+    assert reloaded.metadata.get("last_task_memory", {}).get("source") == ""
+    assert reloaded.metadata.get("last_task_memory", {}).get("reason") == ""
 
 
 @pytest.mark.asyncio
-async def test_web_session_heartbeat_reports_unpassed_continuation_task_in_fallback_reply(tmp_path: Path) -> None:
+async def test_web_session_heartbeat_emits_internal_ack_for_unpassed_task_terminal_when_model_returns_heartbeat_ok(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-task-terminal-unpassed-continuation"
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
@@ -4650,28 +4732,20 @@ async def test_web_session_heartbeat_reports_unpassed_continuation_task_in_fallb
     assert next_delay is None
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
-    assert envelope["type"] == "ceo.reply.final"
-    assert "demo-unpassed" in str(envelope["data"]["text"])
-    assert "cont-2" in str(envelope["data"]["text"])
+    assert envelope["type"] == "ceo.internal.ack"
+    assert envelope["data"]["source"] == "heartbeat"
+    assert envelope["data"]["reason"] == "task_terminal"
+    assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert len(reloaded.messages) == 1
-    assert reloaded.messages[0]["role"] == "assistant"
-    assert "demo-unpassed" in str(reloaded.messages[0]["content"])
-    assert "cont-2" in str(reloaded.messages[0]["content"])
-    assert reloaded.messages[0]["turn_id"] == "turn-heartbeat-default"
-    assert reloaded.metadata["last_task_memory"] == {
-        "version": web_ceo_sessions.TASK_MEMORY_VERSION,
-        "task_ids": ["task:demo-unpassed", "task:cont-2"],
-        "source": "heartbeat",
-        "reason": "task_terminal",
-        "updated_at": reloaded.metadata["last_task_memory"]["updated_at"],
-        "task_results": [{"task_id": "task:demo-unpassed"}],
-    }
+    assert reloaded.messages == []
+    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == []
+    assert reloaded.metadata.get("last_task_memory", {}).get("source") == ""
+    assert reloaded.metadata.get("last_task_memory", {}).get("reason") == ""
 
 
 @pytest.mark.asyncio
-async def test_web_session_heartbeat_does_not_report_continuation_for_engine_failure(tmp_path: Path) -> None:
+async def test_web_session_heartbeat_emits_internal_ack_for_engine_failure_when_model_returns_heartbeat_ok(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-task-terminal-engine-failure"
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
@@ -4707,12 +4781,13 @@ async def test_web_session_heartbeat_does_not_report_continuation_for_engine_fai
     assert len(task_service.registry.published) == 1
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
-    assert envelope["type"] == "ceo.reply.final"
-    assert envelope["data"]["text"] == "任务 `demo-engine-failed` 已失败：model provider failed"
+    assert envelope["type"] == "ceo.internal.ack"
+    assert envelope["data"]["reason"] == "task_terminal"
+    assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
 
 
 @pytest.mark.asyncio
-async def test_web_session_heartbeat_auto_retries_engine_failure_in_place(tmp_path: Path) -> None:
+async def test_web_session_heartbeat_does_not_auto_retry_engine_failure_in_place(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-task-terminal-engine-retry"
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
@@ -4751,24 +4826,17 @@ async def test_web_session_heartbeat_auto_retries_engine_failure_in_place(tmp_pa
 
     assert next_delay is None
     assert task_service.retry_calls == []
-    assert task_service.continue_calls == [
-        {
-            "mode": "retry_in_place",
-            "target_task_id": task_id,
-            "continuation_instruction": "Retry the same task in place after an engine failure.",
-            "reason": "engine_failure",
-            "source": "heartbeat_terminal",
-        }
-    ]
+    assert task_service.continue_calls == []
     assert len(task_service.registry.published) == 1
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
-    assert envelope["type"] == "ceo.reply.final"
-    assert envelope["data"]["text"] == "任务 `demo-engine-retry` 遇到工程故障，已在原任务内继续重试。"
+    assert envelope["type"] == "ceo.internal.ack"
+    assert envelope["data"]["reason"] == "task_terminal"
+    assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
 
 
 @pytest.mark.asyncio
-async def test_web_session_heartbeat_allows_retry_after_prior_in_place_retry_failure(tmp_path: Path) -> None:
+async def test_web_session_heartbeat_does_not_retry_after_prior_in_place_retry_failure(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-task-terminal-engine-retry-again"
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
@@ -4818,20 +4886,13 @@ async def test_web_session_heartbeat_allows_retry_after_prior_in_place_retry_fai
     next_delay = await service._run_session(session_id)
 
     assert next_delay is None
-    assert task_service.continue_calls == [
-        {
-            "mode": "retry_in_place",
-            "target_task_id": task_id,
-            "continuation_instruction": "Retry the same task in place after an engine failure.",
-            "reason": "engine_failure",
-            "source": "heartbeat_terminal",
-        }
-    ]
+    assert task_service.continue_calls == []
     assert len(task_service.registry.published) == 1
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
-    assert envelope["type"] == "ceo.reply.final"
-    assert envelope["data"]["text"] == "任务 `demo-engine-retry-again` 遇到工程故障，已在原任务内继续重试。"
+    assert envelope["type"] == "ceo.internal.ack"
+    assert envelope["data"]["reason"] == "task_terminal"
+    assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
 
 
 @pytest.mark.asyncio
@@ -4882,8 +4943,9 @@ async def test_web_session_heartbeat_skips_engine_failure_retry_after_recreated_
     assert len(task_service.registry.published) == 1
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
-    assert envelope["type"] == "ceo.reply.final"
-    assert envelope["data"]["text"] == "任务 `demo-engine-superseded` 已续跑为 `cont-9`，我会继续推进。"
+    assert envelope["type"] == "ceo.internal.ack"
+    assert envelope["data"]["reason"] == "task_terminal"
+    assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
 
 
 @pytest.mark.asyncio
@@ -4944,21 +5006,9 @@ async def test_web_session_heartbeat_prompt_includes_terminal_root_output_and_me
     assert "Result output ref: artifact:artifact:root-output" in prompt_text
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert len(reloaded.messages) == 1
-    assert reloaded.messages[0]["role"] == "assistant"
-    assert "demo-root-output" in str(reloaded.messages[0]["content"])
-    assert reloaded.messages[0]["turn_id"] == "turn-heartbeat-default"
-    assert reloaded.metadata["last_task_memory"]["task_results"] == [
-        {
-            "task_id": task_id,
-            "node_id": "node:root",
-            "node_kind": "execution",
-            "node_reason": "root_terminal",
-            "output_excerpt": "Top 3 recommendation list",
-            "output_ref": "artifact:artifact:root-output",
-            "check_result": "accepted",
-        }
-    ]
+    assert reloaded.messages == []
+    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == []
+    assert reloaded.metadata["last_task_memory"]["task_results"] == []
 
 
 @pytest.mark.asyncio
@@ -5140,22 +5190,9 @@ async def test_web_session_heartbeat_prefers_acceptance_output_when_final_accept
     assert "Result output ref: artifact:artifact:accept-output" in prompt_text
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert len(reloaded.messages) == 1
-    assert reloaded.messages[0]["role"] == "assistant"
-    assert "demo-acceptance-output" in str(reloaded.messages[0]["content"])
-    assert reloaded.messages[0]["turn_id"] == "turn-heartbeat-default"
-    assert reloaded.metadata["last_task_memory"]["task_results"] == [
-        {
-            "task_id": task_id,
-            "node_id": "node:acceptance",
-            "node_kind": "acceptance",
-            "node_reason": "acceptance_failed",
-            "output_excerpt": "Acceptance node full output",
-            "output_ref": "artifact:artifact:accept-output",
-            "check_result": "acceptance failed",
-            "failure_reason": "Acceptance Failure: evidence mismatch",
-        }
-    ]
+    assert reloaded.messages == []
+    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == []
+    assert reloaded.metadata["last_task_memory"]["task_results"] == []
 
 
 @pytest.mark.asyncio

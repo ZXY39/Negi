@@ -544,7 +544,26 @@ def _should_forward_message_end(payload: dict[str, Any] | None) -> bool:
     text = str(data.get("text") or "").strip()
     if not text:
         return False
-    return text != _HEARTBEAT_OK
+    if text == _HEARTBEAT_OK:
+        return str(data.get("source") or "").strip().lower() == "cron"
+    return True
+
+
+def _is_internal_ack_message_end(payload: dict[str, Any] | None) -> bool:
+    data = payload if isinstance(payload, dict) else {}
+    if str(data.get("role") or "").strip().lower() != "assistant":
+        return False
+    text = str(data.get("text") or "").strip()
+    if text != _HEARTBEAT_OK:
+        return False
+    return str(data.get("source") or "").strip().lower() in {"heartbeat", "cron"}
+
+
+def _internal_ack_label(*, source: str, reason: str) -> str:
+    normalized_source = str(source or "").strip().lower() or "heartbeat"
+    normalized_reason = str(reason or "").strip() or "heartbeat_ok"
+    suffix = "cron" if normalized_source == "cron" else "心跳"
+    return f"已接收来自类型：{normalized_reason}的{suffix}"
 
 
 @router.websocket('/ws/ceo')
@@ -771,6 +790,7 @@ async def ceo_websocket(websocket: WebSocket):
             if not _should_forward_message_end(payload):
                 return
             text = str(payload.get('text') or '').strip()
+            source = str(payload.get('source') or 'user').strip().lower() or 'user'
             turn_id = str(payload.get('turn_id') or '').strip()
             if not turn_id:
                 snapshot = None
@@ -782,11 +802,26 @@ async def ceo_websocket(websocket: WebSocket):
                         snapshot = None
                 if isinstance(snapshot, dict):
                     turn_id = str(snapshot.get('turn_id') or '').strip()
+            if _is_internal_ack_message_end(payload):
+                reason = str(payload.get("heartbeat_reason") or "heartbeat_ok").strip() or "heartbeat_ok"
+                await _push_stream_event(
+                    'ceo.internal.ack',
+                    {
+                        'source': source if source in {'heartbeat', 'cron'} else 'heartbeat',
+                        'reason': reason,
+                        'label': _internal_ack_label(
+                            source=source if source in {'heartbeat', 'cron'} else 'heartbeat',
+                            reason=reason,
+                        ),
+                        'turn_id': turn_id,
+                    },
+                )
+                return
             await _push_stream_event(
                 'ceo.reply.final',
                 {
                     'text': text,
-                    'source': str(payload.get('source') or 'user').strip().lower() or 'user',
+                    'source': source,
                     'turn_id': turn_id,
                 },
             )
