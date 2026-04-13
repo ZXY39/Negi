@@ -2,7 +2,7 @@
 kind: tool
 name: content
 display_name: Content (Legacy)
-description: Legacy compatibility wrapper for describe, search, and open operations over large content by ref or absolute file path.
+description: Legacy compatibility wrapper for describe, search, and open operations over large content by ref or absolute file path. For `action=search` and `action=open`, supplying both `ref` and `path` attempts both targets and returns per-target results.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -39,7 +39,7 @@ parameters:
       description: Content navigation action.
     ref:
       type: string
-      description: Externalized content ref such as artifact:artifact_xxx.
+      description: Externalized content ref such as artifact:artifact:demo123.
     path:
       type: string
       description: Absolute file path for path mode. Relative paths are rejected. When restrict_to_workspace is enabled, the path must stay inside the workspace.

@@ -60,6 +60,145 @@ class ContentTool:
             ensure_ascii=False,
         )
 
+    def _execute_operation(
+        self,
+        *,
+        operation: str,
+        ref: str | None = None,
+        path: str | None = None,
+        query: str | None = None,
+        view: str | None = None,
+        limit: int | None = None,
+        before: int | None = None,
+        after: int | None = None,
+        start_line: int | None = None,
+        end_line: int | None = None,
+        around_line: int | None = None,
+        window: int | None = None,
+        lines: int | None = None,
+    ) -> dict[str, Any]:
+        if operation == "describe":
+            return self._content_store.describe(ref=ref, path=path, view=str(view or "canonical"))
+        if operation == "search":
+            return self._content_store.search(
+                ref=ref,
+                path=path,
+                query=str(query or ""),
+                view=str(view or "canonical"),
+                limit=int(limit or 10),
+                before=int(before or 2),
+                after=int(after or 2),
+            )
+        if operation == "open":
+            return self._content_store.open(
+                ref=ref,
+                path=path,
+                view=str(view or "canonical"),
+                start_line=int(start_line) if start_line is not None else None,
+                end_line=int(end_line) if end_line is not None else None,
+                around_line=int(around_line) if around_line is not None else None,
+                window=int(window) if window is not None else None,
+            )
+        if operation == "head":
+            return self._content_store.head(ref=ref, path=path, view=str(view or "canonical"), lines=int(lines or 80))
+        if operation == "tail":
+            return self._content_store.tail(ref=ref, path=path, view=str(view or "canonical"), lines=int(lines or 80))
+        raise ValueError(f"Unsupported content action: {operation}")
+
+    def _attempt_single_target_operation(
+        self,
+        *,
+        operation: str,
+        target: str,
+        runtime: dict[str, Any] | None,
+        ref: str | None = None,
+        path: str | None = None,
+        query: str | None = None,
+        view: str | None = None,
+        limit: int | None = None,
+        before: int | None = None,
+        after: int | None = None,
+        start_line: int | None = None,
+        end_line: int | None = None,
+        around_line: int | None = None,
+        window: int | None = None,
+        lines: int | None = None,
+    ) -> dict[str, Any]:
+        try:
+            if target == "ref":
+                blocked = self._guard_ref_access(runtime=runtime, ref=ref)
+                if blocked is not None:
+                    payload = json.loads(blocked)
+                else:
+                    payload = self._execute_operation(
+                        operation=operation,
+                        ref=ref,
+                        query=query,
+                        view=view,
+                        limit=limit,
+                        before=before,
+                        after=after,
+                        start_line=start_line,
+                        end_line=end_line,
+                        around_line=around_line,
+                        window=window,
+                        lines=lines,
+                    )
+            elif target == "path":
+                payload = self._execute_operation(
+                    operation=operation,
+                    path=path,
+                    query=query,
+                    view=view,
+                    limit=limit,
+                    before=before,
+                    after=after,
+                    start_line=start_line,
+                    end_line=end_line,
+                    around_line=around_line,
+                    window=window,
+                    lines=lines,
+                )
+            else:
+                raise ValueError(f"unsupported content target: {target}")
+        except Exception as exc:
+            payload = {"ok": False, "error": str(exc)}
+        normalized = dict(payload)
+        normalized.setdefault("ok", bool(normalized.get("ref") or normalized.get("hits") or normalized.get("excerpt") or normalized.get("content")))
+        normalized["target"] = target
+        if ref is not None:
+            normalized.setdefault("input_ref", str(ref))
+        if path is not None:
+            normalized.setdefault("input_path", str(path))
+        return normalized
+
+    @staticmethod
+    def _combine_target_results(
+        *,
+        operation: str,
+        ref: str,
+        path: str,
+        ref_result: dict[str, Any],
+        path_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        targets = {"ref": ref_result, "path": path_result}
+        successes = [name for name, payload in targets.items() if payload.get("ok") is True]
+        failures = [name for name, payload in targets.items() if payload.get("ok") is not True]
+        payload: dict[str, Any] = {
+            "ok": bool(successes),
+            "combined": True,
+            "operation": operation,
+            "requested_ref": str(ref or "").strip(),
+            "requested_path": str(path or "").strip(),
+            "targets": targets,
+            "success_count": len(successes),
+            "failure_count": len(failures),
+            "partial": bool(successes) and bool(failures),
+        }
+        if not successes:
+            payload["error"] = "all requested content targets failed"
+        return payload
+
     async def execute(
         self,
         action: str,
@@ -83,43 +222,73 @@ class ContentTool:
             fallback_runtime = kwargs.get('__g3ku_runtime')
             runtime = fallback_runtime if isinstance(fallback_runtime, dict) else None
         operation = str(action or "").strip().lower()
-        blocked = self._guard_ref_access(runtime=runtime, ref=ref)
-        if blocked is not None:
-            return blocked
+        normalized_ref = str(ref or "").strip()
+        normalized_path = str(path or "").strip()
         try:
-            if operation == "describe":
-                return json.dumps(self._content_store.describe(ref=ref, path=path, view=str(view or "canonical")), ensure_ascii=False)
-            if operation == "search":
+            if normalized_ref and normalized_path and operation in {"search", "open"}:
+                ref_result = self._attempt_single_target_operation(
+                    operation=operation,
+                    target="ref",
+                    runtime=runtime,
+                    ref=normalized_ref,
+                    view=view,
+                    query=query,
+                    limit=limit,
+                    before=before,
+                    after=after,
+                    start_line=start_line,
+                    end_line=end_line,
+                    around_line=around_line,
+                    window=window,
+                    lines=lines,
+                )
+                path_result = self._attempt_single_target_operation(
+                    operation=operation,
+                    target="path",
+                    runtime=runtime,
+                    path=normalized_path,
+                    view=view,
+                    query=query,
+                    limit=limit,
+                    before=before,
+                    after=after,
+                    start_line=start_line,
+                    end_line=end_line,
+                    around_line=around_line,
+                    window=window,
+                    lines=lines,
+                )
                 return json.dumps(
-                    self._content_store.search(
-                        ref=ref,
-                        path=path,
-                        query=str(query or ""),
-                        view=str(view or "canonical"),
-                        limit=int(limit or 10),
-                        before=int(before or 2),
-                        after=int(after or 2),
+                    self._combine_target_results(
+                        operation=operation,
+                        ref=normalized_ref,
+                        path=normalized_path,
+                        ref_result=ref_result,
+                        path_result=path_result,
                     ),
                     ensure_ascii=False,
                 )
-            if operation == "open":
-                return json.dumps(
-                    self._content_store.open(
-                        ref=ref,
-                        path=path,
-                        view=str(view or "canonical"),
-                        start_line=int(start_line) if start_line is not None else None,
-                        end_line=int(end_line) if end_line is not None else None,
-                        around_line=int(around_line) if around_line is not None else None,
-                        window=int(window) if window is not None else None,
-                    ),
-                    ensure_ascii=False,
-                )
-            if operation == "head":
-                return json.dumps(self._content_store.head(ref=ref, path=path, view=str(view or "canonical"), lines=int(lines or 80)), ensure_ascii=False)
-            if operation == "tail":
-                return json.dumps(self._content_store.tail(ref=ref, path=path, view=str(view or "canonical"), lines=int(lines or 80)), ensure_ascii=False)
-            return json.dumps({"ok": False, "error": f"Unsupported content action: {operation}"}, ensure_ascii=False)
+            blocked = self._guard_ref_access(runtime=runtime, ref=ref)
+            if blocked is not None:
+                return blocked
+            return json.dumps(
+                self._execute_operation(
+                    operation=operation,
+                    ref=ref,
+                    path=path,
+                    query=query,
+                    view=view,
+                    limit=limit,
+                    before=before,
+                    after=after,
+                    start_line=start_line,
+                    end_line=end_line,
+                    around_line=around_line,
+                    window=window,
+                    lines=lines,
+                ),
+                ensure_ascii=False,
+            )
         except Exception as exc:
             return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
 

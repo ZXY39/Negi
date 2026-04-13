@@ -2,7 +2,7 @@
 kind: tool
 name: content_open
 display_name: Content Open
-description: Open one excerpt from a content ref or absolute file path.
+description: Open one excerpt from a content ref or absolute file path. When both `ref` and `path` are provided, attempt both targets and return per-target results.
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:
@@ -20,10 +20,10 @@ parameters:
   properties:
     ref:
       type: string
-      description: Externalized content ref such as artifact:artifact_xxx.
+      description: Externalized content ref such as artifact:artifact:demo123.
     path:
       type: string
-      description: Absolute file path for path mode.
+      description: Absolute file path for path mode. When `ref` is also provided, this target is attempted separately and any path-specific failure stays in the path result.
     view:
       type: string
       enum:

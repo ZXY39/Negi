@@ -176,6 +176,19 @@ def test_content_describe_docs_do_not_reference_removed_filesystem_read_tools() 
     assert '`filesystem_list`' not in content_toolskill
 
 
+def test_content_navigation_manifests_use_real_artifact_ref_examples() -> None:
+    for tool_name in ('content', 'content_describe', 'content_open', 'content_search'):
+        manifest = yaml.safe_load((REPO_ROOT / 'tools' / tool_name / 'resource.yaml').read_text(encoding='utf-8')) or {}
+        ref_description = str(
+            (
+                ((manifest.get('parameters') or {}).get('properties') or {}).get('ref') or {}
+            ).get('description')
+            or ''
+        )
+        assert 'artifact:artifact:' in ref_description
+        assert 'artifact:artifact_xxx' not in ref_description
+
+
 def _write_demo_external_tool(
     root: Path,
     *,
@@ -778,6 +791,112 @@ async def test_content_search_overflow_requires_refine(tmp_path: Path):
         assert payload['overflow_lower_bound'] == 6
     finally:
         manager.close()
+
+
+@pytest.mark.asyncio
+async def test_content_search_split_tool_combines_ref_and_path_results_when_both_supplied(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    local_file = workspace / 'local.log'
+    local_file.parent.mkdir(parents=True, exist_ok=True)
+    local_file.write_text('alpha\nneedle in path\nomega\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    shutil.copytree(REPO_ROOT / 'tools' / 'content_search', workspace / 'tools' / 'content_search')
+
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    service = _ArtifactService(artifact_store)
+    artifact = artifact_store.create_text_artifact(
+        task_id='task:test',
+        node_id='node:test',
+        kind='tool_output',
+        title='Artifact Search',
+        content='zero\nneedle in ref\nend\n',
+        extension='.log',
+        mime_type='text/plain',
+    )
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content_search')
+        assert tool is not None
+
+        payload = json.loads(
+            await tool.execute(
+                ref=f'artifact:{artifact.artifact_id}',
+                path=str(local_file),
+                query='needle',
+                before=0,
+                after=0,
+            )
+        )
+
+        assert payload['ok'] is True
+        assert payload['combined'] is True
+        assert payload['partial'] is False
+        assert payload['success_count'] == 2
+        assert payload['failure_count'] == 0
+        assert payload['targets']['ref']['ok'] is True
+        assert payload['targets']['ref']['hits'][0]['line'] == 2
+        assert payload['targets']['path']['ok'] is True
+        assert payload['targets']['path']['hits'][0]['line'] == 2
+    finally:
+        manager.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_content_open_split_tool_returns_ref_success_and_path_error_when_both_supplied(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    shutil.copytree(REPO_ROOT / 'tools' / 'content_open', workspace / 'tools' / 'content_open')
+
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    service = _ArtifactService(artifact_store)
+    artifact = artifact_store.create_text_artifact(
+        task_id='task:test',
+        node_id='node:test',
+        kind='tool_output',
+        title='Artifact Open',
+        content='alpha\nneedle in ref\nomega\n',
+        extension='.log',
+        mime_type='text/plain',
+    )
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content_open')
+        assert tool is not None
+
+        payload = json.loads(
+            await tool.execute(
+                ref=f'artifact:{artifact.artifact_id}',
+                path='artifact:artifact:demo123',
+                around_line=2,
+                window=3,
+            )
+        )
+
+        assert payload['ok'] is True
+        assert payload['combined'] is True
+        assert payload['partial'] is True
+        assert payload['success_count'] == 1
+        assert payload['failure_count'] == 1
+        assert payload['targets']['ref']['ok'] is True
+        assert 'needle in ref' in payload['targets']['ref']['excerpt']
+        assert payload['targets']['path']['ok'] is False
+        assert 'content ref must be passed via ref, not path' in payload['targets']['path']['error']
+    finally:
+        manager.close()
+        store.close()
 
 
 @pytest.mark.asyncio

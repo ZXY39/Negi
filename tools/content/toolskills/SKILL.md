@@ -13,5 +13,6 @@ Rules:
 - Do not request the full body first. Describe or search, then open only the relevant excerpt.
 - For `artifact:` refs, prefer `ref` mode. Do not pass content refs to `filesystem`.
 - `path` mode accepts absolute paths only.
+- For `action=search` and `action=open`, if both `ref` and `path` are provided, the wrapper attempts both targets and returns separate per-target results.
 - When `restrict_to_workspace` is enabled, `path` must stay inside the allowed workspace.
 - Prefer `view=canonical` for wrapped refs. Use `view=raw` only when debugging wrapper payloads.

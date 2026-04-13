@@ -20,7 +20,7 @@ parameters:
   properties:
     ref:
       type: string
-      description: Externalized content ref such as artifact:artifact_xxx.
+      description: Externalized content ref such as artifact:artifact:demo123.
     path:
       type: string
       description: Absolute file path for path mode. Directories are not supported.

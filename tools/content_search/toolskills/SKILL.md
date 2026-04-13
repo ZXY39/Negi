@@ -9,4 +9,6 @@ Provide:
 - `view`: optional `canonical` or `raw`; prefer `canonical`
 - `limit`, `before`, `after`: optional search window controls
 
+If both `ref` and `path` are provided, the tool attempts both targets and returns separate `ref` and `path` results.
+
 Search first, then open only the relevant excerpt instead of requesting the full body.
