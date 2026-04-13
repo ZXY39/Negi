@@ -354,14 +354,17 @@ G3KU 的做法是：
 
 ### 10.2 配置迁移策略
 
-旧配置字段停止参与运行时逻辑，但第一版保留 schema 字段为 deprecated no-op：
+旧的 message-count 配置字段不再保留在 schema 中：
 
 - `frontdoor_recent_message_count`
 - `frontdoor_summary_trigger_message_count`
 - `frontdoor_summarizer_trigger_message_count`
 - `frontdoor_summarizer_keep_message_count`
 
-运行时应记录明确 warning，后续版本再彻底删除字段。
+维护语义改为：
+
+- frontdoor 长上下文压缩只接受 `frontdoor_global_summary_*` 配置入口
+- 旧 message-count 字段视为已移除，而不是 deprecated no-op
 
 ## 11. 具体改动计划
 
@@ -528,3 +531,17 @@ G3KU 的做法是：
 - compression_state 能反映新的语义压缩刷新状态
 - 相关测试通过
 - 架构文档已根据最终落地结果更新
+
+## 17. Finalized Implementation Notes
+
+The implementation now fixes three design points that were still fluid earlier in the document:
+
+1. Global semantic summary refresh is decided by coverage, cooldown, and token pressure together. A previously generated summary can be reused when its recorded coverage still matches the current global zone.
+2. Thresholds are derived from the resolved CEO model context window when available, with the Hermes 64K floor as the final safety baseline. The earlier `128000` fallback is no longer the main rule.
+3. Compression-stage archive handling is finalized as "externalized block only". The semantic summary path may reuse the existing `[G3KU_STAGE_EXTERNALIZED_V1]` block content, but it does not read `archive_ref` raw archive payloads back into prompt assembly.
+
+Runtime migration semantics are also finalized:
+
+- `compression_state` keeps the same public shape but now represents semantic-summary refresh state.
+- legacy message-count settings are removed from schema and runtime
+- the old `_summarize_messages()` compatibility hook is removed rather than kept as a no-op shell

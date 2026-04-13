@@ -668,11 +668,13 @@ async def test_ceo_frontdoor_finalize_turn_persists_direct_reply_into_checkpoint
     ]
 
 
-def test_memory_assembly_config_exposes_frontdoor_compaction_defaults() -> None:
+def test_memory_assembly_config_exposes_frontdoor_runtime_defaults() -> None:
     config = MemoryAssemblyConfig()
 
-    assert config.frontdoor_recent_message_count == 20
-    assert config.frontdoor_summary_trigger_message_count == 10
+    assert not hasattr(config, "frontdoor_recent_message_count")
+    assert not hasattr(config, "frontdoor_summary_trigger_message_count")
+    assert not hasattr(config, "frontdoor_summarizer_trigger_message_count")
+    assert not hasattr(config, "frontdoor_summarizer_keep_message_count")
     assert config.frontdoor_interrupt_approval_enabled is False
     assert config.frontdoor_interrupt_tool_names == ["message", "create_async_task", "continue_task"]
 
@@ -699,10 +701,7 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
         workspace=tmp_path,
         temp_dir=str(tmp_path / "tmp"),
         _memory_runtime_settings=SimpleNamespace(
-            assembly=SimpleNamespace(
-                frontdoor_recent_message_count=3,
-                frontdoor_summary_trigger_message_count=4,
-            )
+            assembly=SimpleNamespace()
         ),
     )
     runner = CeoFrontDoorRunner(loop=loop)

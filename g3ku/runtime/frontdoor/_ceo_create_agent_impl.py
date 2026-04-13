@@ -440,8 +440,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         if len(trailing_tools) < len(tool_call_payloads):
             return None
 
-        compacted_state = await self._summarize_messages(messages=messages, state=state)
-        messages = list(compacted_state.get("messages") or [])
+        messages = list(messages or [])
         used_tools = list(state.get("used_tools") or [])
         used_tools.extend(
             [

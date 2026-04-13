@@ -8,19 +8,27 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
+from loguru import logger
+
+from g3ku.config.live_runtime import get_runtime_config
+from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.runtime.context.semantic_scope import plan_retrieval_scope, semantic_catalog_rankings
 from g3ku.runtime.context.summarizer import score_query
 from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBundle
 from g3ku.runtime.core_tools import resolve_core_tool_targets
 from g3ku.runtime.semantic_context_summary import (
     HERMES_FAILURE_COOLDOWN_SECONDS,
+    HERMES_MIN_CONTEXT_FLOOR,
     build_global_summary_thresholds,
     build_long_context_summary_message,
     default_semantic_context_state,
     estimate_message_tokens,
+    future_cooldown_until,
+    normalize_summary_result,
+    semantic_summary_refresh_decision,
     summarize_global_context_model_first,
 )
-from g3ku.runtime.stage_prompt_compaction import decompose_stage_prompt_messages
+from g3ku.runtime.stage_prompt_compaction import STAGE_EXTERNALIZED_PREFIX, decompose_stage_prompt_messages
 from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
@@ -32,6 +40,55 @@ from g3ku.runtime.web_ceo_sessions import (
     transcript_messages,
 )
 from main.runtime.stage_budget import STAGE_TOOL_NAME
+
+
+def _context_window_from_model_parameters(model_parameters: dict[str, Any] | None) -> int:
+    payload = dict(model_parameters or {})
+    for key in ("context_length", "context_window", "max_input_tokens", "max_context_tokens"):
+        value = payload.get(key)
+        try:
+            resolved = int(value or 0)
+        except (TypeError, ValueError):
+            resolved = 0
+        if resolved > 0:
+            return resolved
+    return 0
+
+
+def _resolve_ceo_context_window_tokens(loop: Any) -> int:
+    config = getattr(loop, "app_config", None)
+    if config is None:
+        try:
+            config, _revision, _changed = get_runtime_config(force=False)
+        except Exception:
+            config = None
+    if config is not None:
+        try:
+            model_key = config.resolve_scope_model_reference("ceo")
+            target = resolve_chat_target(config, model_key)
+            resolved = _context_window_from_model_parameters(getattr(target, "model_parameters", None))
+            if resolved > 0:
+                return resolved
+        except Exception:
+            pass
+    try:
+        resolved = int(getattr(loop, "context_length", 0) or 0)
+    except (TypeError, ValueError):
+        resolved = 0
+    if resolved > 0:
+        return resolved
+    return HERMES_MIN_CONTEXT_FLOOR
+
+
+def _externalized_completed_blocks_for_global_summary(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for item in list(messages or []):
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content") or "").strip()
+        if content.startswith(STAGE_EXTERNALIZED_PREFIX):
+            selected.append(dict(item))
+    return selected
 
 
 class CeoMessageBuilder:
@@ -1192,7 +1249,9 @@ class CeoMessageBuilder:
             preserve_leading_user=False,
         )
         stage_workset_history = [*list(stage_parts["completed_blocks"]), *list(stage_parts["active_window"])]
+        compression_blocks_for_summary = _externalized_completed_blocks_for_global_summary(stage_parts["completed_blocks"])
         global_zone_source = [
+            *list(compression_blocks_for_summary),
             *list(stage_parts["global_zone_source"]),
             *self._hidden_internal_summary_messages(
                 persisted_session=persisted_session,
@@ -1200,7 +1259,7 @@ class CeoMessageBuilder:
             ),
         ]
         global_summary_settings = self._global_summary_settings(self._loop)
-        context_window_tokens = max(int(getattr(self._loop, "context_length", 0) or 0), 128000)
+        context_window_tokens = _resolve_ceo_context_window_tokens(self._loop)
         prompt_estimate_tokens = estimate_message_tokens(
             [
                 {"role": "system", "content": str(context_sources["system_prompt"] or "")},
@@ -1220,24 +1279,79 @@ class CeoMessageBuilder:
             pressure_warn_ratio=global_summary_settings["pressure_warn_ratio"],
             force_refresh_ratio=global_summary_settings["force_refresh_ratio"],
         )
-        semantic_state = dict(semantic_context_state or default_semantic_context_state())
+        semantic_state = {
+            **default_semantic_context_state(),
+            **dict(semantic_context_state or {}),
+        }
         global_summary_text = str(semantic_state.get("summary_text") or "").strip()
-        trigger_reached = prompt_estimate_tokens >= int(thresholds["trigger_tokens"])
-        warn_reached = prompt_estimate_tokens >= int(thresholds["pressure_warn_tokens"])
-        force_reached = prompt_estimate_tokens >= int(thresholds["force_refresh_tokens"])
-        should_refresh_global_summary = bool(global_zone_source) and (
-            not global_summary_text
-            or compressed_zone_tokens >= int(global_summary_settings["min_delta_tokens"])
-            or warn_reached
+        retained_completed_stage_ids = {
+            str(item or "").strip()
+            for item in set(stage_parts.get("retained_completed_stage_ids") or set())
+            if str(item or "").strip()
+        }
+        completed_stage_index = max(
+            (
+                int(item.get("stage_index") or 0)
+                for item in list(normalized_frontdoor_stage_state.get("stages") or [])
+                if isinstance(item, dict)
+                and str(item.get("status") or "").strip().lower() != "active"
+                and str(item.get("stage_id") or "").strip() not in retained_completed_stage_ids
+            ),
+            default=0,
         )
-        if should_refresh_global_summary and prompt_estimate_tokens >= int(thresholds["trigger_tokens"]):
-            global_summary_text = await summarize_global_context_model_first(
-                global_zone_source,
-                max_output_tokens=int(thresholds["max_output_tokens"] or global_summary_settings["min_output_tokens"]),
-                model_key=global_summary_settings["model_key"],
+        refresh_decision = semantic_summary_refresh_decision(
+            semantic_state=semantic_state,
+            history_source=str(history_state["history_source"] or ""),
+            prompt_tokens=prompt_estimate_tokens,
+            trigger_tokens=int(thresholds["trigger_tokens"]),
+            pressure_warn_tokens=int(thresholds["pressure_warn_tokens"]),
+            force_refresh_tokens=int(thresholds["force_refresh_tokens"]),
+            compressed_zone_tokens=compressed_zone_tokens,
+            min_delta_tokens=int(global_summary_settings["min_delta_tokens"]),
+            global_zone_message_count=len(global_zone_source),
+            global_zone_stage_index=completed_stage_index,
+        )
+        trigger_reached = bool(refresh_decision["trigger_reached"])
+        warn_reached = bool(refresh_decision["warn_reached"])
+        force_reached = bool(refresh_decision["force_reached"])
+        refresh_result = {
+            "summary_text": global_summary_text,
+            "used_fallback": False,
+            "failed": False,
+            "error_text": "",
+        }
+        summary_generated = False
+        refresh_attempted = False
+        if bool(refresh_decision["should_refresh"]):
+            refresh_attempted = True
+            refresh_result = normalize_summary_result(
+                await summarize_global_context_model_first(
+                    global_zone_source,
+                    max_output_tokens=int(thresholds["max_output_tokens"] or global_summary_settings["min_output_tokens"]),
+                    model_key=global_summary_settings["model_key"],
+                )
             )
-            semantic_state["updated_at"] = self._now_iso()
-            semantic_state["failure_cooldown_until"] = ""
+            refreshed_summary_text = str(refresh_result.get("summary_text") or "").strip()
+            if refreshed_summary_text:
+                global_summary_text = refreshed_summary_text
+            if bool(refresh_result.get("failed")):
+                semantic_state["failure_cooldown_until"] = future_cooldown_until(
+                    seconds=int(global_summary_settings["failure_cooldown_seconds"]),
+                )
+            else:
+                semantic_state["updated_at"] = self._now_iso()
+                semantic_state["failure_cooldown_until"] = ""
+                summary_generated = True
+        elif bool(refresh_decision["cooldown_active"]) and not global_summary_text and global_zone_source:
+            refresh_result = normalize_summary_result(
+                await summarize_global_context_model_first(
+                    global_zone_source,
+                    max_output_tokens=int(thresholds["max_output_tokens"] or global_summary_settings["min_output_tokens"]),
+                    model_key=global_summary_settings["model_key"],
+                )
+            )
+            global_summary_text = str(refresh_result.get("summary_text") or "").strip()
+            summary_generated = bool(global_summary_text)
         global_summary_message = (
             build_long_context_summary_message(global_summary_text)
             if str(global_summary_text or "").strip()
@@ -1265,6 +1379,39 @@ class CeoMessageBuilder:
             "status": "ready" if global_summary_message is not None else "idle",
             "text": "全局上下文已压缩" if global_summary_message is not None else "",
             "source": "semantic" if global_summary_message is not None else "",
+            "needs_recheck": bool(semantic_state.get("needs_refresh")),
+        }
+        semantic_state["summary_text"] = global_summary_text
+        if summary_generated:
+            semantic_state["coverage_history_source"] = str(history_state["history_source"] or "")
+            semantic_state["coverage_message_index"] = max(-1, len(global_zone_source) - 1)
+            semantic_state["coverage_stage_index"] = completed_stage_index
+        else:
+            semantic_state["coverage_history_source"] = str(semantic_context_state.get("coverage_history_source") or "") if isinstance(semantic_context_state, dict) else ""
+            semantic_state["coverage_message_index"] = int(
+                semantic_context_state.get("coverage_message_index", -1) or -1
+            ) if isinstance(semantic_context_state, dict) else -1
+            semantic_state["coverage_stage_index"] = int(
+                semantic_context_state.get("coverage_stage_index", 0) or 0
+            ) if isinstance(semantic_context_state, dict) else 0
+        semantic_state["needs_refresh"] = bool(refresh_decision["needs_refresh"]) or (
+            refresh_attempted and bool(refresh_result.get("failed"))
+        )
+        compression_status = ""
+        compression_text = ""
+        compression_source = ""
+        if global_summary_message is not None:
+            compression_status = "ready"
+            compression_text = "全局上下文已压缩"
+            compression_source = "semantic"
+        if refresh_attempted and bool(refresh_result.get("failed")):
+            compression_status = "error"
+            compression_text = "全局上下文压缩刷新失败，已回退到摘要缓存或回退摘要"
+            compression_source = "semantic"
+        compression_state_payload = {
+            "status": compression_status,
+            "text": compression_text,
+            "source": compression_source,
             "needs_recheck": bool(semantic_state.get("needs_refresh")),
         }
         staged_history_for_injection = [

@@ -18,20 +18,9 @@ def test_obsolete_frontdoor_summary_modules_are_removed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_frontdoor_message_cleanup_no_longer_compacts_history() -> None:
+async def test_frontdoor_runtime_no_longer_exposes_legacy_history_summarizer_hook() -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
-    messages = [{"role": "user", "content": f"message {idx}"} for idx in range(10)]
-
-    result = await runner._summarize_messages(
-        messages=messages,
-        state={
-            "summary_text": "stale summary",
-            "summary_payload": {"stable_facts": ["stale fact"]},
-            "summary_model_key": "summary-model",
-        },
-    )
-
-    assert result == {"messages": messages}
+    assert not hasattr(runner, "_summarize_messages")
 
 
 def test_frontdoor_no_longer_uses_summary_text_overlay() -> None:

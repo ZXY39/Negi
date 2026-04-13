@@ -11,12 +11,6 @@ from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoo
 async def test_frontdoor_postprocess_tool_cycle_drops_summary_fields(monkeypatch) -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
 
-    async def _fake_summarize_messages(*, messages, state):
-        _ = state
-        return {"messages": list(messages)}
-
-    monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
-
     result = await runner._postprocess_completed_tool_cycle(
         state={
             "tool_call_payloads": [{"id": "call-1", "name": "message", "arguments": {"text": "hello"}}],

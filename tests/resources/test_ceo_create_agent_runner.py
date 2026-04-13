@@ -203,11 +203,13 @@ class _BrokenValidationTool(Tool):
         raise TypeError("unhashable type: 'list'")
 
 
-def test_memory_assembly_config_uses_stage_budget_defaults() -> None:
+def test_memory_assembly_config_uses_frontdoor_global_summary_defaults() -> None:
     cfg = MemoryAssemblyConfig()
 
-    assert cfg.frontdoor_recent_message_count == 20
-    assert cfg.frontdoor_summary_trigger_message_count == 10
+    assert not hasattr(cfg, "frontdoor_recent_message_count")
+    assert not hasattr(cfg, "frontdoor_summary_trigger_message_count")
+    assert not hasattr(cfg, "frontdoor_summarizer_trigger_message_count")
+    assert not hasattr(cfg, "frontdoor_summarizer_keep_message_count")
     assert cfg.frontdoor_interrupt_approval_enabled is False
     assert cfg.frontdoor_interrupt_tool_names == ["message", "create_async_task", "continue_task"]
     assert cfg.frontdoor_global_summary_trigger_ratio == 0.50
@@ -242,8 +244,6 @@ async def test_create_agent_runner_prompt_keeps_history_uncompacted_after_legacy
         loop=SimpleNamespace(
             _memory_runtime_settings=SimpleNamespace(
                 assembly=SimpleNamespace(
-                    frontdoor_summarizer_trigger_message_count=4,
-                    frontdoor_summarizer_keep_message_count=2,
                     core_tools=[],
                 )
             ),
@@ -565,12 +565,6 @@ async def test_create_agent_graph_execute_tools_preserves_parallel_same_name_too
 
     monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"demo_tool": _DemoTool()})
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _on_progress})
-    async def _fake_summarize_messages(*, messages, state):
-        _ = state
-        return {"messages": list(messages)}
-
-    monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
-
     async def _fake_execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
         _ = tool, runtime_context
         await on_progress(
@@ -993,12 +987,6 @@ async def test_create_agent_middleware_syncs_real_stage_state_before_running_too
     session._state.is_running = True
     session._state.status = "running"
 
-    async def _identity_summarize_messages(*, messages, state):
-        _ = state
-        return {"messages": list(messages)}
-
-    monkeypatch.setattr(runner, "_summarize_messages", _identity_summarize_messages)
-
     lifecycle = ceo_agent_middleware.CeoTurnLifecycleMiddleware(runner=runner)
     model_output = ceo_agent_middleware.CeoModelOutputMiddleware(runner=runner)
     runtime = SimpleNamespace(context=SimpleNamespace(session=session))
@@ -1397,12 +1385,6 @@ async def test_create_agent_postprocess_allows_unverified_task_dispatch_reply(mo
         loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))
     )
 
-    async def _fake_summarize_messages(*, messages, state):
-        _ = state
-        return {"messages": list(messages)}
-
-    monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
-
     result = await runner._postprocess_completed_tool_cycle(
         state={
             "tool_call_payloads": [
@@ -1446,12 +1428,6 @@ async def test_create_agent_postprocess_continues_after_verified_async_dispatch(
             main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id))
         )
     )
-
-    async def _fake_summarize_messages(*, messages, state):
-        _ = state
-        return {"messages": list(messages)}
-
-    monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
 
     result = await runner._postprocess_completed_tool_cycle(
         state={
@@ -1500,12 +1476,6 @@ async def test_create_agent_postprocess_verifies_continue_task_recreate_before_r
             main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id))
         )
     )
-
-    async def _fake_summarize_messages(*, messages, state):
-        _ = state
-        return {"messages": list(messages)}
-
-    monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
 
     result = await runner._postprocess_completed_tool_cycle(
         state={
@@ -1993,14 +1963,14 @@ def test_create_agent_prompt_contract_avoids_duplicate_history_when_live_message
     ]
 
 
-def test_create_agent_prompt_contract_does_not_treat_plain_conversation_summary_text_as_compaction() -> None:
+def test_create_agent_prompt_contract_does_not_treat_plain_short_recap_text_as_compaction() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
     contract = runner._frontdoor_prompt_contract(
         state={
             "messages": [
                 {"role": "system", "content": "stable system"},
-                {"role": "assistant", "content": "Conversation summary: here's the answer you asked for."},
+                {"role": "assistant", "content": "Short recap: here's the answer you asked for."},
                 {"role": "user", "content": "latest user"},
             ],
             "stable_messages": [
@@ -2028,7 +1998,7 @@ def test_create_agent_prompt_contract_does_not_treat_plain_conversation_summary_
         {"role": "system", "content": "stable system"},
         {"role": "user", "content": "q1"},
         {"role": "assistant", "content": "a1"},
-        {"role": "assistant", "content": "Conversation summary: here's the answer you asked for."},
+        {"role": "assistant", "content": "Short recap: here's the answer you asked for."},
         {"role": "user", "content": "latest user"},
         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
     ]

@@ -971,15 +971,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             build_ceo_stage_result_block_message(stage_gate),
         )
 
-    async def _summarize_messages(
-        self,
-        *,
-        messages: list[dict[str, Any]],
-        state: CeoGraphState,
-    ) -> dict[str, Any]:
-        _ = state
-        return {"messages": list(messages or [])}
-
     def _reviewable_tool_names(self) -> set[str]:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
         if not bool(getattr(assembly_cfg, "frontdoor_interrupt_approval_enabled", False)):
@@ -1301,18 +1292,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         runtime: Runtime[CeoRuntimeContext],
     ) -> dict[str, Any]:
         if getattr(getattr(runtime, "context", None), "session", None) is None:
-            compacted_state = await self._summarize_messages(
-                messages=list(state.get("messages") or []),
-                state=state,
-            )
-            get_value = (
-                compacted_state.get
-                if isinstance(compacted_state, dict)
-                else lambda key, default=None: getattr(compacted_state, key, default)
-            )
             return {
                 "session_key": str(state.get("session_key") or "").strip(),
-                "messages": list(get_value("messages") or []),
+                "messages": list(state.get("messages") or []),
                 "frontdoor_stage_state": self._frontdoor_stage_state_snapshot(state),
                 "compression_state": dict(state.get("compression_state") or self._default_compression_state()),
             }
@@ -1378,8 +1360,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             messages = [*messages[:insert_at], cron_system_message, *messages[insert_at:]]
         if not messages or str(messages[-1].get("role") or "").strip().lower() != "user":
             messages.append({"role": "user", "content": self._model_content(user_content)})
-        compacted_state = await self._summarize_messages(messages=messages, state=state)
-        messages = list(compacted_state.get("messages") or [])
 
         model_refs = self._resolve_ceo_model_refs()
         provider_model = str(model_refs[0] if model_refs else "").strip()
@@ -1819,8 +1799,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         messages = list(state.get("messages") or [])
         messages.append(assistant_message)
         messages.extend(tool_messages)
-        compacted_state = await self._summarize_messages(messages=messages, state=state)
-        messages = list(compacted_state.get("messages") or [])
 
         used_tools = list(state.get("used_tools") or [])
         used_tools.extend(
@@ -1866,15 +1844,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             last_role = str(messages[-1].get("role") or "").strip().lower() if messages else ""
             if last_role != "assistant":
                 messages.append({"role": "assistant", "content": output})
-            compacted_state = await self._summarize_messages(messages=messages, state=state)
-            result["messages"] = list(compacted_state.get("messages") or [])
+            result["messages"] = list(messages)
             result["frontdoor_stage_state"] = self._complete_active_frontdoor_stage_state(
                 state.get("frontdoor_stage_state"),
                 completed_stage_summary=output,
             )
             return result
-        compacted_state = await self._summarize_messages(messages=messages, state=state)
-        result["messages"] = list(compacted_state.get("messages") or [])
+        result["messages"] = list(messages)
         return result
 
     @staticmethod

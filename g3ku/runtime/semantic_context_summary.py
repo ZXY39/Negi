@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 from typing import Any
 
 from g3ku.runtime.context.summarizer import estimate_tokens, truncate_by_tokens
@@ -30,6 +31,50 @@ def default_semantic_context_state() -> dict[str, Any]:
         "needs_refresh": False,
         "failure_cooldown_until": "",
         "updated_at": "",
+    }
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _fallback_summary_text(
+    serialized: str,
+    *,
+    max_output_tokens: int,
+    error_text: str = "",
+) -> str:
+    excerpt = truncate_by_tokens(serialized, max_tokens=max(32, min(int(max_output_tokens or 0), 256)))
+    lines = [
+        "## Summary Status",
+        "Fallback semantic summary generated because long-context refresh failed.",
+    ]
+    if str(error_text or "").strip():
+        lines.append(f"Error: {str(error_text or '').strip()}")
+    if excerpt:
+        lines.extend(["## Context Excerpt", excerpt])
+    return "\n".join(lines).strip()
+
+
+def normalize_summary_result(result: Any) -> dict[str, Any]:
+    if isinstance(result, dict):
+        return {
+            "summary_text": str(result.get("summary_text") or "").strip(),
+            "used_fallback": bool(result.get("used_fallback")),
+            "failed": bool(result.get("failed")),
+            "error_text": str(result.get("error_text") or "").strip(),
+        }
+    return {
+        "summary_text": str(result or "").strip(),
+        "used_fallback": False,
+        "failed": False,
+        "error_text": "",
     }
 
 
@@ -68,11 +113,16 @@ async def summarize_global_context_model_first(
     *,
     max_output_tokens: int,
     model_key: str | None = None,
-) -> str:
+) -> dict[str, Any]:
     serialized = serialize_messages_for_summary(messages)
     if not serialized:
-        return ""
-    fallback = truncate_by_tokens(serialized, max_tokens=max(32, min(max_output_tokens, 256)))
+        return {
+            "summary_text": "",
+            "used_fallback": False,
+            "failed": False,
+            "error_text": "",
+        }
+    fallback = _fallback_summary_text(serialized, max_output_tokens=max_output_tokens)
     try:
         from g3ku.config.live_runtime import get_runtime_config
         from g3ku.providers.chatmodels import build_chat_model
@@ -118,9 +168,26 @@ async def summarize_global_context_model_first(
                         merged.append(text)
             raw = "\n".join(merged)
         summary = str(raw or "").strip()
-        return summary or fallback
-    except Exception:
-        return fallback
+        if summary:
+            return {
+                "summary_text": summary,
+                "used_fallback": False,
+                "failed": False,
+                "error_text": "",
+            }
+        return {
+            "summary_text": fallback,
+            "used_fallback": True,
+            "failed": True,
+            "error_text": "summary model returned empty output",
+        }
+    except Exception as exc:
+        return {
+            "summary_text": fallback,
+            "used_fallback": True,
+            "failed": True,
+            "error_text": str(exc or "").strip(),
+        }
 
 
 def build_long_context_summary_message(summary_text: str) -> dict[str, str]:
@@ -137,6 +204,73 @@ def build_long_context_summary_message(summary_text: str) -> dict[str, str]:
 
 def estimate_message_tokens(messages: list[dict[str, Any]] | None) -> int:
     return estimate_tokens(serialize_messages_for_summary(messages))
+
+
+def semantic_summary_refresh_decision(
+    *,
+    semantic_state: dict[str, Any] | None,
+    history_source: str,
+    prompt_tokens: int,
+    trigger_tokens: int,
+    pressure_warn_tokens: int,
+    force_refresh_tokens: int,
+    compressed_zone_tokens: int,
+    min_delta_tokens: int,
+    global_zone_message_count: int,
+    global_zone_stage_index: int,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    state = dict(semantic_state or {})
+    has_summary = bool(str(state.get("summary_text") or "").strip())
+    current_message_index = max(-1, int(global_zone_message_count or 0) - 1)
+    current_stage_index = max(0, int(global_zone_stage_index or 0))
+    trigger_reached = int(prompt_tokens or 0) >= int(trigger_tokens or 0)
+    warn_reached = int(prompt_tokens or 0) >= int(pressure_warn_tokens or 0)
+    force_reached = int(prompt_tokens or 0) >= int(force_refresh_tokens or 0)
+    current_time = now or datetime.now()
+    cooldown_until = _parse_iso_datetime(state.get("failure_cooldown_until"))
+    cooldown_active = cooldown_until is not None and cooldown_until > current_time
+    coverage_hit = (
+        has_summary
+        and str(state.get("coverage_history_source") or "") == str(history_source or "")
+        and int(state.get("coverage_message_index", -1) or -1) >= current_message_index
+        and int(state.get("coverage_stage_index", 0) or 0) >= current_stage_index
+    )
+    has_global_zone = int(global_zone_message_count or 0) > 0
+    delta_reached = int(compressed_zone_tokens or 0) >= int(min_delta_tokens or 0)
+    should_refresh = False
+    if has_global_zone and not cooldown_active:
+        if not has_summary:
+            should_refresh = trigger_reached
+        elif force_reached:
+            should_refresh = True
+        elif coverage_hit:
+            should_refresh = False
+        elif warn_reached:
+            should_refresh = True
+        elif trigger_reached and delta_reached:
+            should_refresh = True
+    needs_refresh = False
+    if has_global_zone and has_summary and not coverage_hit:
+        needs_refresh = not should_refresh
+    return {
+        "has_summary": has_summary,
+        "has_global_zone": has_global_zone,
+        "current_message_index": current_message_index,
+        "current_stage_index": current_stage_index,
+        "coverage_hit": coverage_hit,
+        "cooldown_active": cooldown_active,
+        "trigger_reached": trigger_reached,
+        "warn_reached": warn_reached,
+        "force_reached": force_reached,
+        "should_refresh": should_refresh,
+        "needs_refresh": needs_refresh,
+    }
+
+
+def future_cooldown_until(*, seconds: int, now: datetime | None = None) -> str:
+    current_time = now or datetime.now()
+    return (current_time + timedelta(seconds=max(0, int(seconds or 0)))).isoformat()
 
 
 def build_global_summary_thresholds(
@@ -186,6 +320,9 @@ __all__ = [
     "build_long_context_summary_message",
     "default_semantic_context_state",
     "estimate_message_tokens",
+    "future_cooldown_until",
+    "normalize_summary_result",
+    "semantic_summary_refresh_decision",
     "serialize_messages_for_summary",
     "summarize_global_context_model_first",
 ]

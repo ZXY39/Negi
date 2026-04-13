@@ -196,20 +196,9 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
         _ = tool_name, runtime_context, on_progress
         return await tool.execute(**arguments), "success", "2026-04-08T10:00:00", "2026-04-08T10:00:01", 1.0
 
-    async def _fake_summarize_messages(*, messages, state):
-        _ = state
-        return {
-            "messages": list(messages),
-            "summary_text": "",
-            "summary_payload": {},
-            "summary_version": 0,
-            "summary_model_key": "",
-        }
-
     monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"record_tool": _RecordingTool(executed)})
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _noop_progress})
     monkeypatch.setattr(runner, "_execute_tool_call", _execute_tool_call)
-    monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
 
     base_state = initial_persistent_state(user_input={"content": "hello", "metadata": {}})
     tools = runner._build_langchain_tools_for_state(
@@ -326,20 +315,9 @@ async def test_frontdoor_stage_budget_exhaustion_updates_gate_and_blocks_next_or
         _ = tool_name, runtime_context, on_progress
         return await tool.execute(**arguments), "success", "2026-04-08T10:00:00", "2026-04-08T10:00:01", 1.0
 
-    async def _fake_summarize_messages(*, messages, state):
-        _ = state
-        return {
-            "messages": list(messages),
-            "summary_text": "",
-            "summary_payload": {},
-            "summary_version": 0,
-            "summary_model_key": "",
-        }
-
     monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"record_tool": _RecordingTool(executed)})
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _noop_progress})
     monkeypatch.setattr(runner, "_execute_tool_call", _execute_tool_call)
-    monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
 
     active_state = {
         **initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
@@ -485,18 +463,6 @@ async def test_completed_frontdoor_stage_archives_oldest_ten_and_inserts_compres
         execution_mode="web",
     )
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=service))
-
-    async def _fake_summarize_messages(*, messages, state):
-        _ = state
-        return {
-            "messages": list(messages),
-            "summary_text": "",
-            "summary_payload": {},
-            "summary_version": 0,
-            "summary_model_key": "",
-        }
-
-    monkeypatch.setattr(runner, "_summarize_messages", _fake_summarize_messages)
 
     stage_state = {
         "active_stage_id": "frontdoor-stage-22",

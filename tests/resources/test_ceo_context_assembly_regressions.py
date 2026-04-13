@@ -7,6 +7,7 @@ import pytest
 from langchain_core.messages import convert_to_messages
 
 import g3ku.runtime.context.frontdoor_catalog_selection as selection_module
+import g3ku.runtime.frontdoor.message_builder as message_builder_module
 import g3ku.runtime.web_ceo_sessions as web_ceo_sessions
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.context.types import RetrievedContextBundle
@@ -171,6 +172,149 @@ def _tool_resource_record(
         metadata=dict(metadata or {}),
         actions=[SimpleNamespace(executor_names=list(executor_names or [tool_id]))],
     )
+
+
+def _stage_history_with_global_zone() -> tuple[list[dict[str, object]], dict[str, object]]:
+    messages = [
+        {"role": "user", "content": "bootstrap request"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-1",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "stage one raw detail"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-2",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-2", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "stage two raw detail"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-3",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-3", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "stage three raw detail"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-4",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-4", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "stage four raw detail"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-5",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-5", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "active stage raw detail"},
+    ]
+    stage_state = {
+        "active_stage_id": "frontdoor-stage-5",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_kind": "normal",
+                "system_generated": False,
+                "mode": "自主执行",
+                "status": "completed",
+                "stage_goal": "inspect stage one",
+                "completed_stage_summary": "finished stage one",
+                "key_refs": [],
+                "tool_round_budget": 2,
+                "tool_rounds_used": 1,
+            },
+            {
+                "stage_id": "frontdoor-stage-2",
+                "stage_index": 2,
+                "stage_kind": "normal",
+                "system_generated": False,
+                "mode": "自主执行",
+                "status": "completed",
+                "stage_goal": "inspect stage two",
+                "completed_stage_summary": "finished stage two",
+                "key_refs": [],
+                "tool_round_budget": 2,
+                "tool_rounds_used": 1,
+            },
+            {
+                "stage_id": "frontdoor-stage-3",
+                "stage_index": 3,
+                "stage_kind": "normal",
+                "system_generated": False,
+                "mode": "自主执行",
+                "status": "completed",
+                "stage_goal": "inspect stage three",
+                "completed_stage_summary": "finished stage three",
+                "key_refs": [],
+                "tool_round_budget": 2,
+                "tool_rounds_used": 1,
+            },
+            {
+                "stage_id": "frontdoor-stage-4",
+                "stage_index": 4,
+                "stage_kind": "normal",
+                "system_generated": False,
+                "mode": "自主执行",
+                "status": "completed",
+                "stage_goal": "inspect stage four",
+                "completed_stage_summary": "finished stage four",
+                "key_refs": [],
+                "tool_round_budget": 2,
+                "tool_rounds_used": 1,
+            },
+            {
+                "stage_id": "frontdoor-stage-5",
+                "stage_index": 5,
+                "stage_kind": "normal",
+                "system_generated": False,
+                "mode": "自主执行",
+                "status": "active",
+                "stage_goal": "inspect stage five",
+                "completed_stage_summary": "",
+                "key_refs": [],
+                "tool_round_budget": 2,
+                "tool_rounds_used": 0,
+            },
+        ],
+    }
+    return messages, stage_state
 
 
 def test_ceo_prompt_builder_keeps_memory_guidance() -> None:
@@ -1512,6 +1656,221 @@ async def test_message_builder_injects_global_summary_block_and_includes_hidden_
     assert semantic_state.get("summary_text") == "## 长期目标\n继续当前任务"
     assert compression_state.get("status") == "ready"
     assert compression_state.get("source") == "semantic"
+
+
+@pytest.mark.asyncio
+async def test_message_builder_reuses_covered_global_summary_without_recomputation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    loop = _loop(memory_manager)
+    loop.context_length = 200_000
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
+
+    summary_calls = 0
+
+    async def _fake_summary(messages, *, max_output_tokens, model_key=None):
+        nonlocal summary_calls
+        _ = messages, max_output_tokens, model_key
+        summary_calls += 1
+        return "## Goals\nFresh summary"
+
+    def _fake_estimate(messages):
+        rendered = "\n".join(str(item.get("content") or "") for item in list(messages or []) if isinstance(item, dict))
+        return 120_000 if "BASE PROMPT" in rendered else 5_000
+
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor.message_builder.summarize_global_context_model_first",
+        _fake_summary,
+    )
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
+        _fake_estimate,
+    )
+    checkpoint_messages, frontdoor_stage_state = _stage_history_with_global_zone()
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="continue",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=None,
+        checkpoint_messages=checkpoint_messages,
+        user_content="continue",
+        frontdoor_stage_state=frontdoor_stage_state,
+        semantic_context_state={
+            "summary_text": "## Goals\nExisting summary",
+            "coverage_history_source": "checkpoint",
+            "coverage_message_index": 3,
+            "coverage_stage_index": 1,
+            "needs_refresh": False,
+            "failure_cooldown_until": "",
+            "updated_at": "2026-04-13T18:00:00",
+        },
+    )
+
+    assert summary_calls == 0
+    assert result.trace["semantic_context_state"]["summary_text"] == "## Goals\nExisting summary"
+
+
+@pytest.mark.asyncio
+async def test_message_builder_reuses_existing_summary_while_failure_cooldown_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    loop = _loop(memory_manager)
+    loop.context_length = 200_000
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
+
+    summary_calls = 0
+
+    async def _fake_summary(messages, *, max_output_tokens, model_key=None):
+        nonlocal summary_calls
+        _ = messages, max_output_tokens, model_key
+        summary_calls += 1
+        return "## Goals\nFresh summary"
+
+    def _fake_estimate(messages):
+        rendered = "\n".join(str(item.get("content") or "") for item in list(messages or []) if isinstance(item, dict))
+        return 120_000 if "BASE PROMPT" in rendered else 5_000
+
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor.message_builder.summarize_global_context_model_first",
+        _fake_summary,
+    )
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
+        _fake_estimate,
+    )
+    checkpoint_messages, frontdoor_stage_state = _stage_history_with_global_zone()
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="continue",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=None,
+        checkpoint_messages=checkpoint_messages,
+        user_content="continue",
+        frontdoor_stage_state=frontdoor_stage_state,
+        semantic_context_state={
+            "summary_text": "## Goals\nExisting summary",
+            "coverage_history_source": "checkpoint",
+            "coverage_message_index": 3,
+            "coverage_stage_index": 1,
+            "needs_refresh": True,
+            "failure_cooldown_until": "2999-01-01T00:00:00",
+            "updated_at": "2026-04-13T18:00:00",
+        },
+    )
+
+    assert summary_calls == 0
+    assert result.trace["semantic_context_state"]["summary_text"] == "## Goals\nExisting summary"
+    assert result.trace["semantic_context_state"]["failure_cooldown_until"] == "2999-01-01T00:00:00"
+
+
+@pytest.mark.asyncio
+async def test_message_builder_uses_resolved_ceo_context_window_instead_of_loop_context_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    loop = _loop(memory_manager)
+    loop.context_length = 200_000
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
+
+    async def _fake_summary(messages, *, max_output_tokens, model_key=None):
+        _ = messages, max_output_tokens, model_key
+        return "## Goals\nCurrent task"
+
+    monkeypatch.setattr(
+        message_builder_module,
+        "_resolve_ceo_context_window_tokens",
+        lambda loop: 64_000,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor.message_builder.summarize_global_context_model_first",
+        _fake_summary,
+    )
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
+        lambda messages: 120_000 if messages else 0,
+    )
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="continue",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=None,
+        checkpoint_messages=[
+            {"role": "user", "content": "older user"},
+            {"role": "assistant", "content": "older assistant"},
+        ],
+        user_content="continue",
+    )
+
+    assert result.trace["global_summary_trigger_tokens"] == 64_000
+    assert result.trace["global_summary_pressure_warn_tokens"] == 54_400
+    assert result.trace["global_summary_force_refresh_tokens"] == 60_800
+
+
+@pytest.mark.asyncio
+async def test_message_builder_global_summary_uses_externalized_compression_block_without_archive_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    loop = _loop(memory_manager)
+    loop.context_length = 200_000
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
+
+    captured_messages: list[dict[str, object]] = []
+
+    async def _fake_summary(messages, *, max_output_tokens, model_key=None):
+        _ = max_output_tokens, model_key
+        captured_messages.extend(list(messages or []))
+        return "## Goals\nUse the externalized block only"
+
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor.message_builder.summarize_global_context_model_first",
+        _fake_summary,
+    )
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
+        lambda messages: 120_000 if messages else 0,
+    )
+    checkpoint_messages, frontdoor_stage_state = _stage_history_with_global_zone()
+    frontdoor_stage_state["stages"].insert(
+        0,
+        {
+            "stage_id": "frontdoor-stage-compression-0",
+            "stage_index": 0,
+            "stage_kind": "compression",
+            "system_generated": True,
+            "status": "completed",
+            "stage_goal": "older archived work",
+            "completed_stage_summary": "archived summary",
+            "archive_ref": "artifact:artifact:frontdoor-stage-archive",
+            "archive_stage_index_start": 1,
+            "archive_stage_index_end": 10,
+        },
+    )
+
+    await builder.build_for_ceo(
+        session=_session(),
+        query_text="continue",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=None,
+        checkpoint_messages=checkpoint_messages,
+        user_content="continue",
+        frontdoor_stage_state=frontdoor_stage_state,
+    )
+
+    rendered = "\n\n".join(str(item.get("content") or "") for item in captured_messages)
+    assert "[G3KU_STAGE_EXTERNALIZED_V1]" in rendered
+    assert "artifact:artifact:frontdoor-stage-archive" in rendered
+    assert "archived summary" in rendered
 
 
 @pytest.mark.asyncio

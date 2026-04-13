@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.frontdoor.state_models import initial_persistent_state
 from g3ku.runtime.semantic_context_summary import (
     HERMES_MIN_CONTEXT_FLOOR,
     build_global_summary_thresholds,
     default_semantic_context_state,
+    summarize_global_context_model_first,
 )
 
 
@@ -64,3 +69,56 @@ def test_memory_assembly_config_exposes_global_summary_defaults() -> None:
     assert config.frontdoor_global_summary_force_refresh_ratio == 0.95
     assert config.frontdoor_global_summary_min_delta_tokens == 2000
     assert config.frontdoor_global_summary_failure_cooldown_seconds == 600
+
+
+@pytest.mark.asyncio
+async def test_summarize_global_context_model_first_returns_structured_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeModel:
+        async def ainvoke(self, messages):
+            _ = messages
+            return SimpleNamespace(content="## Goals\nContinue the current task")
+
+    monkeypatch.setattr(
+        "g3ku.config.live_runtime.get_runtime_config",
+        lambda force=False: (SimpleNamespace(), 1, False),
+    )
+    monkeypatch.setattr(
+        "g3ku.providers.chatmodels.build_chat_model",
+        lambda config, **kwargs: _FakeModel(),
+    )
+
+    result = await summarize_global_context_model_first(
+        [{"role": "assistant", "content": "Older context"}],
+        max_output_tokens=128,
+    )
+
+    assert isinstance(result, dict)
+    assert result["summary_text"] == "## Goals\nContinue the current task"
+    assert result["used_fallback"] is False
+    assert result["failed"] is False
+    assert result["error_text"] == ""
+
+
+@pytest.mark.asyncio
+async def test_summarize_global_context_model_first_returns_structured_fallback_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "g3ku.config.live_runtime.get_runtime_config",
+        lambda force=False: (SimpleNamespace(), 1, False),
+    )
+    monkeypatch.setattr(
+        "g3ku.providers.chatmodels.build_chat_model",
+        lambda config, **kwargs: (_ for _ in ()).throw(RuntimeError("summary model unavailable")),
+    )
+
+    result = await summarize_global_context_model_first(
+        [{"role": "assistant", "content": "Older context that still matters"}],
+        max_output_tokens=64,
+    )
+
+    assert isinstance(result, dict)
+    assert result["used_fallback"] is True
+    assert result["failed"] is True
+    assert "summary model unavailable" in result["error_text"]
+    assert str(result["summary_text"] or "").strip()
