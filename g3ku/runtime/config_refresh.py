@@ -4,9 +4,15 @@ from loguru import logger
 
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.providers.chatmodels import build_chat_model
+from g3ku.security import get_bootstrap_security_service
 
 
 def refresh_loop_runtime_config(loop, *, force: bool = False, reason: str = "runtime") -> bool:
+    if force:
+        security = get_bootstrap_security_service(
+            getattr(getattr(loop, "app_config", None), "workspace_path", None)
+        )
+        security.reload_overlay_from_disk()
     config, revision, changed = get_runtime_config(force=force)
     if not changed and int(getattr(loop, "_runtime_model_revision", 0) or 0) == int(revision or 0):
         return False

@@ -29,6 +29,7 @@ from g3ku.resources.tool_settings import (
     raw_tool_settings_from_descriptor,
     validate_tool_settings,
 )
+from g3ku.security import get_bootstrap_security_service
 from g3ku.runtime.context.execution_tool_selection import build_execution_tool_selection
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult, build_node_context_selection
 from g3ku.runtime.context.summarizer import layered_body_payload, score_query
@@ -3493,6 +3494,11 @@ class MainRuntimeService:
         return max(0, int(value))
 
     def ensure_runtime_config_current(self, force: bool = False, reason: str = 'runtime') -> bool:
+        if force:
+            security = get_bootstrap_security_service(
+                getattr(getattr(self, '_app_config', None), 'workspace_path', None)
+            )
+            security.reload_overlay_from_disk()
         config, revision, changed = get_runtime_config(force=force)
         if not changed and int(getattr(self, '_runtime_model_revision', 0) or 0) == int(revision or 0):
             return False

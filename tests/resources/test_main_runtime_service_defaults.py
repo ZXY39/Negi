@@ -78,6 +78,46 @@ def test_main_runtime_service_refresh_updates_role_tool_concurrency(monkeypatch,
     assert service._react_loop._max_parallel_tool_calls == 6
 
 
+def test_main_runtime_service_refresh_reloads_security_overlay_before_config_refresh(
+    monkeypatch,
+    tmp_path: Path,
+):
+    initial = Config()
+    refreshed = Config()
+    calls: list[str] = []
+
+    class _Security:
+        def reload_overlay_from_disk(self) -> bool:
+            calls.append("reloaded")
+            return True
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        app_config=initial,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+    )
+
+    monkeypatch.setattr(
+        runtime_service_module,
+        "get_runtime_config",
+        lambda force=False: (refreshed, 42, True),
+    )
+    monkeypatch.setattr(
+        runtime_service_module,
+        "get_bootstrap_security_service",
+        lambda *_args, **_kwargs: _Security(),
+        raising=False,
+    )
+
+    changed = service.ensure_runtime_config_current(force=True, reason="test")
+
+    assert changed is True
+    assert calls == ["reloaded"]
+
+
 def test_main_runtime_service_defaults_event_history_to_store_sibling_with_config(tmp_path: Path):
     config = Config()
 

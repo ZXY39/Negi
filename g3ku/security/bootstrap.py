@@ -279,6 +279,13 @@ class BootstrapSecurityService:
         with self._lock:
             return deepcopy(self._overlay_cache)
 
+    def reload_overlay_from_disk(self) -> bool:
+        with self._lock:
+            if self._active_master_key is None:
+                return False
+            self._overlay_cache = self._overlay_store.load(master_key=self._active_master_key)
+            return True
+
     def get_overlay_value(self, key: str, default: Any = None) -> Any:
         with self._lock:
             if not self._active_master_key:
