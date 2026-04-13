@@ -19,6 +19,7 @@ from g3ku.core.results import RunResult
 from g3ku.core.state import AgentState, StructuredError
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
 from g3ku.runtime.cancellation import ToolCancellationToken
+from g3ku.runtime.semantic_context_summary import default_semantic_context_state
 from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
 
 _CONTROL_TOOL_NAMES = {"stop_tool_execution"}
@@ -67,6 +68,7 @@ class RuntimeAgentSession:
         self._paused_execution_context: dict[str, Any] | None = None
         self._frontdoor_stage_state: dict[str, Any] = {}
         self._compression_state: dict[str, Any] = {}
+        self._semantic_context_state: dict[str, Any] = default_semantic_context_state()
         self._active_turn_id: str | None = None
         self._last_verified_task_ids: list[str] = []
         self._turn_lock = asyncio.Lock()

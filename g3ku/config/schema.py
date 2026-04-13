@@ -661,6 +661,16 @@ class MemoryAssemblyConfig(Base):
     )
     frontdoor_summarizer_trigger_message_count: int = Field(default=10, ge=1)
     frontdoor_summarizer_keep_message_count: int = Field(default=20, ge=1)
+    frontdoor_global_summary_trigger_ratio: float = Field(default=0.50, ge=0.0, le=1.0)
+    frontdoor_global_summary_target_ratio: float = Field(default=0.20, ge=0.0, le=1.0)
+    frontdoor_global_summary_min_output_tokens: int = Field(default=2000, ge=1)
+    frontdoor_global_summary_max_output_ratio: float = Field(default=0.05, ge=0.0, le=1.0)
+    frontdoor_global_summary_max_output_tokens_ceiling: int = Field(default=12000, ge=1)
+    frontdoor_global_summary_pressure_warn_ratio: float = Field(default=0.85, ge=0.0, le=1.0)
+    frontdoor_global_summary_force_refresh_ratio: float = Field(default=0.95, ge=0.0, le=1.0)
+    frontdoor_global_summary_min_delta_tokens: int = Field(default=2000, ge=1)
+    frontdoor_global_summary_failure_cooldown_seconds: int = Field(default=600, ge=0)
+    frontdoor_global_summary_model: str = Field(default="")
     core_tools: list[str] = Field(
         default_factory=lambda: [
             'content',

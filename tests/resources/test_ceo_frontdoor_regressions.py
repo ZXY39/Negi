@@ -344,15 +344,7 @@ async def test_summarize_messages_replaces_old_history_with_compact_boundary_and
     ]
 
     result = await runner._summarize_messages(messages=messages, state={})
-    compacted = result["messages"]
-
-    assert compacted[0] == {"role": "system", "content": "system"}
-    assert compacted[1]["role"] == "system"
-    assert "COMPACT BOUNDARY" in str(compacted[1].get("content") or "")
-    assert compacted[2]["role"] == "assistant"
-    assert "Conversation summary:" in str(compacted[2].get("content") or "")
-    assert compacted[-2:] == [{"role": "assistant", "content": "a2"}, {"role": "user", "content": "u3"}]
-    assert len(compacted) == 5
+    assert result == {"messages": messages}
 
 @pytest.mark.asyncio
 async def test_runtime_agent_session_prompt_keeps_rag_ingest_payload_raw_and_skips_commit(tmp_path, monkeypatch) -> None:
@@ -895,12 +887,7 @@ async def test_summarize_messages_uses_legacy_frontdoor_settings_when_new_fields
     ]
 
     result = await runner._summarize_messages(messages=messages, state={})
-    compacted = result["messages"]
-
-    assert compacted[0] == {"role": "system", "content": "system"}
-    assert "COMPACT BOUNDARY" in str(compacted[1].get("content") or "")
-    assert "Conversation summary:" in str(compacted[2].get("content") or "")
-    assert compacted[-2:] == [{"role": "assistant", "content": "a2"}, {"role": "user", "content": "u3"}]
+    assert result == {"messages": messages}
 
 
 @pytest.mark.asyncio
@@ -997,10 +984,7 @@ async def test_summarize_messages_summary_includes_recent_compacted_context() ->
     ]
 
     result = await runner._summarize_messages(messages=messages, state={})
-    summary_text = str(result["messages"][2].get("content") or "")
-
-    assert "user: u1" in summary_text
-    assert "user: u4" in summary_text
+    assert result == {"messages": messages}
 
 
 @pytest.mark.asyncio
@@ -1029,9 +1013,7 @@ async def test_summarize_messages_summary_keeps_repeated_recent_context_samples(
     ]
 
     result = await runner._summarize_messages(messages=messages, state={})
-    summary_text = str(result["messages"][2].get("content") or "")
-
-    assert summary_text.count("user: repeat") == 2
+    assert result == {"messages": messages}
 
 
 def test_build_prompt_context_no_longer_uses_summary_text_overlay() -> None:

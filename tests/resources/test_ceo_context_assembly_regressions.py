@@ -1292,6 +1292,229 @@ async def test_message_builder_task_ledger_preserves_continuity_when_history_vis
 
 
 @pytest.mark.asyncio
+async def test_message_builder_applies_frontdoor_stage_workset_compaction_to_history() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    checkpoint_messages = [
+        {"role": "user", "content": "bootstrap request"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-1",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "stage one raw detail"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-2",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-2", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "stage two raw detail"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-3",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-3", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "stage three raw detail"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-4",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-4", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "stage four raw detail"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-5",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-5", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "active stage raw detail"},
+    ]
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="continue",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=None,
+        checkpoint_messages=checkpoint_messages,
+        user_content="continue",
+        frontdoor_stage_state={
+            "active_stage_id": "frontdoor-stage-5",
+            "transition_required": False,
+            "stages": [
+                {
+                    "stage_id": "frontdoor-stage-1",
+                    "stage_index": 1,
+                    "stage_kind": "normal",
+                    "system_generated": False,
+                    "mode": "自主执行",
+                    "status": "completed",
+                    "stage_goal": "inspect stage one",
+                    "completed_stage_summary": "finished stage one",
+                    "key_refs": [],
+                    "tool_round_budget": 2,
+                    "tool_rounds_used": 1,
+                },
+                {
+                    "stage_id": "frontdoor-stage-2",
+                    "stage_index": 2,
+                    "stage_kind": "normal",
+                    "system_generated": False,
+                    "mode": "自主执行",
+                    "status": "completed",
+                    "stage_goal": "inspect stage two",
+                    "completed_stage_summary": "finished stage two",
+                    "key_refs": [],
+                    "tool_round_budget": 2,
+                    "tool_rounds_used": 1,
+                },
+                {
+                    "stage_id": "frontdoor-stage-3",
+                    "stage_index": 3,
+                    "stage_kind": "normal",
+                    "system_generated": False,
+                    "mode": "自主执行",
+                    "status": "completed",
+                    "stage_goal": "inspect stage three",
+                    "completed_stage_summary": "finished stage three",
+                    "key_refs": [],
+                    "tool_round_budget": 2,
+                    "tool_rounds_used": 1,
+                },
+                {
+                    "stage_id": "frontdoor-stage-4",
+                    "stage_index": 4,
+                    "stage_kind": "normal",
+                    "system_generated": False,
+                    "mode": "自主执行",
+                    "status": "completed",
+                    "stage_goal": "inspect stage four",
+                    "completed_stage_summary": "finished stage four",
+                    "key_refs": [],
+                    "tool_round_budget": 2,
+                    "tool_rounds_used": 1,
+                },
+                {
+                    "stage_id": "frontdoor-stage-5",
+                    "stage_index": 5,
+                    "stage_kind": "normal",
+                    "system_generated": False,
+                    "mode": "自主执行",
+                    "status": "active",
+                    "stage_goal": "inspect stage five",
+                    "completed_stage_summary": "",
+                    "key_refs": [],
+                    "tool_round_budget": 2,
+                    "tool_rounds_used": 0,
+                },
+            ],
+        },
+    )
+
+    stable_contents = [str(item.get("content") or "") for item in result.stable_messages]
+    rendered = "\n\n".join(stable_contents)
+    assert "stage one raw detail" not in rendered
+    assert "stage two raw detail" in rendered
+    assert "stage three raw detail" in rendered
+    assert "stage four raw detail" in rendered
+    assert "active stage raw detail" in rendered
+    assert any(content.startswith("[G3KU_STAGE_COMPACT_V1]") for content in stable_contents)
+
+
+@pytest.mark.asyncio
+async def test_message_builder_injects_global_summary_block_and_includes_hidden_heartbeat_execution_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    loop = _loop(memory_manager)
+    loop.context_length = 200_000
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
+
+    persisted_session = Session(key="web:shared")
+    persisted_session.add_message(
+        "assistant",
+        "Heartbeat finished a background inspection.",
+        execution_trace_summary={"stages": [{"stage_goal": "inspect repo", "rounds": []}]},
+        metadata={"source": "heartbeat", "history_visible": False},
+    )
+
+    captured_messages: list[dict[str, object]] = []
+
+    async def _fake_summary(messages, *, max_output_tokens, model_key=None):
+        _ = max_output_tokens, model_key
+        captured_messages.extend(list(messages or []))
+        return "## 长期目标\n继续当前任务"
+
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor.message_builder.summarize_global_context_model_first",
+        _fake_summary,
+    )
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
+        lambda messages: 120_000 if messages else 0,
+    )
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="continue",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=persisted_session,
+        checkpoint_messages=[
+            {"role": "user", "content": "older user"},
+            {"role": "assistant", "content": "older assistant"},
+        ],
+        user_content="continue",
+        frontdoor_stage_state={"active_stage_id": "", "transition_required": False, "stages": []},
+    )
+
+    stable_contents = [str(item.get("content") or "") for item in result.stable_messages]
+    assert any(content.startswith("[G3KU_LONG_CONTEXT_SUMMARY_V1]") for content in stable_contents)
+    assert any("Heartbeat finished a background inspection." in str(item.get("content") or "") for item in captured_messages)
+    assert result.trace["global_summary_present"] is True
+    semantic_state = dict(result.trace.get("semantic_context_state") or {})
+    compression_state = dict(result.trace.get("compression_state_payload") or {})
+    assert semantic_state.get("summary_text") == "## 长期目标\n继续当前任务"
+    assert compression_state.get("status") == "ready"
+    assert compression_state.get("source") == "semantic"
+
+
+@pytest.mark.asyncio
 async def test_message_builder_history_visibility_checkpoint_round_trip_keeps_hidden_internal_assistant_turn_out_of_history() -> None:
     prompt_builder = _SplitPromptBuilder()
     memory_manager = _MemoryManager(response="")

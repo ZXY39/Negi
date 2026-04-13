@@ -13,6 +13,7 @@ from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
+from g3ku.runtime.semantic_context_summary import default_semantic_context_state
 
 
 
@@ -96,6 +97,8 @@ class CeoPersistentState(TypedDict, total=False):
     frontdoor_stage_state: dict[str, Any]
 
     compression_state: dict[str, Any]
+
+    semantic_context_state: dict[str, Any]
 
     agent_runtime: str
 
@@ -196,6 +199,8 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
             "needs_recheck": False,
 
         },
+
+        "semantic_context_state": default_semantic_context_state(),
 
         "agent_runtime": "create_agent",
 

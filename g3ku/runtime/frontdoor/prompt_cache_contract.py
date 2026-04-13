@@ -1,13 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from os.path import commonprefix
 from typing import Any
 
-from g3ku.runtime.frontdoor.history_compaction import (
-    build_compact_boundary_message,
-    build_history_summary_message,
-)
+from g3ku.runtime.semantic_context_summary import LONG_CONTEXT_SUMMARY_PREFIX
 from main.runtime.chat_backend import (
     build_prompt_cache_diagnostics,
     build_session_prompt_cache_key,
@@ -15,20 +11,6 @@ from main.runtime.chat_backend import (
 )
 
 DEFAULT_CACHE_FAMILY_REVISION = "ceo_frontdoor:stable-prefix:v1"
-
-
-def _marker_prefix(*values: str) -> str:
-    return commonprefix([str(value or "") for value in values if str(value or "")])
-
-
-_COMPACT_BOUNDARY_PREFIX = _marker_prefix(
-    str(build_compact_boundary_message(summarized_count=0).get("content") or ""),
-    str(build_compact_boundary_message(summarized_count=1).get("content") or ""),
-)
-_CONVERSATION_SUMMARY_PREFIX = _marker_prefix(
-    str(build_history_summary_message(messages=[]).get("content") or ""),
-    str(build_history_summary_message(messages=[{"role": "user", "content": "x"}]).get("content") or ""),
-)
 
 
 def _records_contain_slice(records: list[dict[str, Any]], target: list[dict[str, Any]]) -> bool:
@@ -107,19 +89,12 @@ def _dynamic_diagnostic_messages(
     return diagnostics
 
 
-def _contains_compacted_history(records: list[dict[str, Any]]) -> bool:
+def _contains_long_context_summary(records: list[dict[str, Any]]) -> bool:
     items = list(records or [])
-    for index, record in enumerate(items):
+    for record in items:
         role = str(record.get("role") or "").strip().lower()
         content = str(record.get("content") or "").strip()
-        if role != "system" or not content.startswith(_COMPACT_BOUNDARY_PREFIX):
-            continue
-        if index + 1 >= len(items):
-            continue
-        next_record = items[index + 1]
-        next_role = str(next_record.get("role") or "").strip().lower()
-        next_content = str(next_record.get("content") or "").strip()
-        if next_role == "assistant" and next_content.startswith(_CONVERSATION_SUMMARY_PREFIX):
+        if role == "assistant" and content.startswith(LONG_CONTEXT_SUMMARY_PREFIX):
             return True
     return False
 
@@ -131,7 +106,7 @@ def _effective_stable_messages(
     dynamic_appendix_messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     live_without_appendix = _strip_first_slice(live_request_messages, dynamic_appendix_messages)
-    if live_without_appendix and _contains_compacted_history(live_without_appendix):
+    if live_without_appendix and _contains_long_context_summary(live_without_appendix):
         return live_without_appendix
     return list(stable_messages)
 

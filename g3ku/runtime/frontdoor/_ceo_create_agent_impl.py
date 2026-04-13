@@ -540,7 +540,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         return self._agent
 
     async def run_turn(self, *, user_input, session, on_progress=None) -> str:
-        await self._ensure_ready()
         await self._ensure_runtime_bindings_ready()
         setattr(session, "_last_route_kind", "direct_reply")
         session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
@@ -570,7 +569,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         return str(values.get("final_output") or "")
 
     async def resume_turn(self, *, session, resume_value, on_progress=None) -> str:
-        await self._ensure_ready()
         await self._ensure_runtime_bindings_ready()
         session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
         graph_output = await self._get_agent().ainvoke(

@@ -210,18 +210,15 @@ def test_memory_assembly_config_uses_stage_budget_defaults() -> None:
     assert cfg.frontdoor_summary_trigger_message_count == 10
     assert cfg.frontdoor_interrupt_approval_enabled is False
     assert cfg.frontdoor_interrupt_tool_names == ["message", "create_async_task", "continue_task"]
-    assert {
-        key
-        for key in cfg.model_dump().keys()
-        if key.startswith("frontdoor_")
-    } == {
-        "frontdoor_recent_message_count",
-        "frontdoor_summary_trigger_message_count",
-        "frontdoor_interrupt_approval_enabled",
-        "frontdoor_interrupt_tool_names",
-        "frontdoor_summarizer_trigger_message_count",
-        "frontdoor_summarizer_keep_message_count",
-    }
+    assert cfg.frontdoor_global_summary_trigger_ratio == 0.50
+    assert cfg.frontdoor_global_summary_target_ratio == 0.20
+    assert cfg.frontdoor_global_summary_min_output_tokens == 2000
+    assert cfg.frontdoor_global_summary_max_output_ratio == 0.05
+    assert cfg.frontdoor_global_summary_max_output_tokens_ceiling == 12000
+    assert cfg.frontdoor_global_summary_pressure_warn_ratio == 0.85
+    assert cfg.frontdoor_global_summary_force_refresh_ratio == 0.95
+    assert cfg.frontdoor_global_summary_min_delta_tokens == 2000
+    assert cfg.frontdoor_global_summary_failure_cooldown_seconds == 600
 
 
 def test_initial_persistent_state_tracks_stage_state_and_runtime_marker() -> None:
@@ -240,7 +237,7 @@ def test_initial_persistent_state_tracks_stage_state_and_runtime_marker() -> Non
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runner_prompt_uses_compacted_history_messages_when_threshold_exceeded() -> None:
+async def test_create_agent_runner_prompt_keeps_history_uncompacted_after_legacy_frontdoor_history_compaction_removal() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
             _memory_runtime_settings=SimpleNamespace(
@@ -278,11 +275,13 @@ async def test_create_agent_runner_prompt_uses_compacted_history_messages_when_t
     )
 
     assert prepared["messages"][0] == {"role": "system", "content": "system"}
-    assert prepared["messages"][1]["role"] == "system"
-    assert "COMPACT BOUNDARY" in str(prepared["messages"][1].get("content") or "")
-    assert prepared["messages"][2]["role"] == "assistant"
-    assert "Conversation summary:" in str(prepared["messages"][2].get("content") or "")
-    assert prepared["messages"][-2:] == [{"role": "assistant", "content": "a2"}, {"role": "user", "content": "u3"}]
+    assert prepared["messages"][1:] == [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+    ]
 
 
 def test_build_ceo_agent_uses_create_agent_with_persistence(monkeypatch) -> None:
@@ -765,7 +764,7 @@ async def test_create_agent_runner_passes_thread_id_and_context() -> None:
     )
 
     assert output == "ok"
-    assert readiness_calls == ["ready", "ready"]
+    assert readiness_calls == ["ready"]
     assert session._last_route_kind == "direct_reply"
     assert captured["config"] == {"configurable": {"thread_id": "web:shared"}}
     assert getattr(captured["context"], "session_key") == "web:shared"
@@ -801,7 +800,7 @@ async def test_create_agent_runner_raises_structured_interrupt() -> None:
             on_progress=None,
         )
 
-    assert readiness_calls == ["ready", "ready"]
+    assert readiness_calls == ["ready"]
     assert session._last_route_kind == "direct_reply"
     assert exc_info.value.values == {"approval_request": {"kind": "frontdoor_tool_approval"}}
     assert [item.interrupt_id for item in exc_info.value.interrupts] == ["interrupt-1"]
@@ -837,7 +836,7 @@ async def test_create_agent_runner_resume_uses_command_resume() -> None:
     )
 
     assert result == "approved"
-    assert readiness_calls == ["ready", "ready"]
+    assert readiness_calls == ["ready"]
     assert isinstance(captured["payload"], Command)
     assert getattr(captured["payload"], "resume", None) == {"decisions": [{"type": "approve"}]}
     assert captured["config"] == {"configurable": {"thread_id": "web:shared"}}
@@ -874,7 +873,7 @@ async def test_create_agent_runner_resume_raises_structured_interrupt() -> None:
             on_progress=None,
         )
 
-    assert readiness_calls == ["ready", "ready"]
+    assert readiness_calls == ["ready"]
     assert session._last_route_kind == "task_dispatch"
     assert exc_info.value.values == {
         "approval_request": {"kind": "frontdoor_tool_approval"},
@@ -905,7 +904,16 @@ async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compressio
                     "transition_required": False,
                     "stages": [{"stage_id": "frontdoor-stage-1", "rounds": []}],
                 },
-                "compression_state": {"status": "running", "text": "compressing", "source": "user"},
+                "compression_state": {"status": "ready", "text": "全局上下文已压缩", "source": "semantic"},
+                "semantic_context_state": {
+                    "summary_text": "## 长期目标\n继续当前任务",
+                    "coverage_history_source": "checkpoint",
+                    "coverage_message_index": 3,
+                    "coverage_stage_index": 1,
+                    "needs_refresh": False,
+                    "failure_cooldown_until": "",
+                    "updated_at": "2026-04-13T18:00:00",
+                },
             }
 
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
@@ -923,7 +931,8 @@ async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compressio
     assert session._last_route_kind == "self_execute"
     assert session._last_verified_task_ids == ["task:demo-123"]
     assert session._frontdoor_stage_state["active_stage_id"] == "frontdoor-stage-1"
-    assert session._compression_state == {"status": "running", "text": "compressing", "source": "user"}
+    assert session._compression_state == {"status": "ready", "text": "全局上下文已压缩", "source": "semantic"}
+    assert session._semantic_context_state["summary_text"] == "## 长期目标\n继续当前任务"
 
 
 @pytest.mark.asyncio
@@ -1948,21 +1957,15 @@ def test_create_agent_prompt_contract_avoids_duplicate_history_when_live_message
             "messages": [
                 {"role": "system", "content": "stable system"},
                 {
-                    "role": "system",
-                    "content": "COMPACT BOUNDARY: summarized 3 earlier conversation messages.",
-                },
-                {
                     "role": "assistant",
-                    "content": "Conversation summary: user: q1 | assistant: a1 | user: q2",
+                    "content": "[G3KU_LONG_CONTEXT_SUMMARY_V1]\nsummary body",
                 },
                 {"role": "assistant", "content": "latest assistant"},
                 {"role": "user", "content": "latest user"},
             ],
             "stable_messages": [
                 {"role": "system", "content": "stable system"},
-                {"role": "user", "content": "q1"},
-                {"role": "assistant", "content": "a1"},
-                {"role": "user", "content": "q2"},
+                {"role": "assistant", "content": "[G3KU_LONG_CONTEXT_SUMMARY_V1]\nsummary body"},
                 {"role": "assistant", "content": "latest assistant"},
                 {"role": "user", "content": "latest user"},
             ],
@@ -1977,28 +1980,14 @@ def test_create_agent_prompt_contract_avoids_duplicate_history_when_live_message
 
     assert contract.request_messages == [
         {"role": "system", "content": "stable system"},
-        {
-            "role": "system",
-            "content": "COMPACT BOUNDARY: summarized 3 earlier conversation messages.",
-        },
-        {
-            "role": "assistant",
-            "content": "Conversation summary: user: q1 | assistant: a1 | user: q2",
-        },
+        {"role": "assistant", "content": "[G3KU_LONG_CONTEXT_SUMMARY_V1]\nsummary body"},
         {"role": "assistant", "content": "latest assistant"},
         {"role": "user", "content": "latest user"},
         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
     ]
     assert contract.stable_messages == [
         {"role": "system", "content": "stable system"},
-        {
-            "role": "system",
-            "content": "COMPACT BOUNDARY: summarized 3 earlier conversation messages.",
-        },
-        {
-            "role": "assistant",
-            "content": "Conversation summary: user: q1 | assistant: a1 | user: q2",
-        },
+        {"role": "assistant", "content": "[G3KU_LONG_CONTEXT_SUMMARY_V1]\nsummary body"},
         {"role": "assistant", "content": "latest assistant"},
         {"role": "user", "content": "latest user"},
     ]

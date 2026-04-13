@@ -352,7 +352,7 @@ class CeoModelOutputMiddleware(AgentMiddleware):
                 **current_state,
                 "tool_call_payloads": tool_call_payloads,
             }
-            preview_frontdoor_stage_state, preview_compression_state = self._runner._runtime_session_frontdoor_state(
+            preview_frontdoor_stage_state, preview_compression_state, preview_semantic_context_state = self._runner._runtime_session_frontdoor_state(
                 preview_state,
                 preview_pending_tool_round=True,
             )
@@ -381,6 +381,7 @@ class CeoModelOutputMiddleware(AgentMiddleware):
                     **update,
                     "frontdoor_stage_state": preview_frontdoor_stage_state,
                     "compression_state": preview_compression_state,
+                    "semantic_context_state": preview_semantic_context_state,
                 },
                 runtime=runtime,
             )
@@ -451,7 +452,7 @@ class CeoApprovalMiddleware(AgentMiddleware):
             **current_state,
             "tool_call_payloads": list(current_state.get("tool_call_payloads") or []),
         }
-        preview_frontdoor_stage_state, preview_compression_state = self._runner._runtime_session_frontdoor_state(
+        preview_frontdoor_stage_state, preview_compression_state, preview_semantic_context_state = self._runner._runtime_session_frontdoor_state(
             preview_state,
             preview_pending_tool_round=True,
         )
@@ -459,6 +460,7 @@ class CeoApprovalMiddleware(AgentMiddleware):
             **approval_request,
             "frontdoor_stage_state": preview_frontdoor_stage_state,
             "compression_state": preview_compression_state,
+            "semantic_context_state": preview_semantic_context_state,
             "tool_call_payloads": list(current_state.get("tool_call_payloads") or []),
         }
 

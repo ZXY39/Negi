@@ -753,11 +753,9 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
 
     messages = list(state_update["messages"] or [])
     assert messages[0] == {"role": "system", "content": "SYSTEM PROMPT"}
-    assert messages[1]["role"] == "system"
-    assert "COMPACT BOUNDARY" in str(messages[1].get("content") or "")
-    assert messages[2]["role"] == "assistant"
-    assert "Conversation summary:" in str(messages[2].get("content") or "")
-    assert messages[-3:] == [
+    assert messages[-5:] == [
+        {"role": "user", "content": "question one"},
+        {"role": "assistant", "content": "answer one"},
         {"role": "user", "content": "question two"},
         {"role": "assistant", "content": "answer two"},
         {"role": "user", "content": "question three"},

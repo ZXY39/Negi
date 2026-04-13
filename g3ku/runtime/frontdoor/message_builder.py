@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -10,6 +12,15 @@ from g3ku.runtime.context.semantic_scope import plan_retrieval_scope, semantic_c
 from g3ku.runtime.context.summarizer import score_query
 from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBundle
 from g3ku.runtime.core_tools import resolve_core_tool_targets
+from g3ku.runtime.semantic_context_summary import (
+    HERMES_FAILURE_COOLDOWN_SECONDS,
+    build_global_summary_thresholds,
+    build_long_context_summary_message,
+    default_semantic_context_state,
+    estimate_message_tokens,
+    summarize_global_context_model_first,
+)
+from g3ku.runtime.stage_prompt_compaction import decompose_stage_prompt_messages
 from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
@@ -20,6 +31,7 @@ from g3ku.runtime.web_ceo_sessions import (
     normalize_task_memory,
     transcript_messages,
 )
+from main.runtime.stage_budget import STAGE_TOOL_NAME
 
 
 class CeoMessageBuilder:
@@ -418,6 +430,84 @@ class CeoMessageBuilder:
             if l2:
                 lines.append(f"  L2: {l2}")
         return '\n'.join(lines).strip()
+
+    @staticmethod
+    def _assembly_cfg(loop: Any) -> Any:
+        return getattr(getattr(loop, "_memory_runtime_settings", None), "assembly", None)
+
+    @classmethod
+    def _global_summary_settings(cls, loop: Any) -> dict[str, Any]:
+        assembly_cfg = cls._assembly_cfg(loop)
+        return {
+            "trigger_ratio": float(getattr(assembly_cfg, "frontdoor_global_summary_trigger_ratio", 0.50) or 0.50),
+            "target_ratio": float(getattr(assembly_cfg, "frontdoor_global_summary_target_ratio", 0.20) or 0.20),
+            "min_output_tokens": int(getattr(assembly_cfg, "frontdoor_global_summary_min_output_tokens", 2000) or 2000),
+            "max_output_ratio": float(getattr(assembly_cfg, "frontdoor_global_summary_max_output_ratio", 0.05) or 0.05),
+            "max_output_tokens_ceiling": int(
+                getattr(assembly_cfg, "frontdoor_global_summary_max_output_tokens_ceiling", 12000) or 12000
+            ),
+            "pressure_warn_ratio": float(getattr(assembly_cfg, "frontdoor_global_summary_pressure_warn_ratio", 0.85) or 0.85),
+            "force_refresh_ratio": float(getattr(assembly_cfg, "frontdoor_global_summary_force_refresh_ratio", 0.95) or 0.95),
+            "min_delta_tokens": int(getattr(assembly_cfg, "frontdoor_global_summary_min_delta_tokens", 2000) or 2000),
+            "failure_cooldown_seconds": int(
+                getattr(assembly_cfg, "frontdoor_global_summary_failure_cooldown_seconds", HERMES_FAILURE_COOLDOWN_SECONDS)
+                or HERMES_FAILURE_COOLDOWN_SECONDS
+            ),
+            "model_key": str(getattr(assembly_cfg, "frontdoor_global_summary_model", "") or "").strip(),
+        }
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now().isoformat()
+
+    @staticmethod
+    def _normalize_hidden_internal_summary_message(message: dict[str, Any]) -> dict[str, Any] | None:
+        if message_role(message) != "assistant":
+            return None
+        metadata = message_metadata(message)
+        source = str(metadata.get("source") or "").strip().lower()
+        if source not in {"heartbeat", "cron"}:
+            return None
+        text_parts: list[str] = []
+        content = str(message.get("content") or "").strip()
+        if content:
+            text_parts.append(content)
+        execution_trace_summary = (
+            dict(message.get("execution_trace_summary"))
+            if isinstance(message.get("execution_trace_summary"), dict)
+            else {}
+        )
+        if execution_trace_summary:
+            text_parts.append(
+                "Execution trace summary:\n"
+                + json.dumps(execution_trace_summary, ensure_ascii=False, sort_keys=True)
+            )
+        tool_events = message.get("tool_events") if isinstance(message.get("tool_events"), list) else []
+        if tool_events:
+            text_parts.append("Tool events:\n" + json.dumps(tool_events, ensure_ascii=False, sort_keys=True))
+        if not text_parts:
+            return None
+        return {"role": "assistant", "content": "\n\n".join(text_parts), "metadata": {"source": source}}
+
+    @classmethod
+    def _hidden_internal_summary_messages(
+        cls,
+        *,
+        persisted_session: Any | None,
+        checkpoint_messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for raw in list(getattr(persisted_session, "messages", []) or []) if persisted_session is not None else []:
+            if isinstance(raw, dict):
+                normalized = cls._normalize_hidden_internal_summary_message(raw)
+                if normalized is not None:
+                    items.append(normalized)
+        for raw in list(checkpoint_messages or []):
+            if isinstance(raw, dict):
+                normalized = cls._normalize_hidden_internal_summary_message(raw)
+                if normalized is not None and normalized not in items:
+                    items.append(normalized)
+        return items
 
     @staticmethod
     def _join_turn_overlay_sections(parts: list[str] | None) -> str:
@@ -1072,6 +1162,8 @@ class CeoMessageBuilder:
         checkpoint_messages: list[dict[str, Any]] | None = None,
         user_content: Any | None = None,
         user_metadata: dict[str, Any] | None = None,
+        frontdoor_stage_state: dict[str, Any] | None = None,
+        semantic_context_state: dict[str, Any] | None = None,
     ) -> ContextAssemblyResult:
         collect_started_at = time.perf_counter()
         context_sources = await self._collect_turn_context_sources(
@@ -1089,6 +1181,97 @@ class CeoMessageBuilder:
             user_metadata=user_metadata,
         )
         history_elapsed_ms = self._elapsed_ms(history_started_at)
+        raw_history_messages = list(history_state['history_messages'])
+        normalized_frontdoor_stage_state = dict(frontdoor_stage_state or {})
+        stage_parts = decompose_stage_prompt_messages(
+            raw_history_messages,
+            stage_state=normalized_frontdoor_stage_state,
+            keep_latest_completed_stages=3,
+            stage_tool_name=STAGE_TOOL_NAME,
+            preserve_leading_system=False,
+            preserve_leading_user=False,
+        )
+        stage_workset_history = [*list(stage_parts["completed_blocks"]), *list(stage_parts["active_window"])]
+        global_zone_source = [
+            *list(stage_parts["global_zone_source"]),
+            *self._hidden_internal_summary_messages(
+                persisted_session=persisted_session,
+                checkpoint_messages=checkpoint_messages,
+            ),
+        ]
+        global_summary_settings = self._global_summary_settings(self._loop)
+        context_window_tokens = max(int(getattr(self._loop, "context_length", 0) or 0), 128000)
+        prompt_estimate_tokens = estimate_message_tokens(
+            [
+                {"role": "system", "content": str(context_sources["system_prompt"] or "")},
+                *raw_history_messages,
+                {"role": "user", "content": str(context_sources["user_content"] or "")},
+            ]
+        )
+        compressed_zone_tokens = estimate_message_tokens(global_zone_source)
+        thresholds = build_global_summary_thresholds(
+            context_window_tokens=context_window_tokens,
+            compressed_zone_tokens=compressed_zone_tokens,
+            trigger_ratio=global_summary_settings["trigger_ratio"],
+            target_ratio=global_summary_settings["target_ratio"],
+            min_output_tokens=global_summary_settings["min_output_tokens"],
+            max_output_ratio=global_summary_settings["max_output_ratio"],
+            max_output_tokens_ceiling=global_summary_settings["max_output_tokens_ceiling"],
+            pressure_warn_ratio=global_summary_settings["pressure_warn_ratio"],
+            force_refresh_ratio=global_summary_settings["force_refresh_ratio"],
+        )
+        semantic_state = dict(semantic_context_state or default_semantic_context_state())
+        global_summary_text = str(semantic_state.get("summary_text") or "").strip()
+        trigger_reached = prompt_estimate_tokens >= int(thresholds["trigger_tokens"])
+        warn_reached = prompt_estimate_tokens >= int(thresholds["pressure_warn_tokens"])
+        force_reached = prompt_estimate_tokens >= int(thresholds["force_refresh_tokens"])
+        should_refresh_global_summary = bool(global_zone_source) and (
+            not global_summary_text
+            or compressed_zone_tokens >= int(global_summary_settings["min_delta_tokens"])
+            or warn_reached
+        )
+        if should_refresh_global_summary and prompt_estimate_tokens >= int(thresholds["trigger_tokens"]):
+            global_summary_text = await summarize_global_context_model_first(
+                global_zone_source,
+                max_output_tokens=int(thresholds["max_output_tokens"] or global_summary_settings["min_output_tokens"]),
+                model_key=global_summary_settings["model_key"],
+            )
+            semantic_state["updated_at"] = self._now_iso()
+            semantic_state["failure_cooldown_until"] = ""
+        global_summary_message = (
+            build_long_context_summary_message(global_summary_text)
+            if str(global_summary_text or "").strip()
+            else None
+        )
+        covered_count = len(stage_parts["global_zone_source"])
+        semantic_state = {
+            **default_semantic_context_state(),
+            **semantic_state,
+            "summary_text": global_summary_text,
+            "coverage_history_source": str(history_state["history_source"] or ""),
+            "coverage_message_index": max(-1, covered_count - 1),
+            "coverage_stage_index": max(
+                (
+                    int(item.get("stage_index") or 0)
+                    for item in list(normalized_frontdoor_stage_state.get("stages") or [])
+                    if isinstance(item, dict)
+                    and str(item.get("status") or "").strip().lower() != "active"
+                ),
+                default=0,
+            ),
+            "needs_refresh": bool(global_zone_source) and not warn_reached and compressed_zone_tokens >= int(global_summary_settings["min_delta_tokens"]),
+        }
+        compression_state_payload = {
+            "status": "ready" if global_summary_message is not None else "idle",
+            "text": "全局上下文已压缩" if global_summary_message is not None else "",
+            "source": "semantic" if global_summary_message is not None else "",
+            "needs_recheck": bool(semantic_state.get("needs_refresh")),
+        }
+        staged_history_for_injection = [
+            *([global_summary_message] if global_summary_message is not None else []),
+            *stage_workset_history,
+        ]
+        history_state['history_messages'] = staged_history_for_injection
         task_ledger_state = self._task_ledger_state(persisted_session)
         task_ledger_text = build_task_ledger_summary(task_ledger_state)
         turn_overlay_parts = list(context_sources['turn_overlay_parts'])
@@ -1140,6 +1323,21 @@ class CeoMessageBuilder:
             'history_source': str(history_state['history_source']),
             'checkpoint_message_count': len(history_state['checkpoint_history']),
             'transcript_message_count': len(history_state['transcript_history']),
+            'raw_history_message_count': len(raw_history_messages),
+            'stage_workset_history_message_count': len(stage_workset_history),
+            'global_zone_message_count': len(global_zone_source),
+            'global_zone_tokens': compressed_zone_tokens,
+            'prompt_estimate_tokens': prompt_estimate_tokens,
+            'global_summary_trigger_tokens': int(thresholds["trigger_tokens"]),
+            'global_summary_pressure_warn_tokens': int(thresholds["pressure_warn_tokens"]),
+            'global_summary_force_refresh_tokens': int(thresholds["force_refresh_tokens"]),
+            'global_summary_max_output_tokens': int(thresholds["max_output_tokens"]),
+            'global_summary_present': bool(global_summary_message),
+            'global_summary_trigger_reached': bool(trigger_reached),
+            'global_summary_warn_reached': bool(warn_reached),
+            'global_summary_force_reached': bool(force_reached),
+            'semantic_context_state': dict(semantic_state),
+            'compression_state_payload': dict(compression_state_payload),
             'current_user_in_checkpoint': bool(history_state['current_user_in_checkpoint']),
             'current_user_in_history': bool(history_state['current_user_in_history']),
             'current_user_in_transcript': bool(history_state['current_user_in_transcript']),

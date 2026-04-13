@@ -14,6 +14,16 @@ from typing import Any
 from g3ku.agent.tools.base import Tool
 from g3ku.content import content_summary_and_ref, parse_content_envelope
 from g3ku.providers.base import ToolCallRequest
+from g3ku.runtime.stage_prompt_compaction import (
+    STAGE_COMPACT_PREFIX as _STAGE_COMPACT_PREFIX,
+    STAGE_EXTERNALIZED_PREFIX as _STAGE_EXTERNALIZED_PREFIX,
+    completed_stage_blocks as _shared_completed_stage_blocks,
+    current_stage_active_window as _shared_current_stage_active_window,
+    is_stage_context_message as _shared_is_stage_context_message,
+    prepare_stage_prompt_messages as _shared_prepare_stage_prompt_messages,
+    retained_completed_stage_ids as _shared_retained_completed_stage_ids,
+    stage_prompt_prefix as _shared_stage_prompt_prefix,
+)
 from g3ku.runtime.tool_history import analyze_tool_call_history, extract_call_id
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_detached_watchdog,
@@ -43,8 +53,6 @@ from main.runtime.tool_call_repair import (
 from main.protocol import now_iso
 
 _ARTIFACT_REF_PATTERN = re.compile(r'artifact:artifact:[A-Za-z0-9_-]+')
-_STAGE_COMPACT_PREFIX = '[G3KU_STAGE_COMPACT_V1]'
-_STAGE_EXTERNALIZED_PREFIX = '[G3KU_STAGE_EXTERNALIZED_V1]'
 _STAGE_HISTORY_ARCHIVE_SOURCE_KIND = 'stage_history_archive'
 _COMPACT_HISTORY_STEP_MAX_CHARS = 160
 _ORPHAN_TOOL_RESULT_THRESHOLD = 3
@@ -3809,148 +3817,35 @@ class ReActToolLoop:
 
     @staticmethod
     def _is_stage_context_message(message: dict[str, Any]) -> bool:
-        if str((message or {}).get('role') or '').strip().lower() != 'assistant':
-            return False
-        content = str((message or {}).get('content') or '')
-        return (
-            content.startswith(_STAGE_COMPACT_PREFIX)
-            or content.startswith(_STAGE_EXTERNALIZED_PREFIX)
-        )
+        return _shared_is_stage_context_message(message)
 
     def _stage_prompt_prefix(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        cleaned = [dict(item) for item in list(messages or []) if isinstance(item, dict) and not self._is_stage_context_message(item)]
-        prefix: list[dict[str, Any]] = []
-        remainder = list(cleaned)
-        if remainder and str(remainder[0].get('role') or '').strip().lower() == 'system':
-            prefix.append(remainder.pop(0))
-        if remainder and str(remainder[0].get('role') or '').strip().lower() == 'user':
-            prefix.append(remainder.pop(0))
-        return prefix, remainder
+        return _shared_stage_prompt_prefix(messages)
 
     @staticmethod
     def _retained_completed_stage_ids(stage_state: Any, *, keep_latest: int) -> set[str]:
-        active_stage_id = str(getattr(stage_state, 'active_stage_id', '') or '').strip()
-        if not active_stage_id or keep_latest <= 0:
-            return set()
-        completed = []
-        for stage in list(getattr(stage_state, 'stages', []) or []):
-            stage_id = str(getattr(stage, 'stage_id', '') or '').strip()
-            if not stage_id or stage_id == active_stage_id:
-                continue
-            completed.append((int(getattr(stage, 'stage_index', 0) or 0), stage_id))
-        completed.sort()
-        return {
-            stage_id
-            for _stage_index, stage_id in completed[-max(0, int(keep_latest or 0)) :]
-        }
+        return _shared_retained_completed_stage_ids(stage_state, keep_latest=keep_latest)
 
     @staticmethod
     def _completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None = None) -> list[dict[str, Any]]:
-        externalized: list[dict[str, Any]] = []
-        compacted: list[dict[str, Any]] = []
-        active_stage_id = str(getattr(stage_state, 'active_stage_id', '') or '').strip()
-        skipped = {
-            str(item or '').strip()
-            for item in list(skip_stage_ids or set())
-            if str(item or '').strip()
-        }
-        for stage in list(getattr(stage_state, 'stages', []) or []):
-            stage_id = str(getattr(stage, 'stage_id', '') or '').strip()
-            if stage_id == active_stage_id or stage_id in skipped:
-                continue
-            if str(getattr(stage, 'stage_kind', 'normal') or 'normal').strip() == 'compression':
-                payload = {
-                    'stage_index': int(getattr(stage, 'stage_index', 0) or 0),
-                    'stage_kind': 'compression',
-                    'system_generated': bool(getattr(stage, 'system_generated', False)),
-                    'stage_goal': str(getattr(stage, 'stage_goal', '') or ''),
-                    'completed_stage_summary': str(getattr(stage, 'completed_stage_summary', '') or ''),
-                    'archive_ref': str(getattr(stage, 'archive_ref', '') or ''),
-                    'archive_stage_index_start': int(getattr(stage, 'archive_stage_index_start', 0) or 0),
-                    'archive_stage_index_end': int(getattr(stage, 'archive_stage_index_end', 0) or 0),
-                }
-                externalized.append(
-                    {
-                        'role': 'assistant',
-                        'content': f'{_STAGE_EXTERNALIZED_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}',
-                    }
-                )
-                continue
-            payload = {
-                'stage_index': int(getattr(stage, 'stage_index', 0) or 0),
-                'stage_kind': 'normal',
-                'system_generated': bool(getattr(stage, 'system_generated', False)),
-                'mode': str(getattr(stage, 'mode', '') or ''),
-                'status': str(getattr(stage, 'status', '') or ''),
-                'stage_goal': str(getattr(stage, 'stage_goal', '') or ''),
-                'completed_stage_summary': str(getattr(stage, 'completed_stage_summary', '') or ''),
-                'key_refs': [item.model_dump(mode='json') for item in list(getattr(stage, 'key_refs', []) or [])],
-                'tool_round_budget': int(getattr(stage, 'tool_round_budget', 0) or 0),
-                'tool_rounds_used': int(getattr(stage, 'tool_rounds_used', 0) or 0),
-            }
-            compacted.append(
-                {
-                    'role': 'assistant',
-                    'content': f'{_STAGE_COMPACT_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}',
-                }
-            )
-        return [*externalized, *compacted]
+        return _shared_completed_stage_blocks(stage_state, skip_stage_ids=skip_stage_ids)
 
     @staticmethod
     def _current_stage_active_window(messages: list[dict[str, Any]], *, keep_completed_stages: int = 0) -> list[dict[str, Any]]:
-        message_list = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
-        successful_stage_boundaries: list[int] = []
-        pending_stage_call_ids: dict[str, int] = {}
-        for index, message in enumerate(message_list):
-            role = str(message.get('role') or '').strip().lower()
-            if role == 'assistant':
-                for tool_call in list(message.get('tool_calls') or []):
-                    call_id = extract_call_id((tool_call or {}).get('id'))
-                    tool_name = str(((tool_call or {}).get('function') or {}).get('name') or (tool_call or {}).get('name') or '').strip()
-                    if call_id and tool_name == STAGE_TOOL_NAME:
-                        pending_stage_call_ids[call_id] = index
-                continue
-            if role != 'tool':
-                continue
-            tool_call_id = extract_call_id(message.get('tool_call_id'))
-            if (
-                tool_call_id
-                and tool_call_id in pending_stage_call_ids
-                and str(message.get('name') or '').strip() == STAGE_TOOL_NAME
-                and not str(message.get('content') or '').strip().startswith('Error:')
-            ):
-                successful_stage_boundaries.append(pending_stage_call_ids[tool_call_id])
-                pending_stage_call_ids.clear()
-        if not successful_stage_boundaries:
-            return message_list
-        keep_completed = max(0, int(keep_completed_stages or 0))
-        boundary_index = max(0, len(successful_stage_boundaries) - 1 - keep_completed)
-        stage_boundary = successful_stage_boundaries[boundary_index]
-        return [dict(item) for item in message_list[stage_boundary:]]
+        return _shared_current_stage_active_window(
+            messages,
+            keep_completed_stages=keep_completed_stages,
+            stage_tool_name=STAGE_TOOL_NAME,
+        )
 
     def _prepare_messages(self, messages: list[dict[str, Any]], *, runtime_context: dict[str, Any]) -> list[dict[str, Any]]:
-        prefix, remainder = self._stage_prompt_prefix(messages)
         stage_state = self._execution_stage_state_for_runtime(runtime_context=runtime_context)
-        if not list(getattr(stage_state, 'stages', []) or []):
-            return [*prefix, *remainder]
-        retained_completed_stage_ids = self._retained_completed_stage_ids(
-            stage_state,
-            keep_latest=_UNCOMPACTED_COMPLETED_STAGE_WINDOWS,
+        return _shared_prepare_stage_prompt_messages(
+            messages,
+            stage_state=stage_state,
+            keep_latest_completed_stages=_UNCOMPACTED_COMPLETED_STAGE_WINDOWS,
+            stage_tool_name=STAGE_TOOL_NAME,
         )
-        completed_blocks = self._completed_stage_blocks(
-            stage_state,
-            skip_stage_ids=retained_completed_stage_ids,
-        )
-        active_stage_id = str(getattr(stage_state, 'active_stage_id', '') or '').strip()
-        active_window = (
-            self._current_stage_active_window(
-                remainder,
-                keep_completed_stages=len(retained_completed_stage_ids),
-            )
-            if active_stage_id
-            else list(remainder)
-        )
-        return [*prefix, *completed_blocks, *active_window]
 
     @staticmethod
     def _apply_temporary_system_overlay(messages: list[dict[str, Any]], *, overlay_text: str | None) -> list[dict[str, Any]]:

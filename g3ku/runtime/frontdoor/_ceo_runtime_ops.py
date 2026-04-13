@@ -22,6 +22,7 @@ from g3ku.json_schema_utils import (
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from g3ku.runtime.project_environment import current_project_environment
+from g3ku.runtime.semantic_context_summary import default_semantic_context_state
 from main.models import normalize_execution_policy_metadata
 from main.protocol import now_iso
 from main.runtime.chat_backend import build_prompt_cache_diagnostics, build_session_prompt_cache_key
@@ -42,7 +43,6 @@ from main.runtime.tool_call_repair import (
 from g3ku.runtime.web_ceo_sessions import frontdoor_stage_archive_task_id
 
 from ._ceo_support import CeoFrontDoorSupport
-from .history_compaction import compact_history_messages
 from .prompt_cache_contract import build_frontdoor_prompt_contract
 from .state_models import (
     CeoFrontdoorInterrupted,
@@ -470,13 +470,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "needs_recheck": False,
         }
 
+    @staticmethod
+    def _default_semantic_context_state() -> dict[str, Any]:
+        return default_semantic_context_state()
+
     @classmethod
     def _runtime_session_frontdoor_state(
         cls,
         state: CeoGraphState | None,
         *,
         preview_pending_tool_round: bool = False,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         frontdoor_stage_state = cls._frontdoor_stage_state_snapshot(state)
         if preview_pending_tool_round and isinstance(state, dict):
             frontdoor_stage_state = cls._record_frontdoor_stage_round(
@@ -488,7 +492,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(state, dict)
             else cls._default_compression_state()
         )
-        return frontdoor_stage_state, compression_state
+        semantic_context_state = (
+            dict(state.get("semantic_context_state") or cls._default_semantic_context_state())
+            if isinstance(state, dict)
+            else cls._default_semantic_context_state()
+        )
+        return frontdoor_stage_state, compression_state, semantic_context_state
 
     def _sync_runtime_session_frontdoor_state(
         self,
@@ -501,12 +510,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         target_session = session or getattr(getattr(runtime, "context", None), "session", None)
         if target_session is None:
             return
-        frontdoor_stage_state, compression_state = self._runtime_session_frontdoor_state(
+        frontdoor_stage_state, compression_state, semantic_context_state = self._runtime_session_frontdoor_state(
             state,
             preview_pending_tool_round=preview_pending_tool_round,
         )
         setattr(target_session, "_frontdoor_stage_state", frontdoor_stage_state)
         setattr(target_session, "_compression_state", compression_state)
+        setattr(target_session, "_semantic_context_state", semantic_context_state)
 
     @classmethod
     def _frontdoor_stage_state_snapshot(cls, state: CeoGraphState | None) -> dict[str, Any]:
@@ -968,38 +978,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: CeoGraphState,
     ) -> dict[str, Any]:
         _ = state
-        assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
-        trigger_default = 10
-        keep_default = 20
-
-        def _configured_count(*, primary_name: str, legacy_name: str, default: int) -> int:
-            fields_set = set(getattr(assembly_cfg, "model_fields_set", ()) or ())
-            if primary_name in fields_set:
-                return _positive_int(getattr(assembly_cfg, primary_name, default), default)
-            if legacy_name in fields_set:
-                return _positive_int(getattr(assembly_cfg, legacy_name, default), default)
-            if hasattr(assembly_cfg, primary_name):
-                return _positive_int(getattr(assembly_cfg, primary_name, default), default)
-            if hasattr(assembly_cfg, legacy_name):
-                return _positive_int(getattr(assembly_cfg, legacy_name, default), default)
-            return default
-
-        trigger = _configured_count(
-            primary_name="frontdoor_summarizer_trigger_message_count",
-            legacy_name="frontdoor_summary_trigger_message_count",
-            default=trigger_default,
-        )
-        keep = _configured_count(
-            primary_name="frontdoor_summarizer_keep_message_count",
-            legacy_name="frontdoor_recent_message_count",
-            default=keep_default,
-        )
-        compacted = compact_history_messages(
-            messages=list(messages or []),
-            trigger_message_count=trigger,
-            keep_message_count=keep,
-        )
-        return {"messages": compacted}
+        return {"messages": list(messages or [])}
 
     def _reviewable_tool_names(self) -> set[str]:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
@@ -1382,6 +1361,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             checkpoint_messages=list(state.get("messages") or []),
             user_content=self._model_content(user_content),
             user_metadata=metadata,
+            frontdoor_stage_state=self._frontdoor_stage_state_snapshot(state),
+            semantic_context_state=dict(state.get("semantic_context_state") or {}),
         )
         tool_names = list(
             getattr(assembly, "tool_names", None)
@@ -1468,7 +1449,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "query_text": query_text,
             "messages": messages,
             "frontdoor_stage_state": self._frontdoor_stage_state_snapshot(state),
-            "compression_state": dict(state.get("compression_state") or self._default_compression_state()),
+            "compression_state": dict(
+                getattr(assembly, "trace", {}).get("compression_state_payload")
+                or state.get("compression_state")
+                or self._default_compression_state()
+            ),
+            "semantic_context_state": dict(
+                getattr(assembly, "trace", {}).get("semantic_context_state")
+                or state.get("semantic_context_state")
+                or {}
+            ),
             "turn_overlay_text": str(getattr(assembly, "turn_overlay_text", "") or "").strip() or None,
             "tool_names": list(tool_names),
             "candidate_tool_names": list(getattr(assembly, "candidate_tool_names", []) or []),

@@ -23,12 +23,13 @@ from g3ku.providers.fallback import (
     should_retry_model_chain_error,
     wait_for_model_attempt,
 )
+from g3ku.runtime.stage_prompt_compaction import (
+    STAGE_COMPACT_PREFIX as _STAGE_COMPACT_PREFIX,
+    STAGE_EXTERNALIZED_PREFIX as _STAGE_EXTERNALIZED_PREFIX,
+)
 from g3ku.utils.api_keys import iter_api_key_retry_slots
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
 from main.runtime.node_turn_controller import NodeTurnLease
-
-_STAGE_COMPACT_PREFIX = '[G3KU_STAGE_COMPACT_V1]'
-_STAGE_EXTERNALIZED_PREFIX = '[G3KU_STAGE_EXTERNALIZED_V1]'
 _MODEL_CHAIN_HARD_TIMEOUT_SAFETY_SECONDS = 15.0
 
 
