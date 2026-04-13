@@ -6140,18 +6140,20 @@ async function requestDeleteCeoSession(sessionId) {
     S.ceoSessionCatalogBusy = false;
     renderCeoSessions();
     syncCeoPrimaryButton();
+    const relatedTasks = deleteCheck?.related_tasks && typeof deleteCheck.related_tasks === "object" ? deleteCheck.related_tasks : {};
+    const hasRelatedTaskRecords = normalizeInt(relatedTasks.total, 0) > 0;
     openConfirm({
         title: "删除会话",
         text: `将删除会话“${current.title || current.session_id}”（${shortSessionIdLabel(current.session_id)}）的聊天记录与附件。`,
         confirmLabel: "删除",
         confirmKind: "danger",
         returnFocus: U.ceoNewSession,
-        checkbox: {
+        checkbox: hasRelatedTaskRecords ? {
             label: "同时删除此对话创建的所有任务记录",
             hint: formatSessionDeleteHint(deleteCheck),
             details: formatSessionDeleteTaskDetails(deleteCheck),
             checked: false,
-        },
+        } : null,
         onConfirm: ({ checked } = {}) => performDeleteCeoSession(current.session_id, { deleteTaskRecords: !!checked }),
     });
 }

@@ -77,6 +77,56 @@ def test_bootstrap_status_hides_stale_runtime_state_when_locked(monkeypatch):
     assert payload["runtime"]["agent_ready"] is False
 
 
+def test_bootstrap_bridge_logs_runtime_reset_diagnostics_when_active_sessions_exist(monkeypatch) -> None:
+    logs: list[tuple[str, str]] = []
+
+    def _record(level: str):
+        def _inner(template, *args, **kwargs):
+            _ = kwargs
+            try:
+                rendered = str(template).format(*args)
+            except Exception:
+                rendered = str(template)
+            logs.append((level, rendered))
+        return _inner
+
+    monkeypatch.setattr(
+        "g3ku.runtime.bootstrap_bridge.logger",
+        SimpleNamespace(
+            info=_record("info"),
+            warning=_record("warning"),
+            debug=_record("debug"),
+        ),
+    )
+
+    runner_invalidated: list[str] = []
+    checkpointer = object()
+    loop = SimpleNamespace(
+        commit_service=None,
+        _memory_runtime_settings=SimpleNamespace(),
+        memory_manager=None,
+        _checkpointer=checkpointer,
+        _checkpointer_cm=None,
+        _checkpointer_enabled=True,
+        _checkpointer_backend="sqlite",
+        _checkpointer_path="memory/checkpoints.sqlite3",
+        _active_tasks={"web:ceo-demo": {object()}},
+        multi_agent_runner=SimpleNamespace(
+            invalidate_runtime_bindings=lambda: runner_invalidated.append("done")
+        ),
+        _sqlite_checkpointer_is_active=lambda value: value is checkpointer,
+    )
+
+    RuntimeBootstrapBridge(loop)._reset_memory_runtime(reason="resource_snapshot")
+
+    warning_logs = [message for level, message in logs if level == "warning"]
+    assert any("Resetting memory runtime while active sessions exist" in message for message in warning_logs)
+    assert any("reason=resource_snapshot" in message for message in warning_logs)
+    assert any("active_task_sessions=web:ceo-demo" in message for message in warning_logs)
+    assert any("checkpointer_active=True" in message for message in warning_logs)
+    assert runner_invalidated == ["done"]
+
+
 async def _noop(*_args, **_kwargs):
     return None
 

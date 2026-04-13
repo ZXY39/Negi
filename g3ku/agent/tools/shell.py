@@ -224,16 +224,15 @@ class ExecTool(Tool):
 
     @staticmethod
     def _readonly_error(command: str) -> str:
-        text = str(command or "").lower()
-        if any(token in text for token in ("remove-item", " rm", "rm ", "unlink", "delete", " del ", "rmdir", "rm -", "remove(")):
-            tool_name = "filesystem_delete"
-        elif any(token in text for token in ("diff", "patch", "replace", "sed -i")):
-            tool_name = "filesystem_propose_patch"
-        elif any(token in text for token in ("new-item", "set-content", "add-content", "touch", "mkdir", "write_text", "write_bytes", "writefile", "open(", "echo ", "tee", ">")):
-            tool_name = "filesystem_write"
-        else:
-            tool_name = "filesystem_edit"
-        return f"Error: exec is read-only. Use `{tool_name}` for filesystem side effects."
+        return (
+            "Error: exec is a read-only tool. The command was blocked.\n\n"
+            "Detected syntax that may lead to non-read-only behavior.\n\n"
+            "Recommended handling\n"
+            "- If this is a read-only operation, rewrite it as a single pipeline expression, "
+            "avoid intermediate variables or use a different tool.\n"
+            "- If you need to create, modify, or delete files, use `filesystem_write`, "
+            "`filesystem_edit`, `filesystem_delete`, or `filesystem_propose_patch`."
+        )
 
     def _enforce_command_path_policy(self, command: str, cwd: str, *, runtime: dict[str, Any] | None = None) -> str | None:
         workspace_root = self._workspace_root()

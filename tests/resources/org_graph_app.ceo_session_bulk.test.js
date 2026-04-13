@@ -58,6 +58,8 @@ function loadApp() {
         AbortController,
         ApiClient: {
             getActiveSessionId: () => "",
+            getCeoSessionDeleteCheck: async () => ({ related_tasks: { total: 0, deletable: 0, in_progress: 0 } }),
+            getBootstrapExitCheck: async () => ({ has_running_work: false, summary_text: "" }),
         },
         fetch: async () => ({ ok: true, json: async () => ({}) }),
         lucide: { createIcons() {} },
@@ -77,7 +79,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { S, setCeoSessionTab, renderCeoSessionCard, toggleCeoBulkSelectAll, buildCeoBulkDeleteSummary, requestDeleteSelectedCeoSessions };`,
+        `${APP_CODE}\nthis.__testExports = { S, setCeoSessionTab, renderCeoSessionCard, toggleCeoBulkSelectAll, buildCeoBulkDeleteSummary, requestDeleteSelectedCeoSessions, requestDeleteCeoSession, requestProjectExit };`,
         context
     );
     vm.runInContext(
@@ -118,6 +120,44 @@ test("toggleCeoBulkSelectAll scopes selection to the current tab", () => {
     toggleCeoBulkSelectAll();
 
     assert.deepEqual([...S.ceoSelectedSessionIds], ["web:1", "web:2"]);
+});
+
+test("requestDeleteCeoSession hides task checkbox when there are no related task records", async () => {
+    const { S, requestDeleteCeoSession, __context } = loadApp();
+
+    S.ceoSessions = [
+        { session_id: "web:1", title: "Local Alpha", session_family: "local" },
+    ];
+    __context.ApiClient.getCeoSessionDeleteCheck = async () => ({
+        related_tasks: { total: 0, deletable: 0, in_progress: 0 },
+    });
+    vm.runInContext(
+        "openConfirm = (payload) => { this.__capturedConfirm = payload; };",
+        __context
+    );
+
+    await requestDeleteCeoSession("web:1");
+
+    assert.ok(__context.__capturedConfirm);
+    assert.equal(__context.__capturedConfirm.checkbox, null);
+});
+
+test("requestProjectExit hides pause checkbox when there is no running work", async () => {
+    const { requestProjectExit, __context } = loadApp();
+
+    __context.ApiClient.getBootstrapExitCheck = async () => ({
+        has_running_work: false,
+        summary_text: "",
+    });
+    vm.runInContext(
+        "openConfirm = (payload) => { this.__capturedConfirm = payload; };",
+        __context
+    );
+
+    await requestProjectExit();
+
+    assert.ok(__context.__capturedConfirm);
+    assert.equal(__context.__capturedConfirm.checkbox, null);
 });
 
 test("setCeoSessionTab clears bulk selection when changing tabs", () => {

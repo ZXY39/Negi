@@ -205,6 +205,16 @@ def test_exec_tool_blocks_global_tool_install_commands(tmp_path, monkeypatch) ->
     assert 'global tool installs are blocked' in error.lower()
 
 
+def test_exec_tool_readonly_error_uses_expanded_guidance_template() -> None:
+    error = ExecTool._readonly_error("$checks = @('a'); $result = foreach ($c in $checks) { $c }")
+
+    assert error.startswith('Error: exec is a read-only tool. The command was blocked.')
+    assert 'Detected syntax that may lead to non-read-only behavior' in error
+    assert 'If this is a read-only operation, rewrite it as a single pipeline expression' in error
+    assert 'avoid intermediate variables or use a different tool' in error
+    assert '`filesystem_write`, `filesystem_edit`, `filesystem_delete`, or `filesystem_propose_patch`' in error
+
+
 @pytest.mark.asyncio
 async def test_exec_tool_makes_python_available_from_project_environment_on_windows(monkeypatch) -> None:
     if os.name != 'nt':

@@ -164,6 +164,24 @@ class RuntimeBootstrapBridge:
     def sync_internal_tool_runtimes(self, *, force: bool = False, reason: str = 'runtime') -> bool:
         return self._sync_memory_runtime(force=force, reason=reason)
 
+    def _active_task_session_keys(self) -> list[str]:
+        active_tasks = getattr(self._loop, '_active_tasks', None)
+        if not isinstance(active_tasks, dict):
+            return []
+        return sorted(str(key or '').strip() for key in active_tasks.keys() if str(key or '').strip())
+
+    def _checkpointer_diagnostics(self) -> tuple[str, str]:
+        checkpointer = getattr(self._loop, '_checkpointer', None)
+        if checkpointer is None:
+            return '', 'unknown'
+        is_active = getattr(self._loop, '_sqlite_checkpointer_is_active', None)
+        if callable(is_active):
+            try:
+                return str(id(checkpointer)), str(bool(is_active(checkpointer)))
+            except Exception:
+                return str(id(checkpointer)), 'error'
+        return str(id(checkpointer)), 'unknown'
+
     def _sync_memory_runtime(self, *, force: bool = False, reason: str = 'runtime') -> bool:
         manager = getattr(self._loop, 'resource_manager', None)
         descriptor = manager.get_tool_descriptor('memory_runtime') if manager is not None else None
@@ -175,7 +193,7 @@ class RuntimeBootstrapBridge:
         if descriptor is None:
             had_runtime = bool(getattr(self._loop, '_memory_runtime_settings', None) or self._loop.memory_manager is not None)
             if had_runtime:
-                self._reset_memory_runtime()
+                self._reset_memory_runtime(reason=reason)
                 fingerprints.pop('memory_runtime', None)
             return had_runtime
 
@@ -188,13 +206,33 @@ class RuntimeBootstrapBridge:
         if not force and fingerprints.get('memory_runtime') == fingerprint and getattr(self._loop, '_memory_runtime_settings', None) is not None:
             return False
 
-        self._reset_memory_runtime()
+        self._reset_memory_runtime(reason=reason)
         fingerprints['memory_runtime'] = fingerprint
         self.init_memory_runtime(cfg)
         logger.info('memory runtime synced from resource settings (reason={})', reason)
         return True
 
-    def _reset_memory_runtime(self) -> None:
+    def _reset_memory_runtime(self, *, reason: str = 'runtime') -> None:
+        active_task_sessions = self._active_task_session_keys()
+        checkpointer_id, checkpointer_active = self._checkpointer_diagnostics()
+        if active_task_sessions:
+            logger.warning(
+                'Resetting memory runtime while active sessions exist '
+                '(reason={}, active_task_sessions={}, checkpointer_id={}, checkpointer_active={})',
+                reason,
+                ','.join(active_task_sessions),
+                checkpointer_id,
+                checkpointer_active,
+            )
+        else:
+            logger.info(
+                'Resetting memory runtime '
+                '(reason={}, active_task_sessions={}, checkpointer_id={}, checkpointer_active={})',
+                reason,
+                '',
+                checkpointer_id,
+                checkpointer_active,
+            )
         commit_service = getattr(self._loop, 'commit_service', None)
         if commit_service is not None:
             self._close_value(commit_service)
