@@ -477,7 +477,7 @@ class ConfigChatBackend:
                                     'tool_choice': tool_choice if tool_choice is not None else 'auto',
                                     'parallel_tool_calls': parallel_tool_calls,
                                     'prompt_cache_key': stable_prompt_cache_key,
-                                    'request_timeout_seconds': attempt_timeout_seconds,
+                                    'request_timeout_seconds': None if bool(getattr(target.provider, 'manages_request_timeout_internally', False)) else attempt_timeout_seconds,
                                 },
                                 **_resolve_model_request_parameters(
                                     target,

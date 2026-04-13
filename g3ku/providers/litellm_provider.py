@@ -17,6 +17,13 @@ from litellm import acompletion
 
 from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, normalize_usage_payload
 from g3ku.providers.registry import find_by_model, find_gateway
+from g3ku.providers.streaming_timeouts import (
+    StreamingDiagnostics,
+    consume_openai_like_chat_stream,
+    resolve_non_streaming_timeout_seconds,
+    resolve_streaming_timeout_seconds,
+    should_fallback_to_non_streaming_from_error,
+)
 
 # Standard chat-completion message keys.
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"})
@@ -66,6 +73,14 @@ class LiteLLMProvider(LLMProvider):
         litellm.suppress_debug_info = True
         # Drop unsupported parameters for providers (e.g., gpt-5 rejects some params)
         litellm.drop_params = True
+
+    @property
+    def manages_request_timeout_internally(self) -> bool:
+        return True
+
+    @property
+    def supports_streaming(self) -> bool:
+        return True
 
     def _setup_env(self, api_key: str, api_base: str | None, model: str) -> None:
         """Set environment variables based on detected provider."""
@@ -229,9 +244,6 @@ class LiteLLMProvider(LLMProvider):
             kwargs["max_tokens"] = max(1, int(max_tokens))
         if temperature is not None:
             kwargs["temperature"] = float(temperature)
-        if request_timeout_seconds is not None:
-            kwargs["timeout"] = float(request_timeout_seconds)
-
         # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
         self._apply_model_overrides(model, kwargs)
 
@@ -270,7 +282,35 @@ class LiteLLMProvider(LLMProvider):
         )
 
         try:
-            response = await acompletion(**kwargs)
+            stream_timeout_seconds = resolve_streaming_timeout_seconds(request_timeout_seconds)
+            stream_kwargs = {
+                **kwargs,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                "timeout": float(stream_timeout_seconds),
+            }
+            try:
+                stream = await acompletion(**stream_kwargs)
+                diagnostics = StreamingDiagnostics.start(provider_label)
+                content, tool_calls, finish_reason, usage, reasoning_content = await consume_openai_like_chat_stream(
+                    stream,
+                    diagnostics=diagnostics,
+                    first_chunk_timeout_seconds=stream_timeout_seconds,
+                    idle_chunk_timeout_seconds=stream_timeout_seconds,
+                )
+                from loguru import logger
+                logger.debug(diagnostics.render_summary(outcome="completed"))
+                return LLMResponse(
+                    content=content,
+                    tool_calls=tool_calls,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                    reasoning_content=reasoning_content,
+                )
+            except Exception as stream_exc:
+                if not should_fallback_to_non_streaming_from_error(stream_exc):
+                    raise
+            response = await acompletion(**{**kwargs, "timeout": float(resolve_non_streaming_timeout_seconds(request_timeout_seconds))})
             return self._parse_response(response)
         except Exception as e:
             # Return error as content for graceful handling

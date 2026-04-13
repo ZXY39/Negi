@@ -5836,7 +5836,7 @@ function renderCeoSessions() {
                     class="ceo-session-main ceo-session-select"
                     data-session-activate="${esc(sessionId)}"
                     aria-pressed="${isActive ? "true" : "false"}"
-                    aria-label="${esc(`${title}${isRunning ? "（运行中）" : ""}`)}"
+                    aria-label="${esc(title)}"
                 >
                     <div class="ceo-session-head">
                         <div class="ceo-session-title">${esc(title)}</div>

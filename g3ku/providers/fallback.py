@@ -366,7 +366,7 @@ class FallbackProvider(LLMProvider):
                             "tool_choice": tool_choice,
                             "parallel_tool_calls": parallel_tool_calls,
                             "prompt_cache_key": prompt_cache_key,
-                            "request_timeout_seconds": request_timeout_seconds,
+                            "request_timeout_seconds": None if bool(getattr(target.provider, "manages_request_timeout_internally", False)) else request_timeout_seconds,
                         }
                         if effective_max_tokens is not None:
                             provider_kwargs["max_tokens"] = effective_max_tokens

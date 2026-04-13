@@ -245,6 +245,14 @@ class AgentRuntimeEngine:
 
     async def _reset_checkpointer_handles(self) -> None:
         checkpointer = getattr(self, "_checkpointer", None)
+        checkpointer_cm = getattr(self, "_checkpointer_cm", None)
+        if checkpointer is not None or checkpointer_cm is not None:
+            logger.info(
+                "Closing stale SQLite checkpointer handles "
+                "(checkpointer_id={}, checkpointer_cm_id={})",
+                "" if checkpointer is None else str(id(checkpointer)),
+                "" if checkpointer_cm is None else str(id(checkpointer_cm)),
+            )
         if checkpointer is not None and hasattr(checkpointer, "close"):
             try:
                 maybe = checkpointer.close()
@@ -252,7 +260,6 @@ class AgentRuntimeEngine:
                     await maybe
             except Exception:
                 logger.debug("Stale checkpointer close skipped during rebuild")
-        checkpointer_cm = getattr(self, "_checkpointer_cm", None)
         if checkpointer_cm is not None and hasattr(checkpointer_cm, "__aexit__"):
             try:
                 maybe = checkpointer_cm.__aexit__(None, None, None)
@@ -321,6 +328,35 @@ class AgentRuntimeEngine:
         if self._runtime_closed:
             return None
         self._runtime_closed = True
+        active_task_sessions = sorted(
+            str(key or "").strip()
+            for key in getattr(self, "_active_tasks", {}).keys()
+            if str(key or "").strip()
+        ) if isinstance(getattr(self, "_active_tasks", None), dict) else []
+        checkpointer = getattr(self, "_checkpointer", None)
+        is_active = getattr(self, "_sqlite_checkpointer_is_active", None)
+        checkpointer_active = "unknown"
+        if callable(is_active) and checkpointer is not None:
+            try:
+                checkpointer_active = str(bool(is_active(checkpointer)))
+            except Exception:
+                checkpointer_active = "error"
+        if active_task_sessions:
+            logger.warning(
+                "Closing runtime while active sessions still exist "
+                "(active_task_sessions={}, checkpointer_id={}, checkpointer_active={})",
+                ",".join(active_task_sessions),
+                "" if checkpointer is None else str(id(checkpointer)),
+                checkpointer_active,
+            )
+        else:
+            logger.info(
+                "Closing runtime with no active sessions "
+                "(active_task_sessions={}, checkpointer_id={}, checkpointer_active={})",
+                "",
+                "" if checkpointer is None else str(id(checkpointer)),
+                checkpointer_active,
+            )
 
         for task_set in (self._consolidation_tasks, self._commit_tasks):
             tasks = list(task_set)

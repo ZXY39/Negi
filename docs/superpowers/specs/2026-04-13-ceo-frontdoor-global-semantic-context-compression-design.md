@@ -148,69 +148,154 @@ CEO frontdoor 将完全复用节点侧的 prompt 级阶段工作集语义：
 
 总压缩的触发从旧的 message-count 机制迁移为 token-pressure + coverage-based 机制。
 
-### 7.1 同步触发
+### 7.1 Hermes 对齐的默认阈值
+
+总压缩默认值采用与 Hermes `ContextCompressor` 相同或同语义对齐的基线参数：
+
+- `frontdoor_global_summary_trigger_ratio = 0.50`  
+  参考 Hermes `threshold_percent = 0.50`。当组装后的完整 prompt 估算 token 达到模型上下文窗口的 50% 时，进入总压缩工作区判定。
+- `frontdoor_global_summary_target_ratio = 0.20`  
+  参考 Hermes `summary_target_ratio = 0.20` 和 `_SUMMARY_RATIO = 0.20`。总压缩摘要目标长度约为“被压缩上下文 token 量”的 20%。
+- `frontdoor_global_summary_min_output_tokens = 2000`  
+  参考 Hermes `_MIN_SUMMARY_TOKENS = 2000`。即使被压缩区不大，也不将语义摘要预算压得过短。
+- `frontdoor_global_summary_max_output_ratio = 0.05`  
+  参考 Hermes `self.max_summary_tokens = min(int(context_length * 0.05), 12000)`。摘要上限默认为主模型上下文窗口的 5%。
+- `frontdoor_global_summary_max_output_tokens_ceiling = 12000`  
+  参考 Hermes `_SUMMARY_TOKENS_CEILING = 12000`。即使主模型上下文窗口很大，也不让单个摘要无限膨胀。
+- `frontdoor_global_summary_pressure_warn_ratio = 0.85`  
+  参考 Hermes 的 context pressure tier，85% 视为高压区。到达该比例时，如果 global summary 缺失、过旧或 `needs_refresh = true`，应同步刷新。
+- `frontdoor_global_summary_force_refresh_ratio = 0.95`  
+  参考 Hermes 的第二压力 tier，95% 视为强制刷新区。到达该比例时，即使是 heartbeat / cron turn，也必须优先保证 global summary 可用。
+- `frontdoor_global_summary_min_delta_tokens = 2000`  
+  默认与 Hermes 的最小摘要预算对齐。只有新进入全局压缩区的增量达到 2000 tokens，才值得触发一次新的语义摘要刷新。
+- `frontdoor_global_summary_failure_cooldown_seconds = 600`  
+  参考 Hermes `_SUMMARY_FAILURE_COOLDOWN_SECONDS = 600`，摘要失败后进入 10 分钟冷却，期间复用旧摘要或回退。
+
+在实现中，以上 ratio 默认值必须派生为明确 token 阈值，推荐直接采用以下公式（与 Hermes 数值口径对齐）：
+
+- 设 `C = 主模型上下文窗口 tokens`
+- 设 `HERMES_MIN_CONTEXT_FLOOR = 64000`（参考 Hermes `MINIMUM_CONTEXT_LENGTH = 64_000`）
+- `global_summary_trigger_tokens = max(int(C * 0.50), 64000)`  
+  说明：与 Hermes `threshold_percent=0.50` 和 64K floor 对齐。
+- `global_summary_pressure_warn_tokens = int(C * 0.85)`  
+  说明：高压区阈值，对齐 Hermes 85% pressure tier。
+- `global_summary_force_refresh_tokens = int(C * 0.95)`  
+  说明：强制刷新阈值，对齐 Hermes 95% pressure tier。
+- `global_summary_max_output_tokens = min(int(C * 0.05), 12000)`  
+  说明：对齐 Hermes `min(context_length*0.05, 12000)`。
+- `global_summary_target_tokens = clamp(int(compressed_zone_tokens * 0.20), 2000, global_summary_max_output_tokens)`  
+  说明：对齐 Hermes `_SUMMARY_RATIO=0.20`、`_MIN_SUMMARY_TOKENS=2000` 与输出上限规则。
+
+为避免实现时出现二义性，本设计要求触发判定优先使用上述 token 阈值变量；ratio 仅作为配置输入与可观测展示。
+
+### 7.2 同步触发
 
 在 frontdoor 组装一次真实模型调用的 prompt 之前，满足任一条件时，同步刷新 global summary：
 
 1. 当前不存在可用的 `global semantic summary`
-2. 现有 summary 的覆盖边界落后于当前可压缩全局区
-3. 现有 summary 已存在，但完整 prompt 仍接近上下文窗口上限
-4. 上一次 summary 生成失败，cooldown 已结束，且本轮仍需要总压缩
+2. 现有 summary 的覆盖边界落后于当前可压缩全局区，且新增进入压缩区的内容达到 `frontdoor_global_summary_min_delta_tokens`
+3. 组装后的完整 prompt 估算 token 达到 `global_summary_pressure_warn_tokens`
+4. 组装后的完整 prompt 估算 token 达到 `global_summary_force_refresh_tokens`
+5. 上一次 summary 生成失败，cooldown 已结束，且当前 prompt 估算 token 已达到 `global_summary_trigger_tokens`
 
-### 7.2 延后刷新
+### 7.3 延后刷新
 
-若仅存在“有新历史进入全局压缩区”，但当前 prompt 仍远低于安全阈值，则不立即刷新。  
+若仅存在“有新历史进入全局压缩区”，但同时满足以下条件，则不立即刷新：
+
+- 新增进入压缩区的内容小于 `frontdoor_global_summary_min_delta_tokens`
+- 完整 prompt 估算 token 低于 `global_summary_pressure_warn_tokens`
+
 此时只记录：
 
 - `needs_refresh = true`
 
-等下一次真正需要压缩时再刷新。
+等下一次真正进入高压区或增量足够大时再刷新。
 
-### 7.3 推荐配置语义
+### 7.4 推荐配置语义
 
-新增 token-based 配置，不再使用旧的 message-count 压缩阈值：
+新增 token / ratio-based 配置，不再使用旧的 message-count 压缩阈值：
 
-- `frontdoor_global_summary_trigger_tokens`
-  - 更老全局区达到该 token 量后，允许生成或更新总压缩摘要
-- `frontdoor_global_summary_hard_pressure_ratio`
-  - 组装后 prompt 接近模型上下文窗口多少比例时，必须刷新或重算摘要
+- `frontdoor_global_summary_trigger_ratio`
+  - 总压缩进入工作区的基线比例，默认 `0.50`
+- `frontdoor_global_summary_target_ratio`
+  - 摘要目标长度相对被压缩区的比例，默认 `0.20`
+- `frontdoor_global_summary_min_output_tokens`
+  - 摘要最小输出预算，默认 `2000`
+- `frontdoor_global_summary_max_output_ratio`
+  - 摘要最大输出预算占主模型上下文窗口的比例，默认 `0.05`
+- `frontdoor_global_summary_max_output_tokens_ceiling`
+  - 摘要输出预算硬上限，默认 `12000`
+- `frontdoor_global_summary_pressure_warn_ratio`
+  - 高压区比例，默认 `0.85`
+- `frontdoor_global_summary_force_refresh_ratio`
+  - 强制刷新区比例，默认 `0.95`
 - `frontdoor_global_summary_min_delta_tokens`
-  - 只有新进入压缩区的增量达到该值，才值得刷新摘要
+  - 刷新摘要所需的最小新增压缩区 token，默认 `2000`
 - `frontdoor_global_summary_model`
   - 可选，允许单独指定压缩摘要模型
 - `frontdoor_global_summary_failure_cooldown_seconds`
-  - 摘要失败后的冷却期
+  - 摘要失败后的冷却期，默认 `600`
+
+实现要求：运行时必须把上述 ratio 配置实时换算为 token 阈值并用于判定（见 7.1 公式），至少在 trace/metrics 中暴露：
+
+- `global_summary_trigger_tokens`
+- `global_summary_pressure_warn_tokens`
+- `global_summary_force_refresh_tokens`
+- `global_summary_max_output_tokens`
 
 ## 8. 心跳、Cron 与临时内部消息兼容
 
-### 8.1 输入过滤规则
+### 8.1 三条通道必须显式分离
 
-总压缩输入必须遵守以下硬规则：
+本设计必须区分以下三条通道，避免“前端可见”和“后续 prompt 可读”混淆：
 
-- `heartbeat_internal` 对应的内部 user message 不进入总压缩源数据
-- `cron_internal` 对应的内部 user message 不进入总压缩源数据
-- `metadata.history_visible == false` 的 assistant 消息不进入总压缩源数据
-- 非 `user|assistant|tool` 的非历史可见消息不进入总压缩源数据
+1. `UI 展示通道`  
+   前端继续通过 inflight/session snapshot 渲染 heartbeat / cron 的处理流程，包括开阶段、工具调用、执行轨迹和压缩状态。
+2. `普通历史注入通道`  
+   用于下一次真实用户 turn 的近场 prompt 历史。该通道仍可继续过滤 heartbeat / cron 的内部 user 消息与 `history_visible = false` 的 assistant 消息。
+3. `总压缩输入通道`  
+   用于生成 global semantic summary。该通道不能简单复用普通历史注入的过滤结果，必须额外保留 heartbeat / cron 期间 agent-side 产生的原始执行上下文。
 
-### 8.2 间接影响规则
+### 8.2 总压缩输入规则
 
-heartbeat / cron 可以通过 durable state 间接影响总压缩，例如：
+总压缩输入必须遵守以下规则：
 
-- 更新 frontdoor stage state
-- 更新 task ledger
-- 产生新的 archive refs
-- 写入用户可见的 assistant 最终结果
+- `heartbeat_internal` / `cron_internal` 对应的内部 user message，作为控制包络默认不进入总压缩摘要正文
+- 但 heartbeat / cron 期间 agent 侧产生的**原始执行上下文**必须进入总压缩输入源，包括：
+  - 原始 assistant 回复
+  - 原始工具调用与工具结果
+  - execution trace / stage rounds / tool events
+  - 与该 turn 直接相关的 frontdoor stage state 变化
+- `metadata.history_visible == false` 不再等价于“禁止进入总压缩输入”；它只禁止进入普通历史注入通道
+- 非 `user|assistant|tool` 的非历史消息仍默认排除
 
-但 heartbeat / cron 的原始临时消息本身，不作为长期语义总结对象。
+换句话说：
 
-### 8.3 触发兼容规则
+- heartbeat / cron 的原始内部 user 消息可以不进入近场历史
+- 但其 agent-side 原始处理流程必须进入 global summary 的素材池，避免后续用户对话中出现“前端看见做过，agent 后面忘了”的失忆现象
+
+### 8.3 与后续对话的关系
+
+heartbeat / cron 那一轮留下的 frontdoor stage / compression live snapshot，仍然不要求直接原样继承到下一次真实用户 turn。  
+后续真实用户 turn 能“读到” heartbeat / cron 处理过程，依赖的是：
+
+- 这些 internal turns 的 agent-side raw execution context 被纳入总压缩输入源
+- 然后经 global semantic summary 注回 prompt
+
+因此：
+
+- UI 侧继续看 snapshot
+- 后续真实用户 turn 侧通过 global summary 看到压缩后的高质量 handoff
+
+### 8.4 触发兼容规则
 
 heartbeat / cron 兼容原则如下：
 
-- 内部 turn 本身不强制触发 global summary 刷新
-- 其引起的 durable state 变化只设置 `needs_refresh`
-- 若 heartbeat / cron 自己这一轮 prompt 已经接近上限，可复用现有 global summary
-- 仅在确有上下文压力时，才允许 heartbeat / cron 触发一次同步摘要刷新
+- heartbeat / cron turn 也参与总 prompt 的 token 压力计算
+- 若当前 prompt 估算 token 低于 `global_summary_pressure_warn_tokens`，且仅有小增量进入总压缩区，则只设置 `needs_refresh = true`
+- 若当前 prompt 估算 token 达到 `global_summary_pressure_warn_tokens`，则 heartbeat / cron turn 允许触发同步摘要刷新
+- 若当前 prompt 估算 token 达到 `global_summary_force_refresh_tokens`，则 heartbeat / cron turn 必须优先保证 global summary 可用
+- 当 heartbeat / cron 的 agent-side raw execution context 已进入总压缩区时，后续真实用户 turn 必须能通过 global summary 间接获得这些处理过程的关键语义
 
 ## 9. 参考 Hermes 的可借鉴做法
 
@@ -224,6 +309,12 @@ heartbeat / cron 兼容原则如下：
 4. 迭代式摘要更新，而不是每轮从零总结
 5. 内容量驱动的摘要预算
 6. 摘要失败后的 cooldown
+7. 触发阈值采用 Hermes 的默认数值基线：
+   - 50% 进入总压缩工作区
+   - 20% 压缩目标比例
+   - 最小 2000 tokens 摘要预算
+   - 最大 5% 上下文窗口且不超过 12000 tokens
+   - 85% / 95% 压力分层
 
 本设计明确**不直接照搬** Hermes 的以下实现细节：
 
@@ -353,7 +444,7 @@ G3KU 的做法是：
 2. 最近 3 个阶段保留窗口正确
 3. 更早 completed stages 正确生成 compact / externalized blocks
 4. global summary 只覆盖 local workset 之外的历史
-5. heartbeat / cron / `history_visible=false` 消息不进入总压缩输入
+5. heartbeat / cron 的内部 user 控制消息不进入近场历史，但其 agent-side 原始执行上下文必须进入总压缩输入源；`history_visible=false` 仅约束普通历史注入，不屏蔽总压缩输入
 6. 当 prompt 接近上限时，总压缩会同步刷新
 7. 当仅有轻微增量时，总压缩只打 `needs_refresh`
 8. summary 失败后进入 cooldown，并能回退
@@ -382,8 +473,9 @@ G3KU 的做法是：
 
 缓解：
 
-- 总压缩输入统一走 `history_visible` / internal-source 过滤
-- 临时内部消息只通过 durable state 间接影响 summary
+- 普通历史注入继续走 `history_visible` / internal-source 过滤
+- 总压缩输入单独建模：保留 heartbeat / cron 的 agent-side 原始执行上下文，但对内部 user 控制消息做正文级抑制
+- 通过结构化模板约束摘要写法，避免将内部控制流噪声写入长期手册化语义
 
 ### 风险 4：旧配置仍存在，用户误以为还生效
 
@@ -432,7 +524,7 @@ G3KU 的做法是：
 - 10 段归档机制保持不变
 - 旧规则式历史压缩代码路径已退出运行时
 - prompt 中存在稳定的 global semantic summary block
-- 心跳、cron、`history_visible=false` 消息不会污染长期摘要
+- heartbeat / cron 的 agent-side 原始执行上下文可被后续 turn 通过 global summary 间接读取，同时内部 user 控制消息不会污染近场历史注入
 - compression_state 能反映新的语义压缩刷新状态
 - 相关测试通过
 - 架构文档已根据最终落地结果更新

@@ -8,6 +8,13 @@ import json_repair
 from openai import AsyncOpenAI
 
 from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, normalize_usage_payload
+from g3ku.providers.streaming_timeouts import (
+    StreamingDiagnostics,
+    consume_openai_like_chat_stream,
+    resolve_non_streaming_timeout_seconds,
+    resolve_streaming_timeout_seconds,
+    should_fallback_to_non_streaming_from_error,
+)
 
 
 class CustomProvider(LLMProvider):
@@ -27,6 +34,14 @@ class CustomProvider(LLMProvider):
             base_url=api_base,
             default_headers=self.extra_headers or None,
         )
+
+    @property
+    def manages_request_timeout_internally(self) -> bool:
+        return True
+
+    @property
+    def supports_streaming(self) -> bool:
+        return True
 
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                    model: str | None = None, max_tokens: int | None = None, temperature: float | None = None,
@@ -48,8 +63,6 @@ class CustomProvider(LLMProvider):
             kwargs["extra_headers"] = dict(self.extra_headers)
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
-        if request_timeout_seconds is not None:
-            kwargs["timeout"] = float(request_timeout_seconds)
         if tools:
             kwargs.update(tools=tools, tool_choice=tool_choice if tool_choice is not None else "auto")
             if parallel_tool_calls is not None:
@@ -61,7 +74,36 @@ class CustomProvider(LLMProvider):
             body=dict(kwargs),
         )
         try:
-            return self._parse(await self._client.chat.completions.create(**kwargs))
+            stream_timeout_seconds = resolve_streaming_timeout_seconds(request_timeout_seconds)
+            stream_kwargs = {
+                **kwargs,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                "timeout": float(stream_timeout_seconds),
+            }
+            try:
+                stream = await self._client.chat.completions.create(**stream_kwargs)
+                diagnostics = StreamingDiagnostics.start("custom")
+                content, tool_calls, finish_reason, usage, reasoning_content = await consume_openai_like_chat_stream(
+                    stream,
+                    diagnostics=diagnostics,
+                    first_chunk_timeout_seconds=stream_timeout_seconds,
+                    idle_chunk_timeout_seconds=stream_timeout_seconds,
+                )
+                from loguru import logger
+                logger.debug(diagnostics.render_summary(outcome="completed"))
+                return LLMResponse(
+                    content=content,
+                    tool_calls=tool_calls,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                    reasoning_content=reasoning_content,
+                )
+            except Exception as stream_exc:
+                if not should_fallback_to_non_streaming_from_error(stream_exc):
+                    raise
+            non_stream_timeout_seconds = resolve_non_streaming_timeout_seconds(request_timeout_seconds)
+            return self._parse(await self._client.chat.completions.create(**{**kwargs, "timeout": float(non_stream_timeout_seconds)}))
         except Exception as e:
             return LLMResponse(content=f"Error: {e}", finish_reason="error")
 

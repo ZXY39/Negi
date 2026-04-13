@@ -71,6 +71,11 @@ class LLMProvider(ABC):
         """Whether the provider enforces its own streaming timeout semantics."""
         return False
 
+    @property
+    def supports_streaming(self) -> bool:
+        """Whether the provider can prefer streaming output by default."""
+        return False
+
     @staticmethod
     def _trace_enabled() -> bool:
         raw = str(os.getenv("G3KU_PROMPT_TRACE", "")).strip().lower()

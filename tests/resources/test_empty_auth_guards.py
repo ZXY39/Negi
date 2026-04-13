@@ -366,9 +366,9 @@ async def test_responses_provider_logs_sse_diagnostics_for_success(monkeypatch) 
 
     assert response.content == "ok"
     joined = "\n".join(logs)
-    assert "responses sse diagnostics" in joined
+    assert "responses stream diagnostics" in joined
     assert "status_code=200" in joined
-    assert "headers_received_ms=" in joined
+    assert "first_chunk_received_ms=" in joined
     assert "first_event_received_ms=" in joined
     assert "first_text_delta_received_ms=" in joined
     assert "stream_completed_ms=" in joined
@@ -438,7 +438,7 @@ async def test_responses_provider_logs_sse_diagnostics_for_stream_failure(monkey
         )
 
     joined = "\n".join(logs)
-    assert "responses sse diagnostics" in joined
+    assert "responses stream diagnostics" in joined
     assert "stream_failed_ms=" in joined
     assert "last_event=response.output_item.added" in joined
     assert "first_data_received_ms=" in joined
@@ -549,6 +549,51 @@ async def test_responses_provider_times_out_when_first_chunk_exceeds_timeout(mon
 
 
 @pytest.mark.asyncio
+async def test_responses_provider_times_out_when_stream_goes_idle_after_first_chunk(monkeypatch) -> None:
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+
+        async def aiter_lines(self):
+            yield "event: response.created"
+            await asyncio.sleep(0.03)
+            yield 'data: {"type":"response.created"}'
+
+    class _FakeStream:
+        async def __aenter__(self):
+            return _FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+        def stream(self, *args, **kwargs):
+            _ = args, kwargs
+            return _FakeStream()
+
+    monkeypatch.setattr("g3ku.providers.responses_provider.httpx.AsyncClient", _FakeAsyncClient)
+
+    provider = ResponsesProvider(api_key="test-key", api_base="https://example.com/v1")
+    with pytest.raises(RuntimeError, match="idle timeout"):
+        await provider.chat(
+            messages=[{"role": "user", "content": "ping"}],
+            model="demo",
+            request_timeout_seconds=0.01,
+        )
+
+
+@pytest.mark.asyncio
 async def test_chat_backend_skips_outer_total_timeout_for_internally_managed_stream_provider(monkeypatch) -> None:
     captured: list[dict[str, object]] = []
 
@@ -624,6 +669,289 @@ async def test_litellm_provider_forwards_request_timeout(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_custom_provider_uses_streaming_path_when_stream_is_supported(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class _FakeStream:
+        def __init__(self) -> None:
+            self._chunks = [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="O", reasoning_content=None, tool_calls=[]),
+                            finish_reason=None,
+                        )
+                    ],
+                    usage=None,
+                ),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="K", reasoning_content=None, tool_calls=[]),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage={"prompt_tokens": 1, "completion_tokens": 2},
+                ),
+            ]
+
+        def __aiter__(self):
+            self._index = 0
+            return self
+
+        async def __anext__(self):
+            if self._index >= len(self._chunks):
+                raise StopAsyncIteration
+            chunk = self._chunks[self._index]
+            self._index += 1
+            return chunk
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            calls.append(dict(kwargs))
+            if kwargs.get("stream"):
+                return _FakeStream()
+            raise AssertionError("non-stream fallback should not be used")
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+            self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+    monkeypatch.setattr("g3ku.providers.custom_provider.AsyncOpenAI", _FakeAsyncOpenAI)
+
+    provider = CustomProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="demo",
+        request_timeout_seconds=0.5,
+    )
+
+    assert response.content == "OK"
+    assert response.finish_reason == "stop"
+    assert response.usage == {"input_tokens": 1, "output_tokens": 2}
+    assert len(calls) == 1
+    assert calls[0]["stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_custom_provider_falls_back_to_non_streaming_when_streaming_unsupported(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            calls.append(dict(kwargs))
+            if kwargs.get("stream"):
+                raise RuntimeError("stream unsupported by upstream")
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="ok", tool_calls=[]),
+                        finish_reason="stop",
+                    )
+                ],
+                usage={},
+            )
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+            self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+    monkeypatch.setattr("g3ku.providers.custom_provider.AsyncOpenAI", _FakeAsyncOpenAI)
+
+    provider = CustomProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="demo",
+        request_timeout_seconds=12.5,
+    )
+
+    assert response.content == "ok"
+    assert len(calls) == 2
+    assert calls[0]["stream"] is True
+    assert "stream" not in calls[1]
+    assert calls[1]["timeout"] == 12.5
+
+
+@pytest.mark.asyncio
+async def test_custom_provider_fallback_defaults_to_120_seconds_without_explicit_timeout(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            calls.append(dict(kwargs))
+            if kwargs.get("stream"):
+                raise RuntimeError("stream unsupported by upstream")
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="ok", tool_calls=[]),
+                        finish_reason="stop",
+                    )
+                ],
+                usage={},
+            )
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+            self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+    monkeypatch.setattr("g3ku.providers.custom_provider.AsyncOpenAI", _FakeAsyncOpenAI)
+
+    provider = CustomProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="demo",
+    )
+
+    assert response.content == "ok"
+    assert len(calls) == 2
+    assert calls[1]["timeout"] == 120.0
+
+
+@pytest.mark.asyncio
+async def test_litellm_provider_falls_back_to_non_streaming_when_streaming_unsupported(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    async def _fake_acompletion(**kwargs):
+        calls.append(dict(kwargs))
+        if kwargs.get("stream"):
+            raise RuntimeError("stream unsupported by provider")
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="ok", tool_calls=[]),
+                    finish_reason="stop",
+                )
+            ],
+            usage={},
+        )
+
+    monkeypatch.setattr("g3ku.providers.litellm_provider.acompletion", _fake_acompletion)
+
+    provider = LiteLLMProvider(
+        api_key="test-key",
+        api_base="https://example.com/v1",
+        default_model="openai/gpt-4.1",
+        provider_name="openai",
+    )
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="openai/gpt-4.1",
+        request_timeout_seconds=9.5,
+    )
+
+    assert response.content == "ok"
+    assert len(calls) == 2
+    assert calls[0]["stream"] is True
+    assert "stream" not in calls[1]
+    assert calls[1]["timeout"] == 9.5
+
+
+@pytest.mark.asyncio
+async def test_litellm_provider_uses_streaming_path_when_stream_is_supported(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class _FakeStream:
+        def __init__(self) -> None:
+            self._chunks = [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="O", reasoning_content=None, tool_calls=[]),
+                            finish_reason=None,
+                        )
+                    ],
+                    usage=None,
+                ),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="K", reasoning_content=None, tool_calls=[]),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage={"prompt_tokens": 1, "completion_tokens": 2},
+                ),
+            ]
+
+        def __aiter__(self):
+            self._index = 0
+            return self
+
+        async def __anext__(self):
+            if self._index >= len(self._chunks):
+                raise StopAsyncIteration
+            chunk = self._chunks[self._index]
+            self._index += 1
+            return chunk
+
+    async def _fake_acompletion(**kwargs):
+        calls.append(dict(kwargs))
+        if kwargs.get("stream"):
+            return _FakeStream()
+        raise AssertionError("non-stream fallback should not be used")
+
+    monkeypatch.setattr("g3ku.providers.litellm_provider.acompletion", _fake_acompletion)
+
+    provider = LiteLLMProvider(
+        api_key="test-key",
+        api_base="https://example.com/v1",
+        default_model="openai/gpt-4.1",
+        provider_name="openai",
+    )
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="openai/gpt-4.1",
+        request_timeout_seconds=0.5,
+    )
+
+    assert response.content == "OK"
+    assert response.finish_reason == "stop"
+    assert response.usage == {"input_tokens": 1, "output_tokens": 2}
+    assert len(calls) == 1
+    assert calls[0]["stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_litellm_provider_fallback_defaults_to_120_seconds_without_explicit_timeout(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    async def _fake_acompletion(**kwargs):
+        calls.append(dict(kwargs))
+        if kwargs.get("stream"):
+            raise RuntimeError("stream unsupported by provider")
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="ok", tool_calls=[]),
+                    finish_reason="stop",
+                )
+            ],
+            usage={},
+        )
+
+    monkeypatch.setattr("g3ku.providers.litellm_provider.acompletion", _fake_acompletion)
+
+    provider = LiteLLMProvider(
+        api_key="test-key",
+        api_base="https://example.com/v1",
+        default_model="openai/gpt-4.1",
+        provider_name="openai",
+    )
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="openai/gpt-4.1",
+    )
+
+    assert response.content == "ok"
+    assert len(calls) == 2
+    assert calls[1]["timeout"] == 120.0
+
+
+@pytest.mark.asyncio
 async def test_openai_codex_provider_forwards_request_timeout(monkeypatch) -> None:
     captured: list[float | None] = []
 
@@ -647,6 +975,107 @@ async def test_openai_codex_provider_forwards_request_timeout(monkeypatch) -> No
 
     assert response.content == "ok"
     assert captured == [11.0]
+
+
+@pytest.mark.asyncio
+async def test_openai_codex_provider_times_out_when_first_chunk_exceeds_timeout(monkeypatch) -> None:
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+
+        async def aiter_lines(self):
+            await asyncio.sleep(0.03)
+            yield "event: response.created"
+
+    class _FakeStream:
+        async def __aenter__(self):
+            return _FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+        def stream(self, *args, **kwargs):
+            _ = args, kwargs
+            return _FakeStream()
+
+    monkeypatch.setattr(
+        "g3ku.providers.openai_codex_provider.get_codex_token",
+        lambda: SimpleNamespace(account_id="acct", access="token"),
+    )
+    monkeypatch.setattr("g3ku.providers.openai_codex_provider.httpx.AsyncClient", _FakeAsyncClient)
+
+    provider = OpenAICodexProvider(default_model="openai_codex/gpt-5.1-codex")
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="openai_codex/gpt-5.1-codex",
+        request_timeout_seconds=0.01,
+    )
+
+    assert response.finish_reason == "error"
+    assert "timeout" in str(response.content or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_openai_codex_provider_times_out_when_stream_goes_idle_after_first_chunk(monkeypatch) -> None:
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+
+        async def aiter_lines(self):
+            yield "event: response.created"
+            await asyncio.sleep(0.03)
+            yield 'data: {"type":"response.created"}'
+
+    class _FakeStream:
+        async def __aenter__(self):
+            return _FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+        def stream(self, *args, **kwargs):
+            _ = args, kwargs
+            return _FakeStream()
+
+    monkeypatch.setattr(
+        "g3ku.providers.openai_codex_provider.get_codex_token",
+        lambda: SimpleNamespace(account_id="acct", access="token"),
+    )
+    monkeypatch.setattr("g3ku.providers.openai_codex_provider.httpx.AsyncClient", _FakeAsyncClient)
+
+    provider = OpenAICodexProvider(default_model="openai_codex/gpt-5.1-codex")
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="openai_codex/gpt-5.1-codex",
+        request_timeout_seconds=0.01,
+    )
+
+    assert response.finish_reason == "error"
+    assert "idle timeout" in str(response.content or "").lower()
 
 
 def test_build_openai_headers_omits_empty_authorization() -> None:

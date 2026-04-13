@@ -7,6 +7,7 @@ import hashlib
 import html
 import json
 import re
+import time
 from typing import Any, AsyncGenerator
 
 import httpx
@@ -14,6 +15,11 @@ from loguru import logger
 from oauth_cli_kit import get_token as get_codex_token
 
 from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, normalize_usage_payload
+from g3ku.providers.streaming_timeouts import (
+    StreamingChunkTimeoutError,
+    StreamingDiagnostics,
+    resolve_streaming_timeout_seconds,
+)
 from g3ku.runtime.tool_history import analyze_tool_call_history, extract_call_id
 
 DEFAULT_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
@@ -32,6 +38,14 @@ class OpenAICodexProvider(LLMProvider):
     def __init__(self, default_model: str = "openai-codex/gpt-5.1-codex"):
         super().__init__(api_key=None, api_base=None)
         self.default_model = default_model
+
+    @property
+    def manages_request_timeout_internally(self) -> bool:
+        return True
+
+    @property
+    def supports_streaming(self) -> bool:
+        return True
 
     async def chat(
         self,
@@ -84,13 +98,14 @@ class OpenAICodexProvider(LLMProvider):
         )
 
         try:
+            stream_timeout_seconds = resolve_streaming_timeout_seconds(request_timeout_seconds)
             try:
                 content, tool_calls, finish_reason, usage = await _request_codex(
                     url,
                     headers,
                     body,
                     verify=True,
-                    timeout=request_timeout_seconds,
+                    timeout=stream_timeout_seconds,
                 )
             except Exception as e:
                 if "CERTIFICATE_VERIFY_FAILED" not in str(e):
@@ -101,7 +116,7 @@ class OpenAICodexProvider(LLMProvider):
                     headers,
                     body,
                     verify=False,
-                    timeout=request_timeout_seconds,
+                    timeout=stream_timeout_seconds,
                 )
             return LLMResponse(
                 content=content,
@@ -157,7 +172,92 @@ async def _request_codex(
             if response.status_code != 200:
                 text = await response.aread()
                 raise RuntimeError(_friendly_error(response.status_code, text.decode("utf-8", "ignore")))
-            return await _consume_sse(response)
+            diagnostics = _CodexSSEDiagnosticsProxy(
+                response,
+                first_line_timeout_seconds=client_timeout,
+                idle_line_timeout_seconds=client_timeout,
+            )
+            try:
+                content, tool_calls, finish_reason, usage = await _consume_sse(diagnostics)
+            except Exception:
+                logger.warning(diagnostics.render_summary(outcome="failed"))
+                raise
+            logger.debug(diagnostics.render_summary(outcome="completed"))
+            return content, tool_calls, finish_reason, usage
+
+
+class _CodexSSEDiagnosticsProxy:
+    def __init__(
+        self,
+        response: httpx.Response,
+        *,
+        first_line_timeout_seconds: float,
+        idle_line_timeout_seconds: float,
+    ) -> None:
+        self._response = response
+        self._diagnostics = StreamingDiagnostics.start("openai_codex")
+        self._first_event_received_at: float | None = None
+        self._first_data_received_at: float | None = None
+        self._last_event_name = ""
+        self._event_line_count = 0
+        self._data_line_count = 0
+        self._first_line_timeout_seconds = first_line_timeout_seconds
+        self._idle_line_timeout_seconds = idle_line_timeout_seconds
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._response, name)
+
+    async def aiter_lines(self):
+        iterator = self._response.aiter_lines().__aiter__()
+        line_index = 0
+        while True:
+            timeout_seconds = self._first_line_timeout_seconds if line_index == 0 else self._idle_line_timeout_seconds
+            try:
+                line = await asyncio.wait_for(iterator.__anext__(), timeout=timeout_seconds)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError as exc:
+                if line_index == 0:
+                    raise StreamingChunkTimeoutError(
+                        f"Codex stream timeout waiting for first chunk after {timeout_seconds:.3f}s"
+                    ) from exc
+                raise StreamingChunkTimeoutError(
+                    f"Codex stream idle timeout after {timeout_seconds:.3f}s without a new chunk"
+                ) from exc
+            line_index += 1
+            if not line:
+                yield line
+                continue
+            now = time.perf_counter()
+            if line.startswith("event:"):
+                self._last_event_name = str(line.split(":", 1)[1].strip() or self._last_event_name)
+                self._event_line_count += 1
+                if self._first_event_received_at is None:
+                    self._first_event_received_at = now
+                self._diagnostics.note_chunk(f"event:{self._last_event_name}")
+            elif line.startswith("data:"):
+                self._data_line_count += 1
+                if self._first_data_received_at is None:
+                    self._first_data_received_at = now
+                is_text = self._last_event_name == "response.output_text.delta"
+                self._diagnostics.note_chunk(f"data:{self._last_event_name or 'unknown'}", is_text=is_text)
+            else:
+                self._diagnostics.note_chunk("line")
+            yield line
+
+    def render_summary(self, *, outcome: str) -> str:
+        started_at = self._diagnostics.started_at
+        elapsed_ms = lambda ts: "" if ts is None else f"{max(0.0, (ts - started_at) * 1000.0):.1f}"
+        return self._diagnostics.render_summary(
+            outcome=outcome,
+            extra_fields={
+                "first_event_received_ms": elapsed_ms(self._first_event_received_at),
+                "first_data_received_ms": elapsed_ms(self._first_data_received_at),
+                "last_event": self._last_event_name or "<none>",
+                "event_line_count": self._event_line_count,
+                "data_line_count": self._data_line_count,
+            },
+        )
 
 
 def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
