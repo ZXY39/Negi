@@ -144,7 +144,10 @@ function loadApp() {
         syncCeoInputHeight: () => {},
         clearCeoComposerDraft: () => {},
         addMsg: () => {},
-        showToast: () => {},
+        showToast: (payload) => {
+            context.__showToastCalls = context.__showToastCalls || [];
+            context.__showToastCalls.push(payload);
+        },
         patchCeoSessionRuntimeState: () => false,
         setCeoSessionSnapshotCache: () => ({}),
         createPendingCeoTurn: () => ({}),
@@ -227,4 +230,5 @@ test("sending while a turn is active queues follow-up instead of pausing immedia
     assert.equal(Array.isArray(S.ceoQueuedFollowUps?.["web:test"]), true);
     assert.equal(S.ceoQueuedFollowUps["web:test"].length, 1);
     assert.equal(S.ceoQueuedFollowUps["web:test"][0].text, "前10个");
+    assert.equal((__context.__showToastCalls || []).length, 0);
 });

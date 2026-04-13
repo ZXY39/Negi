@@ -81,13 +81,14 @@ class RepeatedActionCircuitBreaker:
         self._recent: deque[str] = deque(maxlen=max(1, int(window)))
         self._threshold = max(1, int(threshold))
 
-    def register(self, signature: str) -> None:
+    def register(self, signature: str) -> str | None:
         self._recent.append(signature)
         if len(self._recent) < self._threshold:
-            return
+            return None
         tail = list(self._recent)[-self._threshold :]
         if len(set(tail)) == 1:
-            raise RuntimeError(f'repeated tool call detected: {tail[-1]}')
+            return tail[-1]
+        return None
 
 
 class ReActToolLoop:
@@ -565,10 +566,48 @@ class ReActToolLoop:
                         reason='; '.join(reason_parts) or f'{FINAL_RESULT_TOOL_NAME} rejected',
                         count=1,
                     )
+                duplicate_call_violations: list[dict[str, Any]] = []
                 for call in response_tool_calls:
-                    signature = f"{call.name}:{json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)}"
-                    if call.name not in self._CONTROL_TOOL_NAMES and call.name not in {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}:
-                        breaker.register(signature)
+                    tool_name = str(getattr(call, 'name', '') or '').strip()
+                    arguments = self._normalize_tool_call_arguments(getattr(call, 'arguments', {}))
+                    signature = f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
+                    if tool_name in self._CONTROL_TOOL_NAMES or tool_name in {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}:
+                        continue
+                    repeated_signature = breaker.register(signature)
+                    if repeated_signature:
+                        duplicate_call_violations.append(
+                            {
+                                'signature': repeated_signature,
+                                'tool_name': tool_name,
+                                'arguments': arguments,
+                            }
+                        )
+                if duplicate_call_violations:
+                    repair_messages: list[str] = []
+                    for violation in duplicate_call_violations:
+                        repair_text = self._duplicate_tool_call_repair_message(
+                            tool_name=str(violation.get('tool_name') or '').strip(),
+                            arguments=dict(violation.get('arguments') or {}),
+                        )
+                        if repair_text and repair_text not in repair_messages:
+                            repair_messages.append(repair_text)
+                    combined_repair_text = '\n\n'.join(repair_messages).strip()
+                    error_content = (
+                        f'Error: {combined_repair_text}'
+                        if combined_repair_text
+                        else 'Error: duplicate tool call detected; reuse the prior result or change the arguments before retrying'
+                    )
+                    message_history = self._record_rejected_tool_turn(
+                        task=task,
+                        node=node,
+                        response=response,
+                        response_tool_calls=response_tool_calls,
+                        message_history=message_history,
+                        runtime_context=runtime_context,
+                        error_content=error_content,
+                    )
+                    repair_overlay_text = combined_repair_text
+                    continue
                 active_round_payload = None
                 if self._should_record_execution_stage_round(
                     node_kind=node.node_kind,
@@ -2436,6 +2475,46 @@ class ReActToolLoop:
                 f'{suffix}'
             ),
         )
+
+    @staticmethod
+    def _duplicate_tool_call_target(*, tool_name: str, arguments: dict[str, Any]) -> str:
+        normalized_tool = str(tool_name or '').strip()
+        if normalized_tool == 'exec':
+            command = str(arguments.get('command') or '').strip()
+            working_dir = str(arguments.get('working_dir') or arguments.get('cwd') or '').strip()
+            if command and working_dir:
+                return f'command={command}; working_dir={working_dir}'
+            return command or working_dir
+        for key in ('ref', 'path', 'task_id', 'node_id', 'query'):
+            value = str(arguments.get(key) or '').strip()
+            if value:
+                return value
+        if arguments:
+            try:
+                return json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+            except Exception:
+                return str(arguments)
+        return ''
+
+    @classmethod
+    def _duplicate_tool_call_repair_message(cls, *, tool_name: str, arguments: dict[str, Any]) -> str:
+        normalized_tool = str(tool_name or '').strip() or 'tool'
+        target = cls._duplicate_tool_call_target(tool_name=normalized_tool, arguments=dict(arguments or {}))
+        if normalized_tool == 'exec':
+            detail = (
+                'You already ran the same `exec` call multiple times in a row for this node. '
+                'Do not rerun the exact same command immediately. Reuse the existing command result from the transcript/tool output, '
+                'or change `command`, `working_dir`, or other arguments before retrying.'
+            )
+        else:
+            detail = (
+                f'You already called `{normalized_tool}` with the same arguments multiple times in a row for this node. '
+                'Do not repeat the exact same tool call again. Reuse the previous tool result if it is still valid, '
+                'or change the arguments before retrying.'
+            )
+        if target:
+            return f'Duplicate tool call detected. {detail} Latest repeated target: `{target}`.'
+        return f'Duplicate tool call detected. {detail}'
 
     @staticmethod
     def _stage_submission_repair_message(*, reason: str, node_kind: str = 'execution') -> str:

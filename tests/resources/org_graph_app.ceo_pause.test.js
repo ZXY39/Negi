@@ -31,7 +31,29 @@ class StubDocument {
     addEventListener() {}
 
     createElement() {
-        return {};
+        return {
+            className: "",
+            innerHTML: "",
+            hidden: false,
+            querySelector(selector) {
+                if (selector === ".assistant-text") {
+                    return {
+                        textContent: "",
+                        innerHTML: "",
+                        classList: makeClassList("pending"),
+                        setAttribute() {},
+                        removeAttribute() {},
+                    };
+                }
+                if (selector === ".interaction-flow") return { hidden: true, open: false };
+                if (selector === ".interaction-flow-meta") return { textContent: "" };
+                if (selector === ".interaction-flow-list") return { innerHTML: "", querySelectorAll: () => [] };
+                if (selector === ".interaction-flow-footer") return { hidden: true };
+                if (selector === ".interaction-flow-toggle") return { textContent: "", setAttribute() {}, addEventListener() {} };
+                return null;
+            },
+            remove() {},
+        };
     }
 }
 
@@ -50,6 +72,8 @@ function makeTurn({ text = PROCESSING_LABEL, source = "user", steps = 1 } = {}) 
         source,
         turnId: "",
         steps,
+        renderMode: "",
+        lastExecutionTraceSummary: null,
         textEl: {
             textContent: text,
             innerHTML: text,
@@ -105,7 +129,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, dedupeInflightUserMessageAgainstMessages, S, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
+        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, dedupeInflightUserMessageAgainstMessages, applyCeoState, S, U, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
         context
     );
     vm.runInContext(
@@ -121,16 +145,46 @@ function loadApp() {
             return {};
         };
         setCeoSessionSnapshotCache = () => ({});
+        normalizeExecutionStageTrace = (stage, index) => ({
+            stage_id: String(stage?.stage_id || ""),
+            stage_index: index + 1,
+            stage_goal: String(stage?.stage_goal || ""),
+            status: String(stage?.status || "running"),
+            rounds: Array.isArray(stage?.rounds) ? stage.rounds : [],
+        });
+        renderCeoStageTraceIntoTurn = (turn, summary) => {
+            const hasStages = Array.isArray(summary?.stages) && summary.stages.length > 0;
+            if (!hasStages) return 0;
+            turn.renderMode = "stage";
+            turn.lastExecutionTraceSummary = summary;
+            turn.steps = summary.stages.length;
+            turn.flowEl.hidden = false;
+            turn.flowEl.open = true;
+            turn.listEl.innerHTML = "stage-trace";
+            return turn.steps;
+        };
         renderCeoToolEventsIntoTurn = (turn, toolEvents) => {
             const count = Array.isArray(toolEvents) ? toolEvents.length : 0;
+            turn.renderMode = count > 0 ? "tool" : turn.renderMode;
             turn.steps = count;
             turn.flowEl.hidden = count === 0;
             turn.flowEl.open = true;
+            turn.listEl.innerHTML = count > 0 ? "tool-events" : turn.listEl.innerHTML;
             return count;
         };
     `,
         context
     );
+    context.__testExports.U.ceoFeed = {
+        scrollTop: 0,
+        scrollHeight: 0,
+        clientHeight: 0,
+        appended: [],
+        appendChild(element) {
+            this.appended.push(element);
+            return element;
+        },
+    };
     context.__testExports.S.activeSessionId = "web:test";
     return context.__testExports;
 }
@@ -257,4 +311,43 @@ test("discard and final match the target pending turn by turn_id before source",
     assert.equal(newer.textEl.textContent, PAUSED_LABEL);
     assert.equal(newer.finalized, true);
     assert.equal(S.ceoPendingTurns.length, 0);
+});
+
+test("running state without source does not create a phantom pending turn", () => {
+    const { applyCeoState, S } = loadApp();
+
+    S.ceoPendingTurns = [];
+    S.ceoTurnActive = true;
+
+    applyCeoState({ status: "running", is_running: true }, {});
+
+    assert.equal(S.ceoPendingTurns.length, 0);
+});
+
+test("stage trace stays visible when a later patch only carries fallback tool events", () => {
+    const { patchCeoInflightTurn, S } = loadApp();
+    const turn = makeTurn({ text: "", steps: 0 });
+
+    S.ceoPendingTurns = [turn];
+
+    patchCeoInflightTurn({
+        source: "user",
+        status: "running",
+        execution_trace_summary: {
+            stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo" }],
+        },
+    });
+
+    assert.equal(turn.renderMode, "stage");
+    assert.equal(turn.listEl.innerHTML, "stage-trace");
+
+    patchCeoInflightTurn({
+        source: "user",
+        status: "running",
+        assistant_text: "still working",
+        tool_events: [{ tool_name: "command_execution", source: "user" }],
+    });
+
+    assert.equal(turn.renderMode, "stage");
+    assert.equal(turn.listEl.innerHTML, "stage-trace");
 });

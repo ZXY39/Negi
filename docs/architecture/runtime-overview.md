@@ -318,3 +318,12 @@ Heartbeat and cron turns now share the same strict internal-turn contract.
 - Service-layer code must not auto-retry tasks or synthesize fallback assistant replies on behalf of the model.
 - An internal turn that ends with `HEARTBEAT_OK` may surface a live-only UI ACK event, but it does not become transcript history.
 - Maintainers should distinguish live UI state such as inflight snapshots and internal ACK bubbles from durable assistant transcript messages.
+
+## Repeated Tool Call Guard Notes
+
+Execution-stage duplicate-call handling in `main/runtime/react_loop.py` now uses a soft-reject path instead of escalating directly to an engine failure.
+
+- When the model repeats the same ordinary tool signature several consecutive times in the same node, the runtime records the repeated assistant tool call, appends an error tool message explaining that the call is duplicated, and lets the next model turn repair itself.
+- This means a task should no longer fail immediately with `RuntimeError: repeated tool call detected: ...` only because the model repeated a non-control tool call such as `exec` with identical arguments.
+- Read-only duplicate retrieval guidance (`content.open/search`, `filesystem.open/search`, `task_progress`, etc.) is still a separate guard path with its own repair messaging and escalation semantics.
+- If a maintainer is debugging a "stuck on the same tool" report, first inspect the latest tool/error messages in the node transcript and runtime frame before assuming the task was terminated by the runtime itself.

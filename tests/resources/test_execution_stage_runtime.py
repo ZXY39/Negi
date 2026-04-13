@@ -2368,6 +2368,129 @@ async def test_submit_next_stage_does_not_trip_repeated_action_breaker(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_repeated_exec_call_is_soft_rejected_without_engine_failure(tmp_path: Path):
+    class _Backend:
+        def __init__(self) -> None:
+            self._turn = 0
+
+        @staticmethod
+        def _messages_text(kwargs: dict[str, object]) -> str:
+            messages = list(kwargs.get('messages') or [])
+            parts: list[str] = []
+            for item in messages:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get('content')
+                if isinstance(content, str) and content.strip():
+                    parts.append(content)
+            return '\n'.join(parts)
+
+        async def chat(self, **kwargs):
+            self._turn += 1
+            if self._turn == 1:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:stage',
+                            name='submit_next_stage',
+                            arguments={
+                                'stage_goal': '验证重复 exec 调用只会收到工具层重复提示，而不会把整个任务打成引擎失败',
+                                'tool_round_budget': 6,
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            if self._turn in {2, 3, 4}:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id=f'call:exec:{self._turn}',
+                            name='exec',
+                            arguments={
+                                'command': "Write-Output 'inspect multi-search-engine'",
+                                'working_dir': r'D:\NewProjects\G3KU',
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            if self._turn == 5:
+                text = self._messages_text(kwargs)
+                assert 'duplicate tool call' in text.lower()
+                assert 'exec' in text
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        _final_result_call(
+                            status='failed',
+                            delivery_status='blocked',
+                            summary='intentional stop after duplicate tool warning',
+                            answer='',
+                            evidence=[],
+                            remaining_work=['stop after duplicate-call soft reject check'],
+                            blocking_reason='intentional stop after duplicate tool warning',
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            raise AssertionError(f'unexpected extra turn: {self._turn}')
+
+    service = MainRuntimeService(
+        chat_backend=_Backend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+
+    def _build_tools(task, node):
+        async def _submit_stage(stage_goal, tool_round_budget, completed_stage_summary='', key_refs=None):
+            return await service.node_runner._submit_next_stage(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                stage_goal=stage_goal,
+                tool_round_budget=tool_round_budget,
+                completed_stage_summary=completed_stage_summary,
+                key_refs=list(key_refs or []),
+            )
+
+        return {
+            'submit_next_stage': SubmitNextStageTool(_submit_stage),
+            'submit_final_result': SubmitFinalResultTool(service.node_runner._submit_final_result, node_kind=node.node_kind),
+            'exec': _StaticTool(
+                'exec',
+                json.dumps(
+                    {
+                        'status': 'success',
+                        'exit_code': 0,
+                        'head_preview': 'inspect result already available',
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        }
+
+    service.node_runner._build_tools = _build_tools
+    try:
+        record = await service.create_task('duplicate exec soft reject regression', session_id='web:shared')
+        await service.wait_for_task(record.task_id)
+        task = service.store.get_task(record.task_id)
+        assert task is not None
+        assert task.status == 'failed'
+        assert 'repeated tool call detected: exec' not in str(task.failure_reason or '')
+        assert 'intentional stop after duplicate tool warning' in str(task.failure_reason or '')
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_current_task_progress_after_spawn_fails_after_three_ignored_repair_guidances(tmp_path: Path):
     class _Backend:
         def __init__(self) -> None:

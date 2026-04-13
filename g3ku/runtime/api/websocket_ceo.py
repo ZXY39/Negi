@@ -772,7 +772,16 @@ async def ceo_websocket(websocket: WebSocket):
             return
         if event.type == 'state_snapshot':
             state = dict((event.payload or {}).get('state') or {})
-            await _push_stream_event('ceo.state', {'state': state})
+            inflight_turn = _build_inflight_turn_snapshot(session, session_id)
+            state_payload = {'state': state}
+            if isinstance(inflight_turn, dict):
+                source = str(inflight_turn.get('source') or '').strip().lower()
+                turn_id = str(inflight_turn.get('turn_id') or '').strip()
+                if source:
+                    state_payload['source'] = source
+                if turn_id:
+                    state_payload['turn_id'] = turn_id
+            await _push_stream_event('ceo.state', state_payload)
             status = str(state.get('status') or '').strip().lower()
             if status != 'paused':
                 await _push_turn_patch()

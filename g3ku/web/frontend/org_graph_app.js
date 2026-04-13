@@ -1414,6 +1414,12 @@ function normalizeCeoSnapshotExecutionTraceSummary(summary = null) {
     return { stages };
 }
 
+function resolvePreferredCeoStageTraceSummary(summary = null, previousSummary = null) {
+    return normalizeCeoSnapshotExecutionTraceSummary(summary)
+        || normalizeCeoSnapshotExecutionTraceSummary(previousSummary)
+        || null;
+}
+
 function normalizeCeoSnapshotCompression(compression = null) {
     if (!compression || typeof compression !== "object") return null;
     const status = String(compression?.status || "").trim().toLowerCase();
@@ -2811,7 +2817,7 @@ function applyCeoState(state = {}, meta = {}) {
         if (activeTurn) {
             if (source) activeTurn.source = normalizeCeoTurnSource(source);
             if (turnId) activeTurn.turnId = turnId;
-        } else if (hadTurnContext && source !== "heartbeat") {
+        } else if (hadTurnContext && (source || turnId) && source !== "heartbeat") {
             // Ignore stale running snapshots that arrive after the turn already finished.
             ensureActiveCeoTurn({ source, turnId });
         }
@@ -3231,6 +3237,7 @@ function renderCeoStageTraceIntoTurn(turn, executionTraceSummary = null) {
     const stageCount = summary.stages.length;
     const roundCount = summary.stages.reduce((sum, stage) => sum + (Array.isArray(stage?.rounds) ? stage.rounds.length : 0), 0);
     turn.steps = roundCount || stageCount;
+    turn.lastExecutionTraceSummary = summary;
     turn.flowEl.hidden = false;
     turn.flowEl.open = true;
     updateCeoTurnMeta(turn, `${stageCount} 个阶段 · ${roundCount} 轮工具`);
@@ -3253,9 +3260,13 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "" } = {}) {
     const turn = existingTurn || ensureActiveCeoTurn({ source, turnId });
     if (!turn?.textEl || !turn?.flowEl) return false;
     if (turnId) turn.turnId = turnId;
+    const preferredExecutionTraceSummary = resolvePreferredCeoStageTraceSummary(
+        snapshot?.execution_trace_summary || null,
+        turn?.lastExecutionTraceSummary || null
+    );
     mutateCeoFeed(() => {
         renderCeoAssistantTextIntoTurn(turn, snapshot?.assistant_text || "", { status });
-        const stageRoundCount = renderCeoStageTraceIntoTurn(turn, snapshot?.execution_trace_summary || null);
+        const stageRoundCount = renderCeoStageTraceIntoTurn(turn, preferredExecutionTraceSummary);
         const toolCount = stageRoundCount || renderCeoToolEventsIntoTurn(turn, snapshot?.tool_events || [], { source });
         if (!stageRoundCount && !toolCount) {
             if (status === "paused") updateCeoTurnMeta(turn, "已暂停");
@@ -3269,7 +3280,12 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "" } = {}) {
         icons();
     }, { scrollMode: "preserve" });
     const targetSessionId = String(sessionId || activeSessionId()).trim();
-    if (targetSessionId) setCeoSessionSnapshotCache(targetSessionId, { inflight_turn: snapshot });
+    if (targetSessionId) {
+        const inflightTurn = preferredExecutionTraceSummary
+            ? { ...(snapshot || {}), execution_trace_summary: preferredExecutionTraceSummary }
+            : snapshot;
+        setCeoSessionSnapshotCache(targetSessionId, { inflight_turn: inflightTurn });
+    }
     return true;
 }
 
@@ -3396,6 +3412,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
             hasError: false,
             finalized: false,
             historyExpanded: false,
+            lastExecutionTraceSummary: null,
             turnId: "",
             source: String(source || "").trim().toLowerCase() || "user",
         };
@@ -4118,6 +4135,10 @@ function finalizeCeoTurn(text, meta = {}) {
     patchCeoSessionSnapshotCache(sessionId, (entry) => {
         const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
         const inflightTurnId = normalizeCeoTurnId(inflightTurn?.turn_id);
+        const persistedExecutionTraceSummary = resolvePreferredCeoStageTraceSummary(
+            inflightTurn?.execution_trace_summary || null,
+            turn?.lastExecutionTraceSummary || null
+        );
         let messages = trimCeoSessionSnapshotMessages(entry?.messages);
         const inflightSource = normalizeCeoTurnSource(inflightTurn?.source || "user");
         const inflightMatchesSource = !inflightTurn
@@ -4135,7 +4156,7 @@ function finalizeCeoTurn(text, meta = {}) {
             role: "assistant",
             content: String(text || "").trim() || "Done.",
             tool_events: inflightTurn?.tool_events || [],
-            execution_trace_summary: inflightTurn?.execution_trace_summary || null,
+            execution_trace_summary: persistedExecutionTraceSummary,
         });
         return {
             ...(entry || {}),
@@ -6694,7 +6715,6 @@ function sendCeoMessage() {
     try {
         if (S.ceoTurnActive) {
             enqueueCeoFollowUp(activeSessionId(), { text, uploads });
-            showToast({ title: "已加入队列", text: "会在当前轮结束后自动继续发送。", kind: "info" });
         } else {
             const sent = sendImmediateCeoMessage({ text, uploads, scrollMode: "bottom" });
             if (!sent) return;
