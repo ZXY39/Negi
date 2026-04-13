@@ -1626,7 +1626,21 @@ class RuntimeAgentSession:
         await self._emit("control_ack", action="resume", accepted=True, replan=replan)
         await self._emit_state_snapshot()
         if additional_context:
-            return await self.prompt(additional_context)
+            paused_snapshot = self.paused_execution_context_snapshot() or {}
+            paused_user = paused_snapshot.get("user_message") if isinstance(paused_snapshot, dict) else {}
+            base_text = ""
+            if isinstance(paused_user, dict):
+                base_text = self._history_text(paused_user.get("content"))
+            if not base_text and isinstance(self._last_prompt, UserInputMessage):
+                base_text = self._history_text(self._last_prompt.content)
+            elif not base_text:
+                base_text = self._history_text(self._last_prompt)
+            supplemental = str(additional_context or "").strip()
+            if base_text and supplemental:
+                combined = f"{base_text}\n\n补充要求：\n{supplemental}"
+            else:
+                combined = supplemental or base_text
+            return await self.prompt(combined)
         return RunResult(output="", events=list(self._event_log))
 
     async def resume_frontdoor_interrupt(

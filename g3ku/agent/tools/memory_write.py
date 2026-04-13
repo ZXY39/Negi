@@ -46,7 +46,7 @@ class MemoryWriteTool(Tool):
             "MUST CALL: when the user explicitly asks the system to remember a stable identity, preference, "
             "constraint, workflow rule, default setting, relationship, current state, or historical fact.\n"
             "DO NOT CALL: for temporary task status, speculative inferences, short-lived context, or unconfirmed facts.\n"
-            "WRITE RULE: send normalized structured facts with category, scope, entity, attribute, value, and time semantics. "
+            "WRITE RULE: send normalized structured facts with category, entity, attribute, value, and time semantics. "
             "Use merge_mode='merge' only for preference facts that should accumulate values instead of replacing older ones."
         )
 
@@ -65,10 +65,6 @@ class MemoryWriteTool(Tool):
                                 "type": "string",
                                 "enum": sorted(_ALLOWED_CATEGORIES),
                                 "description": "Structured fact category.",
-                            },
-                            "scope": {
-                                "type": "string",
-                                "description": "Namespace scope for the fact (e.g. global, session, project).",
                             },
                             "entity": {
                                 "type": "string",
@@ -111,7 +107,6 @@ class MemoryWriteTool(Tool):
                         },
                         "required": [
                             "category",
-                            "scope",
                             "entity",
                             "attribute",
                             "value",
@@ -137,7 +132,6 @@ class MemoryWriteTool(Tool):
             if not isinstance(fact, dict):
                 continue
             category = str(fact.get("category") or "").strip()
-            scope = str(fact.get("scope") or "").strip()
             entity = str(fact.get("entity") or "").strip()
             attribute = str(fact.get("attribute") or "").strip()
             observed_at = str(fact.get("observed_at") or "").strip()
@@ -146,10 +140,10 @@ class MemoryWriteTool(Tool):
 
             if category not in _ALLOWED_CATEGORIES:
                 errors.append(f"facts[{index}].category must be one of {sorted(_ALLOWED_CATEGORIES)}")
-            if not scope:
-                errors.append(f"facts[{index}].scope must not be empty")
             if not entity:
                 errors.append(f"facts[{index}].entity must not be empty")
+            if entity.lower() in {"assistant", "system"}:
+                errors.append(f"facts[{index}].entity must not be assistant/system for long-term memory")
             if not attribute:
                 errors.append(f"facts[{index}].attribute must not be empty")
             if "value" not in fact:

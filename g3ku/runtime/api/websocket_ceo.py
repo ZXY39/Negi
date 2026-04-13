@@ -62,6 +62,26 @@ def _runtime_session(runtime_manager, session_id: str):
     return getter(session_id) if callable(getter) else None
 
 
+def _session_can_resume_manual_pause(session) -> bool:
+    if session is None or not hasattr(session, 'resume'):
+        return False
+    state = getattr(session, 'state', None)
+    status = str(getattr(state, 'status', '') or '').strip().lower()
+    pending_interrupts = list(getattr(state, 'pending_interrupts', []) or [])
+    if pending_interrupts:
+        return False
+    if bool(getattr(state, 'paused', False)) or status == 'paused':
+        return True
+    snapshot_supplier = getattr(session, 'paused_execution_context_snapshot', None)
+    if callable(snapshot_supplier):
+        try:
+            snapshot = snapshot_supplier()
+        except Exception:
+            snapshot = None
+        return isinstance(snapshot, dict) and str(snapshot.get('status') or '').strip().lower() == 'paused'
+    return False
+
+
 def _session_is_running(runtime_manager, session_id: str) -> bool:
     session = _runtime_session(runtime_manager, session_id)
     if session is None:
@@ -751,12 +771,23 @@ async def ceo_websocket(websocket: WebSocket):
             if not _should_forward_message_end(payload):
                 return
             text = str(payload.get('text') or '').strip()
+            turn_id = str(payload.get('turn_id') or '').strip()
+            if not turn_id:
+                snapshot = None
+                inflight_supplier = getattr(session, 'inflight_turn_snapshot', None)
+                if callable(inflight_supplier):
+                    try:
+                        snapshot = inflight_supplier()
+                    except Exception:
+                        snapshot = None
+                if isinstance(snapshot, dict):
+                    turn_id = str(snapshot.get('turn_id') or '').strip()
             await _push_stream_event(
                 'ceo.reply.final',
                 {
                     'text': text,
                     'source': str(payload.get('source') or 'user').strip().lower() or 'user',
-                    'turn_id': str(payload.get('turn_id') or '').strip(),
+                    'turn_id': turn_id,
                 },
             )
             persisted = transcript_store.get_or_create(session_id)
@@ -892,6 +923,14 @@ async def ceo_websocket(websocket: WebSocket):
                         data={'code': 'ceo_turn_in_progress'},
                     )
                 )
+                continue
+            if _session_can_resume_manual_pause(session):
+                follow_up_text = _history_text(_build_user_message(text, uploads))
+                current_turn_task = asyncio.create_task(
+                    session.resume(additional_context=follow_up_text)
+                )
+                _register_turn_task(current_turn_task)
+                current_turn_task.add_done_callback(_clear_turn_task)
                 continue
             persisted = transcript_store.get_or_create(session_id)
             _publish_ceo_session_patch(

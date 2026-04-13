@@ -29,7 +29,8 @@ Write structured long-term memory facts immediately.
 ## Parameter Shape
 
 - Pass a top-level `facts` array.
-- Each `facts[*]` entry should include: `category`, `scope`, `entity`, `attribute`, `value`, `observed_at`, `time_semantics`, and `source_excerpt`.
+- Each `facts[*]` entry should include: `category`, `entity`, `attribute`, `value`, `observed_at`, `time_semantics`, and `source_excerpt`.
+- Do not write runtime process notes, temporary execution markers, assistant-internal status, or other transient control state into long-term memory.
 - In the compact callable schema, always pass `facts[*].value` as a string.
 - Serialize object/array values as JSON strings. Plain strings stay plain strings. Numbers, booleans, and null should be stringified only when the caller is constrained to the compact callable schema.
 
@@ -49,7 +50,6 @@ Write structured long-term memory facts immediately.
   "facts": [
     {
       "category": "stateful_fact",
-      "scope": "session",
       "entity": "user",
       "attribute": "task_time_precision",
       "value": "write explicit timestamps in task descriptions",

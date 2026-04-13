@@ -924,7 +924,16 @@ class WebSessionHeartbeatService:
             items.append({key: value for key, value in item.items() if value})
         return items
 
-    def _persist_assistant_reply(self, session_id: str, *, text: str, task_ids: list[str], reason: str, task_results: list[dict[str, str]] | None = None) -> None:
+    def _persist_assistant_reply(
+        self,
+        session_id: str,
+        *,
+        text: str,
+        task_ids: list[str],
+        reason: str,
+        task_results: list[dict[str, str]] | None = None,
+        turn_id: str = "",
+    ) -> None:
         if not self._session_exists(session_id):
             return
         session = self._session_manager.get_or_create(session_id)
@@ -942,6 +951,16 @@ class WebSessionHeartbeatService:
             task_results=normalized_results,
             updated_at=now_iso(),
         )
+        metadata_payload: dict[str, Any] = {"source": "heartbeat", "reason": reason}
+        if normalized_task_ids:
+            metadata_payload["task_ids"] = list(normalized_task_ids)
+        if normalized_results:
+            metadata_payload["task_results"] = [dict(item) for item in normalized_results]
+        assistant_payload: dict[str, Any] = {"metadata": metadata_payload}
+        normalized_turn_id = str(turn_id or "").strip()
+        if normalized_turn_id:
+            assistant_payload["turn_id"] = normalized_turn_id
+        session.add_message("assistant", str(text or "").strip(), **assistant_payload)
         self._session_manager.save(session)
 
     async def _run_session(self, session_id: str) -> float | None:
@@ -1020,10 +1039,17 @@ class WebSessionHeartbeatService:
             },
         )
 
+        heartbeat_turn_id = ""
+
         async def _relay(event: AgentEvent) -> None:
+            nonlocal heartbeat_turn_id
             if event.type == "state_snapshot":
                 state_payload = dict((event.payload or {}).get("state") or {})
                 self._publish_ceo(key, "ceo.state", {"state": state_payload, "source": "heartbeat"})
+                return
+            if event.type == "message_end":
+                payload = dict(event.payload or {})
+                heartbeat_turn_id = str(payload.get("turn_id") or heartbeat_turn_id).strip() or heartbeat_turn_id
                 return
             serialized = self._serialize_tool_event(event)
             if serialized is not None:
@@ -1114,11 +1140,12 @@ class WebSessionHeartbeatService:
             task_ids=task_ids,
             reason=heartbeat_reason,
             task_results=task_results,
+            turn_id=heartbeat_turn_id,
         )
         self._publish_ceo(
             key,
             "ceo.reply.final",
-            {"text": output, "source": "heartbeat", "turn_id": f"hb-{now_iso()}"},
+            {"text": output, "source": "heartbeat", "turn_id": heartbeat_turn_id},
         )
         await self._notify_reply(key, output)
         event_ids = {event.event_id for event in events}

@@ -698,6 +698,32 @@ def test_memory_manager_schema_bump_resets_runtime_artifacts(monkeypatch, tmp_pa
         manager.close()
 
 
+def test_memory_manager_reset_runtime_recreates_clean_memory_directory(monkeypatch, tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "custom.tmp").write_text("stale", encoding="utf-8")
+
+    class _FailingBackend:
+        def __init__(self, workspace, cfg):
+            _ = workspace, cfg
+            raise RuntimeError("backend unavailable")
+
+    monkeypatch.setattr(rag_memory, "_RagMemoryBackend", _FailingBackend)
+    manager = rag_memory.MemoryManager(tmp_path, _memory_cfg())
+
+    try:
+        report = manager.reset_runtime(reason="scope_removed")
+
+        assert report["reset"] is True
+        assert report["reason"] == "scope_removed"
+        assert not (memory_dir / "custom.tmp").exists()
+        assert (memory_dir / "sync_state.json").exists()
+        assert (memory_dir / "MEMORY.md").exists()
+        assert (memory_dir / "HISTORY.md").exists()
+    finally:
+        manager.close()
+
+
 @pytest.mark.asyncio
 async def test_structured_memory_dual_write_generates_structured_projections_and_markdown(
     monkeypatch,

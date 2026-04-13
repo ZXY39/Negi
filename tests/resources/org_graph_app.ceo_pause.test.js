@@ -115,6 +115,7 @@ function loadApp() {
         syncCeoPrimaryButton = () => {};
         syncCeoSessionActions = () => {};
         patchCeoSessionRuntimeState = () => false;
+        maybeDispatchQueuedCeoFollowUps = () => false;
         patchCeoSessionSnapshotCache = () => {
             globalThis.__patchSnapshotCalls += 1;
             return {};

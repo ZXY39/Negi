@@ -42,9 +42,6 @@ parameters:
               - stateful_fact
               - workflow_rule
             description: Structured fact category.
-          scope:
-            type: string
-            description: Namespace scope for the fact (e.g. global, session, project).
           entity:
             type: string
             description: Entity the fact is about (e.g. user, project:g3ku).
@@ -88,7 +85,6 @@ parameters:
             description: Optional ISO8601 expiry timestamp (null for no expiry).
         required:
           - category
-          - scope
           - entity
           - attribute
           - value
@@ -118,8 +114,6 @@ model_parameters:
               - relationship
               - stateful_fact
               - workflow_rule
-          scope:
-            type: string
           entity:
             type: string
           attribute:
@@ -149,7 +143,6 @@ model_parameters:
               - 'null'
         required:
           - category
-          - scope
           - entity
           - attribute
           - value

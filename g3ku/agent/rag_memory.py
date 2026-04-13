@@ -4501,6 +4501,22 @@ class MemoryManager:
             self._mark_backend_failure(exc)
             return {"created": 0, "updated": 0, "removed": 0}
 
+    async def ensure_catalog_bootstrap(self, service: Any) -> dict[str, Any]:
+        backend = await self._ensure_backend()
+        if backend is None:
+            return {"ok": False, "synced": False, "reason": "backend_unavailable"}
+        try:
+            from g3ku.runtime.context.catalog import ContextCatalogIndexer
+
+            existing = await backend.list_context_records(namespace_prefix=ContextCatalogIndexer.NAMESPACE, limit=1)
+            if existing:
+                return {"ok": True, "synced": False, "reason": "already_present"}
+            result = await backend.sync_catalog(service)
+            return {"ok": True, "synced": True, "reason": "bootstrap", **dict(result or {})}
+        except Exception as exc:
+            self._mark_backend_failure(exc)
+            return {"ok": False, "synced": False, "reason": "error", "error": str(exc)}
+
     async def read_trace_file(self, *, trace_kind: str, limit: int = 20) -> list[dict[str, Any]]:
         path = self.trace_file
         if not path.exists():
@@ -5335,7 +5351,6 @@ class MemoryManager:
                         older_fact, newer_fact = normalized, old_fact
                     merged_payload: dict[str, Any] = {
                         "category": newer_fact.category,
-                        "scope": newer_fact.scope,
                         "entity": newer_fact.entity,
                         "attribute": newer_fact.attribute,
                         "value": _merge_structured_values(older_fact.value, newer_fact.value),
@@ -5385,7 +5400,6 @@ class MemoryManager:
             fact_payload: dict[str, Any] = {
                 "fact_id": normalized.fact_id,
                 "category": normalized.category,
-                "scope": normalized.scope,
                 "entity": normalized.entity,
                 "attribute": normalized.attribute,
                 "slot_id": normalized.attribute,
@@ -5645,6 +5659,33 @@ class MemoryManager:
             }
         )
         return base
+
+    def reset_runtime(self, *, reason: str = "manual") -> dict[str, Any]:
+        self.close()
+        try:
+            shutil.rmtree(self.mem_dir, ignore_errors=True)
+        except Exception:
+            self._clear_runtime_artifacts()
+        ensure_dir(self.mem_dir)
+        self._sync_state = self._default_sync_state()
+        self._write_json_dict(self.sync_state_file, self._sync_state)
+        self._write_json_dict(
+            self.structured_state_file,
+            {
+                "schema_version": MEMORY_RUNTIME_SCHEMA_VERSION,
+                "last_reset_at": self._sync_state.get("last_reset_at") or _now_iso(),
+                "reason": str(reason or "manual"),
+            },
+        )
+        self._ensure_runtime_layout()
+        self._backend_state = "reset"
+        self._last_backend_error = ""
+        return {
+            "ok": True,
+            "reset": True,
+            "reason": str(reason or "manual"),
+            "memory_dir": str(self.mem_dir),
+        }
 
     def close(self) -> None:
         task = self._bootstrap_replay_task

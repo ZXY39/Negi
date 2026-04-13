@@ -28,6 +28,9 @@ const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
 const CEO_COMPRESSION_TOAST_TEXT = "上下文压缩中";
 const CEO_COMPOSER_DRAFT_CACHE_KEY = "g3ku.ceo.composer-drafts.v1";
 const CEO_COMPOSER_DRAFT_CACHE_LIMIT = 24;
+const CEO_FOLLOW_UP_QUEUE_CACHE_KEY = "g3ku.ceo.follow-up-queues.v1";
+const CEO_FOLLOW_UP_QUEUE_CACHE_LIMIT = 24;
+const CEO_FOLLOW_UP_QUEUE_PER_SESSION_LIMIT = 20;
 const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
     const next = EMPTY_MODEL_ROLES();
     MODEL_SCOPES.forEach(({ key }) => {
@@ -92,6 +95,9 @@ const S = {
     ceoSnapshotPersistId: null,
     ceoComposerDrafts: {},
     ceoComposerDraftPersistId: null,
+    ceoQueuedFollowUps: {},
+    ceoQueuedFollowUpsPersistId: null,
+    ceoQueuedFollowUpDispatching: false,
     liveDurationIntervalId: null,
     activeSessionId: "",
     ceoSessionBusy: false,
@@ -280,6 +286,7 @@ const U = {
     ceoAttach: document.getElementById("ceo-attach-btn"),
     ceoFileInput: document.getElementById("ceo-file-input"),
     ceoUploadList: document.getElementById("ceo-upload-list"),
+    ceoFollowUpQueue: document.getElementById("ceo-follow-up-queue"),
     ceoCompressionToast: document.getElementById("ceo-compression-toast"),
     ceoCompressionToastText: document.getElementById("ceo-compression-toast-text"),
     ceoSend: document.getElementById("ceo-send-btn"),
@@ -1166,6 +1173,7 @@ function restoreCeoComposerDraftForSession(sessionId) {
     if (U.ceoInput) U.ceoInput.value = String(draft?.text || "");
     if (U.ceoFileInput) U.ceoFileInput.value = "";
     renderPendingCeoUploads();
+    renderQueuedCeoFollowUps(key);
     syncCeoInputHeight();
 }
 
@@ -1176,6 +1184,159 @@ function switchCeoComposerDraft(previousSessionId, nextSessionId) {
     if (previousId) setCeoComposerDraft(previousId, captureCeoComposerDraftFromUi());
     restoreCeoComposerDraftForSession(nextId);
     return true;
+}
+
+function normalizeCeoQueuedFollowUpEntry(entry = {}) {
+    const text = String(entry?.text || "");
+    const uploads = cloneCeoSnapshotAttachments(entry?.uploads);
+    if (!text.trim() && !uploads.length) return null;
+    return {
+        id: String(entry?.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`).trim(),
+        text,
+        uploads,
+        queued_at: String(entry?.queued_at || "").trim() || new Date().toISOString(),
+    };
+}
+
+function cloneCeoQueuedFollowUpEntry(entry = null) {
+    if (!entry || typeof entry !== "object") return null;
+    return normalizeCeoQueuedFollowUpEntry(entry);
+}
+
+function normalizeCeoQueuedFollowUpList(items = []) {
+    return (Array.isArray(items) ? items : [])
+        .map((item) => cloneCeoQueuedFollowUpEntry(item))
+        .filter(Boolean)
+        .slice(0, CEO_FOLLOW_UP_QUEUE_PER_SESSION_LIMIT);
+}
+
+function pruneCeoFollowUpQueueCache(cache = {}) {
+    const entries = Object.entries(cache || {})
+        .map(([sessionId, items]) => {
+            const normalizedItems = normalizeCeoQueuedFollowUpList(items);
+            if (!normalizedItems.length) return null;
+            return {
+                session_id: String(sessionId || "").trim(),
+                items: normalizedItems,
+                cached_at: normalizedItems[normalizedItems.length - 1]?.queued_at || new Date().toISOString(),
+            };
+        })
+        .filter(Boolean)
+        .sort((left, right) => String(right.cached_at || "").localeCompare(String(left.cached_at || "")))
+        .slice(0, CEO_FOLLOW_UP_QUEUE_CACHE_LIMIT);
+    return entries.reduce((acc, entry) => {
+        acc[entry.session_id] = entry.items;
+        return acc;
+    }, {});
+}
+
+function persistCeoFollowUpQueueCache() {
+    const cache = pruneCeoFollowUpQueueCache(S.ceoQueuedFollowUps || {});
+    const items = Object.entries(cache).map(([sessionId, queuedItems]) => ({
+        session_id: sessionId,
+        items: queuedItems,
+    }));
+    if (!items.length) {
+        removeSessionJson(CEO_FOLLOW_UP_QUEUE_CACHE_KEY);
+        return;
+    }
+    writeSessionJson(CEO_FOLLOW_UP_QUEUE_CACHE_KEY, { items });
+}
+
+function schedulePersistCeoFollowUpQueueCache() {
+    if (S.ceoQueuedFollowUpsPersistId) window.clearTimeout(S.ceoQueuedFollowUpsPersistId);
+    S.ceoQueuedFollowUpsPersistId = window.setTimeout(() => {
+        S.ceoQueuedFollowUpsPersistId = null;
+        persistCeoFollowUpQueueCache();
+    }, 120);
+}
+
+function flushCeoFollowUpQueueCachePersist() {
+    if (S.ceoQueuedFollowUpsPersistId) {
+        window.clearTimeout(S.ceoQueuedFollowUpsPersistId);
+        S.ceoQueuedFollowUpsPersistId = null;
+    }
+    persistCeoFollowUpQueueCache();
+}
+
+function hydrateCeoFollowUpQueueCache() {
+    const raw = readSessionJson(CEO_FOLLOW_UP_QUEUE_CACHE_KEY);
+    const items = Array.isArray(raw?.items) ? raw.items : [];
+    const next = {};
+    items.forEach((entry) => {
+        const sessionId = String(entry?.session_id || "").trim();
+        if (!sessionId) return;
+        const normalizedItems = normalizeCeoQueuedFollowUpList(entry?.items);
+        if (!normalizedItems.length) return;
+        next[sessionId] = normalizedItems;
+    });
+    S.ceoQueuedFollowUps = pruneCeoFollowUpQueueCache(next);
+}
+
+function getCeoQueuedFollowUps(sessionId = activeSessionId()) {
+    const key = String(sessionId || "").trim();
+    if (!key) return [];
+    return normalizeCeoQueuedFollowUpList(S.ceoQueuedFollowUps?.[key] || []);
+}
+
+function setCeoQueuedFollowUps(sessionId, items = []) {
+    const key = String(sessionId || "").trim();
+    if (!key) return [];
+    const normalizedItems = normalizeCeoQueuedFollowUpList(items);
+    const next = { ...(S.ceoQueuedFollowUps || {}) };
+    if (normalizedItems.length) next[key] = normalizedItems;
+    else delete next[key];
+    S.ceoQueuedFollowUps = pruneCeoFollowUpQueueCache(next);
+    schedulePersistCeoFollowUpQueueCache();
+    const current = getCeoQueuedFollowUps(key);
+    renderQueuedCeoFollowUps(key);
+    syncCeoPrimaryButton();
+    return current;
+}
+
+function enqueueCeoFollowUp(sessionId, entry = {}) {
+    const key = String(sessionId || "").trim();
+    if (!key) return [];
+    const current = getCeoQueuedFollowUps(key);
+    const normalized = normalizeCeoQueuedFollowUpEntry(entry);
+    if (!normalized) return current;
+    return setCeoQueuedFollowUps(key, [...current, normalized]);
+}
+
+function removeCeoQueuedFollowUp(sessionId, entryId) {
+    const key = String(sessionId || "").trim();
+    const targetId = String(entryId || "").trim();
+    if (!key || !targetId) return [];
+    const current = getCeoQueuedFollowUps(key).filter((item) => String(item?.id || "").trim() !== targetId);
+    return setCeoQueuedFollowUps(key, current);
+}
+
+function shiftCeoQueuedFollowUp(sessionId) {
+    const key = String(sessionId || "").trim();
+    const current = getCeoQueuedFollowUps(key);
+    const [first, ...rest] = current;
+    setCeoQueuedFollowUps(key, rest);
+    return first || null;
+}
+
+function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
+    if (!U.ceoFollowUpQueue) return;
+    const items = getCeoQueuedFollowUps(sessionId);
+    U.ceoFollowUpQueue.hidden = !items.length;
+    if (!items.length) {
+        U.ceoFollowUpQueue.innerHTML = "";
+        return;
+    }
+    U.ceoFollowUpQueue.innerHTML = `
+        <div class="ceo-follow-up-queue-title">待发送补充</div>
+        ${items.map((item, index) => `
+            <div class="ceo-follow-up-chip">
+                <span class="ceo-follow-up-chip-index">${index + 1}.</span>
+                <span class="ceo-follow-up-chip-text">${esc(String(item?.text || "").trim() || summarizeUploads(item?.uploads || []))}</span>
+                <button class="ceo-follow-up-chip-remove" type="button" data-follow-up-remove="${esc(String(item?.id || ""))}" aria-label="删除待发送补充">×</button>
+            </div>
+        `).join("")}
+    `;
 }
 
 function cloneCeoSnapshotAttachments(items = []) {
@@ -2545,6 +2706,32 @@ function renderPendingCeoUploads() {
     icons();
 }
 
+function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
+    if (!U.ceoFollowUpQueue) return;
+    const key = String(sessionId || "").trim();
+    const items = normalizeCeoQueuedFollowUpList((S.ceoQueuedFollowUps || {})[key] || []);
+    U.ceoFollowUpQueue.hidden = !items.length;
+    if (!items.length) {
+        U.ceoFollowUpQueue.innerHTML = "";
+        return;
+    }
+    U.ceoFollowUpQueue.innerHTML = `
+        <div class="ceo-follow-up-queue-title">待发送补充</div>
+        <div class="ceo-follow-up-chip-list" role="list">
+            ${items.map((item, index) => `
+                <div class="ceo-follow-up-chip" role="listitem">
+                    <span class="ceo-follow-up-kind">${index + 1}</span>
+                    <span class="ceo-follow-up-name">${esc(String(item.text || "").trim() || summarizeUploads(item.uploads || []))}</span>
+                    <button type="button" class="ceo-follow-up-remove" data-follow-up-remove="${esc(String(item.id || ""))}" aria-label="删除待发送补充">
+                        <i data-lucide="x"></i>
+                    </button>
+                </div>
+            `).join("")}
+        </div>
+    `;
+    icons();
+}
+
 function syncCeoPrimaryButton() {
     syncCeoAttachButton();
     if (!U.ceoSend) return;
@@ -2555,11 +2742,20 @@ function syncCeoPrimaryButton() {
         icons();
         return;
     }
-    const isPause = !!S.ceoTurnActive;
+    const composerText = String(U.ceoInput?.value || "").trim();
+    const hasComposerPayload = !!composerText || normalizeUploadList(S.ceoUploads).length > 0;
+    const isPause = !!S.ceoTurnActive && !hasComposerPayload;
     const label = S.ceoPauseBusy ? "暂停中" : isPause ? "暂停" : "发送";
     const icon = isPause ? "pause" : "send";
     U.ceoSend.innerHTML = `<i data-lucide="${icon}"></i> ${label}`;
-    U.ceoSend.disabled = !!S.ceoUploadBusy || !!S.ceoPauseBusy || !!S.ceoSessionBusy || !!S.ceoSessionCatalogBusy || !activeSessionId();
+    U.ceoSend.disabled = (
+        !!S.ceoUploadBusy
+        || !!S.ceoPauseBusy
+        || !!S.ceoSessionBusy
+        || !!S.ceoSessionCatalogBusy
+        || !activeSessionId()
+        || (!S.ceoTurnActive && !hasComposerPayload)
+    );
     U.ceoSend.setAttribute("aria-label", isPause ? "暂停当前 Leader 会话" : "发送消息");
     icons();
 }
@@ -2623,6 +2819,7 @@ function applyCeoState(state = {}, meta = {}) {
     if (paused) finalizePausedCeoTurn("已暂停", { source, turnId });
     syncCeoSessionActions();
     syncCeoPrimaryButton();
+    if (!running && !paused) maybeDispatchQueuedCeoFollowUps();
 }
 
 function handleCeoControlAck(payload = {}) {
@@ -2641,6 +2838,7 @@ function handleCeoControlAck(payload = {}) {
     finalizePausedCeoTurn("已暂停", { source, turnId });
     syncCeoSessionActions();
     syncCeoPrimaryButton();
+    maybeDispatchQueuedCeoFollowUps();
 }
 
 function handleCeoError(payload = {}) {
@@ -2674,8 +2872,78 @@ function requestCeoPause() {
     }
 }
 
+function sendImmediateCeoMessage({ text = "", uploads = [], scrollMode = "bottom" } = {}) {
+    const normalizedText = String(text || "");
+    const normalizedUploads = normalizeUploadList(uploads);
+    if (!normalizedText.trim() && !normalizedUploads.length) return false;
+    if (!S.ceoWs || S.ceoWs.readyState !== WebSocket.OPEN) {
+        addMsg("Connection is not ready yet. Please try again in a moment.", "system");
+        initCeoWs();
+        return false;
+    }
+    S.ceoWs.send(JSON.stringify({
+        type: "client.user_message",
+        session_id: activeSessionId(),
+        text: normalizedText,
+        uploads: normalizedUploads.map((item) => ({
+            name: item.name,
+            path: item.path,
+            mime_type: item.mime_type,
+            kind: item.kind,
+            size: item.size,
+        })),
+    }));
+    addMsg(hasRenderableText(normalizedText) ? normalizedText : summarizeUploads(normalizedUploads), "user", {
+        attachments: normalizedUploads,
+        scrollMode,
+    });
+    const turn = createPendingCeoTurn("user", { scrollMode });
+    if (turn) S.ceoPendingTurns.push(turn);
+    S.ceoTurnActive = true;
+    S.ceoPauseBusy = false;
+    setCeoSessionSnapshotCache(activeSessionId(), {
+        inflight_turn: {
+            source: "user",
+            status: "running",
+            user_message: {
+                content: normalizedText,
+                attachments: normalizedUploads,
+            },
+        },
+    });
+    if (patchCeoSessionRuntimeState(activeSessionId(), true)) renderCeoSessions();
+    syncCeoSessionActions();
+    syncCeoPrimaryButton();
+    return true;
+}
+
+function maybeDispatchQueuedCeoFollowUps() {
+    if (S.ceoQueuedFollowUpDispatching || S.ceoTurnActive || S.ceoSessionBusy || S.ceoSessionCatalogBusy) return false;
+    const sessionId = activeSessionId();
+    if (!sessionId) return false;
+    const next = shiftCeoQueuedFollowUp(sessionId);
+    if (!next) return false;
+    S.ceoQueuedFollowUpDispatching = true;
+    try {
+        const sent = sendImmediateCeoMessage({
+            text: next.text,
+            uploads: next.uploads,
+            scrollMode: "bottom",
+        });
+        if (!sent) {
+            setCeoQueuedFollowUps(sessionId, [next, ...getCeoQueuedFollowUps(sessionId)]);
+            return false;
+        }
+        return true;
+    } finally {
+        S.ceoQueuedFollowUpDispatching = false;
+    }
+}
+
 function handleCeoPrimaryAction() {
-    if (S.ceoTurnActive) {
+    const text = String(U.ceoInput?.value || "");
+    const uploads = normalizeUploadList(S.ceoUploads);
+    if (S.ceoTurnActive && !text.trim() && !uploads.length) {
         requestCeoPause();
         return;
     }
@@ -3790,6 +4058,7 @@ function finalizeCeoTurn(text, meta = {}) {
             inflight_turn: inflightMatchesSource ? null : inflightTurn,
         };
     });
+    maybeDispatchQueuedCeoFollowUps();
 }
 
 function addNotice(notice, _bump = true) {
@@ -5501,6 +5770,7 @@ function resetCeoComposerState({ clearDraft = false, sessionId = activeSessionId
     if (U.ceoFileInput) U.ceoFileInput.value = "";
     if (clearDraft) clearCeoComposerDraft(sessionId);
     renderPendingCeoUploads();
+    renderQueuedCeoFollowUps(sessionId);
     syncCeoInputHeight();
 }
 
@@ -6325,10 +6595,6 @@ function initCeoWs() {
 
 function sendCeoMessage() {
     if (activeSessionIsReadonly()) return;
-    if (S.ceoTurnActive) {
-        requestCeoPause();
-        return;
-    }
     if (S.ceoSessionBusy || S.ceoSessionCatalogBusy || !activeSessionId()) return;
     const text = String(U.ceoInput.value || "");
     const uploads = normalizeUploadList(S.ceoUploads);
@@ -6337,46 +6603,20 @@ function sendCeoMessage() {
         addMsg("附件仍在上传，请稍候再发送。", "system");
         return;
     }
-    if (!S.ceoWs || S.ceoWs.readyState !== WebSocket.OPEN) {
-        addMsg("Connection is not ready yet. Please try again in a moment.", "system");
-        initCeoWs();
-        return;
-    }
     try {
-        S.ceoWs.send(JSON.stringify({
-            type: "client.user_message",
-            session_id: activeSessionId(),
-            text,
-            uploads: uploads.map((item) => ({
-                name: item.name,
-                path: item.path,
-                mime_type: item.mime_type,
-                kind: item.kind,
-                size: item.size,
-            })),
-        }));
-        addMsg(hasRenderableText(text) ? text : summarizeUploads(uploads), "user", { attachments: uploads, scrollMode: "bottom" });
+        if (S.ceoTurnActive) {
+            enqueueCeoFollowUp(activeSessionId(), { text, uploads });
+            showToast({ title: "已加入队列", text: "会在当前轮结束后自动继续发送。", kind: "info" });
+        } else {
+            const sent = sendImmediateCeoMessage({ text, uploads, scrollMode: "bottom" });
+            if (!sent) return;
+        }
         U.ceoInput.value = "";
         S.ceoUploads = [];
         clearCeoComposerDraft(activeSessionId());
         syncCeoInputHeight();
         renderPendingCeoUploads();
-        const turn = createPendingCeoTurn("user", { scrollMode: "bottom" });
-        if (turn) S.ceoPendingTurns.push(turn);
-        S.ceoTurnActive = true;
-        S.ceoPauseBusy = false;
-        setCeoSessionSnapshotCache(activeSessionId(), {
-            inflight_turn: {
-                source: "user",
-                status: "running",
-                user_message: {
-                    content: text,
-                    attachments: uploads,
-                },
-            },
-        });
-        if (patchCeoSessionRuntimeState(activeSessionId(), true)) renderCeoSessions();
-        syncCeoSessionActions();
+        renderQueuedCeoFollowUps(activeSessionId());
         syncCeoPrimaryButton();
     } catch (e) {
         addMsg(`Failed to send message: ${e.message || "unknown error"}`, "system");
@@ -6854,6 +7094,11 @@ function bind() {
         if (!remove) return;
         removePendingCeoUpload(Number(remove.dataset.uploadRemove));
     });
+    U.ceoFollowUpQueue?.addEventListener("click", (e) => {
+        const remove = e.target.closest("[data-follow-up-remove]");
+        if (!remove) return;
+        removeCeoQueuedFollowUp(activeSessionId(), String(remove.dataset.followUpRemove || ""));
+    });
     U.ceoInput?.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
@@ -7210,17 +7455,20 @@ function init() {
     configureTaskDetailSections();
     bind();
     hydrateCeoComposerDraftCache();
+    hydrateCeoFollowUpQueueCache();
     hydrateCeoSessionSnapshotCache();
     restoreCeoComposerDraftForSession(activeSessionId());
     startLiveDurationTicker();
     window.addEventListener("beforeunload", () => {
         flushCeoComposerDraftCachePersist();
+        flushCeoFollowUpQueueCachePersist();
         flushCeoSessionSnapshotCachePersist();
         flushTaskDetailSessionPersist();
         stopLiveDurationTicker();
     });
     window.addEventListener("pagehide", () => {
         flushCeoComposerDraftCachePersist();
+        flushCeoFollowUpQueueCachePersist();
         flushCeoSessionSnapshotCachePersist();
         flushTaskDetailSessionPersist();
     });

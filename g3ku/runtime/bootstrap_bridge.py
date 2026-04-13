@@ -333,6 +333,7 @@ class RuntimeBootstrapBridge:
                 logger.info('Memory runtime enabled with RAG store ({})', type(self._loop._store).__name__)
             else:
                 logger.warning('Memory runtime enabled in legacy fallback mode (RAG store unavailable).')
+            self._schedule_catalog_bootstrap()
         except Exception as exc:
             logger.warning('Memory runtime init failed: {}', exc)
             self._loop.memory_manager = None
@@ -377,3 +378,28 @@ class RuntimeBootstrapBridge:
             self._loop._checkpointer_path = None
             self._loop._checkpointer_backend = 'disabled'
             self._loop._checkpointer_enabled = False
+
+    def _schedule_catalog_bootstrap(self) -> None:
+        memory_manager = getattr(self._loop, 'memory_manager', None)
+        service = getattr(self._loop, 'main_task_service', None)
+        if memory_manager is None or service is None:
+            return
+        ensure = getattr(memory_manager, 'ensure_catalog_bootstrap', None)
+        if not callable(ensure):
+            return
+        self._close_async(self._run_catalog_bootstrap(memory_manager, service))
+
+    @staticmethod
+    async def _run_catalog_bootstrap(memory_manager, service) -> None:
+        try:
+            result = await memory_manager.ensure_catalog_bootstrap(service)
+        except Exception as exc:
+            logger.debug('memory catalog bootstrap skipped: {}', exc)
+            return
+        if bool((result or {}).get('synced')):
+            logger.info(
+                'Memory catalog bootstrap synced (created={}, updated={}, removed={})',
+                int((result or {}).get('created', 0) or 0),
+                int((result or {}).get('updated', 0) or 0),
+                int((result or {}).get('removed', 0) or 0),
+            )

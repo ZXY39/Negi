@@ -223,6 +223,7 @@ class _FakeHeartbeatSession:
         self.prompts: list[UserInputMessage] = []
         self._listeners = set()
         self._output = output
+        self.turn_id = "turn-heartbeat-default"
 
     def subscribe(self, listener):
         self._listeners.add(listener)
@@ -232,15 +233,32 @@ class _FakeHeartbeatSession:
 
         return _unsubscribe
 
+    async def _emit(self, event_type: str, **payload) -> None:
+        event = AgentEvent(type=event_type, timestamp="2026-03-18T12:00:00", payload=payload)
+        for listener in list(self._listeners):
+            result = listener(event)
+            if hasattr(result, "__await__"):
+                await result
+
     async def prompt(self, user_message, persist_transcript: bool = False) -> SimpleNamespace:
         _ = persist_transcript
         self.prompts.append(user_message)
+        if self._output:
+            await self._emit(
+                "message_end",
+                role="assistant",
+                text=str(self._output),
+                source="heartbeat",
+                heartbeat_internal=True,
+                turn_id=self.turn_id,
+            )
         return SimpleNamespace(output=self._output)
 
 
 class _FakeHeartbeatFinalSession(_FakeHeartbeatSession):
     def __init__(self, *, output: str = "Background task finished.") -> None:
         super().__init__(output=output)
+        self.turn_id = "turn-heartbeat-final"
         self._preserved_snapshot: dict[str, object] | None = {
             "turn_id": "turn-user-preserved",
             "status": "paused",
@@ -1741,7 +1759,7 @@ async def test_runtime_agent_session_manual_pause_dedupes_pending_transcript(
 
 
 @pytest.mark.asyncio
-async def test_runtime_agent_session_follow_up_after_manual_pause_uses_new_transcript_turn(
+async def test_runtime_agent_session_resume_after_manual_pause_combines_original_request_and_additional_context(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1767,9 +1785,12 @@ async def test_runtime_agent_session_follow_up_after_manual_pause_uses_new_trans
             started.set()
             await asyncio.Future()
 
+    captured_inputs: list[str] = []
+
     class _AnswerRunner:
         async def run_turn(self, *, user_input, session, on_progress):
             _ = user_input, session, on_progress
+            captured_inputs.append(str(user_input))
             return "Because this follow-up only needed a direct explanation."
 
     async def _cancel_session_tasks(_session_key: str) -> int:
@@ -1807,22 +1828,19 @@ async def test_runtime_agent_session_follow_up_after_manual_pause_uses_new_trans
         await turn_task
 
     loop.multi_agent_runner = _AnswerRunner()
-    result = await session.prompt("Why no async task?")
+    result = await session.resume(additional_context="Why no async task?")
 
     assert result.output == "Because this follow-up only needed a direct explanation."
+    assert len(captured_inputs) == 1
+    assert "Original paused request" in captured_inputs[0]
+    assert "Why no async task?" in captured_inputs[0]
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert [message["role"] for message in reloaded.messages] == ["user", "user", "assistant"]
-    assert reloaded.messages[0]["content"] == "Original paused request"
-    assert reloaded.messages[0]["metadata"]["_transcript_state"] == "pending"
-    assert reloaded.messages[1]["content"] == "Why no async task?"
-    assert reloaded.messages[1]["metadata"]["_transcript_state"] == "completed"
-    assert reloaded.messages[2]["content"] == "Because this follow-up only needed a direct explanation."
-    first_turn_id = str(reloaded.messages[0]["metadata"]["_transcript_turn_id"]).strip()
-    second_turn_id = str(reloaded.messages[1]["metadata"]["_transcript_turn_id"]).strip()
-    assert first_turn_id
-    assert second_turn_id
-    assert first_turn_id != second_turn_id
+    assert [message["role"] for message in reloaded.messages] == ["user", "assistant"]
+    assert "Original paused request" in reloaded.messages[0]["content"]
+    assert "Why no async task?" in reloaded.messages[0]["content"]
+    assert reloaded.messages[0]["metadata"]["_transcript_state"] == "completed"
+    assert reloaded.messages[1]["content"] == "Because this follow-up only needed a direct explanation."
 
 
 @pytest.mark.asyncio
@@ -3675,6 +3693,96 @@ def test_ceo_websocket_resume_interrupt_forwards_resume_payload(tmp_path, monkey
     assert live_session.resume_payloads == [{"approved": True}]
 
 
+def test_ceo_websocket_user_message_resumes_manual_pause_with_additional_context(tmp_path, monkeypatch) -> None:
+    class _PausedResumeSession:
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(status="paused", is_running=False, pending_interrupts=[])
+            self.resume_payloads: list[dict[str, object]] = []
+            self.prompt_payloads: list[object] = []
+            self._listeners = set()
+
+        def subscribe(self, listener):
+            self._listeners.add(listener)
+            return lambda: self._listeners.discard(listener)
+
+        def state_dict(self) -> dict[str, object]:
+            return {
+                "status": self.state.status,
+                "is_running": self.state.is_running,
+                "pending_interrupts": list(self.state.pending_interrupts),
+            }
+
+        def inflight_turn_snapshot(self):
+            return {
+                "status": "paused",
+                "source": "user",
+                "turn_id": "turn-paused-original",
+                "user_message": {"content": "整理介绍今天GitHub上最热门项目给我"},
+            }
+
+        def paused_execution_context_snapshot(self):
+            return {
+                "status": "paused",
+                "source": "user",
+                "turn_id": "turn-paused-original",
+                "user_message": {"content": "整理介绍今天GitHub上最热门项目给我"},
+            }
+
+        async def resume(self, *, additional_context: str | None = None, replan: bool = False):
+            self.resume_payloads.append({
+                "additional_context": additional_context,
+                "replan": replan,
+            })
+            return SimpleNamespace(output="继续处理原请求")
+
+        async def prompt(self, user_message):
+            self.prompt_payloads.append(user_message)
+            return SimpleNamespace(output="错误地新开了一轮")
+
+    live_session = _PausedResumeSession()
+    session_manager = SessionManager(tmp_path)
+    session_manager.get_or_create("web:shared")
+    app = FastAPI()
+    app.include_router(websocket_ceo.router, prefix="/api")
+
+    monkeypatch.setattr(
+        websocket_ceo,
+        "get_agent",
+        lambda: SimpleNamespace(
+            sessions=session_manager,
+            main_task_service=SimpleNamespace(
+                startup=lambda: None,
+                registry=SimpleNamespace(
+                    subscribe_ceo=lambda _session_id: asyncio.Queue(),
+                    subscribe_global_ceo=lambda: asyncio.Queue(),
+                    unsubscribe_ceo=lambda _session_id, _queue: None,
+                    unsubscribe_global_ceo=lambda _queue: None,
+                    next_ceo_seq=lambda _session_id: 1,
+                    publish_global_ceo=lambda _envelope: None,
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", lambda _agent: None)
+    monkeypatch.setattr(
+        websocket_ceo,
+        "get_runtime_manager",
+        lambda _agent: SimpleNamespace(get_or_create=lambda **kwargs: live_session, get=lambda _key: live_session),
+    )
+    monkeypatch.setattr(websocket_ceo, "workspace_path", lambda: tmp_path)
+
+    client = TestClient(app)
+    with client.websocket_connect("/api/ws/ceo?session_id=web:shared") as ws:
+        ws.receive_json()
+        ws.receive_json()
+        ws.receive_json()
+        ws.receive_json()
+        ws.send_json({"type": "client.user_message", "text": "前10个"})
+
+    assert live_session.prompt_payloads == []
+    assert live_session.resume_payloads == [{"additional_context": "前10个", "replan": False}]
+
+
 def test_ceo_websocket_turn_patch_carries_live_execution_trace_summary(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 
@@ -4490,11 +4598,15 @@ async def test_web_session_heartbeat_forces_task_terminal_reply_when_model_retur
     assert envelope["type"] == "ceo.reply.final"
     assert "demo-terminal" in str(envelope["data"]["text"])
     assert "已完成" in str(envelope["data"]["text"])
+    assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
     assert len(task_service.delivered) == 1
     assert task_service.delivered[0][0] == "task-terminal:task:demo-terminal:success:2026-03-23T01:34:32+08:00"
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert reloaded.messages == []
+    assert len(reloaded.messages) == 1
+    assert reloaded.messages[0]["role"] == "assistant"
+    assert "demo-terminal" in str(reloaded.messages[0]["content"])
+    assert reloaded.messages[0]["turn_id"] == "turn-heartbeat-default"
     assert reloaded.metadata["last_task_memory"]["source"] == "heartbeat"
     assert reloaded.metadata["last_task_memory"]["task_ids"] == ["task:demo-terminal"]
     assert reloaded.metadata["last_task_memory"]["reason"] == "task_terminal"
@@ -4543,7 +4655,11 @@ async def test_web_session_heartbeat_reports_unpassed_continuation_task_in_fallb
     assert "cont-2" in str(envelope["data"]["text"])
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert reloaded.messages == []
+    assert len(reloaded.messages) == 1
+    assert reloaded.messages[0]["role"] == "assistant"
+    assert "demo-unpassed" in str(reloaded.messages[0]["content"])
+    assert "cont-2" in str(reloaded.messages[0]["content"])
+    assert reloaded.messages[0]["turn_id"] == "turn-heartbeat-default"
     assert reloaded.metadata["last_task_memory"] == {
         "version": web_ceo_sessions.TASK_MEMORY_VERSION,
         "task_ids": ["task:demo-unpassed", "task:cont-2"],
@@ -4828,7 +4944,10 @@ async def test_web_session_heartbeat_prompt_includes_terminal_root_output_and_me
     assert "Result output ref: artifact:artifact:root-output" in prompt_text
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert reloaded.messages == []
+    assert len(reloaded.messages) == 1
+    assert reloaded.messages[0]["role"] == "assistant"
+    assert "demo-root-output" in str(reloaded.messages[0]["content"])
+    assert reloaded.messages[0]["turn_id"] == "turn-heartbeat-default"
     assert reloaded.metadata["last_task_memory"]["task_results"] == [
         {
             "task_id": task_id,
@@ -5021,7 +5140,10 @@ async def test_web_session_heartbeat_prefers_acceptance_output_when_final_accept
     assert "Result output ref: artifact:artifact:accept-output" in prompt_text
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert reloaded.messages == []
+    assert len(reloaded.messages) == 1
+    assert reloaded.messages[0]["role"] == "assistant"
+    assert "demo-acceptance-output" in str(reloaded.messages[0]["content"])
+    assert reloaded.messages[0]["turn_id"] == "turn-heartbeat-default"
     assert reloaded.metadata["last_task_memory"]["task_results"] == [
         {
             "task_id": task_id,
@@ -5080,9 +5202,12 @@ async def test_web_session_heartbeat_final_reply_discards_preserved_user_turn(tm
     assert discard_envelope["data"]["turn_id"] == "turn-user-preserved"
     assert final_session == session_id
     assert final_envelope["data"]["source"] == "heartbeat"
-    assert isinstance(final_envelope["data"]["turn_id"], str) and final_envelope["data"]["turn_id"]
-    assert final_envelope["data"]["turn_id"] != "turn-user-preserved"
+    assert final_envelope["data"]["turn_id"] == "turn-heartbeat-final"
     assert "Background install finished successfully." in str(final_envelope["data"]["text"])
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    assert reloaded.messages[-1]["role"] == "assistant"
+    assert "Background install finished successfully." in str(reloaded.messages[-1]["content"])
+    assert reloaded.messages[-1]["turn_id"] == "turn-heartbeat-final"
 
 
 @pytest.mark.asyncio
@@ -5160,12 +5285,26 @@ async def test_web_session_heartbeat_second_visible_reply_is_not_appended_after_
 
     assert next_delay is None
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert len(reloaded.messages) == 2
-    assert [message["role"] for message in reloaded.messages] == ["user", "assistant"]
-    assert reloaded.messages[-1]["content"] == "I started the install."
+    assert len(reloaded.messages) == 3
+    assert [message["role"] for message in reloaded.messages] == ["user", "assistant", "assistant"]
+    assert reloaded.messages[1]["content"] == "I started the install."
+    assert "Background install finished successfully." in str(reloaded.messages[2]["content"])
+    assert reloaded.messages[2]["turn_id"] == "turn-heartbeat-default"
     assert web_ceo_sessions.transcript_messages(reloaded) == [
         {"role": "user", "content": "Install the weather skill", "timestamp": reloaded.messages[0]["timestamp"]},
         {"role": "assistant", "content": "I started the install.", "timestamp": reloaded.messages[1]["timestamp"]},
+        {
+            "role": "assistant",
+            "content": "Background install finished successfully.",
+            "timestamp": reloaded.messages[2]["timestamp"],
+            "metadata": {
+                "source": "heartbeat",
+                "reason": "task_terminal",
+                "task_ids": ["task:demo-hidden-persist"],
+                "task_results": [{"task_id": "task:demo-hidden-persist"}],
+            },
+            "turn_id": "turn-heartbeat-default",
+        },
     ]
     assert reloaded.metadata["last_task_memory"] == {
         "version": web_ceo_sessions.TASK_MEMORY_VERSION,

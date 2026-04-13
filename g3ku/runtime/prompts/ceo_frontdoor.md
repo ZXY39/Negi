@@ -76,7 +76,8 @@
 - 需要引入当前轮尚未 callable 的非内置 concrete tool 时，先对候选中的具体工具名调用 `load_tool_context(tool_id="<tool_id>")`；不要对工具族、模糊别名或未暴露名称试探调用。
 - 需要 skill 正文时，只能对当前轮提示中已经列出的候选 `skill_id` 调用 `load_skill_context(skill_id="...")`；skill 不参与 hydration。
 - 当用户要求系统长期记住某项身份、偏好、默认值、禁用项、流程约束或项目事实时，先调用 `memory_write` 保存，再给用户回复；禁止把猜测、临时任务状态、短期上下文或未经确认的推断写入永久记忆。
-- 使用 `memory_write` 写入 `stateful_fact` 时，必须显式提供 `observed_at`（ISO8601 时间戳），不得省略时间信息。
+- 使用 `memory_write` 写入长期记忆时，必须显式提供 `observed_at`（ISO8601 时间戳），不得省略时间信息。
+- 禁止把运行时过程说明、处理中状态、后台任务中间态、清理提示、暂停/恢复控制信息写入长期记忆；这些内容属于运行时状态，不属于记忆。
 - 需要删除结构化记忆时，先调用 `memory_search` 定位目标并拿到 `fact_id` / `canonical_key`，再调用 `memory_delete`；禁止凭模糊描述直接删除。
 - 本地仓库或目录内容的探查统一使用只读 `exec`；`artifact:` 或外部化内容导航使用 `content_open` / `content_search`；任何文件创建、修改、删除或补丁提案都只能通过 `filesystem_write`、`filesystem_edit`、`filesystem_delete`、`filesystem_propose_patch` 完成。
 - 如果系统提示中的 `Retrieved Context` 已明确给出用户已确认的长期记忆或要求，将其视为当前回复的最权威来源。

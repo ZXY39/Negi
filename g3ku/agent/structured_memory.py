@@ -36,7 +36,6 @@ MergeMode = Literal["merge"]
 class StructuredMemoryFact:
     fact_id: str
     category: StructuredCategory
-    scope: str
     entity: str
     attribute: str
     value: Any
@@ -84,7 +83,6 @@ def canonical_key_for_fact(fact: StructuredMemoryFact) -> str:
     # Keep this human-readable (helps debugging) while remaining stable.
     # Order matters and should only change on a deliberate schema bump.
     parts = [
-        _norm_token(fact.scope),
         _norm_token(fact.category),
         _norm_token(fact.entity),
         _norm_token(fact.attribute),
@@ -142,7 +140,6 @@ def normalize_fact(raw: dict[str, Any], *, fact_id: str, now_iso: str) -> Struct
     else:
         time_semantics = "durable_until_replaced"
 
-    scope = str(raw.get("scope") or "session")
     entity = str(raw.get("entity") or raw.get("subject") or "self")
     attribute = str(raw.get("attribute") or raw.get("slot_id") or raw.get("key") or "").strip()
 
@@ -180,7 +177,6 @@ def normalize_fact(raw: dict[str, Any], *, fact_id: str, now_iso: str) -> Struct
     provisional = StructuredMemoryFact(
         fact_id=str(fact_id),
         category=category,
-        scope=scope,
         entity=entity,
         attribute=attribute,
         value=value,
@@ -202,7 +198,6 @@ def normalize_fact(raw: dict[str, Any], *, fact_id: str, now_iso: str) -> Struct
     return StructuredMemoryFact(
         fact_id=provisional.fact_id,
         category=provisional.category,
-        scope=provisional.scope,
         entity=provisional.entity,
         attribute=provisional.attribute,
         value=provisional.value,
@@ -254,7 +249,6 @@ def fact_to_metadata(fact: StructuredMemoryFact) -> dict[str, Any]:
         "memory_format": "structured_v1",
         "fact_id": fact.fact_id,
         "category": fact.category,
-        "scope": fact.scope,
         "entity": fact.entity,
         "attribute": fact.attribute,
         "observed_at": fact.observed_at,

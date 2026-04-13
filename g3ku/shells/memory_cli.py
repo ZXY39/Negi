@@ -123,6 +123,20 @@ def build_memory_app(console) -> typer.Typer:
             manager.close()
         console.print_json(json.dumps(report, ensure_ascii=False))
 
+    @app.command('reset-runtime')
+    def memory_reset_runtime(
+        reason: str = typer.Option('manual', '--reason', help='Reason recorded in the reset metadata'),
+    ):
+        _config, mem_cfg, manager = _load_manager()
+        if not mem_cfg.enabled:
+            _disabled()
+            raise typer.Exit(1)
+        try:
+            report = manager.reset_runtime(reason=reason)
+        finally:
+            manager.close()
+        console.print_json(json.dumps(report, ensure_ascii=False))
+
     @decay_app.command('run')
     def memory_decay_run(dry_run: bool = typer.Option(False, '--dry-run', help='Preview deletions only')):
         config, mem_cfg, manager = _load_manager()

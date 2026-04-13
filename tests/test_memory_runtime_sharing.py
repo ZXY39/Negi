@@ -922,6 +922,54 @@ def test_sync_internal_tool_runtimes_keeps_memory_manager_when_runtime_has_no_ra
         manager.close()
 
 
+def test_sync_internal_tool_runtimes_bootstraps_catalog_when_memory_store_is_available(tmp_path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+
+    class _FakeMemoryManager:
+        def __init__(self, workspace_path, cfg):
+            self.workspace = workspace_path
+            self.cfg = cfg
+            self.store = object()
+            self.catalog_bootstrap_calls: list[object] = []
+
+        async def ensure_catalog_bootstrap(self, service):
+            self.catalog_bootstrap_calls.append(service)
+            return {"ok": True, "synced": True, "created": 2, "updated": 0, "removed": 0}
+
+        def close(self):
+            return None
+
+    class _Loop(SimpleNamespace):
+        def _use_rag_memory(self) -> bool:
+            cfg = getattr(self, '_memory_runtime_settings', None)
+            return bool(cfg and cfg.enabled)
+
+    loop = _Loop(
+        workspace=workspace,
+        resource_manager=None,
+        _internal_tool_settings_fingerprints={},
+        _memory_manager_cls=_FakeMemoryManager,
+        memory_manager=None,
+        commit_service=None,
+        _memory_runtime_settings=SimpleNamespace(enabled=True),
+        _store=None,
+        _store_enabled=False,
+        _checkpointer_enabled=False,
+        _checkpointer_backend='disabled',
+        _checkpointer_path=None,
+        _checkpointer=None,
+        _checkpointer_cm=None,
+        main_task_service=SimpleNamespace(),
+    )
+
+    RuntimeBootstrapBridge(loop).init_memory_runtime(SimpleNamespace(enabled=True, checkpointer=SimpleNamespace(backend='memory')))
+
+    assert loop.memory_manager is not None
+    assert loop.memory_manager.catalog_bootstrap_calls == [loop.main_task_service]
+
+
 def test_reset_memory_runtime_invalidates_frontdoor_cached_bindings() -> None:
     invalidations: list[str] = []
 

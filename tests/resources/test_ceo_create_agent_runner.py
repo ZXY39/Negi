@@ -100,7 +100,6 @@ class _MemoryWriteLikeTool(Tool):
                         "type": "object",
                         "properties": {
                             "category": {"type": "string"},
-                            "scope": {"type": "string"},
                             "entity": {"type": "string"},
                             "attribute": {"type": "string"},
                             "value": {
@@ -113,7 +112,6 @@ class _MemoryWriteLikeTool(Tool):
                         },
                         "required": [
                             "category",
-                            "scope",
                             "entity",
                             "attribute",
                             "value",
@@ -767,7 +765,7 @@ async def test_create_agent_runner_passes_thread_id_and_context() -> None:
     )
 
     assert output == "ok"
-    assert readiness_calls == ["ready"]
+    assert readiness_calls == ["ready", "ready"]
     assert session._last_route_kind == "direct_reply"
     assert captured["config"] == {"configurable": {"thread_id": "web:shared"}}
     assert getattr(captured["context"], "session_key") == "web:shared"
@@ -803,7 +801,7 @@ async def test_create_agent_runner_raises_structured_interrupt() -> None:
             on_progress=None,
         )
 
-    assert readiness_calls == ["ready"]
+    assert readiness_calls == ["ready", "ready"]
     assert session._last_route_kind == "direct_reply"
     assert exc_info.value.values == {"approval_request": {"kind": "frontdoor_tool_approval"}}
     assert [item.interrupt_id for item in exc_info.value.interrupts] == ["interrupt-1"]
@@ -839,7 +837,7 @@ async def test_create_agent_runner_resume_uses_command_resume() -> None:
     )
 
     assert result == "approved"
-    assert readiness_calls == ["ready"]
+    assert readiness_calls == ["ready", "ready"]
     assert isinstance(captured["payload"], Command)
     assert getattr(captured["payload"], "resume", None) == {"decisions": [{"type": "approve"}]}
     assert captured["config"] == {"configurable": {"thread_id": "web:shared"}}
@@ -876,7 +874,7 @@ async def test_create_agent_runner_resume_raises_structured_interrupt() -> None:
             on_progress=None,
         )
 
-    assert readiness_calls == ["ready"]
+    assert readiness_calls == ["ready", "ready"]
     assert session._last_route_kind == "task_dispatch"
     assert exc_info.value.values == {
         "approval_request": {"kind": "frontdoor_tool_approval"},
@@ -2171,7 +2169,6 @@ async def test_create_agent_frontdoor_execute_tool_call_normalizes_nested_array_
             "facts": [
                 {
                     "category": "preference",
-                    "scope": "global",
                     "entity": "user",
                     "attribute": "default_document_save_location",
                     "value": "desktop",
@@ -2230,7 +2227,6 @@ async def test_create_agent_frontdoor_execute_tool_call_omits_unset_optional_nes
             "facts": [
                 {
                     "category": "preference",
-                    "scope": "global",
                     "entity": "user",
                     "attribute": "default_document_save_location",
                     "value": "desktop",
@@ -2271,7 +2267,6 @@ async def test_create_agent_frontdoor_execute_tool_call_omits_unset_optional_nes
     assert payload["facts"] == [
         {
             "category": "preference",
-            "scope": "global",
             "entity": "user",
             "attribute": "default_document_save_location",
             "value": "desktop",
