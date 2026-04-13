@@ -50,10 +50,9 @@ class CeoPromptBuilder:
         project_python_hint = str(project_environment.get('project_python_hint') or 'python').strip() or 'python'
         return '\n'.join(
             [
-                '## Runtime Environment',
-                '- When a command must use the exact project interpreter, prefer the runtime-exported environment variables `G3KU_PROJECT_PYTHON`, `G3KU_PROJECT_PYTHON_DIR`, `G3KU_PROJECT_SCRIPTS_DIR`, and `G3KU_PROJECT_PYTHON_HINT`.',
-                f'- When the exact interpreter command matters, prefer `{project_python_hint}` instead of assuming plain `python`.',
-                '- If the user asks to search, inspect, install, or update a ClawHub skill, first load `clawhub-skill-manager` with `load_skill_context(skill_id="clawhub-skill-manager")` and treat it as the required workflow entry.',
+                '## 运行时环境',
+                '- 当命令必须使用项目精确解释器时，优先使用运行时导出的环境变量 `G3KU_PROJECT_PYTHON`、`G3KU_PROJECT_PYTHON_DIR`、`G3KU_PROJECT_SCRIPTS_DIR` 和 `G3KU_PROJECT_PYTHON_HINT`。',
+                f'- 当解释器命令必须精确时，优先使用 `{project_python_hint}`，不要默认假设裸 `python` 一定正确。',
             ]
         ).strip()
 
@@ -80,16 +79,17 @@ class CeoPromptBuilder:
             label = display_name if display_name and display_name != skill_id else skill_id
             summary = l0 or description or display_name or skill_id
             lines.append(
-                f'- `{skill_id}` ({label}): {summary}. '
-                f'Load with `load_skill_context(skill_id="{skill_id}")` when you need the full workflow.'
+                f'- `{skill_id}` ({label}): {summary}。'
+                f'如需读取完整工作流正文，仅在当前已经存在活动阶段后调用 `load_skill_context(skill_id="{skill_id}")`。'
             )
         if not lines:
             return ''
         return '\n'.join(
             [
-                '## Visible Skills For This Turn',
-                '- Only the following skill ids are visible in this turn; do not assume any other skill is available.',
-                '- If a workflow requires a skill body, call `load_skill_context` with one of the listed ids only.',
+                '## 本轮可见技能',
+                '- 只有以下 `skill_id` 在本轮可见，不要假设其他 skill 可用。',
+                '- “可见”不等于“本轮一开始就应该读取正文”；如果当前还没有活动阶段且你需要使用工具，第一步必须先调用 `submit_next_stage`。',
+                '- 仅当当前已经存在活动阶段且你确实需要完整工作流正文时，才可对下列 `skill_id` 调用 `load_skill_context`。',
                 *lines,
             ]
         )

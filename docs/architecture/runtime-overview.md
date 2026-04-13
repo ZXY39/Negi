@@ -145,6 +145,19 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 
 这两层不是互斥关系。阶段工作集负责“当前轮还需要精读的近场上下文”，全局语义摘要负责“防止长会话失忆的远场上下文”。
 
+前门提示词本身还要再分成“静态协议层”和“动态注入层”两部分理解：
+
+- `g3ku/runtime/prompts/ceo_frontdoor.md` 承载 CEO frontdoor 的稳定协议，包括角色规则、任务/工具通用约束，以及 stage-first 这类高优先级协议。
+- `g3ku/runtime/frontdoor/prompt_builder.py` 负责把稳定协议与少量环境提示装成 base prompt。
+- `g3ku/runtime/frontdoor/message_builder.py` 继续按本轮会话状态动态注入可见 skill 摘要、候选工具、retrieved context、memory hint、全局语义摘要等 turn 级内容。
+
+维护上一个容易误判的点是：动态 skill/tool 提示块里虽然会出现“如何读取 skill 正文”或“如何读取 tool 契约”的说明，但这些说明不能覆盖 `ceo_frontdoor.md` 里的 stage-first 协议。当前前门的权威顺序是：
+
+1. 先看静态协议是否要求“无活动阶段时必须先 `submit_next_stage`”
+2. 只有在活动阶段已经存在后，动态 skill/tool 暴露里的 `load_skill_context` / `load_tool_context` 提示才真正进入可执行顺序
+
+如果维护者在排查“为什么模型先调用了 `load_skill_context` 却撞上 no active stage”这类问题，不要只盯动态 skill 列表或 candidate tool 列表；要先检查 `ceo_frontdoor.md` 的稳定协议与 `stage_messages.py` 的当前状态 overlay 是否一致，再检查 `prompt_builder.py` / `message_builder.py` 是否把动态提示写成了会与主协议竞争的动作指令。
+
 heartbeat / cron 的维护语义也要分三条通道理解：
 
 - UI 展示通道：

@@ -175,10 +175,10 @@ class CeoMessageBuilder:
         terms = ', '.join(matched_terms)
         return '\n'.join(
             [
-                '## Long-Term Memory Write Hint',
-                f'- The current user turn likely requests durable memory updates ({terms}).',
-                '- If this is a stable identity, preference, constraint, default, avoidance rule, workflow rule, or durable project fact, call `memory_write` before replying.',
-                '- Do not save temporary task state, guesses, or unconfirmed inferences as permanent memory.',
+                '## 长期记忆写入提示',
+                f'- 当前用户回合很可能在请求写入长期记忆（命中词：{terms}）。',
+                '- 如果这是稳定的身份、偏好、约束、默认值、回避规则、工作流规则或项目长期事实，请在回复前调用 `memory_write`。',
+                '- 不要把临时任务状态、猜测或未经确认的推断写入永久记忆。',
             ]
         )
 
@@ -186,10 +186,10 @@ class CeoMessageBuilder:
     def _retrieved_memory_resolution_hint_block() -> str:
         return '\n'.join(
             [
-                '## Retrieved Memory Resolution Hint',
-                '- The retrieved memory below already contains previously confirmed user defaults or preferences relevant to this turn.',
-                '- If the user is asking what the default is, restate the retrieved default directly.',
-                '- Do not invent a new default, propose alternatives, or replace the retrieved default with general best practices unless the user explicitly asks to change the rule.',
+                '## 已检索记忆使用提示',
+                '- 下方已检索记忆中，已经包含与本轮相关、且此前确认过的用户默认值或偏好。',
+                '- 如果用户正在询问默认值是什么，请直接复述已检索到的默认值。',
+                '- 除非用户明确要求改规则，否则不要发明新的默认值、不要主动给出替代方案，也不要用通用最佳实践覆盖已检索到的默认值。',
             ]
         )
 
@@ -270,13 +270,17 @@ class CeoMessageBuilder:
         selected_skill_ids = set(skill_ids)
         if visible_only_mode and selected_skill_ids == all_visible_skill_ids and len(skill_ids) == len(all_visible_skill_ids):
             lines = [
-                '## Skill Summaries For Visible Exposure',
-                '- Semantic ranking is unavailable, so the full visible skill set is summarized below.',
+                '## 本轮可见技能摘要',
+                '- 当前语义排序不可用，因此下面按完整可见技能集给出摘要。',
+                '- 如果当前还没有活动阶段且你需要使用工具，第一步必须先调用 `submit_next_stage`。',
+                '- 如需读取某个 skill 的完整正文，仍然只能在当前已经存在活动阶段后调用 `load_skill_context`。',
             ]
         else:
             lines = [
-                '## Skills Most Relevant To This Turn',
-                '- These summaries are selected from the stable visible capability exposure for the current turn.',
+                '## 本轮最相关的技能',
+                '- 这些摘要来自当前轮稳定的可见能力曝光。',
+                '- 如果当前还没有活动阶段且你需要使用工具，第一步必须先调用 `submit_next_stage`。',
+                '- 如需读取某个 skill 的完整正文，仍然只能在当前已经存在活动阶段后调用 `load_skill_context`。',
             ]
         for item in list(selected_skills or []):
             skill_id = cls._skill_id(item)
@@ -309,17 +313,21 @@ class CeoMessageBuilder:
         selected_tool_name_set = set(tool_names)
         if visible_only_mode and selected_tool_name_set == all_visible_tool_names and len(tool_names) == len(all_visible_tool_names):
             lines = [
-                '## Candidate Tools For This Turn',
-                '- Semantic ranking is unavailable, so the full visible concrete tool set is listed below.',
+                '## 本轮候选工具',
+                '- 当前语义排序不可用，因此下面列出完整的可见具体工具集合。',
+                '- 如果当前还没有活动阶段且你需要使用工具，第一步必须先调用 `submit_next_stage`。',
+                '- 对非内置候选工具，如需读取完整工具契约，仅在当前已经存在活动阶段后调用 `load_tool_context(tool_id="...")`。',
             ]
         else:
             lines = [
-                '## Candidate Tools For This Turn',
-                '- These are candidate concrete tools for this turn. Non-built-in tools require `load_tool_context(tool_id="...")` before use.',
+                '## 本轮候选工具',
+                '- 下面是本轮候选具体工具。',
+                '- 如果当前还没有活动阶段且你需要使用工具，第一步必须先调用 `submit_next_stage`。',
+                '- 对非内置候选工具，如需读取完整工具契约，仅在当前已经存在活动阶段后调用 `load_tool_context(tool_id="...")`。',
             ]
         for tool_name in tool_names:
             lines.append(
-                f'- `{tool_name}`. Load with `load_tool_context(tool_id="{tool_name}")` when you need the tool contract.'
+                f'- `{tool_name}`。如需读取该工具的完整契约，仅在当前已经存在活动阶段后调用 `load_tool_context(tool_id="{tool_name}")`。'
             )
         return '\n'.join(lines)
 
@@ -407,7 +415,7 @@ class CeoMessageBuilder:
             first = history[0]
             if str(first.get('role') or '').strip().lower() != 'assistant':
                 break
-            if '## Retrieved Context' not in self._content_text(first.get('content')):
+            if '## 已检索上下文' not in self._content_text(first.get('content')):
                 break
             history.pop(0)
         return history
@@ -472,9 +480,9 @@ class CeoMessageBuilder:
         records = list(bundle.records or [])
         if not records:
             return ''
-        lines = ['## Retrieved Context']
+        lines = ['## 已检索上下文']
         for record in records:
-            record_id = str(record.get('record_id') or '').strip() or 'unknown'
+            record_id = str(record.get('record_id') or '').strip() or '未知'
             context_type = str(record.get('context_type') or '').strip()
             l0 = str(record.get('l0') or '').strip()
             l1 = str(record.get('l1') or '').strip()
@@ -483,9 +491,9 @@ class CeoMessageBuilder:
             prefix = f"{context_type}:" if context_type else ''
             lines.append(f"- [{prefix}{record_id}] {header_text}".rstrip())
             if l1 and l1 != header_text:
-                lines.append(f"  L1: {l1}")
+                lines.append(f"  一级摘要：{l1}")
             if l2:
-                lines.append(f"  L2: {l2}")
+                lines.append(f"  二级摘要：{l2}")
         return '\n'.join(lines).strip()
 
     @staticmethod

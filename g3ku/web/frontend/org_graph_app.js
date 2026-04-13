@@ -3068,6 +3068,53 @@ function ceoNeedsAssistantTurn(snapshot = null) {
     return ceoInflightTurnHasVisibleAssistantState(snapshot) || (source !== "heartbeat" && status === "running");
 }
 
+const CEO_ASSISTANT_LOADING_LABEL = "正在处理中";
+const CEO_ASSISTANT_LOADING_TEXTS = new Set([
+    "处理中...",
+    "正在处理中...",
+    "正在请求 CEO 模型生成下一步响应...",
+]);
+
+function isCeoAssistantLoadingText(text = "") {
+    const normalizedText = String(text || "").trim();
+    return !!normalizedText && CEO_ASSISTANT_LOADING_TEXTS.has(normalizedText);
+}
+
+function syncCeoAssistantLoadingAria(textEl, label = "") {
+    if (!textEl || typeof textEl.setAttribute !== "function" || typeof textEl.removeAttribute !== "function") return;
+    const normalizedLabel = String(label || "").trim();
+    if (normalizedLabel) {
+        textEl.setAttribute("role", "status");
+        textEl.setAttribute("aria-label", normalizedLabel);
+        return;
+    }
+    textEl.removeAttribute("role");
+    textEl.removeAttribute("aria-label");
+}
+
+function syncCeoTurnLoadingOnlyState(turn, isLoadingOnly = false) {
+    const turnEl = turn?.el;
+    if (!turnEl?.classList) return;
+    if (isLoadingOnly) turnEl.classList.add("ceo-turn-loading-only");
+    else turnEl.classList.remove("ceo-turn-loading-only");
+}
+
+function renderCeoAssistantLoadingMarkup() {
+    return `<span class="assistant-loading-indicator interaction-step-icon is-spinning" aria-hidden="true"><i data-lucide="loader-circle"></i></span>`;
+}
+
+function renderCeoAssistantLoadingState(turn, label = CEO_ASSISTANT_LOADING_LABEL) {
+    if (!turn?.textEl) return;
+    turn.textEl.textContent = "";
+    turn.textEl.innerHTML = renderCeoAssistantLoadingMarkup();
+    turn.textEl.classList.add("pending");
+    turn.textEl.classList.add("assistant-text-loading");
+    turn.textEl.classList.remove("markdown-content");
+    syncCeoAssistantLoadingAria(turn.textEl, label);
+    syncCeoTurnLoadingOnlyState(turn, true);
+    icons();
+}
+
 function renderCeoAssistantTextIntoTurn(turn, text = "", { status = "" } = {}) {
     if (!turn?.textEl) return;
     const normalizedText = String(text || "").trim();
@@ -3077,16 +3124,24 @@ function renderCeoAssistantTextIntoTurn(turn, text = "", { status = "" } = {}) {
             turn.textEl.textContent = "已暂停";
             turn.textEl.classList.remove("pending");
             turn.textEl.classList.remove("markdown-content");
+            turn.textEl.classList.remove("assistant-text-loading");
+            syncCeoAssistantLoadingAria(turn.textEl);
+            syncCeoTurnLoadingOnlyState(turn, false);
             return;
         }
-        if (!turn.textEl.textContent?.trim()) turn.textEl.textContent = "处理中...";
-        turn.textEl.classList.add("pending");
-        turn.textEl.classList.remove("markdown-content");
+        renderCeoAssistantLoadingState(turn);
+        return;
+    }
+    if (normalizedStatus !== "paused" && normalizedStatus !== "error" && isCeoAssistantLoadingText(normalizedText)) {
+        renderCeoAssistantLoadingState(turn, normalizedText);
         return;
     }
     turn.textEl.innerHTML = renderMarkdown(normalizedText);
     turn.textEl.classList.remove("pending");
+    turn.textEl.classList.remove("assistant-text-loading");
     turn.textEl.classList.add("markdown-content");
+    syncCeoAssistantLoadingAria(turn.textEl);
+    syncCeoTurnLoadingOnlyState(turn, false);
 }
 
 function resetCeoToolFlow(turn) {
@@ -3115,6 +3170,7 @@ function renderCeoToolEventsIntoTurn(turn, toolEvents = [], { source = "" } = {}
             source: String(event?.source || normalizedSource).trim().toLowerCase() || normalizedSource,
         });
     });
+    if (events.length) syncCeoTurnLoadingOnlyState(turn, false);
     if (!events.length) updateCeoTurnMeta(turn, "等待工具开始...");
     return events.length;
 }
@@ -3134,6 +3190,7 @@ function renderCeoStageTraceIntoTurn(turn, executionTraceSummary = null) {
         || typeof displayTaskStageStatus !== "function") {
         return 0;
     }
+    syncCeoTurnLoadingOnlyState(turn, false);
     resetCeoToolFlow(turn);
     turn.listEl.classList?.add?.("task-trace-list");
     turn.listEl.innerHTML = summary.stages.map((stage, index) => renderTraceStep({
@@ -3283,10 +3340,10 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
     return mutateCeoFeed(() => {
         if (!U.ceoFeed) return null;
         const el = document.createElement("div");
-        el.className = "message system ceo-turn-message";
+        el.className = "message system ceo-turn-message ceo-turn-loading-only";
         el.innerHTML = `
             <div class="msg-content ceo-turn-content">
-                <div class="assistant-text pending">处理中...</div>
+                <div class="assistant-text pending">${renderCeoAssistantLoadingMarkup()}</div>
                 <details class="interaction-flow" open hidden>
                     <summary class="interaction-flow-summary">
                         <span class="interaction-flow-title">Interaction Flow</span>
@@ -3316,6 +3373,8 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
             turnId: "",
             source: String(source || "").trim().toLowerCase() || "user",
         };
+        turn.textEl?.classList?.add?.("assistant-text-loading");
+        syncCeoAssistantLoadingAria(turn.textEl, CEO_ASSISTANT_LOADING_LABEL);
         toggleButton?.addEventListener("click", (event) => {
             event.preventDefault();
             event.stopPropagation();

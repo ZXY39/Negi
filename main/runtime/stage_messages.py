@@ -62,25 +62,29 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
     active = gate.get('active_stage') if isinstance(gate.get('active_stage'), dict) else None
     if not isinstance(active, dict):
         return (
-            '你当前没有处于有效的 CEO 阶段. '
-            '如需使用任何工具，请先调用 `submit_next_stage` 并传入简洁的 `stage_goal` 和 1 到 10 的 `tool_round_budget`。'
-            '如不需要使用工具，可以直接回复。'
+            '当前没有有效的 CEO 阶段。'
+            '如果本轮需要使用任何工具，你现在必须先调用 `submit_next_stage`，并传入简洁的 `stage_goal` 和 1 到 10 的 `tool_round_budget`。'
+            '如果本轮不需要使用工具，可以直接回复。'
         )
     used = int(active.get('tool_rounds_used') or 0)
     budget = int(active.get('tool_round_budget') or 0)
-    goal = str(active.get('stage_goal') or '').strip() or '(empty)'
-    final_note = ' Current stage is the final convergence stage. It will not be forced to switch only because the budget is exhausted, and it must not call `spawn_child_nodes`.' if bool(active.get('final_stage')) else ''
-    final_note = ' 褰撳墠宸茶繘鍏ユ渶缁堟敹鏁涢樁娈碉紝涓嶄細鍥犻绠楀己鍒跺垏鎹紝涓嶈鍐嶈皟鐢?`spawn_child_nodes`銆?' if bool(active.get('final_stage')) else ''
+    goal = str(active.get('stage_goal') or '').strip() or '（空）'
+    final_note = (
+        ' 当前阶段已标记为最终收敛阶段；它不会仅因为预算耗尽而被强制切换，且不得调用 `spawn_child_nodes`。'
+        if bool(active.get('final_stage'))
+        else ''
+    )
     if bool(gate.get('transition_required')):
         return (
-            f'Current CEO stage budget is exhausted: {used}/{budget}. '
-            f'Stage goal: {goal}. '
-            'Before using more tools, summarize progress and call `submit_next_stage` to create the next stage.'
+            f'当前 CEO 阶段工具轮次预算已耗尽：{used}/{budget}。'
+            f'阶段目标：{goal}。'
+            '如需继续使用工具，必须先总结本阶段进展，并调用 `submit_next_stage` 创建下一阶段。'
         )
     return (
-        f'Active CEO stage goal: {goal}. '
-        f'Ordinary tool rounds used: {used}/{budget}. '
-        'Any tool use in this turn must directly serve this active stage goal.'
+        f'当前 CEO 阶段目标：{goal}。'
+        f'当前普通工具轮次使用：{used}/{budget}。'
+        '本轮任何工具调用都必须直接服务于当前阶段目标。'
+        f'{final_note}'
     )
 
 
@@ -93,13 +97,12 @@ def build_ceo_stage_result_block_message(stage_gate: dict[str, Any] | None) -> s
         return ''
     used = int(active.get('tool_rounds_used') or 0)
     budget = int(active.get('tool_round_budget') or 0)
-    goal = str(active.get('stage_goal') or '').strip() or '(empty)'
+    goal = str(active.get('stage_goal') or '').strip() or '（空）'
     return (
-        f'Current CEO stage budget is exhausted: {used}/{budget}. '
-        f'Stage goal: {goal}. '
-        'Do not finish yet. First summarize the completed progress for this stage and call '
-        '`submit_next_stage` to create the next CEO stage; after that, continue working or deliver '
-        'the final answer from the new stage.'
+        f'当前 CEO 阶段工具轮次预算已耗尽：{used}/{budget}。'
+        f'阶段目标：{goal}。'
+        '先不要直接结束。请先总结本阶段已完成的进展，并调用 `submit_next_stage` 创建下一阶段；'
+        '之后再继续工作，或从新阶段交付最终回复。'
     )
 
 
@@ -124,8 +127,12 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
         )
     used = int(active.get('tool_rounds_used') or 0)
     budget = int(active.get('tool_round_budget') or 0)
-    goal = str(active.get('stage_goal') or '').strip() or '(empty)'
-    final_note = ' Current stage is the final convergence stage. It will not be forced to switch only because the budget is exhausted, and it must not call `spawn_child_nodes`.' if bool(active.get('final_stage')) else ''
+    goal = str(active.get('stage_goal') or '').strip() or '（空）'
+    final_note = (
+        ' 当前阶段已标记为最终收敛阶段；它不会仅因为预算耗尽而被强制切换，且不得调用 `spawn_child_nodes`。'
+        if bool(active.get('final_stage'))
+        else ''
+    )
     mode = str(active.get('mode') or '').strip() or '自主执行'
     status = str(active.get('status') or '').strip() or '进行中'
     if bool(stage_gate.get('transition_required')):

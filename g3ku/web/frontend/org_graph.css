@@ -2703,6 +2703,12 @@ textarea {
     width: min(100%, 760px);
 }
 
+.ceo-turn-message.ceo-turn-loading-only .msg-content {
+    width: fit-content;
+    max-width: none;
+    padding: 12px;
+}
+
 .message .msg-content .chat-attachment-list {
     margin-top: 12px;
 }
@@ -2715,6 +2721,11 @@ textarea {
     min-width: 0;
 }
 
+.ceo-turn-message.ceo-turn-loading-only .ceo-turn-content {
+    width: auto;
+    gap: 0;
+}
+
 .assistant-text {
     white-space: pre-wrap;
     word-break: break-word;
@@ -2722,6 +2733,25 @@ textarea {
 
 .assistant-text.pending {
     color: var(--text-secondary);
+}
+
+.assistant-text.pending.assistant-text-loading {
+    display: flex;
+    align-items: center;
+    min-height: 28px;
+}
+
+.assistant-loading-indicator {
+    width: 28px;
+    height: 28px;
+    color: var(--status-running-text);
+    background: color-mix(in srgb, var(--status-running-bg) 88%, transparent);
+    border-color: color-mix(in srgb, var(--status-running-text) 26%, transparent);
+}
+
+.assistant-loading-indicator svg {
+    width: 16px;
+    height: 16px;
 }
 
 .markdown-content {

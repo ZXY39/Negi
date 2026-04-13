@@ -53,10 +53,10 @@ class _SplitPromptBuilder:
         if not ids:
             return ""
         lines = [
-            "## Visible Skills For This Turn",
-            "- Only the listed skills are available in this turn.",
+            "## 本轮可见技能",
+            "- 只有列出的技能在本轮可见。",
         ]
-        lines.extend(f'- `{skill_id}` available for this turn.' for skill_id in ids)
+        lines.extend(f'- `{skill_id}` 在本轮可用。' for skill_id in ids)
         return "\n".join(lines)
 
 
@@ -325,8 +325,8 @@ def test_ceo_prompt_builder_keeps_memory_guidance() -> None:
     assert "observed_at" in prompt
     assert "memory_delete" in prompt
     assert "memory_search" in prompt
-    assert "Retrieved Context" in prompt
-    assert "submit_next_stage" not in prompt
+    assert "已检索上下文" in prompt
+    assert "submit_next_stage" in prompt
 
 
 def test_capability_snapshot_exposure_revision_ignores_hidden_executor_names() -> None:
@@ -452,7 +452,7 @@ async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_ava
         "allowed_skill_record_ids": ["skill:focused-skill", "skill:secondary-skill"],
     }
     overlay = str(result.turn_overlay_text or "")
-    assert "## Candidate Tools For This Turn" in overlay
+    assert "## 本轮候选工具" in overlay
     assert '`agent_browser`' in overlay
     assert '`web_fetch`' in overlay
     assert 'load_tool_context(tool_id="agent_browser")' in overlay
@@ -681,7 +681,7 @@ async def test_message_builder_dense_unavailable_renders_l0_only_skill_and_exter
     overlay = str(getattr(result, "turn_overlay_text", "") or "")
     assert "L0 concise skill summary." in overlay
     assert '`external_docs`' not in system_prompt
-    assert "## Candidate Tools For This Turn" in overlay
+    assert "## 本轮候选工具" in overlay
     assert "Detail sentence should not appear." not in system_prompt
     assert "Detail sentence should not appear." not in overlay
 
@@ -931,17 +931,17 @@ async def test_message_builder_moves_turn_specific_context_into_overlay_for_stab
 
     assert contents[0].startswith("BASE PROMPT")
     assert "## Capability Exposure Snapshot" in contents[0]
-    assert "## Retrieved Context" not in rendered_messages
-    assert "Skills Most Relevant To This Turn" not in rendered_messages
-    assert "Long-Term Memory Write Hint" not in rendered_messages
+    assert "## 已检索上下文" not in rendered_messages
+    assert "## 本轮最相关的技能" not in rendered_messages
+    assert "## 长期记忆写入提示" not in rendered_messages
     assert contents[-3:] == [
         "prior question",
         "prior answer",
         "from now on default to the focused browser workflow",
     ]
-    assert "## Retrieved Context" in overlay
-    assert "Skills Most Relevant To This Turn" in overlay
-    assert "Long-Term Memory Write Hint" in overlay
+    assert "## 已检索上下文" in overlay
+    assert "## 本轮最相关的技能" in overlay
+    assert "## 长期记忆写入提示" in overlay
     assert prompt_builder.base_calls == 1
     assert prompt_builder.skill_calls == []
     assert result.trace["turn_overlay_present"] is True
@@ -977,12 +977,12 @@ async def test_message_builder_exposes_dynamic_appendix_messages_for_prompt_cach
     dynamic_contents = [str(item.get("content") or "") for item in dynamic_appendix_messages]
 
     assert stable_messages[0]["role"] == "system"
-    assert "## Retrieved Context" not in str(stable_messages[0]["content"] or "")
+    assert "## 已检索上下文" not in str(stable_messages[0]["content"] or "")
     assert "prior question" in stable_contents
     assert "prior answer" in stable_contents
     assert "from now on default to the focused browser workflow" in stable_contents
     assert any(
-        "## Retrieved Context" in str(item.get("content") or "")
+        "## 已检索上下文" in str(item.get("content") or "")
         for item in dynamic_appendix_messages
     )
     assert "prior question" not in dynamic_contents
@@ -1114,7 +1114,7 @@ def test_context_assembly_result_dynamic_appendix_model_messages_stays_combined_
             {"role": "user", "content": "prior question"},
         ],
         dynamic_appendix_messages=[
-            {"role": "assistant", "content": "## Retrieved Context\n- memory"},
+            {"role": "assistant", "content": "## 已检索上下文\n- memory"},
         ],
         tool_names=["filesystem"],
         trace={},
@@ -1123,7 +1123,7 @@ def test_context_assembly_result_dynamic_appendix_model_messages_stays_combined_
     assert result.model_messages == [
         {"role": "system", "content": "BASE PROMPT"},
         {"role": "user", "content": "prior question"},
-        {"role": "assistant", "content": "## Retrieved Context\n- memory"},
+        {"role": "assistant", "content": "## 已检索上下文\n- memory"},
     ]
 
 
@@ -1153,8 +1153,8 @@ async def test_message_builder_includes_retrieval_and_full_transcript_without_du
     contents = [str(item.get("content") or "") for item in result.model_messages]
     assert contents[0].startswith("BASE PROMPT")
     assert "## Capability Exposure Snapshot" in contents[0]
-    assert "## Candidate Tools For This Turn" in contents[1]
-    assert "## Retrieved Context" in contents[2]
+    assert "## 本轮候选工具" in contents[1]
+    assert "## 已检索上下文" in contents[2]
     assert contents.count("follow up question") == 1
     assert contents[-1] == "follow up question"
     assert result.trace["current_user_in_transcript"] is True
@@ -1181,7 +1181,7 @@ async def test_message_builder_prefers_checkpoint_history_over_transcript_once_a
 
     checkpoint_messages = [
         {"role": "system", "content": "OLD SYSTEM"},
-        {"role": "assistant", "content": "## Retrieved Context\n- stale memory"},
+        {"role": "assistant", "content": "## 已检索上下文\n- stale memory"},
         {"role": "user", "content": "checkpoint question"},
         {"role": "assistant", "content": "checkpoint answer"},
         {"role": "user", "content": "follow up question"},
@@ -1201,7 +1201,7 @@ async def test_message_builder_prefers_checkpoint_history_over_transcript_once_a
     assert contents[0].startswith("BASE PROMPT")
     assert "## Capability Exposure Snapshot" in contents[0]
     assert "OLD SYSTEM" not in contents
-    assert "## Retrieved Context\n- stale memory" not in contents
+    assert "## 已检索上下文\n- stale memory" not in contents
     assert "checkpoint question" in contents
     assert "checkpoint answer" in contents
     assert "bootstrap transcript question" not in contents
@@ -1339,7 +1339,7 @@ async def test_message_builder_collects_retrieved_context_separately_from_histor
         "current_user_appended": True,
         "retrieved_context_in_model_messages": False,
     }
-    assert "## Retrieved Context" in str(result.turn_overlay_text or "")
+    assert "## 已检索上下文" in str(result.turn_overlay_text or "")
     assert result.model_messages[-3:] == [
         {"role": "user", "content": "prior user"},
         {"role": "assistant", "content": "prior answer"},

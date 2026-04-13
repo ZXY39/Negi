@@ -858,8 +858,8 @@ def test_build_prompt_context_no_longer_uses_summary_text_overlay() -> None:
     )
 
     overlay = str(result["system_overlay"])
-    assert "Current CEO stage budget is exhausted: 1/1." in overlay
-    assert "Do not finish yet. First summarize the completed progress for this stage" in overlay
+    assert "当前 CEO 阶段工具轮次预算已耗尽：1/1。" in overlay
+    assert "先不要直接结束。请先总结本阶段已完成的进展" in overlay
     assert "Use the existing CEO layered context rules." not in overlay
     assert "## CEO Durable Summary" not in overlay
 
@@ -903,8 +903,8 @@ def test_build_prompt_context_keeps_dispatch_overlay_and_exhausted_stage_instruc
 
     overlay = str(result["system_overlay"])
     assert "verified task id task:demo-123" in overlay
-    assert "Current CEO stage budget is exhausted: 1/1." in overlay
-    assert "First summarize the completed progress for this stage and call `submit_next_stage`" in overlay
+    assert "当前 CEO 阶段工具轮次预算已耗尽：1/1。" in overlay
+    assert "必须先总结本阶段进展，并调用 `submit_next_stage` 创建下一阶段。" in overlay
 
 
 @pytest.mark.asyncio
@@ -944,7 +944,7 @@ async def test_graph_normalize_model_output_rejects_plain_text_when_transition_r
 
     assert result["next_step"] == "call_model"
     assert "submit_next_stage" in str(result["repair_overlay_text"])
-    assert "Do not finish yet." in str(result["repair_overlay_text"])
+    assert "先不要直接结束。" in str(result["repair_overlay_text"])
     assert str(result.get("final_output") or "") == ""
 
 
