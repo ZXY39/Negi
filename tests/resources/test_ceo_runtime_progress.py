@@ -2304,16 +2304,24 @@ def test_inflight_snapshot_with_real_stage_state_preserves_goal_budget_and_round
                 "stage_goal": "查看当前可检索的长期记忆，并向用户按类别清晰汇总我已记住的内容。",
                 "tool_round_budget": 3,
                 "tool_rounds_used": 2,
-                "status": "active",
-                "mode": "自主执行",
-                "stage_kind": "normal",
-                "rounds": [
-                    {"round_index": 1, "tool_names": ["load_tool_context"]},
-                    {"round_index": 2, "tool_names": ["memory_search"]},
-                ],
-            }
-        ],
-    }
+                    "status": "active",
+                    "mode": "自主执行",
+                    "stage_kind": "normal",
+                    "rounds": [
+                        {
+                            "round_index": 1,
+                            "tool_call_ids": ["load_tool_context:1"],
+                            "tool_names": ["load_tool_context"],
+                        },
+                        {
+                            "round_index": 2,
+                            "tool_call_ids": ["memory_search:2"],
+                            "tool_names": ["memory_search"],
+                        },
+                    ],
+                }
+            ],
+        }
     session._event_log = [
         {
             "type": "tool_execution_start",
@@ -2620,15 +2628,16 @@ def test_ceo_snapshot_summary_keeps_old_tool_details_only_as_preview_and_ref() -
                 "tool_rounds_used": 1,
                 "status": "active",
                 "rounds": [
-                    {
-                        "round_id": "frontdoor-stage-1:round-1",
-                        "round_index": 1,
-                        "created_at": "2026-04-08T12:00:00+08:00",
-                        "budget_counted": True,
-                        "tool_names": ["load_tool_context"],
-                    }
-                ],
-            }
+                        {
+                            "round_id": "frontdoor-stage-1:round-1",
+                            "round_index": 1,
+                            "created_at": "2026-04-08T12:00:00+08:00",
+                            "budget_counted": True,
+                            "tool_call_ids": ["call-1"],
+                            "tool_names": ["load_tool_context"],
+                        }
+                    ],
+                }
         ],
     }
     session._event_log = [
@@ -3182,7 +3191,7 @@ async def test_ceo_slow_generic_tool_stays_inline_and_never_detaches() -> None:
     assert elapsed_seconds is not None and elapsed_seconds >= 0.1
 
 
-def test_stage_trace_name_fallback_does_not_reuse_same_tool_result_across_rounds() -> None:
+def test_stage_trace_call_id_fallback_does_not_reuse_same_tool_result_across_rounds() -> None:
     session = RuntimeAgentSession(
         SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
         session_key="web:shared",
@@ -3204,8 +3213,8 @@ def test_stage_trace_name_fallback_does_not_reuse_same_tool_result_across_rounds
                 "tool_rounds_used": 2,
                 "status": "active",
                 "rounds": [
-                    {"round_index": 1, "tool_names": ["filesystem"]},
-                    {"round_index": 2, "tool_names": ["filesystem"]},
+                    {"round_index": 1, "tool_call_ids": ["filesystem:1"], "tool_names": ["filesystem"]},
+                    {"round_index": 2, "tool_call_ids": ["filesystem:2"], "tool_names": ["filesystem"]},
                 ],
             }
         ],
@@ -3258,6 +3267,198 @@ def test_stage_trace_name_fallback_does_not_reuse_same_tool_result_across_rounds
     assert [len(round_item["tools"]) for round_item in rounds] == [1, 1]
     assert rounds[0]["tools"][0]["tool_call_id"] == "filesystem:1"
     assert rounds[1]["tools"][0]["tool_call_id"] == "filesystem:2"
+
+
+def test_stage_trace_with_mixed_same_name_rounds_does_not_pull_future_exec_into_prior_round() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    exec_round_1 = "call_yng5IS4S1QGJ7gGa35BArtLt|fc_036f236b3fb53d5b0169de312be2f48191934a3b4ca58f9b80"
+    load_round_1 = "call_lftc3j1B076UIrNCmn4kyyrZ|fc_036f236b3fb53d5b0169de312be30081918fc4c8ce00206cc9"
+    exec_round_2 = "call_4TQeCNWdG1PeIjqrgRLm8NkG|fc_036f236b3fb53d5b0169de312f5e1c8191ab2796363eb60754"
+    exec_round_3 = "call_7HkcgF1xR6v670xKw298IF1m|fc_036f236b3fb53d5b0169de3139173c8191a267d514c2c85d1d"
+    session._frontdoor_stage_state = {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": True,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_kind": "normal",
+                "stage_goal": "write markdown file on desktop",
+                "tool_round_budget": 4,
+                "tool_rounds_used": 3,
+                "status": "active",
+                "created_at": "2026-04-14T20:20:54+08:00",
+                "rounds": [
+                    {
+                        "round_id": "frontdoor-stage-1:round-1",
+                        "round_index": 1,
+                        "created_at": "2026-04-14T20:21:01+08:00",
+                        "tool_call_ids": [exec_round_1, load_round_1],
+                        "tool_names": ["exec", "load_tool_context"],
+                    },
+                    {
+                        "round_id": "frontdoor-stage-1:round-2",
+                        "round_index": 2,
+                        "created_at": "2026-04-14T20:21:08+08:00",
+                        "tool_call_ids": [exec_round_2],
+                        "tool_names": ["exec"],
+                    },
+                    {
+                        "round_id": "frontdoor-stage-1:round-3",
+                        "round_index": 3,
+                        "created_at": "2026-04-14T20:21:18+08:00",
+                        "tool_call_ids": [exec_round_3],
+                        "tool_names": ["exec"],
+                    },
+                ],
+            }
+        ],
+    }
+    session._event_log = [
+        {
+            "type": "tool_execution_end",
+            "timestamp": "2026-04-14T20:21:01.642584",
+            "payload": {
+                "tool_name": "exec",
+                "text": '{"status":"success","head_preview":"env"}',
+                "tool_call_id": exec_round_1,
+                "is_error": False,
+            },
+        },
+        {
+            "type": "tool_execution_end",
+            "timestamp": "2026-04-14T20:21:00.822205",
+            "payload": {
+                "tool_name": "load_tool_context",
+                "text": '{"ok":true,"tool_id":"filesystem_write"}',
+                "tool_call_id": load_round_1,
+                "is_error": False,
+            },
+        },
+        {
+            "type": "tool_execution_end",
+            "timestamp": "2026-04-14T20:21:08.273269",
+            "payload": {
+                "tool_name": "exec",
+                "text": '{"status":"error","head_preview":"blocked"}',
+                "tool_call_id": exec_round_2,
+                "is_error": False,
+            },
+        },
+        {
+            "type": "tool_execution_end",
+            "timestamp": "2026-04-14T20:21:18.232596",
+            "payload": {
+                "tool_name": "exec",
+                "text": '{"status":"error","head_preview":"retry"}',
+                "tool_call_id": exec_round_3,
+                "is_error": False,
+            },
+        },
+    ]
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert snapshot is not None
+    rounds = snapshot["execution_trace_summary"]["stages"][0]["rounds"]
+    assert [len(round_item["tools"]) for round_item in rounds] == [2, 1, 1]
+    assert [tool["tool_call_id"] for tool in rounds[0]["tools"]] == [exec_round_1, load_round_1]
+    assert [tool["tool_call_id"] for tool in rounds[1]["tools"]] == [exec_round_2]
+    assert [tool["tool_call_id"] for tool in rounds[2]["tools"]] == [exec_round_3]
+
+
+def test_stage_trace_uses_existing_round_tools_without_event_log_reassignment() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._frontdoor_stage_state = {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_kind": "normal",
+                "stage_goal": "inspect repository",
+                "tool_round_budget": 2,
+                "tool_rounds_used": 2,
+                "status": "active",
+                "rounds": [
+                    {
+                        "round_id": "frontdoor-stage-1:round-1",
+                        "round_index": 1,
+                        "created_at": "2026-04-08T08:00:00Z",
+                        "tool_call_ids": ["filesystem:1"],
+                        "tool_names": ["filesystem"],
+                        "tools": [
+                            {
+                                "tool_call_id": "filesystem:1",
+                                "tool_name": "filesystem",
+                                "status": "success",
+                                "arguments_text": "filesystem (path=/tmp/a.txt)",
+                                "output_text": "round 1 done",
+                                "output_ref": "",
+                                "timestamp": "2026-04-08T08:00:02Z",
+                                "kind": "tool_result",
+                                "source": "user",
+                            }
+                        ],
+                    },
+                    {
+                        "round_id": "frontdoor-stage-1:round-2",
+                        "round_index": 2,
+                        "created_at": "2026-04-08T08:00:03Z",
+                        "tool_call_ids": ["filesystem:2"],
+                        "tool_names": ["filesystem"],
+                        "tools": [
+                            {
+                                "tool_call_id": "filesystem:2",
+                                "tool_name": "filesystem",
+                                "status": "success",
+                                "arguments_text": "filesystem (path=/tmp/b.txt)",
+                                "output_text": "round 2 done",
+                                "output_ref": "",
+                                "timestamp": "2026-04-08T08:00:04Z",
+                                "kind": "tool_result",
+                                "source": "user",
+                            }
+                        ],
+                    },
+                ],
+            }
+        ],
+    }
+    session._event_log = [
+        {
+            "type": "tool_execution_end",
+            "timestamp": "2026-04-08T08:00:05Z",
+            "payload": {
+                "tool_name": "filesystem",
+                "text": "future stray tool",
+                "tool_call_id": "filesystem:3",
+                "is_error": False,
+            },
+        }
+    ]
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert snapshot is not None
+    rounds = snapshot["execution_trace_summary"]["stages"][0]["rounds"]
+    assert [tool["tool_call_id"] for tool in rounds[0]["tools"]] == ["filesystem:1"]
+    assert [tool["tool_call_id"] for tool in rounds[1]["tools"]] == ["filesystem:2"]
 
 
 @pytest.mark.parametrize(

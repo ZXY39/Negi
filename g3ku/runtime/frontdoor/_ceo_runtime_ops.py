@@ -627,11 +627,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         for round_item in list(active_stage.get("rounds") or []):
             if not isinstance(round_item, dict):
                 continue
+            tools = [dict(item) for item in list(round_item.get("tools") or []) if isinstance(item, dict)]
             tool_names = [
-                str(name or "").strip()
-                for name in list(round_item.get("tool_names") or [])
-                if str(name or "").strip()
+                str(item.get("tool_name") or "").strip()
+                for item in tools
+                if str(item.get("tool_name") or "").strip()
             ]
+            if not tool_names:
+                tool_names = [
+                    str(name or "").strip()
+                    for name in list(round_item.get("tool_names") or [])
+                    if str(name or "").strip()
+                ]
             if any(name not in non_substantive for name in tool_names):
                 return True
         return False
@@ -724,6 +731,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         stage_state: dict[str, Any],
         *,
         tool_call_payloads: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
         active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
@@ -766,6 +774,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                             if str(item.get("id") or "").strip()
                         ],
                         "budget_counted": counts_budget,
+                        "tools": [
+                            dict(item)
+                            for item in list(tools or [])
+                            if isinstance(item, dict)
+                        ],
                     }
                 )
                 next_used = int(current.get("tool_rounds_used") or 0) + (1 if counts_budget else 0)
@@ -896,6 +909,52 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "stages": stages,
         }
 
+    def _frontdoor_round_tool_entry(
+        self,
+        *,
+        payload: dict[str, Any],
+        result: dict[str, Any],
+        source: str,
+    ) -> dict[str, Any]:
+        tool_name = str(payload.get("name") or result.get("tool_name") or "tool").strip() or "tool"
+        tool_call_id = str(payload.get("id") or result.get("tool_call_id") or "").strip()
+        arguments = dict(payload.get("arguments") or {}) if isinstance(payload.get("arguments"), dict) else {}
+        result_text = str(result.get("result_text") or "")
+        status = str(result.get("status") or self._tool_status(result_text)).strip().lower() or "success"
+        tool_message = dict(result.get("tool_message") or {}) if isinstance(result.get("tool_message"), dict) else {}
+        progress_payload = self._tool_result_progress_event_data(
+            tool_name=tool_name,
+            result_text=result_text,
+            tool_call_id=tool_call_id or None,
+        )
+        timestamp = str(
+            tool_message.get("finished_at")
+            or result.get("finished_at")
+            or tool_message.get("started_at")
+            or result.get("started_at")
+            or ""
+        ).strip()
+        item: dict[str, Any] = {
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "arguments_text": self._tool_invocation_hint(tool_name, arguments),
+            "output_text": result_text,
+            "output_ref": str(progress_payload.get("output_ref") or "").strip(),
+            "status": status,
+            "started_at": str(tool_message.get("started_at") or result.get("started_at") or "").strip(),
+            "finished_at": str(tool_message.get("finished_at") or result.get("finished_at") or "").strip(),
+            "timestamp": timestamp,
+            "kind": "tool_result" if status == "success" else "tool_error",
+            "source": str(source or "user").strip().lower() or "user",
+        }
+        output_preview_text = str(progress_payload.get("output_preview_text") or "").strip()
+        if output_preview_text:
+            item["output_preview_text"] = output_preview_text
+        elapsed_seconds = result.get("elapsed_seconds", tool_message.get("elapsed_seconds"))
+        if isinstance(elapsed_seconds, (int, float)):
+            item["elapsed_seconds"] = float(elapsed_seconds)
+        return item
+
     def _frontdoor_stage_state_after_tool_cycle(
         self,
         state: CeoGraphState,
@@ -905,6 +964,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> dict[str, Any]:
         stage_state = self._frontdoor_stage_state_snapshot(state)
         ordinary_calls: list[dict[str, Any]] = []
+        ordinary_results: list[dict[str, Any]] = []
+        source = "cron" if bool(state.get("cron_internal")) else "heartbeat" if bool(state.get("heartbeat_internal")) else "user"
         for payload, result in zip(list(tool_call_payloads or []), list(tool_results or []), strict=False):
             tool_name = str(payload.get("name") or "").strip()
             status = str(result.get("status") or "").strip().lower()
@@ -926,7 +987,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     )
                 continue
             ordinary_calls.append(dict(payload))
-        updated_state = self._record_frontdoor_stage_round(stage_state, tool_call_payloads=ordinary_calls)
+            ordinary_results.append(dict(result))
+        updated_state = self._record_frontdoor_stage_round(
+            stage_state,
+            tool_call_payloads=ordinary_calls,
+            tools=[
+                self._frontdoor_round_tool_entry(payload=payload, result=result, source=source)
+                for payload, result in zip(list(ordinary_calls or []), list(ordinary_results or []), strict=False)
+            ],
+        )
         return self._externalize_completed_frontdoor_stage_batches(
             session_key=str(state.get("session_key") or "").strip(),
             stage_state=updated_state,

@@ -133,6 +133,59 @@ def completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None 
     return [*externalized, *compacted]
 
 
+def repair_split_stage_tool_boundaries(
+    messages: list[dict[str, Any]],
+    *,
+    stage_tool_name: str = "submit_next_stage",
+) -> list[dict[str, Any]]:
+    normalized_stage_tool_name = str(stage_tool_name or "").strip()
+    if not normalized_stage_tool_name:
+        return [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+
+    declared_stage_call_ids: set[str] = set()
+    for message in list(messages or []):
+        if _message_role(message) != "assistant":
+            continue
+        for tool_call in list(message.get("tool_calls") or []):
+            call_id = extract_call_id((tool_call or {}).get("id"))
+            function = (tool_call or {}).get("function") or {}
+            tool_name = str(function.get("name") or (tool_call or {}).get("name") or "").strip()
+            if call_id and tool_name == normalized_stage_tool_name:
+                declared_stage_call_ids.add(call_id)
+
+    repaired: list[dict[str, Any]] = []
+    for message in list(messages or []):
+        if not isinstance(message, dict):
+            continue
+        role = _message_role(message)
+        if role == "tool":
+            tool_call_id = str(message.get("tool_call_id") or "").strip()
+            call_id = extract_call_id(tool_call_id)
+            tool_name = str(message.get("name") or "").strip()
+            if call_id and tool_name == normalized_stage_tool_name and call_id not in declared_stage_call_ids:
+                repaired.append(
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": tool_call_id or call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": normalized_stage_tool_name,
+                                    # Preserve tool-call pairing even when the original
+                                    # assistant half was lost during history rewriting.
+                                    "arguments": "{}",
+                                },
+                            }
+                        ],
+                    }
+                )
+                declared_stage_call_ids.add(call_id)
+        repaired.append(dict(message))
+    return repaired
+
+
 def current_stage_active_window(
     messages: list[dict[str, Any]],
     *,
@@ -209,6 +262,7 @@ def decompose_stage_prompt_messages(
         preserve_leading_system=preserve_leading_system,
         preserve_leading_user=preserve_leading_user,
     )
+    remainder = repair_split_stage_tool_boundaries(remainder, stage_tool_name=stage_tool_name)
     if not list(_stage_get(stage_state, "stages", []) or []):
         return {
             "prefix": prefix,
@@ -249,6 +303,7 @@ __all__ = [
     "decompose_stage_prompt_messages",
     "is_stage_context_message",
     "prepare_stage_prompt_messages",
+    "repair_split_stage_tool_boundaries",
     "retained_completed_stage_ids",
     "stage_prompt_prefix",
 ]

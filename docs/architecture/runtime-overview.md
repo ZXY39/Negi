@@ -164,6 +164,22 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - 同一用户 turn 内，`load_tool_context` 成功后，下一轮真正发给模型的函数工具列表会并入对应 hydrated tool。
 - frontdoor approval interrupt、session inflight snapshot、paused execution context 也会携带这份 hydrated state，避免“暂停前已经 load 成功，恢复后又退回 candidate-only”。
 
+### CEO Frontdoor Round Tool Ownership
+
+For the CEO/frontdoor path, `frontdoor_stage_state.stages[].rounds[].tools` is now the authoritative record of which tool calls belong to a round.
+
+- `_frontdoor_stage_state_after_tool_cycle()` writes the exact round-level tool entries at tool-cycle completion time.
+- Each stored tool entry should carry the stable identity (`tool_call_id`) together with the display-oriented fields used by snapshots and transcript summaries, such as `tool_name`, `status`, `arguments_text`, `output_preview_text` / `output_text`, `output_ref`, `timestamp`, `kind`, and `source`.
+- `tool_names` and `tool_call_ids` may still exist for compatibility or summary purposes, but maintainers should treat them as derived hints rather than a second source of truth.
+
+When `RuntimeAgentSession` rebuilds `execution_trace_summary`, the intended contract is:
+
+- If a round already has `tools`, trust `round.tools` directly.
+- If an older round only has `tool_call_ids`, backfill only by exact `tool_call_id`.
+- Matching by `tool_name` alone is a regression risk because it can steal a later same-name tool result into an earlier round.
+
+If a maintainer sees a CEO stage trace where a later `exec` appears inside an earlier round, first inspect whether the stored round was missing `tools` and whether the persisted `tool_call_ids` are stable and unique. Do not reintroduce any `tool_name`-only round fill path in session snapshot assembly.
+
 维护上一个容易误判的点是：动态 skill/tool 提示块里虽然会出现“如何读取 skill 正文”或“如何读取 tool 契约”的说明，但这些说明不能覆盖 `ceo_frontdoor.md` 里的 stage-first 协议。当前前门的权威顺序是：
 
 1. 先看静态协议是否要求“无活动阶段时必须先 `submit_next_stage`”

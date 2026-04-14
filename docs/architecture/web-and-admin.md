@@ -73,6 +73,18 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - The next outbound user message after pause must start a new round.
 - The paused round's user message, execution trace, stage state, tool calls, and compression state are preserved in transcript and snapshot context so the next round can inherit them without rewriting the original user text.
 
+### CEO Stage Trace Round Rendering Contract
+
+- The browser CEO stage view should treat `execution_trace_summary.stages[].rounds[].tools` as the authoritative round-level tool list.
+- Refreshing the page or reopening a completed session should reproduce the same round grouping that live inflight snapshots used; the frontend should not try to regroup same-name tools on its own.
+- `tool_names` and `tool_call_ids` may still be present for compatibility, but they are summary metadata rather than a second grouping algorithm.
+
+The backend contract behind that UI behavior is:
+
+- CEO/frontdoor runtime writes precise round tool entries into `frontdoor_stage_state.stages[].rounds[].tools` when a tool cycle finishes.
+- Session snapshot assembly trusts stored `round.tools` first and only backfills legacy rounds by exact `tool_call_id`.
+- A `tool_name`-only fallback is considered a regression because it can make a later same-name tool appear inside an earlier stage round after refresh or transcript reload.
+
 ### Heartbeat Compatibility
 
 - Heartbeat turns count as active session work for the composer button and queueing logic.

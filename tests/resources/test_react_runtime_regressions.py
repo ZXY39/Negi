@@ -17,6 +17,7 @@ from g3ku.resources.loader import ManifestBackedTool
 from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
 from g3ku.resources.registry import ResourceRegistry
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
+from g3ku.runtime.tool_history import analyze_tool_call_history
 from g3ku.runtime.tool_watchdog import ToolExecutionManager
 from main.errors import TaskPausedError
 from main.monitoring.log_service import (
@@ -2359,6 +2360,162 @@ def test_prepare_messages_is_idempotent_for_compacted_stage_prompt() -> None:
     prepared_again = loop._prepare_messages(prepared, runtime_context={"task_id": "task-1", "node_id": "node-1"})
 
     assert prepared_again == prepared
+
+
+def test_prepare_messages_repairs_split_submit_next_stage_boundary_in_retained_window() -> None:
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    loop._log_service._store._node = SimpleNamespace(
+        metadata={
+            "execution_stages": {
+                "active_stage_id": "stage-7",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "stage-1",
+                        "stage_index": 1,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": _EXECUTION_STAGE_MODE_SELF,
+                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
+                        "stage_goal": "inspect stage one",
+                        "completed_stage_summary": "finished stage one",
+                        "key_refs": [],
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 1,
+                    },
+                    {
+                        "stage_id": "stage-2",
+                        "stage_index": 2,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": _EXECUTION_STAGE_MODE_SELF,
+                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
+                        "stage_goal": "inspect stage two",
+                        "completed_stage_summary": "finished stage two",
+                        "key_refs": [],
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 1,
+                    },
+                    {
+                        "stage_id": "stage-3",
+                        "stage_index": 3,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": _EXECUTION_STAGE_MODE_SELF,
+                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
+                        "stage_goal": "inspect stage three",
+                        "completed_stage_summary": "finished stage three",
+                        "key_refs": [],
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 1,
+                    },
+                    {
+                        "stage_id": "stage-4",
+                        "stage_index": 4,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": _EXECUTION_STAGE_MODE_SELF,
+                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
+                        "stage_goal": "inspect stage four",
+                        "completed_stage_summary": "finished stage four",
+                        "key_refs": [],
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 1,
+                    },
+                    {
+                        "stage_id": "stage-5",
+                        "stage_index": 5,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": _EXECUTION_STAGE_MODE_SELF,
+                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
+                        "stage_goal": "inspect stage five",
+                        "completed_stage_summary": "finished stage five",
+                        "key_refs": [],
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 1,
+                    },
+                    {
+                        "stage_id": "stage-6",
+                        "stage_index": 6,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": _EXECUTION_STAGE_MODE_SELF,
+                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
+                        "stage_goal": "inspect stage six",
+                        "completed_stage_summary": "finished stage six",
+                        "key_refs": [],
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 1,
+                    },
+                    {
+                        "stage_id": "stage-7",
+                        "stage_index": 7,
+                        "stage_kind": "normal",
+                        "system_generated": False,
+                        "mode": _EXECUTION_STAGE_MODE_SELF,
+                        "status": _EXECUTION_STAGE_STATUS_ACTIVE,
+                        "stage_goal": "inspect stage seven",
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 0,
+                    },
+                ],
+            }
+        }
+    )
+    original = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-4",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-4", "content": '{"ok": true}'},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-5",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-5", "content": '{"ok": true}'},
+        # Reproduce the broken history shape seen in task:9001280b6cbe:
+        # the retained stage-6 window only keeps the tool half.
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-6", "content": '{"ok": true}'},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-7",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-7", "content": '{"ok": true}'},
+    ]
+
+    prepared = loop._prepare_messages(original, runtime_context={"task_id": "task-1", "node_id": "node-1"})
+    history = analyze_tool_call_history(prepared)
+
+    assert history.orphan_tool_result_ids == []
+    assert any(
+        str(item.get("role") or "") == "assistant"
+        and any(str((tool_call or {}).get("id") or "").startswith("call-stage-6") for tool_call in list(item.get("tool_calls") or []))
+        for item in prepared
+    )
 
 
 @pytest.mark.asyncio

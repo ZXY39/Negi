@@ -687,14 +687,14 @@ class RuntimeAgentSession:
         if self._has_renderable_frontdoor_stage_state():
             snapshot = copy.deepcopy(stage_state)
             interaction_flow = self._interaction_flow_snapshot()
-            ordered_tools: list[dict[str, Any]] = []
-            tools_by_key: dict[str, dict[str, Any]] = {}
-            tools_by_call_id: dict[str, list[dict[str, Any]]] = {}
-            tools_by_name: dict[str, list[dict[str, Any]]] = {}
+            tools_by_call_id: dict[str, dict[str, Any]] = {}
             for item in interaction_flow:
+                call_id = str(item.get("tool_call_id") or "").strip()
+                if not call_id:
+                    continue
                 tool_item = {
                     "tool_name": str(item.get("tool_name") or "tool").strip() or "tool",
-                    "tool_call_id": str(item.get("tool_call_id") or "").strip(),
+                    "tool_call_id": call_id,
                     "arguments_text": str(item.get("arguments_text") or item.get("arguments_preview") or ""),
                     "output_text": str(item.get("output_text") or ""),
                     "output_preview_text": str(item.get("output_preview_text") or item.get("output_preview") or ""),
@@ -722,14 +722,9 @@ class RuntimeAgentSession:
                 }
                 if isinstance(item.get("elapsed_seconds"), (int, float)):
                     tool_item["elapsed_seconds"] = float(item["elapsed_seconds"])
-                key = str(tool_item.get("tool_call_id") or tool_item.get("tool_name") or "").strip()
-                if not key:
-                    continue
-                current = tools_by_key.get(key)
+                current = tools_by_call_id.get(call_id)
                 if current is None:
-                    current = tool_item
-                    tools_by_key[key] = current
-                    ordered_tools.append(current)
+                    tools_by_call_id[call_id] = tool_item
                     continue
                 for field in (
                     "tool_name",
@@ -761,14 +756,7 @@ class RuntimeAgentSession:
                         current[field] = value
                 if "elapsed_seconds" in tool_item:
                     current["elapsed_seconds"] = tool_item["elapsed_seconds"]
-            for tool_item in ordered_tools:
-                call_id = str(tool_item.get("tool_call_id") or "").strip()
-                tool_name = str(tool_item.get("tool_name") or "").strip()
-                if call_id:
-                    tools_by_call_id.setdefault(call_id, []).append(tool_item)
-                if tool_name:
-                    tools_by_name.setdefault(tool_name, []).append(tool_item)
-            claimed_keys: set[str] = set()
+            claimed_call_ids: set[str] = set()
             for stage in list(snapshot.get("stages") or []):
                 if not isinstance(stage, dict):
                     continue
@@ -778,44 +766,20 @@ class RuntimeAgentSession:
                     raw_tools = [dict(item) for item in list(round_item.get("tools") or []) if isinstance(item, dict)]
                     if not raw_tools:
                         selected: list[dict[str, Any]] = []
-                        seen_keys: set[str] = set()
                         round_call_ids = [
                             str(raw or "").strip()
                             for raw in list(round_item.get("tool_call_ids") or [])
                             if str(raw or "").strip()
                         ]
-                        round_tool_names = [
-                            str(raw or "").strip()
-                            for raw in list(round_item.get("tool_names") or [])
-                            if str(raw or "").strip()
-                        ]
                         for call_id in round_call_ids:
-                            for item in list(tools_by_call_id.get(call_id) or []):
-                                key = str(item.get("tool_call_id") or item.get("tool_name") or "").strip()
-                                if not key or key in claimed_keys:
-                                    continue
-                                seen_keys.add(key)
-                                claimed_keys.add(key)
-                                selected.append({"_key": key, **dict(item)})
-                                break
-                        for tool_name in round_tool_names:
-                            chosen: dict[str, Any] | None = None
-                            for item in list(tools_by_name.get(tool_name) or []):
-                                key = str(item.get("tool_call_id") or item.get("tool_name") or "").strip()
-                                if not key or key in claimed_keys:
-                                    continue
-                                chosen = {"_key": key, **dict(item)}
-                                break
-                            if chosen is None:
+                            if call_id in claimed_call_ids:
                                 continue
-                            key = str(chosen.get("_key") or "").strip()
-                            seen_keys.add(key)
-                            claimed_keys.add(key)
-                            selected.append(chosen)
-                        raw_tools = [
-                            {key: value for key, value in item.items() if key != "_key"}
-                            for item in selected
-                        ]
+                            matched = tools_by_call_id.get(call_id)
+                            if not isinstance(matched, dict):
+                                continue
+                            claimed_call_ids.add(call_id)
+                            selected.append(dict(matched))
+                        raw_tools = selected
                     compact_tools = [
                         compact_tool_step_for_summary(tool)
                         for tool in raw_tools
