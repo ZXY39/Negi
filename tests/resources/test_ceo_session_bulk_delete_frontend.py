@@ -80,8 +80,7 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     assert 'id="skill-save-btn"' not in skill_html
     assert skill_html.index('id="skill-risk-filter"') < skill_html.index('id="skill-status-filter"')
     assert skill_html.index('id="skill-status-filter"') < skill_html.index('id="skill-search-input"')
-    assert '>风险</option>' in skill_html
-    assert '>状态</option>' in skill_html
+    assert skill_html.count('>全部</option>') == 2
 
     tool_section = re.search(r'<section id="view-tools".*?</section>', html, flags=re.DOTALL)
     assert tool_section is not None
@@ -89,8 +88,7 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     assert 'id="tool-save-btn"' not in tool_html
     assert tool_html.index('id="tool-risk-filter"') < tool_html.index('id="tool-status-filter"')
     assert tool_html.index('id="tool-status-filter"') < tool_html.index('id="tool-search-input"')
-    assert '>风险</option>' in tool_html
-    assert '>状态</option>' in tool_html
+    assert tool_html.count('>全部</option>') == 2
 
     model_section = re.search(r'<section id="view-models".*?</section>', html, flags=re.DOTALL)
     assert model_section is not None

@@ -2350,7 +2350,11 @@ function canMutateCeoSessions() {
 }
 
 function canCreateCeoSessions() {
-    return !(S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionBusy || S.ceoSessionCatalogBusy);
+    return !(S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionCatalogBusy);
+}
+
+function canSelectCeoBulkSessions() {
+    return !(S.ceoPauseBusy || S.ceoUploadBusy || S.ceoSessionCatalogBusy);
 }
 
 function canActivateCeoSessions() {
@@ -2401,20 +2405,21 @@ function setCeoSessionMenuOpen(sessionId, open, { restoreFocus = false } = {}) {
 function syncCeoSessionActions() {
     const mutationDisabled = !canMutateCeoSessions();
     const creationDisabled = !canCreateCeoSessions();
+    const bulkSelectionDisabled = !canSelectCeoBulkSessions();
     const activationDisabled = !canActivateCeoSessions();
     const bulkIds = visibleCeoBulkSelectableSessionIds();
     const allSelected = bulkIds.length > 0 && bulkIds.every((sessionId) => isCeoBulkSessionSelected(sessionId));
     if (U.ceoNewSession) U.ceoNewSession.disabled = creationDisabled;
     if (U.ceoSessionBulkToggle) {
         U.ceoSessionBulkToggle.hidden = !S.ceoSessionPanelExpanded;
-        U.ceoSessionBulkToggle.disabled = mutationDisabled && !S.ceoBulkMode;
+        U.ceoSessionBulkToggle.disabled = bulkSelectionDisabled && !S.ceoBulkMode;
         U.ceoSessionBulkToggle.textContent = S.ceoBulkMode ? "取消" : "多选";
         U.ceoSessionBulkToggle.setAttribute("aria-pressed", S.ceoBulkMode ? "true" : "false");
     }
     if (U.ceoSessionBulkActions) U.ceoSessionBulkActions.hidden = !(S.ceoSessionPanelExpanded && S.ceoBulkMode);
     if (U.ceoSessionBulkDelete) U.ceoSessionBulkDelete.disabled = mutationDisabled || S.ceoSelectedSessionIds.size <= 0;
     if (U.ceoSessionBulkSelectAll) {
-        U.ceoSessionBulkSelectAll.disabled = mutationDisabled || bulkIds.length <= 0;
+        U.ceoSessionBulkSelectAll.disabled = bulkSelectionDisabled || bulkIds.length <= 0;
         U.ceoSessionBulkSelectAll.setAttribute("aria-pressed", allSelected ? "true" : "false");
     }
     U.ceoSessionList?.querySelectorAll("[data-session-activate]")?.forEach((button) => {
@@ -2422,7 +2427,7 @@ function syncCeoSessionActions() {
         button.disabled = S.ceoBulkMode ? false : activationDisabled || targetId === activeSessionId();
     });
     U.ceoSessionList?.querySelectorAll("[data-session-bulk-checkbox]")?.forEach((input) => {
-        input.disabled = mutationDisabled;
+        input.disabled = bulkSelectionDisabled;
     });
     U.ceoSessionList?.querySelectorAll("[data-session-menu-toggle], [data-session-rename], [data-session-delete]")?.forEach((button) => {
         button.disabled = mutationDisabled;

@@ -531,7 +531,11 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     if is_channel_session:
-        clear_web_ceo_session_artifacts(session_id=session_key, task_service=service)
+        delete_web_ceo_session_artifacts(
+            session_manager=session_manager,
+            session_id=session_key,
+            task_service=service,
+        )
     else:
         delete_web_ceo_session_artifacts(
             session_manager=session_manager,

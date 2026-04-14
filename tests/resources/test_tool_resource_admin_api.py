@@ -1981,7 +1981,7 @@ def test_ceo_session_delete_accepts_inflight_only_session(tmp_path: Path, monkey
     assert not inflight_path.exists()
 
 
-def _build_channel_ceo_session_delete_client(tmp_path: Path, monkeypatch):
+def _build_channel_ceo_session_delete_client(tmp_path: Path, monkeypatch, *, persist_channel_session: bool = False):
     _mock_ceo_catalog_config(monkeypatch)
 
     from g3ku.runtime.api import ceo_sessions
@@ -2057,7 +2057,44 @@ def _build_channel_ceo_session_delete_client(tmp_path: Path, monkeypatch):
     current_path.parent.mkdir(parents=True, exist_ok=True)
     current_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
     channel_id = 'china:qqbot:default:dm:user-42'
-    manager = _SessionManager([current], {current.key: current_path}, [channel_id])
+    channel_session = Session(
+        key=channel_id,
+        metadata={'title': 'QQ Channel'},
+        messages=[
+            {'role': 'user', 'content': 'old channel question'},
+            {'role': 'assistant', 'content': 'old channel answer'},
+        ],
+    )
+    channel_path = tmp_path / 'sessions' / 'china_qqbot_default_dm_user-42.jsonl'
+    if persist_channel_session:
+        channel_path.write_text(
+            '\n'.join(
+                [
+                    json.dumps(
+                        {
+                            '_type': 'metadata',
+                            'key': channel_id,
+                            'created_at': datetime.now().isoformat(),
+                            'updated_at': datetime.now().isoformat(),
+                            'metadata': channel_session.metadata,
+                            'last_user_turn_at': None,
+                            'commit_turn_counter': 0,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(channel_session.messages[0], ensure_ascii=False),
+                    json.dumps(channel_session.messages[1], ensure_ascii=False),
+                ]
+            )
+            + '\n',
+            encoding='utf-8',
+        )
+        sessions = [current, channel_session]
+        paths = {current.key: current_path, channel_id: channel_path}
+    else:
+        sessions = [current]
+        paths = {current.key: current_path, channel_id: channel_path}
+    manager = _SessionManager(sessions, paths, [channel_id])
     captured: dict[str, str] = {}
 
     monkeypatch.setattr(web_ceo_sessions, 'workspace_path', lambda: tmp_path)
@@ -2120,32 +2157,42 @@ def _build_channel_ceo_session_delete_client(tmp_path: Path, monkeypatch):
     client = TestClient(app)
     inflight_path = web_ceo_sessions.inflight_snapshot_path_for_session(channel_id, create=False)
     paused_path = web_ceo_sessions.paused_execution_context_path_for_session(channel_id, create=False)
-    return client, current, channel_id, captured, inflight_path, paused_path, upload_dir
+    return SimpleNamespace(
+        client=client,
+        current=current,
+        channel_id=channel_id,
+        captured=captured,
+        inflight_path=inflight_path,
+        paused_path=paused_path,
+        upload_dir=upload_dir,
+        session_manager=manager,
+        channel_path=channel_path,
+    )
 
 
 def test_channel_ceo_session_delete_check_returns_clear_payload(tmp_path: Path, monkeypatch):
-    client, _current, channel_id, _captured, inflight_path, paused_path, upload_dir = _build_channel_ceo_session_delete_client(tmp_path, monkeypatch)
+    state = _build_channel_ceo_session_delete_client(tmp_path, monkeypatch)
 
-    response = client.get(f'/api/ceo/sessions/{channel_id}/delete-check')
+    response = state.client.get(f'/api/ceo/sessions/{state.channel_id}/delete-check')
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload['session_id'] == channel_id
+    assert payload['session_id'] == state.channel_id
     assert payload['can_delete'] is True
     assert payload['related_tasks']['deletable'] == 1
     assert [item['task_id'] for item in payload['usage']['completed_tasks']] == ['task:channel-done']
     assert [item['task_id'] for item in payload['usage']['in_progress_tasks']] == ['task:channel-running']
-    assert inflight_path.exists()
-    assert paused_path.exists()
-    assert upload_dir.exists()
+    assert state.inflight_path.exists()
+    assert state.paused_path.exists()
+    assert state.upload_dir.exists()
 
 
 def test_channel_ceo_session_delete_clears_context_without_deleting_channel_entry(tmp_path: Path, monkeypatch):
-    client, _current, channel_id, captured, inflight_path, paused_path, upload_dir = _build_channel_ceo_session_delete_client(tmp_path, monkeypatch)
+    state = _build_channel_ceo_session_delete_client(tmp_path, monkeypatch)
 
-    response = client.request(
+    response = state.client.request(
         'DELETE',
-        f'/api/ceo/sessions/{channel_id}',
+        f'/api/ceo/sessions/{state.channel_id}',
         json={'delete_task_records': True},
     )
 
@@ -2153,20 +2200,37 @@ def test_channel_ceo_session_delete_clears_context_without_deleting_channel_entr
     payload = response.json()
     assert payload['deleted'] is False
     assert payload['cleared'] is True
-    assert payload['session_id'] == channel_id
+    assert payload['session_id'] == state.channel_id
     assert payload['deleted_task_count'] == 2
-    assert payload['active_session_id'] == channel_id
+    assert payload['active_session_id'] == state.channel_id
     channel_items = payload['channel_groups'][0]['items']
-    assert [item['session_id'] for item in channel_items] == [channel_id]
-    assert captured == {
-        'heartbeat_cleared': channel_id,
-        'deleted_task_session': channel_id,
-        'removed_session': channel_id,
-        'cancelled_session': channel_id,
+    assert [item['session_id'] for item in channel_items] == [state.channel_id]
+    assert state.captured == {
+        'heartbeat_cleared': state.channel_id,
+        'deleted_task_session': state.channel_id,
+        'removed_session': state.channel_id,
+        'cancelled_session': state.channel_id,
     }
-    assert not inflight_path.exists()
-    assert not paused_path.exists()
-    assert not upload_dir.exists()
+    assert not state.inflight_path.exists()
+    assert not state.paused_path.exists()
+    assert not state.upload_dir.exists()
+
+
+def test_channel_ceo_session_delete_removes_persisted_transcript_and_cached_session(tmp_path: Path, monkeypatch):
+    state = _build_channel_ceo_session_delete_client(tmp_path, monkeypatch, persist_channel_session=True)
+
+    assert state.channel_path.exists()
+    assert state.channel_id in state.session_manager._sessions
+
+    response = state.client.request(
+        'DELETE',
+        f'/api/ceo/sessions/{state.channel_id}',
+        json={'delete_task_records': False},
+    )
+
+    assert response.status_code == 200
+    assert not state.channel_path.exists()
+    assert state.channel_id not in state.session_manager._sessions
 
 
 @pytest.mark.asyncio

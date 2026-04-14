@@ -278,6 +278,12 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - `main/storage/artifact_store.py`
 - `main/governance/`
 
+关于节点运行帧还要额外记住一个新的维护语义：
+
+- `task_runtime_messages` / `runtime-frame-messages:{node_id}` artifact 不再只是当前 messages 列表；它现在还会在同一个 artifact 里累计 `callable_tool_snapshots`。
+- 每条快照代表一次 `before_model` 轮次下，模型真正看到的 callable/candidate/visible tool 截面，包括 `callable_tool_names`、`candidate_tool_names`、`model_visible_tool_names`、`hydrated_executor_names` 和选择 trace。
+- 因此当维护者排查“为什么这一轮模型明明 load 过工具却没法调用”时，先看这个 artifact 里的最近一条快照，再去看 transcript 或 stage trace；它比只看最终 messages 更能说明当轮可调用集到底是什么。
+
 ## 7. 新人阅读顺序建议
 
 建议按下面顺序读运行时源码：

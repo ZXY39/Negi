@@ -79,14 +79,13 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { S, setCeoSessionTab, renderCeoSessionCard, toggleCeoBulkSelectAll, buildCeoBulkDeleteSummary, requestDeleteSelectedCeoSessions, requestDeleteCeoSession, requestProjectExit };`,
+        `${APP_CODE}\nthis.__testExports = { S, U, canCreateCeoSessions, syncCeoSessionActions, setCeoSessionTab, renderCeoSessionCard, toggleCeoBulkSelectAll, buildCeoBulkDeleteSummary, requestDeleteSelectedCeoSessions, requestDeleteCeoSession, requestProjectExit };`,
         context
     );
     vm.runInContext(
         `
         renderCeoSessions = () => {};
         syncCeoPrimaryButton = () => {};
-        syncCeoSessionActions = () => {};
         syncCeoComposerReadonlyState = () => {};
         syncCeoAttachButton = () => {};
         syncCeoCompressionToast = () => {};
@@ -120,6 +119,79 @@ test("toggleCeoBulkSelectAll scopes selection to the current tab", () => {
     toggleCeoBulkSelectAll();
 
     assert.deepEqual([...S.ceoSelectedSessionIds], ["web:1", "web:2"]);
+});
+
+test("canCreateCeoSessions stays enabled during session switch busy", () => {
+    const { S, canCreateCeoSessions } = loadApp();
+
+    S.ceoPauseBusy = false;
+    S.ceoUploadBusy = false;
+    S.ceoSessionCatalogBusy = false;
+    S.ceoSessionBusy = true;
+
+    assert.equal(canCreateCeoSessions(), true);
+});
+
+test("syncCeoSessionActions keeps bulk selection controls enabled during session switch busy", () => {
+    const { S, U, syncCeoSessionActions, __makeSet } = loadApp();
+
+    const bulkToggle = {
+        hidden: false,
+        disabled: true,
+        textContent: "",
+        setAttribute() {},
+    };
+    const bulkSelectAll = {
+        disabled: true,
+        setAttribute() {},
+    };
+    const bulkDelete = {
+        disabled: false,
+    };
+    const newSession = {
+        disabled: true,
+    };
+    const bulkCheckboxes = [{ disabled: true }, { disabled: true }];
+    const sessionList = {
+        querySelectorAll(selector) {
+            if (selector === "[data-session-bulk-checkbox]") {
+                return bulkCheckboxes;
+            }
+            return [];
+        },
+    };
+
+    U.ceoNewSession = newSession;
+    U.ceoSessionBulkToggle = bulkToggle;
+    U.ceoSessionBulkActions = { hidden: true };
+    U.ceoSessionBulkDelete = bulkDelete;
+    U.ceoSessionBulkSelectAll = bulkSelectAll;
+    U.ceoSessionList = sessionList;
+    U.ceoSessionTabLocal = null;
+    U.ceoSessionTabChannel = null;
+    U.ceoSessionTabs = null;
+
+    S.ceoPauseBusy = false;
+    S.ceoUploadBusy = false;
+    S.ceoSessionCatalogBusy = false;
+    S.ceoSessionBusy = true;
+    S.ceoSessionPanelExpanded = true;
+    S.ceoBulkMode = false;
+    S.ceoSelectedSessionIds = __makeSet();
+    S.ceoSessionTab = "local";
+    S.ceoLocalSessions = [
+        { session_id: "web:1", title: "Local 1" },
+        { session_id: "web:2", title: "Local 2" },
+    ];
+    S.ceoChannelGroups = [];
+
+    syncCeoSessionActions();
+
+    assert.equal(newSession.disabled, false);
+    assert.equal(bulkToggle.disabled, false);
+    assert.equal(bulkSelectAll.disabled, false);
+    assert.equal(bulkDelete.disabled, true);
+    assert.deepEqual(bulkCheckboxes.map((item) => item.disabled), [false, false]);
 });
 
 test("requestDeleteCeoSession hides task checkbox when there are no related task records", async () => {

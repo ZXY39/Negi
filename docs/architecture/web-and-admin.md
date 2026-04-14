@@ -91,6 +91,42 @@ The backend contract behind that UI behavior is:
 - Queued follow-ups should not interrupt heartbeat execution.
 - Once heartbeat finishes and the session becomes dispatchable again, queued follow-ups may begin draining automatically.
 
+### CEO Session List Interaction Contract
+
+- The session list distinguishes between "session switch is still settling" and "session catalog is being mutated".
+- Frontend `ceoSessionBusy` means the active-session switch is still waiting for the new CEO websocket snapshot / connection state to settle. This is a session-view readiness flag, not a general catalog lock.
+- Frontend `ceoSessionCatalogBusy` means the session catalog itself is being refreshed or mutated by create / rename / delete / bulk-delete checks.
+
+The intended operator-visible behavior is:
+
+- During `ceoSessionBusy` alone, the left rail should still allow `new session` and bulk-selection entry/selection so operators do not get trapped in a fully disabled sidebar after switching sessions.
+- During `ceoSessionBusy`, composer send/pause and any action that depends on the active session being fully ready may still remain blocked.
+- Destructive or catalog-writing actions such as rename, delete, and bulk delete should continue to key off the stricter mutation-safe state rather than the relaxed selection state.
+- During `ceoSessionCatalogBusy`, pause requests, or attachment uploads, the left rail may still disable new-session creation and bulk-selection controls because those operations are competing with in-flight catalog or payload changes.
+
+If an operator reports "switching sessions makes the whole Leader sidebar unusable", inspect these frontend flags separately before changing button rules:
+
+1. `ceoSessionBusy`
+2. `ceoSessionCatalogBusy`
+3. `ceoPauseBusy`
+4. `ceoUploadBusy`
+
+Do not treat `ceoSessionBusy` as equivalent to "all session-list mutations must be locked". That coupling is a UX regression for the Leader session rail.
+
+### Channel Session Clear Contract
+
+- In the CEO session UI, deleting a local session and deleting a channel session are intentionally different operations.
+- Deleting a local session removes the session record itself. Deleting a channel session is a clear operation: the channel/account entry remains available, but the next reopened conversation must start from empty session context.
+- Backend clear handling for channel sessions must remove the persisted `SessionManager` transcript for that `china:*` session key, invalidate any in-memory cached session object, and clear the same side artifacts that local-session deletion clears for that session id, including inflight snapshots, paused execution context, uploads, and frontdoor stage-archive artifacts.
+- For DM channel rows, the catalog entry may still remain visible after clear because it is synthesized from enabled channel-account configuration rather than from transcript persistence alone.
+
+If an operator reports “the channel conversation was deleted but old context came back,” inspect these layers in order:
+
+1. `DELETE /api/ceo/sessions/{session_id}` response payload for `cleared=true`
+2. persisted `sessions/china_*.jsonl` transcript files and in-memory `SessionManager` cache
+3. inflight / paused CEO session artifacts
+4. frontend snapshot cache only after the backend-owned state is confirmed cleared
+
 ### Heartbeat/Cron Visibility Versus Prompt Inheritance
 
 - Browser-side CEO timeline rendering and inflight bubbles are allowed to show heartbeat / cron 的原始处理流程。

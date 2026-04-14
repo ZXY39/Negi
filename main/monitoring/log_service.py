@@ -311,8 +311,150 @@ class TaskLogService:
             'partial_child_results': [],
             'tool_calls': [],
             'child_pipelines': [],
+            'callable_tool_snapshots': [],
             'last_error': '',
         }
+
+    @staticmethod
+    def _normalized_name_list(items: Any) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for item in list(items or []):
+            normalized = str(item or '').strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        return ordered
+
+    @classmethod
+    def _runtime_message_payload(cls, messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+        for message in list(messages or []):
+            if str(message.get('role') or '').strip().lower() != 'user':
+                continue
+            raw_content = message.get('content')
+            if not isinstance(raw_content, str):
+                continue
+            try:
+                payload = json.loads(raw_content)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return None
+
+    @classmethod
+    def _sanitize_callable_tool_snapshot(cls, snapshot: Any, *, default_index: int = 0) -> dict[str, Any] | None:
+        if not isinstance(snapshot, dict):
+            return None
+        return {
+            'snapshot_index': max(1, int(snapshot.get('snapshot_index') or default_index or 1)),
+            'captured_at': str(snapshot.get('captured_at') or ''),
+            'phase': str(snapshot.get('phase') or ''),
+            'stage_mode': str(snapshot.get('stage_mode') or ''),
+            'stage_status': str(snapshot.get('stage_status') or ''),
+            'stage_goal': str(snapshot.get('stage_goal') or ''),
+            'active_round_id': str(snapshot.get('active_round_id') or ''),
+            'active_round_tool_call_ids': cls._normalized_name_list(snapshot.get('active_round_tool_call_ids') or []),
+            'messages_count': max(0, int(snapshot.get('messages_count') or 0)),
+            'callable_tool_names': cls._normalized_name_list(snapshot.get('callable_tool_names') or []),
+            'candidate_tool_names': cls._normalized_name_list(
+                snapshot.get('candidate_tool_names')
+                or snapshot.get('candidate_tools')
+                or []
+            ),
+            'model_visible_tool_names': cls._normalized_name_list(snapshot.get('model_visible_tool_names') or []),
+            'hydrated_executor_names': cls._normalized_name_list(snapshot.get('hydrated_executor_names') or []),
+            'lightweight_tool_ids': cls._normalized_name_list(snapshot.get('lightweight_tool_ids') or []),
+            'model_visible_tool_selection_trace': dict(snapshot.get('model_visible_tool_selection_trace') or {}),
+        }
+
+    @classmethod
+    def _sanitize_callable_tool_snapshots(cls, snapshots: Any) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for index, item in enumerate(list(snapshots or []), start=1):
+            snapshot = cls._sanitize_callable_tool_snapshot(item, default_index=index)
+            if snapshot is None:
+                continue
+            normalized.append(snapshot)
+        return normalized
+
+    @staticmethod
+    def _callable_tool_snapshot_fingerprint(snapshot: dict[str, Any]) -> str:
+        comparable = dict(snapshot or {})
+        comparable.pop('snapshot_index', None)
+        comparable.pop('captured_at', None)
+        return json.dumps(comparable, ensure_ascii=False, sort_keys=True)
+
+    @classmethod
+    def _build_callable_tool_snapshot(
+        cls,
+        *,
+        frame: dict[str, Any],
+        messages: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if str(frame.get('phase') or '').strip() != 'before_model':
+            return None
+        message_payload = cls._runtime_message_payload(messages) or {}
+        snapshot = cls._sanitize_callable_tool_snapshot(
+            {
+                'phase': str(frame.get('phase') or ''),
+                'stage_mode': str(frame.get('stage_mode') or ''),
+                'stage_status': str(frame.get('stage_status') or ''),
+                'stage_goal': str(frame.get('stage_goal') or ''),
+                'active_round_id': str(frame.get('active_round_id') or ''),
+                'active_round_tool_call_ids': list(frame.get('active_round_tool_call_ids') or []),
+                'messages_count': len(list(messages or [])),
+                'callable_tool_names': list(message_payload.get('callable_tool_names') or []),
+                'candidate_tool_names': list(
+                    message_payload.get('candidate_tool_names')
+                    or message_payload.get('candidate_tools')
+                    or []
+                ),
+                'model_visible_tool_names': list(frame.get('model_visible_tool_names') or []),
+                'hydrated_executor_names': list(frame.get('hydrated_executor_names') or []),
+                'lightweight_tool_ids': list(frame.get('lightweight_tool_ids') or []),
+                'model_visible_tool_selection_trace': dict(frame.get('model_visible_tool_selection_trace') or {}),
+            }
+        )
+        if snapshot is None:
+            return None
+        if not any(
+            [
+                snapshot['callable_tool_names'],
+                snapshot['candidate_tool_names'],
+                snapshot['model_visible_tool_names'],
+                snapshot['hydrated_executor_names'],
+                snapshot['lightweight_tool_ids'],
+            ]
+        ):
+            return None
+        return snapshot
+
+    @classmethod
+    def _append_callable_tool_snapshot(
+        cls,
+        *,
+        existing_snapshots: Any,
+        frame: dict[str, Any],
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        normalized = cls._sanitize_callable_tool_snapshots(existing_snapshots)
+        current = cls._build_callable_tool_snapshot(frame=frame, messages=messages)
+        if current is None:
+            return normalized
+        if normalized:
+            previous = normalized[-1]
+            if cls._callable_tool_snapshot_fingerprint(previous) == cls._callable_tool_snapshot_fingerprint(current):
+                return normalized
+        return [
+            *normalized,
+            {
+                **current,
+                'snapshot_index': len(normalized) + 1,
+                'captured_at': _precise_now_iso(),
+            },
+        ]
 
     @classmethod
     def _frame_has_active_children(cls, frame: dict[str, Any]) -> bool:
@@ -2819,8 +2961,21 @@ class TaskLogService:
         payload = dict(frame or {})
         node_id = str(payload.get('node_id') or '').strip()
         messages = [dict(item) for item in list(payload.get('messages') or []) if isinstance(item, dict)]
-        if messages:
-            serialized = json.dumps(messages, ensure_ascii=False, indent=2)
+        callable_tool_snapshots = self._append_callable_tool_snapshot(
+            existing_snapshots=payload.get('callable_tool_snapshots') or [],
+            frame=payload,
+            messages=messages,
+        )
+        payload['callable_tool_snapshots'] = callable_tool_snapshots
+        if messages or callable_tool_snapshots:
+            serialized = json.dumps(
+                {
+                    'messages': messages,
+                    'callable_tool_snapshots': callable_tool_snapshots,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
             _summary, ref = self._summarize_content(
                 serialized,
                 task_id=task.task_id,
@@ -2878,6 +3033,7 @@ class TaskLogService:
                 'partial_child_results': [dict(item) for item in list(next_frame.get('partial_child_results') or []) if isinstance(item, dict)],
                 'tool_calls': [dict(item) for item in list(next_frame.get('tool_calls') or []) if isinstance(item, dict)],
                 'child_pipelines': [dict(item) for item in list(next_frame.get('child_pipelines') or []) if isinstance(item, dict)],
+                'callable_tool_snapshots': self._sanitize_callable_tool_snapshots(next_frame.get('callable_tool_snapshots') or []),
                 'model_visible_tool_names': [
                     str(item or '').strip()
                     for item in list(next_frame.get('model_visible_tool_names') or [])
@@ -2919,6 +3075,7 @@ class TaskLogService:
     def _hydrate_runtime_frame_record(self, record: TaskProjectionRuntimeFrameRecord) -> dict[str, Any]:
         payload = dict(record.payload or {})
         messages: list[dict[str, Any]] = []
+        callable_tool_snapshots: list[dict[str, Any]] = self._sanitize_callable_tool_snapshots(payload.get('callable_tool_snapshots') or [])
         ref = str(payload.get('messages_ref') or '').strip()
         if ref:
             text = self._resolve_content_ref(ref)
@@ -2929,6 +3086,11 @@ class TaskLogService:
                     parsed = []
                 if isinstance(parsed, list):
                     messages = [item for item in parsed if isinstance(item, dict)]
+                elif isinstance(parsed, dict):
+                    messages = [dict(item) for item in list(parsed.get('messages') or []) if isinstance(item, dict)]
+                    callable_tool_snapshots = self._sanitize_callable_tool_snapshots(
+                        parsed.get('callable_tool_snapshots') or callable_tool_snapshots
+                    )
         return {
             'node_id': record.node_id,
             'depth': int(record.depth or 0),
@@ -2953,6 +3115,7 @@ class TaskLogService:
             'partial_child_results': [dict(item) for item in list(payload.get('partial_child_results') or []) if isinstance(item, dict)],
             'tool_calls': [dict(item) for item in list(payload.get('tool_calls') or []) if isinstance(item, dict)],
             'child_pipelines': [dict(item) for item in list(payload.get('child_pipelines') or []) if isinstance(item, dict)],
+            'callable_tool_snapshots': callable_tool_snapshots,
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])
@@ -3478,6 +3641,9 @@ class TaskLogService:
             'partial_child_results': [dict(item) for item in list(payload.get('partial_child_results') or []) if isinstance(item, dict)],
             'tool_calls': [dict(item) for item in list(payload.get('tool_calls') or []) if isinstance(item, dict)],
             'child_pipelines': [dict(item) for item in list(payload.get('child_pipelines') or []) if isinstance(item, dict)],
+            'callable_tool_snapshots': TaskLogService._sanitize_callable_tool_snapshots(
+                payload.get('callable_tool_snapshots') or []
+            ),
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])
@@ -3513,6 +3679,9 @@ class TaskLogService:
             'stage_total_steps': int(payload.get('stage_total_steps') or 0),
             'tool_calls': [dict(item) for item in list(payload.get('tool_calls') or []) if isinstance(item, dict)],
             'child_pipelines': [dict(item) for item in list(payload.get('child_pipelines') or []) if isinstance(item, dict)],
+            'callable_tool_snapshots': TaskLogService._sanitize_callable_tool_snapshots(
+                payload.get('callable_tool_snapshots') or []
+            ),
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])

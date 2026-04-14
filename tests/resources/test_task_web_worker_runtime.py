@@ -4424,6 +4424,166 @@ def test_latest_context_route_returns_payload(tmp_path: Path, monkeypatch):
     assert "route context" in payload["content"]
 
 
+def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    def _frame_payload(*, prompt: str, callable_tools: list[str], candidate_tools: list[str]):
+        return {
+            "prompt": prompt,
+            "goal": "inspect callable snapshots",
+            "callable_tool_names": callable_tools,
+            "candidate_tools": candidate_tools,
+        }
+
+    service.log_service.upsert_frame(
+        record.task_id,
+        {
+            "node_id": root.node_id,
+            "depth": root.depth,
+            "node_kind": root.node_kind,
+            "phase": "before_model",
+            "active_round_id": "round:1",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        _frame_payload(
+                            prompt="first prompt",
+                            callable_tools=["submit_next_stage", "filesystem_write"],
+                            candidate_tools=["filesystem_read"],
+                        ),
+                        ensure_ascii=False,
+                    ),
+                }
+            ],
+            "model_visible_tool_names": [
+                "submit_next_stage",
+                "filesystem_write",
+                "filesystem_read",
+            ],
+            "hydrated_executor_names": [
+                "filesystem_write",
+            ],
+            "lightweight_tool_ids": [
+                "filesystem",
+            ],
+            "model_visible_tool_selection_trace": {
+                "mode": "execution_tool_selection",
+                "final_schema_chars": 1200,
+            },
+        },
+        publish_snapshot=False,
+    )
+
+    service.log_service.update_frame(
+        record.task_id,
+        root.node_id,
+        lambda frame: {
+            **frame,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        _frame_payload(
+                            prompt="first prompt updated",
+                            callable_tools=["submit_next_stage", "filesystem_write"],
+                            candidate_tools=["filesystem_read"],
+                        ),
+                        ensure_ascii=False,
+                    ),
+                }
+            ],
+        },
+        publish_snapshot=False,
+    )
+
+    service.log_service.update_frame(
+        record.task_id,
+        root.node_id,
+        lambda frame: {
+            **frame,
+            "phase": "before_model",
+            "active_round_id": "round:2",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        _frame_payload(
+                            prompt="second prompt",
+                            callable_tools=["submit_next_stage", "filesystem_edit"],
+                            candidate_tools=["filesystem_write"],
+                        ),
+                        ensure_ascii=False,
+                    ),
+                }
+            ],
+            "model_visible_tool_names": [
+                "submit_next_stage",
+                "filesystem_edit",
+                "filesystem_write",
+            ],
+            "hydrated_executor_names": [
+                "filesystem_edit",
+            ],
+            "lightweight_tool_ids": [
+                "filesystem",
+                "content",
+            ],
+            "model_visible_tool_selection_trace": {
+                "mode": "execution_tool_selection",
+                "final_schema_chars": 1600,
+            },
+        },
+        publish_snapshot=False,
+    )
+
+    runtime_frame = service.log_service.read_runtime_frame(record.task_id, root.node_id)
+
+    assert runtime_frame is not None
+    assert runtime_frame["messages"][0]["role"] == "user"
+
+    runtime_artifacts = [
+        artifact
+        for artifact in service.list_artifacts(record.task_id)
+        if artifact.kind == "task_runtime_messages" and artifact.node_id == root.node_id
+    ]
+    assert len(runtime_artifacts) == 1
+
+    payload = json.loads(Path(runtime_artifacts[0].path).read_text(encoding="utf-8"))
+
+    assert payload["messages"][0]["role"] == "user"
+    snapshots = payload["callable_tool_snapshots"]
+    assert len(snapshots) == 2
+    assert snapshots[0]["snapshot_index"] == 1
+    assert snapshots[0]["active_round_id"] == "round:1"
+    assert snapshots[0]["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
+    assert snapshots[0]["candidate_tool_names"] == ["filesystem_read"]
+    assert snapshots[0]["model_visible_tool_names"] == [
+        "submit_next_stage",
+        "filesystem_write",
+        "filesystem_read",
+    ]
+    assert snapshots[1]["snapshot_index"] == 2
+    assert snapshots[1]["active_round_id"] == "round:2"
+    assert snapshots[1]["callable_tool_names"] == ["submit_next_stage", "filesystem_edit"]
+    assert snapshots[1]["candidate_tool_names"] == ["filesystem_write"]
+    assert snapshots[1]["hydrated_executor_names"] == ["filesystem_edit"]
+    assert snapshots[1]["lightweight_tool_ids"] == ["filesystem", "content"]
+    assert snapshots[1]["model_visible_tool_selection_trace"]["final_schema_chars"] == 1600
+
+
 def test_node_detail_and_latest_context_repair_legacy_mojibake(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
