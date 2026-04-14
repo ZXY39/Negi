@@ -171,6 +171,20 @@ def test_tool_resource_current_version_text_has_no_replacement_question_marks():
             assert '?' not in value, f'{manifest_path}:{key} contains replacement question marks: {value}'
 
 
+def test_skill_dependency_on_tool_family_resolves_from_split_executors(tmp_path: Path) -> None:
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'skills' / 'add-tool', workspace / 'skills' / 'add-tool')
+    _copy_filesystem_split_tools(workspace)
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    skill = registry.discover().skills['add-tool']
+
+    assert skill.available is True
+    assert not any('missing required tools' in warning for warning in skill.warnings)
+
+
 def test_content_describe_docs_do_not_reference_removed_filesystem_read_tools() -> None:
     content_manifest = yaml.safe_load(
         (REPO_ROOT / 'tools' / 'content_describe' / 'resource.yaml').read_text(encoding='utf-8')

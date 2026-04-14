@@ -62,8 +62,7 @@ parameters:
       - auto
       - download
       - git
-      description: 涓嬭浇绛栫暐銆俛uto 浼氶伒寰?settings.auto_prefer锛涘綋鍓嶉粯璁や紭鍏?git sparse checkout锛屽け璐ュ悗鍥為€€鍒?GitHub
-        codeload zip銆?
+      description: Download strategy. `auto` follows `settings.auto_prefer`; the current default prefers `git sparse checkout` and falls back to the GitHub codeload zip archive after git failures.
   required: []
 governance:
   family: skill-installer

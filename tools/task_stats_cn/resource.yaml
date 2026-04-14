@@ -1,6 +1,6 @@
 ﻿schema_version: 1
 kind: tool
-display_name: "浠诲姟缁熻宸ュ叿"
+display_name: "任务统计工具"
 name: task_stats
 description: Inspect saved tasks, prompt previews, and disk usage.
 tool_result_delivery_contract: runtime_managed

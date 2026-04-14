@@ -45,7 +45,7 @@ class ResourceRegistry:
 
     def discover(self) -> DiscoveryResult:
         tools = self._discover_tools()
-        skills = self._discover_skills(tool_names=set(tools.keys()))
+        skills = self._discover_skills(tool_names=self._provided_tool_names(tools))
         return DiscoveryResult(tools=tools, skills=skills)
 
     def skill_root_for_path(self, path: Path | str) -> Path | None:
@@ -272,6 +272,19 @@ class ResourceRegistry:
             descriptor.warnings.append(f"missing toolskills/SKILL.md: {root}")
         self._apply_tool_result_delivery_contract_requirements(descriptor)
         return descriptor
+
+    @staticmethod
+    def _provided_tool_names(tools: dict[str, ToolResourceDescriptor]) -> set[str]:
+        names: set[str] = set()
+        for descriptor in list((tools or {}).values()):
+            name = str(getattr(descriptor, "name", "") or "").strip()
+            if name:
+                names.add(name)
+            governance = dict(getattr(descriptor, "metadata", {}) or {}).get("governance") or {}
+            family = str((governance or {}).get("family") or "").strip()
+            if family:
+                names.add(family)
+        return names
 
     def _apply_tool_result_delivery_contract_requirements(self, descriptor: ToolResourceDescriptor) -> None:
         if not bool(descriptor.callable):

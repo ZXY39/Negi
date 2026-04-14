@@ -1869,6 +1869,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 completed_stage_summary=output,
             )
             return result
+        if output:
+            result["frontdoor_stage_state"] = self._complete_active_frontdoor_stage_state(
+                state.get("frontdoor_stage_state"),
+                completed_stage_summary=output,
+            )
         result["messages"] = list(messages)
         return result
 

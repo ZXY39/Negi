@@ -1,20 +1,16 @@
 schema_version: 1
 kind: tool
 name: model_config
-description: 绠＄悊 .g3ku/config.json 鐨勬ā鍨嬬洰褰曘€丳rovider 妯℃澘/鑽夌/缁戝畾锛屼互鍙?ceo/execution/inspection
-  鐨勬湁搴忓洖閫€閾俱€?
+description: Manage `.g3ku/config.json`, provider templates, drafts, bindings, and the ordered fallback chain for `ceo` / `execution` / `inspection`.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: Resource-local model configuration tool. The manifest, handler, and configuration
-    contract together define the current behavior.
-  compare_rule: Treat manifest, main/, parameter contract, permissions, settings,
-    and returned payload changes as version-relevant.
-  source_of_truth: resource.yaml, main/, and toolskills together define the effective
-    behavior.
+  summary: Resource-local model configuration tool. The manifest, handler, and configuration contract together define the current behavior.
+  compare_rule: Treat manifest, main/, parameter contract, permissions, settings, and returned payload changes as version-relevant.
+  source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
 requires:
   tools: []
   bins: []
@@ -42,67 +38,67 @@ parameters:
       - enable_model
       - disable_model
       - set_scope_chain
-      description: 瑕佹墽琛岀殑妯″瀷閰嶇疆鍔ㄤ綔銆?
+      description: Model configuration action to execute.
     key:
       type: string
-      description: 鍙楃妯″瀷 key銆?
+      description: Managed model key.
     provider_model:
       type: string
-      description: Provider:model 鏍囪瘑绗︽垨鍙楃妯″瀷寮曠敤銆?
+      description: "`provider:model` identifier or managed model reference."
     api_key:
       type: string
-      description: add/update 鎿嶄綔鐨?API key銆?
+      description: API key for `add_model` or `update_model`.
     api_base:
       type: string
-      description: add/update 鎿嶄綔鐨?API base URL銆?
+      description: API base URL for `add_model` or `update_model`.
     extra_headers:
       type: object
-      description: 鍙€夛細璇ユā鍨嬬殑棰濆璇锋眰澶淬€?
+      description: Optional additional request headers for the model.
     provider_id:
       type: string
-      description: Provider 妯℃澘 id锛岀敤浜?get_template銆?
+      description: Provider template id used by `get_template`.
     draft:
       type: object
-      description: LLM 閰嶇疆鑽夌锛岀敤浜?validate_draft銆乸robe_draft銆乧reate_binding銆乽pdate_binding銆?
+      description: LLM configuration draft used by `validate_draft`, `probe_draft`, `create_binding`, or `update_binding`.
     binding:
       type: object
-      description: 缁戝畾杞借嵎锛屽寘鍚?key/config_id/enabled/retry 绛夊瓧娈碉紝鐢ㄤ簬 create_binding銆?
+      description: Binding payload, including fields such as `key`, `config_id`, `enabled`, and retry settings, used by `create_binding` or `update_binding`.
     enabled:
       type: boolean
-      description: 鍙€夛細add/update 鐨?enabled 鏍囪銆?
+      description: Optional `enabled` flag for add/update actions.
     max_tokens:
       type: integer
-      description: 鍙€夛細璇ユā鍨嬬殑鏈€澶ц緭鍑?token 涓婇檺銆?
+      description: Optional maximum output token limit for the model.
     temperature:
       type: number
-      description: 鍙€夛細璇ユā鍨嬮粯璁?temperature銆?
+      description: Optional default `temperature` override for the model.
     reasoning_effort:
       type: string
-      description: 鍙€夛細鎺ㄧ悊寮哄害瑕嗙洊鍊笺€?
+      description: Optional reasoning-effort override.
     retry_on:
       type: array
       items:
         type: string
-      description: 閲嶈瘯瑙﹀彂鏉′欢锛屽 network銆?29銆?xx銆?
+      description: Retry trigger classes, for example `network`, `429`, or `5xx`.
     retry_count:
       type: integer
-      description: 鍦ㄥ悓涓€妯″瀷涓婂厑璁哥殑鍙噸璇曞け璐ユ鏁帮紝瓒呰繃鍚庡啀杩涘叆鍥為€€閾俱€?
+      description: How many retries are allowed on the same model before the runtime falls through to the next fallback.
     description:
       type: string
-      description: 鍙€夛細浜虹被鍙鐨勬弿杩般€?
+      description: Optional human-readable description.
     scopes:
       type: array
       items:
         type: string
-      description: add_model 鐨勪綔鐢ㄥ煙锛屼緥濡?ceo銆乪xecution銆乮nspection銆?
+      description: Scopes for `add_model`, for example `ceo`, `execution`, or `inspection`.
     scope:
       type: string
-      description: set_scope_chain 鐨勭洰鏍囦綔鐢ㄥ煙銆?
+      description: Target scope for `set_scope_chain`.
     model_keys:
       type: array
       items:
         type: string
-      description: set_scope_chain 鐨勬湁搴忔ā鍨?key 鍒楄〃銆?
+      description: Ordered model key list for `set_scope_chain`.
   required:
   - action
 exposure:

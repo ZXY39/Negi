@@ -187,8 +187,29 @@ def test_task_runtime_resource_tools_do_not_depend_on_host_action_mapper_entries
 def test_skill_installer_method_description_matches_runtime_strategy():
     manifest = yaml.safe_load((TOOLS_ROOT / 'skill-installer' / 'resource.yaml').read_text(encoding='utf-8'))
     method_description = manifest['parameters']['properties']['method']['description']
+    assert '涓' not in method_description
+    assert '鍙' not in method_description
     assert 'auto_prefer' in method_description
     assert 'git sparse checkout' in method_description
+
+
+def test_selected_tool_manifests_do_not_contain_known_mojibake_tokens() -> None:
+    manifest_paths = [
+        TOOLS_ROOT / 'cron' / 'resource.yaml',
+        TOOLS_ROOT / 'message' / 'resource.yaml',
+        TOOLS_ROOT / 'model_config' / 'resource.yaml',
+        TOOLS_ROOT / 'skill-installer' / 'resource.yaml',
+        TOOLS_ROOT / 'web_fetch' / 'resource.yaml',
+        TOOLS_ROOT / 'continue_task_cn' / 'resource.yaml',
+        TOOLS_ROOT / 'create_async_task_cn' / 'resource.yaml',
+        TOOLS_ROOT / 'task_stats_cn' / 'resource.yaml',
+    ]
+    bad_tokens = ('銆', '锛', '€', '缁窇', '鍒涘缓寮傛', '浠诲姟缁熻')
+
+    for manifest_path in manifest_paths:
+        text = manifest_path.read_text(encoding='utf-8')
+        for token in bad_tokens:
+            assert token not in text, f'{manifest_path} still contains mojibake token: {token}'
 
 
 def test_tool_result_inline_full_flag_defaults_false_and_mirrors_manifest_metadata(tmp_path):

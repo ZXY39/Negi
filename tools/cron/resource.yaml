@@ -1,19 +1,16 @@
 schema_version: 1
 kind: tool
 name: cron
-description: 瀹夋帓鎻愰啋鍜屽懆鏈熶换鍔°€傚姩浣滐細add銆乴ist銆乺emove銆傚惊鐜换鍔″垱寤烘椂蹇呴』鎻愪緵 `stop_condition`锛屽啓鎴愨€滄浠诲姟鐨勫叿浣撻€€鍑烘潯浠?鎴栫敤鎴疯姹傚彇娑堚€濄€?
+description: "Schedule reminders and recurring tasks. Actions: `add`, `list`, `remove`. Recurring tasks must provide `stop_condition` as the concrete exit condition or user-cancel rule."
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: Resource-local cron tool. The manifest, handler, and scheduling contract
-    together define the current behavior.
-  compare_rule: Treat manifest, main/, parameter contract, permissions, settings,
-    and returned payload changes as version-relevant.
-  source_of_truth: resource.yaml, main/, and toolskills together define the effective
-    behavior.
+  summary: Resource-local cron tool. The manifest, handler, and scheduling contract together define the current behavior.
+  compare_rule: Treat manifest, main/, parameter contract, permissions, settings, and returned payload changes as version-relevant.
+  source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
 requires:
   tools: []
   bins: []
@@ -30,28 +27,28 @@ parameters:
       - add
       - list
       - remove
-      description: 瑕佹墽琛岀殑鍔ㄤ綔銆?
+      description: Action to execute.
     message:
       type: string
-      description: 鎻愰啋鎴栦换鍔″唴瀹癸紝浠呭～鍐欑敤鎴峰彲瑙佹枃鏈€?
+      description: Reminder or task content. Write only user-visible text.
     stop_condition:
       type: string
-      description: 寰幆浠诲姟蹇呭～銆傚啓鎴愨€滄浠诲姟鐨勫叿浣撻€€鍑烘潯浠?鎴栫敤鎴疯姹傚彇娑堚€濄€?
+      description: Required for recurring tasks. Describe the concrete exit condition or how user cancellation should stop the loop.
     every_seconds:
       type: integer
-      description: 鍛ㄦ湡浠诲姟鐨勯棿闅旂鏁般€?
+      description: Interval in seconds for recurring tasks.
     cron_expr:
       type: string
-      description: Cron 琛ㄨ揪寮忥紝渚嬪 '0 9 * * *'銆?
+      description: Cron expression, for example `0 9 * * *`.
     tz:
       type: string
-      description: Cron 琛ㄨ揪寮忕殑 IANA 鏃跺尯锛屼緥濡?'America/Vancouver'銆?
+      description: IANA time zone for the cron expression, for example `America/Vancouver`.
     at:
       type: string
-      description: 涓€娆℃€ф墽琛岀殑 ISO datetime锛屼緥濡?'2026-02-12T10:30:00'銆?
+      description: One-shot ISO datetime, for example `2026-02-12T10:30:00`.
     job_id:
       type: string
-      description: 浠诲姟 ID锛岀敤浜?remove銆?
+      description: Task id used by `remove`.
   required:
   - action
 exposure:

@@ -1,19 +1,16 @@
 schema_version: 1
 kind: tool
 name: message
-description: 鍚戠敤鎴峰彂閫佹秷鎭紝闇€瑕佷笌澶栭儴娓犻亾娌熼€氭椂浣跨敤銆?
+description: Send a message to the user when the workflow must communicate through an external channel.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: Resource-local messaging tool. The manifest, handler, and delivery contract
-    together define the current behavior.
-  compare_rule: Treat manifest, main/, parameter contract, permissions, settings,
-    and returned payload changes as version-relevant.
-  source_of_truth: resource.yaml, main/, and toolskills together define the effective
-    behavior.
+  summary: Resource-local messaging tool. The manifest, handler, and delivery contract together define the current behavior.
+  compare_rule: Treat manifest, main/, parameter contract, permissions, settings, and returned payload changes as version-relevant.
+  source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
 requires:
   tools: []
   bins: []
@@ -26,18 +23,18 @@ parameters:
   properties:
     content:
       type: string
-      description: 瑕佸彂閫佺殑娑堟伅鍐呭
+      description: Message content to send.
     channel:
       type: string
-      description: 鍙€夛細鐩爣娓犻亾锛坱elegram銆乨iscord 绛夛級
+      description: Optional target channel, for example Telegram or Discord.
     chat_id:
       type: string
-      description: 鍙€夛細鐩爣鑱婂ぉ/鐢ㄦ埛 ID
+      description: Optional target chat or user id.
     media:
       type: array
       items:
         type: string
-      description: 鍙€夛細瑕侀檮鍔犵殑鏂囦欢璺緞鍒楄〃锛堝浘鐗囥€侀煶棰戙€佹枃妗ｏ級
+      description: Optional attachment paths to include, such as images, audio, or documents.
   required:
   - content
 exposure:

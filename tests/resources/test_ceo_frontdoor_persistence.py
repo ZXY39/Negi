@@ -1205,6 +1205,58 @@ async def test_graph_finalize_turn_completes_active_frontdoor_stage_for_direct_r
 
 
 @pytest.mark.asyncio
+async def test_graph_finalize_turn_completes_active_frontdoor_stage_for_self_execute() -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+
+    result = await runner._graph_finalize_turn(
+        {
+            "messages": [{"role": "user", "content": "write the file and verify it"}],
+            "final_output": "The file has been written and verified.",
+            "route_kind": "self_execute",
+            "heartbeat_internal": False,
+            "query_text": "write the file and verify it",
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_kind": "normal",
+                        "mode": "自主执行",
+                        "status": "active",
+                        "stage_goal": "write the file and verify it",
+                        "completed_stage_summary": "",
+                        "tool_round_budget": 6,
+                        "tool_rounds_used": 2,
+                        "created_at": "2026-04-14T17:38:36+08:00",
+                        "finished_at": "",
+                        "rounds": [
+                            {
+                                "round_id": "frontdoor-stage-1:round-1",
+                                "round_index": 1,
+                                "created_at": "2026-04-14T17:38:55+08:00",
+                                "budget_counted": True,
+                                "tool_names": ["filesystem_write"],
+                                "tool_call_ids": ["call-1"],
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+
+    stage_state = dict(result.get("frontdoor_stage_state") or {})
+    assert stage_state["active_stage_id"] == ""
+    assert stage_state["transition_required"] is False
+    stage = stage_state["stages"][0]
+    assert stage["status"] == "completed"
+    assert stage["completed_stage_summary"] == "The file has been written and verified."
+    assert stage["finished_at"]
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_inspection_uses_runner_graph_surface(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

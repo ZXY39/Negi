@@ -1,6 +1,6 @@
 ﻿schema_version: 1
 kind: tool
-display_name: "鍒涘缓寮傛浠诲姟"
+display_name: "创建异步任务"
 name: create_async_task
 description: Create a background task in the main runtime.
 tool_result_delivery_contract: runtime_managed
