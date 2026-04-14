@@ -4,10 +4,9 @@ from collections import OrderedDict
 from typing import Any
 
 from g3ku.resources.models import SkillResourceDescriptor, ToolResourceDescriptor
-
 from main.governance.action_mapper import DEFAULT_ALLOWED_ROLES, get_default_tool_governance
 from main.governance.models import SkillResourceRecord, ToolActionRecord, ToolFamilyRecord
-from main.governance.roles import to_public_allowed_roles
+from main.governance.roles import normalize_public_allowed_roles, to_public_allowed_roles
 
 ALL_ROLES = list(DEFAULT_ALLOWED_ROLES)
 
@@ -105,6 +104,7 @@ def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[
         governance = _tool_governance(descriptor)
         if governance is None:
             continue
+        explicit_governance = _has_explicit_tool_governance(descriptor)
         tool_id = str(governance.get('tool_id') or descriptor.name)
         family = grouped.setdefault(
             tool_id,
@@ -152,7 +152,7 @@ def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[
                     destructive=bool(action.get('destructive', False)),
                     agent_visible=bool(action.get('agent_visible', True)),
                     admin_mode=str(action.get('admin_mode') or 'editable'),
-                    allowed_roles=to_public_allowed_roles([str(role) for role in (action.get('allowed_roles') or ALL_ROLES)]),
+                    allowed_roles=_tool_action_allowed_roles(action, explicit_governance=explicit_governance),
                     executor_names=executor_names,
                 )
             else:
@@ -180,6 +180,18 @@ def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[
             )
         )
     return items
+
+
+def _has_explicit_tool_governance(descriptor: ToolResourceDescriptor) -> bool:
+    governance = descriptor.metadata.get('governance')
+    return isinstance(governance, dict) and bool(governance.get('family'))
+
+
+def _tool_action_allowed_roles(action: dict[str, Any], *, explicit_governance: bool) -> list[str]:
+    raw_roles = action.get('allowed_roles') if isinstance(action, dict) else None
+    if explicit_governance:
+        return normalize_public_allowed_roles([str(role) for role in list(raw_roles or [])])
+    return []
 
 
 def _tool_governance(descriptor: ToolResourceDescriptor) -> dict[str, Any] | None:

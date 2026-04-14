@@ -29,13 +29,16 @@ from g3ku.resources.tool_settings import (
     raw_tool_settings_from_descriptor,
     validate_tool_settings,
 )
-from g3ku.security import get_bootstrap_security_service
 from g3ku.runtime.context.execution_tool_selection import build_execution_tool_selection
-from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult, build_node_context_selection
+from g3ku.runtime.context.node_context_selection import (
+    NodeContextSelectionResult,
+    build_node_context_selection,
+)
 from g3ku.runtime.context.summarizer import layered_body_payload, score_query
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.runtime.tool_watchdog import ToolExecutionManager
+from g3ku.security import get_bootstrap_security_service
 from g3ku.utils.api_keys import parse_api_keys, resolve_api_key_concurrency_layout
 from g3ku.web.worker_control import managed_worker_snapshot
 from main.governance import (
@@ -47,7 +50,7 @@ from main.governance import (
     list_effective_tool_names,
 )
 from main.governance.action_mapper import get_governance_tool_id
-from main.governance.roles import to_public_allowed_roles
+from main.governance.roles import normalize_public_allowed_roles
 from main.governance.tool_context import build_tool_toolskill_payload, resolve_primary_executor_name
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
@@ -67,8 +70,8 @@ from main.models import (
     TokenUsageSummary,
     normalize_continuation_mode,
     normalize_continuation_state,
-    normalize_failure_class,
     normalize_execution_policy_metadata,
+    normalize_failure_class,
     normalize_final_acceptance_metadata,
 )
 from main.monitoring.file_store import TaskFileStore
@@ -5455,16 +5458,9 @@ class MainRuntimeService:
             if str(getattr(family, 'tool_id', '') or '').strip() not in resolution.family_ids:
                 continue
             family_changed = not bool(getattr(family, 'enabled', True))
-            actions = []
-            for action in list(getattr(family, 'actions', []) or []):
-                roles = list(getattr(action, 'allowed_roles', []) or [])
-                if bool(getattr(action, 'agent_visible', True)) and 'ceo' not in roles:
-                    roles = to_public_allowed_roles([*roles, 'ceo'])
-                    family_changed = True
-                actions.append(action.model_copy(update={'allowed_roles': roles}))
             if not family_changed:
                 continue
-            updated = family.model_copy(update={'enabled': True, 'actions': actions})
+            updated = family.model_copy(update={'enabled': True})
             self.governance_store.upsert_tool_family(updated, updated_at=now_iso())
             changed = True
         return changed
@@ -5588,8 +5584,8 @@ class MainRuntimeService:
         for action in family.actions:
             roles = allowed_roles_by_action.get(action.action_id)
             if str(getattr(action, 'admin_mode', 'editable') or 'editable') == 'readonly_system' and roles is not None:
-                normalized_roles = to_public_allowed_roles([str(role) for role in (roles or [])])
-                current_roles = to_public_allowed_roles(list(getattr(action, 'allowed_roles', []) or []))
+                normalized_roles = normalize_public_allowed_roles([str(role) for role in list(roles or [])])
+                current_roles = normalize_public_allowed_roles(list(getattr(action, 'allowed_roles', []) or []))
                 if normalized_roles != current_roles:
                     raise ResourceMutationBlockedError(
                         code='tool_action_readonly',
@@ -5598,17 +5594,11 @@ class MainRuntimeService:
                         resource_id=target_tool_id,
                         details={'action_id': action.action_id},
                     )
-            next_roles = to_public_allowed_roles(
-                [str(role) for role in (action.allowed_roles if roles is None else roles)]
+            next_roles = (
+                list(getattr(action, 'allowed_roles', []) or [])
+                if roles is None
+                else normalize_public_allowed_roles([str(role) for role in list(roles or [])])
             )
-            if is_core and bool(getattr(action, 'agent_visible', True)) and 'ceo' not in next_roles:
-                raise ResourceMutationBlockedError(
-                    code='core_tool_ceo_visibility_required',
-                    message='Core tool families must remain visible to the CEO for agent-visible actions.',
-                    resource_kind='tool_family',
-                    resource_id=target_tool_id,
-                    details={'action_id': action.action_id},
-                )
             actions.append(action.model_copy(update={'allowed_roles': next_roles}))
         updated = family.model_copy(update={'enabled': family.enabled if enabled is None else bool(enabled), 'actions': actions})
         self.governance_store.upsert_tool_family(updated, updated_at=now_iso())

@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -110,6 +109,8 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     assert "skill-modal-save" not in resources_js
     assert "tool-modal-save" not in resources_js
     assert "resource-select-option-check" not in app_js
+    assert '(isCoreTool && agentVisible && role === "ceo")' not in resources_js
+    assert '当前 action 对所有角色禁用。' in resources_js
 
     communication_section = re.search(r'<section id="view-communications".*?</section>', html, flags=re.DOTALL)
     assert communication_section is not None

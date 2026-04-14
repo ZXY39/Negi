@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 MAIN_ACTOR_ROLE = 'ceo'
 PUBLIC_ACTOR_ROLES = ('ceo', 'execution', 'inspection')
 
@@ -18,7 +17,7 @@ def to_public_actor_role(actor_role: str | None) -> str:
     raise ValueError(f'Unsupported actor role: {actor_role}')
 
 
-def to_public_allowed_roles(roles: list[str] | None) -> list[str]:
+def normalize_public_allowed_roles(roles: list[str] | None) -> list[str]:
     seen: set[str] = set()
     normalized: list[str] = []
     for role in roles or []:
@@ -27,6 +26,11 @@ def to_public_allowed_roles(roles: list[str] | None) -> list[str]:
             continue
         seen.add(public_role)
         normalized.append(public_role)
+    return normalized
+
+
+def to_public_allowed_roles(roles: list[str] | None) -> list[str]:
+    normalized = normalize_public_allowed_roles(roles)
     return normalized or ['ceo', 'execution']
 
 

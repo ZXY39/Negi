@@ -3,8 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from g3ku.resources import ResourceManager
-
-from main.governance.action_mapper import DEFAULT_ALLOWED_ROLES, DEFAULT_TOOL_FAMILIES
+from main.governance.action_mapper import DEFAULT_TOOL_FAMILIES
 from main.governance.models import SkillResourceRecord, ToolActionRecord, ToolFamilyRecord
 from main.governance.resource_bridge import build_skill_resources, build_tool_families
 from main.protocol import now_iso
@@ -78,7 +77,7 @@ class MainRuntimeResourceRegistry:
         return record.model_copy(
             update={
                 'enabled': existing.enabled,
-                'allowed_roles': list(existing.allowed_roles or record.allowed_roles),
+                'allowed_roles': list(existing.allowed_roles) if existing.allowed_roles is not None else list(record.allowed_roles),
                 'editable_files': list(existing.editable_files or record.editable_files),
                 'risk_level': existing.risk_level or record.risk_level,
             }
@@ -106,7 +105,7 @@ class MainRuntimeResourceRegistry:
                 if old is None:
                     merged_actions.append(action)
                 else:
-                    merged_actions.append(action.model_copy(update={'allowed_roles': list(old.allowed_roles or action.allowed_roles)}))
+                    merged_actions.append(action.model_copy(update={'allowed_roles': list(old.allowed_roles)}))
             merged.append(
                 record.model_copy(
                     update={
@@ -138,7 +137,7 @@ class MainRuntimeResourceRegistry:
                         label=str(action.get('label') or action_id),
                         risk_level=str(action.get('risk_level') or 'medium'),
                         destructive=bool(action.get('destructive', False)),
-                        allowed_roles=[str(role) for role in (action.get('allowed_roles') or DEFAULT_ALLOWED_ROLES)],
+                        allowed_roles=[],
                         executor_names=[tool_name],
                     )
                 else:

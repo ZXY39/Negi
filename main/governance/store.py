@@ -9,7 +9,11 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from main.governance.models import RolePolicyMatrixRecord, SkillResourceRecord, ToolFamilyRecord
-from main.governance.roles import to_public_actor_role, to_public_allowed_roles
+from main.governance.roles import (
+    normalize_public_allowed_roles,
+    to_public_actor_role,
+    to_public_allowed_roles,
+)
 from main.protocol import now_iso
 
 T = TypeVar('T', bound=BaseModel)
@@ -176,7 +180,7 @@ class GovernanceStore:
         elif model_cls is ToolFamilyRecord and isinstance(payload, dict):
             for action in payload.get('actions') or []:
                 if isinstance(action, dict):
-                    action['allowed_roles'] = to_public_allowed_roles(action.get('allowed_roles') or [])
+                    action['allowed_roles'] = normalize_public_allowed_roles(action.get('allowed_roles') or [])
         elif model_cls is RolePolicyMatrixRecord and isinstance(payload, dict):
             payload['actor_role'] = to_public_actor_role(payload.get('actor_role'))
         return model_cls.model_validate(payload)

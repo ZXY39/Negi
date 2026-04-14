@@ -6,16 +6,15 @@ import shutil
 import textwrap
 import time
 from pathlib import Path
-from types import SimpleNamespace
-from types import MethodType
+from types import MethodType, SimpleNamespace
 
 import pytest
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from g3ku.agent.tools.propose_patch import parse_patch_artifact
 from g3ku.agent.tools.filesystem_mutation import FilesystemTool
+from g3ku.agent.tools.propose_patch import parse_patch_artifact
 from g3ku.content import ContentNavigationService, content_summary_and_ref, parse_content_envelope
 from g3ku.resources import ResourceManager
 from g3ku.resources.loader import ResourceLoader
@@ -23,10 +22,9 @@ from g3ku.resources.registry import ResourceRegistry
 from g3ku.resources.tool_settings import FilesystemToolSettings
 from main.api import rest as api_rest
 from main.governance.resource_bridge import build_tool_families
-from main.models import TaskArtifactRecord
 from main.service.runtime_service import MainRuntimeService
-from main.storage.sqlite_store import SQLiteTaskStore
 from main.storage.artifact_store import TaskArtifactStore
+from main.storage.sqlite_store import SQLiteTaskStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -651,6 +649,22 @@ def test_content_split_tools_are_discoverable_and_merge_into_content_navigation_
     assert 'content_describe' in action_map['describe'].executor_names
     assert 'content_search' in action_map['search'].executor_names
     assert 'content_open' in action_map['open'].executor_names
+
+
+def test_tool_managed_builtin_family_defaults_to_deny_all_roles_on_first_discovery(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'exec', workspace / 'tools' / 'exec')
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    snapshot = registry.discover()
+
+    families = {item.tool_id: item for item in build_tool_families(list(snapshot.tools.values()))}
+    family = families['exec_runtime']
+    action_map = {action.action_id: action for action in family.actions}
+
+    assert action_map['run'].allowed_roles == []
 
 
 @pytest.mark.asyncio

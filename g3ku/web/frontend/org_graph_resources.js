@@ -116,6 +116,20 @@ function renderSkills() {
     });
 }
 
+function hideToolAdminAction(tool, action) {
+    const toolId = String(tool?.tool_id || "").trim().toLowerCase();
+    const actionId = String(action?.action_id || "").trim().toLowerCase();
+    if (!toolId || !actionId) return false;
+    if ((toolId === "content_navigation" || toolId === "content") && actionId === "inspect") return true;
+    if (toolId === "memory" && actionId === "runtime") return true;
+    return false;
+}
+
+function toolActionsForDisplay(tool) {
+    const actions = Array.isArray(tool?.actions) ? tool.actions : [];
+    return actions.filter((action) => !hideToolAdminAction(tool, action));
+}
+
 function filterTools() {
     const q = String(U.toolSearch.value || "").trim().toLowerCase();
     return S.tools.filter((tool) => {
@@ -125,7 +139,8 @@ function filterTools() {
             ? "repair_required"
             : (tool.available === false ? "unavailable" : (tool.enabled ? "enabled" : "disabled"));
         if (statusFilter !== "all" && statusKey !== statusFilter) return false;
-        if (U.toolRisk.value !== "all" && !(tool.actions || []).some((a) => a.risk_level === U.toolRisk.value)) return false;
+        const displayActions = toolActionsForDisplay(tool);
+        if (U.toolRisk.value !== "all" && !displayActions.some((a) => a.risk_level === U.toolRisk.value)) return false;
         return true;
     });
 }
@@ -149,7 +164,7 @@ function renderTools() {
             <div class="resource-list-meta">
                 <span class="meta-tag status-${resourceAvailabilityStatus(tool)}">${esc(displayEnabledLabel(tool.enabled, tool.available, toolRepairRequired(tool)))}</span>
                 ${tool.is_core ? '<span class="meta-tag">核心工具</span>' : ''}
-                <span class="meta-tag tool-actions">${(tool.actions || []).length} 个 action</span>
+                <span class="meta-tag tool-actions">${toolActionsForDisplay(tool).length} 个 action</span>
             </div>`;
         el.addEventListener("click", () => openTool(tool.tool_id));
         U.toolList.appendChild(el);
@@ -1113,7 +1128,7 @@ function renderToolDetail() {
     U.toolEmpty.style.display = "none";
     setDrawerOpen(U.toolBackdrop, U.toolDrawer, true);
     const roles = ["ceo", "execution", "inspection"];
-    const actions = Array.isArray(S.selectedTool.actions) ? S.selectedTool.actions : [];
+    const actions = toolActionsForDisplay(S.selectedTool);
     const description = String(S.selectedTool.description || "").trim();
     const toolskillContent = String(S.selectedTool.toolskill_content || "").trim();
     const isCoreTool = !!S.selectedTool.is_core;
@@ -1203,12 +1218,15 @@ function renderToolDetail() {
                                     </div>
                                     <div class="tool-role-toggle-group">
                                         ${roles.map((role) => `
-                                            <label class="role-toggle tool-role-toggle ${((isCoreTool && agentVisible && role === "ceo") || action.allowed_roles?.includes(role)) ? "checked" : ""}">
-                                                <input type="checkbox" class="tool-role tool-role-input" data-action="${actionId}" data-role="${role}" aria-label="${actionName} - ${esc(displayRoleLabel(role))}" ${((isCoreTool && agentVisible && role === "ceo") || action.allowed_roles?.includes(role)) ? "checked" : ""} ${(isCoreTool && agentVisible && role === "ceo") ? "disabled" : ""}>
+                                            <label class="role-toggle tool-role-toggle ${action.allowed_roles?.includes(role) ? "checked" : ""}">
+                                                <input type="checkbox" class="tool-role tool-role-input" data-action="${actionId}" data-role="${role}" aria-label="${actionName} - ${esc(displayRoleLabel(role))}" ${action.allowed_roles?.includes(role) ? "checked" : ""}>
                                                 <span>${esc(displayRoleLabel(role))}</span>
                                             </label>
                                         `).join("")}
                                     </div>
+                                    ${Array.isArray(action.allowed_roles) && action.allowed_roles.length === 0
+                                        ? '<div class="resource-copy-block">当前 action 对所有角色禁用。</div>'
+                                        : ''}
                                 </article>`;
                         }).join("") : `<div class="tool-empty-card">当前工具族没有 action。</div>`}
                     </div>

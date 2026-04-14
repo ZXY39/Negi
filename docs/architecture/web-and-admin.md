@@ -110,6 +110,35 @@ Use these focused checks when validating i18n shell behavior:
 - `python -m pytest tests/web/test_frontend_i18n.py -v`
 - `python -m pytest tests/resources/test_bootstrap_runtime_status.py -v`
 
+## Tool Admin RBAC Contract
+
+Tool management now has a strict persisted-RBAC contract for surfaced tool families.
+
+- The backend `PUT /api/resources/tools/{tool_id}/policy` path treats each action's `allowed_roles` as the authoritative whitelist.
+- Clearing all checkboxes for a surfaced action is valid and persists as `[]`, meaning deny-all.
+- Reopening the same tool after save or after `/api/resources/reload` must show the same empty-role state instead of silently restoring `ceo` or `execution`.
+
+The frontend responsibilities are now:
+
+- reflect the backend-owned `allowed_roles` exactly,
+- allow all surfaced action role toggles to be unchecked,
+- avoid special-casing CEO for surfaced core tool families,
+- and show a clear operator-visible hint when an action is currently disabled for all roles.
+
+The backend responsibilities are now:
+
+- preserve explicit empty role lists through store readback and resource refresh,
+- derive runtime visibility for surfaced tools from that persisted RBAC state,
+- and keep internal non-Tool-Admin tools outside the Tool Admin contract.
+
+If an operator reports "save succeeded but reopen restored the roles", first inspect:
+
+1. the Tool Admin save payload,
+2. the stored `tool_families.payload_json` row for that surfaced family,
+3. the post-reload `GET /api/resources/tools/{tool_id}` response.
+
+Do not start with frontdoor prompt debugging unless those three layers already agree.
+
 ## CEO Compression UI Contract
 
 The browser shell still receives `compression` snapshot data, but it now refers only to semantic-summary refresh state.

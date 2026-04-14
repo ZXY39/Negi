@@ -1,14 +1,15 @@
 ﻿from __future__ import annotations
 
-from contextlib import contextmanager
-from inspect import isawaitable
-import json
 import errno
+import json
 import os
 import shutil
-import httpx
+from contextlib import contextmanager
+from inspect import isawaitable
 from pathlib import Path
 from typing import Any
+
+import httpx
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from g3ku.china_bridge.registry import (
@@ -19,11 +20,13 @@ from g3ku.china_bridge.registry import (
     china_channel_spec,
     china_channel_template,
     list_china_channel_specs,
+)
+from g3ku.china_bridge.registry import (
     normalize_china_channel_id as normalize_registry_channel_id,
 )
 from g3ku.config.loader import load_config, save_config
+from g3ku.config.model_manager import _UNSET, VALID_SCOPES, ModelManager
 from g3ku.config.schema import Config
-from g3ku.config.model_manager import ModelManager, VALID_SCOPES, _UNSET
 from g3ku.resources import get_shared_resource_manager
 from g3ku.resources.models import ResourceKind
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
@@ -41,8 +44,8 @@ from main.governance import (
     list_effective_skill_ids,
     list_effective_tool_names,
 )
+from main.governance.roles import normalize_public_allowed_roles
 from main.governance.tool_context import build_tool_toolskill_payload, resolve_primary_executor_name
-from main.governance.roles import to_public_allowed_roles
 from main.protocol import now_iso
 from main.storage.sqlite_store import SQLiteTaskStore
 
@@ -748,8 +751,8 @@ class _StandaloneResourceService:
         for action in family.actions:
             roles = allowed_roles_by_action.get(action.action_id)
             if str(getattr(action, 'admin_mode', 'editable') or 'editable') == 'readonly_system' and roles is not None:
-                normalized_roles = to_public_allowed_roles([str(role) for role in (roles or [])])
-                current_roles = to_public_allowed_roles(list(getattr(action, 'allowed_roles', []) or []))
+                normalized_roles = normalize_public_allowed_roles([str(role) for role in list(roles or [])])
+                current_roles = normalize_public_allowed_roles(list(getattr(action, 'allowed_roles', []) or []))
                 if normalized_roles != current_roles:
                     raise _ResourceMutationBlockedError(
                         code='tool_action_readonly',
@@ -758,15 +761,11 @@ class _StandaloneResourceService:
                         resource_id=target_tool_id,
                         details={'action_id': action.action_id},
                     )
-            next_roles = to_public_allowed_roles([str(role) for role in (action.allowed_roles if roles is None else roles)])
-            if is_core and bool(getattr(action, 'agent_visible', True)) and 'ceo' not in next_roles:
-                raise _ResourceMutationBlockedError(
-                    code='core_tool_ceo_visibility_required',
-                    message='Core tool families must remain visible to the CEO for agent-visible actions.',
-                    resource_kind='tool_family',
-                    resource_id=target_tool_id,
-                    details={'action_id': action.action_id},
-                )
+            next_roles = (
+                list(getattr(action, 'allowed_roles', []) or [])
+                if roles is None
+                else normalize_public_allowed_roles([str(role) for role in list(roles or [])])
+            )
             actions.append(action.model_copy(update={'allowed_roles': next_roles}))
         updated = family.model_copy(
             update={

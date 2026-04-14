@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import inspect
+import json
 import shutil
 from datetime import datetime
-import inspect
 from pathlib import Path
-import json
 from types import SimpleNamespace
 
 import httpx
@@ -13,15 +13,15 @@ import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import g3ku.runtime.web_ceo_sessions as web_ceo_sessions
 from g3ku.china_bridge.registry import china_channel_template
 from g3ku.config.loader import ensure_startup_config_ready
 from g3ku.resources import ResourceManager
-import g3ku.runtime.web_ceo_sessions as web_ceo_sessions
 from g3ku.security import get_bootstrap_security_service
 from g3ku.session.manager import Session
 from main.api import admin_rest
-from main.governance.resource_filter import list_effective_tool_names
 from main.governance.models import ToolActionRecord, ToolFamilyRecord
+from main.governance.resource_filter import list_effective_tool_names
 from main.models import TaskRecord
 from main.protocol import now_iso
 from main.service.runtime_service import CreateAsyncTaskTool, MainRuntimeService, TaskNodeDetailTool
@@ -337,7 +337,6 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
         assert toolskill['required_parameters'] == ['facts']
         assert toolskill['parameters_schema']['properties']['facts']['items']['required'] == [
             'category',
-            'scope',
             'entity',
             'attribute',
             'value',
@@ -347,6 +346,13 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
         ]
         assert 'facts[*].category' in str(toolskill['parameter_contract_markdown'])
         assert dict(toolskill['example_arguments']).get('facts')
+
+        seeded = service.update_tool_policy(
+            'memory',
+            session_id='web:shared',
+            allowed_roles_by_action={'write': ['ceo']},
+        )
+        assert seeded is not None
 
         payload = service.load_tool_context(
             actor_role='ceo',
@@ -366,7 +372,6 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
         assert payload_v2['required_parameters'] == ['facts']
         assert payload_v2['parameters_schema']['properties']['facts']['items']['required'] == [
             'category',
-            'scope',
             'entity',
             'attribute',
             'value',
@@ -1200,8 +1205,8 @@ def test_ceo_session_task_defaults_endpoint_reads_and_updates_depth(tmp_path: Pa
     session = Session(key='web:ceo-demo', metadata={}, updated_at=original_updated_at)
     manager = _SessionManager(session, session_path)
 
-    from g3ku.runtime.api import ceo_sessions
     from g3ku.runtime import web_ceo_sessions
+    from g3ku.runtime.api import ceo_sessions
 
     app = FastAPI()
     app.include_router(ceo_sessions.router, prefix='/api')
@@ -1417,8 +1422,8 @@ def test_ceo_session_create_endpoint_allows_new_session_while_current_session_is
     current_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
     manager = _SessionManager([current], {current.key: current_path})
 
-    from g3ku.runtime.api import ceo_sessions
     from g3ku.runtime import web_ceo_sessions
+    from g3ku.runtime.api import ceo_sessions
 
     monkeypatch.setattr(web_ceo_sessions, 'new_web_ceo_session_id', lambda: 'web:ceo-new')
 
@@ -4397,6 +4402,57 @@ def test_resource_write_endpoints_work_without_configured_models(tmp_path: Path,
     assert reload_response.json()['ok'] is True
 
 
+def test_update_tool_policy_endpoint_preserves_empty_action_role_lists():
+    captured: dict[str, object] = {}
+    family = ToolFamilyRecord(
+        tool_id='exec_runtime',
+        display_name='Exec Runtime',
+        description='Execute shell commands.',
+        primary_executor_name='exec',
+        enabled=True,
+        available=True,
+        source_path='tools/exec',
+        actions=[ToolActionRecord(action_id='run', label='Run Command', allowed_roles=['ceo', 'execution'])],
+        metadata={},
+    )
+
+    class _StubService:
+        async def startup(self) -> None:
+            return None
+
+        def update_tool_policy(self, tool_id: str, *, session_id: str, enabled=None, allowed_roles_by_action=None):
+            captured['tool_id'] = tool_id
+            captured['session_id'] = session_id
+            captured['enabled'] = enabled
+            captured['allowed_roles_by_action'] = allowed_roles_by_action
+            return family.model_copy(
+                update={
+                    'enabled': family.enabled if enabled is None else bool(enabled),
+                    'actions': [
+                        family.actions[0].model_copy(
+                            update={'allowed_roles': list((allowed_roles_by_action or {}).get('run', family.actions[0].allowed_roles))}
+                        )
+                    ],
+                }
+            )
+
+    client = TestClient(_build_app(_StubService()))
+    response = client.put(
+        '/api/resources/tools/exec_runtime/policy',
+        params={'session_id': 'web:shared'},
+        json={'actions': {'run': []}},
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        'tool_id': 'exec_runtime',
+        'session_id': 'web:shared',
+        'enabled': None,
+        'allowed_roles_by_action': {'run': []},
+    }
+    assert response.json()['item']['actions'][0]['allowed_roles'] == []
+
+
 @pytest.mark.asyncio
 async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_path: Path):
     workspace = tmp_path / 'workspace'
@@ -4501,9 +4557,9 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
                 mutation_allowed=True,
             )
         )
-        assert visible == {'memory_search', 'memory_write'}
-        assert execution_visible == {'memory_search'}
-        assert inspection_visible == {'memory_search'}
+        assert visible == set()
+        assert execution_visible == set()
+        assert inspection_visible == set()
     finally:
         await service.close()
         manager.close()
@@ -4547,7 +4603,7 @@ async def test_startup_reconciles_core_tool_family_visibility_and_enablement(tmp
         assert reconciled is not None
         assert reconciled.is_core is True
         assert reconciled.enabled is True
-        assert all('ceo' in action.allowed_roles for action in reconciled.actions if action.agent_visible)
+        assert all('ceo' not in action.allowed_roles for action in reconciled.actions if action.agent_visible)
     finally:
         await service.close()
         manager.close()
@@ -4580,8 +4636,8 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         'task_summary_cn',
     )
 
-    from g3ku.config.loader import load_config
     import main.service.runtime_service as runtime_service_module
+    from g3ku.config.loader import load_config
 
     config = load_config()
     monkeypatch.setattr(runtime_service_module, 'get_runtime_config', lambda force=False: (config, 7, True))
@@ -4606,7 +4662,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         await service.startup()
         before = service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
         assert 'create_async_task' in before
-        assert 'memory_write' in before
+        assert 'memory_write' not in before
 
         changed = service.ensure_runtime_config_current(force=True, reason='test')
 
@@ -4614,7 +4670,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         assert 'create_async_task' in manager.tool_instances()
         after = service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
         assert 'create_async_task' in after
-        assert 'memory_write' in after
+        assert 'memory_write' not in after
         assert {'task_list', 'task_delete', 'task_failed_nodes', 'task_node_detail', 'task_progress', 'task_stats', 'task_summary'}.issubset(set(after))
     finally:
         await service.close()
@@ -4622,7 +4678,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
 
 
 @pytest.mark.asyncio
-async def test_core_tool_admin_endpoints_block_disable_delete_and_ceo_removal(tmp_path: Path):
+async def test_core_tool_admin_endpoints_block_disable_and_delete_but_allow_role_removal(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -4672,8 +4728,67 @@ async def test_core_tool_admin_endpoints_block_disable_delete_and_ceo_removal(tm
             params={'session_id': 'web:shared'},
             json={'actions': {'inspect': ['execution', 'inspection']}},
         )
-        assert policy_response.status_code == 409
-        assert policy_response.json()['detail']['code'] == 'core_tool_ceo_visibility_required'
+        assert policy_response.status_code == 200
+        assert policy_response.json()['item']['actions'][0]['allowed_roles'] == ['execution', 'inspection']
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_policy_empty_roles_persist_across_reload_for_exec_runtime(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'exec', 'memory_runtime')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+        client = TestClient(_build_app(service))
+
+        seeded = service.update_tool_policy(
+            'exec_runtime',
+            session_id='web:shared',
+            allowed_roles_by_action={'run': ['ceo', 'execution']},
+        )
+        assert seeded is not None
+
+        before = service.get_tool_family('exec_runtime')
+        assert before is not None
+        assert before.actions[0].allowed_roles == ['ceo', 'execution']
+        assert 'exec' in service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
+
+        policy_response = client.put(
+            '/api/resources/tools/exec_runtime/policy',
+            params={'session_id': 'web:shared'},
+            json={'actions': {'run': []}},
+        )
+        assert policy_response.status_code == 200
+        assert policy_response.json()['item']['actions'][0]['allowed_roles'] == []
+
+        reloaded = client.post('/api/resources/reload', params={'session_id': 'web:shared'}, json={})
+        assert reloaded.status_code == 200
+        assert reloaded.json()['ok'] is True
+
+        detail = client.get('/api/resources/tools/exec_runtime')
+        assert detail.status_code == 200
+        assert detail.json()['item']['actions'][0]['allowed_roles'] == []
+
+        assert 'exec' not in service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
+        visible = service.list_visible_tool_families(actor_role='ceo', session_id='web:shared')
+        assert all(item.tool_id != 'exec_runtime' for item in visible)
     finally:
         await service.close()
         manager.close()

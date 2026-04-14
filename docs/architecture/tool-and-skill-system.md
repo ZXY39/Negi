@@ -304,3 +304,29 @@ For maintainers, the key implication is:
 
 - "No watcher" does not mean "restart required".
 - It means "external disk edits are picked up lazily at the next throttled runtime check, then reconciled through targeted refresh + targeted catalog sync."
+
+## 13. Tool Admin RBAC For Surfaced Tool Families
+
+There is now an explicit maintenance boundary between:
+
+- tool families that appear in Tool Admin (`/api/resources/tools`, Tool management UI), and
+- internal fixed tools that never appear there, such as `submit_next_stage`.
+
+For Tool Admin surfaced tool families, RBAC is the highest-priority access contract.
+
+- `actions[].allowed_roles` is now an exact persisted whitelist.
+- An empty list means deny-all for that action.
+- Refresh, reload, reopen, and store readback must preserve an explicit empty list; maintainers should treat `[]` as real state, not as "missing".
+- Tool discovery no longer injects default roles for newly surfaced tool actions. If no persisted RBAC exists yet, the surfaced action starts deny-all until an operator grants roles explicitly.
+
+This changes how maintainers should reason about surfaced tools such as `exec`, `content_*`, `memory_*`, and `task_runtime`:
+
+- If the executor belongs to a surfaced tool family, its model visibility now follows Tool Admin RBAC exactly.
+- A surfaced fixed-builtin executor may still be listed in frontdoor or execution fixed-builtin sets, but it only becomes actually visible/callable when the surfaced family/action RBAC allows it.
+- When debugging "the tool still appears after I removed all roles", inspect the persisted `tool_families` record and the derived `role_policy_matrix` first. Do not assume there is still any fallback to `ceo` or `execution`.
+
+Internal fixed tools that are not surfaced in Tool Admin remain outside this contract.
+
+- They keep their existing runtime-only visibility rules.
+- Do not try to model their access through Tool Admin `allowed_roles`.
+- If a behavior question involves stage protocol tools such as `submit_next_stage`, debug the stage/runtime path rather than Tool Admin RBAC.
