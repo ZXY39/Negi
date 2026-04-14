@@ -635,25 +635,26 @@ def extract_live_raw_tail_context(
     normalized_turns = max(1, int(turn_limit or DEFAULT_LIVE_RAW_TAIL_TURNS))
     if not messages:
         return [], 'transcript'
-    turn_start_indexes: list[int] = []
-    current_user_index: int | None = None
-    for index, message in enumerate(messages):
+    turn_groups: list[list[dict[str, Any]]] = []
+    pending_users: list[dict[str, Any]] = []
+    for message in messages:
         role = str(message.get('role') or '').strip().lower()
         if role == 'user':
-            current_user_index = index
+            pending_users.append(message)
             continue
-        if role == 'assistant' and current_user_index is not None:
-            turn_start_indexes.append(current_user_index)
-            current_user_index = None
-    if turn_start_indexes:
-        start_index = (
-            turn_start_indexes[-normalized_turns]
-            if len(turn_start_indexes) >= normalized_turns
-            else turn_start_indexes[0]
-        )
-    else:
-        start_index = max(0, len(messages) - max(1, normalized_turns * 2))
-    return [_history_entry_from_message(message) for message in messages[start_index:]], 'transcript'
+        if role == 'assistant':
+            if pending_users:
+                turn_groups.append([*pending_users, message])
+                pending_users = []
+                continue
+            turn_groups.append([message])
+    if pending_users:
+        turn_groups.append(list(pending_users))
+    if not turn_groups:
+        return [_history_entry_from_message(message) for message in messages], 'transcript'
+    selected_groups = turn_groups[-normalized_turns:]
+    flattened = [message for group in selected_groups for message in group]
+    return [_history_entry_from_message(message) for message in flattened], 'transcript'
 
 
 def extract_live_raw_tail(
@@ -687,15 +688,15 @@ def extract_execution_live_raw_tail(
 
 def _complete_transcript_turns(session: Any) -> list[list[dict[str, Any]]]:
     turns: list[list[dict[str, Any]]] = []
-    current_user: dict[str, Any] | None = None
+    current_users: list[dict[str, Any]] = []
     for raw in transcript_messages(session):
         role = str(raw.get("role") or "").strip().lower()
         if role == "user":
-            current_user = raw
+            current_users.append(raw)
             continue
-        if role == "assistant" and current_user is not None:
-            turns.append([current_user, raw])
-            current_user = None
+        if role == "assistant" and current_users:
+            turns.append([*current_users, raw])
+            current_users = []
     return turns
 
 

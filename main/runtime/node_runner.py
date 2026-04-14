@@ -618,7 +618,6 @@ class NodeRunner:
                 'filesystem': (
                     '使用绝对路径。默认把新建脚本、抓取结果、缓存、调试输出和其他中间文件写到 '
                     'runtime_environment.task_temp_dir；只有为了满足任务要求且只能写到其他目录时才允许例外。'
-                    '需要递归搜索目录时，优先使用 filesystem.search。'
                 ),
                 'content': '单个内容体优先用 ref 导航或绝对文件路径；不要把它当成目录搜索工具。',
                 'exec': (

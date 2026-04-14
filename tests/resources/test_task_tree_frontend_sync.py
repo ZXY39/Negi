@@ -1849,6 +1849,7 @@ def test_render_artifacts_uses_status_icons_instead_of_plain_change_text() -> No
             tool_file_changes: [
               { path: "D:/tmp/created.txt", change_type: "created" },
               { path: "D:/tmp/updated.txt", change_type: "modified" },
+              { path: "D:/tmp/deleted.txt", change_type: "deleted" },
             ],
           },
           taskNodeDetails: {},
@@ -1871,33 +1872,42 @@ def test_render_artifacts_uses_status_icons_instead_of_plain_change_text() -> No
 
         const createdHtml = artifactList.children[0]?.innerHTML || "";
         const modifiedHtml = artifactList.children[1]?.innerHTML || "";
+        const deletedHtml = artifactList.children[2]?.innerHTML || "";
         console.log(JSON.stringify({
           count: artifactList.children.length,
           createdType: artifactList.children[0]?.dataset?.changeType || "",
           modifiedType: artifactList.children[1]?.dataset?.changeType || "",
+          deletedType: artifactList.children[2]?.dataset?.changeType || "",
           createdHasPathClass: createdHtml.includes("artifact-item-path"),
           createdHasIconClass: createdHtml.includes("artifact-item-state artifact-item-state--created"),
           modifiedHasIconClass: modifiedHtml.includes("artifact-item-state artifact-item-state--modified"),
+          deletedHasIconClass: deletedHtml.includes("artifact-item-state artifact-item-state--deleted"),
           createdHasSvg: createdHtml.includes("<svg"),
           modifiedHasSvg: modifiedHtml.includes("<svg"),
+          deletedHasSvg: deletedHtml.includes("<svg"),
           createdPathBeforeIcon: createdHtml.indexOf("artifact-item-path") < createdHtml.indexOf("artifact-item-state"),
           noPlainCreatedText: !createdHtml.includes(">created<"),
           noPlainModifiedText: !modifiedHtml.includes(">modified<"),
+          noPlainDeletedText: !deletedHtml.includes(">deleted<"),
         }));
         """
     )
 
-    assert result["count"] == 2
+    assert result["count"] == 3
     assert result["createdType"] == "created"
     assert result["modifiedType"] == "modified"
+    assert result["deletedType"] == "deleted"
     assert result["createdHasPathClass"] is True
     assert result["createdHasIconClass"] is True
     assert result["modifiedHasIconClass"] is True
+    assert result["deletedHasIconClass"] is True
     assert result["createdHasSvg"] is True
     assert result["modifiedHasSvg"] is True
+    assert result["deletedHasSvg"] is True
     assert result["createdPathBeforeIcon"] is True
     assert result["noPlainCreatedText"] is True
     assert result["noPlainModifiedText"] is True
+    assert result["noPlainDeletedText"] is True
 
 
 def test_ensure_task_node_detail_refetches_stale_flattened_summary_cache() -> None:

@@ -1,34 +1,22 @@
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
+from g3ku.agent.tools.filesystem_mutation import FilesystemTool
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _load_filesystem_module():
-    module_path = REPO_ROOT / 'tools' / 'filesystem' / 'main' / 'tool.py'
-    module_name = f'test_filesystem_tool_{uuid4().hex}'
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 @pytest.mark.asyncio
 async def test_filesystem_allows_write_under_temp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _load_filesystem_module()
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
-    monkeypatch.setattr(module.FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
-    tool = module.FilesystemTool(workspace=workspace)
+    monkeypatch.setattr(FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = FilesystemTool(workspace=workspace)
     target = workspace / 'temp' / 'notes.txt'
 
-    result = await tool.execute(action='write', path=str(target), content='ok')
+    result = await tool.write(path=str(target), content='ok', runtime={})
 
     assert result.startswith('Successfully wrote')
     assert target.read_text(encoding='utf-8') == 'ok'
@@ -36,14 +24,13 @@ async def test_filesystem_allows_write_under_temp(tmp_path: Path, monkeypatch: p
 
 @pytest.mark.asyncio
 async def test_filesystem_blocks_write_under_legacy_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _load_filesystem_module()
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
-    monkeypatch.setattr(module.FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
-    tool = module.FilesystemTool(workspace=workspace)
+    monkeypatch.setattr(FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = FilesystemTool(workspace=workspace)
     target = workspace / 'tmp' / 'notes.txt'
 
-    result = await tool.execute(action='write', path=str(target), content='blocked')
+    result = await tool.write(path=str(target), content='blocked', runtime={})
 
     assert result.startswith('Error:')
     assert 'legacy tmp directories' in result
@@ -52,14 +39,13 @@ async def test_filesystem_blocks_write_under_legacy_tmp(tmp_path: Path, monkeypa
 
 @pytest.mark.asyncio
 async def test_filesystem_blocks_non_registration_writes_under_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _load_filesystem_module()
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
-    monkeypatch.setattr(module.FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
-    tool = module.FilesystemTool(workspace=workspace)
+    monkeypatch.setattr(FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = FilesystemTool(workspace=workspace)
     target = workspace / 'tools' / 'demo' / 'vendor' / 'tool.exe'
 
-    result = await tool.execute(action='write', path=str(target), content='binary payload')
+    result = await tool.write(path=str(target), content='binary payload', runtime={})
 
     assert result.startswith('Error:')
     assert 'tools/ may only contain resource.yaml, main/, and toolskills/' in result
@@ -68,14 +54,13 @@ async def test_filesystem_blocks_non_registration_writes_under_tools(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_filesystem_allows_registration_writes_under_tools_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _load_filesystem_module()
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
-    monkeypatch.setattr(module.FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
-    tool = module.FilesystemTool(workspace=workspace)
+    monkeypatch.setattr(FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = FilesystemTool(workspace=workspace)
     target = workspace / 'tools' / 'demo' / 'main' / 'tool.py'
 
-    result = await tool.execute(action='write', path=str(target), content='print("ok")\n')
+    result = await tool.write(path=str(target), content='print("ok")\n', runtime={})
 
     assert result.startswith('Successfully wrote')
     assert target.read_text(encoding='utf-8') == 'print("ok")\n'
@@ -83,14 +68,13 @@ async def test_filesystem_allows_registration_writes_under_tools_main(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_filesystem_allows_tool_payloads_under_externaltools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _load_filesystem_module()
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
-    monkeypatch.setattr(module.FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
-    tool = module.FilesystemTool(workspace=workspace)
+    monkeypatch.setattr(FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = FilesystemTool(workspace=workspace)
     target = workspace / 'externaltools' / 'demo' / 'tool.zip'
 
-    result = await tool.execute(action='write', path=str(target), content='archive payload')
+    result = await tool.write(path=str(target), content='archive payload', runtime={})
 
     assert result.startswith('Successfully wrote')
     assert target.read_text(encoding='utf-8') == 'archive payload'
@@ -98,19 +82,17 @@ async def test_filesystem_allows_tool_payloads_under_externaltools(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_filesystem_allows_temp_like_write_inside_task_temp_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _load_filesystem_module()
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     task_temp_dir = workspace / 'temp' / 'tasks' / 'task_abc'
-    monkeypatch.setattr(module.FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
-    tool = module.FilesystemTool(workspace=workspace)
+    monkeypatch.setattr(FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = FilesystemTool(workspace=workspace)
     target = task_temp_dir / 'notes.tmp'
 
-    result = await tool.execute(
-        action='write',
+    result = await tool.write(
         path=str(target),
         content='ok',
-        __g3ku_runtime={'task_temp_dir': str(task_temp_dir)},
+        runtime={'task_temp_dir': str(task_temp_dir)},
     )
 
     assert result.startswith('Successfully wrote')
@@ -119,19 +101,17 @@ async def test_filesystem_allows_temp_like_write_inside_task_temp_dir(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_filesystem_blocks_temp_like_write_outside_task_temp_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _load_filesystem_module()
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     task_temp_dir = workspace / 'temp' / 'tasks' / 'task_abc'
-    monkeypatch.setattr(module.FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
-    tool = module.FilesystemTool(workspace=workspace)
+    monkeypatch.setattr(FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = FilesystemTool(workspace=workspace)
     target = workspace / 'temp' / 'notes.tmp'
 
-    result = await tool.execute(
-        action='write',
+    result = await tool.write(
         path=str(target),
         content='blocked',
-        __g3ku_runtime={'task_temp_dir': str(task_temp_dir)},
+        runtime={'task_temp_dir': str(task_temp_dir)},
     )
 
     assert result.startswith('Error:')

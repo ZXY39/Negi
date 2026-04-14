@@ -336,6 +336,7 @@ class CeoMessageBuilder:
         cls,
         *,
         visible_tool_names: list[str],
+        hydrated_tool_names: list[str] | None = None,
     ) -> list[str]:
         visible = [
             str(item or '').strip()
@@ -346,6 +347,12 @@ class CeoMessageBuilder:
         ordered: list[str] = []
         seen: set[str] = set()
         for name in [*cls.RESERVED_INTERNAL_TOOLS, *cls.FIXED_BUILTIN_TOOL_NAMES]:
+            normalized = str(name or '').strip()
+            if not normalized or normalized not in visible_set or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        for name in list(hydrated_tool_names or []):
             normalized = str(name or '').strip()
             if not normalized or normalized not in visible_set or normalized in seen:
                 continue
@@ -930,6 +937,7 @@ class CeoMessageBuilder:
         query_text: str,
         exposure: dict[str, Any],
         user_content: Any | None,
+        hydrated_tool_names: list[str] | None = None,
     ) -> dict[str, Any]:
         semantic_started_at = 0.0
         semantic_elapsed_ms = 0.0
@@ -947,10 +955,17 @@ class CeoMessageBuilder:
         ]
         callable_tool_names = self._callable_tool_names(
             visible_tool_names=visible_tool_names,
+            hydrated_tool_names=list(hydrated_tool_names or []),
         )
+        callable_tool_name_set = set(callable_tool_names)
 
         if main_service is not None and memory_manager is not None:
             try:
+                maybe_refresh = getattr(main_service, 'maybe_refresh_external_resource_changes', None)
+                if callable(maybe_refresh):
+                    await maybe_refresh(
+                        session_id=str(getattr(getattr(session, 'state', None), 'session_key', '') or 'web:shared').strip() or 'web:shared',
+                    )
                 await memory_manager.sync_catalog(main_service)
             except Exception:
                 pass
@@ -1028,9 +1043,23 @@ class CeoMessageBuilder:
                 'reserved_internal_tool_names': [
                     name for name in selected_tool_names if name in self.RESERVED_INTERNAL_TOOLS
                 ],
-                'fixed_builtin_tool_names': [],
+                'fixed_builtin_tool_names': [
+                    name
+                    for name in selected_tool_names
+                    if name in self.FIXED_BUILTIN_TOOL_NAMES
+                ],
+                'hydrated_tool_names': [
+                    name
+                    for name in selected_tool_names
+                    if name in callable_tool_name_set
+                    and name not in self.RESERVED_INTERNAL_TOOLS
+                    and name not in self.FIXED_BUILTIN_TOOL_NAMES
+                ],
                 'candidate_tool_names': [
-                    name for name in selected_tool_names if name not in self.RESERVED_INTERNAL_TOOLS
+                    name
+                    for name in selected_tool_names
+                    if name not in callable_tool_name_set
+                    and name not in self.RESERVED_INTERNAL_TOOLS
                 ],
             }
         else:
@@ -1129,8 +1158,14 @@ class CeoMessageBuilder:
             'skill_trace': skill_trace,
             'semantic_trace': semantic_trace,
             'external_trace': external_trace,
-                'selected_tool_names': candidate_tool_names,
-                'callable_tool_names': callable_tool_names,
+            'selected_tool_names': candidate_tool_names,
+            'callable_tool_names': callable_tool_names,
+            'hydrated_tool_names': [
+                name
+                for name in callable_tool_names
+                if name not in self.RESERVED_INTERNAL_TOOLS
+                and name not in self.FIXED_BUILTIN_TOOL_NAMES
+            ],
             'tool_trace': tool_trace,
             'retrieval_scope': retrieval_scope,
             'retrieved_bundle': retrieved_bundle,
@@ -1229,6 +1264,7 @@ class CeoMessageBuilder:
         user_metadata: dict[str, Any] | None = None,
         frontdoor_stage_state: dict[str, Any] | None = None,
         semantic_context_state: dict[str, Any] | None = None,
+        hydrated_tool_names: list[str] | None = None,
     ) -> ContextAssemblyResult:
         collect_started_at = time.perf_counter()
         context_sources = await self._collect_turn_context_sources(
@@ -1236,6 +1272,7 @@ class CeoMessageBuilder:
             query_text=query_text,
             exposure=exposure,
             user_content=user_content,
+            hydrated_tool_names=hydrated_tool_names,
         )
         collect_elapsed_ms = self._elapsed_ms(collect_started_at)
         history_started_at = time.perf_counter()

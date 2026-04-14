@@ -474,13 +474,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     def _default_semantic_context_state() -> dict[str, Any]:
         return default_semantic_context_state()
 
+    @staticmethod
+    def _normalized_hydrated_tool_names(raw: Any) -> list[str]:
+        normalized: list[str] = []
+        for item in list(raw or []):
+            name = str(item or "").strip()
+            if name and name not in normalized:
+                normalized.append(name)
+        return normalized
+
     @classmethod
     def _runtime_session_frontdoor_state(
         cls,
         state: CeoGraphState | None,
         *,
         preview_pending_tool_round: bool = False,
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[str]]:
         frontdoor_stage_state = cls._frontdoor_stage_state_snapshot(state)
         if preview_pending_tool_round and isinstance(state, dict):
             frontdoor_stage_state = cls._record_frontdoor_stage_round(
@@ -497,7 +506,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(state, dict)
             else cls._default_semantic_context_state()
         )
-        return frontdoor_stage_state, compression_state, semantic_context_state
+        hydrated_tool_names = (
+            cls._normalized_hydrated_tool_names(state.get("hydrated_tool_names"))
+            if isinstance(state, dict)
+            else []
+        )
+        return frontdoor_stage_state, compression_state, semantic_context_state, hydrated_tool_names
 
     def _sync_runtime_session_frontdoor_state(
         self,
@@ -510,13 +524,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         target_session = session or getattr(getattr(runtime, "context", None), "session", None)
         if target_session is None:
             return
-        frontdoor_stage_state, compression_state, semantic_context_state = self._runtime_session_frontdoor_state(
+        frontdoor_stage_state, compression_state, semantic_context_state, hydrated_tool_names = self._runtime_session_frontdoor_state(
             state,
             preview_pending_tool_round=preview_pending_tool_round,
         )
         setattr(target_session, "_frontdoor_stage_state", frontdoor_stage_state)
         setattr(target_session, "_compression_state", compression_state)
         setattr(target_session, "_semantic_context_state", semantic_context_state)
+        setattr(target_session, "_frontdoor_hydrated_tool_names", list(hydrated_tool_names))
 
     @classmethod
     def _frontdoor_stage_state_snapshot(cls, state: CeoGraphState | None) -> dict[str, Any]:
@@ -1302,12 +1317,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         user_input = _persistent_user_input_payload(state.get("user_input"))
         user_content = _user_input_content(user_input)
         session = runtime.context.session
-        query_text = self._content_text(user_content)
         metadata = _user_input_metadata(user_input)
+        batch_query_text = str(metadata.get("web_ceo_batch_query_text") or "").strip()
+        query_text = batch_query_text or self._content_text(user_content)
         heartbeat_internal = bool(metadata.get("heartbeat_internal"))
         cron_internal = bool(metadata.get("cron_internal"))
         retrieval_query = str(metadata.get("heartbeat_retrieval_query") or "").strip()
         builder_query_text = retrieval_query if heartbeat_internal and retrieval_query else query_text
+        hydrated_tool_names: list[str] = []
         runtime_session = self._loop.sessions.get_or_create(session.state.session_key)
         main_service = getattr(self._loop, "main_task_service", None)
         if main_service is not None:
@@ -1345,6 +1362,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             user_metadata=metadata,
             frontdoor_stage_state=self._frontdoor_stage_state_snapshot(state),
             semantic_context_state=dict(state.get("semantic_context_state") or {}),
+            hydrated_tool_names=list(hydrated_tool_names),
         )
         tool_names = list(
             getattr(assembly, "tool_names", None)
@@ -1442,6 +1460,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "turn_overlay_text": str(getattr(assembly, "turn_overlay_text", "") or "").strip() or None,
             "tool_names": list(tool_names),
             "candidate_tool_names": list(getattr(assembly, "candidate_tool_names", []) or []),
+            "hydrated_tool_names": list(hydrated_tool_names),
             "used_tools": [],
             "route_kind": "direct_reply",
             "verified_task_ids": [],

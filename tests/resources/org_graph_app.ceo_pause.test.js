@@ -129,7 +129,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, dedupeInflightUserMessageAgainstMessages, applyCeoState, S, U, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
+        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, dedupeInflightUserMessageAgainstMessages, applyCeoState, maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, S, U, WebSocket, setAddMsg(fn) { addMsg = fn; }, setCreatePendingCeoTurn(fn) { createPendingCeoTurn = fn; }, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
         context
     );
     vm.runInContext(
@@ -350,4 +350,52 @@ test("stage trace stays visible when a later patch only carries fallback tool ev
 
     assert.equal(turn.renderMode, "stage");
     assert.equal(turn.listEl.innerHTML, "stage-trace");
+});
+
+test("queued follow-ups drain as one batch request and render multiple user bubbles", () => {
+    const context = loadApp();
+    const { maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, S } = context;
+    const sent = [];
+    const userBubbles = [];
+    let pendingTurnCount = 0;
+
+    context.WebSocket.OPEN = 1;
+    S.ceoWs = {
+        readyState: 1,
+        send(payload) {
+            sent.push(JSON.parse(payload));
+        },
+    };
+    context.activeSessionId = () => "web:test";
+    context.setAddMsg((text, role) => {
+        userBubbles.push({ text, role });
+    });
+    context.setCreatePendingCeoTurn(() => {
+        pendingTurnCount += 1;
+        return makeTurn({ source: "user", steps: 0 });
+    });
+
+    setCeoQueuedFollowUps("web:test", [
+        { id: "follow-1", text: "先补齐 skill 元数据", uploads: [] },
+        { id: "follow-2", text: "再检查 filesystem_write 是否可用", uploads: [] },
+    ]);
+
+    const dispatched = maybeDispatchQueuedCeoFollowUps();
+
+    assert.equal(dispatched, true);
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0], {
+        type: "client.user_message",
+        session_id: "web:test",
+        messages: [
+            { text: "先补齐 skill 元数据", uploads: [] },
+            { text: "再检查 filesystem_write 是否可用", uploads: [] },
+        ],
+    });
+    assert.deepEqual(userBubbles, [
+        { text: "先补齐 skill 元数据", role: "user" },
+        { text: "再检查 filesystem_write 是否可用", role: "user" },
+    ]);
+    assert.equal(pendingTurnCount, 1);
+    assert.equal(getCeoQueuedFollowUps("web:test").length, 0);
 });

@@ -2187,7 +2187,7 @@ class ReActToolLoop:
     @classmethod
     def _search_overflow_signature_from_tool_message(cls, message: dict[str, Any]) -> str:
         tool_name = str(message.get('name') or '').strip()
-        if tool_name not in {'filesystem', 'content'}:
+        if tool_name != 'content':
             return ''
         content = message.get('content')
         if isinstance(content, str):
@@ -2213,7 +2213,7 @@ class ReActToolLoop:
     @staticmethod
     def _search_overflow_signature_for_call(*, tool_name: str, arguments: dict[str, Any]) -> str:
         normalized_tool = str(tool_name or '').strip()
-        if normalized_tool not in {'filesystem', 'content'}:
+        if normalized_tool != 'content':
             return ''
         payload = ReActToolLoop._normalize_tool_call_arguments(arguments)
         if str(payload.get('action') or '').strip().lower() != 'search':
@@ -2996,8 +2996,6 @@ class ReActToolLoop:
         action = str(arguments.get('action') or '').strip().lower()
         if normalized_tool == 'content':
             return action in {'open', 'search', 'describe'}
-        if normalized_tool == 'filesystem':
-            return action in {'open', 'search', 'list', 'describe'}
         return False
 
     @staticmethod
@@ -3107,12 +3105,6 @@ class ReActToolLoop:
             detail = (
                 f'你刚刚已经对同一内容执行了 `content.{action or "open"}`。'
                 '先基于已有结果继续分析；若信息不足，请改用不同的 `start_line` / `end_line`、不同的 `query`，或直接进入汇总/下一阶段。'
-            )
-        elif normalized_tool == 'filesystem':
-            action = str(arguments.get('action') or '').strip().lower()
-            detail = (
-                f'你刚刚已经对同一路径执行了 `filesystem.{action or "open"}`。'
-                '先基于已有结果推进；若信息不足，请改用更具体的路径、不同的行号窗口、不同的 `query`，或直接进入汇总。'
             )
         elif normalized_tool == 'task_node_detail':
             detail = (

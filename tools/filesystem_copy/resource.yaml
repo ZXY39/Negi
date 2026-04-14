@@ -1,0 +1,65 @@
+schema_version: 1
+kind: tool
+name: filesystem_copy
+display_name: Filesystem Copy
+description: Copy one or more files or directory trees to new absolute destinations.
+tool_result_delivery_contract: runtime_managed
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+    - workspace
+settings:
+  restrict_to_workspace: false
+parameters:
+  type: object
+  properties:
+    operations:
+      type: array
+      description: Copy operations to execute.
+      items:
+        type: object
+        properties:
+          source:
+            type: string
+            description: Absolute source path to copy.
+          destination:
+            type: string
+            description: Absolute destination path to create.
+        required:
+          - source
+          - destination
+    overwrite:
+      type: boolean
+      description: Allow overwriting an existing destination file. Existing destination directories are never allowed.
+    create_parents:
+      type: boolean
+      description: Create missing destination parent directories before copying.
+    continue_on_error:
+      type: boolean
+      description: Continue processing later operations after one copy operation fails.
+  required:
+    - operations
+governance:
+  family: filesystem
+  display_name: Filesystem
+  description: Write, edit, copy, move, delete, and propose patches for local files.
+  actions:
+    - id: copy
+      label: Copy Files
+      risk_level: high
+      destructive: true
+      allowed_roles:
+        - ceo
+        - execution
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

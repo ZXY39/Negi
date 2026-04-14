@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,18 @@ class ContextCatalogIndexer:
         catalog_summary = getattr(payload, 'catalog_summary', None)
         value = str(getattr(catalog_summary, 'model_key', '') or '').strip()
         return value or None
+
+    @staticmethod
+    def _catalog_fingerprint_source(*, title: str, description: str, body: str) -> str:
+        return json.dumps(
+            {
+                'title': str(title or '').strip(),
+                'description': str(description or '').strip(),
+                'content': str(body or '').strip(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
     async def sync(
         self,
@@ -43,20 +56,27 @@ class ContextCatalogIndexer:
                 continue
             record_id = f'skill:{skill.skill_id}'
             seen.add(record_id)
+            display_name = str(getattr(skill, 'display_name', '') or '').strip()
+            description = str(getattr(skill, 'description', '') or '').strip()
             path = str(getattr(skill, 'skill_doc_path', '') or '')
             body = ''
             if path and Path(path).exists():
                 body = Path(path).read_text(encoding='utf-8')
-            text_for_summary = body or str(getattr(skill, 'description', '') or '')
-            hash_tag = f"hash:{self._memory_manager._stable_text_hash(text_for_summary)[:12]}"
+            text_for_summary = body or description
+            fingerprint_source = self._catalog_fingerprint_source(
+                title=display_name,
+                description=description,
+                body=text_for_summary,
+            )
+            hash_tag = f"hash:{self._memory_manager._stable_text_hash(fingerprint_source)[:12]}"
             tags = ['catalog', 'kind:skill', f'skill:{skill.skill_id}', hash_tag]
             current = existing.get(record_id)
             if current is not None and hash_tag in set(current.tags or []):
                 continue
             l0, l1 = await summarize_layered_model_first(
                 text_for_summary,
-                title=getattr(skill, 'display_name', ''),
-                description=getattr(skill, 'description', ''),
+                title=display_name,
+                description=description,
                 model_key=self._catalog_summary_model_key(),
             )
             record = ContextRecordV2(
@@ -64,8 +84,8 @@ class ContextCatalogIndexer:
                 context_type='skill',
                 uri=f'g3ku://skill/{skill.skill_id}',
                 parent_uri='g3ku://catalog/skills',
-                l0=l0 or summarize_l0(text_for_summary, title=getattr(skill, 'display_name', ''), description=getattr(skill, 'description', '')),
-                l1=l1 or summarize_l1(text_for_summary, title=getattr(skill, 'display_name', ''), description=getattr(skill, 'description', '')),
+                l0=l0 or summarize_l0(text_for_summary, title=display_name, description=description),
+                l1=l1 or summarize_l1(text_for_summary, title=display_name, description=description),
                 l2_ref=path or None,
                 tags=tags,
                 source='catalog',
@@ -88,20 +108,27 @@ class ContextCatalogIndexer:
                 continue
             record_id = f'tool:{tool_id}'
             seen.add(record_id)
+            display_name = str(getattr(family, 'display_name', '') or '').strip()
+            description = str(getattr(family, 'description', '') or '').strip()
             toolskill = self._service.get_tool_toolskill(tool_id) or {}
             path = str(toolskill.get('path') or '')
             body = str(toolskill.get('content') or '')
             if not body:
-                body = str(getattr(family, 'description', '') or '')
-            hash_tag = f"hash:{self._memory_manager._stable_text_hash(body)[:12]}"
+                body = description
+            fingerprint_source = self._catalog_fingerprint_source(
+                title=display_name,
+                description=description,
+                body=body,
+            )
+            hash_tag = f"hash:{self._memory_manager._stable_text_hash(fingerprint_source)[:12]}"
             tags = ['catalog', 'kind:tool', f'tool:{tool_id}', hash_tag]
             current = existing.get(record_id)
             if current is not None and hash_tag in set(current.tags or []):
                 continue
             l0, l1 = await summarize_layered_model_first(
                 body,
-                title=getattr(family, 'display_name', ''),
-                description=getattr(family, 'description', ''),
+                title=display_name,
+                description=description,
                 model_key=self._catalog_summary_model_key(),
             )
             record = ContextRecordV2(
@@ -109,8 +136,8 @@ class ContextCatalogIndexer:
                 context_type='resource',
                 uri=f'g3ku://resource/tool/{tool_id}',
                 parent_uri='g3ku://catalog/tools',
-                l0=l0 or summarize_l0(body, title=getattr(family, 'display_name', ''), description=getattr(family, 'description', '')),
-                l1=l1 or summarize_l1(body, title=getattr(family, 'display_name', ''), description=getattr(family, 'description', '')),
+                l0=l0 or summarize_l0(body, title=display_name, description=description),
+                l1=l1 or summarize_l1(body, title=display_name, description=description),
                 l2_ref=path or None,
                 tags=tags,
                 source='catalog',

@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from g3ku.agent.tools.propose_patch import parse_patch_artifact
+from g3ku.agent.tools.filesystem_mutation import FilesystemTool
 from g3ku.content import ContentNavigationService, content_summary_and_ref, parse_content_envelope
 from g3ku.resources import ResourceManager
 from g3ku.resources.loader import ResourceLoader
@@ -26,7 +27,6 @@ from main.models import TaskArtifactRecord
 from main.service.runtime_service import MainRuntimeService
 from main.storage.sqlite_store import SQLiteTaskStore
 from main.storage.artifact_store import TaskArtifactStore
-from tools.filesystem.main.tool import FilesystemTool
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -72,6 +72,19 @@ def _python_launcher() -> str:
             return 'py -3'
         return f'& "{Path(os.sys.executable)}"'
     return 'python3' if shutil.which('python3') else 'python'
+
+
+def _copy_filesystem_split_tools(workspace: Path, *tool_names: str) -> None:
+    names = tool_names or (
+        'filesystem_write',
+        'filesystem_edit',
+        'filesystem_copy',
+        'filesystem_move',
+        'filesystem_delete',
+        'filesystem_propose_patch',
+    )
+    for name in names:
+        shutil.copytree(REPO_ROOT / 'tools' / name, workspace / 'tools' / name)
 
 
 def _large_direct_load_payload(*, uri: str, body_label: str) -> dict[str, object]:
@@ -485,7 +498,7 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    _copy_filesystem_split_tools(workspace)
 
     target_file = workspace / 'temp' / 'target.txt'
     written_file = workspace / 'temp' / 'written.txt'
@@ -501,19 +514,23 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
     manager.reload_now(trigger='test-bind')
 
     try:
-        tool = manager.get_tool('filesystem')
-        assert tool is not None
-        assert 'Successfully wrote' in await tool.execute(action='write', path=str(written_file), content='hello\n')
-        assert 'Successfully edited' in await tool.execute(
-            action='edit',
+        write_tool = manager.get_tool('filesystem_write')
+        edit_tool = manager.get_tool('filesystem_edit')
+        delete_tool = manager.get_tool('filesystem_delete')
+        patch_tool = manager.get_tool('filesystem_propose_patch')
+        assert write_tool is not None
+        assert edit_tool is not None
+        assert delete_tool is not None
+        assert patch_tool is not None
+        assert 'Successfully wrote' in await write_tool.execute(path=str(written_file), content='hello\n')
+        assert 'Successfully edited' in await edit_tool.execute(
             path=str(target_file),
             old_text='before value',
             new_text='after value',
         )
 
         result = json.loads(
-            await tool.execute(
-                action='propose_patch',
+            await patch_tool.execute(
                 path=str(target_file),
                 old_text='after value',
                 new_text='patched value',
@@ -535,7 +552,9 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
         metadata, diff_text = parse_patch_artifact(artifact_path.read_text(encoding='utf-8'))
         assert Path(metadata['path']) == target_file.resolve()
         assert 'patched value' in diff_text
-        assert 'Successfully deleted' in await tool.execute(action='delete', path=str(written_file))
+        deleted = json.loads(await delete_tool.execute(paths=[str(written_file)]))
+        assert deleted['ok'] is True
+        assert deleted['items'][0]['status'] == 'deleted'
         assert not written_file.exists()
     finally:
         manager.close()
@@ -546,22 +565,16 @@ def test_filesystem_split_tools_are_discoverable_and_merge_into_filesystem_famil
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
-    for tool_name in (
-        'filesystem_write',
-        'filesystem_edit',
-        'filesystem_delete',
-        'filesystem_propose_patch',
-    ):
-        shutil.copytree(REPO_ROOT / 'tools' / tool_name, workspace / 'tools' / tool_name)
+    _copy_filesystem_split_tools(workspace)
 
     registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
     snapshot = registry.discover()
 
     for tool_name in (
-        'filesystem',
         'filesystem_write',
         'filesystem_edit',
+        'filesystem_copy',
+        'filesystem_move',
         'filesystem_delete',
         'filesystem_propose_patch',
     ):
@@ -573,14 +586,17 @@ def test_filesystem_split_tools_are_discoverable_and_merge_into_filesystem_famil
 
     assert family.primary_executor_name == 'filesystem_write'
     assert set(family.metadata['sources']) == {
-        'filesystem',
         'filesystem_write',
         'filesystem_edit',
+        'filesystem_copy',
+        'filesystem_move',
         'filesystem_delete',
         'filesystem_propose_patch',
     }
     assert 'filesystem_write' in action_map['write'].executor_names
     assert 'filesystem_edit' in action_map['edit'].executor_names
+    assert 'filesystem_copy' in action_map['copy'].executor_names
+    assert 'filesystem_move' in action_map['move'].executor_names
     assert 'filesystem_delete' in action_map['delete'].executor_names
     assert 'filesystem_propose_patch' in action_map['propose_patch'].executor_names
 
@@ -666,14 +682,14 @@ async def test_filesystem_tool_rejects_relative_paths(tmp_path: Path):
     target_file.write_text('hello\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    _copy_filesystem_split_tools(workspace, 'filesystem_write')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('filesystem')
+        tool = manager.get_tool('filesystem_write')
         assert tool is not None
-        result = await tool.execute(action='write', path='target.txt', content='hello\n')
+        result = await tool.execute(path='target.txt', content='hello\n')
         assert 'relative path is not allowed; provide absolute path' in result
     finally:
         manager.close()
@@ -714,29 +730,28 @@ async def test_filesystem_tool_reports_reliable_file_changes_only(tmp_path: Path
     }
 
     created_file = workspace / 'temp' / 'created.txt'
-    result = await tool.execute(action='write', path=str(created_file), content='hello\n', _FilesystemTool__g3ku_runtime=runtime)
+    result = await tool.write(path=str(created_file), content='hello\n', runtime=runtime)
     assert 'Successfully wrote' in result
 
-    result = await tool.execute(
-        action='edit',
+    result = await tool.edit(
         path=str(target_file),
         old_text='before',
         new_text='after',
-        _FilesystemTool__g3ku_runtime=runtime,
+        runtime=runtime,
     )
     assert 'Successfully edited' in result
 
-    result = await tool.execute(action='delete', path=str(created_file), _FilesystemTool__g3ku_runtime=runtime)
-    assert 'Successfully deleted' in result
+    result = json.loads(await tool.delete(paths=[str(created_file)], runtime=runtime))
+    assert result['ok'] is True
+    assert result['items'][0]['status'] == 'deleted'
 
     result = json.loads(
-        await tool.execute(
-            action='propose_patch',
+        tool.propose_patch(
             path=str(target_file),
             old_text='after',
             new_text='patched',
             summary='Patch target',
-            _FilesystemTool__g3ku_runtime=runtime,
+            runtime=runtime,
         )
     )
     assert result['success'] is True
@@ -744,6 +759,7 @@ async def test_filesystem_tool_reports_reliable_file_changes_only(tmp_path: Path
     assert service.calls == [
         ('task:test', 'node:test', str(created_file.resolve()), 'created'),
         ('task:test', 'node:test', str(target_file.resolve()), 'modified'),
+        ('task:test', 'node:test', str(created_file.resolve()), 'deleted'),
     ]
     store.close()
 
@@ -753,14 +769,14 @@ async def test_filesystem_tool_rejects_artifact_refs_with_content_guidance(tmp_p
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    _copy_filesystem_split_tools(workspace, 'filesystem_write')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('filesystem')
+        tool = manager.get_tool('filesystem_write')
         assert tool is not None
-        result = await tool.execute(action='write', path='artifact:artifact:demo123', content='demo')
+        result = await tool.execute(path='artifact:artifact:demo123', content='demo')
         assert 'content ref is not a filesystem path' in result
         assert 'use the content tool with ref=artifact:artifact:demo123' in result
     finally:
@@ -907,15 +923,14 @@ async def test_filesystem_edit_line_range_mode(tmp_path: Path):
     target_file.write_text('alpha\nbeta\ngamma\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    _copy_filesystem_split_tools(workspace, 'filesystem_edit')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('filesystem')
+        tool = manager.get_tool('filesystem_edit')
         assert tool is not None
         result = await tool.execute(
-            action='edit',
             path=str(target_file),
             start_line=1,
             end_line=2,
@@ -935,12 +950,12 @@ async def test_filesystem_edit_validation_failure_rolls_back(tmp_path: Path):
     target_file.write_text('print("before")\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    _copy_filesystem_split_tools(workspace, 'filesystem_edit')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('filesystem')
+        tool = manager.get_tool('filesystem_edit')
         assert tool is not None
         tool._handler._settings = tool._handler._settings.model_copy(
             update={
@@ -951,7 +966,6 @@ async def test_filesystem_edit_validation_failure_rolls_back(tmp_path: Path):
             }
         )
         result = await tool.execute(
-            action='edit',
             path=str(target_file),
             old_text='print("before")\n',
             new_text='print("after")\n',
@@ -970,15 +984,14 @@ async def test_filesystem_edit_rejects_mixed_modes(tmp_path: Path):
     target_file.write_text('before\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    _copy_filesystem_split_tools(workspace, 'filesystem_edit')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('filesystem')
+        tool = manager.get_tool('filesystem_edit')
         assert tool is not None
         result = await tool.execute(
-            action='edit',
             path=str(target_file),
             old_text='before',
             new_text='after',
@@ -997,12 +1010,12 @@ async def test_filesystem_write_validation_failure_removes_new_file(tmp_path: Pa
     target_file = workspace / 'target.py'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    _copy_filesystem_split_tools(workspace, 'filesystem_write')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('filesystem')
+        tool = manager.get_tool('filesystem_write')
         assert tool is not None
         tool._handler._settings = tool._handler._settings.model_copy(
             update={
@@ -1012,7 +1025,7 @@ async def test_filesystem_write_validation_failure_removes_new_file(tmp_path: Pa
                 },
             }
         )
-        result = await tool.execute(action='write', path=str(target_file), content='print("after")\n')
+        result = await tool.execute(path=str(target_file), content='print("after")\n')
         assert result.startswith('Error: Write validation failed')
         assert target_file.exists() is False
     finally:
@@ -1027,12 +1040,12 @@ async def test_filesystem_write_validation_failure_restores_existing_file(tmp_pa
     target_file.write_text('print("before")\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    _copy_filesystem_split_tools(workspace, 'filesystem_write')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('filesystem')
+        tool = manager.get_tool('filesystem_write')
         assert tool is not None
         tool._handler._settings = tool._handler._settings.model_copy(
             update={
@@ -1042,7 +1055,7 @@ async def test_filesystem_write_validation_failure_restores_existing_file(tmp_pa
                 },
             }
         )
-        result = await tool.execute(action='write', path=str(target_file), content='print("after")\n')
+        result = await tool.execute(path=str(target_file), content='print("after")\n')
         assert result.startswith('Error: Write validation failed')
         assert target_file.read_text(encoding='utf-8') == 'print("before")\n'
     finally:
@@ -1196,7 +1209,7 @@ async def test_filesystem_tool_auto_refreshes_new_skill_without_full_reload(tmp_
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    _copy_filesystem_split_tools(workspace, 'filesystem_write')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     service = _ResourceSyncService()
@@ -1211,7 +1224,7 @@ async def test_filesystem_tool_auto_refreshes_new_skill_without_full_reload(tmp_
     manager.reload_now = MethodType(_fail_reload, manager)
 
     try:
-        tool = manager.get_tool('filesystem')
+        tool = manager.get_tool('filesystem_write')
         assert tool is not None
 
         skill_root = workspace / 'skills' / 'auto_skill'
@@ -1234,8 +1247,8 @@ async def test_filesystem_tool_auto_refreshes_new_skill_without_full_reload(tmp_
         )
         body = '# auto_skill\n\nAuto skill guide\n'
 
-        await tool.execute(action='write', path=str(skill_root / 'resource.yaml'), content=manifest)
-        await tool.execute(action='write', path=str(skill_root / 'SKILL.md'), content=body)
+        await tool.execute(path=str(skill_root / 'resource.yaml'), content=manifest)
+        await tool.execute(path=str(skill_root / 'SKILL.md'), content=body)
 
         skill = manager.get_skill('auto_skill')
         assert skill is not None
@@ -1486,20 +1499,12 @@ async def test_filesystem_tool_rejects_removed_read_actions(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    _copy_filesystem_split_tools(workspace)
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('filesystem')
-        assert tool is not None
-        target = workspace / 'temp' / 'target.txt'
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text('hello\n', encoding='utf-8')
-
-        for action in ('describe', 'search', 'open', 'head', 'tail', 'list'):
-            result = await tool.execute(action=action, path=str(target))
-            assert 'Unsupported filesystem action' in result
+        assert manager.get_tool('filesystem') is None
     finally:
         manager.close()
 
@@ -2867,17 +2872,15 @@ def test_resource_loader_injects_tool_secrets(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    _copy_filesystem_split_tools(workspace, 'filesystem_write')
 
     registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
-    descriptor = registry.discover().tools['filesystem']
-    loader = ResourceLoader(workspace, app_config=SimpleNamespace(tool_secrets={'filesystem': {'token': 'demo-secret'}}))
+    descriptor = registry.discover().tools['filesystem_write']
+    loader = ResourceLoader(workspace, app_config=SimpleNamespace(tool_secrets={'filesystem_write': {'token': 'demo-secret'}}))
     runtime = loader.build_runtime_context(descriptor)
 
     assert runtime.tool_settings['restrict_to_workspace'] is False
-    assert 'search_timeout_seconds' in runtime.tool_settings
-    assert 'search_max_files' in runtime.tool_settings
-    assert 'search_max_bytes' in runtime.tool_settings
+    assert 'write_validation_enabled' in runtime.tool_settings
     assert runtime.tool_secrets == {'token': 'demo-secret'}
 
 
@@ -2888,14 +2891,14 @@ async def test_filesystem_tool_blocks_writes_to_system_temp_outside_workspace_de
     outside_file.write_text('allowed\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    _copy_filesystem_split_tools(workspace, 'filesystem_write')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('filesystem')
+        tool = manager.get_tool('filesystem_write')
         assert tool is not None
-        result = await tool.execute(action='write', path=str(outside_file), content='updated\n')
+        result = await tool.execute(path=str(outside_file), content='updated\n')
         assert 'system temp directory' in result
         assert outside_file.read_text(encoding='utf-8') == 'allowed\n'
     finally:
@@ -2909,9 +2912,9 @@ async def test_filesystem_tool_blocks_writes_outside_workspace_when_restricted(t
     outside_file.write_text('blocked\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem', workspace / 'tools' / 'filesystem')
+    _copy_filesystem_split_tools(workspace, 'filesystem_write')
 
-    manifest = workspace / 'tools' / 'filesystem' / 'resource.yaml'
+    manifest = workspace / 'tools' / 'filesystem_write' / 'resource.yaml'
     manifest.write_text(
         manifest.read_text(encoding='utf-8').replace('restrict_to_workspace: false', 'restrict_to_workspace: true'),
         encoding='utf-8',
@@ -2920,9 +2923,9 @@ async def test_filesystem_tool_blocks_writes_outside_workspace_when_restricted(t
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('filesystem')
+        tool = manager.get_tool('filesystem_write')
         assert tool is not None
-        result = await tool.execute(action='write', path=str(outside_file), content='blocked-again\n')
+        result = await tool.execute(path=str(outside_file), content='blocked-again\n')
         assert 'outside workspace' in result or 'outside allowed directory' in result
     finally:
         manager.close()

@@ -1755,11 +1755,11 @@ async def test_runtime_agent_session_manual_pause_dedupes_pending_transcript(
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
     assert [message["role"] for message in reloaded.messages] == ["user"]
     assert reloaded.messages[0]["content"] == "Pause without duplicate transcript"
-    assert reloaded.messages[0]["metadata"]["_transcript_state"] == "pending"
+    assert reloaded.messages[0]["metadata"]["_transcript_state"] == "paused"
 
 
 @pytest.mark.asyncio
-async def test_runtime_agent_session_resume_after_manual_pause_combines_original_request_and_additional_context(
+async def test_runtime_agent_session_prompt_batch_after_manual_pause_preserves_paused_request_and_starts_fresh_turn(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1790,7 +1790,7 @@ async def test_runtime_agent_session_resume_after_manual_pause_combines_original
     class _AnswerRunner:
         async def run_turn(self, *, user_input, session, on_progress):
             _ = user_input, session, on_progress
-            captured_inputs.append(str(user_input))
+            captured_inputs.append(session._history_text(user_input.content))
             return "Because this follow-up only needed a direct explanation."
 
     async def _cancel_session_tasks(_session_key: str) -> int:
@@ -1828,19 +1828,28 @@ async def test_runtime_agent_session_resume_after_manual_pause_combines_original
         await turn_task
 
     loop.multi_agent_runner = _AnswerRunner()
-    result = await session.resume(additional_context="Why no async task?")
+    result = await session.prompt_batch(
+        [
+            UserInputMessage(content="Please keep the original request context"),
+            UserInputMessage(content="Why no async task?"),
+        ]
+    )
 
     assert result.output == "Because this follow-up only needed a direct explanation."
     assert len(captured_inputs) == 1
-    assert "Original paused request" in captured_inputs[0]
-    assert "Why no async task?" in captured_inputs[0]
+    assert captured_inputs[0] == "Why no async task?"
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert [message["role"] for message in reloaded.messages] == ["user", "assistant"]
-    assert "Original paused request" in reloaded.messages[0]["content"]
-    assert "Why no async task?" in reloaded.messages[0]["content"]
-    assert reloaded.messages[0]["metadata"]["_transcript_state"] == "completed"
-    assert reloaded.messages[1]["content"] == "Because this follow-up only needed a direct explanation."
+    assert [message["role"] for message in reloaded.messages] == ["user", "user", "user", "assistant"]
+    assert reloaded.messages[0]["content"] == "Original paused request"
+    assert reloaded.messages[0]["metadata"]["_transcript_state"] == "paused"
+    assert reloaded.messages[1]["content"] == "Please keep the original request context"
+    assert reloaded.messages[2]["content"] == "Why no async task?"
+    assert reloaded.messages[1]["metadata"]["_transcript_state"] == "completed"
+    assert reloaded.messages[2]["metadata"]["_transcript_state"] == "completed"
+    assert reloaded.messages[1]["metadata"]["_transcript_batch_id"] == reloaded.messages[2]["metadata"]["_transcript_batch_id"]
+    assert "补充要求" not in "".join(str(message["content"]) for message in reloaded.messages)
+    assert reloaded.messages[3]["content"] == "Because this follow-up only needed a direct explanation."
 
 
 @pytest.mark.asyncio
@@ -3775,12 +3784,13 @@ def test_ceo_websocket_resume_interrupt_forwards_resume_payload(tmp_path, monkey
     assert live_session.resume_payloads == [{"approved": True}]
 
 
-def test_ceo_websocket_user_message_resumes_manual_pause_with_additional_context(tmp_path, monkeypatch) -> None:
+def test_ceo_websocket_user_message_after_manual_pause_starts_fresh_turn(tmp_path, monkeypatch) -> None:
     class _PausedResumeSession:
         def __init__(self) -> None:
             self.state = SimpleNamespace(status="paused", is_running=False, pending_interrupts=[])
             self.resume_payloads: list[dict[str, object]] = []
             self.prompt_payloads: list[object] = []
+            self.prompt_batch_payloads: list[list[object]] = []
             self._listeners = set()
 
         def subscribe(self, listener):
@@ -3819,7 +3829,11 @@ def test_ceo_websocket_user_message_resumes_manual_pause_with_additional_context
 
         async def prompt(self, user_message):
             self.prompt_payloads.append(user_message)
-            return SimpleNamespace(output="错误地新开了一轮")
+            return SimpleNamespace(output="正确地新开了一轮")
+
+        async def prompt_batch(self, user_messages):
+            self.prompt_batch_payloads.append(list(user_messages or []))
+            return SimpleNamespace(output="正确地批量新开了一轮")
 
     live_session = _PausedResumeSession()
     session_manager = SessionManager(tmp_path)
@@ -3861,8 +3875,99 @@ def test_ceo_websocket_user_message_resumes_manual_pause_with_additional_context
         ws.receive_json()
         ws.send_json({"type": "client.user_message", "text": "前10个"})
 
+    assert live_session.resume_payloads == []
+    assert len(live_session.prompt_payloads) == 1
+    assert websocket_ceo._history_text(live_session.prompt_payloads[0].content) == "前10个"
+    assert live_session.prompt_batch_payloads == []
+
+
+def test_ceo_websocket_user_message_batch_payload_dispatches_single_fresh_batch_turn(tmp_path, monkeypatch) -> None:
+    class _BatchSession:
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(status="idle", is_running=False, pending_interrupts=[])
+            self.prompt_payloads: list[object] = []
+            self.prompt_batch_payloads: list[list[object]] = []
+            self._listeners = set()
+
+        def subscribe(self, listener):
+            self._listeners.add(listener)
+            return lambda: self._listeners.discard(listener)
+
+        def state_dict(self) -> dict[str, object]:
+            return {
+                "status": self.state.status,
+                "is_running": self.state.is_running,
+                "pending_interrupts": list(self.state.pending_interrupts),
+            }
+
+        def inflight_turn_snapshot(self):
+            return None
+
+        async def prompt(self, user_message):
+            self.prompt_payloads.append(user_message)
+            return SimpleNamespace(output="single")
+
+        async def prompt_batch(self, user_messages):
+            self.prompt_batch_payloads.append(list(user_messages or []))
+            return SimpleNamespace(output="batch")
+
+    live_session = _BatchSession()
+    session_manager = SessionManager(tmp_path)
+    session_manager.get_or_create("web:shared")
+    app = FastAPI()
+    app.include_router(websocket_ceo.router, prefix="/api")
+
+    monkeypatch.setattr(
+        websocket_ceo,
+        "get_agent",
+        lambda: SimpleNamespace(
+            sessions=session_manager,
+            main_task_service=SimpleNamespace(
+                startup=lambda: None,
+                registry=SimpleNamespace(
+                    subscribe_ceo=lambda _session_id: asyncio.Queue(),
+                    subscribe_global_ceo=lambda: asyncio.Queue(),
+                    unsubscribe_ceo=lambda _session_id, _queue: None,
+                    unsubscribe_global_ceo=lambda _queue: None,
+                    next_ceo_seq=lambda _session_id: 1,
+                    publish_global_ceo=lambda _envelope: None,
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", lambda _agent: None)
+    monkeypatch.setattr(
+        websocket_ceo,
+        "get_runtime_manager",
+        lambda _agent: SimpleNamespace(get_or_create=lambda **kwargs: live_session, get=lambda _key: live_session),
+    )
+    monkeypatch.setattr(websocket_ceo, "workspace_path", lambda: tmp_path)
+
+    client = TestClient(app)
+    with client.websocket_connect("/api/ws/ceo?session_id=web:shared") as ws:
+        ws.receive_json()
+        ws.receive_json()
+        ws.receive_json()
+        ws.receive_json()
+        ws.send_json(
+            {
+                "type": "client.user_message",
+                "messages": [
+                    {"text": "先补齐 skill 元数据"},
+                    {"text": "再检查 filesystem_write 是否可用"},
+                ],
+            }
+        )
+
     assert live_session.prompt_payloads == []
-    assert live_session.resume_payloads == [{"additional_context": "前10个", "replan": False}]
+    assert len(live_session.prompt_batch_payloads) == 1
+    assert [
+        websocket_ceo._history_text(item.content)
+        for item in live_session.prompt_batch_payloads[0]
+    ] == [
+        "先补齐 skill 元数据",
+        "再检查 filesystem_write 是否可用",
+    ]
 
 
 def test_ceo_websocket_turn_patch_carries_live_execution_trace_summary(tmp_path: Path, monkeypatch) -> None:

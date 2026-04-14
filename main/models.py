@@ -232,7 +232,7 @@ class TaskArtifactRecord(Model):
 
 class NodeToolFileChange(Model):
     path: str = ''
-    change_type: Literal['created', 'modified'] = 'modified'
+    change_type: Literal['created', 'modified', 'deleted'] = 'modified'
 
 
 class TaskRecord(Model):
@@ -389,7 +389,7 @@ def normalize_tool_file_changes(value: Any) -> list[NodeToolFileChange]:
         change_type = str(change.change_type or 'modified').strip().lower()
         if not path:
             continue
-        if change_type not in {'created', 'modified'}:
+        if change_type not in {'created', 'modified', 'deleted'}:
             change_type = 'modified'
         changes.append(
             change.model_copy(

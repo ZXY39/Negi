@@ -64,14 +64,14 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 
 - Browser-side queued follow-ups are stored per session and rendered above the composer.
 - Sending while a turn is active enqueues a follow-up instead of interrupting the current turn.
-- The queue is consumed automatically in FIFO order after the current turn finishes.
-- Consumption is sequential across multiple turns: each queued item becomes the next outbound user message, and the queue keeps draining until it is empty or the session re-enters a blocked state.
+- Once the session becomes dispatchable again, queued follow-ups are drained in FIFO order into one fresh outbound batch.
+- Each queued item still remains its own user message in the frontend timeline and in transcript persistence; batching only changes how the next LLM call is assembled.
 
 ### Manual Pause Resume Rule
 
-- If the session is in a resumable manual-pause state, the next outbound user message must resume the paused request with additional context.
-- It must not be treated as a completely new independent prompt.
-- This distinction matters because otherwise the model only sees the fragmentary follow-up text, such as "前10个", and loses the original task intent.
+- Manual pause now freezes the current turn as the previous round context instead of waiting for a textual resume merge.
+- The next outbound user message after pause must start a new round.
+- The paused round's user message, execution trace, stage state, tool calls, and compression state are preserved in transcript and snapshot context so the next round can inherit them without rewriting the original user text.
 
 ### Heartbeat Compatibility
 

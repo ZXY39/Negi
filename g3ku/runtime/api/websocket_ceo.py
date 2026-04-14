@@ -306,6 +306,25 @@ def _build_user_message(text: str, uploads: list[dict[str, Any]]) -> str | UserI
     )
 
 
+def _normalize_client_user_messages(session_id: str, payload: dict[str, Any]) -> list[UserInputMessage]:
+    batch_payload = payload.get('messages')
+    raw_entries = list(batch_payload or []) if isinstance(batch_payload, list) else [payload]
+    messages: list[UserInputMessage] = []
+    for raw in raw_entries:
+        if not isinstance(raw, dict):
+            continue
+        text = str(raw.get('text') or '')
+        uploads = _normalize_uploaded_files(session_id, raw.get('uploads'))
+        if not text.strip() and not uploads:
+            continue
+        built = _build_user_message(text, uploads)
+        if isinstance(built, UserInputMessage):
+            messages.append(built)
+        else:
+            messages.append(UserInputMessage(content=str(built)))
+    return messages
+
+
 def _build_inflight_turn_snapshot(
     session: Any,
     session_id: str,
@@ -721,9 +740,19 @@ async def ceo_websocket(websocket: WebSocket):
         except Exception:
             return
 
-    async def _run_user_turn(user_message: str | UserInputMessage) -> None:
+    async def _run_user_turn(user_message: str | UserInputMessage | list[UserInputMessage]) -> None:
         try:
-            await session.prompt(user_message)
+            if isinstance(user_message, list):
+                if len(user_message) == 1:
+                    await session.prompt(user_message[0])
+                else:
+                    prompt_batch = getattr(session, 'prompt_batch', None)
+                    if callable(prompt_batch):
+                        await prompt_batch(user_message)
+                    else:
+                        await session.prompt(user_message[-1])
+            else:
+                await session.prompt(user_message)
         except asyncio.CancelledError:
             return
         except Exception as exc:
@@ -930,9 +959,8 @@ async def ceo_websocket(websocket: WebSocket):
                     )
                 )
                 continue
-            text = str(data.get('text') or '')
             try:
-                uploads = _normalize_uploaded_files(session_id, data.get('uploads'))
+                user_messages = _normalize_client_user_messages(session_id, data)
             except HTTPException as exc:
                 await _safe_send(
                     build_envelope(
@@ -943,7 +971,7 @@ async def ceo_websocket(websocket: WebSocket):
                     )
                 )
                 continue
-            if not text.strip() and not uploads:
+            if not user_messages:
                 continue
             if bool(getattr(session, "has_blocking_tool_execution", lambda: False)()):
                 await _safe_send(
@@ -968,27 +996,19 @@ async def ceo_websocket(websocket: WebSocket):
                     )
                 )
                 continue
-            if _session_can_resume_manual_pause(session):
-                follow_up_text = _history_text(_build_user_message(text, uploads))
-                current_turn_task = asyncio.create_task(
-                    session.resume(additional_context=follow_up_text)
-                )
-                _register_turn_task(current_turn_task)
-                current_turn_task.add_done_callback(_clear_turn_task)
-                continue
             persisted = transcript_store.get_or_create(session_id)
+            preview_text = _history_text(user_messages[-1].content)
             _publish_ceo_session_patch(
                 agent=agent,
                 transcript_store=transcript_store,
                 runtime_manager=runtime_manager,
                 state_store=state_store,
                 session_id=session_id,
-                preview_text=text,
-                message_count=len(list(getattr(persisted, 'messages', []) or [])) + 1,
+                preview_text=preview_text,
+                message_count=len(list(getattr(persisted, 'messages', []) or [])) + len(user_messages),
                 is_running=True,
             )
-            user_message = _build_user_message(text, uploads)
-            current_turn_task = asyncio.create_task(_run_user_turn(user_message))
+            current_turn_task = asyncio.create_task(_run_user_turn(user_messages))
             _register_turn_task(current_turn_task)
             current_turn_task.add_done_callback(_clear_turn_task)
     except (WebSocketDisconnect, WebSocketChannelClosed):

@@ -235,6 +235,7 @@ def test_initial_persistent_state_tracks_stage_state_and_runtime_marker() -> Non
         "transition_required": False,
         "stages": [],
     }
+    assert state["hydrated_tool_names"] == []
     assert state["agent_runtime"] == "create_agent"
 
 
@@ -883,6 +884,7 @@ async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compressio
         _last_route_kind="task_dispatch",
         _frontdoor_stage_state={},
         _compression_state={},
+        _frontdoor_hydrated_tool_names=[],
     )
 
     class _FakeAgent:
@@ -893,6 +895,7 @@ async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compressio
                 "route_kind": "self_execute",
                 "final_output": "ok",
                 "verified_task_ids": ["task:demo-123"],
+                "hydrated_tool_names": ["filesystem_write"],
                 "frontdoor_stage_state": {
                     "active_stage_id": "frontdoor-stage-1",
                     "transition_required": False,
@@ -924,6 +927,7 @@ async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compressio
     assert output == "ok"
     assert session._last_route_kind == "self_execute"
     assert session._last_verified_task_ids == ["task:demo-123"]
+    assert session._frontdoor_hydrated_tool_names == ["filesystem_write"]
     assert session._frontdoor_stage_state["active_stage_id"] == "frontdoor-stage-1"
     assert session._compression_state == {"status": "ready", "text": "全局上下文已压缩", "source": "semantic"}
     assert session._semantic_context_state["summary_text"] == "## 长期目标\n继续当前任务"
@@ -936,6 +940,7 @@ async def test_create_agent_runner_resume_turn_wires_frontdoor_stage_and_compres
         _last_route_kind="task_dispatch",
         _frontdoor_stage_state={},
         _compression_state={},
+        _frontdoor_hydrated_tool_names=[],
     )
 
     class _FakeAgent:
@@ -946,6 +951,7 @@ async def test_create_agent_runner_resume_turn_wires_frontdoor_stage_and_compres
                 "route_kind": "direct_reply",
                 "final_output": "approved",
                 "verified_task_ids": [],
+                "hydrated_tool_names": ["filesystem_write"],
                 "frontdoor_stage_state": {
                     "active_stage_id": "",
                     "transition_required": True,
@@ -967,10 +973,75 @@ async def test_create_agent_runner_resume_turn_wires_frontdoor_stage_and_compres
 
     assert output == "approved"
     assert session._last_route_kind == "direct_reply"
+    assert session._frontdoor_hydrated_tool_names == ["filesystem_write"]
     assert session._frontdoor_stage_state["active_stage_id"] == ""
     assert session._frontdoor_stage_state["transition_required"] is False
     assert session._frontdoor_stage_state["stages"][0]["status"] == "completed"
     assert session._compression_state == {"status": "idle", "text": "", "source": ""}
+
+
+@pytest.mark.asyncio
+async def test_create_agent_postprocess_promotes_loaded_tool_context_into_next_turn_state() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    result = await runner._postprocess_completed_tool_cycle(
+        state={
+            "tool_call_payloads": [
+                {"id": "call-1", "name": "load_tool_context", "arguments": {"tool_id": "filesystem_write"}}
+            ],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "load_tool_context", "arguments": '{"tool_id":"filesystem_write"}'},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "load_tool_context",
+                    "content": (
+                        '{"ok": true, "tool_id": "filesystem_write", '
+                        '"callable_now": true, "will_be_hydrated_next_turn": true, '
+                        '"hydration_targets": ["filesystem_write"]}'
+                    ),
+                },
+            ],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "tool_names": ["load_tool_context"],
+            "candidate_tool_names": ["filesystem_write", "agent_browser"],
+            "hydrated_tool_names": [],
+        }
+    )
+
+    assert result is not None
+    assert result["hydrated_tool_names"] == ["filesystem_write"]
+    assert result["tool_names"] == ["load_tool_context", "filesystem_write"]
+    assert result["candidate_tool_names"] == ["agent_browser"]
+
+
+def test_runtime_agent_session_inflight_snapshot_keeps_frontdoor_hydrated_tool_names() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._state.latest_message = "working"
+    session._frontdoor_hydrated_tool_names = ["filesystem_write"]
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert isinstance(snapshot, dict)
+    assert snapshot["hydrated_tool_names"] == ["filesystem_write"]
 
 
 @pytest.mark.asyncio

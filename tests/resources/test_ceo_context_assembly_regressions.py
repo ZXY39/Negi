@@ -881,6 +881,35 @@ async def test_message_builder_uses_memory_only_retrieval_for_memory_intent() ->
 
 
 @pytest.mark.asyncio
+async def test_message_builder_polls_main_runtime_for_external_resource_changes_before_catalog_sync() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    refresh_calls: list[str] = []
+
+    class _MainService:
+        async def maybe_refresh_external_resource_changes(self, *, session_id: str):
+            refresh_calls.append(session_id)
+            return {"refreshed": True, "catalog_synced": True}
+
+    loop = _loop(memory_manager)
+    loop.main_task_service = _MainService()
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
+
+    await builder.build_for_ceo(
+        session=_session(),
+        query_text="browser workflow",
+        exposure={
+            "skills": [_skill("focused-skill", "Primary workflow")],
+            "tool_families": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
+            "tool_names": ["filesystem", "agent_browser"],
+        },
+        persisted_session=None,
+    )
+
+    assert refresh_calls == ["web:shared"]
+
+
+@pytest.mark.asyncio
 async def test_message_builder_keeps_callable_and_candidate_tools_separate() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _MemoryManager(response="")
@@ -902,6 +931,40 @@ async def test_message_builder_keeps_callable_and_candidate_tools_separate() -> 
 
     assert result.tool_names == ["load_tool_context"]
     assert result.candidate_tool_names == ["agent_browser", "web_fetch"]
+
+
+@pytest.mark.asyncio
+async def test_message_builder_promotes_hydrated_tools_into_callable_list() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    async def _semantic_rankings(**kwargs):
+        _ = kwargs
+        return {"mode": "unavailable", "available": False, "trace": {}}
+
+    original = message_builder_module.semantic_catalog_rankings
+    message_builder_module.semantic_catalog_rankings = _semantic_rankings
+    try:
+        result = await builder.build_for_ceo(
+            session=_session(),
+            query_text="write the skill manifest",
+            exposure={
+                "skills": [],
+                "tool_families": [
+                    _tool_resource_record("filesystem_write", "Write a file with full content."),
+                    _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
+                ],
+                "tool_names": ["load_tool_context", "filesystem_write", "agent_browser"],
+            },
+            persisted_session=None,
+            hydrated_tool_names=["filesystem_write"],
+        )
+    finally:
+        message_builder_module.semantic_catalog_rankings = original
+
+    assert result.tool_names == ["load_tool_context", "filesystem_write"]
+    assert result.candidate_tool_names == ["agent_browser"]
 
 
 @pytest.mark.asyncio
@@ -1208,6 +1271,49 @@ async def test_message_builder_prefers_checkpoint_history_over_transcript_once_a
     assert "bootstrap transcript answer" not in contents
     assert contents.count("follow up question") == 1
     assert contents[-1] == "follow up question"
+    assert result.trace["current_user_in_transcript"] is True
+
+
+@pytest.mark.asyncio
+async def test_message_builder_keeps_batched_user_messages_in_transcript_history_without_duping_current_user() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    persisted_session = Session(key="web:shared")
+    persisted_session.add_message("user", "first question")
+    persisted_session.add_message("assistant", "first answer")
+    persisted_session.add_message(
+        "user",
+        "first batched follow-up",
+        metadata={
+            "_transcript_turn_id": "turn-batch-1",
+            "_transcript_state": "pending",
+            "_transcript_batch_id": "batch-1",
+        },
+    )
+    persisted_session.add_message(
+        "user",
+        "second batched follow-up",
+        metadata={
+            "_transcript_turn_id": "turn-batch-2",
+            "_transcript_state": "pending",
+            "_transcript_batch_id": "batch-1",
+        },
+    )
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="first batched follow-up\n\nsecond batched follow-up",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=persisted_session,
+        user_content="second batched follow-up",
+        user_metadata={"_transcript_turn_id": "turn-batch-2", "_transcript_batch_id": "batch-1"},
+    )
+
+    contents = [str(item.get("content") or "") for item in result.model_messages]
+    assert contents.count("first batched follow-up") == 1
+    assert contents.count("second batched follow-up") == 1
+    assert contents[-2:] == ["first batched follow-up", "second batched follow-up"]
     assert result.trace["current_user_in_transcript"] is True
 
 

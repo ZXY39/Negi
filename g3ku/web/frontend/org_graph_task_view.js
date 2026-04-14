@@ -1999,7 +1999,9 @@ function renderArtifacts() {
 }
 
 function normalizeFileChangeType(changeType) {
-    return String(changeType || "modified").trim().toLowerCase() === "created" ? "created" : "modified";
+    const normalized = String(changeType || "modified").trim().toLowerCase();
+    if (normalized === "created" || normalized === "deleted") return normalized;
+    return "modified";
 }
 
 function describeFileChange(changeType) {
@@ -2014,6 +2016,21 @@ function describeFileChange(changeType) {
                     <path d="M14 2v5h5"></path>
                     <path d="M12 12v6"></path>
                     <path d="M9 15h6"></path>
+                </svg>
+            `.trim(),
+        };
+    }
+    if (type === "deleted") {
+        return {
+            type,
+            label: "Deleted file",
+            iconSvg: `
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M3 6h18"></path>
+                    <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"></path>
+                    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+                    <path d="M10 11v6"></path>
+                    <path d="M14 11v6"></path>
                 </svg>
             `.trim(),
         };

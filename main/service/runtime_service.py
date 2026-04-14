@@ -344,6 +344,9 @@ class MainRuntimeService:
         self.policy_engine = MainRuntimePolicyEngine(store=self.governance_store, resource_registry=self.resource_registry)
         self._external_tool_provider = tool_provider or (lambda _node: {})
         self._resource_manager = resource_manager
+        self._resource_tree_state_cache: dict[str, dict[str, str]] | None = None
+        self._resource_tree_state_checked_at: float = 0.0
+        self._resource_tree_state_poll_interval_ms = self._resource_reload_poll_interval_ms(app_config)
         self.memory_manager = None
         self._default_max_depth = max(0, int(default_max_depth or 0))
         self._hard_max_depth = max(self._default_max_depth, int(hard_max_depth or self._default_max_depth))
@@ -515,6 +518,7 @@ class MainRuntimeService:
         self.resource_registry.refresh_from_current_resources()
         self.reconcile_core_tool_families()
         self.policy_engine.sync_default_role_policies()
+        self._record_resource_tree_state()
         if self.memory_manager is not None and hasattr(self.memory_manager, 'sync_catalog'):
             try:
                 await self.memory_manager.sync_catalog(self)
@@ -2638,6 +2642,7 @@ class MainRuntimeService:
     def bind_resource_manager(self, resource_manager) -> None:
         self._resource_manager = resource_manager
         self.resource_registry.bind_resource_manager(resource_manager)
+        self._record_resource_tree_state()
 
     def bind_runtime_loop(self, loop: Any | None) -> None:
         self._runtime_loop = loop
@@ -3446,6 +3451,159 @@ class MainRuntimeService:
         }
 
     @staticmethod
+    def _resource_reload_poll_interval_ms(config: Any | None) -> int:
+        resources = getattr(config, 'resources', None) if config is not None else None
+        reload_cfg = getattr(resources, 'reload', None) if resources is not None else None
+        return max(0, int(getattr(reload_cfg, 'poll_interval_ms', 1000) or 1000))
+
+    @staticmethod
+    def _resource_state_names_changed(
+        before_state: dict[str, dict[str, str]] | None,
+        after_state: dict[str, dict[str, str]] | None,
+        section: str,
+    ) -> list[str]:
+        previous = dict((before_state or {}).get(section) or {})
+        current = dict((after_state or {}).get(section) or {})
+        return sorted(
+            name
+            for name in set(previous) | set(current)
+            if previous.get(name) != current.get(name)
+        )
+
+    def _resource_tree_state_snapshot(self) -> dict[str, dict[str, str]]:
+        manager = getattr(self, '_resource_manager', None)
+        if manager is None or not hasattr(manager, 'capture_resource_tree_state'):
+            return {}
+        try:
+            snapshot = manager.capture_resource_tree_state()
+        except Exception:
+            return {}
+        return dict(snapshot or {})
+
+    def _record_resource_tree_state(
+        self,
+        state: dict[str, dict[str, str]] | None = None,
+        *,
+        checked_at: float | None = None,
+    ) -> None:
+        self._resource_tree_state_cache = dict(state or self._resource_tree_state_snapshot() or {})
+        self._resource_tree_state_checked_at = float(time.perf_counter() if checked_at is None else checked_at)
+
+    async def _sync_catalog_targets(
+        self,
+        *,
+        skill_ids: set[str] | None = None,
+        tool_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        normalized_skill_ids = {
+            str(item or '').strip()
+            for item in (skill_ids or set())
+            if str(item or '').strip()
+        }
+        normalized_tool_ids = {
+            str(item or '').strip()
+            for item in (tool_ids or set())
+            if str(item or '').strip()
+        }
+        if not normalized_skill_ids and not normalized_tool_ids:
+            return {
+                'catalog_synced': False,
+                'skill_ids': [],
+                'tool_ids': [],
+            }
+        memory_manager = getattr(self, 'memory_manager', None)
+        if memory_manager is None or not hasattr(memory_manager, 'sync_catalog'):
+            return {
+                'catalog_synced': False,
+                'skill_ids': sorted(normalized_skill_ids),
+                'tool_ids': sorted(normalized_tool_ids),
+            }
+        try:
+            result = await memory_manager.sync_catalog(
+                self,
+                skill_ids=normalized_skill_ids or None,
+                tool_ids=normalized_tool_ids or None,
+            )
+        except Exception:
+            return {
+                'catalog_synced': False,
+                'skill_ids': sorted(normalized_skill_ids),
+                'tool_ids': sorted(normalized_tool_ids),
+            }
+        return {
+            'catalog_synced': True,
+            'catalog': dict(result or {}),
+            'skill_ids': sorted(normalized_skill_ids),
+            'tool_ids': sorted(normalized_tool_ids),
+        }
+
+    async def maybe_refresh_external_resource_changes(
+        self,
+        *,
+        session_id: str = 'web:shared',
+        force: bool = False,
+    ) -> dict[str, Any]:
+        manager = getattr(self, '_resource_manager', None)
+        if manager is None or not hasattr(manager, 'capture_resource_tree_state'):
+            return {
+                'refreshed': False,
+                'catalog_synced': False,
+                'skill_ids': [],
+                'tool_ids': [],
+            }
+        now = time.perf_counter()
+        interval_ms = max(0, int(getattr(self, '_resource_tree_state_poll_interval_ms', 0) or 0))
+        before_state = dict(getattr(self, '_resource_tree_state_cache', None) or {})
+        last_checked_at = float(getattr(self, '_resource_tree_state_checked_at', 0.0) or 0.0)
+        if not before_state:
+            self._record_resource_tree_state(checked_at=now)
+            return {
+                'refreshed': False,
+                'catalog_synced': False,
+                'skill_ids': [],
+                'tool_ids': [],
+            }
+        if (
+            not force
+            and interval_ms > 0
+            and last_checked_at > 0.0
+            and ((now - last_checked_at) * 1000.0) < interval_ms
+        ):
+            return {
+                'refreshed': False,
+                'catalog_synced': False,
+                'skill_ids': [],
+                'tool_ids': [],
+            }
+        after_state = self._resource_tree_state_snapshot()
+        if after_state == before_state:
+            self._record_resource_tree_state(after_state, checked_at=now)
+            return {
+                'refreshed': False,
+                'catalog_synced': False,
+                'skill_ids': [],
+                'tool_ids': [],
+            }
+        skill_ids = self._resource_state_names_changed(before_state, after_state, 'skills')
+        tool_ids = self._resource_state_names_changed(before_state, after_state, 'tools')
+        refresh_result = self.refresh_changed_resources(
+            before_state,
+            trigger='external-resource-generation-check',
+            session_id=session_id,
+        )
+        self._node_context_selection_cache = {}
+        self._record_resource_tree_state(after_state, checked_at=now)
+        sync_result = await self._sync_catalog_targets(
+            skill_ids=set(skill_ids),
+            tool_ids=set(tool_ids),
+        )
+        return {
+            'refreshed': True,
+            'resources': refresh_result,
+            **sync_result,
+        }
+
+    @staticmethod
     def _repair_legacy_display_text(value: Any) -> Any:
         if not isinstance(value, str):
             return value
@@ -3631,8 +3789,13 @@ class MainRuntimeService:
         return PermissionSubject(user_key=session_id, session_id=session_id, task_id=task_id, node_id=node_id, actor_role=actor_role)
 
     def list_effective_tool_names(self, *, actor_role: str, session_id: str) -> list[str]:
-        supported = sorted((self._resource_manager.tool_instances().keys() if self._resource_manager is not None else []))
-        return list_effective_tool_names(subject=self._subject(actor_role=actor_role, session_id=session_id), supported_tool_names=supported, resource_registry=self.resource_registry, policy_engine=self.policy_engine, mutation_allowed=True)
+        resource_manager = getattr(self, '_resource_manager', None)
+        supported = sorted((resource_manager.tool_instances().keys() if resource_manager is not None else []))
+        resource_registry = getattr(self, 'resource_registry', None)
+        policy_engine = getattr(self, 'policy_engine', None)
+        if resource_registry is None or policy_engine is None:
+            return list(supported)
+        return list_effective_tool_names(subject=self._subject(actor_role=actor_role, session_id=session_id), supported_tool_names=supported, resource_registry=resource_registry, policy_engine=policy_engine, mutation_allowed=True)
 
     def list_visible_skill_resources(self, *, actor_role: str, session_id: str):
         visible_ids = set(list_effective_skill_ids(subject=self._subject(actor_role=actor_role, session_id=session_id), available_skill_ids=[item.skill_id for item in self.resource_registry.list_skill_resources()], policy_engine=self.policy_engine))
@@ -3939,22 +4102,85 @@ class MainRuntimeService:
             runtime_payload.get('actor_role')
             or ('inspection' if normalized_node_kind == 'acceptance' else 'execution')
         ).strip() or ('inspection' if normalized_node_kind == 'acceptance' else 'execution')
-        ordered_visible_tool_names: list[str] = []
-        for raw_name in dict(visible_tools or {}).keys():
-            name = str(raw_name or '').strip()
-            if not name:
-                continue
-            ordered_visible_tool_names.append(name)
-        visible_rbac_tool_names = self._normalized_tool_name_list(
-            list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
+        ordered_visible_tool_names = self._normalized_tool_name_list(list(dict(visible_tools or {}).keys()))
+        visible_rbac_tool_names = self._normalized_tool_name_list(list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or []))
+        if not visible_rbac_tool_names:
+            visible_rbac_tool_names = list(ordered_visible_tool_names)
+        stable_lightweight_items = self._stable_execution_visible_tool_families(
+            items=list(self.execution_visible_tool_lightweight_items(actor_role=actor_role, session_id=session_id) or []),
+            visible_tool_names=visible_rbac_tool_names,
         )
+        lightweight_items = self._filter_execution_model_visible_lightweight_items(items=stable_lightweight_items)
+        legacy_monolith_names: set[str] = set()
+        for item in list(stable_lightweight_items or []):
+            tool_id = str((item or {}).get('tool_id') or '').strip()
+            actions = list((item or {}).get('actions') or [])
+            all_executor_names = [
+                str(executor_name or '').strip()
+                for action in actions
+                for executor_name in list((action or {}).get('executor_names') or [])
+                if str(executor_name or '').strip()
+            ]
+            split_available = any(
+                not self._is_legacy_execution_monolith_name(tool_id=tool_id, executor_name=executor_name)
+                for executor_name in all_executor_names
+            )
+            if split_available and tool_id:
+                legacy_monolith_names.add(tool_id)
+                for executor_name in all_executor_names:
+                    if self._is_legacy_execution_monolith_name(tool_id=tool_id, executor_name=executor_name):
+                        legacy_monolith_names.add(executor_name)
         hydrated_executor_names = self._node_hydrated_executor_names(
             task_id=str(task_id or '').strip(),
             node_id=str(node_id or '').strip(),
             actor_role=actor_role,
             session_id=session_id,
         )
-        callable_tool_names = self._normalized_tool_name_list(ordered_visible_tool_names)
+        always_callable_tool_names: list[str] = []
+        lightweight_executor_names = {
+            str(executor_name or '').strip()
+            for item in list(lightweight_items or [])
+            for action in list((item or {}).get('actions') or [])
+            for executor_name in list((action or {}).get('executor_names') or [])
+            if str(executor_name or '').strip()
+        }
+        control_tool_names = self._execution_control_tool_names(
+            node_kind=normalized_node_kind,
+            can_spawn_children=bool(getattr(node, 'can_spawn_children', normalized_node_kind == 'execution')),
+        )
+        for name in [
+            *control_tool_names,
+            *self._execution_fixed_builtin_tool_names(visible_tool_names=ordered_visible_tool_names),
+        ]:
+            normalized = str(name or '').strip()
+            if normalized and normalized in ordered_visible_tool_names and normalized not in always_callable_tool_names:
+                always_callable_tool_names.append(normalized)
+        for name in ordered_visible_tool_names:
+            if name in lightweight_executor_names or name in always_callable_tool_names or name in legacy_monolith_names:
+                continue
+            always_callable_tool_names.append(name)
+        promoted_hydrated_executor_names = self._canonicalize_execution_promoted_tool_names(
+            tool_names=list(hydrated_executor_names),
+            visible_tool_families=lightweight_items,
+        )
+        promoted_only_hydrated_executor_names = [
+            name for name in promoted_hydrated_executor_names if name not in always_callable_tool_names
+        ]
+        schema_size_by_executor = {
+            name: len(json.dumps(tool.to_model_schema(), ensure_ascii=False, sort_keys=True))
+            for name, tool in dict(visible_tools or {}).items()
+        }
+        selection = build_execution_tool_selection(
+            prompt=str(getattr(node, 'prompt', '') or ''),
+            goal=str(getattr(node, 'goal', '') or ''),
+            core_requirement=str(getattr(task, 'metadata', {}).get('core_requirement') or getattr(node, 'prompt', '') or getattr(node, 'goal', '') or ''),
+            visible_tool_families=list(lightweight_items),
+            visible_tool_names=list(ordered_visible_tool_names),
+            always_callable_tool_names=list(always_callable_tool_names),
+            promoted_tool_names=list(promoted_hydrated_executor_names),
+            schema_size_by_executor=schema_size_by_executor,
+        )
+        callable_tool_names = self._normalized_tool_name_list(list(selection.hydrated_tool_names or []))
         log_service = getattr(self, 'log_service', None)
         read_runtime_frame = getattr(log_service, 'read_runtime_frame', None)
         prior_selected_tool_names: list[str] = []
@@ -3970,7 +4196,7 @@ class MainRuntimeService:
         for name in prior_selected_tool_names:
             if name in callable_tool_names and name not in selected_tool_names:
                 selected_tool_names.append(name)
-        for name in ordered_visible_tool_names:
+        for name in callable_tool_names:
             if name not in selected_tool_names:
                 selected_tool_names.append(name)
         final_schema_chars = sum(
@@ -3980,8 +4206,8 @@ class MainRuntimeService:
         )
         return {
             'tool_names': selected_tool_names,
-            'lightweight_tool_ids': [],
-            'hydrated_executor_names': list(hydrated_executor_names),
+            'lightweight_tool_ids': list(selection.lightweight_tool_ids or []),
+            'hydrated_executor_names': list(promoted_only_hydrated_executor_names),
             'schema_chars': int(final_schema_chars),
             'trace': {
                 'mode': 'execution_tool_selection',
@@ -3991,10 +4217,11 @@ class MainRuntimeService:
                 'rbac_visible_tool_names': list(visible_rbac_tool_names),
                 'callable_tool_names': list(callable_tool_names),
                 'requested_promoted_hydrated_executor_names': list(hydrated_executor_names),
-                'promoted_hydrated_executor_names': list(hydrated_executor_names),
-                'base_schema_chars': 0,
-                'top_k': 0,
+                'promoted_hydrated_executor_names': list(promoted_only_hydrated_executor_names),
+                'base_schema_chars': int(selection.schema_chars),
+                'top_k': int((selection.trace or {}).get('top_k', 0) or 0),
                 'final_schema_chars': int(final_schema_chars),
+                **dict(selection.trace or {}),
             },
         }
 
@@ -4102,6 +4329,9 @@ class MainRuntimeService:
     def _tool_context_hydration_targets(self, *, requested_tool_id: str, visible_family: Any) -> list[str]:
         requested_name = str(requested_tool_id or '').strip()
         if not requested_name:
+            return []
+        family_tool_id = str(getattr(visible_family, 'tool_id', '') or '').strip()
+        if family_tool_id == 'filesystem' and requested_name == family_tool_id:
             return []
         family_executors = self._family_executor_names(visible_family)
         if requested_name in family_executors:
@@ -4245,6 +4475,8 @@ class MainRuntimeService:
             for name in list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
             if str(name or '').strip()
         }
+        if not visible_tool_names:
+            return self._normalized_hydrated_executor_names(list(frame.get('hydrated_executor_names') or []))
         hydrated: list[str] = []
         for raw_name in list(frame.get('hydrated_executor_names') or []):
             name = str(raw_name or '').strip()
@@ -4693,6 +4925,7 @@ class MainRuntimeService:
                 skills, tools = registry.refresh_from_current_resources()
                 if policy_engine is not None and hasattr(policy_engine, 'sync_default_role_policies'):
                     policy_engine.sync_default_role_policies()
+                self._record_resource_tree_state()
                 return {'ok': True, 'session_id': session_id, 'skills': len(skills), 'tools': len(tools)}
         fallback = getattr(self, 'reload_resources', None)
         if callable(fallback):
@@ -4715,6 +4948,7 @@ class MainRuntimeService:
                 skills, tools = registry.refresh_from_current_resources()
                 if policy_engine is not None and hasattr(policy_engine, 'sync_default_role_policies'):
                     policy_engine.sync_default_role_policies()
+                self._record_resource_tree_state()
                 return {'ok': True, 'session_id': session_id, 'skills': len(skills), 'tools': len(tools)}
         fallback = getattr(self, 'reload_resources', None)
         if callable(fallback):
@@ -4739,18 +4973,7 @@ class MainRuntimeService:
         session_id: str = 'web:shared',
     ) -> dict[str, Any]:
         item = self.write_skill_file(skill_id, file_key, content, session_id=session_id)
-        if self.memory_manager is not None and hasattr(self.memory_manager, 'sync_catalog'):
-            try:
-                sync_result = await self.memory_manager.sync_catalog(
-                    self,
-                    skill_ids={str(skill_id or '').strip()},
-                )
-                item['catalog_synced'] = True
-                item['catalog'] = sync_result
-            except Exception:
-                item['catalog_synced'] = False
-        else:
-            item['catalog_synced'] = False
+        item.update(await self._sync_catalog_targets(skill_ids={str(skill_id or '').strip()}))
         return item
 
     def _workspace_root(self) -> Path:
@@ -5156,18 +5379,7 @@ class MainRuntimeService:
     ) -> dict[str, Any]:
         target_skill_id = str(skill_id or '').strip()
         item = self.delete_skill_resource(target_skill_id, session_id=session_id)
-        if self.memory_manager is not None and hasattr(self.memory_manager, 'sync_catalog'):
-            try:
-                sync_result = await self.memory_manager.sync_catalog(
-                    self,
-                    skill_ids={target_skill_id},
-                )
-                item['catalog_synced'] = True
-                item['catalog'] = sync_result
-            except Exception:
-                item['catalog_synced'] = False
-        else:
-            item['catalog_synced'] = False
+        item.update(await self._sync_catalog_targets(skill_ids={target_skill_id}))
         return item
 
     def update_skill_policy(self, skill_id: str, *, session_id: str = 'web:shared', enabled: bool | None = None, allowed_roles: list[str] | None = None):
@@ -5355,18 +5567,7 @@ class MainRuntimeService:
     ) -> dict[str, Any]:
         target_tool_id = str(tool_id or '').strip()
         item = self.delete_tool_resource(target_tool_id, session_id=session_id)
-        if self.memory_manager is not None and hasattr(self.memory_manager, 'sync_catalog'):
-            try:
-                sync_result = await self.memory_manager.sync_catalog(
-                    self,
-                    tool_ids={target_tool_id},
-                )
-                item['catalog_synced'] = True
-                item['catalog'] = sync_result
-            except Exception:
-                item['catalog_synced'] = False
-        else:
-            item['catalog_synced'] = False
+        item.update(await self._sync_catalog_targets(tool_ids={target_tool_id}))
         return item
 
     def update_tool_policy(self, tool_id: str, *, session_id: str = 'web:shared', enabled: bool | None = None, allowed_roles_by_action: dict[str, list[str]] | None = None):
@@ -5443,16 +5644,27 @@ class MainRuntimeService:
         skills, tools = self.resource_registry.refresh_from_current_resources()
         self.reconcile_core_tool_families()
         self.policy_engine.sync_default_role_policies()
+        self._record_resource_tree_state()
         return {'ok': True, 'session_id': session_id, 'skills': len(skills), 'tools': len(tools)}
 
     async def reload_resources_async(self, *, session_id: str = 'web:shared') -> dict[str, Any]:
         result = self.reload_resources(session_id=session_id)
-        if self.memory_manager is not None and hasattr(self.memory_manager, 'sync_catalog'):
-            try:
-                sync_result = await self.memory_manager.sync_catalog(self)
-                result['catalog'] = sync_result
-            except Exception:
-                result['catalog'] = {'created': 0, 'updated': 0, 'removed': 0}
+        sync_result = await self._sync_catalog_targets(
+            skill_ids={
+                str(getattr(item, 'skill_id', '') or '').strip()
+                for item in list(self.list_skill_resources() or [])
+                if str(getattr(item, 'skill_id', '') or '').strip()
+            },
+            tool_ids={
+                str(getattr(item, 'tool_id', '') or '').strip()
+                for item in list(self.list_tool_resources() or [])
+                if str(getattr(item, 'tool_id', '') or '').strip()
+            },
+        )
+        if bool(sync_result.get('catalog_synced')):
+            result['catalog'] = sync_result.get('catalog', {'created': 0, 'updated': 0, 'removed': 0})
+        else:
+            result['catalog'] = {'created': 0, 'updated': 0, 'removed': 0}
         return result
 
     async def get_context_traces(self, *, trace_kind: str, limit: int = 20) -> dict[str, Any]:
@@ -5897,6 +6109,11 @@ class MainRuntimeService:
         }
 
     async def _prepare_node_context_selection(self, *, task, node: NodeRecord) -> NodeContextSelectionResult:
+        session_id = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        try:
+            await self.maybe_refresh_external_resource_changes(session_id=session_id)
+        except Exception:
+            pass
         cached = self._cached_node_context_selection_entry(task=task, node=node)
         if cached is not None and isinstance(cached.get('selection'), NodeContextSelectionResult):
             return cached['selection']
@@ -5960,10 +6177,17 @@ class MainRuntimeService:
                 visible_tool_names=visible_tool_names,
             )
         )
+        cached = self._cached_node_context_selection_entry(task=(task or SimpleNamespace(task_id=node.task_id, session_id=session_id)), node=node)
+        selection = cached.get('selection') if isinstance(cached, dict) else None
+        for raw_name in list(getattr(selection, 'selected_tool_names', []) or []):
+            name = str(raw_name or '').strip()
+            if name and name in visible_tool_names:
+                selected_visible.add(name)
         provided = dict(self._external_tool_provider(node) or {})
         provided.update(self._builtin_tool_instances(actor_role=actor_role))
-        if self._resource_manager is not None:
-            for name, tool in self._resource_manager.tool_instances().items():
+        resource_manager = getattr(self, '_resource_manager', None)
+        if resource_manager is not None:
+            for name, tool in resource_manager.tool_instances().items():
                 if name in selected_visible:
                     provided[name] = tool
         return provided
@@ -6063,21 +6287,29 @@ class MainRuntimeService:
                 continue
             seen_selected_skill_ids.add(normalized_skill_id)
             selected_visible_skills.append(record)
+        callable_tool_names = self._callable_tool_names_for_node(
+            task=task,
+            node=node,
+            visible_tool_names=list(inputs.get('visible_tool_names') or []),
+        )
+        used_selector_selected_as_callable = not bool(callable_tool_names)
+        if used_selector_selected_as_callable:
+            callable_tool_names = self._normalized_tool_name_list(list(getattr(selection, 'selected_tool_names', []) or []))
+        candidate_tool_names = self._normalized_tool_name_list(list(getattr(selection, 'candidate_tool_names', []) or []))
+        if not candidate_tool_names:
+            candidate_tool_names = [
+                name
+                for name in self._normalized_tool_name_list(list(getattr(selection, 'selected_tool_names', []) or []))
+                if name not in set(callable_tool_names)
+            ]
+        elif not used_selector_selected_as_callable:
+            candidate_tool_names = [name for name in candidate_tool_names if name not in set(callable_tool_names)]
         enriched = self._inject_visible_skills_into_node_messages(
             messages=messages,
             visible_skills=selected_visible_skills,
-            callable_tool_names=self._callable_tool_names_for_node(
-                task=task,
-                node=node,
-                visible_tool_names=list(inputs.get('visible_tool_names') or []),
-            ),
+            callable_tool_names=callable_tool_names,
             candidate_skill_ids=list(getattr(selection, 'candidate_skill_ids', []) or []),
-            candidate_tool_names=self._candidate_tool_names_for_node(
-                task=task,
-                node=node,
-                selection=selection,
-                visible_tool_names=list(inputs.get('visible_tool_names') or []),
-            ),
+            candidate_tool_names=candidate_tool_names,
         )
         manager = getattr(self, 'memory_manager', None)
         # Node catalog narrowing is always selector-driven; unified_context only gates memory block retrieval.

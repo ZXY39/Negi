@@ -93,6 +93,7 @@
 - 每个可显示的 inflight turn 现在都有稳定的 `turn_id`
 - `inflight_turn_snapshot`、`message_end`、heartbeat discard/final reply 都会沿这个 `turn_id` 传递
 - 前端不应再仅靠 `source=user|heartbeat` 去猜“当前该收口的是哪个 pending bubble”
+- 对 Web CEO/frontdoor 来说，session 侧还会同步保存当前 turn 的 hydrated tool state；它和 stage trace 一样属于“当前进行中 turn 的运行时事实”，不是长期 transcript。
 
 这意味着 `RuntimeAgentSession` 不只是维护“session 是否正在运行”，还维护了“当前可显示 turn 的身份”。如果这里的 `turn_id` 传播断掉，典型回归就是：
 
@@ -102,15 +103,16 @@
 
 另外，手动 pause 之后的后续输入语义也有一个容易误改的点：
 
-- Web 会话里，用户在手动 pause 后补充的新输入，不应直接被当成全新的独立 prompt
-- 正确语义是：恢复原 paused request，并把补充输入作为 additional context 合并回该请求
-- 因此前端/网关层若检测到 session 处于可恢复的 manual-pause 状态，应优先走 `resume(additional_context=...)`，而不是重新 `prompt(...)`
+- Web 会话里，手动 pause 的语义现在是“冻结上一轮”，不是“等待下一条输入来补写原请求”
+- pause 当下的 user message、阶段状态、工具调用轨迹、压缩状态和中间 assistant 文本都会继续持久化，作为上一轮上下文保留
+- 因此前端/网关层在 session 处于 manual-pause 状态时，不应再走 `resume(additional_context=...)`；后续输入必须作为新一轮 user turn 发送
+- 如果用户在运行中连续补充多条消息，运行时会把它们作为“同一轮 LLM 调用前的一批独立 user message”一起持久化并一起注入模型，而不是拼接成一条 `补充要求` 文本
 
-如果这里被改回“手动 pause 后的补充输入直接新开 turn”，典型回归就是：
+如果这里被改回“pause 后仍把新输入合并回原 user message”，典型回归就是：
 
-- agent 只理解到补充片段，例如“前10个”，却丢掉原问题
-- transcript 中出现语义割裂的新 turn
-- 用户误以为模型忘记了上一句，其实是恢复路径走错了
+- 被暂停前的 transcript user message 被覆盖，上一轮真实输入丢失
+- 工具调用和阶段轨迹虽然还在 snapshot 里，但 transcript 与上下文压缩看到的是被篡改后的 user 文本
+- 前端多个补充气泡在后端被折叠成一条 `补充要求`，导致 UI 和 LLM 实际收到的消息结构不一致
 
 可以把它看成“一个会话的状态机 + turn 执行器”。
 
@@ -122,6 +124,7 @@
 - async dispatch 错误恢复
 - paused execution context
 - frontdoor stage state
+- frontdoor hydrated tool state
 
 ## 4. frontdoor 与任务运行时的关系
 
@@ -150,6 +153,16 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - `g3ku/runtime/prompts/ceo_frontdoor.md` 承载 CEO frontdoor 的稳定协议，包括角色规则、任务/工具通用约束，以及 stage-first 这类高优先级协议。
 - `g3ku/runtime/frontdoor/prompt_builder.py` 负责把稳定协议与少量环境提示装成 base prompt。
 - `g3ku/runtime/frontdoor/message_builder.py` 继续按本轮会话状态动态注入可见 skill 摘要、候选工具、retrieved context、memory hint、全局语义摘要等 turn 级内容。
+
+维护上现在还要区分 frontdoor 的两份工具状态：
+
+- `candidate_tool_names` 表示当前轮对模型可见、但默认仍需先 `load_tool_context` 的 concrete tools。
+- `hydrated_tool_names` 表示本 turn 里已经成功读过契约、并被提升为下一轮 callable 的 concrete tools。
+
+这两份状态都由 frontdoor persistent state 维护，而不是只存在于某一轮 prompt 文本里。其直接后果是：
+
+- 同一用户 turn 内，`load_tool_context` 成功后，下一轮真正发给模型的函数工具列表会并入对应 hydrated tool。
+- frontdoor approval interrupt、session inflight snapshot、paused execution context 也会携带这份 hydrated state，避免“暂停前已经 load 成功，恢复后又退回 candidate-only”。
 
 维护上一个容易误判的点是：动态 skill/tool 提示块里虽然会出现“如何读取 skill 正文”或“如何读取 tool 契约”的说明，但这些说明不能覆盖 `ceo_frontdoor.md` 里的 stage-first 协议。当前前门的权威顺序是：
 
@@ -325,5 +338,26 @@ Execution-stage duplicate-call handling in `main/runtime/react_loop.py` now uses
 
 - When the model repeats the same ordinary tool signature several consecutive times in the same node, the runtime records the repeated assistant tool call, appends an error tool message explaining that the call is duplicated, and lets the next model turn repair itself.
 - This means a task should no longer fail immediately with `RuntimeError: repeated tool call detected: ...` only because the model repeated a non-control tool call such as `exec` with identical arguments.
-- Read-only duplicate retrieval guidance (`content.open/search`, `filesystem.open/search`, `task_progress`, etc.) is still a separate guard path with its own repair messaging and escalation semantics.
+- Read-only duplicate retrieval guidance (`content.open/search`, `task_progress`, etc.) is still a separate guard path with its own repair messaging and escalation semantics.
 - If a maintainer is debugging a "stuck on the same tool" report, first inspect the latest tool/error messages in the node transcript and runtime frame before assuming the task was terminated by the runtime itself.
+
+The filesystem family no longer participates in that read-only retrieval branch.
+
+- `filesystem` is now a family/context id only, not a live callable tool.
+- The execution runtime only hydrates concrete mutation executors such as `filesystem_write`, `filesystem_edit`, `filesystem_copy`, `filesystem_move`, `filesystem_delete`, and `filesystem_propose_patch`.
+- This means repeated filesystem mutations now follow the ordinary duplicate-call soft-reject path, while retrieval-style guards remain reserved for `content_*`, `task_progress`, `task_node_detail`, and similar read-only tools.
+
+## Resource Generation Checks For Semantic Catalog Freshness
+
+The runtime still does not keep a full watcher on `skills/` and `tools/`, but semantic catalog freshness is no longer tied only to explicit admin reloads.
+
+- `MainRuntimeService` keeps the last known top-level resource tree fingerprint state.
+- The CEO/frontdoor assembly path and node-context selection path now perform a throttled external resource generation check before semantic catalog narrowing.
+- The check interval is bounded by `resources.reload.poll_interval_ms`; the runtime does not rescan without limit on every low-level access.
+- When fingerprints differ, the service refreshes only the changed roots and then performs a targeted catalog sync for the changed resource ids.
+
+This gives maintainers a middle ground:
+
+- The resource runtime itself is still manual/release-triggered and does not promise instant discovery.
+- Runtime-facing semantic selection can still reconcile direct disk edits lazily on the next bounded generation check.
+- Metadata-only edits such as `display_name` / `description` changes now also invalidate the catalog summary hash, so catalog `l0` / `l1` no longer stay stale just because the正文 body stayed the same.

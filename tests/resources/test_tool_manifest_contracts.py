@@ -79,6 +79,12 @@ def test_tool_manifests_match_explicit_parameter_contracts():
         'agent_browser',
         'create_async_task_cn',
         'cron',
+        'filesystem_copy',
+        'filesystem_delete',
+        'filesystem_edit',
+        'filesystem_move',
+        'filesystem_propose_patch',
+        'filesystem_write',
         'load_skill_context',
         'load_tool_context',
         'memory_search',
@@ -101,6 +107,34 @@ def test_tool_manifests_match_explicit_parameter_contracts():
         assert manifest['name'] == built.name
         assert set((manifest.get('parameters') or {}).get('properties', {}).keys()) == set((schema.get('properties') or {}).keys())
         assert set((manifest.get('parameters') or {}).get('required', []) or []) == set(schema.get('required') or [])
+
+
+def test_filesystem_split_mutation_manifests_replace_legacy_monolith():
+    assert not (TOOLS_ROOT / 'filesystem').exists()
+
+    for tool_name in [
+        'filesystem_write',
+        'filesystem_edit',
+        'filesystem_copy',
+        'filesystem_move',
+        'filesystem_delete',
+        'filesystem_propose_patch',
+    ]:
+        manifest_path = TOOLS_ROOT / tool_name / 'resource.yaml'
+        assert manifest_path.exists(), f'missing manifest for {tool_name}'
+
+    delete_manifest = yaml.safe_load((TOOLS_ROOT / 'filesystem_delete' / 'resource.yaml').read_text(encoding='utf-8'))
+    delete_properties = dict((delete_manifest.get('parameters') or {}).get('properties') or {})
+    assert 'paths' in delete_properties
+    assert 'path' not in delete_properties
+
+    copy_manifest = yaml.safe_load((TOOLS_ROOT / 'filesystem_copy' / 'resource.yaml').read_text(encoding='utf-8'))
+    copy_properties = dict((copy_manifest.get('parameters') or {}).get('properties') or {})
+    assert 'operations' in copy_properties
+
+    move_manifest = yaml.safe_load((TOOLS_ROOT / 'filesystem_move' / 'resource.yaml').read_text(encoding='utf-8'))
+    move_properties = dict((move_manifest.get('parameters') or {}).get('properties') or {})
+    assert 'operations' in move_properties
 
 
 def test_all_manifest_parameters_have_descriptions():

@@ -418,6 +418,57 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         refreshed["agent_runtime"] = "create_agent"
         return refreshed
 
+    @staticmethod
+    def _normalized_tool_name_state_list(raw: Any) -> list[str]:
+        normalized: list[str] = []
+        for item in list(raw or []):
+            name = str(item or "").strip()
+            if name and name not in normalized:
+                normalized.append(name)
+        return normalized
+
+    def _hydrated_tool_names_after_tool_results(
+        self,
+        *,
+        state: dict[str, Any],
+        tool_results: list[dict[str, Any]],
+    ) -> list[str]:
+        hydrated_tool_names = self._normalized_tool_name_state_list(state.get("hydrated_tool_names"))
+        for tool_result in list(tool_results or []):
+            tool_name = str(tool_result.get("tool_name") or "").strip()
+            if tool_name not in {"load_tool_context", "load_tool_context_v2"}:
+                continue
+            if not bool(tool_result.get("ok")):
+                continue
+            targets = self._normalized_tool_name_state_list(tool_result.get("hydration_targets"))
+            if not targets and bool(tool_result.get("will_be_hydrated_next_turn")):
+                tool_id = str(tool_result.get("tool_id") or "").strip()
+                if tool_id:
+                    targets = [tool_id]
+            for name in targets:
+                if name not in hydrated_tool_names:
+                    hydrated_tool_names.append(name)
+        return hydrated_tool_names
+
+    def _frontdoor_tool_state_after_hydration(
+        self,
+        *,
+        state: dict[str, Any],
+        hydrated_tool_names: list[str],
+    ) -> tuple[list[str], list[str]]:
+        tool_names = self._normalized_tool_name_state_list(state.get("tool_names"))
+        candidate_tool_names = self._normalized_tool_name_state_list(state.get("candidate_tool_names"))
+        for name in list(hydrated_tool_names or []):
+            if name not in tool_names:
+                tool_names.append(name)
+        hydrated_set = set(hydrated_tool_names)
+        candidate_tool_names = [
+            name
+            for name in candidate_tool_names
+            if name not in hydrated_set
+        ]
+        return tool_names, candidate_tool_names
+
     async def _postprocess_completed_tool_cycle(
         self,
         *,
@@ -466,6 +517,14 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 strict=False,
             )
         ]
+        hydrated_tool_names = self._hydrated_tool_names_after_tool_results(
+            state=state,
+            tool_results=tool_results,
+        )
+        tool_names, candidate_tool_names = self._frontdoor_tool_state_after_hydration(
+            state=state,
+            hydrated_tool_names=hydrated_tool_names,
+        )
         frontdoor_stage_state = self._frontdoor_stage_state_after_tool_cycle(
             state,
             tool_call_payloads=tool_call_payloads,
@@ -503,6 +562,18 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             "verified_task_ids": verified_task_ids,
             "synthetic_tool_calls_used": False,
         }
+        should_update_frontdoor_tool_state = (
+            "candidate_tool_names" in state
+            or "hydrated_tool_names" in state
+            or any(
+                str(payload.get("name") or "").strip() in {"load_tool_context", "load_tool_context_v2"}
+                for payload in tool_call_payloads
+            )
+        )
+        if should_update_frontdoor_tool_state:
+            result["tool_names"] = tool_names
+            result["candidate_tool_names"] = candidate_tool_names
+            result["hydrated_tool_names"] = hydrated_tool_names
         if repair_overlay_text:
             result["repair_overlay_text"] = repair_overlay_text
         return result

@@ -4296,6 +4296,7 @@ def test_node_detail_resolves_full_final_and_acceptance_text_from_refs(tmp_path:
         acceptance_result,
     )
     service.record_node_file_change(record.task_id, root.node_id, path=str((tmp_path / "created.txt").resolve()), change_type="created")
+    service.record_node_file_change(record.task_id, root.node_id, path=str((tmp_path / "deleted.txt").resolve()), change_type="deleted")
 
     payload = service.get_node_detail_payload(record.task_id, root.node_id, detail_level="full")
 
@@ -4311,7 +4312,11 @@ def test_node_detail_resolves_full_final_and_acceptance_text_from_refs(tmp_path:
         {
             "path": str((tmp_path / "created.txt").resolve()),
             "change_type": "created",
-        }
+        },
+        {
+            "path": str((tmp_path / "deleted.txt").resolve()),
+            "change_type": "deleted",
+        },
     ]
 
 
@@ -6463,15 +6468,14 @@ async def test_resume_pending_tool_turn_uses_recovery_check_for_verified_done_wr
             tool_calls=[
                 {
                     "id": "call:write",
-                    "name": "filesystem",
+                    "name": "filesystem_write",
                     "arguments": {
-                        "action": "write",
                         "path": str(target),
                         "content": "expected body",
                     },
                 }
             ],
-            live_tool_calls=[{"tool_call_id": "call:write", "tool_name": "filesystem", "status": "running"}],
+            live_tool_calls=[{"tool_call_id": "call:write", "tool_name": "filesystem_write", "status": "running"}],
             content="write pending before shutdown",
         )
 
@@ -6492,7 +6496,7 @@ async def test_resume_pending_tool_turn_uses_recovery_check_for_verified_done_wr
         detail = service.get_node_detail_payload(record.task_id, root.node_id)
         assert detail is not None
         round_tools = detail["item"]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
-        assert [item["tool_name"] for item in round_tools] == ["recovery_check", "filesystem"]
+        assert [item["tool_name"] for item in round_tools] == ["recovery_check", "filesystem_write"]
         recovery_step = round_tools[0]
         assert recovery_step["status"] == "success"
         assert recovery_step["tool_call_id"] == f"recovery_check:{round_payload['round_id']}"

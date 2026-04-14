@@ -10,6 +10,8 @@ WRITE_ALLOWED_ROLES = ['ceo', 'execution']
 TOOL_FAMILY_ALIASES: dict[str, str] = {
     'filesystem_write': 'filesystem',
     'filesystem_edit': 'filesystem',
+    'filesystem_copy': 'filesystem',
+    'filesystem_move': 'filesystem',
     'filesystem_delete': 'filesystem',
     'filesystem_propose_patch': 'filesystem',
     'content_describe': 'content',
@@ -22,11 +24,13 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
     'filesystem': {
         'tool_id': 'filesystem',
         'display_name': 'Filesystem',
-        'description': 'Write, edit, delete, and propose patches for workspace files.',
+        'description': 'Write, edit, copy, move, delete, and propose patches for workspace files.',
         'actions': [
             {'id': 'write', 'label': 'Write File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': WRITE_ALLOWED_ROLES},
             {'id': 'edit', 'label': 'Edit File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': WRITE_ALLOWED_ROLES},
-            {'id': 'delete', 'label': 'Delete File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': ['ceo']},
+            {'id': 'copy', 'label': 'Copy Files', 'risk_level': 'high', 'destructive': True, 'allowed_roles': WRITE_ALLOWED_ROLES},
+            {'id': 'move', 'label': 'Move Files', 'risk_level': 'high', 'destructive': True, 'allowed_roles': WRITE_ALLOWED_ROLES},
+            {'id': 'delete', 'label': 'Delete File', 'risk_level': 'high', 'destructive': True, 'allowed_roles': WRITE_ALLOWED_ROLES},
             {'id': 'propose_patch', 'label': 'Propose Patch', 'risk_level': 'medium', 'destructive': False, 'allowed_roles': ['ceo', 'execution']},
         ],
     },

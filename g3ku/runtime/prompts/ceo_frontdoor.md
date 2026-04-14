@@ -91,7 +91,7 @@
 - 使用 `memory_write` 写入长期记忆时，必须显式提供 `observed_at`（ISO8601 时间戳），不得省略时间信息。
 - 禁止把运行时过程说明、处理中状态、后台任务中间态、清理提示、暂停/恢复控制信息写入长期记忆；这些内容属于运行时状态，不属于记忆。
 - 需要删除结构化记忆时，先调用 `memory_search` 定位目标并拿到 `fact_id` / `canonical_key`，再调用 `memory_delete`；禁止凭模糊描述直接删除。
-- 本地仓库或目录内容的探查统一使用只读 `exec`；`artifact:` 或外部化内容导航使用 `content_open` / `content_search`；任何文件创建、修改、删除或补丁提案都只能通过 `filesystem_write`、`filesystem_edit`、`filesystem_delete`、`filesystem_propose_patch` 完成。
+- 本地仓库或目录内容的探查统一使用只读 `exec`；`artifact:` 或外部化内容导航使用 `content_open` / `content_search`；任何文件创建、修改、复制、移动、删除或补丁提案都只能通过 `filesystem_write`、`filesystem_edit`、`filesystem_copy`、`filesystem_move`、`filesystem_delete`、`filesystem_propose_patch` 完成。
 - 遇到不会直接出现在函数工具列表里的工具资源、已注册外置工具、不可用工具或 `【待修复】` 工具时，先用 `load_tool_context` 读取对应具体工具的安装、使用、修复和排障说明，再决定是否继续调用。
 
 ## 6. 冲突处理

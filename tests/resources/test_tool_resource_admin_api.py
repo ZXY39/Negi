@@ -557,12 +557,12 @@ def test_admin_tool_policy_endpoint_accepts_actions_mapping():
     family = ToolFamilyRecord(
         tool_id='filesystem',
         display_name='Filesystem',
-        description='Describe, search, and open workspace files by local excerpt, plus write, edit, delete, and patch actions.',
-        primary_executor_name='filesystem',
+        description='Workspace filesystem mutation family for write, edit, copy, move, delete, and patch operations.',
+        primary_executor_name='filesystem_write',
         enabled=True,
         available=True,
-        source_path='tools/filesystem',
-        actions=[ToolActionRecord(action_id='describe', label='Describe File', allowed_roles=['ceo'])],
+        source_path='tools/filesystem_write',
+        actions=[ToolActionRecord(action_id='write', label='Write File', allowed_roles=['ceo'])],
         metadata={},
     )
 
@@ -580,7 +580,7 @@ def test_admin_tool_policy_endpoint_accepts_actions_mapping():
                     'enabled': bool(enabled),
                     'actions': [
                         family.actions[0].model_copy(
-                            update={'allowed_roles': list((allowed_roles_by_action or {}).get('describe') or [])}
+                            update={'allowed_roles': list((allowed_roles_by_action or {}).get('write') or [])}
                         )
                     ],
                 }
@@ -590,7 +590,7 @@ def test_admin_tool_policy_endpoint_accepts_actions_mapping():
     response = client.put(
         '/api/resources/tools/filesystem/policy',
         params={'session_id': 'web:shared'},
-        json={'enabled': True, 'actions': {'describe': ['ceo', 'inspection']}},
+        json={'enabled': True, 'actions': {'write': ['ceo', 'inspection']}},
     )
 
     assert response.status_code == 200
@@ -598,7 +598,7 @@ def test_admin_tool_policy_endpoint_accepts_actions_mapping():
         'tool_id': 'filesystem',
         'session_id': 'web:shared',
         'enabled': True,
-        'allowed_roles_by_action': {'describe': ['ceo', 'inspection']},
+        'allowed_roles_by_action': {'write': ['ceo', 'inspection']},
     }
     assert response.json()['item']['actions'][0]['allowed_roles'] == ['ceo', 'inspection']
 
@@ -608,13 +608,13 @@ def test_main_runtime_service_filters_visible_actions_for_shared_executor():
         tool_id='filesystem',
         display_name='Filesystem',
         description='Workspace file operations.',
-        primary_executor_name='filesystem',
+        primary_executor_name='filesystem_write',
         enabled=True,
         available=True,
-        source_path='tools/filesystem',
+        source_path='tools/filesystem_write',
         actions=[
-            ToolActionRecord(action_id='describe', label='Describe File', allowed_roles=['ceo', 'execution', 'inspection'], executor_names=['filesystem']),
-            ToolActionRecord(action_id='write', label='Write File', allowed_roles=['ceo', 'execution'], executor_names=['filesystem']),
+            ToolActionRecord(action_id='copy', label='Copy', allowed_roles=['ceo', 'execution', 'inspection'], executor_names=['filesystem_copy']),
+            ToolActionRecord(action_id='write', label='Write File', allowed_roles=['ceo', 'execution'], executor_names=['filesystem_write']),
         ],
         metadata={},
     )
@@ -626,18 +626,18 @@ def test_main_runtime_service_filters_visible_actions_for_shared_executor():
     class _PolicyEngine:
         def evaluate_tool_action(self, *, subject, tool_id: str, action_id: str):
             _ = subject, tool_id
-            return SimpleNamespace(allowed=action_id == 'describe')
+            return SimpleNamespace(allowed=action_id == 'copy')
 
     service = object.__new__(MainRuntimeService)
     service.resource_registry = _Registry()
     service.policy_engine = _PolicyEngine()
-    service.list_effective_tool_names = lambda **kwargs: ['filesystem']
+    service.list_effective_tool_names = lambda **kwargs: ['filesystem_copy', 'filesystem_write']
     service._subject = lambda **kwargs: SimpleNamespace(**kwargs)
 
     visible = service.list_visible_tool_families(actor_role='inspection', session_id='web:shared')
 
     assert len(visible) == 1
-    assert [action.action_id for action in visible[0].actions] == ['describe']
+    assert [action.action_id for action in visible[0].actions] == ['copy']
 
 
 def test_main_runtime_service_keeps_unavailable_tool_family_visible_for_context_lookup():

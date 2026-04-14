@@ -1365,7 +1365,7 @@ def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
     )
 
     promoted_frame = log_service.read_runtime_frame('task-tool-hydration', 'node-tool-hydration')
-    assert promoted_frame['hydrated_executor_names'] == ['filesystem']
+    assert promoted_frame.get('hydrated_executor_names') in (None, [])
 
     next_selection = service._select_model_visible_tool_schema_payload(
         task_id='task-tool-hydration',
@@ -1385,14 +1385,11 @@ def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
         'submit_final_result',
         'spawn_child_nodes',
         loader_tool_name,
-        'filesystem',
     ]
-    assert next_selection['schema_chars'] == first_selection['schema_chars'] + len(
-        json.dumps(visible_tools['filesystem'].to_model_schema(), ensure_ascii=False, sort_keys=True)
-    )
+    assert next_selection['schema_chars'] == first_selection['schema_chars']
     assert next_selection['trace']['base_schema_chars'] == 321
     assert next_selection['trace']['final_schema_chars'] == next_selection['schema_chars']
-    assert next_selection['trace']['promoted_hydrated_executor_names'] == ['filesystem']
+    assert next_selection['trace']['promoted_hydrated_executor_names'] == []
 
 
 def test_promote_tool_context_hydration_keeps_executor_requests_precise() -> None:
@@ -3198,23 +3195,23 @@ def test_filter_retrieved_records_preserves_memory_and_filters_catalog_context()
 
 @pytest.mark.asyncio
 async def test_execute_tool_blocks_repeated_overflowed_search() -> None:
-    class _FilesystemTool(Tool):
+    class _ContentTool(Tool):
         @property
         def name(self) -> str:
-            return 'filesystem'
+            return 'content'
 
         @property
         def description(self) -> str:
-            return 'Filesystem stub'
+            return 'Content stub'
 
         @property
         def parameters(self) -> dict[str, object]:
             return {
-                'type': 'object',
-                'properties': {
-                    'action': {'type': 'string', 'description': 'action'},
-                    'path': {'type': 'string', 'description': 'path'},
-                    'query': {'type': 'string', 'description': 'query'},
+                    'type': 'object',
+                    'properties': {
+                        'action': {'type': 'string', 'description': 'action'},
+                        'path': {'type': 'string', 'description': 'path'},
+                        'query': {'type': 'string', 'description': 'query'},
                 },
                 'required': ['action', 'path', 'query'],
             }
@@ -3224,10 +3221,10 @@ async def test_execute_tool_blocks_repeated_overflowed_search() -> None:
 
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
     result = await loop._execute_tool(
-        tools={'filesystem': _FilesystemTool()},
-        tool_name='filesystem',
+        tools={'content': _ContentTool()},
+        tool_name='content',
         arguments={'action': 'search', 'path': '/tmp/demo.py', 'query': 'needle'},
-        runtime_context={'prior_overflow_signatures': ['filesystem|/tmp/demo.py|needle']},
+        runtime_context={'prior_overflow_signatures': ['content|/tmp/demo.py|needle']},
     )
 
     assert result == 'Error: previous search overflowed; refine query before retrying'

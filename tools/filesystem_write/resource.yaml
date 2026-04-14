@@ -15,6 +15,15 @@ permissions:
   network: false
   filesystem:
     - workspace
+settings:
+  restrict_to_workspace: false
+  write_validation_enabled: true
+  write_validation_timeout_seconds: 20
+  write_validation_rollback_on_failure: true
+  write_validation_default_commands: []
+  write_validation_commands_by_ext:
+    .py:
+      - python -m py_compile {path}
 parameters:
   type: object
   properties:
@@ -30,7 +39,7 @@ parameters:
 governance:
   family: filesystem
   display_name: Filesystem
-  description: Describe, search, open, list, write, edit, delete, and patch local files.
+  description: Write, edit, copy, move, delete, and propose patches for local files.
   actions:
     - id: write
       label: Write File

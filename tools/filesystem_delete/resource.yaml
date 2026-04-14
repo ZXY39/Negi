@@ -2,7 +2,7 @@
 kind: tool
 name: filesystem_delete
 display_name: Filesystem Delete
-description: Delete one file or directory path.
+description: Delete one or more files or directory paths.
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:
@@ -15,18 +15,32 @@ permissions:
   network: false
   filesystem:
     - workspace
+settings:
+  restrict_to_workspace: false
 parameters:
   type: object
   properties:
-    path:
-      type: string
-      description: Absolute path to delete.
+    paths:
+      type: array
+      description: Absolute paths to delete.
+      items:
+        type: string
+        description: Absolute path to delete.
+    recursive:
+      type: boolean
+      description: Allow deleting directory paths recursively.
+    allow_missing:
+      type: boolean
+      description: Treat already-missing paths as successful items.
+    continue_on_error:
+      type: boolean
+      description: Continue processing later delete items after one delete fails.
   required:
-    - path
+    - paths
 governance:
   family: filesystem
   display_name: Filesystem
-  description: Describe, search, open, list, write, edit, delete, and patch local files.
+  description: Write, edit, copy, move, delete, and propose patches for local files.
   actions:
     - id: delete
       label: Delete File
@@ -34,6 +48,7 @@ governance:
       destructive: true
       allowed_roles:
         - ceo
+        - execution
 exposure:
   agent: true
   main_runtime: true

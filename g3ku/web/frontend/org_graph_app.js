@@ -2923,21 +2923,75 @@ function sendImmediateCeoMessage({ text = "", uploads = [], scrollMode = "bottom
     return true;
 }
 
+function sendImmediateCeoMessageBatch(entries = [], { scrollMode = "bottom" } = {}) {
+    const normalizedEntries = (Array.isArray(entries) ? entries : [])
+        .map((entry) => ({
+            text: String(entry?.text || ""),
+            uploads: normalizeUploadList(entry?.uploads),
+        }))
+        .filter((entry) => entry.text.trim() || entry.uploads.length > 0);
+    if (!normalizedEntries.length) return false;
+    if (!S.ceoWs || S.ceoWs.readyState !== WebSocket.OPEN) {
+        addMsg("Connection is not ready yet. Please try again in a moment.", "system");
+        initCeoWs();
+        return false;
+    }
+    S.ceoWs.send(JSON.stringify({
+        type: "client.user_message",
+        session_id: activeSessionId(),
+        messages: normalizedEntries.map((entry) => ({
+            text: entry.text,
+            uploads: entry.uploads.map((item) => ({
+                name: item.name,
+                path: item.path,
+                mime_type: item.mime_type,
+                kind: item.kind,
+                size: item.size,
+            })),
+        })),
+    }));
+    normalizedEntries.forEach((entry) => {
+        addMsg(hasRenderableText(entry.text) ? entry.text : summarizeUploads(entry.uploads), "user", {
+            attachments: entry.uploads,
+            scrollMode,
+        });
+    });
+    const turn = createPendingCeoTurn("user", { scrollMode });
+    if (turn) S.ceoPendingTurns.push(turn);
+    const lastEntry = normalizedEntries[normalizedEntries.length - 1];
+    S.ceoTurnActive = true;
+    S.ceoPauseBusy = false;
+    setCeoSessionSnapshotCache(activeSessionId(), {
+        inflight_turn: {
+            source: "user",
+            status: "running",
+            user_message: {
+                content: lastEntry.text,
+                attachments: lastEntry.uploads,
+            },
+        },
+    });
+    if (patchCeoSessionRuntimeState(activeSessionId(), true)) renderCeoSessions();
+    syncCeoSessionActions();
+    syncCeoPrimaryButton();
+    return true;
+}
+
 function maybeDispatchQueuedCeoFollowUps() {
     if (S.ceoQueuedFollowUpDispatching || S.ceoTurnActive || S.ceoSessionBusy || S.ceoSessionCatalogBusy) return false;
     const sessionId = activeSessionId();
     if (!sessionId) return false;
-    const next = shiftCeoQueuedFollowUp(sessionId);
-    if (!next) return false;
+    const queued = getCeoQueuedFollowUps(sessionId);
+    if (!queued.length) return false;
     S.ceoQueuedFollowUpDispatching = true;
     try {
-        const sent = sendImmediateCeoMessage({
-            text: next.text,
-            uploads: next.uploads,
-            scrollMode: "bottom",
-        });
+        setCeoQueuedFollowUps(sessionId, []);
+        const sent = sendImmediateCeoMessageBatch(
+            queued.map((item) => ({ text: item.text, uploads: item.uploads })),
+            { scrollMode: "bottom" }
+        );
         if (!sent) {
-            setCeoQueuedFollowUps(sessionId, [next, ...getCeoQueuedFollowUps(sessionId)]);
+            setCeoQueuedFollowUps(sessionId, queued);
             return false;
         }
         return true;

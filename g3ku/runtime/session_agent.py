@@ -25,8 +25,10 @@ from main.runtime.execution_trace_compaction import compact_tool_step_for_summar
 _CONTROL_TOOL_NAMES = {"stop_tool_execution"}
 _LEGACY_CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
 _TRANSCRIPT_TURN_ID_KEY = "_transcript_turn_id"
+_TRANSCRIPT_BATCH_ID_KEY = "_transcript_batch_id"
 _TRANSCRIPT_STATE_KEY = "_transcript_state"
 _TRANSCRIPT_STATE_PENDING = "pending"
+_TRANSCRIPT_STATE_PAUSED = "paused"
 _TRANSCRIPT_STATE_COMPLETED = "completed"
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
 
@@ -69,7 +71,10 @@ class RuntimeAgentSession:
         self._frontdoor_stage_state: dict[str, Any] = {}
         self._compression_state: dict[str, Any] = {}
         self._semantic_context_state: dict[str, Any] = default_semantic_context_state()
+        self._frontdoor_hydrated_tool_names: list[str] = []
         self._active_turn_id: str | None = None
+        self._active_batch_id: str | None = None
+        self._active_user_batch_inputs: list[UserInputMessage] = []
         self._last_verified_task_ids: list[str] = []
         self._turn_lock = asyncio.Lock()
 
@@ -181,15 +186,32 @@ class RuntimeAgentSession:
     def _message_transcript_state(cls, message: dict[str, Any]) -> str:
         return cls._turn_metadata_value(message, _TRANSCRIPT_STATE_KEY)
 
+    @classmethod
+    def _message_batch_id(cls, message: dict[str, Any]) -> str:
+        return cls._turn_metadata_value(message, _TRANSCRIPT_BATCH_ID_KEY)
+
     @staticmethod
-    def _build_turn_metadata(metadata: dict[str, Any] | None, *, turn_id: str, transcript_state: str) -> dict[str, Any]:
+    def _build_turn_metadata(
+        metadata: dict[str, Any] | None,
+        *,
+        turn_id: str,
+        transcript_state: str,
+        batch_id: str | None = None,
+    ) -> dict[str, Any]:
         payload = dict(metadata or {})
         payload[_TRANSCRIPT_TURN_ID_KEY] = str(turn_id or "").strip()
         payload[_TRANSCRIPT_STATE_KEY] = str(transcript_state or "").strip()
+        resolved_batch_id = str(batch_id or payload.get(_TRANSCRIPT_BATCH_ID_KEY) or "").strip()
+        if resolved_batch_id:
+            payload[_TRANSCRIPT_BATCH_ID_KEY] = resolved_batch_id
         return payload
 
     @staticmethod
     def _new_turn_id() -> str:
+        return uuid.uuid4().hex[:16]
+
+    @staticmethod
+    def _new_batch_id() -> str:
         return uuid.uuid4().hex[:16]
 
     @staticmethod
@@ -292,9 +314,10 @@ class RuntimeAgentSession:
             "task_ids": task_ids,
         }
 
-    def _ensure_user_turn_id(self, user_input: UserInputMessage) -> str:
+    def _ensure_user_turn_id(self, user_input: UserInputMessage, *, reuse_active: bool = True) -> str:
         metadata = dict(user_input.metadata or {})
-        turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or self._active_turn_id or "").strip()
+        active_turn_id = self._active_turn_id if reuse_active else None
+        turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or active_turn_id or "").strip()
         if not turn_id:
             turn_id = self._new_turn_id()
         if metadata.get(_TRANSCRIPT_TURN_ID_KEY) != turn_id:
@@ -302,6 +325,57 @@ class RuntimeAgentSession:
             user_input.metadata = metadata
         self._active_turn_id = turn_id
         return turn_id
+
+    def _ensure_user_batch_id(self, user_input: UserInputMessage, *, batch_id: str | None = None) -> str:
+        metadata = dict(user_input.metadata or {})
+        resolved_batch_id = str(
+            batch_id
+            or metadata.get(_TRANSCRIPT_BATCH_ID_KEY)
+            or self._active_batch_id
+            or ""
+        ).strip()
+        if not resolved_batch_id:
+            resolved_batch_id = self._new_batch_id()
+        if metadata.get(_TRANSCRIPT_BATCH_ID_KEY) != resolved_batch_id:
+            metadata[_TRANSCRIPT_BATCH_ID_KEY] = resolved_batch_id
+            user_input.metadata = metadata
+        self._active_batch_id = resolved_batch_id
+        return resolved_batch_id
+
+    def _configure_user_batch(
+        self,
+        user_inputs: list[UserInputMessage],
+        *,
+        batch_id: str | None = None,
+    ) -> list[UserInputMessage]:
+        configured: list[UserInputMessage] = []
+        resolved_batch_id = str(batch_id or "").strip() or None
+        for item in list(user_inputs or []):
+            if not isinstance(item, UserInputMessage):
+                continue
+            self._ensure_user_turn_id(item, reuse_active=False)
+            resolved_batch_id = self._ensure_user_batch_id(item, batch_id=resolved_batch_id)
+            configured.append(item)
+        self._active_user_batch_inputs = list(configured)
+        self._active_batch_id = str(resolved_batch_id or "").strip() or None
+        return configured
+
+    def _current_user_batch_inputs(self, fallback_user_input: UserInputMessage | None = None) -> list[UserInputMessage]:
+        if self._active_user_batch_inputs:
+            return list(self._active_user_batch_inputs)
+        return [fallback_user_input] if isinstance(fallback_user_input, UserInputMessage) else []
+
+    def _clear_user_batch_context(self) -> None:
+        self._active_user_batch_inputs = []
+        self._active_batch_id = None
+
+    def _batch_query_text(self, user_inputs: list[UserInputMessage]) -> str:
+        parts: list[str] = []
+        for user_input in list(user_inputs or []):
+            text = self._history_text(getattr(user_input, "content", ""))
+            if text.strip():
+                parts.append(text)
+        return "\n\n".join(parts).strip()
 
     def _current_turn_id(self, prompt: Any | None = None) -> str:
         current = self._last_prompt if prompt is None else prompt
@@ -344,10 +418,12 @@ class RuntimeAgentSession:
         transcript_state: str,
     ) -> None:
         turn_id = self._ensure_user_turn_id(user_input)
+        batch_id = self._ensure_user_batch_id(user_input)
         metadata = self._build_turn_metadata(
             dict(user_input.metadata or {}),
             turn_id=turn_id,
             transcript_state=transcript_state,
+            batch_id=batch_id,
         )
         user_input.metadata = metadata
         existing_index = self._find_transcript_user_index(persisted_session, turn_id=turn_id)
@@ -370,23 +446,42 @@ class RuntimeAgentSession:
             persisted_session.updated_at = datetime.now()
 
     async def _persist_pending_user_message(self, *, user_input: UserInputMessage, user_text: str) -> Any | None:
-        if not user_text.strip() and not user_input.attachments:
+        return await self._persist_pending_user_messages(user_inputs=[user_input])
+
+    async def _persist_pending_user_messages(self, *, user_inputs: list[UserInputMessage]) -> Any | None:
+        normalized_inputs = [
+            item
+            for item in list(user_inputs or [])
+            if isinstance(item, UserInputMessage)
+        ]
+        if not normalized_inputs:
+            return None
+        visible_texts = [
+            self._history_text(item.content)
+            for item in normalized_inputs
+            if self._history_text(item.content).strip() or item.attachments
+        ]
+        if not visible_texts and not any(item.attachments for item in normalized_inputs):
             return None
         persisted_session = None
         try:
             persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
-            self._upsert_transcript_user_message(
-                persisted_session=persisted_session,
-                user_input=user_input,
-                user_text=user_text,
-                transcript_state=_TRANSCRIPT_STATE_PENDING,
-            )
+            for item in normalized_inputs:
+                user_text = self._history_text(item.content)
+                if not user_text.strip() and not item.attachments:
+                    continue
+                self._upsert_transcript_user_message(
+                    persisted_session=persisted_session,
+                    user_input=item,
+                    user_text=user_text,
+                    transcript_state=_TRANSCRIPT_STATE_PENDING,
+                )
             if self._state.session_key.startswith("web:"):
                 from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
 
                 update_ceo_session_after_turn(
                     persisted_session,
-                    user_text=user_text,
+                    user_text=visible_texts[-1] if visible_texts else "",
                     assistant_text="",
                     route_kind="",
                 )
@@ -834,6 +929,13 @@ class RuntimeAgentSession:
             snapshot["assistant_text"] = str(self._state.latest_message)
         if self._state.last_error is not None:
             snapshot["last_error"] = asdict(self._state.last_error)
+        hydrated_tool_names = [
+            str(item or "").strip()
+            for item in list(getattr(self, "_frontdoor_hydrated_tool_names", []) or [])
+            if str(item or "").strip()
+        ]
+        if hydrated_tool_names:
+            snapshot["hydrated_tool_names"] = hydrated_tool_names
         if (
             not execution_trace_summary
             and not compression
@@ -841,6 +943,7 @@ class RuntimeAgentSession:
             and "assistant_text" not in snapshot
             and "last_error" not in snapshot
             and "tool_events" not in snapshot
+            and "hydrated_tool_names" not in snapshot
         ):
             return None
         return snapshot
@@ -974,12 +1077,20 @@ class RuntimeAgentSession:
         try:
             persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
             if internal_source is None:
-                self._upsert_transcript_user_message(
-                    persisted_session=persisted_session,
-                    user_input=user_input,
-                    user_text=user_text,
-                    transcript_state=_TRANSCRIPT_STATE_COMPLETED,
-                )
+                visible_user_texts: list[str] = []
+                for current_input in self._current_user_batch_inputs(user_input):
+                    current_text = self._history_text(current_input.content)
+                    if not current_text.strip() and not current_input.attachments:
+                        continue
+                    self._upsert_transcript_user_message(
+                        persisted_session=persisted_session,
+                        user_input=current_input,
+                        user_text=current_text,
+                        transcript_state=_TRANSCRIPT_STATE_COMPLETED,
+                    )
+                    visible_user_texts.append(current_text)
+                if visible_user_texts:
+                    user_text = visible_user_texts[-1]
             assistant_payload: dict[str, Any] = {}
             execution_trace_summary = self._frontdoor_execution_trace_summary_snapshot()
             compression = self._compression_snapshot()
@@ -1024,28 +1135,49 @@ class RuntimeAgentSession:
         self._sync_persisted_inflight_turn()
         await self._emit("state_snapshot", state=self.state_dict())
 
-    async def _persist_manual_pause_user_message(self) -> None:
-        prompt = self._last_prompt
-        user_input = prompt if isinstance(prompt, UserInputMessage) else UserInputMessage(content=self._history_text(prompt))
-        if self._internal_prompt_source(user_input) is not None:
+    async def _persist_manual_pause_user_messages(self) -> None:
+        user_inputs = [
+            item
+            for item in self._current_user_batch_inputs(
+                self._last_prompt if isinstance(self._last_prompt, UserInputMessage) else None
+            )
+            if isinstance(item, UserInputMessage)
+        ]
+        if not user_inputs:
+            prompt = self._last_prompt
+            fallback = (
+                prompt
+                if isinstance(prompt, UserInputMessage)
+                else UserInputMessage(content=self._history_text(prompt))
+            )
+            user_inputs = [fallback]
+        if any(self._internal_prompt_source(item) is not None for item in user_inputs):
             return
-        user_text = self._history_text(user_input.content)
-        if not user_text.strip() and not user_input.attachments:
+        visible_texts = [
+            self._history_text(item.content)
+            for item in user_inputs
+            if self._history_text(item.content).strip() or item.attachments
+        ]
+        if not visible_texts and not any(item.attachments for item in user_inputs):
             return
         try:
             persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
-            self._upsert_transcript_user_message(
-                persisted_session=persisted_session,
-                user_input=user_input,
-                user_text=user_text,
-                transcript_state=_TRANSCRIPT_STATE_PENDING,
-            )
+            for item in user_inputs:
+                user_text = self._history_text(item.content)
+                if not user_text.strip() and not item.attachments:
+                    continue
+                self._upsert_transcript_user_message(
+                    persisted_session=persisted_session,
+                    user_input=item,
+                    user_text=user_text,
+                    transcript_state=_TRANSCRIPT_STATE_PAUSED,
+                )
             if self._state.session_key.startswith("web:"):
                 from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
 
                 update_ceo_session_after_turn(
                     persisted_session,
-                    user_text=user_text,
+                    user_text=visible_texts[-1] if visible_texts else "",
                     assistant_text="",
                     route_kind="",
                 )
@@ -1283,8 +1415,10 @@ class RuntimeAgentSession:
         interrupt_values = dict(exc.values or {}) if isinstance(exc.values, dict) else {}
         frontdoor_stage_state = interrupt_values.get("frontdoor_stage_state")
         compression_state = interrupt_values.get("compression_state")
+        hydrated_tool_names = interrupt_values.get("hydrated_tool_names")
         preserved_frontdoor_stage_state = getattr(self, "_frontdoor_stage_state", None)
         preserved_compression_state = getattr(self, "_compression_state", None)
+        preserved_hydrated_tool_names = getattr(self, "_frontdoor_hydrated_tool_names", None)
         self._frontdoor_stage_state = (
             dict(frontdoor_stage_state)
             if isinstance(frontdoor_stage_state, dict)
@@ -1299,6 +1433,11 @@ class RuntimeAgentSession:
             if isinstance(preserved_compression_state, dict)
             else {}
         )
+        self._frontdoor_hydrated_tool_names = [
+            str(item or "").strip()
+            for item in list(hydrated_tool_names or preserved_hydrated_tool_names or [])
+            if str(item or "").strip()
+        ]
         self._state.is_running = False
         self._state.paused = True
         self._state.status = "paused"
@@ -1321,202 +1460,123 @@ class RuntimeAgentSession:
         await self._emit_state_snapshot()
         return RunResult(output="", events=list(self._event_log))
 
-    async def prompt(
+    async def _prompt_locked(
         self,
-        message: str | UserInputMessage,
+        user_input: UserInputMessage,
         *,
         persist_transcript: bool = True,
         live_context: dict[str, str] | None = None,
     ) -> RunResult:
         from g3ku.shells.web import refresh_web_agent_runtime
 
-        async with self._turn_lock:
-            self._apply_live_context(live_context)
-            await refresh_web_agent_runtime(force=False, reason="prompt")
-            user_input = message if isinstance(message, UserInputMessage) else UserInputMessage(content=str(message))
-            internal_source = self._internal_prompt_source(user_input)
-            heartbeat_internal = internal_source == "heartbeat"
-            cron_internal = internal_source == "cron"
+        self._apply_live_context(live_context)
+        await refresh_web_agent_runtime(force=False, reason="prompt")
+        internal_source = self._internal_prompt_source(user_input)
+        heartbeat_internal = internal_source == "heartbeat"
+        cron_internal = internal_source == "cron"
+        if internal_source is None:
+            self._clear_manual_pause_waiting_reason_for_user_turn()
+            if not self._active_user_batch_inputs or self._active_user_batch_inputs[-1] is not user_input:
+                self._configure_user_batch([user_input])
+        else:
+            self._clear_user_batch_context()
+        if internal_source is not None:
+            current_snapshot = self._current_inflight_turn_snapshot()
+            current_source = str((current_snapshot or {}).get("source") or "").strip().lower()
+            if current_snapshot is not None and current_source != internal_source:
+                self._preserved_inflight_turn = copy.deepcopy(current_snapshot)
+        else:
+            self._preserved_inflight_turn = None
+        cancel_token = self._loop.create_session_cancellation_token(self._state.session_key)
+        self._active_cancel_token = cancel_token
+        try:
+            self._ensure_user_turn_id(user_input)
             if internal_source is None:
-                self._clear_manual_pause_waiting_reason_for_user_turn()
-            if internal_source is not None:
-                current_snapshot = self._current_inflight_turn_snapshot()
-                current_source = str((current_snapshot or {}).get("source") or "").strip().lower()
-                if current_snapshot is not None and current_source != internal_source:
-                    self._preserved_inflight_turn = copy.deepcopy(current_snapshot)
-            else:
-                self._preserved_inflight_turn = None
-            cancel_token = self._loop.create_session_cancellation_token(self._state.session_key)
-            self._active_cancel_token = cancel_token
-            try:
-                self._ensure_user_turn_id(user_input)
-                self._last_prompt = user_input
-                self._event_log = []
-                self._pending_tool_call_names.clear()
-                self._pending_tool_name_calls.clear()
-                self._background_tool_targets.clear()
-                if internal_source is None:
-                    # Fresh user turns should never inherit previous turn stage/compression snapshots.
-                    self._frontdoor_stage_state = {}
-                    self._compression_state = {}
-                self._state.is_running = True
-                self._state.paused = False
-                self._state.status = "running"
-                self._state.latest_message = ""
-                self._state.last_error = None
-                self._state.pending_tool_calls.clear()
-                self._state.pending_interrupts = []
-                self._last_verified_task_ids = []
-                if persist_transcript and internal_source is None:
-                    await self._persist_pending_user_message(
-                        user_input=user_input,
-                        user_text=self._history_text(user_input.content),
-                    )
-
-                await self._emit("agent_start", session_key=self._state.session_key, trigger="prompt")
-                await self._emit("turn_start", session_key=self._state.session_key)
-                await self._emit_state_snapshot()
-
-                output = await self._run_message(user_input)
-            except asyncio.CancelledError:
-                already_paused = bool(self._state.paused) or str(self._state.status or "").strip().lower() == "paused"
-                self._state.is_running = False
-                self._state.paused = True
-                self._state.status = "paused"
-                if not already_paused:
-                    await self._emit("control_ack", action="pause", accepted=True)
-                await self._emit("agent_end", session_key=self._state.session_key, status="paused")
-                if not already_paused:
-                    await self._emit_state_snapshot()
-                raise
-            except CeoFrontdoorInterrupted as exc:
-                return await self._pause_for_frontdoor_interrupt(exc)
-            except Exception as exc:
-                interaction_flow = self._interaction_flow_snapshot()
-                user_text = self._history_text(user_input.content)
-                recovered_dispatch = self._recover_dispatched_async_runtime_error(
-                    exc,
-                    interaction_flow=interaction_flow,
+                self._ensure_user_batch_id(user_input)
+            self._last_prompt = user_input
+            self._event_log = []
+            self._pending_tool_call_names.clear()
+            self._pending_tool_name_calls.clear()
+            self._background_tool_targets.clear()
+            if internal_source is None:
+                # Fresh user turns should never inherit previous turn stage/compression snapshots.
+                self._frontdoor_stage_state = {}
+                self._compression_state = {}
+                self._frontdoor_hydrated_tool_names = []
+            self._state.is_running = True
+            self._state.paused = False
+            self._state.status = "running"
+            self._state.latest_message = ""
+            self._state.last_error = None
+            self._state.pending_tool_calls.clear()
+            self._state.pending_interrupts = []
+            self._last_verified_task_ids = []
+            if persist_transcript and internal_source is None:
+                await self._persist_pending_user_messages(
+                    user_inputs=self._current_user_batch_inputs(user_input),
                 )
-                if recovered_dispatch is not None:
-                    output = str(recovered_dispatch.get("text") or "").strip()
-                    task_ids = self._normalize_verified_task_ids(recovered_dispatch.get("task_ids"))
-                    logger.opt(exception=exc).error(
-                        "Recovered async dispatch turn after internal runtime error "
-                        "(session_key={}, route_kind={}, internal_source={}, task_ids={})",
-                        self._state.session_key,
-                        str(getattr(self, "_last_route_kind", "") or ""),
-                        internal_source or "user",
-                        ",".join(task_ids),
-                    )
-                    self._frontdoor_stage_state = self._complete_active_frontdoor_stage_state(
-                        self._frontdoor_stage_state,
-                        completed_stage_summary=output,
-                    )
-                    assistant = AssistantMessage(content=output, timestamp=self._now())
-                    self._state.messages.append(assistant)
-                    self._state.latest_message = output
-                    self._state.is_running = False
-                    self._state.status = "completed"
-                    self._state.last_error = None
-                    self._state.pending_tool_calls.clear()
-                    self._last_verified_task_ids = list(task_ids)
-                    if getattr(self._loop, "prompt_trace", False):
-                        logger.info(render_output_trace(output))
-                    if persist_transcript:
-                        assistant_metadata = {
-                            "task_ids": task_ids,
-                            "reason": "async_dispatch_runtime_recovered",
-                        }
-                        if cron_internal:
-                            assistant_metadata["source"] = "cron"
-                            assistant_metadata["cron_job_id"] = str(
-                                (user_input.metadata or {}).get("cron_job_id") or ""
-                            ).strip()
-                        await self._persist_turn_transcript(
-                            user_input=user_input,
-                            user_text=user_text,
-                            assistant_text=output,
-                            interaction_flow=interaction_flow,
-                            internal_source=internal_source,
-                            route_kind=str(getattr(self, "_last_route_kind", "") or ""),
-                            assistant_metadata=assistant_metadata,
-                        )
-                    await self._emit(
-                        "message_end",
-                        role="assistant",
-                        text=output,
-                        heartbeat_internal=heartbeat_internal,
-                        source=internal_source or "user",
-                        turn_id=self._current_turn_id(user_input),
-                    )
-                    if internal_source is None:
-                        self.clear_paused_execution_context()
-                    await self._emit("turn_end", session_key=self._state.session_key, status="completed")
-                    await self._emit("agent_end", session_key=self._state.session_key, status="completed")
-                    await self._emit_state_snapshot()
-                    return RunResult(output=output, events=list(self._event_log))
+
+            await self._emit("agent_start", session_key=self._state.session_key, trigger="prompt")
+            await self._emit("turn_start", session_key=self._state.session_key)
+            await self._emit_state_snapshot()
+
+            output = await self._run_message(user_input)
+        except asyncio.CancelledError:
+            already_paused = bool(self._state.paused) or str(self._state.status or "").strip().lower() == "paused"
+            self._state.is_running = False
+            self._state.paused = True
+            self._state.status = "paused"
+            if not already_paused:
+                await self._emit("control_ack", action="pause", accepted=True)
+            await self._emit("agent_end", session_key=self._state.session_key, status="paused")
+            if not already_paused:
+                await self._emit_state_snapshot()
+            raise
+        except CeoFrontdoorInterrupted as exc:
+            return await self._pause_for_frontdoor_interrupt(exc)
+        except Exception as exc:
+            interaction_flow = self._interaction_flow_snapshot()
+            user_text = self._history_text(user_input.content)
+            recovered_dispatch = self._recover_dispatched_async_runtime_error(
+                exc,
+                interaction_flow=interaction_flow,
+            )
+            if recovered_dispatch is not None:
+                output = str(recovered_dispatch.get("text") or "").strip()
+                task_ids = self._normalize_verified_task_ids(recovered_dispatch.get("task_ids"))
                 logger.opt(exception=exc).error(
-                    "Runtime agent turn failed "
-                    "(session_key={}, route_kind={}, internal_source={})",
+                    "Recovered async dispatch turn after internal runtime error "
+                    "(session_key={}, route_kind={}, internal_source={}, task_ids={})",
                     self._state.session_key,
                     str(getattr(self, "_last_route_kind", "") or ""),
                     internal_source or "user",
+                    ",".join(task_ids),
                 )
-                self._state.is_running = False
-                self._state.status = "error"
-                error = StructuredError(code="legacy_session_error", message=str(exc), recoverable=True)
-                self._state.last_error = error
-                error_reply = f"运行出错：{error.message}"
-                self._state.latest_message = error_reply
-                if persist_transcript:
-                    assistant_metadata = {
-                        "source": "runtime_error",
-                        "error_code": error.code,
-                        "error_message": error.message,
-                        "recoverable": error.recoverable,
-                    }
-                    if cron_internal:
-                        assistant_metadata["cron_job_id"] = str((user_input.metadata or {}).get("cron_job_id") or "").strip()
-                    await self._persist_turn_transcript(
-                        user_input=user_input,
-                        user_text=user_text,
-                        assistant_text=error_reply,
-                        interaction_flow=interaction_flow,
-                        internal_source=internal_source,
-                        route_kind=str(getattr(self, "_last_route_kind", "") or ""),
-                        assistant_metadata=assistant_metadata,
-                    )
-                await self._emit(
-                    "error",
-                    code=error.code,
-                    message=error.message,
-                    recoverable=error.recoverable,
-                    source="runtime",
+                self._frontdoor_stage_state = self._complete_active_frontdoor_stage_state(
+                    self._frontdoor_stage_state,
+                    completed_stage_summary=output,
                 )
-                await self._emit("agent_end", session_key=self._state.session_key, status="error")
-                await self._emit_state_snapshot()
-                raise
-            else:
                 assistant = AssistantMessage(content=output, timestamp=self._now())
                 self._state.messages.append(assistant)
                 self._state.latest_message = output
                 self._state.is_running = False
                 self._state.status = "completed"
+                self._state.last_error = None
                 self._state.pending_tool_calls.clear()
-                user_text = self._history_text(user_input.content)
-                interaction_flow = self._interaction_flow_snapshot()
+                self._last_verified_task_ids = list(task_ids)
                 if getattr(self._loop, "prompt_trace", False):
                     logger.info(render_output_trace(output))
-                persisted_session = None
                 if persist_transcript:
-                    assistant_metadata = None
+                    assistant_metadata = {
+                        "task_ids": task_ids,
+                        "reason": "async_dispatch_runtime_recovered",
+                    }
                     if cron_internal:
-                        assistant_metadata = {
-                            "source": "cron",
-                            "cron_job_id": str((user_input.metadata or {}).get("cron_job_id") or "").strip(),
-                        }
-                    persisted_session = await self._persist_turn_transcript(
+                        assistant_metadata["source"] = "cron"
+                        assistant_metadata["cron_job_id"] = str(
+                            (user_input.metadata or {}).get("cron_job_id") or ""
+                        ).strip()
+                    await self._persist_turn_transcript(
                         user_input=user_input,
                         user_text=user_text,
                         assistant_text=output,
@@ -1525,24 +1585,6 @@ class RuntimeAgentSession:
                         route_kind=str(getattr(self, "_last_route_kind", "") or ""),
                         assistant_metadata=assistant_metadata,
                     )
-                    if internal_source is None and getattr(self._loop, "memory_manager", None) is not None:
-                        try:
-                            await self._loop.memory_manager.ingest_turn(
-                                session_key=self._state.session_key,
-                                channel=self._memory_channel,
-                                chat_id=self._memory_chat_id,
-                                messages=[
-                                    {"role": "user", "content": user_text},
-                                    {"role": "assistant", "content": output},
-                                ],
-                            )
-                        except Exception:
-                            await self._emit(
-                                "message_delta",
-                                channel="analysis",
-                                kind="persistence_warning",
-                                text="Memory ingest failed; turn history is still available in session transcript.",
-                            )
                 await self._emit(
                     "message_end",
                     role="assistant",
@@ -1557,11 +1599,168 @@ class RuntimeAgentSession:
                 await self._emit("agent_end", session_key=self._state.session_key, status="completed")
                 await self._emit_state_snapshot()
                 return RunResult(output=output, events=list(self._event_log))
-            finally:
-                if self._active_cancel_token is cancel_token:
-                    self._active_cancel_token = None
-                self._active_turn_id = None
-                self._loop.release_session_cancellation_token(self._state.session_key, cancel_token)
+            logger.opt(exception=exc).error(
+                "Runtime agent turn failed "
+                "(session_key={}, route_kind={}, internal_source={})",
+                self._state.session_key,
+                str(getattr(self, "_last_route_kind", "") or ""),
+                internal_source or "user",
+            )
+            self._state.is_running = False
+            self._state.status = "error"
+            error = StructuredError(code="legacy_session_error", message=str(exc), recoverable=True)
+            self._state.last_error = error
+            error_reply = f"运行出错：{error.message}"
+            self._state.latest_message = error_reply
+            if persist_transcript:
+                assistant_metadata = {
+                    "source": "runtime_error",
+                    "error_code": error.code,
+                    "error_message": error.message,
+                    "recoverable": error.recoverable,
+                }
+                if cron_internal:
+                    assistant_metadata["cron_job_id"] = str((user_input.metadata or {}).get("cron_job_id") or "").strip()
+                await self._persist_turn_transcript(
+                    user_input=user_input,
+                    user_text=user_text,
+                    assistant_text=error_reply,
+                    interaction_flow=interaction_flow,
+                    internal_source=internal_source,
+                    route_kind=str(getattr(self, "_last_route_kind", "") or ""),
+                    assistant_metadata=assistant_metadata,
+                )
+            await self._emit(
+                "error",
+                code=error.code,
+                message=error.message,
+                recoverable=error.recoverable,
+                source="runtime",
+            )
+            await self._emit("agent_end", session_key=self._state.session_key, status="error")
+            await self._emit_state_snapshot()
+            raise
+        else:
+            assistant = AssistantMessage(content=output, timestamp=self._now())
+            self._state.messages.append(assistant)
+            self._state.latest_message = output
+            self._state.is_running = False
+            self._state.status = "completed"
+            self._state.pending_tool_calls.clear()
+            user_text = self._history_text(user_input.content)
+            interaction_flow = self._interaction_flow_snapshot()
+            if getattr(self._loop, "prompt_trace", False):
+                logger.info(render_output_trace(output))
+            persisted_session = None
+            if persist_transcript:
+                assistant_metadata = None
+                if cron_internal:
+                    assistant_metadata = {
+                        "source": "cron",
+                        "cron_job_id": str((user_input.metadata or {}).get("cron_job_id") or "").strip(),
+                    }
+                persisted_session = await self._persist_turn_transcript(
+                    user_input=user_input,
+                    user_text=user_text,
+                    assistant_text=output,
+                    interaction_flow=interaction_flow,
+                    internal_source=internal_source,
+                    route_kind=str(getattr(self, "_last_route_kind", "") or ""),
+                    assistant_metadata=assistant_metadata,
+                )
+                if internal_source is None and getattr(self._loop, "memory_manager", None) is not None:
+                    batch_messages = [
+                        {"role": "user", "content": self._history_text(item.content)}
+                        for item in self._current_user_batch_inputs(user_input)
+                        if self._history_text(item.content).strip()
+                    ]
+                    try:
+                        await self._loop.memory_manager.ingest_turn(
+                            session_key=self._state.session_key,
+                            channel=self._memory_channel,
+                            chat_id=self._memory_chat_id,
+                            messages=[
+                                *batch_messages,
+                                {"role": "assistant", "content": output},
+                            ],
+                        )
+                    except Exception:
+                        await self._emit(
+                            "message_delta",
+                            channel="analysis",
+                            kind="persistence_warning",
+                            text="Memory ingest failed; turn history is still available in session transcript.",
+                        )
+            await self._emit(
+                "message_end",
+                role="assistant",
+                text=output,
+                heartbeat_internal=heartbeat_internal,
+                source=internal_source or "user",
+                turn_id=self._current_turn_id(user_input),
+            )
+            if internal_source is None:
+                self.clear_paused_execution_context()
+            await self._emit("turn_end", session_key=self._state.session_key, status="completed")
+            await self._emit("agent_end", session_key=self._state.session_key, status="completed")
+            await self._emit_state_snapshot()
+            return RunResult(output=output, events=list(self._event_log))
+        finally:
+            if self._active_cancel_token is cancel_token:
+                self._active_cancel_token = None
+            self._active_turn_id = None
+            self._clear_user_batch_context()
+            self._loop.release_session_cancellation_token(self._state.session_key, cancel_token)
+
+    async def prompt(
+        self,
+        message: str | UserInputMessage,
+        *,
+        persist_transcript: bool = True,
+        live_context: dict[str, str] | None = None,
+    ) -> RunResult:
+        async with self._turn_lock:
+            user_input = message if isinstance(message, UserInputMessage) else UserInputMessage(content=str(message))
+            if self._internal_prompt_source(user_input) is None:
+                self._configure_user_batch([user_input])
+            return await self._prompt_locked(
+                user_input,
+                persist_transcript=persist_transcript,
+                live_context=live_context,
+            )
+
+    async def prompt_batch(
+        self,
+        messages: list[str | UserInputMessage],
+        *,
+        persist_transcript: bool = True,
+        live_context: dict[str, str] | None = None,
+    ) -> RunResult:
+        normalized_inputs: list[UserInputMessage] = []
+        for raw in list(messages or []):
+            item = raw if isinstance(raw, UserInputMessage) else UserInputMessage(content=str(raw))
+            if self._internal_prompt_source(item) is not None:
+                raise ValueError("prompt_batch_user_messages_only")
+            text = self._history_text(item.content)
+            if not text.strip() and not item.attachments:
+                continue
+            normalized_inputs.append(item)
+        if not normalized_inputs:
+            raise ValueError("prompt_batch_requires_messages")
+        combined_query_text = self._batch_query_text(normalized_inputs)
+        batch_id = self._new_batch_id()
+        self._configure_user_batch(normalized_inputs, batch_id=batch_id)
+        last_input = normalized_inputs[-1]
+        last_metadata = dict(last_input.metadata or {})
+        if combined_query_text:
+            last_metadata["web_ceo_batch_query_text"] = combined_query_text
+            last_input.metadata = last_metadata
+        async with self._turn_lock:
+            return await self._prompt_locked(
+                last_input,
+                persist_transcript=persist_transcript,
+                live_context=live_context,
+            )
 
     async def continue_(self, *, live_context: dict[str, str] | None = None) -> RunResult:
         return await self.prompt(self._last_prompt, live_context=live_context)
@@ -1606,7 +1805,7 @@ class RuntimeAgentSession:
         self._background_tool_targets.clear()
         self._preserved_inflight_turn = None
         if manual:
-            await self._persist_manual_pause_user_message()
+            await self._persist_manual_pause_user_messages()
             # Manual pause persists the current prompt's transcript state using the
             # existing turn id so the pending user message can be updated in place.
             # Clear the active turn binding again afterwards so the next real user
@@ -1623,26 +1822,14 @@ class RuntimeAgentSession:
 
     async def resume(self, *, replan: bool = False, additional_context: str | None = None) -> RunResult:
         self._set_manual_pause_waiting_reason(False)
+        if additional_context:
+            await self._emit("control_ack", action="resume", accepted=True, replan=replan)
+            await self._emit_state_snapshot()
+            return await self.prompt_batch([UserInputMessage(content=str(additional_context or "").strip())])
         self._state.paused = False
         self._state.status = "running"
         await self._emit("control_ack", action="resume", accepted=True, replan=replan)
         await self._emit_state_snapshot()
-        if additional_context:
-            paused_snapshot = self.paused_execution_context_snapshot() or {}
-            paused_user = paused_snapshot.get("user_message") if isinstance(paused_snapshot, dict) else {}
-            base_text = ""
-            if isinstance(paused_user, dict):
-                base_text = self._history_text(paused_user.get("content"))
-            if not base_text and isinstance(self._last_prompt, UserInputMessage):
-                base_text = self._history_text(self._last_prompt.content)
-            elif not base_text:
-                base_text = self._history_text(self._last_prompt)
-            supplemental = str(additional_context or "").strip()
-            if base_text and supplemental:
-                combined = f"{base_text}\n\n补充要求：\n{supplemental}"
-            else:
-                combined = supplemental or base_text
-            return await self.prompt(combined)
         return RunResult(output="", events=list(self._event_log))
 
     async def resume_frontdoor_interrupt(

@@ -15,6 +15,22 @@ ALL_ROLES = list(DEFAULT_ALLOWED_ROLES)
 def _primary_executor_name(actions: list[ToolActionRecord], *, preferred_executor_name: str = '') -> str:
     preferred = str(preferred_executor_name or '').strip()
     visible_actions = [action for action in actions if bool(getattr(action, 'agent_visible', True))]
+    governance = get_default_tool_governance(preferred)
+    governance_order = [
+        str(item.get('id') or '').strip()
+        for item in list((governance or {}).get('actions') or [])
+        if str(item.get('id') or '').strip()
+    ]
+    if governance_order:
+        action_map = {str(action.action_id or '').strip(): action for action in visible_actions or actions}
+        for action_id in governance_order:
+            action = action_map.get(action_id)
+            if action is None:
+                continue
+            for executor_name in action.executor_names or []:
+                name = str(executor_name or '').strip()
+                if name and name != preferred:
+                    return name
     for action in visible_actions or actions:
         for executor_name in action.executor_names or []:
             name = str(executor_name or '').strip()

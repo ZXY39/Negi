@@ -15,6 +15,8 @@ def test_execution_prompts_use_exec_for_reading_and_filesystem_for_mutation() ->
         assert "`exec`" in prompt
         assert "`filesystem_write`" in prompt
         assert "`filesystem_edit`" in prompt
+        assert "`filesystem_copy`" in prompt
+        assert "`filesystem_move`" in prompt
         assert "`filesystem_delete`" in prompt
         assert "`filesystem_propose_patch`" in prompt
         assert "`filesystem_list`" not in prompt
