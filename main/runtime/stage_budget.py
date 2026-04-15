@@ -8,8 +8,25 @@ STAGE_TOOL_NAME = "submit_next_stage"
 FINAL_RESULT_TOOL_NAME = "submit_final_result"
 SPAWN_CHILD_NODES_TOOL_NAME = "spawn_child_nodes"
 CONTROL_STAGE_TOOL_NAMES = frozenset({"wait_tool_execution", "stop_tool_execution"})
-DEFAULT_NON_BUDGET_STAGE_TOOLS = frozenset(
+DEFAULT_STAGE_GATE_BYPASS_TOOLS = frozenset(
     {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, SPAWN_CHILD_NODES_TOOL_NAME, *CONTROL_STAGE_TOOL_NAMES}
+)
+CONTEXT_LOADER_STAGE_TOOL_NAMES = frozenset(
+    {
+        "load_tool_context",
+        "load_tool_context_v2",
+        "load_skill_context",
+        "load_skill_context_v2",
+    }
+)
+DEFAULT_NON_BUDGET_STAGE_TOOLS = frozenset(
+    {
+        STAGE_TOOL_NAME,
+        FINAL_RESULT_TOOL_NAME,
+        SPAWN_CHILD_NODES_TOOL_NAME,
+        *CONTROL_STAGE_TOOL_NAMES,
+        *CONTEXT_LOADER_STAGE_TOOL_NAMES,
+    }
 )
 
 
@@ -17,6 +34,15 @@ def normalize_non_budget_stage_tools(extra_non_budget_tools: Iterable[str] | Non
     names = {
         str(item or "").strip()
         for item in list(DEFAULT_NON_BUDGET_STAGE_TOOLS) + list(extra_non_budget_tools or [])
+        if str(item or "").strip()
+    }
+    return names
+
+
+def normalize_stage_gate_bypass_tools(extra_allowed_tools: Iterable[str] | None = None) -> set[str]:
+    names = {
+        str(item or "").strip()
+        for item in list(DEFAULT_STAGE_GATE_BYPASS_TOOLS) + list(extra_allowed_tools or [])
         if str(item or "").strip()
     }
     return names
@@ -67,7 +93,7 @@ def stage_gate_error_for_tool(
     stage_tool_name: str = STAGE_TOOL_NAME,
 ) -> str:
     normalized_tool_name = str(tool_name or "").strip()
-    allowed_tools = normalize_non_budget_stage_tools(extra_allowed_tools)
+    allowed_tools = normalize_stage_gate_bypass_tools(extra_allowed_tools)
     allowed_tools.add(str(stage_tool_name or "").strip())
     if normalized_tool_name in allowed_tools:
         return ""

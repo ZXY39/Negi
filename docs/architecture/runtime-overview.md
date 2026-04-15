@@ -164,6 +164,12 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - 同一用户 turn 内，`load_tool_context` 成功后，下一轮真正发给模型的函数工具列表会并入对应 hydrated tool。
 - frontdoor approval interrupt、session inflight snapshot、paused execution context 也会携带这份 hydrated state，避免“暂停前已经 load 成功，恢复后又退回 candidate-only”。
 
+阶段预算上还有一个容易被误判的点：
+
+- `load_tool_context` / `load_skill_context` 会照常进入 round 记录与执行轨迹，但它们现在不再增加 `tool_rounds_used`。
+- 这条规则同时适用于 execution/acceptance 节点和 CEO/frontdoor；如果维护者看到很多 loader 调用，不要据此直接推断阶段预算已经被吃掉。
+- 排查预算问题时，应优先检查 `rounds[*].budget_counted`、阶段快照和 runtime messages artifact，而不是按工具名手算。
+
 ### CEO Frontdoor Round Tool Ownership
 
 For the CEO/frontdoor path, `frontdoor_stage_state.stages[].rounds[].tools` is now the authoritative record of which tool calls belong to a round.

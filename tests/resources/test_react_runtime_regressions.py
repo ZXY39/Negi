@@ -120,6 +120,17 @@ def _submit_final_result_tool(*, node_kind: str = "execution") -> SubmitFinalRes
     return SubmitFinalResultTool(_submit, node_kind=node_kind)
 
 
+@pytest.mark.parametrize(
+    "loader_tool_name",
+    ["load_tool_context", "load_tool_context_v2", "load_skill_context", "load_skill_context_v2"],
+)
+def test_react_loop_treats_loader_tools_as_budget_bypass(loader_tool_name: str) -> None:
+    assert ReActToolLoop._should_bypass_execution_budget(call=SimpleNamespace(name=loader_tool_name)) is True
+    assert ReActToolLoop.model_visible_always_callable_tool_names(
+        visible_tool_names=[loader_tool_name]
+    ) == [loader_tool_name]
+
+
 class _DirectLoadTool(Tool):
     @property
     def name(self) -> str:

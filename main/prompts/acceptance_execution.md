@@ -29,7 +29,7 @@
 - 若 `execution_policy.mode="focus"`，验收目标是确认关键结果与必要验证是否已经完成；不要仅因未做边缘扩展或系统性全量操作就直接判定失败。
 - 若 `execution_policy.mode="coverage"`，仍先检查关键结果与必要验证；如任务目标明确要求补漏、扩展范围或系统性覆盖，则需据此判断是否完成。
 - 判断哪些历史 round 扣除了本阶段预算时，**禁止按工具名自行猜测**；如果上下文、阶段快照或系统 overlay 提供了 `rounds[*].budget_counted` / `tool_rounds_used`，必须以这些系统字段为准。
-- 当前不会计入本阶段 `tool_rounds_used` 的工具只有 `submit_next_stage`、`submit_final_result`、`spawn_child_nodes`、`stop_tool_execution`；但这不代表预算耗尽后它们都仍允许调用，是否可调用仍以系统门控和工具返回为准。
+- 当前不会计入本阶段 `tool_rounds_used` 的工具只有 `submit_next_stage`、`submit_final_result`、`spawn_child_nodes`、`wait_tool_execution`、`stop_tool_execution`、`load_tool_context`、`load_skill_context`；但这不代表预算耗尽后它们都仍允许调用，是否可调用仍以系统门控和工具返回为准。
 - 校验 `task_node_detail` 时，优先依据 summary 字段、`final_output_ref`、`check_result_ref`、`execution_trace_ref` 和 `artifacts_preview` 判断；不要把 full node detail 当成默认入口。
 - 优先基于输出摘要、结构化结果和证据摘要判断；只有这些信息不足以完成校验时，才使用 `content.search` / `content.open` 访问 `artifact:` 引用。
 - 若 `task_node_detail` 的 summary 仍不足以支撑判断，优先打开 `execution_trace_ref` 或 `final_output_ref` 做局部核对，而不是直接请求 `detail_level="full"`。

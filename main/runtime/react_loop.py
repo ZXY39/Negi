@@ -41,6 +41,7 @@ from main.runtime.node_prompt_contract import (
 from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from main.runtime.stage_budget import (
+    DEFAULT_NON_BUDGET_STAGE_TOOLS,
     FINAL_RESULT_TOOL_NAME,
     STAGE_TOOL_NAME,
     stage_gate_error_for_tool,
@@ -100,7 +101,7 @@ class ReActToolLoop:
     _CONTROL_TOOL_NAMES = {'stop_tool_execution'}
     _ORDERED_CONTROL_TOOL_NAMES = ('stop_tool_execution',)
     _EXCLUSIVE_TOOL_TURN_NAMES = {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}
-    _BUDGET_BYPASS_TOOL_NAMES = _CONTROL_TOOL_NAMES | {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, _STAGE_SPAWN_TOOL_NAME}
+    _BUDGET_BYPASS_TOOL_NAMES = set(DEFAULT_NON_BUDGET_STAGE_TOOLS) - {'wait_tool_execution'}
 
     def __init__(
         self,

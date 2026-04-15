@@ -1126,6 +1126,66 @@ async def test_mixed_ref_reads_and_regular_tools_still_consume_stage_budget(tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'tool_names',
+    [
+        ['load_tool_context'],
+        ['load_skill_context'],
+        ['load_tool_context_v2'],
+        ['load_skill_context_v2'],
+        ['load_tool_context', 'load_skill_context'],
+    ],
+)
+async def test_loader_tools_do_not_consume_stage_budget(tmp_path: Path, tool_names: list[str]):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        stage = service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='加载上下文工具本身不应消耗当前阶段预算',
+            tool_round_budget=2,
+        )
+        tool_calls = []
+        for index, tool_name in enumerate(tool_names, start=1):
+            arguments = {'skill_id': 'memory'} if 'skill' in tool_name else {'tool_id': 'filesystem_write'}
+            tool_calls.append(
+                {
+                    'id': f'call:loader:{index}',
+                    'name': tool_name,
+                    'arguments': arguments,
+                }
+            )
+        service.log_service.record_execution_stage_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=tool_calls,
+            created_at=now_iso(),
+        )
+
+        snapshot = service.log_service.execution_stage_gate_snapshot(record.task_id, record.root_node_id)
+        active = dict(snapshot.get('active_stage') or {})
+        assert active['stage_id'] == stage['stage_id']
+        assert active['tool_rounds_used'] == 0
+        assert active['rounds'][0]['tool_names'] == tool_names
+
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
+        assert detail is not None
+        rounds = detail['item']['execution_trace']['stages'][0]['rounds']
+        assert len(rounds) == 1
+        assert rounds[0]['budget_counted'] is False
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_final_budgeted_round_is_allowed_and_next_turn_is_blocked(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -1565,6 +1625,8 @@ def test_execution_stage_overlay_exposes_budget_accounting_rules_and_latest_roun
     assert '`submit_next_stage`' in overlay
     assert '`submit_final_result`' in overlay
     assert '`spawn_child_nodes`' in overlay
+    assert '`load_tool_context`' in overlay
+    assert '`load_skill_context`' in overlay
     assert '第 2 轮' in overlay
     assert 'budget_counted=true' in overlay
 

@@ -161,6 +161,12 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - 这份 frontdoor hydration 状态会在同一用户 turn 的后续模型轮次里直接并入 callable tool 集合，而不只是继续停留在 candidate tool 列表里。
 - frontdoor approval interrupt、session inflight snapshot、paused execution context 也会带上这份 hydrated tool 状态；因此排查“load 成功但下一轮又看不见工具”时，不能只看 candidate tool 提示块，还要看 frontdoor 当前保存的 hydrated tool state。
 
+维护上还要再记住一个和阶段预算相关的边界：
+
+- `load_tool_context` / `load_skill_context` 属于上下文加载型工具调用，会写入 round 历史，但不会增加当前阶段的 `tool_rounds_used`。
+- execution/acceptance 节点与 CEO/frontdoor 的阶段记账现在都按同一条规则处理这两类 loader；排查预算耗尽时，不要再把它们当成普通预算轮次。
+- 真正的预算结论只看 `rounds[*].budget_counted` 与聚合后的 `tool_rounds_used`，不要根据 transcript 里看到了多少次 loader 调用自行推断。
+
 ## 4. 一条从上下文到 callable tools 的链路
 
 1. 节点/CEO 进入一次新 turn。

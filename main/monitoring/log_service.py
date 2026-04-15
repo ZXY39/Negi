@@ -30,6 +30,7 @@ from main.models import (
     normalize_tool_file_changes,
 )
 from main.runtime.stage_budget import (
+    CONTEXT_LOADER_STAGE_TOOL_NAMES,
     CONTROL_STAGE_TOOL_NAMES,
     FINAL_RESULT_TOOL_NAME,
     STAGE_TOOL_NAME,
@@ -80,6 +81,7 @@ _NON_BUDGET_EXECUTION_TOOLS = {
     'spawn_child_nodes',
     'wait_tool_execution',
     'stop_tool_execution',
+    *CONTEXT_LOADER_STAGE_TOOL_NAMES,
 }
 _NON_SUBSTANTIVE_EXECUTION_PROGRESS_TOOLS = {
     _EXECUTION_STAGE_TOOL_NAME,

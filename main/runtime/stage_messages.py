@@ -2,16 +2,25 @@ from __future__ import annotations
 
 from typing import Any
 
-from main.runtime.stage_budget import CONTROL_STAGE_TOOL_NAMES, FINAL_RESULT_TOOL_NAME, STAGE_TOOL_NAME
+from main.runtime.stage_budget import (
+    CONTEXT_LOADER_STAGE_TOOL_NAMES,
+    CONTROL_STAGE_TOOL_NAMES,
+    FINAL_RESULT_TOOL_NAME,
+    STAGE_TOOL_NAME,
+)
 
 _STAGE_BUDGET_NODE_KINDS = {'execution', 'acceptance'}
 _NON_SUBSTANTIVE_PROGRESS_TOOL_NAMES = {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, *CONTROL_STAGE_TOOL_NAMES}
+_PUBLIC_CONTEXT_LOADER_STAGE_TOOL_NAMES = tuple(
+    name for name in sorted(CONTEXT_LOADER_STAGE_TOOL_NAMES) if not str(name or '').endswith('_v2')
+)
 _NON_BUDGET_ACCOUNTING_TOOL_NAMES = (
     STAGE_TOOL_NAME,
     FINAL_RESULT_TOOL_NAME,
     'spawn_child_nodes',
     'wait_tool_execution',
     'stop_tool_execution',
+    *_PUBLIC_CONTEXT_LOADER_STAGE_TOOL_NAMES,
 )
 
 

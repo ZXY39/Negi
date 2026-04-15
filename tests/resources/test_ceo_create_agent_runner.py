@@ -669,6 +669,54 @@ def test_frontdoor_stage_state_after_tool_cycle_writes_precise_round_tools() -> 
     assert rounds[0]["tools"][1]["output_ref"] == ""
 
 
+@pytest.mark.parametrize("loader_tool_name", ["load_tool_context", "load_skill_context"])
+def test_frontdoor_stage_state_after_loader_only_tool_cycle_does_not_consume_budget(loader_tool_name: str) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    arguments = {"skill_id": "find-skills"} if "skill" in loader_tool_name else {"tool_id": "filesystem_write"}
+
+    result = runner._frontdoor_stage_state_after_tool_cycle(
+        {
+            "session_key": "web:shared",
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_kind": "normal",
+                        "mode": "自主执行",
+                        "status": "active",
+                        "stage_goal": "inspect loader context",
+                        "completed_stage_summary": "",
+                        "tool_round_budget": 2,
+                        "tool_rounds_used": 0,
+                        "created_at": "2026-04-15T10:00:00+08:00",
+                        "finished_at": "",
+                        "rounds": [],
+                    }
+                ],
+            },
+        },
+        tool_call_payloads=[
+            {"id": "call-loader-1", "name": loader_tool_name, "arguments": arguments},
+        ],
+        tool_results=[
+            {
+                "tool_name": loader_tool_name,
+                "status": "success",
+                "result_text": '{"ok":true}',
+            }
+        ],
+    )
+
+    stage = result["stages"][0]
+    assert stage["tool_rounds_used"] == 0
+    assert len(stage["rounds"]) == 1
+    assert stage["rounds"][0]["tool_names"] == [loader_tool_name]
+    assert stage["rounds"][0]["budget_counted"] is False
+
+
 @pytest.mark.asyncio
 async def test_create_agent_langchain_tool_normalizes_create_async_task_execution_policy(monkeypatch) -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
