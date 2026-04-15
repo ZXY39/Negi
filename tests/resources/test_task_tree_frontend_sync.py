@@ -849,6 +849,43 @@ def test_build_node_execution_trace_preserves_summary_round_boundaries() -> None
     assert result["roundsUsed"] == 2
 
 
+def test_execution_stage_progress_ignores_non_budget_rounds_in_frontend_formatting() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          liveFrameMap: {},
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const progress = formatExecutionStageProgress({
+          stage_total_steps: 5,
+          tool_rounds_used: 1,
+          rounds: [
+            { round_id: "round-loader", budget_counted: false, tools: [{ tool_name: "load_skill_context" }] },
+            { round_id: "round-budgeted", budget_counted: true, tools: [{ tool_name: "memory_search" }] },
+          ],
+        });
+
+        console.log(JSON.stringify({ progress }));
+        """
+    )
+
+    assert result["progress"] == "1/5"
+
+
 def test_build_node_execution_trace_prefers_detail_final_output_when_full_trace_output_is_blank() -> None:
     result = _run_node_script(
         """

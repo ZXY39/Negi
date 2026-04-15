@@ -7,6 +7,53 @@ from typing import Any
 NODE_DYNAMIC_CONTRACT_KIND = 'node_runtime_tool_contract'
 
 
+def _normalized_name_list(items: list[Any] | None) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in list(items or []):
+        normalized = str(item or '').strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
+def _active_stage_prompt_view(active_stage: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(active_stage, dict):
+        return None
+    stage_id = str(active_stage.get('stage_id') or '').strip()
+    if not stage_id:
+        return None
+    return {
+        'stage_id': stage_id,
+        'stage_goal': str(active_stage.get('stage_goal') or '').strip(),
+        'tool_round_budget': max(0, int(active_stage.get('tool_round_budget') or 0)),
+        'stage_kind': str(active_stage.get('stage_kind') or 'normal').strip() or 'normal',
+        'final_stage': bool(active_stage.get('final_stage', False)),
+    }
+
+
+def _stable_stage_payload(stage_payload: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(stage_payload or {})
+    return {
+        'has_active_stage': bool(payload.get('has_active_stage')),
+        'transition_required': bool(payload.get('transition_required')),
+        'active_stage': _active_stage_prompt_view(
+            payload.get('active_stage') if isinstance(payload.get('active_stage'), dict) else None
+        ),
+    }
+
+
+def _stable_selection_trace(selection_trace: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(selection_trace or {})
+    return {
+        'mode': str(payload.get('mode') or '').strip(),
+        'full_callable_tool_names': _normalized_name_list(list(payload.get('full_callable_tool_names') or [])),
+        'stage_locked_to_submit_next_stage': bool(payload.get('stage_locked_to_submit_next_stage')),
+    }
+
+
 @dataclass(slots=True)
 class NodeRuntimeToolContract:
     node_id: str
@@ -33,7 +80,7 @@ class NodeRuntimeToolContract:
                 for item in list(self.candidate_skill_ids or [])
                 if str(item or '').strip()
             ],
-            'execution_stage': dict(self.stage_payload or {}),
+            'execution_stage': _stable_stage_payload(self.stage_payload),
             'hydrated_executor_names': [
                 str(item or '').strip()
                 for item in list(self.hydrated_executor_names or [])
@@ -44,7 +91,7 @@ class NodeRuntimeToolContract:
                 for item in list(self.lightweight_tool_ids or [])
                 if str(item or '').strip()
             ],
-            'model_visible_tool_selection_trace': dict(self.selection_trace or {}),
+            'model_visible_tool_selection_trace': _stable_selection_trace(self.selection_trace),
         }
 
     def to_message(self) -> dict[str, str]:
@@ -86,6 +133,38 @@ def upsert_node_dynamic_contract_message(
     return updated
 
 
+def strip_node_dynamic_contract_messages(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    return [
+        dict(message)
+        for message in list(messages or [])
+        if isinstance(message, dict) and not is_node_dynamic_contract_message(message)
+    ]
+
+
+def inject_node_dynamic_contract_message(
+    messages: list[dict[str, Any]] | None,
+    contract: NodeRuntimeToolContract,
+) -> list[dict[str, Any]]:
+    normalized_messages = strip_node_dynamic_contract_messages(messages)
+    insert_at = 0
+    if (
+        normalized_messages
+        and str(normalized_messages[0].get('role') or '').strip().lower() == 'system'
+    ):
+        insert_at = 1
+    if (
+        insert_at < len(normalized_messages)
+        and str(normalized_messages[insert_at].get('role') or '').strip().lower() == 'user'
+    ):
+        insert_at += 1
+    contract_message = contract.to_message()
+    return [
+        *normalized_messages[:insert_at],
+        contract_message,
+        *normalized_messages[insert_at:],
+    ]
+
+
 def extract_node_dynamic_contract_payload(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
     for message in list(messages or []):
         if not is_node_dynamic_contract_message(message):
@@ -100,3 +179,14 @@ def extract_node_dynamic_contract_payload(messages: list[dict[str, Any]]) -> dic
         if isinstance(payload, dict):
             return payload
     return None
+
+
+__all__ = [
+    'NODE_DYNAMIC_CONTRACT_KIND',
+    'NodeRuntimeToolContract',
+    'extract_node_dynamic_contract_payload',
+    'inject_node_dynamic_contract_message',
+    'is_node_dynamic_contract_message',
+    'strip_node_dynamic_contract_messages',
+    'upsert_node_dynamic_contract_message',
+]

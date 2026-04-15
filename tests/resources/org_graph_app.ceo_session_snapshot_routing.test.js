@@ -110,6 +110,7 @@ function loadApp() {
         globalThis.__renderCalls = [];
         globalThis.__renderFeedTexts = [];
         globalThis.__renderSessionPayloads = [];
+        globalThis.__toolEvents = [];
         renderCeoSnapshot = (messages, inflightTurn, options = {}) => {
             globalThis.__renderCalls.push({
                 sessionId: String(options?.sessionId || ""),
@@ -127,6 +128,9 @@ function loadApp() {
         applyCeoState = () => {};
         handleCeoControlAck = () => {};
         patchCeoInflightTurn = () => {};
+        appendCeoToolEvent = (event) => {
+            globalThis.__toolEvents.push(event);
+        };
         handleCeoError = () => {};
         finalizeCeoTurn = () => {};
         discardActiveCeoTurn = () => {};
@@ -199,4 +203,31 @@ test("snapshot.ceo for a different session does not render into the active feed"
     });
 
     assert.equal(__context.__renderCalls.length, 0);
+});
+
+test("ceo.agent.tool forwards live tool events into the active session feed", () => {
+    const { S, initCeoWs, __socket, __context } = loadApp();
+
+    S.activeSessionId = "web:current";
+    initCeoWs();
+
+    const socket = __socket();
+    assert.ok(socket);
+
+    socket.onmessage({
+        data: JSON.stringify({
+            type: "ceo.agent.tool",
+            session_id: "web:current",
+            data: {
+                tool_name: "load_tool_context",
+                status: "success",
+                text: '{"tool_id":"filesystem_write"}',
+                source: "user",
+            },
+        }),
+    });
+
+    assert.equal(__context.__toolEvents.length, 1);
+    assert.equal(__context.__toolEvents[0].tool_name, "load_tool_context");
+    assert.equal(__context.__toolEvents[0].status, "success");
 });

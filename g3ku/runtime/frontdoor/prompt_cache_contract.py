@@ -45,6 +45,26 @@ def _dynamic_appendix_overlap_records(dynamic_appendix_messages: list[dict[str, 
     ]
 
 
+def _with_dynamic_appendix_after_system(
+    stable_messages: list[dict[str, Any]],
+    dynamic_appendix_messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized_stable_messages = [dict(item) for item in list(stable_messages or []) if isinstance(item, dict)]
+    normalized_dynamic_messages = [dict(item) for item in list(dynamic_appendix_messages or []) if isinstance(item, dict)]
+    if not normalized_dynamic_messages:
+        return normalized_stable_messages
+    if (
+        normalized_stable_messages
+        and str(normalized_stable_messages[0].get("role") or "").strip().lower() == "system"
+    ):
+        return [
+            normalized_stable_messages[0],
+            *normalized_dynamic_messages,
+            *normalized_stable_messages[1:],
+        ]
+    return [*normalized_dynamic_messages, *normalized_stable_messages]
+
+
 def _records_contain_slice(records: list[dict[str, Any]], target: list[dict[str, Any]]) -> bool:
     if not target:
         return True
@@ -203,16 +223,24 @@ def build_frontdoor_prompt_contract(
         str(cache_family_revision or "").strip() or DEFAULT_CACHE_FAMILY_REVISION
     )
     normalized_overlay_text = str(overlay_text or "").strip()
-    normalized_effective_stable_messages = _effective_stable_messages(
-        stable_messages=normalized_stable_messages,
-        live_request_messages=normalized_live_request_messages,
-        dynamic_appendix_messages=normalized_dynamic_appendix_messages,
-    )
-    normalized_request_messages = _build_request_messages(
-        stable_messages=normalized_effective_stable_messages,
-        live_request_messages=normalized_live_request_messages,
-        dynamic_appendix_messages=normalized_dynamic_appendix_messages,
-    )
+    base_stable_messages = list(normalized_stable_messages or normalized_live_request_messages)
+    if normalized_scope == "ceo_frontdoor":
+        normalized_effective_stable_messages = list(base_stable_messages)
+        normalized_request_messages = _with_dynamic_appendix_after_system(
+            normalized_effective_stable_messages,
+            normalized_dynamic_appendix_messages,
+        )
+    else:
+        normalized_effective_stable_messages = _effective_stable_messages(
+            stable_messages=base_stable_messages,
+            live_request_messages=normalized_live_request_messages,
+            dynamic_appendix_messages=normalized_dynamic_appendix_messages,
+        )
+        normalized_request_messages = _build_request_messages(
+            stable_messages=normalized_effective_stable_messages,
+            live_request_messages=normalized_live_request_messages,
+            dynamic_appendix_messages=normalized_dynamic_appendix_messages,
+        )
     normalized_diagnostic_dynamic_messages = _dynamic_diagnostic_messages(
         dynamic_appendix_messages=normalized_dynamic_appendix_messages,
         overlay_text=normalized_overlay_text,

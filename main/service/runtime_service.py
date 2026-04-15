@@ -88,7 +88,7 @@ from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
-    upsert_node_dynamic_contract_message,
+    inject_node_dynamic_contract_message,
 )
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.node_runner import NodeRunner
@@ -6365,7 +6365,7 @@ class MainRuntimeService:
             selection=selection,
             visible_tool_names=list(inputs.get('visible_tool_names') or []),
         )
-        enriched = upsert_node_dynamic_contract_message(
+        enriched = inject_node_dynamic_contract_message(
             list(messages or []),
             NodeRuntimeToolContract(
                 node_id=str(getattr(node, 'node_id', '') or '').strip(),

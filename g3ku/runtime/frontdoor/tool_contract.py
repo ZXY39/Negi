@@ -19,6 +19,21 @@ def _normalized_name_list(items: list[Any] | None) -> list[str]:
     return ordered
 
 
+def _active_stage_prompt_view(active_stage: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(active_stage, dict):
+        return None
+    stage_id = str(active_stage.get('stage_id') or '').strip()
+    if not stage_id:
+        return None
+    return {
+        'stage_id': stage_id,
+        'stage_goal': str(active_stage.get('stage_goal') or '').strip(),
+        'tool_round_budget': max(0, int(active_stage.get('tool_round_budget') or 0)),
+        'stage_kind': str(active_stage.get('stage_kind') or 'normal').strip() or 'normal',
+        'final_stage': bool(active_stage.get('final_stage', False)),
+    }
+
+
 def _active_stage_summary(frontdoor_stage_state: dict[str, Any] | None) -> dict[str, Any]:
     payload = dict(frontdoor_stage_state or {})
     active_stage_id = str(payload.get('active_stage_id') or '').strip()
@@ -34,7 +49,7 @@ def _active_stage_summary(frontdoor_stage_state: dict[str, Any] | None) -> dict[
     return {
         'active_stage_id': active_stage_id,
         'transition_required': bool(payload.get('transition_required')),
-        'active_stage': dict(active_stage or {}) if isinstance(active_stage, dict) else None,
+        'active_stage': _active_stage_prompt_view(active_stage),
     }
 
 

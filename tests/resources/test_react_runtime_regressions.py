@@ -26,7 +26,11 @@ from main.monitoring.log_service import (
     _EXECUTION_STAGE_STATUS_ACTIVE,
     _EXECUTION_STAGE_STATUS_COMPLETED,
 )
-from main.runtime.node_prompt_contract import NodeRuntimeToolContract, extract_node_dynamic_contract_payload
+from main.runtime.node_prompt_contract import (
+    NodeRuntimeToolContract,
+    extract_node_dynamic_contract_payload,
+    inject_node_dynamic_contract_message,
+)
 import main.service.runtime_service as runtime_service_module
 from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool, SpawnChildNodesTool
 from main.runtime.react_loop import ReActToolLoop
@@ -3152,6 +3156,71 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
         }
     ]
     assert payload["candidate_skills"] == ["tmux"]
+
+
+def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootstrap_prefix() -> None:
+    contract = NodeRuntimeToolContract(
+        node_id="node-1",
+        node_kind="execution",
+        callable_tool_names=["submit_next_stage"],
+        candidate_tool_names=["filesystem_write"],
+        visible_skills=[
+            {
+                "skill_id": "tmux",
+                "display_name": "tmux",
+                "description": "terminal workflow",
+            }
+        ],
+        candidate_skill_ids=["tmux"],
+        stage_payload={
+            "has_active_stage": True,
+            "transition_required": False,
+            "active_stage": {
+                "stage_id": "stage-1",
+                "stage_goal": "inspect repo",
+                "tool_round_budget": 6,
+                "tool_rounds_used": 3,
+                "rounds": [{"round_id": "round-1"}],
+            },
+        },
+        hydrated_executor_names=["filesystem_write"],
+        lightweight_tool_ids=["filesystem"],
+        selection_trace={
+            "mode": "execution_tool_selection",
+            "full_callable_tool_names": ["submit_next_stage", "filesystem_write"],
+            "stage_locked_to_submit_next_stage": True,
+            "final_schema_chars": 4096,
+        },
+    )
+
+    injected = inject_node_dynamic_contract_message(
+        [
+            {"role": "system", "content": "node system"},
+            {"role": "user", "content": '{"prompt":"inspect repo"}'},
+            {"role": "assistant", "content": "prior reasoning"},
+        ],
+        contract,
+    )
+
+    assert [item["role"] for item in injected[:4]] == ["system", "user", "user", "assistant"]
+    payload = extract_node_dynamic_contract_payload(injected)
+    assert payload is not None
+    assert payload["execution_stage"] == {
+        "has_active_stage": True,
+        "transition_required": False,
+        "active_stage": {
+            "stage_id": "stage-1",
+            "stage_goal": "inspect repo",
+            "tool_round_budget": 6,
+            "stage_kind": "normal",
+            "final_stage": False,
+        },
+    }
+    assert payload["model_visible_tool_selection_trace"] == {
+        "mode": "execution_tool_selection",
+        "full_callable_tool_names": ["submit_next_stage", "filesystem_write"],
+        "stage_locked_to_submit_next_stage": True,
+    }
 
 
 @pytest.mark.asyncio

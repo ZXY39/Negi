@@ -3693,7 +3693,7 @@ function clearCeoContextLoadNoticeTimer(noticeId = "") {
 function syncCeoContextLoadNoticeVisibility() {
     const noticeEl = U.ceoContextLoadNotice;
     if (!noticeEl) return;
-    const hasChildren = Array.isArray(noticeEl.children) && noticeEl.children.length > 0;
+    const hasChildren = Number(noticeEl.children?.length || 0) > 0;
     noticeEl.hidden = !hasChildren;
     noticeEl.setAttribute("aria-hidden", hasChildren ? "false" : "true");
 }
@@ -3703,8 +3703,10 @@ function removeCeoContextLoadNoticeItem(noticeId = "") {
     if (!normalizedNoticeId) return;
     clearCeoContextLoadNoticeTimer(normalizedNoticeId);
     const noticeEl = U.ceoContextLoadNotice;
-    if (!noticeEl || !Array.isArray(noticeEl.children)) return;
-    const target = noticeEl.children.find((item) => String(item?.dataset?.noticeId || "").trim() === normalizedNoticeId);
+    if (!noticeEl) return;
+    const target = Array.from(noticeEl.children || []).find((item) => (
+        String(item?.dataset?.noticeId || "").trim() === normalizedNoticeId
+    ));
     target?.remove?.();
     syncCeoContextLoadNoticeVisibility();
 }
@@ -3823,9 +3825,12 @@ function filterCeoInteractionFlowSummary(summary = null) {
     return {
         stages: normalizedSummary.stages.map((stage) => {
             const originalRounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
+            const inferredUsed = typeof countBudgetedExecutionStageRounds === "function"
+                ? countBudgetedExecutionStageRounds(stage)
+                : originalRounds.length;
             return {
                 ...stage,
-                tool_rounds_used: Math.max(Number(stage?.tool_rounds_used || 0), originalRounds.length),
+                tool_rounds_used: Math.max(Number(stage?.tool_rounds_used || 0), inferredUsed),
                 rounds: originalRounds
                     .map((round) => ({
                         ...round,
@@ -6948,6 +6953,9 @@ function initCeoWs() {
                     inflight_turn: payload.data?.inflight_turn || null,
                 });
             }
+        }
+        if (payload.type === "ceo.agent.tool" && effectiveSessionId === activeSessionId()) {
+            appendCeoToolEvent(payload.data || {});
         }
         if (payload.type === "ceo.error") handleCeoError(payload.data || {});
         if (payload.type === "ceo.internal.ack" && effectiveSessionId === activeSessionId()) {

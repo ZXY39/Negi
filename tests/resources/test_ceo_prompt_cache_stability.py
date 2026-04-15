@@ -190,3 +190,78 @@ def test_frontdoor_prompt_cache_key_ignores_dynamic_tool_contract_changes() -> N
 
     assert _field(first, "prompt_cache_key") == _field(second, "prompt_cache_key")
     assert _field(first, "request_messages") != _field(second, "request_messages")
+
+
+def test_frontdoor_prompt_contract_keeps_dynamic_appendix_directly_after_system_for_main_lane() -> None:
+    from g3ku.runtime.frontdoor.prompt_cache_contract import build_frontdoor_prompt_contract
+
+    contract = build_frontdoor_prompt_contract(
+        scope="ceo_frontdoor",
+        provider_model="openai:gpt-4.1",
+        stable_messages=[
+            {"role": "system", "content": "stable system"},
+            {"role": "user", "content": "bootstrap user"},
+            {"role": "assistant", "content": "stable history"},
+        ],
+        dynamic_appendix_messages=[
+            {"role": "assistant", "content": "## Retrieved Context\n- memory"},
+            {"role": "user", "content": '{"message_type":"frontdoor_runtime_tool_contract"}'},
+        ],
+        live_request_messages=[
+            {"role": "system", "content": "unstable system ordering should be ignored"},
+            {"role": "assistant", "content": "old request-only appendix"},
+            {"role": "user", "content": "bootstrap user"},
+        ],
+        tool_schemas=[],
+        cache_family_revision="frontdoor:v1",
+    )
+
+    request_messages = list(_field(contract, "request_messages"))
+    assert request_messages == [
+        {"role": "system", "content": "stable system"},
+        {"role": "assistant", "content": "## Retrieved Context\n- memory"},
+        {"role": "user", "content": '{"message_type":"frontdoor_runtime_tool_contract"}'},
+        {"role": "user", "content": "bootstrap user"},
+        {"role": "assistant", "content": "stable history"},
+    ]
+
+
+def test_frontdoor_tool_contract_stage_summary_omits_round_counters_and_trace_fields() -> None:
+    from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract
+
+    payload = build_frontdoor_tool_contract(
+        callable_tool_names=["exec"],
+        candidate_tool_names=["filesystem_write"],
+        hydrated_tool_names=["exec"],
+        frontdoor_stage_state={
+            "active_stage_id": "frontdoor-stage-2",
+            "transition_required": False,
+            "stages": [
+                {
+                    "stage_id": "frontdoor-stage-2",
+                    "stage_goal": "inspect repo",
+                    "tool_round_budget": 6,
+                    "tool_rounds_used": 3,
+                    "stage_kind": "normal",
+                    "final_stage": False,
+                    "completed_stage_summary": "should not leak",
+                    "key_refs": [{"ref": "file:a"}],
+                    "rounds": [{"round_id": "round-1"}],
+                    "created_at": "2026-04-16T02:49:26+08:00",
+                }
+            ],
+        },
+        contract_revision="frontdoor:v1",
+    ).to_message_payload()
+
+    assert payload["stage_summary"] == {
+        "active_stage_id": "frontdoor-stage-2",
+        "transition_required": False,
+        "active_stage": {
+            "stage_id": "frontdoor-stage-2",
+            "stage_goal": "inspect repo",
+            "tool_round_budget": 6,
+            "stage_kind": "normal",
+            "final_stage": False,
+        },
+    }

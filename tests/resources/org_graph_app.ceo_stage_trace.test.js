@@ -10,6 +10,18 @@ const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
 const COMPRESSION_TEXT = "\u4e0a\u4e0b\u6587\u538b\u7f29\u4e2d";
 
 class StubElement {}
+function createStubChildrenCollection(owner) {
+    return new Proxy({}, {
+        get(_target, prop) {
+            if (prop === "length") return owner._children.length;
+            if (prop === "item") return (index) => owner._children[index] || null;
+            if (prop === Symbol.iterator) return owner._children[Symbol.iterator].bind(owner._children);
+            if (typeof prop === "string" && /^\d+$/.test(prop)) return owner._children[Number(prop)] || undefined;
+            return undefined;
+        },
+    });
+}
+
 class StubHTMLElement extends StubElement {
     constructor() {
         super();
@@ -22,7 +34,8 @@ class StubHTMLElement extends StubElement {
         this.attributes = {};
         this._selectors = {};
         this._selectorLists = {};
-        this.children = [];
+        this._children = [];
+        this._childrenCollection = createStubChildrenCollection(this);
         this.parentElement = null;
         this.classList = {
             add: (...tokens) => {
@@ -48,14 +61,14 @@ class StubHTMLElement extends StubElement {
 
     querySelector(selector) {
         if (selector === ".interaction-step") {
-            return this.children.find((child) => child.classList.contains("interaction-step")) || null;
+            return this._children.find((child) => child.classList.contains("interaction-step")) || null;
         }
         return this._selectors[selector] || null;
     }
 
     querySelectorAll(selector) {
         if (selector === ".interaction-step") {
-            return this.children.filter((child) => child.classList.contains("interaction-step"));
+            return this._children.filter((child) => child.classList.contains("interaction-step"));
         }
         return this._selectorLists[selector] || [];
     }
@@ -64,14 +77,18 @@ class StubHTMLElement extends StubElement {
 
     appendChild(child) {
         child.parentElement = this;
-        this.children.push(child);
+        this._children.push(child);
         return child;
     }
 
     remove() {
-        if (!this.parentElement || !Array.isArray(this.parentElement.children)) return;
-        this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+        if (!this.parentElement || !Array.isArray(this.parentElement._children)) return;
+        this.parentElement._children = this.parentElement._children.filter((child) => child !== this);
         this.parentElement = null;
+    }
+
+    get children() {
+        return this._childrenCollection;
     }
 
     setAttribute(name, value) {
@@ -135,7 +152,7 @@ function makeTurn({ text = "" } = {}) {
 }
 
 function noticeText(item) {
-    if (!item || !Array.isArray(item.children) || !item.children[0]) return "";
+    if (!item || !item.children?.[0]) return "";
     return String(item.children[0].textContent || "");
 }
 
@@ -277,15 +294,18 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
                 stage_goal: "\u67e5\u770b\u5f53\u524d\u53ef\u68c0\u7d22\u7684\u957f\u671f\u8bb0\u5fc6\uff0c\u5e76\u5411\u7528\u6237\u6309\u7c7b\u522b\u6e05\u6670\u6c47\u603b\u6211\u5df2\u8bb0\u4f4f\u7684\u5185\u5bb9\u3002",
                 status: "running",
                 tool_round_budget: 7,
+                tool_rounds_used: 1,
                 rounds: [
                     {
                         round_id: "round-1",
                         round_index: 1,
+                        budget_counted: false,
                         tools: [{ tool_name: "load_tool_context", status: "success", output_text: "loaded context" }],
                     },
                     {
                         round_id: "round-2",
                         round_index: 2,
+                        budget_counted: true,
                         tools: [{ tool_name: "memory_search", status: "running", output_text: "" }],
                     },
                 ],
@@ -294,7 +314,7 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
     });
 
     assert.match(turn.listEl.innerHTML, /\u67e5\u770b\u5f53\u524d\u53ef\u68c0\u7d22\u7684\u957f\u671f\u8bb0\u5fc6/);
-    assert.match(turn.listEl.innerHTML, /2\/7/);
+    assert.match(turn.listEl.innerHTML, /1\/7/);
     assert.doesNotMatch(turn.listEl.innerHTML, /\u6700\u5927\u8f6e\u6570/);
     assert.doesNotMatch(turn.listEl.innerHTML, /loaded context/);
     assert.match(turn.listEl.innerHTML, /memory_search/);
@@ -303,6 +323,47 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
     assert.doesNotMatch(turn.listEl.innerHTML, /ceo:stage:inflight-stage-1/);
     assert.doesNotMatch(turn.listEl.innerHTML, /synthetic carryover/);
     assert.doesNotMatch(turn.listEl.innerHTML, /submit_next_stage/);
+});
+
+test("ceo stage trace does not count successful loader-only rounds toward displayed budget progress", () => {
+    const { renderCeoStageTraceIntoTurn, U } = loadApp();
+    const turn = makeTurn({ text: "" });
+
+    U.ceoContextLoadNotice = new StubHTMLElement();
+    U.ceoContextLoadNotice.hidden = true;
+
+    const renderedSteps = renderCeoStageTraceIntoTurn(turn, {
+        stages: [
+            {
+                stage_id: "frontdoor-stage-loader-only",
+                stage_goal: "read skill context",
+                status: "running",
+                tool_round_budget: 5,
+                tool_rounds_used: 0,
+                rounds: [
+                    {
+                        round_id: "round-loader-only",
+                        round_index: 1,
+                        budget_counted: false,
+                        tools: [
+                            {
+                                tool_name: "load_skill_context",
+                                status: "success",
+                                arguments_text: 'load_skill_context (skill_id=skill-creator)',
+                                output_text: '{"skill_id":"skill-creator"}',
+                            },
+                        ],
+                    },
+                ],
+            },
+        ],
+    });
+
+    assert.equal(renderedSteps, 1);
+    assert.match(turn.listEl.innerHTML, /0\/5/);
+    assert.doesNotMatch(turn.listEl.innerHTML, /load_skill_context/);
+    assert.equal(U.ceoContextLoadNotice.children.length, 1);
+    assert.match(noticeText(U.ceoContextLoadNotice.children[0]), /skill-creator/);
 });
 
 test("ceo legacy tool flow hides submit_next_stage events until stage trace arrives", () => {
@@ -460,11 +521,11 @@ test("ceo tool rows stay distinct for same-name events with different tool_call_
     assert.equal(rendered, 2);
     assert.equal(turn.listEl.children.length, 2);
     assert.deepEqual(
-        turn.listEl.children.map((item) => item.dataset.toolCallId),
+        Array.from(turn.listEl.children).map((item) => item.dataset.toolCallId),
         ["filesystem:1", "filesystem:2"]
     );
     assert.deepEqual(
-        turn.listEl.children.map((item) => item.dataset.detailText),
+        Array.from(turn.listEl.children).map((item) => item.dataset.detailText),
         ['{"path": "alpha"}', '{"path": "beta"}']
     );
 });

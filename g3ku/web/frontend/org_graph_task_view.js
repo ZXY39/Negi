@@ -1366,11 +1366,24 @@ function formatExecutionStageTitle(stage) {
     return `${title}${meta ? ` · ${meta}` : ""}`;
 }
 
+function countBudgetedExecutionStageRounds(stage) {
+    const rounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
+    let sawBudgetMarker = false;
+    let countedRounds = 0;
+    rounds.forEach((round) => {
+        if (!round || typeof round !== "object") return;
+        if (!Object.prototype.hasOwnProperty.call(round, "budget_counted")) return;
+        sawBudgetMarker = true;
+        if (round.budget_counted) countedRounds += 1;
+    });
+    return sawBudgetMarker ? countedRounds : rounds.length;
+}
+
 function formatExecutionStageProgress(stage) {
     const totalRounds = normalizeInt(stage?.stage_total_steps, 0);
     if (totalRounds <= 0) return "";
     const explicitUsed = normalizeInt(stage?.tool_rounds_used, 0);
-    const inferredUsed = Array.isArray(stage?.rounds) ? stage.rounds.length : 0;
+    const inferredUsed = countBudgetedExecutionStageRounds(stage);
     const usedRounds = Math.max(explicitUsed, inferredUsed);
     return `${Math.min(usedRounds, totalRounds)}/${totalRounds}`;
 }

@@ -36,6 +36,8 @@ from main.runtime.chat_backend import build_stable_prompt_cache_key
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
+    inject_node_dynamic_contract_message,
+    strip_node_dynamic_contract_messages,
     upsert_node_dynamic_contract_message,
 )
 from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
@@ -218,13 +220,13 @@ class ReActToolLoop:
                 runtime_context=runtime_context,
             )
             tool_schemas = [tool.to_model_schema() for tool in model_visible_tools.values()]
-            message_history = self._refresh_node_dynamic_contract_message(
+            dynamic_contract = self._build_node_dynamic_contract(
                 node=node,
                 message_history=message_history,
                 tool_schema_selection=tool_schema_selection,
                 stage_gate=stage_gate,
             )
-            dynamic_contract_payload = extract_node_dynamic_contract_payload(message_history) or {}
+            dynamic_contract_payload = dynamic_contract.to_message_payload()
             selected_skill_ids = self._normalized_name_list(
                 [
                     item.get('skill_id')
@@ -236,12 +238,16 @@ class ReActToolLoop:
                 list(dynamic_contract_payload.get('candidate_skills') or [])
             )
             model_messages = self._prepare_messages(message_history, runtime_context=runtime_context)
+            request_messages = inject_node_dynamic_contract_message(
+                model_messages,
+                dynamic_contract,
+            )
             overlay_parts = [
                 build_execution_stage_overlay(node_kind=node.node_kind, stage_gate=stage_gate),
                 repair_overlay_text,
             ]
             request_messages = self._apply_temporary_system_overlay(
-                model_messages,
+                request_messages,
                 overlay_text='\n\n'.join(str(part or '').strip() for part in overlay_parts if str(part or '').strip()),
             )
             repair_overlay_text = None
@@ -1690,14 +1696,14 @@ class ReActToolLoop:
             'active_stage': dict(active_stage or {}) if isinstance(active_stage, dict) else None,
         }
 
-    def _refresh_node_dynamic_contract_message(
+    def _build_node_dynamic_contract(
         self,
         *,
         node,
         message_history: list[dict[str, Any]],
         tool_schema_selection: dict[str, Any],
         stage_gate: dict[str, Any],
-    ) -> list[dict[str, Any]]:
+    ) -> NodeRuntimeToolContract:
         existing_payload = extract_node_dynamic_contract_payload(message_history) or {}
         current_frame = self._runtime_frame(
             str(getattr(node, 'task_id', '') or '').strip(),
@@ -1728,7 +1734,7 @@ class ReActToolLoop:
                 or []
             )
         )
-        contract = NodeRuntimeToolContract(
+        return NodeRuntimeToolContract(
             node_id=str(getattr(node, 'node_id', '') or '').strip(),
             node_kind=str(getattr(node, 'node_kind', '') or '').strip(),
             callable_tool_names=callable_tool_names,
@@ -1739,6 +1745,21 @@ class ReActToolLoop:
             hydrated_executor_names=self._normalized_name_list(list(tool_schema_selection.get('hydrated_executor_names') or [])),
             lightweight_tool_ids=self._normalized_name_list(list(tool_schema_selection.get('lightweight_tool_ids') or [])),
             selection_trace=dict(tool_schema_selection.get('trace') or {}),
+        )
+
+    def _refresh_node_dynamic_contract_message(
+        self,
+        *,
+        node,
+        message_history: list[dict[str, Any]],
+        tool_schema_selection: dict[str, Any],
+        stage_gate: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        contract = self._build_node_dynamic_contract(
+            node=node,
+            message_history=message_history,
+            tool_schema_selection=tool_schema_selection,
+            stage_gate=stage_gate,
         )
         return upsert_node_dynamic_contract_message(message_history, contract)
 
@@ -4071,9 +4092,10 @@ class ReActToolLoop:
         )
 
     def _prepare_messages(self, messages: list[dict[str, Any]], *, runtime_context: dict[str, Any]) -> list[dict[str, Any]]:
+        normalized_messages = strip_node_dynamic_contract_messages(messages)
         stage_state = self._execution_stage_state_for_runtime(runtime_context=runtime_context)
         return _shared_prepare_stage_prompt_messages(
-            messages,
+            normalized_messages,
             stage_state=stage_state,
             keep_latest_completed_stages=_UNCOMPACTED_COMPLETED_STAGE_WINDOWS,
             stage_tool_name=STAGE_TOOL_NAME,
