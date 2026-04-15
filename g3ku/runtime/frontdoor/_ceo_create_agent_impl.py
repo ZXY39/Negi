@@ -4,14 +4,11 @@ import inspect
 import json
 from typing import Any
 
-from langchain.agents import create_agent
-from langchain.messages import SystemMessage
 from langchain_core.messages import BaseMessage, RemoveMessage, convert_to_messages
 from langchain_core.messages import SystemMessage as CoreSystemMessage
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command
-
-from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 
 from ._ceo_runtime_ops import CeoFrontDoorRuntimeOps
 from .ceo_agent_middleware import (
@@ -564,7 +561,83 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             result["repair_overlay_text"] = repair_overlay_text
         return result
 
+    def _message_replace_update(self, messages: list[Any] | None) -> dict[str, Any]:
+        return self._replace_messages_update(self._state_message_records(messages))
+
+    async def _node_prepare_turn(self, state, runtime) -> dict[str, Any]:
+        prepared = await self._graph_prepare_turn(state, runtime=runtime)
+        self._sync_runtime_session_frontdoor_state(
+            state={**dict(state or {}), **dict(prepared or {})},
+            runtime=runtime,
+        )
+        return prepared
+
+    async def _node_call_model(self, state, runtime) -> dict[str, Any]:
+        return await self._graph_call_model(state, runtime=runtime)
+
+    async def _node_normalize_model_output(self, state, runtime) -> dict[str, Any]:
+        current_state = dict(state or {})
+        normalized = await self._graph_normalize_model_output(current_state, runtime=runtime)
+        next_step = str(normalized.get("next_step") or "").strip()
+        if next_step == "review_tool_calls":
+            preview_state = {**current_state, **dict(normalized or {})}
+            preview_frontdoor_stage_state, preview_compression_state, preview_semantic_context_state, _preview_hydrated_tool_names = self._runtime_session_frontdoor_state(
+                preview_state,
+                preview_pending_tool_round=True,
+            )
+            self._sync_runtime_session_frontdoor_state(
+                state={
+                    **preview_state,
+                    "frontdoor_stage_state": preview_frontdoor_stage_state,
+                    "compression_state": preview_compression_state,
+                    "semantic_context_state": preview_semantic_context_state,
+                },
+                runtime=runtime,
+            )
+        elif next_step in {"call_model", "finalize"}:
+            self._sync_runtime_session_frontdoor_state(
+                state={**current_state, **dict(normalized or {})},
+                runtime=runtime,
+            )
+        return normalized
+
+    def _node_review_tool_calls(self, state, runtime) -> dict[str, Any]:
+        reviewed = self._graph_review_tool_calls(state, runtime=runtime)
+        self._sync_runtime_session_frontdoor_state(
+            state={**dict(state or {}), **dict(reviewed or {})},
+            runtime=runtime,
+        )
+        return reviewed
+
+    async def _node_execute_tools(self, state, runtime) -> dict[str, Any]:
+        executed = await self._graph_execute_tools(state, runtime=runtime)
+        messages = self._state_message_records(executed.get("messages") or [])
+        update = dict(executed or {})
+        if "messages" in update:
+            update.pop("messages", None)
+            update.update(self._message_replace_update(messages))
+        self._sync_runtime_session_frontdoor_state(
+            state={**dict(state or {}), **dict(executed or {}), "messages": messages},
+            runtime=runtime,
+        )
+        return update
+
+    async def _node_finalize_turn(self, state, runtime) -> dict[str, Any]:
+        finalized = await self._graph_finalize_turn(state)
+        messages = self._state_message_records(finalized.get("messages") or [])
+        update = dict(finalized or {})
+        if "messages" in update:
+            update.pop("messages", None)
+            update.update(self._message_replace_update(messages))
+        self._sync_runtime_session_frontdoor_state(
+            state={**dict(state or {}), **dict(finalized or {}), "messages": messages},
+            runtime=runtime,
+        )
+        return update
+
     def _middleware(self) -> list[Any]:
+        # Retained only for compatibility tests around prompt assembly and cache diagnostics.
+        # The production CEO/frontdoor path now runs exclusively on the explicit StateGraph.
         return [
             CeoTurnLifecycleMiddleware(runner=self),
             CeoToolExposureMiddleware(runner=self),
@@ -573,27 +646,63 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             CeoModelOutputMiddleware(runner=self),
         ]
 
+    def _build_compiled_graph(self):
+        builder = StateGraph(CeoPersistentState, context_schema=CeoRuntimeContext)
+        builder.add_node("prepare_turn", self._node_prepare_turn)
+        builder.add_node("call_model", self._node_call_model)
+        builder.add_node("normalize_model_output", self._node_normalize_model_output)
+        builder.add_node("review_tool_calls", self._node_review_tool_calls)
+        builder.add_node("execute_tools", self._node_execute_tools)
+        builder.add_node("finalize", self._node_finalize_turn)
+        builder.add_edge(START, "prepare_turn")
+        builder.add_edge("prepare_turn", "call_model")
+        builder.add_edge("call_model", "normalize_model_output")
+        builder.add_conditional_edges(
+            "normalize_model_output",
+            self._graph_next_step,
+            {
+                "call_model": "call_model",
+                "review_tool_calls": "review_tool_calls",
+                "execute_tools": "execute_tools",
+                "finalize": "finalize",
+            },
+        )
+        builder.add_conditional_edges(
+            "review_tool_calls",
+            self._graph_next_step,
+            {
+                "call_model": "call_model",
+                "review_tool_calls": "review_tool_calls",
+                "execute_tools": "execute_tools",
+                "finalize": "finalize",
+            },
+        )
+        builder.add_conditional_edges(
+            "execute_tools",
+            self._graph_next_step,
+            {
+                "call_model": "call_model",
+                "review_tool_calls": "review_tool_calls",
+                "execute_tools": "execute_tools",
+                "finalize": "finalize",
+            },
+        )
+        builder.add_edge("finalize", END)
+        return builder.compile(
+            checkpointer=getattr(self._loop, "_checkpointer", None),
+            store=getattr(self._loop, "_store", None),
+            name="ceo_frontdoor",
+        )
+
     def _get_agent(self):
         if self._compiled_graph is not None:
             return self._compiled_graph
-        if self._agent is None:
-            model_refs = self._resolve_ceo_model_refs()
-            self._agent = create_agent(
-                model=G3kuChatModelAdapter(
-                    chat_backend=self._resolve_chat_backend(),
-                    model_refs=list(model_refs or []),
-                ),
-                tools=[],
-                name="ceo_frontdoor",
-                system_prompt=SystemMessage(content="You are the CEO frontdoor agent."),
-                checkpointer=getattr(self._loop, "_checkpointer", None),
-                store=getattr(self._loop, "_store", None),
-                state_schema=CeoPersistentState,
-                context_schema=CeoRuntimeContext,
-                middleware=self._middleware(),
-            )
+        if self._agent is not None:
+            return self._agent
+        if self._compiled_graph is None:
+            self._compiled_graph = self._build_compiled_graph()
             self._agent_checkpointer_ref = getattr(self._loop, "_checkpointer", None)
-        return self._agent
+        return self._compiled_graph
 
     async def run_turn(self, *, user_input, session, on_progress=None) -> str:
         await self._ensure_runtime_bindings_ready()
@@ -605,12 +714,11 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             session_key=session_key,
             on_progress=on_progress,
         )
-        payload = await self._prepare_turn_state(
+        payload = initial_persistent_state(
             user_input={
                 "content": getattr(user_input, "content", ""),
                 "metadata": dict(getattr(user_input, "metadata", {}) or {}),
             },
-            runtime_context=runtime_context,
         )
         graph_output = await self._get_agent().ainvoke(
             payload,

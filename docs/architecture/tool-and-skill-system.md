@@ -175,6 +175,10 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - frontdoor approval interrupt、session inflight snapshot、paused execution context 也会带上这份 hydrated tool 状态；因此排查“load 成功但下一轮又看不见工具”时，不能只看 candidate tool 提示块，还要看 frontdoor 当前保存的 hydrated tool state。
 - frontdoor 现在还会把候选生成诊断同步到 session snapshot 里的 `frontdoor_selection_debug`。这份结构化调试信息至少应包含：当前 raw query、rewrite 后的 `skill_query` / `tool_query`、dense 命中、rerank 结果、tool selection trace，以及最终 callable/candidate/hydrated 集合。
 - CEO/frontdoor 现在也不再从 trailing `ToolMessage` / `result_text` 反推 hydration；tool promotion 的权威来源是执行循环里的 `raw_result.ok / raw_result.hydration_targets`。
+- 对生产前门来说，这个“执行循环”现在就是显式 frontdoor `StateGraph` 的 `execute_tools` 节点，而不是 `create_agent` middleware 的后处理链。维护者应把 `_graph_execute_tools()` 视为唯一 promotion 入口。
+- `_graph_execute_tools()` 现在还必须复用与模型暴露阶段相同的 runtime-visible tool bundle，其中包含运行时注入的 `submit_next_stage`。如果维护者再次在执行环节只按 `state.tool_names` 重建工具映射，就会重新制造“模型能看到 `submit_next_stage`，但执行时报 `tool not available`”的分裂。
+- CEO/frontdoor 的 stage gate 现在由 `execute_tools` 真正执行，而不是只靠 prompt 约束。普通工具在无活动阶段或预算耗尽时会直接收到 gate error；`submit_next_stage` 与普通工具混在同一批 tool calls 里时，整批会被拒绝，要求模型先单独完成阶段切换。
+- approval interrupt 在暂停前会把 `frontdoor_stage_state`、`compression_state`、`semantic_context_state`、`hydrated_tool_names`、`tool_call_payloads` 与 `frontdoor_selection_debug` 一并写进 interrupt payload；恢复后如果这些字段丢失，应按“frontdoor canonical runtime contract / runtime state 损坏”排查。
 
 维护上还要再记住一个和阶段预算相关的边界：
 
@@ -203,6 +207,7 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - frontdoor 的 callable tool 集合并不只来自 fixed builtin；它还会把当前 turn 内已经 hydration 的 concrete tools 合并进去。
 - frontdoor 的 `candidate_tool_names` 必须排除已经进入 hydrated state 的工具；如果一个工具同时出现在 candidate 列表和 callable tool schemas 里，通常表示状态推进漏了。
 - 如果维护者在排查 `load_tool_context` 成功后下一轮仍然只会 `exec` / 再次 `load_tool_context`，优先检查 frontdoor persistent state 里的 `hydrated_tool_names`、`tool_names`、`candidate_tool_names` 是否一起更新，而不是只检查 toolskill 内容。
+- 如果线上 frontdoor 表现与测试里的 graph helper 一致、却和实际会话不一致，先确认 runner 是否真的走显式 graph checkpoint，而不是怀疑还存在第二条生产 promotion 路径；当前生产路径已经不再以 `ceo_agent_middleware.py` 为权威。
 - 对执行节点和检验节点，`callable_tool_names` / `candidate_tools` 现在不应再视为 bootstrap user JSON 的静态字段；它们属于每轮动态 `node_runtime_tool_contract`。
 - 对 CEO/frontdoor，当前 turn 的 callable/candidate tool 合同现在应只存在于 dynamic appendix 和持久状态；不要再从稳定 prompt 前缀或旧 transcript 文本恢复“当前可调用工具”。
 - 排查“load 成功但下一轮没调用”时，优先对照 canonical runtime frame / frontdoor state 与 runtime messages snapshot；如果旧 bootstrap 文本和当前 snapshot 冲突，应以当前 snapshot 为准。

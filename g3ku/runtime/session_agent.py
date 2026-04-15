@@ -1384,10 +1384,12 @@ class RuntimeAgentSession:
         interrupt_values = dict(exc.values or {}) if isinstance(exc.values, dict) else {}
         frontdoor_stage_state = interrupt_values.get("frontdoor_stage_state")
         compression_state = interrupt_values.get("compression_state")
+        semantic_context_state = interrupt_values.get("semantic_context_state")
         hydrated_tool_names = interrupt_values.get("hydrated_tool_names")
         frontdoor_selection_debug = interrupt_values.get("frontdoor_selection_debug")
         preserved_frontdoor_stage_state = getattr(self, "_frontdoor_stage_state", None)
         preserved_compression_state = getattr(self, "_compression_state", None)
+        preserved_semantic_context_state = getattr(self, "_semantic_context_state", None)
         preserved_hydrated_tool_names = getattr(self, "_frontdoor_hydrated_tool_names", None)
         preserved_frontdoor_selection_debug = getattr(self, "_frontdoor_selection_debug", None)
         self._frontdoor_stage_state = (
@@ -1403,6 +1405,13 @@ class RuntimeAgentSession:
             else dict(preserved_compression_state)
             if isinstance(preserved_compression_state, dict)
             else {}
+        )
+        self._semantic_context_state = (
+            dict(semantic_context_state)
+            if isinstance(semantic_context_state, dict)
+            else dict(preserved_semantic_context_state)
+            if isinstance(preserved_semantic_context_state, dict)
+            else default_semantic_context_state()
         )
         self._frontdoor_hydrated_tool_names = [
             str(item or "").strip()

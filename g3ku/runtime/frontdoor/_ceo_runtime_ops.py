@@ -66,6 +66,15 @@ class VisibleToolBundle:
     langchain_tool_map: dict[str, BaseTool]
 
 
+@dataclass(slots=True)
+class FrontdoorExecutionBundle:
+    base_stage_state: dict[str, Any]
+    mutable_stage_state: dict[str, Any]
+    visible_tools: dict[str, Tool]
+    runtime_context: dict[str, Any]
+    on_progress: Any
+
+
 class _CeoStructuredTool(StructuredTool):
     def _to_args_and_kwargs(self, tool_input: str | dict, tool_call_id: str | None) -> tuple[tuple, dict]:
         args, kwargs = super()._to_args_and_kwargs(tool_input, tool_call_id)
@@ -341,6 +350,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 values["frontdoor_stage_state"] = dict(interrupt_state.get("frontdoor_stage_state") or {})
             if isinstance(interrupt_state.get("compression_state"), dict):
                 values["compression_state"] = dict(interrupt_state.get("compression_state") or {})
+            if isinstance(interrupt_state.get("semantic_context_state"), dict):
+                values["semantic_context_state"] = dict(interrupt_state.get("semantic_context_state") or {})
+            hydrated_tool_names = interrupt_state.get("hydrated_tool_names")
+            if isinstance(hydrated_tool_names, list):
+                values["hydrated_tool_names"] = [
+                    str(item or "").strip()
+                    for item in list(hydrated_tool_names or [])
+                    if str(item or "").strip()
+                ]
+            if isinstance(interrupt_state.get("frontdoor_selection_debug"), dict):
+                values["frontdoor_selection_debug"] = dict(interrupt_state.get("frontdoor_selection_debug") or {})
             raise CeoFrontdoorInterrupted(interrupts=interrupts, values=values)
         return values
 
@@ -666,6 +686,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: dict[str, Any],
     ) -> dict[str, Any]:
         refreshed = dict(state or {})
+        for legacy_field in ("summary_text", "summary_payload", "summary_model_key", "summary_version"):
+            refreshed.pop(legacy_field, None)
         if not hasattr(self, "_frontdoor_prompt_contract"):
             return refreshed
         try:
@@ -1263,41 +1285,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: CeoGraphState,
         runtime: Runtime[CeoRuntimeContext],
     ) -> list[BaseTool]:
-        registered_tools = self._registered_tools_for_state(state)
-        mutable_stage_state = self._frontdoor_stage_state_snapshot(state)
-
-        async def _submit_stage(
-            stage_goal: str,
-            tool_round_budget: int,
-            completed_stage_summary: str = "",
-            key_refs: list[dict[str, Any]] | None = None,
-            final: bool = False,
-        ) -> dict[str, Any]:
-            next_stage_state, stage_payload = self._submit_frontdoor_next_stage_state(
-                mutable_stage_state,
-                stage_goal=stage_goal,
-                tool_round_budget=tool_round_budget,
-                completed_stage_summary=completed_stage_summary,
-                key_refs=key_refs,
-                final=final,
-            )
-            mutable_stage_state.clear()
-            mutable_stage_state.update(next_stage_state)
-            return stage_payload
-
-        all_tools = {
-            **registered_tools,
-            STAGE_TOOL_NAME: SubmitNextStageTool(_submit_stage),
-        }
-        stage_gate = self._frontdoor_stage_gate({"frontdoor_stage_state": mutable_stage_state})
-        visible_tools = visible_tools_for_stage_iteration(
-            all_tools,
-            has_active_stage=bool(stage_gate.get("has_active_stage")),
-            transition_required=bool(stage_gate.get("transition_required")),
-            stage_tool_name=STAGE_TOOL_NAME,
-        )
-        runtime_context = self._build_tool_runtime_context(state=state, runtime=runtime)
-        on_progress = runtime_context.get("on_progress")
+        execution_bundle = self._frontdoor_execution_bundle(state=state, runtime=runtime)
+        visible_tools = execution_bundle.visible_tools
+        runtime_context = execution_bundle.runtime_context
+        on_progress = execution_bundle.on_progress
+        mutable_stage_state = execution_bundle.mutable_stage_state
 
         async def _tool_executor(
             tool_name: str,
@@ -1355,6 +1347,72 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             executor=_tool_executor,
         )
         return list(tool_bundle.langchain_tools)
+
+    def _frontdoor_execution_bundle(
+        self,
+        *,
+        state: CeoGraphState,
+        runtime: Runtime[CeoRuntimeContext],
+    ) -> FrontdoorExecutionBundle:
+        registered_tools = self._registered_tools_for_state(state)
+        base_stage_state = self._frontdoor_stage_state_snapshot(state)
+        mutable_stage_state = copy.deepcopy(base_stage_state)
+
+        async def _submit_stage(
+            stage_goal: str,
+            tool_round_budget: int,
+            completed_stage_summary: str = "",
+            key_refs: list[dict[str, Any]] | None = None,
+            final: bool = False,
+        ) -> dict[str, Any]:
+            next_stage_state, stage_payload = self._submit_frontdoor_next_stage_state(
+                mutable_stage_state,
+                stage_goal=stage_goal,
+                tool_round_budget=tool_round_budget,
+                completed_stage_summary=completed_stage_summary,
+                key_refs=key_refs,
+                final=final,
+            )
+            mutable_stage_state.clear()
+            mutable_stage_state.update(next_stage_state)
+            return stage_payload
+
+        all_tools = {
+            **registered_tools,
+            STAGE_TOOL_NAME: SubmitNextStageTool(_submit_stage),
+        }
+        stage_gate = self._frontdoor_stage_gate({"frontdoor_stage_state": mutable_stage_state})
+        visible_tools = visible_tools_for_stage_iteration(
+            all_tools,
+            has_active_stage=bool(stage_gate.get("has_active_stage")),
+            transition_required=bool(stage_gate.get("transition_required")),
+            stage_tool_name=STAGE_TOOL_NAME,
+        )
+        runtime_context = self._build_tool_runtime_context(state=state, runtime=runtime)
+        return FrontdoorExecutionBundle(
+            base_stage_state=base_stage_state,
+            mutable_stage_state=mutable_stage_state,
+            visible_tools=visible_tools,
+            runtime_context=runtime_context,
+            on_progress=runtime_context.get("on_progress"),
+        )
+
+    @staticmethod
+    def _frontdoor_mixed_stage_tool_batch_error(tool_call_payloads: list[dict[str, Any]]) -> str:
+        has_stage_tool = any(
+            str(payload.get("name") or "").strip() == STAGE_TOOL_NAME
+            for payload in list(tool_call_payloads or [])
+            if isinstance(payload, dict)
+        )
+        has_non_stage_tool = any(
+            str(payload.get("name") or "").strip()
+            and str(payload.get("name") or "").strip() != STAGE_TOOL_NAME
+            for payload in list(tool_call_payloads or [])
+            if isinstance(payload, dict)
+        )
+        if has_stage_tool and has_non_stage_tool:
+            return f"{STAGE_TOOL_NAME} must be called alone before using other tools"
+        return ""
 
     @staticmethod
     def _model_response_view(message: AIMessage | dict[str, Any]) -> Any:
@@ -1771,8 +1829,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             raise RuntimeError("CEO frontdoor exceeded maximum iterations")
 
         langchain_tools = self._build_langchain_tools_for_state(state=state, runtime=runtime)
+        base_messages = list(state.get("messages") or [])
+        if hasattr(self, "_state_message_records"):
+            base_messages = list(getattr(self, "_state_message_records")(base_messages))
         request_messages = self._apply_turn_overlay(
-            list(state.get("messages") or []),
+            base_messages,
             overlay_text=self._effective_turn_overlay_text(state),
         )
         provider_retry_count = 0
@@ -1964,12 +2025,40 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "next_step": "finalize",
         }
 
-    def _graph_review_tool_calls(self, state: CeoGraphState) -> dict[str, Any]:
+    def _graph_review_tool_calls(
+        self,
+        state: CeoGraphState,
+        *,
+        runtime: Runtime[CeoRuntimeContext] | None = None,
+    ) -> dict[str, Any]:
         approval_request = dict(state.get("approval_request") or {})
         if not approval_request:
             return {"next_step": "execute_tools"}
 
-        decision = interrupt(approval_request)
+        preview_state = dict(state or {})
+        preview_frontdoor_stage_state, preview_compression_state, preview_semantic_context_state, _preview_hydrated_tool_names = self._runtime_session_frontdoor_state(
+            preview_state,
+            preview_pending_tool_round=True,
+        )
+        interrupt_payload = {
+            **approval_request,
+            "frontdoor_stage_state": preview_frontdoor_stage_state,
+            "compression_state": preview_compression_state,
+            "semantic_context_state": preview_semantic_context_state,
+            "hydrated_tool_names": [
+                str(item or "").strip()
+                for item in list(state.get("hydrated_tool_names") or [])
+                if str(item or "").strip()
+            ],
+            "tool_call_payloads": [
+                dict(item)
+                for item in list(state.get("tool_call_payloads") or [])
+                if isinstance(item, dict)
+            ],
+            "frontdoor_selection_debug": self._frontdoor_selection_debug_snapshot(state),
+        }
+        _ = runtime
+        decision = interrupt(interrupt_payload)
         normalized = self._normalize_approval_resume_value(
             decision=decision,
             original_payloads=list(state.get("tool_call_payloads") or []),
@@ -2000,8 +2089,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not tool_call_payloads:
             return {"next_step": "call_model"}
 
-        runtime_context = self._build_tool_runtime_context(state=state, runtime=runtime)
-        on_progress = runtime_context.get("on_progress")
+        execution_bundle = self._frontdoor_execution_bundle(state=state, runtime=runtime)
+        runtime_context = execution_bundle.runtime_context
+        on_progress = execution_bundle.on_progress
         analysis_text = str(state.get("analysis_text") or "").strip()
         if analysis_text:
             await self._emit_progress(
@@ -2010,7 +2100,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 event_kind="analysis",
             )
 
-        visible_tools = self._registered_tools_for_state(state)
+        visible_tools = execution_bundle.visible_tools
+        mutable_stage_state = execution_bundle.mutable_stage_state
+        base_stage_state = execution_bundle.base_stage_state
         semaphore = asyncio.Semaphore(
             self._parallel_slot_count(
                 state.get("max_parallel_tool_calls"),
@@ -2019,36 +2111,64 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
         )
 
+        async def _error_result(payload: dict[str, Any], error_text: str) -> dict[str, Any]:
+            tool_name = str(payload.get("name") or "")
+            normalized_error_text = str(error_text or "").strip()
+            if not normalized_error_text.lower().startswith("error:"):
+                normalized_error_text = f"Error: {normalized_error_text}"
+            await self._emit_progress(
+                on_progress,
+                normalized_error_text,
+                event_kind="tool_error",
+                event_data=self._tool_result_progress_event_data(
+                    tool_name=tool_name,
+                    result_text=normalized_error_text,
+                    tool_call_id=str(payload.get("id") or "").strip() or None,
+                ),
+            )
+            return {
+                "tool_name": tool_name,
+                "status": "error",
+                "raw_result": None,
+                "result_text": normalized_error_text,
+                "tool_message": self._tool_result_message(
+                    tool_call_id=str(payload.get("id") or ""),
+                    tool_name=tool_name or "tool",
+                    content=normalized_error_text,
+                    started_at="",
+                    finished_at="",
+                    elapsed_seconds=None,
+                ),
+                "started_at": "",
+                "finished_at": "",
+                "elapsed_seconds": None,
+            }
+
         async def _run_single(payload: dict[str, Any]) -> dict[str, Any]:
             tool_name = str(payload.get("name") or "")
+            gate_error = self._frontdoor_stage_gate_error(tool_name=tool_name, stage_state=mutable_stage_state)
+            if gate_error:
+                return await _error_result(payload, gate_error)
             tool = visible_tools.get(tool_name)
             if tool is None:
-                result_text = f"Error: tool not available: {tool_name}"
-                result_payload = {
-                    "result_text": result_text,
-                    "status": "error",
-                    "started_at": "",
-                    "finished_at": "",
-                    "elapsed_seconds": None,
-                }
-            else:
-                async with semaphore:
-                    raw_result, result_text, status, started_at, finished_at, elapsed_seconds = await self._execute_tool_call_with_raw_result(
-                        tool=tool,
-                        tool_name=tool_name,
-                        arguments=dict(payload.get("arguments") or {}),
-                        runtime_context=runtime_context,
-                        on_progress=on_progress,
-                        tool_call_id=str(payload.get("id") or "").strip() or None,
-                    )
-                result_payload = {
-                    "raw_result": raw_result,
-                    "result_text": result_text,
-                    "status": status,
-                    "started_at": started_at,
-                    "finished_at": finished_at,
-                    "elapsed_seconds": elapsed_seconds,
-                }
+                return await _error_result(payload, f"tool not available: {tool_name}")
+            async with semaphore:
+                raw_result, result_text, status, started_at, finished_at, elapsed_seconds = await self._execute_tool_call_with_raw_result(
+                    tool=tool,
+                    tool_name=tool_name,
+                    arguments=_normalize_frontdoor_tool_arguments(tool_name, dict(payload.get("arguments") or {})),
+                    runtime_context=runtime_context,
+                    on_progress=on_progress,
+                    tool_call_id=str(payload.get("id") or "").strip() or None,
+                )
+            result_payload = {
+                "raw_result": raw_result,
+                "result_text": result_text,
+                "status": status,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "elapsed_seconds": elapsed_seconds,
+            }
             result_text = str(result_payload.get("result_text") or "")
             status = str(result_payload.get("status") or self._tool_status(result_text))
             await self._emit_progress(
@@ -2076,9 +2196,21 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ),
             }
 
-        tool_results = await asyncio.gather(*[_run_single(payload) for payload in tool_call_payloads])
+        mixed_batch_error = self._frontdoor_mixed_stage_tool_batch_error(tool_call_payloads)
+        if mixed_batch_error:
+            tool_results = [await _error_result(payload, mixed_batch_error) for payload in tool_call_payloads]
+        else:
+            tool_results = await asyncio.gather(*[_run_single(payload) for payload in tool_call_payloads])
         updated_tool_contract_state = self._frontdoor_tool_state_after_tool_results(
             state=dict(state or {}),
+            tool_results=tool_results,
+        )
+        frontdoor_stage_state = self._frontdoor_stage_state_after_tool_cycle(
+            {
+                **dict(state or {}),
+                "frontdoor_stage_state": base_stage_state,
+            },
+            tool_call_payloads=tool_call_payloads,
             tool_results=tool_results,
         )
         tool_messages = [dict(item.get("tool_message") or {}) for item in tool_results]
@@ -2093,6 +2225,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "tool_calls": self._assistant_tool_calls_from_payloads(tool_call_payloads),
         }
         messages = list(state.get("messages") or [])
+        if hasattr(self, "_state_message_records"):
+            messages = list(getattr(self, "_state_message_records")(messages))
         messages.append(assistant_message)
         messages.extend(tool_messages)
 
@@ -2123,6 +2257,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "tool_call_payloads": [],
             "verified_task_ids": [],
             "synthetic_tool_calls_used": False,
+            "frontdoor_stage_state": frontdoor_stage_state,
             "next_step": "call_model",
         }
         result.update(updated_tool_contract_state)
@@ -2166,7 +2301,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "final_output": output,
             "route_kind": route_kind,
         }
-        messages = [dict(message) for message in list(state.get("messages") or []) if isinstance(message, dict)]
+        messages = list(state.get("messages") or [])
+        if hasattr(self, "_state_message_records"):
+            messages = list(getattr(self, "_state_message_records")(messages))
+        else:
+            messages = [dict(message) for message in messages if isinstance(message, dict)]
         if output and route_kind == "direct_reply":
             last_role = str(messages[-1].get("role") or "").strip().lower() if messages else ""
             if last_role != "assistant":

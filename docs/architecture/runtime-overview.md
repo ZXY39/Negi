@@ -155,6 +155,11 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - `g3ku/runtime/prompts/ceo_frontdoor.md` 承载 CEO frontdoor 的稳定协议，包括角色规则、任务/工具通用约束，以及 stage-first 这类高优先级协议。
 - `g3ku/runtime/frontdoor/prompt_builder.py` 负责把稳定协议与少量环境提示装成 base prompt。
 - `g3ku/runtime/frontdoor/message_builder.py` 继续按本轮会话状态动态注入可见 skill 摘要、候选工具、retrieved context、memory hint、全局语义摘要等 turn 级内容。
+- CEO/frontdoor 的生产执行面现在是显式 `StateGraph`，入口到收尾固定经过 `prepare_turn -> call_model -> normalize_model_output -> review_tool_calls -> execute_tools -> finalize`。
+- `call_model` 和 `execute_tools` 现在共用同一份 frontdoor runtime tool bundle。像 `submit_next_stage` 这类运行时注入的 stage protocol tool，必须同时对模型“可见”并且在 `execute_tools` 里可真实执行；维护时不要再在执行环节单独从 `state.tool_names` 重建第二套工具表。
+- `execute_tools` 现在会在真正执行前落实 stage gate：普通工具在无活动阶段或阶段预算耗尽时会直接得到 gate error；如果同一批 tool calls 里把 `submit_next_stage` 和其他普通工具混在一起，整个批次会被拒绝，要求模型先单独完成阶段切换。
+- 成功的 `submit_next_stage` 会在同一轮 `execute_tools` 完成后立刻写回 `frontdoor_stage_state`；下一次 `call_model` 看到的已经是 promotion 后、阶段已推进后的 runtime state，而不是等额外的后处理链再补写。
+- `g3ku/runtime/frontdoor/_ceo_create_agent_impl.py` 仍是 runner 入口，但它不再把 `create_agent + middleware` 当作前门主执行链；维护时应把 `_graph_*` 节点看成唯一权威路径。
 
 维护上现在还要区分 frontdoor 的两份工具状态：
 
@@ -167,6 +172,7 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - 同一用户 turn 内，`load_tool_context` 成功后，下一轮真正发给模型的函数工具列表会并入对应 hydrated tool。
 - frontdoor approval interrupt、session inflight snapshot、paused execution context 也会携带这份 hydrated state，避免“暂停前已经 load 成功，恢复后又退回 candidate-only”。
 - 同一套 inflight snapshot / paused execution context 现在也会带上 `frontdoor_selection_debug`。排查“rewrite 后 query 不对”“向量召回打到了哪些 tool/skill”“为什么某个工具没进 candidate”时，优先查看这份 snapshot，而不是只看最终 assistant 文本。
+- approval interrupt 负载现在还会一起携带 `frontdoor_stage_state`、`compression_state`、`semantic_context_state`、`hydrated_tool_names`、`tool_call_payloads` 和 `frontdoor_selection_debug`；恢复时这些字段会直接回灌 session/runtime state，而不是再由 middleware 临时重建。
 
 阶段预算上还有一个容易被误判的点：
 
@@ -207,6 +213,7 @@ If a maintainer sees a CEO stage trace where a later `exec` appears inside an ea
 - 因此前门的“tool contract 更新”和“阶段工具显示”是两条平行链路：
   - promotion 改动只影响 callable/candidate/hydrated contract
   - `round.tools` 与 `execution_trace_summary` 继续只依赖 `tool_call_payloads + tool_results` 的显示字段
+- `g3ku/runtime/frontdoor/ceo_agent_middleware.py` 现在只剩兼容/测试价值，不再是生产前门的权威执行链。若线上 frontdoor 行为与预期不符，优先检查显式图节点和 checkpoint state，而不是先检查 middleware hook 次序。
 
 维护上一个容易误判的点是：动态 skill/tool 提示块里虽然会出现“如何读取 skill 正文”或“如何读取 tool 契约”的说明，但这些说明不能覆盖 `ceo_frontdoor.md` 里的 stage-first 协议。当前前门的权威顺序是：
 

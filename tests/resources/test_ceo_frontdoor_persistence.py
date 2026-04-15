@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 if "litellm" not in sys.modules:
@@ -27,6 +28,7 @@ from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.api import websocket_ceo
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor import checkpoint_inspection
+from g3ku.runtime.frontdoor import prompt_cache_contract
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.frontdoor.state_models import (
@@ -403,35 +405,20 @@ def test_ceo_frontdoor_approval_request_respects_enabled_flag() -> None:
     }
 
 
-def test_ceo_frontdoor_get_compiled_graph_uses_create_agent_with_checkpointer_and_store(
+def test_ceo_frontdoor_get_compiled_graph_uses_explicit_state_graph_with_checkpointer_and_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
-    compiled_graph = object()
-
-    def _fake_create_agent(*args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = dict(kwargs)
-        return compiled_graph
-
-    loop = SimpleNamespace(_checkpointer=object(), _store=object())
+    loop = SimpleNamespace(_checkpointer=InMemorySaver(), _store=object())
     runner = CeoFrontDoorRunner(loop=loop)
-    monkeypatch.setattr(
-        "g3ku.runtime.frontdoor._ceo_create_agent_impl.create_agent",
-        _fake_create_agent,
-    )
-    monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: object())
-    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai:gpt-4.1"])
 
     result = runner._get_compiled_graph()
 
-    assert result is compiled_graph
-    kwargs = dict(captured["kwargs"] or {})
-    assert kwargs["checkpointer"] is loop._checkpointer
-    assert kwargs["store"] is loop._store
-    assert kwargs["name"] == "ceo_frontdoor"
-    assert kwargs["state_schema"] is CeoPersistentState
-    assert kwargs["context_schema"] is CeoRuntimeContext
+    assert result is runner._compiled_graph
+    assert result.checkpointer is loop._checkpointer
+    assert result.store is loop._store
+    assert result.name == "ceo_frontdoor"
+    assert result.builder.state_schema is CeoPersistentState
+    assert result.builder.context_schema is CeoRuntimeContext
 
 
 @pytest.mark.asyncio
@@ -443,7 +430,7 @@ async def test_ceo_frontdoor_prepare_turn_keeps_runtime_only_objects_out_of_chec
         return None
 
     monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
-    monkeypatch.setattr(ceo_runtime_ops, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+    monkeypatch.setattr(prompt_cache_contract, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
 
     loop = SimpleNamespace(
         _ensure_checkpointer_ready=_noop_ready,
@@ -522,7 +509,7 @@ async def test_ceo_frontdoor_prepare_turn_passes_checkpoint_messages_to_builder(
         return None
 
     monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
-    monkeypatch.setattr(ceo_runtime_ops, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+    monkeypatch.setattr(prompt_cache_contract, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
 
     loop = SimpleNamespace(
         _ensure_checkpointer_ready=_noop_ready,
@@ -688,7 +675,7 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
         return None
 
     monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
-    monkeypatch.setattr(ceo_runtime_ops, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+    monkeypatch.setattr(prompt_cache_contract, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
 
     loop = SimpleNamespace(
         _ensure_checkpointer_ready=_noop_ready,
@@ -1059,7 +1046,7 @@ async def test_graph_prepare_turn_real_session_path_drops_summary_fields(
         return None
 
     monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
-    monkeypatch.setattr(ceo_runtime_ops, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+    monkeypatch.setattr(prompt_cache_contract, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
 
     loop = SimpleNamespace(
         _ensure_checkpointer_ready=_noop_ready,

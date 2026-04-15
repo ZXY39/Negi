@@ -5,6 +5,7 @@ import pytest
 from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain.agents.middleware.types import ExtendedModelResponse
 from langchain.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from g3ku.agent.tools.base import Tool
@@ -327,36 +328,32 @@ async def test_create_agent_runner_prompt_keeps_history_uncompacted_after_legacy
     ]
 
 
-def test_build_ceo_agent_uses_create_agent_with_persistence(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+def test_build_ceo_agent_compiles_state_graph_with_persistence(monkeypatch) -> None:
+    def _unexpected_create_agent(*args, **kwargs):
+        _ = args, kwargs
+        raise AssertionError("create_agent should not be used by the CEO frontdoor runner")
 
-    def _fake_create_agent(*args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return SimpleNamespace(ainvoke=None)
-
-    monkeypatch.setattr(create_agent_impl, "create_agent", _fake_create_agent)
-    monkeypatch.setattr(
-        create_agent_impl.CreateAgentCeoFrontDoorRunner,
-        "_resolve_ceo_model_refs",
-        lambda self: ["openai:gpt-4.1"],
-    )
+    monkeypatch.setattr(create_agent_impl, "create_agent", _unexpected_create_agent, raising=False)
 
     loop = SimpleNamespace(
-        _checkpointer=object(),
+        _checkpointer=InMemorySaver(),
         _store=object(),
-        app_config=SimpleNamespace(get_role_model_keys=lambda role: ["openai:gpt-4.1"]),
     )
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=loop)
-    runner._get_agent()
+    compiled = runner._get_agent()
 
-    kwargs = dict(captured["kwargs"] or {})
-    assert kwargs["checkpointer"] is loop._checkpointer
-    assert kwargs["store"] is loop._store
-    assert kwargs["name"] == "ceo_frontdoor"
-    assert kwargs["context_schema"].__name__ == "CeoRuntimeContext"
-    assert kwargs["state_schema"].__name__ == "CeoPersistentState"
-    assert kwargs["middleware"]
+    assert compiled is runner._compiled_graph
+    assert compiled.checkpointer is loop._checkpointer
+    assert compiled.store is loop._store
+    assert compiled.name == "ceo_frontdoor"
+    assert sorted(compiled.builder.nodes.keys()) == [
+        "call_model",
+        "execute_tools",
+        "finalize",
+        "normalize_model_output",
+        "prepare_turn",
+        "review_tool_calls",
+    ]
 
 
 def test_create_agent_runner_resolve_ceo_model_refs_prefers_cache_capable_refs(monkeypatch) -> None:
@@ -634,21 +631,40 @@ async def test_create_agent_graph_execute_tools_preserves_parallel_same_name_too
     monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
 
     result = await runner._graph_execute_tools(
-        {
-            "tool_call_payloads": [
-                {"id": "call-demo-tool-1", "name": "demo_tool", "arguments": {"value": "alpha"}},
-                {"id": "call-demo-tool-2", "name": "demo_tool", "arguments": {"value": "beta"}},
-            ],
-            "messages": [],
-            "used_tools": [],
-            "route_kind": "direct_reply",
-            "parallel_enabled": True,
-            "max_parallel_tool_calls": 2,
-            "synthetic_tool_calls_used": False,
-            "response_payload": {"content": "", "tool_calls": []},
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
+            {
+                "tool_call_payloads": [
+                    {"id": "call-demo-tool-1", "name": "demo_tool", "arguments": {"value": "alpha"}},
+                    {"id": "call-demo-tool-2", "name": "demo_tool", "arguments": {"value": "beta"}},
+                ],
+                "messages": [],
+                "used_tools": [],
+                "route_kind": "direct_reply",
+                "parallel_enabled": True,
+                "max_parallel_tool_calls": 2,
+                "synthetic_tool_calls_used": False,
+                "response_payload": {"content": "", "tool_calls": []},
+                "frontdoor_stage_state": {
+                    "active_stage_id": "frontdoor-stage-1",
+                    "transition_required": False,
+                    "stages": [
+                        {
+                            "stage_id": "frontdoor-stage-1",
+                            "stage_index": 1,
+                            "stage_goal": "Run the selected tool calls",
+                            "tool_round_budget": 2,
+                            "tool_rounds_used": 0,
+                            "status": "active",
+                            "mode": "自主执行",
+                            "stage_kind": "normal",
+                            "completed_stage_summary": "",
+                            "key_refs": [],
+                            "rounds": [],
+                        }
+                    ],
+                },
+            },
+            runtime=SimpleNamespace(context=SimpleNamespace()),
+        )
 
     assert result["next_step"] == "call_model"
     assert [(item[1], item[2]["tool_call_id"]) for item in progress_calls if item[1] == "tool_start"] == [
@@ -886,7 +902,7 @@ async def test_create_agent_langchain_tool_degrades_validation_exception_to_tool
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runner_passes_thread_id_and_context() -> None:
+async def test_create_agent_runner_passes_thread_id_and_context_with_minimal_initial_state() -> None:
     captured: dict[str, object] = {}
     readiness_calls: list[str] = []
     session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"), _last_route_kind="task_dispatch")
@@ -895,7 +911,7 @@ async def test_create_agent_runner_passes_thread_id_and_context() -> None:
     async def _on_progress(*args, **kwargs):
         progress_calls.append((args, kwargs))
 
-    class _FakeAgent:
+    class _FakeCompiledGraph:
         async def ainvoke(self, payload, config=None, *, context=None, version="v1"):
             captured["payload"] = payload
             captured["config"] = config
@@ -906,7 +922,7 @@ async def test_create_agent_runner_passes_thread_id_and_context() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: readiness_calls.append("ready"))
     )
-    runner._agent = _FakeAgent()
+    runner._compiled_graph = _FakeCompiledGraph()
 
     output = await runner.run_turn(
         user_input=SimpleNamespace(content="hello", metadata={}),
@@ -922,7 +938,9 @@ async def test_create_agent_runner_passes_thread_id_and_context() -> None:
     assert getattr(captured["context"], "loop") is runner._loop
     assert getattr(captured["context"], "session") is session
     assert getattr(captured["context"], "on_progress") is _on_progress
-    assert captured["payload"]["agent_runtime"] == "create_agent"
+    assert captured["payload"] == initial_persistent_state(
+        user_input={"content": "hello", "metadata": {}}
+    )
     assert progress_calls == []
 
 
@@ -1252,16 +1270,35 @@ async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_int
             ],
             "messages": [],
             "used_tools": [],
-            "route_kind": "direct_reply",
-            "parallel_enabled": False,
-            "max_parallel_tool_calls": 1,
-            "synthetic_tool_calls_used": False,
-            "response_payload": {"content": "", "tool_calls": []},
-            "compression_state": {"status": "running", "text": "compressing", "source": "user"},
-            "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
+                "route_kind": "direct_reply",
+                "parallel_enabled": False,
+                "max_parallel_tool_calls": 1,
+                "synthetic_tool_calls_used": False,
+                "response_payload": {"content": "", "tool_calls": []},
+                "compression_state": {"status": "running", "text": "compressing", "source": "user"},
+                "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
+                "frontdoor_stage_state": {
+                    "active_stage_id": "frontdoor-stage-1",
+                    "transition_required": False,
+                    "stages": [
+                        {
+                            "stage_id": "frontdoor-stage-1",
+                            "stage_index": 1,
+                            "stage_goal": "Load the filesystem tool context",
+                            "tool_round_budget": 2,
+                            "tool_rounds_used": 0,
+                            "status": "active",
+                            "mode": "自主执行",
+                            "stage_kind": "normal",
+                            "completed_stage_summary": "",
+                            "key_refs": [],
+                            "rounds": [],
+                        }
+                    ],
+                },
+            },
+            runtime=SimpleNamespace(context=SimpleNamespace()),
+        )
 
     assert result["next_step"] == "call_model"
     assert result["hydrated_tool_names"] == ["filesystem_write"]
