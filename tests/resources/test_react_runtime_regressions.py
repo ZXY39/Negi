@@ -26,6 +26,7 @@ from main.monitoring.log_service import (
     _EXECUTION_STAGE_STATUS_ACTIVE,
     _EXECUTION_STAGE_STATUS_COMPLETED,
 )
+from main.runtime.node_prompt_contract import NodeRuntimeToolContract, extract_node_dynamic_contract_payload
 import main.service.runtime_service as runtime_service_module
 from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool, SpawnChildNodesTool
 from main.runtime.react_loop import ReActToolLoop
@@ -2898,6 +2899,94 @@ async def test_react_loop_writes_before_model_frame_before_chat_dispatch() -> No
 
 
 @pytest.mark.asyncio
+async def test_react_loop_writes_visible_skills_into_before_model_frame() -> None:
+    log_service = _FakeLogService()
+    final_tool = _submit_final_result_tool()
+    node_id = "node-before-model-visible-skills"
+    contract_message = NodeRuntimeToolContract(
+        node_id=node_id,
+        node_kind="execution",
+        callable_tool_names=["submit_final_result"],
+        candidate_tool_names=["filesystem_write"],
+        visible_skills=[
+            {
+                "skill_id": "tmux",
+                "display_name": "tmux",
+                "description": "terminal workflow",
+            }
+        ],
+        candidate_skill_ids=["tmux"],
+        stage_payload={},
+        hydrated_executor_names=[],
+        lightweight_tool_ids=[],
+        selection_trace={},
+    ).to_message()
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            frame = log_service.read_runtime_frame("task-before-model-visible-skills", node_id)
+            assert frame.get("visible_skills") == [
+                {
+                    "skill_id": "tmux",
+                    "display_name": "tmux",
+                    "description": "terminal workflow",
+                }
+            ]
+            assert frame.get("candidate_skill_ids") == ["tmux"]
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final-visible-skills",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "done",
+                            "answer": "done",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=2)
+    loop._visible_tools_for_iteration = lambda **kwargs: dict(kwargs.get("tools") or {})
+    loop._model_visible_tools_for_iteration = lambda **kwargs: (
+        {"submit_final_result": final_tool},
+        {
+            "tool_names": ["submit_final_result"],
+            "candidate_tool_names": ["filesystem_write"],
+            "lightweight_tool_ids": [],
+            "hydrated_executor_names": [],
+            "trace": {"rbac_visible_tool_names": ["submit_final_result", "filesystem_write"]},
+        },
+    )
+
+    result = await loop.run(
+        task=SimpleNamespace(task_id="task-before-model-visible-skills"),
+        node=SimpleNamespace(task_id="task-before-model-visible-skills", node_id=node_id, depth=0, node_kind="execution"),
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-before-model-visible-skills","goal":"demo"}'},
+            contract_message,
+        ],
+        tools={"submit_final_result": final_tool},
+        model_refs=["fake"],
+        runtime_context={"task_id": "task-before-model-visible-skills", "node_id": node_id},
+        max_iterations=2,
+    )
+
+    assert result.status == "success"
+    assert result.answer == "done"
+
+
+@pytest.mark.asyncio
 async def test_react_loop_execute_tool_keeps_direct_load_payload_inline(tmp_path) -> None:
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
@@ -2961,6 +3050,108 @@ async def test_load_skill_context_tool_rejects_non_candidate_runtime_target() ->
 
     assert rendered.startswith("Error:")
     assert service.load_skill_calls == []
+
+
+def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_after_stage_compaction() -> None:
+    log_service = _FakeLogService()
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+    task_id = "task-stage-skill-restore"
+    node = SimpleNamespace(task_id=task_id, node_id="node-stage-skill-restore", depth=0, node_kind="execution")
+    log_service._store._node = SimpleNamespace(
+        metadata={
+            "execution_stages": {
+                "active_stage_id": "stage-1",
+                "stages": [
+                    {
+                        "stage_id": "stage-1",
+                        "stage_index": 1,
+                        "stage_kind": "normal",
+                    }
+                ],
+            }
+        }
+    )
+    log_service.upsert_frame(
+        task_id,
+        {
+            "node_id": node.node_id,
+            "visible_skills": [
+                {
+                    "skill_id": "tmux",
+                    "display_name": "tmux",
+                    "description": "terminal workflow",
+                }
+            ],
+            "selected_skill_ids": ["tmux"],
+            "candidate_skill_ids": ["tmux"],
+        },
+    )
+    stage_contract = NodeRuntimeToolContract(
+        node_id=node.node_id,
+        node_kind=node.node_kind,
+        callable_tool_names=["submit_next_stage", "load_skill_context"],
+        candidate_tool_names=["content"],
+        visible_skills=[
+            {
+                "skill_id": "tmux",
+                "display_name": "tmux",
+                "description": "terminal workflow",
+            }
+        ],
+        candidate_skill_ids=["tmux"],
+        stage_payload={},
+        hydrated_executor_names=[],
+        lightweight_tool_ids=[],
+        selection_trace={},
+    ).to_message()
+    message_history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": '{"task_id":"task-stage-skill-restore","goal":"demo"}'},
+        stage_contract,
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-stage-1",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
+    ]
+
+    prepared = loop._prepare_messages(
+        message_history,
+        runtime_context={"task_id": task_id, "node_id": node.node_id},
+    )
+
+    assert extract_node_dynamic_contract_payload(prepared) is None
+
+    refreshed = loop._refresh_node_dynamic_contract_message(
+        node=node,
+        message_history=prepared,
+        tool_schema_selection={
+            "tool_names": ["submit_next_stage", "load_skill_context"],
+            "candidate_tool_names": ["content"],
+            "hydrated_executor_names": [],
+            "lightweight_tool_ids": [],
+            "trace": {},
+        },
+        stage_gate={"has_active_stage": True, "transition_required": False, "active_stage": {"stage_id": "stage-1"}},
+    )
+
+    payload = extract_node_dynamic_contract_payload(refreshed)
+    assert payload is not None
+    assert payload["visible_skills"] == [
+        {
+            "skill_id": "tmux",
+            "display_name": "tmux",
+            "description": "terminal workflow",
+        }
+    ]
+    assert payload["candidate_skills"] == ["tmux"]
 
 
 @pytest.mark.asyncio

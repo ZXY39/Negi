@@ -573,9 +573,12 @@ class TaskQueryService:
                 continue
             rounds_payload: list[dict[str, Any]] = []
             tool_calls: list[dict[str, Any]] = []
+            counted_rounds = 0
             for round_item in list(stage.get('rounds') or []):
                 if not isinstance(round_item, dict):
                     continue
+                if bool(round_item.get('budget_counted')):
+                    counted_rounds += 1
                 compact_tools = [
                     compact_step
                     for compact_step in (
@@ -606,7 +609,7 @@ class TaskQueryService:
             ]
             tool_rounds_used = int(stage.get('tool_rounds_used') or 0)
             if rounds_payload:
-                tool_rounds_used = len(rounds_payload)
+                tool_rounds_used = counted_rounds
             elif fallback_tool_calls and tool_rounds_used <= 0:
                 tool_rounds_used = 1
             stages_payload.append(

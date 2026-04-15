@@ -268,6 +268,7 @@ class ReActToolLoop:
                     'partial_child_results': [],
                     'tool_calls': [],
                     'child_pipelines': [],
+                    'visible_skills': [dict(item) for item in list(dynamic_contract_payload.get('visible_skills') or []) if isinstance(item, dict)],
                     'callable_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
                     'candidate_tool_names': list(tool_schema_selection.get('candidate_tool_names') or []),
                     'selected_skill_ids': list(selected_skill_ids),
@@ -1698,22 +1699,42 @@ class ReActToolLoop:
         stage_gate: dict[str, Any],
     ) -> list[dict[str, Any]]:
         existing_payload = extract_node_dynamic_contract_payload(message_history) or {}
+        current_frame = self._runtime_frame(
+            str(getattr(node, 'task_id', '') or '').strip(),
+            str(getattr(node, 'node_id', '') or '').strip(),
+        ) or {}
         callable_tool_names = self._normalized_name_list(list(tool_schema_selection.get('tool_names') or []))
         candidate_tool_names = self._normalized_name_list(
             list(tool_schema_selection.get('candidate_tool_names') or existing_payload.get('candidate_tools') or [])
         )
         candidate_tool_names = [name for name in candidate_tool_names if name not in set(callable_tool_names)]
+        visible_skills = [dict(item) for item in list(existing_payload.get('visible_skills') or []) if isinstance(item, dict)]
+        if not visible_skills:
+            visible_skills = [dict(item) for item in list(current_frame.get('visible_skills') or []) if isinstance(item, dict)]
+        if not visible_skills:
+            visible_skills = [
+                {
+                    'skill_id': skill_id,
+                    'display_name': skill_id,
+                    'description': '',
+                }
+                for skill_id in self._normalized_name_list(list(current_frame.get('selected_skill_ids') or []))
+            ]
+        candidate_skill_ids = self._normalized_name_list(
+            list(
+                existing_payload.get('candidate_skills')
+                or current_frame.get('candidate_skill_ids')
+                or current_frame.get('selected_skill_ids')
+                or []
+            )
+        )
         contract = NodeRuntimeToolContract(
             node_id=str(getattr(node, 'node_id', '') or '').strip(),
             node_kind=str(getattr(node, 'node_kind', '') or '').strip(),
             callable_tool_names=callable_tool_names,
             candidate_tool_names=candidate_tool_names,
-            visible_skills=[dict(item) for item in list(existing_payload.get('visible_skills') or []) if isinstance(item, dict)],
-            candidate_skill_ids=[
-                str(item or '').strip()
-                for item in list(existing_payload.get('candidate_skills') or [])
-                if str(item or '').strip()
-            ],
+            visible_skills=visible_skills,
+            candidate_skill_ids=candidate_skill_ids,
             stage_payload=self._stage_prompt_payload_from_gate(stage_gate),
             hydrated_executor_names=self._normalized_name_list(list(tool_schema_selection.get('hydrated_executor_names') or [])),
             lightweight_tool_ids=self._normalized_name_list(list(tool_schema_selection.get('lightweight_tool_ids') or [])),

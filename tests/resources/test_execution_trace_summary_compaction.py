@@ -135,3 +135,59 @@ def test_execution_trace_summary_keeps_multiple_round_boundaries(service_name, s
     assert [item["round_index"] for item in summary["stages"][0]["rounds"]] == [1, 2], service_name
     assert summary["stages"][0]["rounds"][0]["tools"][0]["tool_name"] == "filesystem", service_name
     assert summary["stages"][0]["rounds"][1]["tools"][0]["tool_name"] == "content", service_name
+
+
+def test_query_sanitize_execution_trace_summary_keeps_budget_counted_round_total() -> None:
+    summary = TaskQueryService._sanitize_execution_trace_summary(
+        {
+            "stages": [
+                {
+                    "stage_id": "stage-1",
+                    "stage_index": 1,
+                    "mode": "自主执行",
+                    "status": "进行中",
+                    "stage_goal": "inspect repository",
+                    "tool_round_budget": 5,
+                    "tool_rounds_used": 1,
+                    "rounds": [
+                        {
+                            "round_id": "round-loader",
+                            "round_index": 1,
+                            "created_at": "2026-04-16T10:00:00+08:00",
+                            "budget_counted": False,
+                            "tools": [
+                                {
+                                    "tool_call_id": "call-loader",
+                                    "tool_name": "load_tool_context",
+                                    "arguments_text": '{"tool_id":"filesystem_write"}',
+                                    "output_text": '{"ok":true}',
+                                    "status": "success",
+                                }
+                            ],
+                        },
+                        {
+                            "round_id": "round-budgeted",
+                            "round_index": 2,
+                            "created_at": "2026-04-16T10:01:00+08:00",
+                            "budget_counted": True,
+                            "tools": [
+                                {
+                                    "tool_call_id": "call-write",
+                                    "tool_name": "filesystem_write",
+                                    "arguments_text": '{"path":"D:/NewProjects/G3KU/tmp.txt"}',
+                                    "output_text": 'written',
+                                    "status": "success",
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+
+    stage = summary["stages"][0]
+
+    assert len(stage["rounds"]) == 2
+    assert [round_item["budget_counted"] for round_item in stage["rounds"]] == [False, True]
+    assert stage["tool_rounds_used"] == 1

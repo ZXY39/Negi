@@ -25,6 +25,7 @@ const CEO_SESSION_SNAPSHOT_CACHE_KEY = "g3ku.ceo.session-snapshots.v2";
 const CEO_SESSION_SNAPSHOT_CACHE_LIMIT = 6;
 const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
 const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
+const CEO_CONTEXT_LOAD_NOTICE_DURATION_MS = 5000;
 const CEO_COMPRESSION_TOAST_TEXT = "上下文压缩中";
 const CEO_COMPOSER_DRAFT_CACHE_KEY = "g3ku.ceo.composer-drafts.v1";
 const CEO_COMPOSER_DRAFT_CACHE_LIMIT = 24;
@@ -93,6 +94,8 @@ const S = {
     ceoScrollToLatestOnSnapshot: false,
     ceoSnapshotCache: {},
     ceoSnapshotPersistId: null,
+    ceoContextLoadNoticeSeq: 0,
+    ceoContextLoadNoticeTimeoutIds: new Map(),
     ceoComposerDrafts: {},
     ceoComposerDraftPersistId: null,
     ceoQueuedFollowUps: {},
@@ -287,6 +290,7 @@ const U = {
     ceoFileInput: document.getElementById("ceo-file-input"),
     ceoUploadList: document.getElementById("ceo-upload-list"),
     ceoFollowUpQueue: document.getElementById("ceo-follow-up-queue"),
+    ceoContextLoadNotice: document.getElementById("ceo-context-load-notice"),
     ceoCompressionToast: document.getElementById("ceo-compression-toast"),
     ceoCompressionToastText: document.getElementById("ceo-compression-toast-text"),
     ceoSend: document.getElementById("ceo-send-btn"),
@@ -1692,6 +1696,7 @@ function dedupeInflightUserMessageAgainstMessages(messages = [], inflightTurn = 
 
 function renderCeoSessionLoadingState(sessionId, session = null) {
     resetCeoFeed();
+    hideCeoContextLoadNotice();
     const title = String(session?.title || session?.channel_id || sessionId || "conversation").trim() || "conversation";
     addMsg(`Loading ${title}...`, "system", { scrollMode: "bottom" });
 }
@@ -3268,7 +3273,8 @@ function renderCeoToolEventsIntoTurn(turn, toolEvents = [], { source = "" } = {}
 
 function renderCeoStageTraceIntoTurn(turn, executionTraceSummary = null) {
     if (!turn?.listEl || !turn?.flowEl) return 0;
-    const summary = normalizeCeoSnapshotExecutionTraceSummary(executionTraceSummary);
+    maybeShowCeoContextLoadNoticesFromSummary(turn, executionTraceSummary);
+    const summary = filterCeoInteractionFlowSummary(executionTraceSummary);
     if (!summary?.stages?.length) {
         resetCeoToolFlow(turn);
         updateCeoTurnMeta(turn, "绛夊緟宸ュ叿寮€濮?..");
@@ -3400,6 +3406,7 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "" 
     const shouldScrollToLatest = !!S.ceoScrollToLatestOnSnapshot;
     S.ceoScrollToLatestOnSnapshot = false;
     const targetSessionId = String(sessionId || activeSessionId()).trim();
+    hideCeoContextLoadNotice();
     withCeoFeedBatch(() => {
         resetCeoFeed();
         messages.forEach((item) => {
@@ -3472,6 +3479,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
             finalized: false,
             historyExpanded: false,
             lastExecutionTraceSummary: null,
+            contextLoadNoticeKeys: new Set(),
             turnId: "",
             source: String(source || "").trim().toLowerCase() || "user",
         };
@@ -3657,6 +3665,196 @@ function parseJsonObjectText(raw = "") {
     } catch {
         return null;
     }
+}
+
+function isCeoContextLoaderToolName(toolName = "") {
+    const normalized = String(toolName || "").trim().toLowerCase();
+    return normalized === "load_tool_context" || normalized === "load_skill_context";
+}
+
+function clearCeoContextLoadNoticeTimer(noticeId = "") {
+    const normalizedNoticeId = String(noticeId || "").trim();
+    const timers = S.ceoContextLoadNoticeTimeoutIds instanceof Map
+        ? S.ceoContextLoadNoticeTimeoutIds
+        : new Map();
+    S.ceoContextLoadNoticeTimeoutIds = timers;
+    if (!normalizedNoticeId) {
+        timers.forEach((timeoutId) => {
+            window.clearTimeout(timeoutId);
+        });
+        timers.clear();
+        return;
+    }
+    if (!timers.has(normalizedNoticeId)) return;
+    window.clearTimeout(timers.get(normalizedNoticeId));
+    timers.delete(normalizedNoticeId);
+}
+
+function syncCeoContextLoadNoticeVisibility() {
+    const noticeEl = U.ceoContextLoadNotice;
+    if (!noticeEl) return;
+    const hasChildren = Array.isArray(noticeEl.children) && noticeEl.children.length > 0;
+    noticeEl.hidden = !hasChildren;
+    noticeEl.setAttribute("aria-hidden", hasChildren ? "false" : "true");
+}
+
+function removeCeoContextLoadNoticeItem(noticeId = "") {
+    const normalizedNoticeId = String(noticeId || "").trim();
+    if (!normalizedNoticeId) return;
+    clearCeoContextLoadNoticeTimer(normalizedNoticeId);
+    const noticeEl = U.ceoContextLoadNotice;
+    if (!noticeEl || !Array.isArray(noticeEl.children)) return;
+    const target = noticeEl.children.find((item) => String(item?.dataset?.noticeId || "").trim() === normalizedNoticeId);
+    target?.remove?.();
+    syncCeoContextLoadNoticeVisibility();
+}
+
+function hideCeoContextLoadNotice() {
+    clearCeoContextLoadNoticeTimer();
+    const noticeEl = U.ceoContextLoadNotice;
+    if (!noticeEl) return;
+    Array.from(noticeEl.children || []).forEach((item) => item?.remove?.());
+    noticeEl.innerHTML = "";
+    syncCeoContextLoadNoticeVisibility();
+}
+
+function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOTICE_DURATION_MS } = {}) {
+    const normalizedText = String(text || "").trim();
+    if (!normalizedText) {
+        hideCeoContextLoadNotice();
+        return null;
+    }
+    const noticeEl = U.ceoContextLoadNotice;
+    if (!noticeEl || typeof document?.createElement !== "function") return null;
+    const noticeId = `ceo-context-load-${(Number(S.ceoContextLoadNoticeSeq) || 0) + 1}`;
+    S.ceoContextLoadNoticeSeq = (Number(S.ceoContextLoadNoticeSeq) || 0) + 1;
+    const item = document.createElement("div");
+    item.className = "ceo-context-load-notice-item";
+    item.dataset.noticeId = noticeId;
+    const textEl = document.createElement("span");
+    textEl.className = "ceo-context-load-notice-text";
+    textEl.textContent = normalizedText;
+    item.appendChild(textEl);
+    noticeEl.appendChild(item);
+    syncCeoContextLoadNoticeVisibility();
+    if (Number.isFinite(durationMs) && durationMs > 0) {
+        const timeoutId = window.setTimeout(() => {
+            removeCeoContextLoadNoticeItem(noticeId);
+        }, durationMs);
+        const timers = S.ceoContextLoadNoticeTimeoutIds instanceof Map
+            ? S.ceoContextLoadNoticeTimeoutIds
+            : new Map();
+        timers.set(noticeId, timeoutId);
+        S.ceoContextLoadNoticeTimeoutIds = timers;
+    }
+    return item;
+}
+
+function extractCeoContextLoadTarget(toolName = "", rawText = "") {
+    const normalizedTool = String(toolName || "").trim().toLowerCase();
+    const key = normalizedTool === "load_skill_context" ? "skill_id" : "tool_id";
+    const text = String(rawText || "").trim();
+    if (!text) return "";
+    const payload = parseJsonObjectText(text);
+    const directCandidates = [
+        payload?.[key],
+        payload?.target_id,
+        payload?.id,
+        payload?.resource_id,
+        payload?.resource?.[key],
+        payload?.resource?.id,
+        payload?.candidate?.[key],
+        payload?.candidate?.id,
+    ];
+    for (const candidate of directCandidates) {
+        const normalized = String(candidate || "").trim();
+        if (normalized) return normalized;
+    }
+    const hydrationTargets = Array.isArray(payload?.hydration_targets) ? payload.hydration_targets : [];
+    for (const candidate of hydrationTargets) {
+        const normalized = String(candidate || "").trim();
+        if (normalized) return normalized;
+    }
+    const match = text.match(new RegExp(`${key}"?\\s*[:=]\\s*"?(?<id>[A-Za-z0-9_.:/-]+)`));
+    return String(match?.groups?.id || "").trim();
+}
+
+function buildCeoContextLoadNotice(toolName = "", targetId = "") {
+    const normalizedTool = String(toolName || "").trim().toLowerCase();
+    const normalizedTargetId = String(targetId || "").trim();
+    if (normalizedTool === "load_skill_context") {
+        return normalizedTargetId
+            ? `\u3010\u5df2\u52a0\u8f7d skill ${normalizedTargetId}\u3011`
+            : "\u3010\u5df2\u52a0\u8f7d skill\u3011";
+    }
+    return normalizedTargetId
+        ? `\u3010\u5df2\u52a0\u8f7d\u5de5\u5177 ${normalizedTargetId}\u3011`
+        : "\u3010\u5df2\u52a0\u8f7d\u5de5\u5177\u4e0a\u4e0b\u6587\u3011";
+}
+
+function ensureCeoContextLoadNoticeKeys(turn) {
+    if (!turn || turn.contextLoadNoticeKeys instanceof Set) return turn?.contextLoadNoticeKeys || null;
+    turn.contextLoadNoticeKeys = new Set();
+    return turn.contextLoadNoticeKeys;
+}
+
+function maybeShowCeoContextLoadNotice(turn, { toolName = "", status = "", detailTexts = [] } = {}) {
+    const normalizedTool = String(toolName || "").trim().toLowerCase();
+    const normalizedStatus = String(status || "").trim().toLowerCase();
+    if (!isCeoContextLoaderToolName(normalizedTool) || normalizedStatus !== "success") return false;
+    if (String(turn?.source || "").trim().toLowerCase() === "history") return false;
+    const keys = ensureCeoContextLoadNoticeKeys(turn);
+    let targetId = "";
+    for (const candidate of Array.isArray(detailTexts) ? detailTexts : []) {
+        targetId = extractCeoContextLoadTarget(normalizedTool, candidate);
+        if (targetId) break;
+    }
+    const noticeText = buildCeoContextLoadNotice(normalizedTool, targetId);
+    const signature = `${normalizedTool}:${targetId || noticeText}`;
+    if (keys?.has(signature)) return true;
+    keys?.add(signature);
+    showCeoContextLoadNotice(noticeText);
+    return true;
+}
+
+function filterCeoInteractionFlowSummary(summary = null) {
+    const normalizedSummary = normalizeCeoSnapshotExecutionTraceSummary(summary);
+    if (!normalizedSummary?.stages?.length) return null;
+    return {
+        stages: normalizedSummary.stages.map((stage) => {
+            const originalRounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
+            return {
+                ...stage,
+                tool_rounds_used: Math.max(Number(stage?.tool_rounds_used || 0), originalRounds.length),
+                rounds: originalRounds
+                    .map((round) => ({
+                        ...round,
+                        tools: (Array.isArray(round?.tools) ? round.tools : []).filter((step) => {
+                            const toolName = String(step?.tool_name || "").trim().toLowerCase();
+                            const status = String(step?.status || "").trim().toLowerCase();
+                            return !isCeoContextLoaderToolName(toolName) || status === "error";
+                        }),
+                    }))
+                    .filter((round) => Array.isArray(round?.tools) && round.tools.length),
+            };
+        }),
+    };
+}
+
+function maybeShowCeoContextLoadNoticesFromSummary(turn, summary = null) {
+    const normalizedSummary = normalizeCeoSnapshotExecutionTraceSummary(summary);
+    if (!normalizedSummary?.stages?.length) return;
+    normalizedSummary.stages.forEach((stage) => {
+        (Array.isArray(stage?.rounds) ? stage.rounds : []).forEach((round) => {
+            (Array.isArray(round?.tools) ? round.tools : []).forEach((step) => {
+                maybeShowCeoContextLoadNotice(turn, {
+                    toolName: step?.tool_name || "",
+                    status: step?.status || "",
+                    detailTexts: [step?.output_text || "", step?.arguments_text || ""],
+                });
+            });
+        });
+    });
 }
 
 function ceoPayloadStatus(detail = "") {
@@ -4033,6 +4231,14 @@ function applyCeoToolEventToTurn(turn, event = {}) {
     const status = resolveCeoToolEventStatus(event);
     const toolName = String(event.tool_name || "tool").trim() || "tool";
     const rawText = String(event.text || "").trim();
+    if (isCeoContextLoaderToolName(toolName) && status !== "error") {
+        maybeShowCeoContextLoadNotice(turn, {
+            toolName,
+            status,
+            detailTexts: [rawText],
+        });
+        return null;
+    }
     const eventKind = String(event.kind || "").trim().toLowerCase();
     const detail = status === "running" && eventKind === "tool_start"
         ? ""
@@ -4201,8 +4407,8 @@ function finalizeCeoTurn(text, meta = {}) {
         const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
         const inflightTurnId = normalizeCeoTurnId(inflightTurn?.turn_id);
         const fallbackExecutionTraceSummary = resolvePreferredCeoStageTraceSummary(
-            inflightTurn?.execution_trace_summary || null,
-            turn?.lastExecutionTraceSummary || null
+            turn?.lastExecutionTraceSummary || null,
+            inflightTurn?.execution_trace_summary || null
         );
         const persistedExecutionTraceSummary = resolvePreferredCeoStageTraceSummary(
             finalExecutionTraceSummary,

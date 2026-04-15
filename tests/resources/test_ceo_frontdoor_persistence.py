@@ -645,6 +645,92 @@ async def test_ceo_frontdoor_call_model_returns_json_safe_response_payload(
 
 
 @pytest.mark.asyncio
+async def test_ceo_frontdoor_call_model_rebuilds_request_messages_from_stable_and_dynamic_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+
+    async def _call_model_with_tools(**kwargs):
+        captured.update(kwargs)
+        return AIMessage(content="plain reply", response_metadata={"finish_reason": "stop"})
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+
+    update = await runner._graph_call_model(
+        {
+            "messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "hello"},
+            ],
+            "stable_messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "hello"},
+            ],
+            "dynamic_appendix_messages": [
+                {"role": "assistant", "content": "## Retrieved Context\n- memory"},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "message_type": "frontdoor_runtime_tool_contract",
+                            "callable_tool_names": ["submit_next_stage"],
+                            "candidate_tool_names": [],
+                            "hydrated_tool_names": [],
+                            "visible_skill_ids": [],
+                            "candidate_skill_ids": [],
+                            "rbac_visible_tool_names": ["submit_next_stage"],
+                            "rbac_visible_skill_ids": [],
+                            "stage_summary": {
+                                "active_stage_id": "",
+                                "transition_required": False,
+                                "active_stage": None,
+                            },
+                            "contract_revision": "exp:test",
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            "turn_overlay_text": "## Retrieved Context\n- memory",
+            "repair_overlay_text": "repair only",
+            "tool_names": ["submit_next_stage"],
+            "candidate_tool_names": [],
+            "hydrated_tool_names": [],
+            "visible_skill_ids": [],
+            "candidate_skill_ids": [],
+            "rbac_visible_tool_names": ["submit_next_stage"],
+            "rbac_visible_skill_ids": [],
+            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "model_refs": ["openai_codex:gpt-test"],
+            "parallel_enabled": False,
+            "prompt_cache_key": "cache-key",
+            "iteration": 0,
+            "max_iterations": 4,
+            "session_key": "web:shared",
+        },
+        runtime=SimpleNamespace(context=CeoRuntimeContext(loop=None, session=None, session_key="web:shared", on_progress=None)),
+    )
+
+    request_messages = list(captured["messages"] or [])
+    assert any(_frontdoor_tool_contract_payload(dict(message)) for message in request_messages)
+    assert any(str(message.get("content") or "").startswith("## Retrieved Context") for message in request_messages)
+    assert not any(
+        "System note for this turn only:\n## Retrieved Context" in str(message.get("content") or "")
+        for message in request_messages
+    )
+    assert any(
+        "System note for this turn only:\nrepair only" in str(message.get("content") or "")
+        for message in request_messages
+        if str(message.get("role") or "").strip().lower() == "user"
+    )
+    assert captured["prompt_cache_key"] == "cache-key"
+    assert update["iteration"] == 1
+
+
+@pytest.mark.asyncio
 async def test_ceo_frontdoor_finalize_turn_persists_direct_reply_into_checkpoint_messages(tmp_path) -> None:
     loop = SimpleNamespace(
         sessions=SessionManager(tmp_path),
@@ -756,19 +842,7 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
 
     messages = list(state_update["messages"] or [])
     assert messages[0] == {"role": "system", "content": "SYSTEM PROMPT"}
-    contract_payloads = [
-        payload
-        for payload in (_frontdoor_tool_contract_payload(dict(message)) for message in messages)
-        if isinstance(payload, dict)
-    ]
-    assert len(contract_payloads) == 1
-    assert contract_payloads[0]["callable_tool_names"] == ["submit_next_stage"]
-    history_messages = [
-        dict(message)
-        for message in messages
-        if _frontdoor_tool_contract_payload(dict(message)) is None
-    ]
-    assert history_messages == [
+    assert messages == [
         {"role": "system", "content": "SYSTEM PROMPT"},
         {"role": "user", "content": "question one"},
         {"role": "assistant", "content": "answer one"},
@@ -776,6 +850,16 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
         {"role": "assistant", "content": "answer two"},
         {"role": "user", "content": "question three"},
     ]
+    contract_payloads = [
+        payload
+        for payload in (
+            _frontdoor_tool_contract_payload(dict(message))
+            for message in list(state_update["dynamic_appendix_messages"] or [])
+        )
+        if isinstance(payload, dict)
+    ]
+    assert len(contract_payloads) == 1
+    assert contract_payloads[0]["callable_tool_names"] == ["submit_next_stage"]
     assert "summary_text" not in state_update
     assert "summary_payload" not in state_update
     assert "summary_model_key" not in state_update
@@ -1135,19 +1219,7 @@ async def test_graph_prepare_turn_real_session_path_drops_summary_fields(
         runtime=runtime,
     )
 
-    contract_payloads = [
-        payload
-        for payload in (_frontdoor_tool_contract_payload(dict(message)) for message in list(result["messages"] or []))
-        if isinstance(payload, dict)
-    ]
-    assert len(contract_payloads) == 1
-    assert contract_payloads[0]["callable_tool_names"] == ["submit_next_stage"]
-    history_messages = [
-        dict(message)
-        for message in list(result["messages"] or [])
-        if _frontdoor_tool_contract_payload(dict(message)) is None
-    ]
-    assert history_messages == [
+    assert list(result["messages"] or []) == [
         {"role": "system", "content": "SYSTEM PROMPT"},
         {"role": "user", "content": "question one"},
         {"role": "assistant", "content": "answer one"},
@@ -1155,6 +1227,16 @@ async def test_graph_prepare_turn_real_session_path_drops_summary_fields(
         {"role": "assistant", "content": "answer two"},
         {"role": "user", "content": "question three"},
     ]
+    contract_payloads = [
+        payload
+        for payload in (
+            _frontdoor_tool_contract_payload(dict(message))
+            for message in list(result["dynamic_appendix_messages"] or [])
+        )
+        if isinstance(payload, dict)
+    ]
+    assert len(contract_payloads) == 1
+    assert contract_payloads[0]["callable_tool_names"] == ["submit_next_stage"]
     assert "summary_text" not in result
     assert "summary_payload" not in result
     assert "summary_model_key" not in result

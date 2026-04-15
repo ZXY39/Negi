@@ -6,6 +6,7 @@ from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain.agents.middleware.types import ExtendedModelResponse
 from langchain.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command
 
 from g3ku.agent.tools.base import Tool
@@ -527,6 +528,48 @@ def test_create_agent_runner_visible_langchain_tools_uses_prepared_state(monkeyp
 
     assert result == ["tool-a"]
     assert captured == {"state": state, "runtime": runtime}
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_node_prepare_turn_replaces_messages_instead_of_appending() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    synced: dict[str, object] = {}
+
+    async def _fake_graph_prepare_turn(state, runtime) -> dict[str, object]:
+        _ = state, runtime
+        return {
+            "messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "latest user"},
+            ],
+            "stable_messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "latest user"},
+            ],
+            "dynamic_appendix_messages": [
+                {"role": "assistant", "content": "## Retrieved Context\n- memory"}
+            ],
+        }
+
+    runner._graph_prepare_turn = _fake_graph_prepare_turn  # type: ignore[method-assign]
+    runner._sync_runtime_session_frontdoor_state = lambda *, state, runtime: synced.update(  # type: ignore[method-assign]
+        {"state": state, "runtime": runtime}
+    )
+
+    update = await runner._node_prepare_turn(
+        state={"messages": [{"role": "user", "content": "stale request bundle"}]},
+        runtime=SimpleNamespace(),
+    )
+
+    assert getattr(update["messages"][0], "id", "") == REMOVE_ALL_MESSAGES
+    assert update["messages"][1:] == [
+        {"role": "system", "content": "stable system"},
+        {"role": "user", "content": "latest user"},
+    ]
+    assert dict(synced["state"])["messages"] == [
+        {"role": "system", "content": "stable system"},
+        {"role": "user", "content": "latest user"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -1675,7 +1718,7 @@ async def test_create_agent_middleware_syncs_real_stage_state_before_running_too
                             "arguments": json.dumps(
                                 {
                                     "stage_goal": "Inspect the repository structure",
-                                    "tool_round_budget": 2,
+                                    "tool_round_budget": 5,
                                 }
                             ),
                         },
@@ -1695,7 +1738,7 @@ async def test_create_agent_middleware_syncs_real_stage_state_before_running_too
                 "name": "submit_next_stage",
                 "arguments": {
                     "stage_goal": "Inspect the repository structure",
-                    "tool_round_budget": 2,
+                    "tool_round_budget": 5,
                 },
             }
         ],
@@ -1716,7 +1759,7 @@ async def test_create_agent_middleware_syncs_real_stage_state_before_running_too
     assert isinstance(running_after_submit, dict)
     assert running_after_submit["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
     assert running_after_submit["execution_trace_summary"]["stages"][0]["stage_goal"] == "Inspect the repository structure"
-    assert running_after_submit["execution_trace_summary"]["stages"][0]["tool_round_budget"] == 2
+    assert running_after_submit["execution_trace_summary"]["stages"][0]["tool_round_budget"] == 5
     assert "tool_events" not in running_after_submit
     assert running_after_submit["compression"]["status"] == "running"
 
@@ -1776,7 +1819,7 @@ async def test_create_agent_middleware_syncs_real_stage_state_before_running_too
     assert "tool_events" not in running_tool_snapshot
     stage = running_tool_snapshot["execution_trace_summary"]["stages"][0]
     assert stage["stage_goal"] == "Inspect the repository structure"
-    assert stage["tool_round_budget"] == 2
+    assert stage["tool_round_budget"] == 5
     assert [round_item["tool_names"] for round_item in stage["rounds"]] == [["memory_search"]]
     assert [round_item["tool_call_ids"] for round_item in stage["rounds"]] == [["call-memory-1"]]
     assert [tool["tool_name"] for tool in stage["rounds"][0]["tools"]] == ["memory_search"]
@@ -1918,6 +1961,169 @@ async def test_create_agent_runner_preserves_verified_dispatch_text_from_model()
     assert result["next_step"] == "finalize"
     assert result["final_output"] == text
     assert result["route_kind"] == "task_dispatch"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_reprompts_when_active_stage_has_no_substantive_progress() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            main_task_service=SimpleNamespace(get_task=lambda task_id: None),
+            tools=SimpleNamespace(get=lambda *_: None),
+        )
+    )
+
+    result = await runner._graph_normalize_model_output(
+        {
+            "response_payload": {
+                "content": "我现在继续写文件。",
+                "tool_calls": [],
+                "finish_reason": "stop",
+                "error_text": "",
+                "reasoning_content": None,
+                "thinking_blocks": None,
+            },
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_kind": "normal",
+                        "mode": "自主执行",
+                        "status": "active",
+                        "stage_goal": "write the file",
+                        "completed_stage_summary": "",
+                        "tool_round_budget": 5,
+                        "tool_rounds_used": 0,
+                        "rounds": [],
+                    }
+                ],
+            },
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    assert result["next_step"] == "call_model"
+    assert result["final_output"] == ""
+    assert "repair_overlay_text" in result
+    assert "submit_next_stage" in result["repair_overlay_text"]
+    assert "普通工具" in result["repair_overlay_text"]
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_allows_finalize_after_substantive_stage_progress() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            main_task_service=SimpleNamespace(get_task=lambda task_id: None),
+            tools=SimpleNamespace(get=lambda *_: None),
+        )
+    )
+
+    result = await runner._graph_normalize_model_output(
+        {
+            "response_payload": {
+                "content": "文件已经写好并核对完成。",
+                "tool_calls": [],
+                "finish_reason": "stop",
+                "error_text": "",
+                "reasoning_content": None,
+                "thinking_blocks": None,
+            },
+            "used_tools": ["filesystem_write"],
+            "route_kind": "self_execute",
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_kind": "normal",
+                        "mode": "自主执行",
+                        "status": "active",
+                        "stage_goal": "write the file",
+                        "completed_stage_summary": "",
+                        "tool_round_budget": 5,
+                        "tool_rounds_used": 1,
+                        "rounds": [
+                            {
+                                "round_id": "frontdoor-stage-1:round-1",
+                                "round_index": 1,
+                                "created_at": "2026-04-16T01:00:00+08:00",
+                                "budget_counted": True,
+                                "tool_names": ["filesystem_write"],
+                                "tool_call_ids": ["call-1"],
+                            }
+                        ],
+                    }
+                ],
+            },
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    assert result["next_step"] == "finalize"
+    assert result["final_output"] == "文件已经写好并核对完成。"
+    assert result["route_kind"] == "self_execute"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_keeps_heartbeat_finalize_even_with_empty_active_stage_progress() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            main_task_service=SimpleNamespace(get_task=lambda task_id: None),
+            tools=SimpleNamespace(get=lambda *_: None),
+        )
+    )
+
+    result = await runner._graph_normalize_model_output(
+        {
+            "response_payload": {
+                "content": "后台任务已完成。",
+                "tool_calls": [],
+                "finish_reason": "stop",
+                "error_text": "",
+                "reasoning_content": None,
+                "thinking_blocks": None,
+            },
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "heartbeat_internal": True,
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_kind": "normal",
+                        "mode": "自主执行",
+                        "status": "active",
+                        "stage_goal": "write the file",
+                        "completed_stage_summary": "",
+                        "tool_round_budget": 5,
+                        "tool_rounds_used": 0,
+                        "rounds": [],
+                    }
+                ],
+            },
+            "user_input": {
+                "content": "[SESSION EVENTS]",
+                "metadata": {
+                    "heartbeat_internal": True,
+                    "heartbeat_reason": "task_terminal",
+                    "heartbeat_task_ids": ["task:demo-terminal"],
+                },
+            },
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    assert result["next_step"] == "finalize"
+    assert result["final_output"] == "后台任务已完成。"
 
 
 @pytest.mark.asyncio

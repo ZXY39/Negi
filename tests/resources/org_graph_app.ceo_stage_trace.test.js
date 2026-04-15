@@ -68,6 +68,12 @@ class StubHTMLElement extends StubElement {
         return child;
     }
 
+    remove() {
+        if (!this.parentElement || !Array.isArray(this.parentElement.children)) return;
+        this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+        this.parentElement = null;
+    }
+
     setAttribute(name, value) {
         this.attributes[name] = String(value);
     }
@@ -126,6 +132,11 @@ function makeTurn({ text = "" } = {}) {
         footerEl: { hidden: true },
         toggleEl: { textContent: "", setAttribute() {} },
     };
+}
+
+function noticeText(item) {
+    if (!item || !Array.isArray(item.children) || !item.children[0]) return "";
+    return String(item.children[0].textContent || "");
 }
 
 function loadApp() {
@@ -285,10 +296,10 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
     assert.match(turn.listEl.innerHTML, /\u67e5\u770b\u5f53\u524d\u53ef\u68c0\u7d22\u7684\u957f\u671f\u8bb0\u5fc6/);
     assert.match(turn.listEl.innerHTML, /2\/7/);
     assert.doesNotMatch(turn.listEl.innerHTML, /\u6700\u5927\u8f6e\u6570/);
-    assert.match(turn.listEl.innerHTML, /loaded context/);
+    assert.doesNotMatch(turn.listEl.innerHTML, /loaded context/);
     assert.match(turn.listEl.innerHTML, /memory_search/);
-    assert.equal(renderedSteps, 2);
-    assert.match(turn.metaEl.textContent, /2/);
+    assert.equal(renderedSteps, 1);
+    assert.match(turn.metaEl.textContent, /1/);
     assert.doesNotMatch(turn.listEl.innerHTML, /ceo:stage:inflight-stage-1/);
     assert.doesNotMatch(turn.listEl.innerHTML, /synthetic carryover/);
     assert.doesNotMatch(turn.listEl.innerHTML, /submit_next_stage/);
@@ -308,6 +319,98 @@ test("ceo legacy tool flow hides submit_next_stage events until stage trace arri
     ]);
 
     assert.deepEqual(events, []);
+});
+
+test("ceo loader tool events stack floating composer notices for five seconds", () => {
+    const { applyCeoToolEventToTurn, U, __context } = loadApp();
+    const turn = makeTurn({ text: "" });
+    const scheduled = [];
+
+    __context.setTimeout = (callback, delay) => {
+        scheduled.push({ callback, delay });
+        return scheduled.length;
+    };
+    __context.clearTimeout = () => {};
+    U.ceoContextLoadNotice = new StubHTMLElement();
+    U.ceoContextLoadNotice.hidden = true;
+
+    const firstRendered = applyCeoToolEventToTurn(turn, {
+        tool_name: "load_tool_context",
+        status: "success",
+        text: '{"tool_id":"filesystem_write"}',
+        tool_call_id: "load-tool:1",
+        source: "user",
+    });
+    const secondRendered = applyCeoToolEventToTurn(turn, {
+        tool_name: "load_skill_context",
+        status: "success",
+        text: '{"skill_id":"find-skills"}',
+        tool_call_id: "load-skill:2",
+        source: "user",
+    });
+
+    assert.equal(firstRendered, null);
+    assert.equal(secondRendered, null);
+    assert.equal(turn.listEl.children.length, 0);
+    assert.equal(U.ceoContextLoadNotice.hidden, false);
+    assert.equal(U.ceoContextLoadNotice.children.length, 2);
+    assert.match(noticeText(U.ceoContextLoadNotice.children[0]), /filesystem_write/);
+    assert.match(noticeText(U.ceoContextLoadNotice.children[1]), /find-skills/);
+    assert.deepEqual(scheduled.map((item) => item.delay), [5000, 5000]);
+
+    scheduled[0].callback();
+
+    assert.equal(U.ceoContextLoadNotice.children.length, 1);
+    assert.equal(U.ceoContextLoadNotice.hidden, false);
+
+    scheduled[1].callback();
+
+    assert.equal(U.ceoContextLoadNotice.children.length, 0);
+    assert.equal(U.ceoContextLoadNotice.hidden, true);
+});
+
+test("ceo stage trace hides successful loader tools from interaction flow rendering", () => {
+    const { renderCeoStageTraceIntoTurn, U } = loadApp();
+    const turn = makeTurn({ text: "" });
+
+    U.ceoContextLoadNotice = new StubHTMLElement();
+    U.ceoContextLoadNotice.hidden = true;
+
+    const renderedSteps = renderCeoStageTraceIntoTurn(turn, {
+        stages: [
+            {
+                stage_id: "frontdoor-stage-1",
+                stage_goal: "inspect repository",
+                status: "running",
+                tool_round_budget: 3,
+                rounds: [
+                    {
+                        round_id: "round-1",
+                        round_index: 1,
+                        tools: [
+                            {
+                                tool_name: "load_tool_context",
+                                status: "success",
+                                arguments_text: 'load_tool_context (tool_id=filesystem_write)',
+                                output_text: '{"tool_id":"filesystem_write"}',
+                            },
+                            {
+                                tool_name: "memory_search",
+                                status: "success",
+                                output_text: "ok",
+                            },
+                        ],
+                    },
+                ],
+            },
+        ],
+    });
+
+    assert.equal(renderedSteps, 1);
+    assert.doesNotMatch(turn.listEl.innerHTML, /load_tool_context/);
+    assert.match(turn.listEl.innerHTML, /memory_search/);
+    assert.equal(U.ceoContextLoadNotice.children.length, 1);
+    assert.match(noticeText(U.ceoContextLoadNotice.children[0]), /filesystem_write/);
 });
 
 test("ceo snapshot tool normalization preserves distinct tool_call_id values for same-name events", () => {

@@ -125,6 +125,8 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - 如果语义召回不可用，候选集合直接退化为 `RBAC 可见集合`，而不是停止运行。
 - 对 agent 来说，candidate 仍然是“可见但默认不可直接调用”的资源；candidate 不会自动进入 callable tool 集合。
 - `load_tool_context` / `load_skill_context` 现在也只允许命中当前 canonical candidate 集合，不再允许“RBAC 可见但不在 candidate 中”的旁路加载。
+- 对执行/验收节点，skill 候选不再只依赖当前轮的 `node_runtime_tool_contract` user 消息存活；canonical `candidate_skill_ids` 继续落在 runtime frame，`visible_skills` 也会随 frame 一起持久化，供阶段切换、prompt compaction 之后的下一轮 contract 刷新从 frame 恢复。
+- 维护时如果看到 `load_skill_context` 报“当前运行时候选技能未包含 ...”，不要只检查模型当轮提示里是否还看得到那条 dynamic contract；先看节点 runtime frame 里的 `candidate_skill_ids` / `visible_skills` 是否仍在，若 frame 还在而动态消息丢了，说明是 contract 重建链路问题，而不是 selector 一开始没选中。
 - 节点路径里，语义可用时的 candidate skills / candidate tools 上限都固定为 16；语义不可用时，直接退化为全部 RBAC 可见集合。
 - CEO/frontdoor 路径里，语义可用时默认也按 16 取候选：`skill_inventory_top_k=16`、`extension_tool_top_k=16`；这两个值的实际来源是 `tools/memory_runtime/resource.yaml` / `MemoryAssemblyConfig`，而不是前门内的额外 6/8 fallback。
 - frontdoor 的 `extension_tool_top_k` 现在只控制“最终候选工具数”，不等于 dense 检索宽度；前门会先用更宽的 `tool_limit` 做 dense/rerank，再在最后一层把 candidate 工具收敛到 `extension_tool_top_k`。
@@ -191,6 +193,8 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - `load_tool_context` / `load_skill_context` 属于上下文加载型工具调用，会写入 round 历史，但不会增加当前阶段的 `tool_rounds_used`。
 - execution/acceptance 节点与 CEO/frontdoor 的阶段记账现在都按同一条规则处理这两类 loader；排查预算耗尽时，不要再把它们当成普通预算轮次。
 - 真正的预算结论只看 `rounds[*].budget_counted` 与聚合后的 `tool_rounds_used`，不要根据 transcript 里看到了多少次 loader 调用自行推断。
+- 对 CEO/frontdoor 的浏览器展示，还要再区分“运行时记账”和“用户可见步骤”：成功的 `load_tool_context` / `load_skill_context` 仍会保留在底层 round/tool 历史里，但前端 Interaction Flow 会把它们当成上下文加载提示而不是普通执行步骤。
+- 当前 CEO UI 合同是：成功 loader 调用改为在输入框上方显示短暂的 live-only notice（尽量带上 `tool_id` / `skill_id`），而不是在 assistant 气泡下方长期保留一个工具步骤；如果 loader 失败，维护者仍应优先检查原始 round/tool 数据与 runtime snapshot，而不是只看 notice 是否出现。
 
 ## 4. 一条从上下文到 callable tools 的链路
 
@@ -215,8 +219,10 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - 如果维护者在排查 `load_tool_context` 成功后下一轮仍然只会 `exec` / 再次 `load_tool_context`，优先检查 frontdoor persistent state 里的 `hydrated_tool_names`、`tool_names`、`candidate_tool_names` 是否一起更新，而不是只检查 toolskill 内容。
 - 如果线上 frontdoor 表现与测试里的 graph helper 一致、却和实际会话不一致，先确认 runner 是否真的走显式 graph checkpoint，而不是怀疑还存在第二条生产 promotion 路径；当前生产路径已经不再以 `ceo_agent_middleware.py` 为权威。
 - 对执行节点和检验节点，`callable_tool_names` / `candidate_tools` 现在不应再视为 bootstrap user JSON 的静态字段；它们属于每轮动态 `node_runtime_tool_contract`。
+- 对执行节点和检验节点，`visible_skills` / `candidate_skills` 也属于动态 `node_runtime_tool_contract` 的显示合同；但它们的恢复来源现在以 runtime frame 中的 canonical skill state 为准，而不是只靠旧的 dynamic contract user 消息。
 - 对执行节点和检验节点，还要再区分“当前轮对模型暴露的 callable 合同”和“内部可恢复的完整 callable pool”：前者在无有效阶段时会被收紧到 `submit_next_stage`，后者保留在 `model_visible_tool_selection_trace.full_callable_tool_names` 里供排障。
 - 节点侧的 `runtime frame`、动态 `node_runtime_tool_contract` 与 `runtime-frame-messages:{node_id}` artifact 现在都必须写入同一份收紧后的 callable 列表；如果三者不一致，应按运行时合同分裂排查，而不是先怀疑 prompt 文本。
+- 同理，节点侧的 runtime frame 与重建后的 `node_runtime_tool_contract` 也必须对 skill 候选保持一致：`candidate_skill_ids` 与 `visible_skills` 若在 frame 中存在，就不应因为阶段压缩或 active window 裁剪而在下一轮 contract 中无故清空。
 - 节点执行层的 `stage_gate_error_for_tool()` 仍然保留，它现在是 schema 收紧之外的兜底防线；如果模型通过恢复态或手工构造仍然尝试普通工具，执行层仍应返回 `no active stage` / `current stage budget is exhausted`。
 - 对 CEO/frontdoor，当前 turn 的 callable/candidate tool 合同现在应只存在于 dynamic appendix 和持久状态；不要再从稳定 prompt 前缀或旧 transcript 文本恢复“当前可调用工具”。
 - 排查“load 成功但下一轮没调用”时，优先对照 canonical runtime frame / frontdoor state 与 runtime messages snapshot；如果旧 bootstrap 文本和当前 snapshot 冲突，应以当前 snapshot 为准。

@@ -530,15 +530,6 @@ def _resolve_final_execution_trace_summary(
             summary = None
         if isinstance(summary, dict) and summary:
             return dict(summary)
-    persisted_messages = getattr(persisted_session, "messages", None)
-    for raw in reversed(list(persisted_messages or [])):
-        if not isinstance(raw, dict):
-            continue
-        if str(raw.get("role") or "").strip().lower() != "assistant":
-            continue
-        summary = raw.get("execution_trace_summary")
-        if isinstance(summary, dict) and summary:
-            return dict(summary)
     return {}
 
 

@@ -3057,6 +3057,15 @@ class TaskLogService:
                 'tool_calls': [dict(item) for item in list(next_frame.get('tool_calls') or []) if isinstance(item, dict)],
                 'child_pipelines': [dict(item) for item in list(next_frame.get('child_pipelines') or []) if isinstance(item, dict)],
                 'callable_tool_snapshots': self._sanitize_callable_tool_snapshots(next_frame.get('callable_tool_snapshots') or []),
+                'visible_skills': [
+                    {
+                        'skill_id': str(item.get('skill_id') or '').strip(),
+                        'display_name': str(item.get('display_name') or '').strip(),
+                        'description': str(item.get('description') or '').strip(),
+                    }
+                    for item in list(next_frame.get('visible_skills') or [])
+                    if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
+                ],
                 'callable_tool_names': [
                     str(item or '').strip()
                     for item in list(next_frame.get('callable_tool_names') or [])
@@ -3174,6 +3183,15 @@ class TaskLogService:
             'tool_calls': [dict(item) for item in list(payload.get('tool_calls') or []) if isinstance(item, dict)],
             'child_pipelines': [dict(item) for item in list(payload.get('child_pipelines') or []) if isinstance(item, dict)],
             'callable_tool_snapshots': callable_tool_snapshots,
+            'visible_skills': [
+                {
+                    'skill_id': str(item.get('skill_id') or '').strip(),
+                    'display_name': str(item.get('display_name') or '').strip(),
+                    'description': str(item.get('description') or '').strip(),
+                }
+                for item in list(payload.get('visible_skills') or [])
+                if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
+            ],
             'callable_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('callable_tool_names') or [])

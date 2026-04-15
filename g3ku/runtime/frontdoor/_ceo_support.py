@@ -17,6 +17,7 @@ from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.frontdoor.exposure_resolver import CeoExposureResolver
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
+from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 from main.protocol import now_iso
 from main.runtime.chat_backend import ConfigChatBackend, sanitize_provider_messages
@@ -330,7 +331,7 @@ class CeoFrontDoorSupport:
         if base_messages and str(base_messages[-1].get("role") or "").strip().lower() == "user":
             last_message = dict(base_messages[-1])
             last_content = last_message.get("content")
-            if isinstance(last_content, str):
+            if isinstance(last_content, str) and not is_frontdoor_tool_contract_message(last_message):
                 last_message["content"] = (
                     f"{last_content.rstrip()}\n\n{overlay_block}"
                     if last_content.strip()

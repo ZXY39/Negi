@@ -1853,6 +1853,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             cache_family_revision = str(contract.cache_family_revision or "").strip()
             prompt_cache_key = contract.prompt_cache_key
             prompt_cache_diagnostics = dict(contract.diagnostics)
+        persisted_messages = list(stable_messages)
+        if cron_system_message is not None:
+            insert_at = 1 if persisted_messages and str(persisted_messages[0].get("role") or "").strip().lower() == "system" else 0
+            persisted_messages = [
+                *persisted_messages[:insert_at],
+                cron_system_message,
+                *persisted_messages[insert_at:],
+            ]
         parallel_enabled, max_parallel_tool_calls = self._parallel_tool_settings()
         return {
             "session_key": str(getattr(session.state, "session_key", "") or ""),
@@ -1860,7 +1868,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "approval_request": None,
             "approval_status": "",
             "query_text": query_text,
-            "messages": messages,
+            "messages": persisted_messages,
             "frontdoor_stage_state": current_frontdoor_stage_state,
             "compression_state": dict(
                 getattr(assembly, "trace", {}).get("compression_state_payload")
@@ -1919,12 +1927,34 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             raise RuntimeError("CEO frontdoor exceeded maximum iterations")
 
         langchain_tools = self._build_langchain_tools_for_state(state=state, runtime=runtime)
-        base_messages = list(state.get("messages") or [])
-        if hasattr(self, "_state_message_records"):
-            base_messages = list(getattr(self, "_state_message_records")(base_messages))
+        request_messages = list(state.get("messages") or [])
+        if hasattr(self, "_frontdoor_prompt_contract"):
+            try:
+                callable_tool_names = self._frontdoor_callable_tool_names_for_state(
+                    state,
+                    tool_names=list(state.get("tool_names") or []),
+                )
+                try:
+                    tool_schemas = self._selected_tool_schemas(list(callable_tool_names))
+                except Exception:
+                    tool_schemas = []
+                request_contract = self._frontdoor_prompt_contract(
+                    state=dict(state or {}),
+                    provider_model=str((list(state.get("model_refs") or []) or [""])[0] or "").strip(),
+                    tool_schemas=tool_schemas,
+                    overlay_text=str(state.get("turn_overlay_text") or "").strip(),
+                    session_key=str(state.get("session_key") or "").strip(),
+                    overlay_section_count=len(list(state.get("dynamic_appendix_messages") or [])),
+                )
+                request_messages = list(request_contract.request_messages)
+            except Exception:
+                if hasattr(self, "_state_message_records"):
+                    request_messages = list(getattr(self, "_state_message_records")(request_messages))
+        elif hasattr(self, "_state_message_records"):
+            request_messages = list(getattr(self, "_state_message_records")(request_messages))
         request_messages = self._apply_turn_overlay(
-            base_messages,
-            overlay_text=self._effective_turn_overlay_text(state),
+            request_messages,
+            overlay_text=str(state.get("repair_overlay_text") or "").strip(),
         )
         provider_retry_count = 0
         empty_response_retry_count = 0
@@ -1977,6 +2007,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         used_tools = list(state.get("used_tools") or [])
         xml_repair_attempt_count = int(state.get("xml_repair_attempt_count", 0) or 0)
         stage_gate = self._frontdoor_stage_gate(state)
+        stage_protocol_message = ""
+        if not bool(state.get("heartbeat_internal")) and not bool(state.get("cron_internal")):
+            stage_protocol_message = build_ceo_stage_result_block_message(stage_gate)
 
         if not response_tool_calls and visible_tool_names:
             xml_extraction = extract_tool_calls_from_xml_pseudo_content(
@@ -2087,14 +2120,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         text = self._content_text(response_view.content)
         if text.strip():
-            if (
-                bool(stage_gate.get("transition_required"))
-                and str(current_route_kind or "direct_reply") == "direct_reply"
-                and not str(state.get("repair_overlay_text") or "").strip()
-            ):
+            if stage_protocol_message and not str(state.get("repair_overlay_text") or "").strip():
                 return {
                     "repair_overlay_text": (
-                        build_ceo_stage_result_block_message(stage_gate)
+                        stage_protocol_message
                         or build_ceo_stage_overlay(stage_gate)
                     ),
                     "final_output": "",
@@ -2108,6 +2137,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         if str(response_view.finish_reason or "").strip().lower() == "error":
             raise RuntimeError(str(response_view.error_text or response_view.content or "model response failed"))
+
+        if stage_protocol_message and not str(state.get("repair_overlay_text") or "").strip():
+            return {
+                "repair_overlay_text": (
+                    stage_protocol_message
+                    or build_ceo_stage_overlay(stage_gate)
+                ),
+                "final_output": "",
+                "next_step": "call_model",
+            }
 
         return {
             "final_output": self._empty_response_explanation(used_tools=used_tools),

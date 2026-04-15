@@ -67,6 +67,14 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - Once the session becomes dispatchable again, queued follow-ups are drained in FIFO order into one fresh outbound batch.
 - Each queued item still remains its own user message in the frontend timeline and in transcript persistence; batching only changes how the next LLM call is assembled.
 
+### 3. Context Loader Notices
+
+- Successful CEO/frontdoor `load_tool_context` and `load_skill_context` calls are no longer shown as ordinary `Interaction Flow` steps under the assistant bubble.
+- Instead, the browser shows a short-lived composer notice above the input row, using the loaded `tool_id` or `skill_id` when the runtime payload exposes it.
+- These notices are intentionally stackable rather than single-slot: multiple successful loader calls may coexist in a small floating notice stack above the composer.
+- The intended motion contract is "launch from the composer, settle into the notice stack, then fade out"; the full lifecycle is currently about 5 seconds per notice.
+- That notice is intentionally live-only UI state. It should fade away after a short timeout and must not be appended into the persisted CEO session `messages` list.
+
 ### Manual Pause Resume Rule
 
 - Manual pause now freezes the current turn as the previous round context instead of waiting for a textual resume merge.
@@ -84,7 +92,9 @@ The backend contract behind that UI behavior is:
 - CEO/frontdoor runtime writes precise round tool entries into `frontdoor_stage_state.stages[].rounds[].tools` when a tool cycle finishes.
 - Session snapshot assembly trusts stored `round.tools` first and only backfills legacy rounds by exact `tool_call_id`.
 - A `tool_name`-only fallback is considered a regression because it can make a later same-name tool appear inside an earlier stage round after refresh or transcript reload.
+- The browser still treats `round.tools` as authoritative input, but it filters successful `load_tool_context` / `load_skill_context` entries out of the visible stage-trace tool chips because those calls represent context acquisition rather than user-facing execution work.
 - `ceo.reply.final` 现在会在有可展示阶段摘要时携带权威 final `execution_trace_summary`；浏览器收尾 live turn 时应优先使用这份 final payload，而不是沿用旧的 `inflight_turn.execution_trace_summary` 快照。
+- If the current turn never produced a stage trace, `ceo.reply.final` must omit `execution_trace_summary` entirely rather than backfilling the previous persisted assistant trace. Reusing an older trace under a new direct-reply bubble is a frontend/backend contract bug.
 
 ### Heartbeat Compatibility
 

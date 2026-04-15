@@ -86,6 +86,13 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
         if bool(active.get('final_stage'))
         else ''
     )
+    reminder = ''
+    if not bool(gate.get('transition_required')) and not _stage_has_substantive_progress(active):
+        reminder = (
+            ' 当前阶段已经创建，但还没有任何真实工具执行结果。'
+            ' 不要只输出口头说明，也不要再次调用 `submit_next_stage`；'
+            ' 请先调用一个服务于当前阶段目标的普通工具。'
+        )
     if bool(gate.get('transition_required')):
         return (
             f'当前 CEO 阶段工具轮次预算已耗尽：{used}/{budget}。'
@@ -97,6 +104,7 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
         f'当前普通工具轮次使用：{used}/{budget}。'
         '本轮任何工具调用都必须直接服务于当前阶段目标。'
         f'{final_note}'
+        f'{reminder}'
     )
 
 
@@ -105,6 +113,15 @@ def build_ceo_stage_result_block_message(stage_gate: dict[str, Any] | None) -> s
     active = gate.get('active_stage') if isinstance(gate.get('active_stage'), dict) else None
     if not isinstance(active, dict):
         return ''
+    if not bool(gate.get('transition_required')) and not _stage_has_substantive_progress(active):
+        goal = str(active.get('stage_goal') or '').strip() or '（空）'
+        return (
+            '当前 CEO 阶段已创建，但还没有任何真实工具执行结果。'
+            f'阶段目标：{goal}。'
+            '不要只输出口头说明，也不要再次调用 `submit_next_stage`。'
+            '请立即调用一个服务于当前阶段目标的普通工具；'
+            '至少产生一个真实工具回合后，再继续总结或结束。'
+        )
     if not bool(gate.get('transition_required')):
         return ''
     used = int(active.get('tool_rounds_used') or 0)

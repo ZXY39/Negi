@@ -418,7 +418,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         )
         return {
             **updated_state,
-            "messages": list(contract.request_messages),
+            "messages": list(updated_state.get("messages") or contract.stable_messages),
             "stable_messages": list(contract.stable_messages),
             "dynamic_appendix_messages": list(contract.dynamic_appendix_messages),
             "cache_family_revision": contract.cache_family_revision,
@@ -582,11 +582,16 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
 
     async def _node_prepare_turn(self, state, runtime) -> dict[str, Any]:
         prepared = await self._graph_prepare_turn(state, runtime=runtime)
+        messages = self._state_message_records(prepared.get("messages") or [])
+        update = dict(prepared or {})
+        if "messages" in update:
+            update.pop("messages", None)
+            update.update(self._message_replace_update(messages))
         self._sync_runtime_session_frontdoor_state(
-            state={**dict(state or {}), **dict(prepared or {})},
+            state={**dict(state or {}), **dict(prepared or {}), "messages": messages},
             runtime=runtime,
         )
-        return prepared
+        return update
 
     async def _node_call_model(self, state, runtime) -> dict[str, Any]:
         return await self._graph_call_model(state, runtime=runtime)

@@ -6118,6 +6118,12 @@ class MainRuntimeService:
             for item in list(dynamic_contract_payload.get('visible_skills') or [])
             if isinstance(item, dict)
         ]
+        if not visible_skills:
+            visible_skills = [
+                dict(item)
+                for item in list(frame.get('visible_skills') or [])
+                if isinstance(item, dict)
+            ]
         raw_candidate_skill_ids = list(frame.get('candidate_skill_ids') or [])
         candidate_skill_ids = [
             str(item or '').strip()
@@ -6137,6 +6143,15 @@ class MainRuntimeService:
             for item in raw_selected_skill_ids
             if str(item or '').strip()
         ]
+        if not visible_skills:
+            visible_skills = [
+                {
+                    'skill_id': skill_id,
+                    'display_name': skill_id,
+                    'description': '',
+                }
+                for skill_id in selected_skill_ids
+            ]
         selection = NodeContextSelectionResult(
             mode='persisted_frame_restore',
             memory_search_visible='memory_search' in set(callable_tool_names),
