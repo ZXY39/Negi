@@ -682,10 +682,27 @@ def test_tool_model_visible_schema_api_docs_call_out_non_authoritative_contract(
 @pytest.mark.asyncio
 async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_path) -> None:
     requests: list[dict[str, object]] = []
+    react_log_service = _FakeLogService()
+    react_log_service.execution_stage_gate_snapshot = lambda task_id, node_id: {
+        'has_active_stage': False,
+        'transition_required': False,
+        'active_stage': None,
+    }
 
     class _Backend:
         async def chat(self, **kwargs):
             requests.append(dict(kwargs))
+            frame = react_log_service.read_runtime_frame('task-first-turn-schemas', 'node-first-turn-schemas')
+            assert frame.get('phase') == 'before_model'
+            assert frame.get('callable_tool_names') == ['submit_next_stage']
+            assert frame.get('model_visible_tool_names') == ['submit_next_stage']
+            assert frame.get('model_visible_tool_selection_trace', {}).get('full_callable_tool_names') == [
+                'submit_next_stage',
+                'submit_final_result',
+                'spawn_child_nodes',
+                'stop_tool_execution',
+            ]
+            assert frame.get('model_visible_tool_selection_trace', {}).get('stage_locked_to_submit_next_stage') is True
             return LLMResponse(
                 content='',
                 tool_calls=[
@@ -716,7 +733,7 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
         execution_model_refs=['fake'],
         acceptance_model_refs=['fake'],
     )
-    service._react_loop._log_service = _FakeLogService()
+    service._react_loop._log_service = react_log_service
     service.store = SimpleNamespace(
         get_task=lambda task_id: SimpleNamespace(
             task_id=task_id,
@@ -783,12 +800,7 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
     emitted_tools = list(requests[0].get('tools') or [])
     emitted_tool_names = [item['function']['name'] for item in emitted_tools]
 
-    assert set(emitted_tool_names) == {
-        'stop_tool_execution',
-        'submit_next_stage',
-        'submit_final_result',
-        'spawn_child_nodes',
-    }
+    assert emitted_tool_names == ['submit_next_stage']
     assert 'filesystem' not in emitted_tool_names
     assert 'memory_write' not in emitted_tool_names
 
@@ -845,6 +857,11 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
             'hydrated_executor_names': ['filesystem', 'content'],
         },
     )
+    fake_log_service.execution_stage_gate_snapshot = lambda task_id, node_id: {
+        'has_active_stage': True,
+        'transition_required': False,
+        'active_stage': {'stage_id': 'stage-root-replay'},
+    }
     service.log_service = fake_log_service
     service._react_loop._log_service = fake_log_service
     service.store = SimpleNamespace(
@@ -951,12 +968,9 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
     assert requests
     emitted_tools = list(requests[0].get('tools') or [])
     emitted_tool_names = [item['function']['name'] for item in emitted_tools]
-    assert emitted_tool_names[:4] == [
-        'stop_tool_execution',
-        'submit_next_stage',
-        'submit_final_result',
-        'spawn_child_nodes',
-    ]
+    assert 'submit_next_stage' in emitted_tool_names
+    assert 'submit_final_result' in emitted_tool_names
+    assert 'spawn_child_nodes' in emitted_tool_names
     assert 'filesystem' not in emitted_tool_names
     assert 'content' not in emitted_tool_names
     assert 'filesystem_write' in emitted_tool_names
@@ -1184,6 +1198,11 @@ def test_execution_selector_preserves_prior_model_visible_tool_order_across_turn
             ],
         },
     )
+    log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
+        'has_active_stage': False,
+        'transition_required': False,
+        'active_stage': None,
+    }
     service = object.__new__(MainRuntimeService)
     service.log_service = log_service
     service.store = SimpleNamespace(
@@ -1223,11 +1242,13 @@ def test_execution_selector_preserves_prior_model_visible_tool_order_across_turn
         },
     )
 
-    assert selection['tool_names'] == [
+    assert selection['tool_names'] == ['submit_next_stage']
+    assert selection['trace']['full_callable_tool_names'] == [
         'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
     ]
+    assert selection['trace']['stage_locked_to_submit_next_stage'] is True
 
 
 def test_execution_selector_appends_missing_tools_after_prior_stable_prefix() -> None:
@@ -1249,6 +1270,11 @@ def test_execution_selector_appends_missing_tools_after_prior_stable_prefix() ->
             'model_visible_tool_names': ['submit_next_stage'],
         },
     )
+    log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
+        'has_active_stage': False,
+        'transition_required': False,
+        'active_stage': None,
+    }
     service = object.__new__(MainRuntimeService)
     service.log_service = log_service
     service.store = SimpleNamespace(
@@ -1288,11 +1314,78 @@ def test_execution_selector_appends_missing_tools_after_prior_stable_prefix() ->
         },
     )
 
-    assert selection['tool_names'] == [
+    assert selection['tool_names'] == ['submit_next_stage']
+    assert selection['trace']['full_callable_tool_names'] == [
         'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
     ]
+    assert selection['trace']['stage_locked_to_submit_next_stage'] is True
+
+
+def test_execution_selector_locks_callable_tools_to_submit_next_stage_when_transition_required() -> None:
+    visible_tools = {
+        'filesystem': _ModelSchemaRecordingTool(
+            name='filesystem',
+            authoritative_description='filesystem authoritative schema',
+            model_description='filesystem compact model schema ' + ('F' * 1200),
+        ),
+        'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
+        'submit_final_result': _submit_final_result_tool(),
+        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
+    }
+    log_service = _FakeLogService()
+    log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
+        'has_active_stage': True,
+        'transition_required': True,
+        'active_stage': {'stage_id': 'stage-exhausted'},
+    }
+    service = object.__new__(MainRuntimeService)
+    service.log_service = log_service
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(
+            task_id=task_id,
+            session_id='web:shared',
+            metadata={'core_requirement': 'find terminal workflow skills'},
+        ),
+        get_node=lambda node_id: SimpleNamespace(
+            node_id=node_id,
+            prompt='find terminal workflow skills',
+            goal='find terminal workflow skills',
+            node_kind='execution',
+        ),
+    )
+    service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
+        {
+            'tool_id': 'filesystem',
+            'display_name': 'Filesystem',
+            'description': 'Inspect files',
+            'l0': 'Inspect files',
+            'l1': 'Inspect files',
+            'actions': [{'action_id': 'inspect', 'executor_names': ['filesystem']}],
+        }
+    ]
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-transition-required',
+        node_id='node-transition-required',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-transition-required',
+            'node_id': 'node-transition-required',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert selection['tool_names'] == ['submit_next_stage']
+    assert selection['trace']['full_callable_tool_names'] == [
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+    ]
+    assert selection['trace']['stage_locked_to_submit_next_stage'] is True
 
 
 @pytest.mark.parametrize('loader_tool_name', ['load_tool_context', 'load_tool_context_v2'])
@@ -1337,6 +1430,11 @@ def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
     )
 
     log_service = _FakeLogService()
+    log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
+        'has_active_stage': True,
+        'transition_required': False,
+        'active_stage': {'stage_id': 'stage-1'},
+    }
     service = object.__new__(MainRuntimeService)
     service.log_service = log_service
     service.store = SimpleNamespace(
@@ -3369,6 +3467,11 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
     service.memory_manager = SimpleNamespace(_feature_enabled=lambda _key: False)
     service._node_context_selection_cache = {}
     service.log_service = _FakeLogService()
+    service.log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
+        'has_active_stage': True,
+        'transition_required': False,
+        'active_stage': {'stage_id': 'stage-1'},
+    }
     service.log_service.upsert_frame(
         'task-hydrated-payload',
         {
@@ -3407,6 +3510,84 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
     assert dynamic_payload["callable_tool_names"] == ["load_tool_context", "filesystem_write"]
     assert dynamic_payload["candidate_tools"] == ["content"]
+
+
+@pytest.mark.asyncio
+async def test_enrich_node_messages_locks_callable_tools_to_submit_next_stage_without_valid_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_build_node_context_selection(**kwargs):
+        _ = kwargs
+        return NodeContextSelectionResult(
+            mode="dense_rerank",
+            memory_search_visible=False,
+            selected_skill_ids=["tmux"],
+            selected_tool_names=["content"],
+            candidate_skill_ids=["tmux"],
+            candidate_tool_names=["content"],
+            memory_query="",
+            retrieval_scope={},
+            trace={"mode": "dense_rerank"},
+        )
+
+    monkeypatch.setattr(
+        runtime_service_module,
+        "build_node_context_selection",
+        _fake_build_node_context_selection,
+    )
+
+    service = object.__new__(MainRuntimeService)
+    service.memory_manager = SimpleNamespace(_feature_enabled=lambda _key: False)
+    service._node_context_selection_cache = {}
+    service.log_service = _FakeLogService()
+    service.log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
+        'has_active_stage': False,
+        'transition_required': False,
+        'active_stage': None,
+    }
+    service.log_service.upsert_frame(
+        'task-stage-locked-payload',
+        {
+            'node_id': 'node-stage-locked-payload',
+            'hydrated_executor_names': ['filesystem_write'],
+        },
+    )
+    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='content'),
+        SimpleNamespace(tool_id='filesystem'),
+    ]
+    service.list_visible_skill_resources = lambda *, actor_role, session_id: [
+        SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
+    ]
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content', 'filesystem_write', 'load_tool_context']
+    task = SimpleNamespace(task_id='task-stage-locked-payload', session_id="web:ceo-origin", metadata={})
+    node = SimpleNamespace(
+        task_id='task-stage-locked-payload',
+        node_id='node-stage-locked-payload',
+        prompt="terminal workflow",
+        goal="terminal workflow",
+        node_kind="execution",
+        can_spawn_children=False,
+    )
+
+    enriched = await service._enrich_node_messages(
+        task=task,
+        node=node,
+        messages=[
+            {"role": "system", "content": "base prompt"},
+            {"role": "user", "content": '{"prompt":"terminal workflow"}'},
+        ],
+    )
+
+    dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
+    assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
+    assert dynamic_payload["callable_tool_names"] == ["submit_next_stage"]
+    assert dynamic_payload["candidate_tools"] == ["content"]
+    assert dynamic_payload["model_visible_tool_selection_trace"]["full_callable_tool_names"] == [
+        "load_tool_context",
+        "filesystem_write",
+    ]
+    assert dynamic_payload["model_visible_tool_selection_trace"]["stage_locked_to_submit_next_stage"] is True
 
 
 @pytest.mark.asyncio

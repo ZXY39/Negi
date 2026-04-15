@@ -339,3 +339,29 @@ test("requestDeleteSelectedCeoSessions opens one aggregated confirm dialog", asy
     assert.match(confirmPayload.checkbox.details, /task:1/);
     assert.match(confirmPayload.checkbox.details, /task:2/);
 });
+
+test("requestDeleteSelectedCeoSessions hides task checkbox when no selected sessions have related task records", async () => {
+    const { S, requestDeleteSelectedCeoSessions, __context, __makeSet } = loadApp();
+
+    S.ceoSelectedSessionIds = __makeSet(["web:1"]);
+    S.ceoSessions = [
+        { session_id: "web:1", title: "Local Alpha", session_family: "local" },
+    ];
+    __context.ApiClient.getCeoSessionDeleteCheck = async () => ({
+        related_tasks: { total: 0, deletable: 0, in_progress: 0 },
+        usage: {
+            completed_tasks: [],
+            paused_tasks: [],
+            in_progress_tasks: [],
+        },
+    });
+    vm.runInContext(
+        "openConfirm = (payload) => { this.__capturedConfirm = payload; };",
+        __context
+    );
+
+    await requestDeleteSelectedCeoSessions();
+
+    assert.ok(__context.__capturedConfirm);
+    assert.equal(__context.__capturedConfirm.checkbox, null);
+});

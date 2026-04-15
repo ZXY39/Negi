@@ -192,6 +192,9 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - 节点的 hydration canonical state 继续落在 runtime frame：`hydrated_executor_state` / `hydrated_executor_names`。这是节点生命周期级 LRU，跨多轮、阶段切换、pause/resume、restore 保留。
 - CEO/frontdoor 的 hydration canonical state 继续落在 session/frontdoor state：`RuntimeAgentSession._frontdoor_hydrated_tool_names` 加上前门 persistent state 中的 `hydrated_tool_names`。这是 session 生命周期级 LRU，跨 turn 保留，但每轮都会按当前 RBAC 可见集合过滤。
 - 节点与 CEO/frontdoor 都只允许 concrete tool names 进入 hydration LRU；family id 不能进入 promoted callable 集合。
+- execution / acceptance 节点现在也采用与 CEO/frontdoor 对齐的“有效阶段”合同：只要 `has_active_stage=false`，或当前阶段已经 `transition_required=true`，当前轮真正暴露给模型的 callable tool schemas 就只剩 `submit_next_stage`。
+- 这条节点规则只收紧当前轮 callable，不收紧 candidate。`candidate_tool_names` / `candidate_skill_ids` 继续表达候选集合；维护时如果看到节点动态合同里 callable 只剩 `submit_next_stage`，不要据此误判 selector、hydration 或语义召回已经丢失。
+- 节点侧的完整 callable pool 现在通过 `model_visible_tool_selection_trace.full_callable_tool_names` 保留下来，并随 runtime frame、`node_runtime_tool_contract` 与 `runtime-frame-messages:{node_id}` artifact 一起落盘。排障时应先看这份 trace，再决定是阶段锁定还是工具选择真的出错。
 - restore / recovery 只认 canonical frame / session state 中的 callable/candidate/hydrated/skill 字段；缺失时直接报“运行时工具合同损坏/缺失”，不再回退 bootstrap 文本、旧 transcript 或旧动态消息。
 - 对 CEO/frontdoor，`frontdoor_stage_state`、`compression_state`、`semantic_context_state` 属于受保护运行时状态。工具合同刷新不能覆盖、清空或重置这三份状态。
 
@@ -322,6 +325,7 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 
 - `task_runtime_messages` / `runtime-frame-messages:{node_id}` artifact 不再只是当前 messages 列表；它现在还会在同一个 artifact 里累计 `callable_tool_snapshots`。
 - 每条快照代表一次 `before_model` 轮次下，模型真正看到的 callable/candidate/visible tool 截面，包括 `callable_tool_names`、`candidate_tool_names`、`model_visible_tool_names`、`hydrated_executor_names` 和选择 trace。
+- 对 execution / acceptance 节点，如果当轮没有有效阶段，那么这些快照里的 `callable_tool_names` 与 `model_visible_tool_names` 都应只剩 `submit_next_stage`；候选集合仍保留在 `candidate_tool_names`，完整 callable pool 则留在选择 trace 里。
 - 因此当维护者排查“为什么这一轮模型明明 load 过工具却没法调用”时，先看这个 artifact 里的最近一条快照，再去看 transcript 或 stage trace；它比只看最终 messages 更能说明当轮可调用集到底是什么。
 - 执行节点与检验节点现在都应理解为“两层消息结构”：稳定 bootstrap user JSON 负责任务定义，单独的动态 `node_runtime_tool_contract` user 消息负责当前轮的 callable/candidate tool 合同。
 - 对节点运行时来说，`before_model` 当轮真正下发给模型的 schema 选择结果才是权威工具来源；runtime frame、restore/recovery 和 runtime messages artifact 都应从这份结果派生，而不是再从旧 bootstrap 文本反推。

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import HumanMessage
+from langchain_core.messages.utils import convert_to_messages
 
 import main.runtime.chat_backend as chat_backend_module
 import g3ku.providers.fallback as fallback_module
@@ -372,6 +373,59 @@ async def test_config_chat_backend_sanitizes_internal_runtime_message_fields_bef
             "name": "content",
             "content": "Error: duplicate read-only request",
         },
+    ]
+
+
+def test_sanitize_provider_messages_preserves_langchain_style_tool_call_args_for_round_trip() -> None:
+    sanitized = chat_backend_module.sanitize_provider_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "name": "submit_next_stage",
+                        "args": {
+                            "stage_goal": "create markdown file",
+                            "tool_round_budget": 5,
+                        },
+                        "type": "tool_call",
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert sanitized == [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "submit_next_stage",
+                        "arguments": {
+                            "stage_goal": "create markdown file",
+                            "tool_round_budget": 5,
+                        },
+                    },
+                }
+            ],
+        }
+    ]
+    assert convert_to_messages(sanitized)[0].tool_calls == [
+        {
+            "name": "submit_next_stage",
+            "args": {
+                "stage_goal": "create markdown file",
+                "tool_round_budget": 5,
+            },
+            "id": "call-1",
+            "type": "tool_call",
+        }
     ]
 
 

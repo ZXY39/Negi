@@ -94,6 +94,7 @@ from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.node_runner import NodeRunner
 from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.react_loop import ReActToolLoop
+from main.runtime.stage_budget import STAGE_TOOL_NAME, callable_tool_names_for_stage_iteration
 from main.runtime.task_actor_service import TaskActorService
 from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
 from main.service.create_async_task_contract import (
@@ -4188,7 +4189,13 @@ class MainRuntimeService:
             promoted_tool_names=list(promoted_hydrated_executor_names),
             schema_size_by_executor=schema_size_by_executor,
         )
-        callable_tool_names = self._normalized_tool_name_list(list(selection.hydrated_tool_names or []))
+        full_callable_tool_names = self._normalized_tool_name_list(list(selection.hydrated_tool_names or []))
+        model_visible_callable_tool_names = self._model_visible_callable_tool_names_for_node(
+            task_id=str(task_id or '').strip(),
+            node_id=str(node_id or '').strip(),
+            node_kind=normalized_node_kind,
+            callable_tool_names=full_callable_tool_names,
+        )
         log_service = getattr(self, 'log_service', None)
         read_runtime_frame = getattr(log_service, 'read_runtime_frame', None)
         prior_selected_tool_names: list[str] = []
@@ -4202,9 +4209,9 @@ class MainRuntimeService:
                 ]
         selected_tool_names: list[str] = []
         for name in prior_selected_tool_names:
-            if name in callable_tool_names and name not in selected_tool_names:
+            if name in model_visible_callable_tool_names and name not in selected_tool_names:
                 selected_tool_names.append(name)
-        for name in callable_tool_names:
+        for name in model_visible_callable_tool_names:
             if name not in selected_tool_names:
                 selected_tool_names.append(name)
         final_schema_chars = sum(
@@ -4229,7 +4236,12 @@ class MainRuntimeService:
                 'session_id': session_id,
                 'actor_role': actor_role,
                 'rbac_visible_tool_names': list(visible_rbac_tool_names),
-                'callable_tool_names': list(callable_tool_names),
+                'callable_tool_names': list(full_callable_tool_names),
+                'full_callable_tool_names': list(full_callable_tool_names),
+                'stage_locked_to_submit_next_stage': (
+                    list(model_visible_callable_tool_names) == [STAGE_TOOL_NAME]
+                    and list(full_callable_tool_names) != [STAGE_TOOL_NAME]
+                ),
                 'requested_promoted_hydrated_executor_names': list(hydrated_executor_names),
                 'promoted_hydrated_executor_names': list(promoted_only_hydrated_executor_names),
                 'candidate_tool_names': list(candidate_tool_names),
@@ -4536,6 +4548,38 @@ class MainRuntimeService:
                 callable_names.append(name)
                 seen.add(name)
         return callable_names
+
+    def _model_visible_callable_tool_names_for_node(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        node_kind: str,
+        callable_tool_names: list[str] | None,
+        stage_payload: dict[str, Any] | None = None,
+    ) -> list[str]:
+        full_callable_tool_names = self._normalized_tool_name_list(list(callable_tool_names or []))
+        if str(node_kind or '').strip().lower() not in {'execution', 'acceptance'}:
+            return full_callable_tool_names
+        effective_stage_payload = dict(stage_payload or {}) if isinstance(stage_payload, dict) else {}
+        if not effective_stage_payload:
+            log_service = getattr(self, 'log_service', None)
+            stage_payload_supplier = getattr(log_service, 'execution_stage_prompt_payload', None)
+            if callable(stage_payload_supplier):
+                supplied_stage_payload = stage_payload_supplier(
+                    str(task_id or '').strip(),
+                    str(node_id or '').strip(),
+                )
+                if isinstance(supplied_stage_payload, dict):
+                    effective_stage_payload = dict(supplied_stage_payload)
+        if not effective_stage_payload:
+            return full_callable_tool_names
+        return callable_tool_names_for_stage_iteration(
+            full_callable_tool_names,
+            has_active_stage=bool(effective_stage_payload.get('has_active_stage')),
+            transition_required=bool(effective_stage_payload.get('transition_required')),
+            stage_tool_name=STAGE_TOOL_NAME,
+        )
 
     def _candidate_tool_names_for_node(
         self,
@@ -6275,20 +6319,14 @@ class MainRuntimeService:
                 continue
             seen_selected_skill_ids.add(normalized_skill_id)
             selected_visible_skills.append(record)
-        callable_tool_names = self._callable_tool_names_for_node(
+        full_callable_tool_names = self._callable_tool_names_for_node(
             task=task,
             node=node,
             visible_tool_names=list(inputs.get('visible_tool_names') or []),
         )
-        used_selector_selected_as_callable = not bool(callable_tool_names)
+        used_selector_selected_as_callable = not bool(full_callable_tool_names)
         if used_selector_selected_as_callable:
-            callable_tool_names = self._normalized_tool_name_list(list(getattr(selection, 'selected_tool_names', []) or []))
-        candidate_tool_names = self._candidate_tool_names_for_node(
-            task=task,
-            node=node,
-            selection=selection,
-            visible_tool_names=list(inputs.get('visible_tool_names') or []),
-        )
+            full_callable_tool_names = self._normalized_tool_name_list(list(getattr(selection, 'selected_tool_names', []) or []))
         stage_payload = {}
         log_service = getattr(self, 'log_service', None)
         stage_payload_supplier = getattr(log_service, 'execution_stage_prompt_payload', None)
@@ -6299,6 +6337,19 @@ class MainRuntimeService:
             )
             if isinstance(supplied_stage_payload, dict):
                 stage_payload = dict(supplied_stage_payload)
+        callable_tool_names = self._model_visible_callable_tool_names_for_node(
+            task_id=str(getattr(task, 'task_id', '') or '').strip(),
+            node_id=str(getattr(node, 'node_id', '') or '').strip(),
+            node_kind=str(getattr(node, 'node_kind', '') or '').strip(),
+            callable_tool_names=full_callable_tool_names,
+            stage_payload=stage_payload,
+        )
+        candidate_tool_names = self._candidate_tool_names_for_node(
+            task=task,
+            node=node,
+            selection=selection,
+            visible_tool_names=list(inputs.get('visible_tool_names') or []),
+        )
         enriched = upsert_node_dynamic_contract_message(
             list(messages or []),
             NodeRuntimeToolContract(
@@ -6316,7 +6367,14 @@ class MainRuntimeService:
                     session_id=session_key,
                 ),
                 lightweight_tool_ids=[],
-                selection_trace={'mode': 'node_context_enricher'},
+                selection_trace={
+                    'mode': 'node_context_enricher',
+                    'full_callable_tool_names': list(full_callable_tool_names),
+                    'stage_locked_to_submit_next_stage': (
+                        list(callable_tool_names) == [STAGE_TOOL_NAME]
+                        and list(full_callable_tool_names) != [STAGE_TOOL_NAME]
+                    ),
+                },
             ),
         )
         manager = getattr(self, 'memory_manager', None)

@@ -1502,15 +1502,40 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     def _tool_call_payloads_from_calls(calls: list[Any]) -> list[dict[str, Any]]:
         payloads: list[dict[str, Any]] = []
         for call in list(calls or []):
+            raw_arguments: Any = {}
             if isinstance(call, dict):
-                arguments = call.get("args", call.get("arguments", {}))
-                name = str(call.get("name") or "").strip()
+                function = call.get("function") if isinstance(call.get("function"), dict) else {}
+                name = str(function.get("name") or call.get("name") or "").strip()
                 call_id = str(call.get("id") or "")
+                if "arguments" in function:
+                    raw_arguments = function.get("arguments")
+                elif "args" in function:
+                    raw_arguments = function.get("args")
+                elif "arguments" in call:
+                    raw_arguments = call.get("arguments")
+                elif "args" in call:
+                    raw_arguments = call.get("args")
             else:
-                arguments = getattr(call, "arguments", getattr(call, "args", {}))
-                name = str(getattr(call, "name", "") or "").strip()
+                function = getattr(call, "function", None)
+                name = str(getattr(function, "name", "") or getattr(call, "name", "") or "").strip()
                 call_id = str(getattr(call, "id", "") or "")
-            if not isinstance(arguments, dict):
+                if hasattr(function, "arguments"):
+                    raw_arguments = getattr(function, "arguments")
+                elif hasattr(function, "args"):
+                    raw_arguments = getattr(function, "args")
+                elif hasattr(call, "arguments"):
+                    raw_arguments = getattr(call, "arguments")
+                elif hasattr(call, "args"):
+                    raw_arguments = getattr(call, "args")
+            if isinstance(raw_arguments, str):
+                try:
+                    parsed_arguments = json.loads(raw_arguments)
+                except Exception:
+                    parsed_arguments = None
+                arguments = dict(parsed_arguments) if isinstance(parsed_arguments, dict) else {}
+            elif isinstance(raw_arguments, dict):
+                arguments = dict(raw_arguments)
+            else:
                 arguments = {}
             payloads.append(
                 {

@@ -46,6 +46,7 @@ from main.runtime.stage_budget import (
     STAGE_TOOL_NAME,
     STAGE_TOOL_ROUND_BUDGET_MAX,
     STAGE_TOOL_ROUND_BUDGET_MIN,
+    callable_tool_names_for_stage_iteration,
     stage_gate_error_for_tool,
     visible_tools_for_stage_iteration,
 )
@@ -213,6 +214,7 @@ class ReActToolLoop:
                 node_id=node.node_id,
                 node_kind=node.node_kind,
                 visible_tools=visible_tools,
+                stage_gate=stage_gate,
                 runtime_context=runtime_context,
             )
             tool_schemas = [tool.to_model_schema() for tool in model_visible_tools.values()]
@@ -1584,6 +1586,7 @@ class ReActToolLoop:
         node_id: str,
         node_kind: str,
         visible_tools: dict[str, Tool],
+        stage_gate: dict[str, Any],
         runtime_context: dict[str, Any],
     ) -> tuple[dict[str, Tool], dict[str, Any]]:
         selected_tools = dict(visible_tools or {})
@@ -1596,44 +1599,73 @@ class ReActToolLoop:
         if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
             return selected_tools, selection_payload
         selector = getattr(self, '_model_visible_tool_schema_selector', None)
-        if not callable(selector):
-            return selected_tools, selection_payload
-        raw_selection = selector(
-            task_id=str(task_id or '').strip(),
-            node_id=str(node_id or '').strip(),
-            node_kind=str(node_kind or '').strip(),
-            visible_tools=dict(visible_tools or {}),
-            runtime_context=dict(runtime_context or {}),
+        if callable(selector):
+            raw_selection = selector(
+                task_id=str(task_id or '').strip(),
+                node_id=str(node_id or '').strip(),
+                node_kind=str(node_kind or '').strip(),
+                visible_tools=dict(visible_tools or {}),
+                runtime_context=dict(runtime_context or {}),
+            )
+            if isinstance(raw_selection, dict):
+                requested_names: list[str] = []
+                seen_requested_names: set[str] = set()
+                for item in list(raw_selection.get('tool_names') or []):
+                    normalized = str(item or '').strip()
+                    if not normalized or normalized in seen_requested_names or normalized not in visible_tools:
+                        continue
+                    seen_requested_names.add(normalized)
+                    requested_names.append(normalized)
+                if requested_names:
+                    selected_tools = {name: visible_tools[name] for name in requested_names}
+                    selection_payload['tool_names'] = list(requested_names)
+                selection_payload['lightweight_tool_ids'] = [
+                    str(item or '').strip()
+                    for item in list(raw_selection.get('lightweight_tool_ids') or [])
+                    if str(item or '').strip()
+                ]
+                selection_payload['hydrated_executor_names'] = [
+                    str(item or '').strip()
+                    for item in list(raw_selection.get('hydrated_executor_names') or [])
+                    if str(item or '').strip()
+                ]
+                selection_payload['candidate_tool_names'] = [
+                    str(item or '').strip()
+                    for item in list(raw_selection.get('candidate_tool_names') or [])
+                    if str(item or '').strip()
+                ]
+                selection_payload['trace'] = dict(raw_selection.get('trace') or {})
+        selection_trace = dict(selection_payload.get('trace') or {})
+        traced_full_callable_tool_names = self._normalized_name_list(
+            list(
+                selection_trace.get('full_callable_tool_names')
+                or selection_trace.get('callable_tool_names')
+                or []
+            )
         )
-        if not isinstance(raw_selection, dict):
-            return selected_tools, selection_payload
-        requested_names: list[str] = []
-        seen_requested_names: set[str] = set()
-        for item in list(raw_selection.get('tool_names') or []):
-            normalized = str(item or '').strip()
-            if not normalized or normalized in seen_requested_names or normalized not in visible_tools:
-                continue
-            seen_requested_names.add(normalized)
-            requested_names.append(normalized)
-        if requested_names:
-            selected_tools = {name: visible_tools[name] for name in requested_names}
-            selection_payload['tool_names'] = list(requested_names)
-        selection_payload['lightweight_tool_ids'] = [
-            str(item or '').strip()
-            for item in list(raw_selection.get('lightweight_tool_ids') or [])
-            if str(item or '').strip()
-        ]
-        selection_payload['hydrated_executor_names'] = [
-            str(item or '').strip()
-            for item in list(raw_selection.get('hydrated_executor_names') or [])
-            if str(item or '').strip()
-        ]
-        selection_payload['candidate_tool_names'] = [
-            str(item or '').strip()
-            for item in list(raw_selection.get('candidate_tool_names') or [])
-            if str(item or '').strip()
-        ]
-        selection_payload['trace'] = dict(raw_selection.get('trace') or {})
+        full_callable_tool_names = traced_full_callable_tool_names or self._normalized_name_list(
+            list(selection_payload.get('tool_names') or list(selected_tools.keys()))
+        )
+        model_visible_callable_tool_names = callable_tool_names_for_stage_iteration(
+            full_callable_tool_names,
+            has_active_stage=bool(stage_gate.get('has_active_stage')),
+            transition_required=bool(stage_gate.get('transition_required')),
+            stage_tool_name=STAGE_TOOL_NAME,
+        )
+        selected_tools = {
+            name: visible_tools[name]
+            for name in model_visible_callable_tool_names
+            if name in visible_tools
+        }
+        selection_payload['tool_names'] = list(model_visible_callable_tool_names)
+        selection_payload['trace'] = {
+            **selection_trace,
+            'full_callable_tool_names': list(full_callable_tool_names),
+            'stage_locked_to_submit_next_stage': (
+                list(model_visible_callable_tool_names) == [STAGE_TOOL_NAME]
+                and list(full_callable_tool_names) != [STAGE_TOOL_NAME]
+            ),
+        }
         return selected_tools, selection_payload
 
     @staticmethod

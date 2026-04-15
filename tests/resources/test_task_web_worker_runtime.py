@@ -3210,6 +3210,11 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_after
         assert task is not None
         assert root is not None
 
+        service.log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
+            "has_active_stage": True,
+            "transition_required": False,
+            "active_stage": {"stage_id": "stage-1"},
+        }
         service.log_service.upsert_frame(
             record.task_id,
             {
@@ -3243,6 +3248,62 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_after
 
 
 @pytest.mark.asyncio
+async def test_execution_node_build_messages_locks_callable_tools_to_submit_next_stage_without_active_stage(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        service.log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
+            "has_active_stage": False,
+            "transition_required": False,
+            "active_stage": None,
+        }
+        service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "messages": [
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": json.dumps({"prompt": "write file"}, ensure_ascii=False)},
+                ],
+                "callable_tool_names": ["submit_next_stage", "submit_final_result", "spawn_child_nodes", "load_tool_context"],
+                "candidate_tool_names": ["filesystem_write"],
+                "selected_skill_ids": [],
+                "candidate_skill_ids": [],
+                "hydrated_executor_state": ["filesystem_write"],
+                "hydrated_executor_names": ["filesystem_write"],
+            },
+            publish_snapshot=False,
+        )
+
+        messages = await service.node_runner._build_messages(task=task, node=root)
+
+        assert len(messages) >= 3
+        payload = json.loads(messages[-1]["content"])
+        assert payload["message_type"] == "node_runtime_tool_contract"
+        assert payload["callable_tool_names"] == ["submit_next_stage"]
+        assert payload["model_visible_tool_selection_trace"]["stage_locked_to_submit_next_stage"] is True
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_after_hydration(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -3270,6 +3331,11 @@ async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_afte
             metadata={"final_acceptance": True},
         )
 
+        service.log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
+            "has_active_stage": True,
+            "transition_required": False,
+            "active_stage": {"stage_id": "stage-acceptance-1"},
+        }
         service.log_service.upsert_frame(
             record.task_id,
             {

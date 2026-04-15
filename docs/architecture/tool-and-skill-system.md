@@ -179,6 +179,7 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - `_graph_execute_tools()` 现在还必须复用与模型暴露阶段相同的 runtime-visible tool bundle，其中包含运行时注入的 `submit_next_stage`。如果维护者再次在执行环节只按 `state.tool_names` 重建工具映射，就会重新制造“模型能看到 `submit_next_stage`，但执行时报 `tool not available`”的分裂。
 - CEO/frontdoor 的 stage gate 现在由 `execute_tools` 真正执行，而不是只靠 prompt 约束。普通工具在无活动阶段或预算耗尽时会直接收到 gate error；`submit_next_stage` 与普通工具混在同一批 tool calls 里时，整批会被拒绝，要求模型先单独完成阶段切换。
 - CEO/frontdoor 现在还多了一层更前置的 contract 收紧：当当前没有“有效阶段”时，模型真正看到的 callable tool 列表只剩 `submit_next_stage`。这条规则同样适用于阶段预算已耗尽、必须换阶段的时刻。
+- execution / acceptance 节点现在也采用同样的 contract 收紧，而且没有类似 `cron_internal` 的例外：只要没有有效阶段，当前轮模型可见的 callable tool 列表就只剩 `submit_next_stage`。
 - 当前保留的特例是 `cron_internal`：为了继续支持 cron 自移除，这类内部轮次不会被收紧到只剩 `submit_next_stage`。
 - `submit_next_stage` 的阶段预算现在在 execution / acceptance / CEO-frontdoor 三条路径上统一为 `5-15`；运行时仍允许在预算未耗尽前提前切到下一阶段，因此预算应理解为“本阶段声明的上限窗口”，而不是“必须烧满的最小轮数”。
 - 这不影响 candidate 语义。`candidate_tool_names` / `candidate_skill_ids` 仍继续表达“RBAC 可见 ∩ 语义召回命中”的候选集合，只是这些候选在无有效阶段时不会同时出现在 callable tool schemas 里。
@@ -214,6 +215,9 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - 如果维护者在排查 `load_tool_context` 成功后下一轮仍然只会 `exec` / 再次 `load_tool_context`，优先检查 frontdoor persistent state 里的 `hydrated_tool_names`、`tool_names`、`candidate_tool_names` 是否一起更新，而不是只检查 toolskill 内容。
 - 如果线上 frontdoor 表现与测试里的 graph helper 一致、却和实际会话不一致，先确认 runner 是否真的走显式 graph checkpoint，而不是怀疑还存在第二条生产 promotion 路径；当前生产路径已经不再以 `ceo_agent_middleware.py` 为权威。
 - 对执行节点和检验节点，`callable_tool_names` / `candidate_tools` 现在不应再视为 bootstrap user JSON 的静态字段；它们属于每轮动态 `node_runtime_tool_contract`。
+- 对执行节点和检验节点，还要再区分“当前轮对模型暴露的 callable 合同”和“内部可恢复的完整 callable pool”：前者在无有效阶段时会被收紧到 `submit_next_stage`，后者保留在 `model_visible_tool_selection_trace.full_callable_tool_names` 里供排障。
+- 节点侧的 `runtime frame`、动态 `node_runtime_tool_contract` 与 `runtime-frame-messages:{node_id}` artifact 现在都必须写入同一份收紧后的 callable 列表；如果三者不一致，应按运行时合同分裂排查，而不是先怀疑 prompt 文本。
+- 节点执行层的 `stage_gate_error_for_tool()` 仍然保留，它现在是 schema 收紧之外的兜底防线；如果模型通过恢复态或手工构造仍然尝试普通工具，执行层仍应返回 `no active stage` / `current stage budget is exhausted`。
 - 对 CEO/frontdoor，当前 turn 的 callable/candidate tool 合同现在应只存在于 dynamic appendix 和持久状态；不要再从稳定 prompt 前缀或旧 transcript 文本恢复“当前可调用工具”。
 - 排查“load 成功但下一轮没调用”时，优先对照 canonical runtime frame / frontdoor state 与 runtime messages snapshot；如果旧 bootstrap 文本和当前 snapshot 冲突，应以当前 snapshot 为准。
 - 排查“某个工具为什么没进前门候选集”时，优先看 `frontdoor_selection_debug.semantic_frontdoor` 与 `frontdoor_selection_debug.tool_selection`：

@@ -19,6 +19,7 @@ from main.runtime.node_prompt_contract import NodeRuntimeToolContract, extract_n
 from main.runtime.stage_budget import (
     STAGE_TOOL_NAME,
     STAGE_TOOL_ROUND_BUDGET_MIN,
+    callable_tool_names_for_stage_iteration,
     visible_tools_for_stage_iteration,
 )
 from main.runtime.stage_messages import build_execution_stage_overlay
@@ -718,6 +719,30 @@ def test_stage_visibility_keeps_all_tools_visible_before_stage_and_after_budget(
 
     assert set(before_stage) == {STAGE_TOOL_NAME, 'ordinary_tool'}
     assert set(exhausted_stage) == {STAGE_TOOL_NAME, 'ordinary_tool'}
+
+
+def test_callable_tool_names_for_stage_iteration_only_exposes_submit_next_stage_without_valid_stage() -> None:
+    tool_names = [STAGE_TOOL_NAME, 'submit_final_result', 'load_tool_context', 'filesystem_write']
+
+    before_stage = callable_tool_names_for_stage_iteration(
+        tool_names,
+        has_active_stage=False,
+        transition_required=False,
+    )
+    exhausted_stage = callable_tool_names_for_stage_iteration(
+        tool_names,
+        has_active_stage=True,
+        transition_required=True,
+    )
+    active_stage = callable_tool_names_for_stage_iteration(
+        tool_names,
+        has_active_stage=True,
+        transition_required=False,
+    )
+
+    assert before_stage == [STAGE_TOOL_NAME]
+    assert exhausted_stage == [STAGE_TOOL_NAME]
+    assert active_stage == tool_names
 
 
 def test_spawn_child_nodes_tool_requires_execution_policy_for_each_child() -> None:

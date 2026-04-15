@@ -2414,6 +2414,39 @@ def test_create_agent_request_render_serializes_frontdoor_tool_contract_message(
     assert payload["candidate_tool_names"] == ["filesystem_write"]
 
 
+def test_create_agent_request_render_repairs_null_tool_call_arguments() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    _, request_messages = runner._render_request_records(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "submit_next_stage",
+                            "arguments": None,
+                        },
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert len(request_messages) == 1
+    assert getattr(request_messages[0], "tool_calls", None) == [
+        {
+            "name": "submit_next_stage",
+            "args": {},
+            "id": "call-1",
+            "type": "tool_call",
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_create_agent_dynamic_appendix_request_preserves_live_assistant_and_tool_messages() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())

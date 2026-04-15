@@ -6517,6 +6517,7 @@ function buildCeoBulkDeleteSummary(items = []) {
         checkboxLabel: "清除关联任务",
         checkboxHint: formatSessionDeleteHint(relatedPayload),
         checkboxDetails: formatSessionDeleteTaskDetails(relatedPayload),
+        hasRelatedTaskRecords: normalizeInt(relatedPayload?.related_tasks?.total, 0) > 0,
         sessionIds: entries.map((entry) => entry.sessionId),
     };
 }
@@ -6674,12 +6675,12 @@ async function requestDeleteSelectedCeoSessions() {
         confirmLabel: "删除",
         confirmKind: "danger",
         returnFocus: U.ceoSessionBulkToggle || U.ceoNewSession,
-        checkbox: {
+        checkbox: summary.hasRelatedTaskRecords ? {
             label: summary.checkboxLabel,
             hint: summary.checkboxHint,
             details: summary.checkboxDetails,
             checked: false,
-        },
+        } : null,
         onConfirm: ({ checked } = {}) => performDeleteSelectedCeoSessions(summary.sessionIds, { deleteTaskRecords: !!checked }),
     });
 }

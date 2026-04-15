@@ -73,6 +73,27 @@ def response_tool_calls_count_against_stage_budget(
     )
 
 
+def callable_tool_names_for_stage_iteration(
+    tool_names: list[str] | None,
+    *,
+    has_active_stage: bool,
+    transition_required: bool,
+    stage_tool_name: str = STAGE_TOOL_NAME,
+) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in list(tool_names or []):
+        normalized = str(item or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    if not has_active_stage or transition_required:
+        normalized_stage_tool_name = str(stage_tool_name or "").strip() or STAGE_TOOL_NAME
+        return [normalized_stage_tool_name]
+    return ordered
+
+
 def visible_tools_for_stage_iteration(
     tools: dict[str, Any],
     *,

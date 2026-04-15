@@ -31,6 +31,7 @@ from g3ku.utils.api_keys import iter_api_key_retry_slots
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
 from main.runtime.node_turn_controller import NodeTurnLease
 _MODEL_CHAIN_HARD_TIMEOUT_SAFETY_SECONDS = 15.0
+_MISSING = object()
 
 
 class ChatBackend(Protocol):
@@ -76,7 +77,18 @@ def _normalize_provider_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
             continue
         function = item.get('function') if isinstance(item.get('function'), dict) else {}
         name = str(function.get('name') or item.get('name') or '').strip()
-        arguments = function.get('arguments', item.get('arguments'))
+        arguments = _MISSING
+        for container in (function, item):
+            if not isinstance(container, dict):
+                continue
+            if 'arguments' in container:
+                arguments = container.get('arguments')
+                break
+            if 'args' in container:
+                arguments = container.get('args')
+                break
+        if arguments is _MISSING or arguments is None or not isinstance(arguments, dict | str):
+            arguments = {}
         call_id = str(item.get('id') or '').strip()
         payload: dict[str, Any] = {
             'type': 'function',

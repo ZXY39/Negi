@@ -101,7 +101,15 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
 
     def _message_record(self, value: Any) -> dict[str, Any]:
         if isinstance(value, dict):
-            return dict(value)
+            record = dict(value)
+            role = self._message_role(record)
+            if role == "assistant":
+                tool_calls = list(record.get("tool_calls") or [])
+                if tool_calls:
+                    record["tool_calls"] = self._assistant_tool_calls_from_payloads(
+                        self._tool_call_payloads_from_calls(tool_calls)
+                    )
+            return record
         role = self._message_role(value)
         record: dict[str, Any] = {
             "role": role,
