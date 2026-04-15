@@ -182,6 +182,9 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - frontdoor 的 callable tool 集合并不只来自 fixed builtin；它还会把当前 turn 内已经 hydration 的 concrete tools 合并进去。
 - frontdoor 的 `candidate_tool_names` 必须排除已经进入 hydrated state 的工具；如果一个工具同时出现在 candidate 列表和 callable tool schemas 里，通常表示状态推进漏了。
 - 如果维护者在排查 `load_tool_context` 成功后下一轮仍然只会 `exec` / 再次 `load_tool_context`，优先检查 frontdoor persistent state 里的 `hydrated_tool_names`、`tool_names`、`candidate_tool_names` 是否一起更新，而不是只检查 toolskill 内容。
+- 对执行节点和检验节点，`callable_tool_names` / `candidate_tools` 现在不应再视为 bootstrap user JSON 的静态字段；它们属于每轮动态 `node_runtime_tool_contract`。
+- 对 CEO/frontdoor，当前 turn 的 callable/candidate tool 合同现在应只存在于 dynamic appendix 和持久状态；不要再从稳定 prompt 前缀或旧 transcript 文本恢复“当前可调用工具”。
+- 排查“load 成功但下一轮没调用”时，优先对照 canonical runtime frame / frontdoor state 与 runtime messages snapshot；如果旧 bootstrap 文本和当前 snapshot 冲突，应以当前 snapshot 为准。
 
 对 CEO frontdoor 还要额外记住一个优先级边界：
 

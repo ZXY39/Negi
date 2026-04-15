@@ -27,6 +27,7 @@ from .state_models import (
     initial_persistent_state,
 )
 from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION, build_frontdoor_prompt_contract
+from .tool_contract import build_frontdoor_tool_contract, upsert_frontdoor_tool_contract_message
 
 
 class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
@@ -269,12 +270,19 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         overlay_text: str = "",
     ) -> list[dict[str, Any]]:
         raw_dynamic_messages = list(state.get("dynamic_appendix_messages") or [])
-        if raw_dynamic_messages:
-            return [self._message_record(item) for item in raw_dynamic_messages]
+        normalized_dynamic_messages = [self._message_record(item) for item in raw_dynamic_messages]
         normalized_overlay_text = str(overlay_text or "").strip()
-        if not normalized_overlay_text:
-            return []
-        return [{"role": "assistant", "content": normalized_overlay_text}]
+        if not normalized_dynamic_messages and normalized_overlay_text:
+            normalized_dynamic_messages = [{"role": "assistant", "content": normalized_overlay_text}]
+        frontdoor_tool_contract = build_frontdoor_tool_contract(
+            callable_tool_names=list(state.get("tool_names") or []),
+            candidate_tool_names=list(state.get("candidate_tool_names") or []),
+            hydrated_tool_names=list(state.get("hydrated_tool_names") or []),
+            frontdoor_stage_state=dict(state.get("frontdoor_stage_state") or {}),
+            visible_skill_ids=list(state.get("visible_skill_ids") or []),
+            contract_revision=self._prompt_cache_family_revision(state),
+        )
+        return upsert_frontdoor_tool_contract_message(normalized_dynamic_messages, frontdoor_tool_contract)
 
     def _render_request_records(
         self,

@@ -3192,6 +3192,165 @@ async def test_spawn_children_materializes_batch_children_before_pipeline_comple
 
 
 @pytest.mark.asyncio
+async def test_execution_node_build_messages_appends_dynamic_tool_contract_after_hydration(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "messages": [
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": json.dumps({"prompt": "write file"}, ensure_ascii=False)},
+                ],
+                "hydrated_executor_names": ["filesystem_write"],
+            },
+            publish_snapshot=False,
+        )
+
+        messages = await service.node_runner._build_messages(task=task, node=root)
+
+        assert len(messages) >= 3
+        payload = json.loads(messages[-1]["content"])
+        assert payload["message_type"] == "node_runtime_tool_contract"
+        assert "filesystem_write" in payload["callable_tool_names"]
+        assert "filesystem_write" not in payload["candidate_tools"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_after_hydration(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        acceptance = service.node_runner.create_acceptance_node(
+            task=task,
+            accepted_node=root,
+            goal="验收写盘结果",
+            acceptance_prompt="检查文件已创建并包含时间",
+            parent_node_id=root.node_id,
+            metadata={"final_acceptance": True},
+        )
+
+        service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": acceptance.node_id,
+                "depth": acceptance.depth,
+                "node_kind": acceptance.node_kind,
+                "phase": "before_model",
+                "messages": [
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": json.dumps({"prompt": "verify file"}, ensure_ascii=False)},
+                ],
+                "hydrated_executor_names": ["content_open"],
+            },
+            publish_snapshot=False,
+        )
+
+        messages = await service.node_runner._build_messages(task=task, node=acceptance)
+
+        assert len(messages) >= 3
+        payload = json.loads(messages[-1]["content"])
+        assert payload["message_type"] == "node_runtime_tool_contract"
+        assert "content_open" in payload["callable_tool_names"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_restore_node_context_selection_prefers_frame_contract_over_stale_bootstrap_payload(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "messages": [
+                    {"role": "system", "content": "system"},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "prompt": "stable bootstrap",
+                                "callable_tool_names": ["exec"],
+                                "candidate_tools": ["filesystem_write"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                "callable_tool_names": ["filesystem_write"],
+                "candidate_tool_names": [],
+                "selected_skill_ids": ["memory"],
+                "candidate_skill_ids": [],
+                "model_visible_tool_names": ["filesystem_write"],
+            },
+            publish_snapshot=False,
+        )
+
+        restored = service._restore_node_context_selection_entry(task=task, node=root)
+
+        assert restored is not None
+        assert restored["selection"].selected_tool_names == ["filesystem_write"]
+        assert restored["selection"].candidate_tool_names == []
+        assert restored["selection"].selected_skill_ids == ["memory"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_spawn_children_parent_metadata_keeps_lightweight_entries_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

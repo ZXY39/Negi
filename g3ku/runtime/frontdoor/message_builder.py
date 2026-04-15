@@ -32,6 +32,7 @@ from g3ku.runtime.stage_prompt_compaction import STAGE_EXTERNALIZED_PREFIX, deco
 from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
+from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract, upsert_frontdoor_tool_contract_message
 from g3ku.runtime.web_ceo_sessions import (
     is_history_visible_message,
     message_metadata,
@@ -1481,6 +1482,35 @@ class CeoMessageBuilder:
             turn_overlay_parts=turn_overlay_parts,
             current_user_in_history=bool(history_state['current_user_in_history']),
         )
+        frontdoor_tool_contract = build_frontdoor_tool_contract(
+            callable_tool_names=list(context_sources['callable_tool_names']),
+            candidate_tool_names=list(context_sources['selected_tool_names']),
+            hydrated_tool_names=list(context_sources['hydrated_tool_names']),
+            frontdoor_stage_state=normalized_frontdoor_stage_state,
+            visible_skill_ids=[
+                self._skill_id(item)
+                for item in list(context_sources['selected_skills'] or [])
+                if self._skill_id(item)
+            ],
+            contract_revision=(
+                str(context_sources['capability_snapshot'].exposure_revision or '').strip()
+                or DEFAULT_CACHE_FAMILY_REVISION
+            ),
+        )
+        dynamic_appendix_messages = upsert_frontdoor_tool_contract_message(
+            list(dynamic_appendix_messages),
+            frontdoor_tool_contract,
+        )
+        if bool(context_sources['split_prompt_builder']):
+            model_messages = list(stable_messages)
+        elif dynamic_appendix_messages:
+            model_messages = [
+                stable_messages[0],
+                *dynamic_appendix_messages,
+                *stable_messages[1:],
+            ]
+        else:
+            model_messages = list(stable_messages)
         inject_elapsed_ms = self._elapsed_ms(inject_started_at)
         frontdoor_spans_ms = {
             'collect_context_sources': collect_elapsed_ms,

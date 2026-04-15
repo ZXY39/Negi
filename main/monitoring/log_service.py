@@ -312,6 +312,10 @@ class TaskLogService:
             'tool_calls': [],
             'child_pipelines': [],
             'callable_tool_snapshots': [],
+            'callable_tool_names': [],
+            'candidate_tool_names': [],
+            'selected_skill_ids': [],
+            'candidate_skill_ids': [],
             'last_error': '',
         }
 
@@ -405,9 +409,10 @@ class TaskLogService:
                 'active_round_id': str(frame.get('active_round_id') or ''),
                 'active_round_tool_call_ids': list(frame.get('active_round_tool_call_ids') or []),
                 'messages_count': len(list(messages or [])),
-                'callable_tool_names': list(message_payload.get('callable_tool_names') or []),
+                'callable_tool_names': list(frame.get('callable_tool_names') or message_payload.get('callable_tool_names') or []),
                 'candidate_tool_names': list(
-                    message_payload.get('candidate_tool_names')
+                    frame.get('candidate_tool_names')
+                    or message_payload.get('candidate_tool_names')
                     or message_payload.get('candidate_tools')
                     or []
                 ),
@@ -3034,6 +3039,26 @@ class TaskLogService:
                 'tool_calls': [dict(item) for item in list(next_frame.get('tool_calls') or []) if isinstance(item, dict)],
                 'child_pipelines': [dict(item) for item in list(next_frame.get('child_pipelines') or []) if isinstance(item, dict)],
                 'callable_tool_snapshots': self._sanitize_callable_tool_snapshots(next_frame.get('callable_tool_snapshots') or []),
+                'callable_tool_names': [
+                    str(item or '').strip()
+                    for item in list(next_frame.get('callable_tool_names') or [])
+                    if str(item or '').strip()
+                ],
+                'candidate_tool_names': [
+                    str(item or '').strip()
+                    for item in list(next_frame.get('candidate_tool_names') or [])
+                    if str(item or '').strip()
+                ],
+                'selected_skill_ids': [
+                    str(item or '').strip()
+                    for item in list(next_frame.get('selected_skill_ids') or [])
+                    if str(item or '').strip()
+                ],
+                'candidate_skill_ids': [
+                    str(item or '').strip()
+                    for item in list(next_frame.get('candidate_skill_ids') or [])
+                    if str(item or '').strip()
+                ],
                 'model_visible_tool_names': [
                     str(item or '').strip()
                     for item in list(next_frame.get('model_visible_tool_names') or [])
@@ -3116,6 +3141,26 @@ class TaskLogService:
             'tool_calls': [dict(item) for item in list(payload.get('tool_calls') or []) if isinstance(item, dict)],
             'child_pipelines': [dict(item) for item in list(payload.get('child_pipelines') or []) if isinstance(item, dict)],
             'callable_tool_snapshots': callable_tool_snapshots,
+            'callable_tool_names': [
+                str(item or '').strip()
+                for item in list(payload.get('callable_tool_names') or [])
+                if str(item or '').strip()
+            ],
+            'candidate_tool_names': [
+                str(item or '').strip()
+                for item in list(payload.get('candidate_tool_names') or [])
+                if str(item or '').strip()
+            ],
+            'selected_skill_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('selected_skill_ids') or [])
+                if str(item or '').strip()
+            ],
+            'candidate_skill_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('candidate_skill_ids') or [])
+                if str(item or '').strip()
+            ],
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])
@@ -3644,6 +3689,26 @@ class TaskLogService:
             'callable_tool_snapshots': TaskLogService._sanitize_callable_tool_snapshots(
                 payload.get('callable_tool_snapshots') or []
             ),
+            'callable_tool_names': [
+                str(item or '').strip()
+                for item in list(payload.get('callable_tool_names') or [])
+                if str(item or '').strip()
+            ],
+            'candidate_tool_names': [
+                str(item or '').strip()
+                for item in list(payload.get('candidate_tool_names') or [])
+                if str(item or '').strip()
+            ],
+            'selected_skill_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('selected_skill_ids') or [])
+                if str(item or '').strip()
+            ],
+            'candidate_skill_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('candidate_skill_ids') or [])
+                if str(item or '').strip()
+            ],
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])
@@ -3682,6 +3747,26 @@ class TaskLogService:
             'callable_tool_snapshots': TaskLogService._sanitize_callable_tool_snapshots(
                 payload.get('callable_tool_snapshots') or []
             ),
+            'callable_tool_names': [
+                str(item or '').strip()
+                for item in list(payload.get('callable_tool_names') or [])
+                if str(item or '').strip()
+            ],
+            'candidate_tool_names': [
+                str(item or '').strip()
+                for item in list(payload.get('candidate_tool_names') or [])
+                if str(item or '').strip()
+            ],
+            'selected_skill_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('selected_skill_ids') or [])
+                if str(item or '').strip()
+            ],
+            'candidate_skill_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('candidate_skill_ids') or [])
+                if str(item or '').strip()
+            ],
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])

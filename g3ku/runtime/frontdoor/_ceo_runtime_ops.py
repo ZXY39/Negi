@@ -25,7 +25,6 @@ from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.semantic_context_summary import default_semantic_context_state
 from main.models import normalize_execution_policy_metadata
 from main.protocol import now_iso
-from main.runtime.chat_backend import build_prompt_cache_diagnostics, build_session_prompt_cache_key
 from main.runtime.internal_tools import SubmitNextStageTool
 from main.runtime.stage_budget import (
     STAGE_TOOL_NAME,
@@ -1451,8 +1450,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         model_refs = self._resolve_ceo_model_refs()
         provider_model = str(model_refs[0] if model_refs else "").strip()
         tool_schemas = self._selected_tool_schemas(tool_names)
-        stable_messages = list(messages)
-        dynamic_appendix_messages: list[dict[str, Any]] = []
+        stable_messages = self._prompt_message_records(getattr(assembly, "stable_messages", None)) or list(messages)
+        dynamic_appendix_messages = self._prompt_message_records(
+            getattr(assembly, "dynamic_appendix_messages", None)
+        )
         cache_family_revision = str(getattr(assembly, "cache_family_revision", "") or "").strip()
         prompt_scope = "ceo_frontdoor"
         if heartbeat_internal:
@@ -1491,22 +1492,25 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             prompt_cache_key = contract.prompt_cache_key
             prompt_cache_diagnostics = dict(contract.diagnostics)
         else:
-            prompt_cache_key = build_session_prompt_cache_key(
+            live_request_messages = self._prompt_message_records(messages)
+            contract = build_frontdoor_prompt_contract(
+                scope=prompt_scope,
+                provider_model=provider_model,
+                stable_messages=stable_messages,
+                dynamic_appendix_messages=dynamic_appendix_messages,
+                live_request_messages=live_request_messages,
+                tool_schemas=tool_schemas,
+                cache_family_revision=cache_family_revision,
                 session_key=str(getattr(session.state, "session_key", "") or ""),
-                provider_model=provider_model,
-                scope=prompt_scope,
-                stable_messages=messages,
-                tool_schemas=tool_schemas,
-            )
-            prompt_cache_diagnostics = build_prompt_cache_diagnostics(
-                stable_messages=messages,
-                tool_schemas=tool_schemas,
-                provider_model=provider_model,
-                scope=prompt_scope,
-                prompt_cache_key=prompt_cache_key,
                 overlay_text=str(getattr(assembly, "turn_overlay_text", "") or ""),
                 overlay_section_count=int(getattr(assembly, "trace", {}).get("turn_overlay_section_count", 0) or 0),
             )
+            messages = list(contract.request_messages)
+            stable_messages = list(contract.stable_messages)
+            dynamic_appendix_messages = list(contract.dynamic_appendix_messages)
+            cache_family_revision = str(contract.cache_family_revision or "").strip()
+            prompt_cache_key = contract.prompt_cache_key
+            prompt_cache_diagnostics = dict(contract.diagnostics)
         parallel_enabled, max_parallel_tool_calls = self._parallel_tool_settings()
         return {
             "session_key": str(getattr(session.state, "session_key", "") or ""),
@@ -1530,6 +1534,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "tool_names": list(tool_names),
             "candidate_tool_names": list(getattr(assembly, "candidate_tool_names", []) or []),
             "hydrated_tool_names": list(hydrated_tool_names),
+            "visible_skill_ids": [
+                str(item.get("skill_id") or "").strip()
+                for item in list(getattr(assembly, "trace", {}).get("selected_skills") or [])
+                if isinstance(item, dict) and str(item.get("skill_id") or "").strip()
+            ],
             "used_tools": [],
             "route_kind": "direct_reply",
             "verified_task_ids": [],

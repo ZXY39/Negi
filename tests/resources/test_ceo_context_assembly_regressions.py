@@ -1054,6 +1054,87 @@ async def test_message_builder_exposes_dynamic_appendix_messages_for_prompt_cach
 
 
 @pytest.mark.asyncio
+async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynamic_appendix() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="write the file with filesystem_write",
+        exposure={
+            "skills": [_skill("focused-skill", "Primary workflow")],
+            "tool_families": [
+                _tool_resource_record("filesystem_write", "Write file content."),
+                _tool_resource_record("exec", "Read-only shell helper."),
+            ],
+            "tool_names": ["exec", "filesystem_write", "load_tool_context"],
+        },
+        persisted_session=None,
+        hydrated_tool_names=["filesystem_write"],
+    )
+
+    contract_messages = [
+        item
+        for item in list(result.dynamic_appendix_messages or [])
+        if isinstance(item, dict)
+        and str(item.get("role") or "").strip().lower() == "user"
+        and isinstance(item.get("content"), dict)
+        and str((item.get("content") or {}).get("message_type") or "").strip() == "frontdoor_runtime_tool_contract"
+    ]
+
+    assert len(contract_messages) == 1
+    payload = dict(contract_messages[0]["content"])
+    assert "filesystem_write" in payload["callable_tool_names"]
+    assert "filesystem_write" not in payload["candidate_tool_names"]
+    assert payload["hydrated_tool_names"] == ["filesystem_write"]
+
+
+def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stale_message() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    records = runner._dynamic_appendix_message_records_for_state(
+        state={
+            "tool_names": ["submit_next_stage", "filesystem_write"],
+            "candidate_tool_names": [],
+            "hydrated_tool_names": ["filesystem_write"],
+            "visible_skill_ids": ["memory"],
+            "frontdoor_stage_state": {
+                "active_stage_id": "stage:1",
+                "transition_required": False,
+                "stages": [
+                    {"stage_id": "stage:1", "stage_goal": "write the file", "status": "active"},
+                ],
+            },
+            "dynamic_appendix_messages": [
+                {
+                    "role": "user",
+                    "content": {
+                        "message_type": "frontdoor_runtime_tool_contract",
+                        "callable_tool_names": ["exec"],
+                        "candidate_tool_names": ["filesystem_write"],
+                    },
+                }
+            ],
+        }
+    )
+
+    contract_messages = [
+        item
+        for item in records
+        if str(item.get("role") or "").strip().lower() == "user"
+        and isinstance(item.get("content"), dict)
+        and str((item.get("content") or {}).get("message_type") or "").strip() == "frontdoor_runtime_tool_contract"
+    ]
+
+    assert len(contract_messages) == 1
+    payload = dict(contract_messages[0]["content"])
+    assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
+    assert payload["candidate_tool_names"] == []
+    assert payload["hydrated_tool_names"] == ["filesystem_write"]
+
+
+@pytest.mark.asyncio
 async def test_message_builder_keeps_capability_snapshot_stable_when_semantic_skill_selection_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -33,6 +33,11 @@ from g3ku.runtime.tool_watchdog import (
 from main.errors import TaskPausedError, describe_exception
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_stable_prompt_cache_key
+from main.runtime.node_prompt_contract import (
+    NodeRuntimeToolContract,
+    extract_node_dynamic_contract_payload,
+    upsert_node_dynamic_contract_message,
+)
 from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from main.runtime.stage_budget import (
@@ -208,6 +213,12 @@ class ReActToolLoop:
                 runtime_context=runtime_context,
             )
             tool_schemas = [tool.to_model_schema() for tool in model_visible_tools.values()]
+            message_history = self._refresh_node_dynamic_contract_message(
+                node=node,
+                message_history=message_history,
+                tool_schema_selection=tool_schema_selection,
+                stage_gate=stage_gate,
+            )
             model_messages = self._prepare_messages(message_history, runtime_context=runtime_context)
             overlay_parts = [
                 build_execution_stage_overlay(node_kind=node.node_kind, stage_gate=stage_gate),
@@ -241,6 +252,8 @@ class ReActToolLoop:
                     'partial_child_results': [],
                     'tool_calls': [],
                     'child_pipelines': [],
+                    'callable_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
+                    'candidate_tool_names': list(tool_schema_selection.get('candidate_tool_names') or []),
                     'lightweight_tool_ids': list(tool_schema_selection.get('lightweight_tool_ids') or []),
                     'hydrated_executor_names': list(tool_schema_selection.get('hydrated_executor_names') or []),
                     'model_visible_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
@@ -1594,8 +1607,66 @@ class ReActToolLoop:
             for item in list(raw_selection.get('hydrated_executor_names') or [])
             if str(item or '').strip()
         ]
+        selection_payload['candidate_tool_names'] = [
+            str(item or '').strip()
+            for item in list(raw_selection.get('candidate_tool_names') or [])
+            if str(item or '').strip()
+        ]
         selection_payload['trace'] = dict(raw_selection.get('trace') or {})
         return selected_tools, selection_payload
+
+    @staticmethod
+    def _normalized_name_list(items: list[Any] | None) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for item in list(items or []):
+            normalized = str(item or '').strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        return ordered
+
+    @staticmethod
+    def _stage_prompt_payload_from_gate(stage_gate: dict[str, Any]) -> dict[str, Any]:
+        active_stage = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else None
+        return {
+            'has_active_stage': bool(stage_gate.get('has_active_stage')),
+            'transition_required': bool(stage_gate.get('transition_required')),
+            'active_stage': dict(active_stage or {}) if isinstance(active_stage, dict) else None,
+        }
+
+    def _refresh_node_dynamic_contract_message(
+        self,
+        *,
+        node,
+        message_history: list[dict[str, Any]],
+        tool_schema_selection: dict[str, Any],
+        stage_gate: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        existing_payload = extract_node_dynamic_contract_payload(message_history) or {}
+        callable_tool_names = self._normalized_name_list(list(tool_schema_selection.get('tool_names') or []))
+        candidate_tool_names = self._normalized_name_list(
+            list(tool_schema_selection.get('candidate_tool_names') or existing_payload.get('candidate_tools') or [])
+        )
+        candidate_tool_names = [name for name in candidate_tool_names if name not in set(callable_tool_names)]
+        contract = NodeRuntimeToolContract(
+            node_id=str(getattr(node, 'node_id', '') or '').strip(),
+            node_kind=str(getattr(node, 'node_kind', '') or '').strip(),
+            callable_tool_names=callable_tool_names,
+            candidate_tool_names=candidate_tool_names,
+            visible_skills=[dict(item) for item in list(existing_payload.get('visible_skills') or []) if isinstance(item, dict)],
+            candidate_skill_ids=[
+                str(item or '').strip()
+                for item in list(existing_payload.get('candidate_skills') or [])
+                if str(item or '').strip()
+            ],
+            stage_payload=self._stage_prompt_payload_from_gate(stage_gate),
+            hydrated_executor_names=self._normalized_name_list(list(tool_schema_selection.get('hydrated_executor_names') or [])),
+            lightweight_tool_ids=self._normalized_name_list(list(tool_schema_selection.get('lightweight_tool_ids') or [])),
+            selection_trace=dict(tool_schema_selection.get('trace') or {}),
+        )
+        return upsert_node_dynamic_contract_message(message_history, contract)
 
     def _promote_tool_context_hydration_after_results(
         self,

@@ -85,6 +85,11 @@ from main.runtime.debug_recorder import RuntimeDebugRecorder
 from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
 from main.runtime.global_scheduler import GlobalScheduler
 from main.runtime.internal_tools import build_detail_level_schema
+from main.runtime.node_prompt_contract import (
+    NodeRuntimeToolContract,
+    extract_node_dynamic_contract_payload,
+    upsert_node_dynamic_contract_message,
+)
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.node_runner import NodeRunner
 from main.runtime.node_turn_controller import NodeTurnController
@@ -4207,8 +4212,14 @@ class MainRuntimeService:
             for name in selected_tool_names
             if name in visible_tools
         )
+        candidate_tool_names = [
+            name
+            for name in self._normalized_tool_name_list(list(getattr(selection, 'candidate_tool_names', []) or []))
+            if name not in set(selected_tool_names)
+        ]
         return {
             'tool_names': selected_tool_names,
+            'candidate_tool_names': candidate_tool_names,
             'lightweight_tool_ids': list(selection.lightweight_tool_ids or []),
             'hydrated_executor_names': list(promoted_only_hydrated_executor_names),
             'schema_chars': int(final_schema_chars),
@@ -4221,6 +4232,7 @@ class MainRuntimeService:
                 'callable_tool_names': list(callable_tool_names),
                 'requested_promoted_hydrated_executor_names': list(hydrated_executor_names),
                 'promoted_hydrated_executor_names': list(promoted_only_hydrated_executor_names),
+                'candidate_tool_names': list(candidate_tool_names),
                 'base_schema_chars': int(selection.schema_chars),
                 'top_k': int((selection.trace or {}).get('top_k', 0) or 0),
                 'final_schema_chars': int(final_schema_chars),
@@ -6033,34 +6045,66 @@ class MainRuntimeService:
         messages = [item for item in list(frame.get('messages') or []) if isinstance(item, dict)]
         if not messages:
             return None
-        payload = self._node_message_payload(messages)
-        if not isinstance(payload, dict):
-            return None
-        callable_tool_names = self._normalized_tool_name_list(list(payload.get('callable_tool_names') or []))
-        visible_skills = [dict(item) for item in list(payload.get('visible_skills') or []) if isinstance(item, dict)]
+        payload = self._node_message_payload(messages) or {}
+        dynamic_contract_payload = extract_node_dynamic_contract_payload(messages) or {}
+        callable_tool_names = self._normalized_tool_name_list(
+            list(frame.get('callable_tool_names') or frame.get('model_visible_tool_names') or [])
+        )
+        if not callable_tool_names:
+            callable_tool_names = self._normalized_tool_name_list(
+                list(dynamic_contract_payload.get('callable_tool_names') or [])
+            )
+        if not callable_tool_names:
+            callable_tool_names = self._normalized_tool_name_list(list(payload.get('callable_tool_names') or []))
+        visible_skills = [
+            dict(item)
+            for item in list(dynamic_contract_payload.get('visible_skills') or payload.get('visible_skills') or [])
+            if isinstance(item, dict)
+        ]
+        if 'candidate_skill_ids' in frame:
+            raw_candidate_skill_ids = list(frame.get('candidate_skill_ids') or [])
+        elif 'candidate_skills' in dynamic_contract_payload:
+            raw_candidate_skill_ids = list(dynamic_contract_payload.get('candidate_skills') or [])
+        else:
+            raw_candidate_skill_ids = list(payload.get('candidate_skills') or [])
         candidate_skill_ids = [
             str(item or '').strip()
-            for item in list(payload.get('candidate_skills') or [])
+            for item in raw_candidate_skill_ids
             if str(item or '').strip()
         ]
-        candidate_tool_names = self._normalized_tool_name_list(list(payload.get('candidate_tools') or []))
+        if 'candidate_tool_names' in frame:
+            raw_candidate_tool_names = list(frame.get('candidate_tool_names') or [])
+        elif 'candidate_tools' in dynamic_contract_payload:
+            raw_candidate_tool_names = list(dynamic_contract_payload.get('candidate_tools') or [])
+        else:
+            raw_candidate_tool_names = list(payload.get('candidate_tools') or [])
+        candidate_tool_names = self._normalized_tool_name_list(raw_candidate_tool_names)
         visible_tool_names = list(
             self.list_effective_tool_names(
                 actor_role=self._actor_role_for_node(node),
                 session_id=str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared',
             ) or []
         )
-        selection = NodeContextSelectionResult(
-            mode='dense_rerank',
-            memory_search_visible='memory_search' in set(callable_tool_names),
-            selected_skill_ids=[
-                str(item.get('skill_id') or '').strip()
+        if 'selected_skill_ids' in frame:
+            raw_selected_skill_ids = list(frame.get('selected_skill_ids') or [])
+        else:
+            raw_selected_skill_ids = [
+                item.get('skill_id')
                 for item in visible_skills
                 if str(item.get('skill_id') or '').strip()
-            ],
-            selected_tool_names=candidate_tool_names or callable_tool_names,
+            ]
+        selected_skill_ids = [
+            str(item or '').strip()
+            for item in raw_selected_skill_ids
+            if str(item or '').strip()
+        ]
+        selection = NodeContextSelectionResult(
+            mode='persisted_frame_restore',
+            memory_search_visible='memory_search' in set(callable_tool_names),
+            selected_skill_ids=selected_skill_ids,
+            selected_tool_names=callable_tool_names,
             candidate_skill_ids=candidate_skill_ids,
-            candidate_tool_names=candidate_tool_names or callable_tool_names,
+            candidate_tool_names=candidate_tool_names,
             memory_query='',
             retrieval_scope={},
             trace={'mode': 'persisted_frame_restore'},
@@ -6214,47 +6258,6 @@ class MainRuntimeService:
             )
         return items
 
-    def _inject_visible_skills_into_node_messages(
-        self,
-        *,
-        messages: list[dict[str, Any]],
-        visible_skills: list[Any],
-        callable_tool_names: list[str] | None = None,
-        candidate_skill_ids: list[str] | None = None,
-        candidate_tool_names: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        enriched = list(messages or [])
-        skill_items = self._visible_skill_prompt_items(visible_skills)
-        normalized_callable_tool_names = self._normalized_tool_name_list(list(callable_tool_names or []))
-        normalized_candidate_skill_ids = [
-            str(item or '').strip()
-            for item in list(candidate_skill_ids or [])
-            if str(item or '').strip()
-        ]
-        normalized_candidate_tool_names = self._normalized_tool_name_list(list(candidate_tool_names or []))
-        for index, message in enumerate(enriched):
-            if str(message.get('role') or '').strip().lower() != 'user':
-                continue
-            raw_content = message.get('content')
-            if not isinstance(raw_content, str):
-                continue
-            try:
-                payload = json.loads(raw_content)
-            except Exception:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            payload['visible_skills'] = skill_items
-            payload['callable_tool_names'] = normalized_callable_tool_names
-            payload['candidate_skills'] = normalized_candidate_skill_ids
-            payload['candidate_tools'] = normalized_candidate_tool_names
-            enriched[index] = {
-                **message,
-                'content': json.dumps(payload, ensure_ascii=False, indent=2),
-            }
-            break
-        return enriched
-
     async def _enrich_node_messages(self, *, task, node: NodeRecord, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         selection = await self._prepare_node_context_selection(task=task, node=node)
         cached = self._cached_node_context_selection_entry(task=task, node=node)
@@ -6294,12 +6297,35 @@ class MainRuntimeService:
             ]
         elif not used_selector_selected_as_callable:
             candidate_tool_names = [name for name in candidate_tool_names if name not in set(callable_tool_names)]
-        enriched = self._inject_visible_skills_into_node_messages(
-            messages=messages,
-            visible_skills=selected_visible_skills,
-            callable_tool_names=callable_tool_names,
-            candidate_skill_ids=list(getattr(selection, 'candidate_skill_ids', []) or []),
-            candidate_tool_names=candidate_tool_names,
+        stage_payload = {}
+        log_service = getattr(self, 'log_service', None)
+        stage_payload_supplier = getattr(log_service, 'execution_stage_prompt_payload', None)
+        if callable(stage_payload_supplier):
+            supplied_stage_payload = stage_payload_supplier(
+                str(getattr(task, 'task_id', '') or '').strip(),
+                str(getattr(node, 'node_id', '') or '').strip(),
+            )
+            if isinstance(supplied_stage_payload, dict):
+                stage_payload = dict(supplied_stage_payload)
+        enriched = upsert_node_dynamic_contract_message(
+            list(messages or []),
+            NodeRuntimeToolContract(
+                node_id=str(getattr(node, 'node_id', '') or '').strip(),
+                node_kind=str(getattr(node, 'node_kind', '') or '').strip(),
+                callable_tool_names=callable_tool_names,
+                candidate_tool_names=candidate_tool_names,
+                visible_skills=self._visible_skill_prompt_items(selected_visible_skills),
+                candidate_skill_ids=list(getattr(selection, 'candidate_skill_ids', []) or []),
+                stage_payload=stage_payload,
+                hydrated_executor_names=self._node_hydrated_executor_names(
+                    task_id=str(getattr(task, 'task_id', '') or '').strip(),
+                    node_id=str(getattr(node, 'node_id', '') or '').strip(),
+                    actor_role=self._actor_role_for_node(node),
+                    session_id=session_key,
+                ),
+                lightweight_tool_ids=[],
+                selection_trace={'mode': 'node_context_enricher'},
+            ),
         )
         manager = getattr(self, 'memory_manager', None)
         # Node catalog narrowing is always selector-driven; unified_context only gates memory block retrieval.

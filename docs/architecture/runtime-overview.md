@@ -283,6 +283,9 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - `task_runtime_messages` / `runtime-frame-messages:{node_id}` artifact 不再只是当前 messages 列表；它现在还会在同一个 artifact 里累计 `callable_tool_snapshots`。
 - 每条快照代表一次 `before_model` 轮次下，模型真正看到的 callable/candidate/visible tool 截面，包括 `callable_tool_names`、`candidate_tool_names`、`model_visible_tool_names`、`hydrated_executor_names` 和选择 trace。
 - 因此当维护者排查“为什么这一轮模型明明 load 过工具却没法调用”时，先看这个 artifact 里的最近一条快照，再去看 transcript 或 stage trace；它比只看最终 messages 更能说明当轮可调用集到底是什么。
+- 执行节点与检验节点现在都应理解为“两层消息结构”：稳定 bootstrap user JSON 负责任务定义，单独的动态 `node_runtime_tool_contract` user 消息负责当前轮的 callable/candidate tool 合同。
+- 对节点运行时来说，`before_model` 当轮真正下发给模型的 schema 选择结果才是权威工具来源；runtime frame、restore/recovery 和 runtime messages artifact 都应从这份结果派生，而不是再从旧 bootstrap 文本反推。
+- CEO/frontdoor 也采用同样的分层思想：稳定会话前缀不再承担当前轮 callable/candidate tool 状态，当前轮工具合同放在 dynamic appendix，并随 turn state 刷新。
 
 ## 7. 新人阅读顺序建议
 
