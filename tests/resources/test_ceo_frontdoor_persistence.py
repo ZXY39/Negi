@@ -39,6 +39,23 @@ from g3ku.runtime.frontdoor.state_models import (
 from g3ku.session.manager import SessionManager
 
 
+def _frontdoor_tool_contract_payload(message: dict[str, object]) -> dict[str, object] | None:
+    if str(message.get("role") or "").strip().lower() != "user":
+        return None
+    content = message.get("content")
+    if not isinstance(content, str):
+        return None
+    try:
+        payload = json.loads(content)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("message_type") or "").strip() != "frontdoor_runtime_tool_contract":
+        return None
+    return dict(payload)
+
+
 def test_ceo_snapshot_keeps_execution_trace_summary_and_compression_payloads() -> None:
     snapshot = websocket_ceo._build_ceo_snapshot(
         [
@@ -739,7 +756,20 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
 
     messages = list(state_update["messages"] or [])
     assert messages[0] == {"role": "system", "content": "SYSTEM PROMPT"}
-    assert messages[-5:] == [
+    contract_payloads = [
+        payload
+        for payload in (_frontdoor_tool_contract_payload(dict(message)) for message in messages)
+        if isinstance(payload, dict)
+    ]
+    assert len(contract_payloads) == 1
+    assert contract_payloads[0]["callable_tool_names"] == ["submit_next_stage"]
+    history_messages = [
+        dict(message)
+        for message in messages
+        if _frontdoor_tool_contract_payload(dict(message)) is None
+    ]
+    assert history_messages == [
+        {"role": "system", "content": "SYSTEM PROMPT"},
         {"role": "user", "content": "question one"},
         {"role": "assistant", "content": "answer one"},
         {"role": "user", "content": "question two"},
@@ -951,8 +981,8 @@ async def test_ceo_frontdoor_prepare_turn_records_prompt_cache_diagnostics(
 
     diagnostics = dict(state_update["prompt_cache_diagnostics"] or {})
     assert str(diagnostics["stable_prompt_signature"] or "").strip()
-    assert diagnostics["tool_signature_count"] == 1
-    assert str(diagnostics["tool_signature_hash"] or "").strip()
+    assert diagnostics["tool_signature_count"] == 0
+    assert str(diagnostics["tool_signature_hash"] or "").strip() == ""
     assert diagnostics["overlay_present"] is True
     assert diagnostics["overlay_section_count"] == 1
     assert str(diagnostics["overlay_text_hash"] or "").strip()
@@ -1105,7 +1135,19 @@ async def test_graph_prepare_turn_real_session_path_drops_summary_fields(
         runtime=runtime,
     )
 
-    assert result["messages"] == [
+    contract_payloads = [
+        payload
+        for payload in (_frontdoor_tool_contract_payload(dict(message)) for message in list(result["messages"] or []))
+        if isinstance(payload, dict)
+    ]
+    assert len(contract_payloads) == 1
+    assert contract_payloads[0]["callable_tool_names"] == ["submit_next_stage"]
+    history_messages = [
+        dict(message)
+        for message in list(result["messages"] or [])
+        if _frontdoor_tool_contract_payload(dict(message)) is None
+    ]
+    assert history_messages == [
         {"role": "system", "content": "SYSTEM PROMPT"},
         {"role": "user", "content": "question one"},
         {"role": "assistant", "content": "answer one"},

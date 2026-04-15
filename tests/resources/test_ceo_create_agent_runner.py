@@ -1449,7 +1449,7 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
     )
 
     assert prepared["hydrated_tool_names"] == ["filesystem_write"]
-    assert "filesystem_write" in prepared["tool_names"]
+    assert prepared["tool_names"] == ["submit_next_stage", "load_tool_context", "filesystem_write"]
     assert prepared["frontdoor_selection_debug"] == {
         "query_text": "hello",
         "raw_turn_query_text": "hello",
@@ -1473,10 +1473,102 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
             "visible_skill_ids": [],
         },
         "selected_skills": [],
-        "callable_tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+        "callable_tool_names": ["submit_next_stage"],
         "candidate_tool_names": [],
         "hydrated_tool_names": ["filesystem_write"],
     }
+    contract_messages = [
+        dict(item)
+        for item in list(prepared["dynamic_appendix_messages"])
+        if _is_frontdoor_runtime_tool_contract_record(dict(item))
+    ]
+    assert len(contract_messages) == 1
+    contract_payload = json.loads(str(contract_messages[0]["content"] or ""))
+    assert contract_payload["callable_tool_names"] == ["submit_next_stage"]
+    assert contract_payload["candidate_tool_names"] == []
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_graph_prepare_turn_keeps_candidate_tools_visible_without_valid_stage() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            sessions=SimpleNamespace(get_or_create=lambda session_key: SimpleNamespace(session_key=session_key)),
+            main_task_service=None,
+            tools=SimpleNamespace(get=lambda *_: None, tool_names=[]),
+            provider_name="openai",
+            model="gpt-test",
+        )
+    )
+
+    async def _resolve_for_actor(**kwargs):
+        _ = kwargs
+        return {
+            "skills": [],
+            "tool_families": [],
+            "tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+        }
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            model_messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "hello"},
+            ],
+            stable_messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "hello"},
+            ],
+            dynamic_appendix_messages=[],
+            tool_names=["submit_next_stage", "load_tool_context", "filesystem_write"],
+            candidate_tool_names=["filesystem_write"],
+            trace={
+                "selected_skills": [{"skill_id": "memory"}],
+                "semantic_frontdoor": {},
+                "tool_selection": {
+                    "mode": "dense_only",
+                    "candidate_tool_names": ["filesystem_write"],
+                },
+                "capability_snapshot": {
+                    "visible_tool_ids": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+                    "visible_skill_ids": ["memory"],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    runner._resolver = SimpleNamespace(resolve_for_actor=_resolve_for_actor)
+    runner._builder = SimpleNamespace(build_for_ceo=_build_for_ceo)
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    runner._selected_tool_schemas = lambda tool_names: [{"name": name, "parameters": {"type": "object"}} for name in list(tool_names or [])]
+
+    prepared = await runner._graph_prepare_turn(
+        state=initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
+        runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
+    )
+
+    assert prepared["tool_names"] == ["submit_next_stage", "load_tool_context", "filesystem_write"]
+    assert prepared["candidate_tool_names"] == ["filesystem_write"]
+    assert prepared["candidate_skill_ids"] == ["memory"]
+    assert prepared["visible_skill_ids"] == ["memory"]
+    contract_messages = [
+        dict(item)
+        for item in list(prepared["dynamic_appendix_messages"])
+        if _is_frontdoor_runtime_tool_contract_record(dict(item))
+    ]
+    assert len(contract_messages) == 1
+    contract_payload = json.loads(str(contract_messages[0]["content"] or ""))
+    assert contract_payload["callable_tool_names"] == ["submit_next_stage"]
+    assert contract_payload["candidate_tool_names"] == ["filesystem_write"]
+    assert contract_payload["candidate_skill_ids"] == ["memory"]
 
 
 def test_runtime_agent_session_inflight_snapshot_keeps_frontdoor_hydrated_tool_names() -> None:
@@ -1767,7 +1859,10 @@ async def test_create_agent_lifecycle_abefore_model_syncs_only_postprocessed_sta
 @pytest.mark.asyncio
 async def test_create_agent_runner_preserves_unverified_dispatch_text_from_model() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))
+        loop=SimpleNamespace(
+            main_task_service=SimpleNamespace(get_task=lambda task_id: None),
+            tools=SimpleNamespace(get=lambda *_: None),
+        )
     )
 
     result = await runner._graph_normalize_model_output(
@@ -1797,7 +1892,8 @@ async def test_create_agent_runner_preserves_unverified_dispatch_text_from_model
 async def test_create_agent_runner_preserves_verified_dispatch_text_from_model() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
-            main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id))
+            main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id)),
+            tools=SimpleNamespace(get=lambda *_: None),
         )
     )
 
@@ -1828,7 +1924,8 @@ async def test_create_agent_runner_preserves_verified_dispatch_text_from_model()
 async def test_create_agent_runner_does_not_treat_continue_task_as_task_dispatch() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
-            main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id))
+            main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id)),
+            tools=SimpleNamespace(get=lambda *_: None),
         )
     )
 
@@ -1858,7 +1955,10 @@ async def test_create_agent_runner_does_not_treat_continue_task_as_task_dispatch
 @pytest.mark.asyncio
 async def test_create_agent_runner_preserves_dispatch_text_for_unverified_task_id_even_when_verified_task_exists() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))
+        loop=SimpleNamespace(
+            main_task_service=SimpleNamespace(get_task=lambda task_id: None),
+            tools=SimpleNamespace(get=lambda *_: None),
+        )
     )
 
     result = await runner._graph_normalize_model_output(
@@ -1886,7 +1986,8 @@ async def test_create_agent_runner_preserves_dispatch_text_for_unverified_task_i
 async def test_create_agent_runner_preserves_heartbeat_success_reply_for_current_task_id() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
-            main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id))
+            main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id)),
+            tools=SimpleNamespace(get=lambda *_: None),
         )
     )
 
@@ -1924,7 +2025,10 @@ async def test_create_agent_runner_preserves_heartbeat_success_reply_for_current
 @pytest.mark.asyncio
 async def test_create_agent_runner_preserves_heartbeat_dispatch_claim_for_unknown_task_id() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(main_task_service=SimpleNamespace(get_task=lambda task_id: None))
+        loop=SimpleNamespace(
+            main_task_service=SimpleNamespace(get_task=lambda task_id: None),
+            tools=SimpleNamespace(get=lambda *_: None),
+        )
     )
 
     result = await runner._graph_normalize_model_output(

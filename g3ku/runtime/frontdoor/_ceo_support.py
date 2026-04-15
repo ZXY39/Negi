@@ -226,8 +226,12 @@ class CeoFrontDoorSupport:
 
     def _registered_tools(self, tool_names: list[str]) -> dict[str, Tool]:
         tools: dict[str, Tool] = {}
+        tool_registry = getattr(self._loop, "tools", None)
+        getter = getattr(tool_registry, "get", None) if tool_registry is not None else None
+        if not callable(getter):
+            return tools
         for name in list(tool_names or []):
-            tool = self._loop.tools.get(str(name or "").strip())
+            tool = getter(str(name or "").strip())
             if isinstance(tool, Tool):
                 tools[tool.name] = tool
         return tools

@@ -290,8 +290,12 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         normalized_overlay_text = str(overlay_text or "").strip()
         if not normalized_dynamic_messages and normalized_overlay_text:
             normalized_dynamic_messages = [{"role": "assistant", "content": normalized_overlay_text}]
+        callable_tool_names = self._frontdoor_callable_tool_names_for_state(
+            state,
+            tool_names=list(state.get("tool_names") or []),
+        )
         frontdoor_tool_contract = build_frontdoor_tool_contract(
-            callable_tool_names=list(state.get("tool_names") or []),
+            callable_tool_names=list(callable_tool_names),
             candidate_tool_names=list(state.get("candidate_tool_names") or []),
             hydrated_tool_names=list(state.get("hydrated_tool_names") or []),
             frontdoor_stage_state=dict(state.get("frontdoor_stage_state") or {}),
@@ -385,11 +389,15 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
 
     def _refresh_prompt_cache_state(self, *, state: dict[str, Any]) -> dict[str, Any]:
         updated_state = dict(state or {})
+        callable_tool_names = self._frontdoor_callable_tool_names_for_state(
+            updated_state,
+            tool_names=list(updated_state.get("tool_names") or []),
+        )
         model_refs = list(updated_state.get("model_refs") or self._resolve_ceo_model_refs() or [])
         provider_model = str(model_refs[0] if model_refs else "").strip()
         tool_schemas = []
         try:
-            tool_schemas = self._selected_tool_schemas(list(updated_state.get("tool_names") or []))
+            tool_schemas = self._selected_tool_schemas(list(callable_tool_names))
         except Exception:
             tool_schemas = []
         contract = self._frontdoor_prompt_contract(

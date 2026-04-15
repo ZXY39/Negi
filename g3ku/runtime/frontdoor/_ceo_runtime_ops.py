@@ -49,6 +49,7 @@ from .state_models import (
     CeoPersistentState,
     CeoRuntimeContext,
 )
+from .tool_contract import build_frontdoor_tool_contract, upsert_frontdoor_tool_contract_message
 
 ToolExecutor = Callable[..., Awaitable[Any]]
 CeoGraphState = CeoPersistentState
@@ -412,7 +413,37 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         }
 
     def _registered_tools_for_state(self, state: CeoGraphState) -> dict[str, Tool]:
-        return self._registered_tools(list(state.get("tool_names") or []))
+        return self._registered_tools(
+            self._frontdoor_callable_tool_names_for_state(
+                state,
+                tool_names=list(state.get("tool_names") or []),
+            )
+        )
+
+    def _frontdoor_has_valid_stage(self, state: CeoGraphState | dict[str, Any] | None) -> bool:
+        normalized_state = (
+            state
+            if isinstance(state, dict) and "frontdoor_stage_state" in state
+            else {"frontdoor_stage_state": dict(state or {}) if isinstance(state, dict) else {}}
+        )
+        snapshot = self._frontdoor_stage_state_snapshot(normalized_state)
+        return bool(str(snapshot.get("active_stage_id") or "").strip()) and not bool(snapshot.get("transition_required"))
+
+    def _frontdoor_callable_tool_names_for_state(
+        self,
+        state: CeoGraphState | dict[str, Any] | None,
+        *,
+        tool_names: list[str] | None = None,
+    ) -> list[str]:
+        raw_names = tool_names
+        if raw_names is None and isinstance(state, dict):
+            raw_names = list(state.get("tool_names") or [])
+        normalized = self._normalized_tool_name_state_list(raw_names)
+        if isinstance(state, dict) and bool(state.get("cron_internal")):
+            return normalized
+        if self._frontdoor_has_valid_stage(state):
+            return normalized
+        return [STAGE_TOOL_NAME]
 
     def _selected_tool_schemas(self, tool_names: list[str] | None) -> list[dict[str, Any]]:
         schemas: list[dict[str, Any]] = []
@@ -686,6 +717,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: dict[str, Any],
     ) -> dict[str, Any]:
         refreshed = dict(state or {})
+        callable_tool_names = self._frontdoor_callable_tool_names_for_state(
+            refreshed,
+            tool_names=list(refreshed.get("tool_names") or []),
+        )
         for legacy_field in ("summary_text", "summary_payload", "summary_model_key", "summary_version"):
             refreshed.pop(legacy_field, None)
         if not hasattr(self, "_frontdoor_prompt_contract"):
@@ -694,7 +729,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             model_refs = list(refreshed.get("model_refs") or [])
             provider_model = str(model_refs[0] if model_refs else "").strip()
             try:
-                tool_schemas = self._selected_tool_schemas(list(refreshed.get("tool_names") or []))
+                tool_schemas = self._selected_tool_schemas(list(callable_tool_names))
             except Exception:
                 tool_schemas = []
             contract = self._frontdoor_prompt_contract(
@@ -1657,6 +1692,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             semantic_context_state=dict(state.get("semantic_context_state") or {}),
             hydrated_tool_names=list(hydrated_tool_names),
         )
+        current_frontdoor_stage_state = self._frontdoor_stage_state_snapshot(state)
+        selected_skill_ids = [
+            str(item.get("skill_id") or "").strip()
+            for item in list(getattr(assembly, "trace", {}).get("selected_skills") or [])
+            if isinstance(item, dict) and str(item.get("skill_id") or "").strip()
+        ]
+        candidate_tool_names = list(getattr(assembly, "candidate_tool_names", []) or [])
+        rbac_visible_tool_names = [
+            str(item or "").strip()
+            for item in list(getattr(assembly, "trace", {}).get("capability_snapshot", {}).get("visible_tool_ids") or [])
+            if str(item or "").strip()
+        ]
+        rbac_visible_skill_ids = [
+            str(item or "").strip()
+            for item in list(getattr(assembly, "trace", {}).get("capability_snapshot", {}).get("visible_skill_ids") or [])
+            if str(item or "").strip()
+        ]
         frontdoor_selection_debug = {
             "query_text": str(builder_query_text or "").strip(),
             "raw_turn_query_text": str(query_text or "").strip(),
@@ -1664,8 +1716,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "tool_selection": dict(getattr(assembly, "trace", {}).get("tool_selection") or {}),
             "selected_skills": list(getattr(assembly, "trace", {}).get("selected_skills") or []),
             "capability_snapshot": dict(getattr(assembly, "trace", {}).get("capability_snapshot") or {}),
-            "callable_tool_names": list(getattr(assembly, "tool_names", None) or getattr(assembly, "callable_tool_names", None) or []),
-            "candidate_tool_names": list(getattr(assembly, "candidate_tool_names", []) or []),
+            "callable_tool_names": [],
+            "candidate_tool_names": list(candidate_tool_names),
             "hydrated_tool_names": list(hydrated_tool_names),
         }
         tool_names = list(
@@ -1675,6 +1727,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         if cron_internal:
             tool_names = ["cron"]
+        callable_tool_names = self._frontdoor_callable_tool_names_for_state(
+            {
+                "frontdoor_stage_state": current_frontdoor_stage_state,
+                "cron_internal": cron_internal,
+                "heartbeat_internal": heartbeat_internal,
+            },
+            tool_names=tool_names,
+        )
+        frontdoor_selection_debug["callable_tool_names"] = list(callable_tool_names)
         cron_system_message = self._cron_internal_system_message(metadata)
         messages: list[dict[str, Any]] = list(assembly.model_messages or [])
         if cron_system_message is not None:
@@ -1685,12 +1746,27 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         model_refs = self._resolve_ceo_model_refs()
         provider_model = str(model_refs[0] if model_refs else "").strip()
-        tool_schemas = self._selected_tool_schemas(tool_names)
+        tool_schemas = self._selected_tool_schemas(callable_tool_names)
         stable_messages = self._prompt_message_records(getattr(assembly, "stable_messages", None)) or list(messages)
         dynamic_appendix_messages = self._prompt_message_records(
             getattr(assembly, "dynamic_appendix_messages", None)
         )
         cache_family_revision = str(getattr(assembly, "cache_family_revision", "") or "").strip()
+        turn_overlay_text = str(getattr(assembly, "turn_overlay_text", "") or "").strip()
+        dynamic_appendix_messages = upsert_frontdoor_tool_contract_message(
+            dynamic_appendix_messages,
+            build_frontdoor_tool_contract(
+                callable_tool_names=list(callable_tool_names),
+                candidate_tool_names=list(candidate_tool_names),
+                hydrated_tool_names=list(hydrated_tool_names),
+                frontdoor_stage_state=dict(current_frontdoor_stage_state or {}),
+                visible_skill_ids=list(selected_skill_ids),
+                candidate_skill_ids=list(selected_skill_ids),
+                rbac_visible_tool_names=list(rbac_visible_tool_names),
+                rbac_visible_skill_ids=list(rbac_visible_skill_ids),
+                contract_revision=cache_family_revision,
+            ),
+        )
         prompt_scope = "ceo_frontdoor"
         if heartbeat_internal:
             live_request_messages = self._prompt_message_records(messages)
@@ -1718,7 +1794,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 tool_schemas=tool_schemas,
                 cache_family_revision=cache_family_revision,
                 session_key=str(getattr(session.state, "session_key", "") or ""),
-                overlay_text=str(getattr(assembly, "turn_overlay_text", "") or ""),
+                overlay_text=turn_overlay_text,
                 overlay_section_count=int(getattr(assembly, "trace", {}).get("turn_overlay_section_count", 0) or 0),
             )
             messages = list(contract.request_messages)
@@ -1738,7 +1814,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 tool_schemas=tool_schemas,
                 cache_family_revision=cache_family_revision,
                 session_key=str(getattr(session.state, "session_key", "") or ""),
-                overlay_text=str(getattr(assembly, "turn_overlay_text", "") or ""),
+                overlay_text=turn_overlay_text,
                 overlay_section_count=int(getattr(assembly, "trace", {}).get("turn_overlay_section_count", 0) or 0),
             )
             messages = list(contract.request_messages)
@@ -1755,7 +1831,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "approval_status": "",
             "query_text": query_text,
             "messages": messages,
-            "frontdoor_stage_state": self._frontdoor_stage_state_snapshot(state),
+            "frontdoor_stage_state": current_frontdoor_stage_state,
             "compression_state": dict(
                 getattr(assembly, "trace", {}).get("compression_state_payload")
                 or state.get("compression_state")
@@ -1766,31 +1842,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 or state.get("semantic_context_state")
                 or {}
             ),
-            "turn_overlay_text": str(getattr(assembly, "turn_overlay_text", "") or "").strip() or None,
+            "turn_overlay_text": turn_overlay_text or None,
             "frontdoor_selection_debug": frontdoor_selection_debug,
             "tool_names": list(tool_names),
-            "candidate_tool_names": list(getattr(assembly, "candidate_tool_names", []) or []),
+            "candidate_tool_names": list(candidate_tool_names),
             "hydrated_tool_names": list(hydrated_tool_names),
-            "visible_skill_ids": [
-                str(item.get("skill_id") or "").strip()
-                for item in list(getattr(assembly, "trace", {}).get("selected_skills") or [])
-                if isinstance(item, dict) and str(item.get("skill_id") or "").strip()
-            ],
-            "candidate_skill_ids": [
-                str(item.get("skill_id") or "").strip()
-                for item in list(getattr(assembly, "trace", {}).get("selected_skills") or [])
-                if isinstance(item, dict) and str(item.get("skill_id") or "").strip()
-            ],
-            "rbac_visible_tool_names": [
-                str(item or "").strip()
-                for item in list(getattr(assembly, "trace", {}).get("capability_snapshot", {}).get("visible_tool_ids") or [])
-                if str(item or "").strip()
-            ],
-            "rbac_visible_skill_ids": [
-                str(item or "").strip()
-                for item in list(getattr(assembly, "trace", {}).get("capability_snapshot", {}).get("visible_skill_ids") or [])
-                if str(item or "").strip()
-            ],
+            "visible_skill_ids": list(selected_skill_ids),
+            "candidate_skill_ids": list(selected_skill_ids),
+            "rbac_visible_tool_names": list(rbac_visible_tool_names),
+            "rbac_visible_skill_ids": list(rbac_visible_skill_ids),
             "used_tools": [],
             "route_kind": "direct_reply",
             "verified_task_ids": [],
