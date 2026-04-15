@@ -11,6 +11,45 @@ def _runtime_session_key(runtime: dict[str, Any] | None) -> str:
     return str(payload.get('session_key') or 'web:shared').strip() or 'web:shared'
 
 
+def _runtime_contract_enforced(runtime: dict[str, Any] | None) -> bool:
+    payload = runtime if isinstance(runtime, dict) else {}
+    return bool(payload.get('tool_contract_enforced'))
+
+
+def _normalized_runtime_names(values: Any) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw_value in list(values or []):
+        value = str(raw_value or '').strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def _candidate_gate_error(
+    *,
+    runtime: dict[str, Any] | None,
+    field_name: str,
+    requested_id: str,
+    label: str,
+) -> str:
+    if not _runtime_contract_enforced(runtime):
+        return ''
+    payload = runtime if isinstance(runtime, dict) else {}
+    raw_values = payload.get(field_name)
+    if not isinstance(raw_values, list):
+        return f'Error: 运行时工具合同损坏/缺失：{field_name} 缺失'
+    candidates = _normalized_runtime_names(raw_values)
+    target = str(requested_id or '').strip()
+    if not target:
+        return ''
+    if target in set(candidates):
+        return ''
+    return f'Error: 当前运行时候选{label}未包含 `{target}`，只能加载本轮候选{label}'
+
+
 class _ProjectServiceTool(Tool):
     def __init__(self, service_getter: Callable[[], Any]):
         self._service_getter = service_getter
@@ -43,6 +82,14 @@ class LoadSkillContextTool(_ProjectServiceTool):
     async def execute(self, skill_id: str, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
         service = await self._service()
         session_id = _runtime_session_key(__g3ku_runtime)
+        gate_error = _candidate_gate_error(
+            runtime=__g3ku_runtime,
+            field_name='candidate_skill_ids',
+            requested_id=str(skill_id or '').strip(),
+            label='技能',
+        )
+        if gate_error:
+            return gate_error
         visible = {item.skill_id: item for item in service.list_visible_skill_resources(actor_role='ceo', session_id=session_id)}
         record = visible.get(str(skill_id or '').strip())
         if record is None:
@@ -75,5 +122,13 @@ class LoadToolContextTool(_ProjectServiceTool):
     async def execute(self, tool_id: str, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
         service = await self._service()
         session_id = _runtime_session_key(__g3ku_runtime)
+        gate_error = _candidate_gate_error(
+            runtime=__g3ku_runtime,
+            field_name='candidate_tool_names',
+            requested_id=str(tool_id or '').strip(),
+            label='工具',
+        )
+        if gate_error:
+            return gate_error
         payload = service.load_tool_context(actor_role='ceo', session_id=session_id, tool_id=str(tool_id or '').strip())
         return json.dumps(payload, ensure_ascii=False)

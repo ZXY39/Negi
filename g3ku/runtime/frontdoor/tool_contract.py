@@ -45,6 +45,9 @@ class FrontdoorToolContract:
     hydrated_tool_names: list[str]
     stage_summary: dict[str, Any]
     visible_skill_ids: list[str]
+    candidate_skill_ids: list[str]
+    rbac_visible_tool_names: list[str]
+    rbac_visible_skill_ids: list[str]
     contract_revision: str
 
     def to_message_payload(self) -> dict[str, Any]:
@@ -54,6 +57,9 @@ class FrontdoorToolContract:
             'candidate_tool_names': list(self.candidate_tool_names),
             'hydrated_tool_names': list(self.hydrated_tool_names),
             'visible_skill_ids': list(self.visible_skill_ids),
+            'candidate_skill_ids': list(self.candidate_skill_ids),
+            'rbac_visible_tool_names': list(self.rbac_visible_tool_names),
+            'rbac_visible_skill_ids': list(self.rbac_visible_skill_ids),
             'stage_summary': dict(self.stage_summary),
             'contract_revision': str(self.contract_revision or '').strip(),
         }
@@ -93,6 +99,9 @@ def build_frontdoor_tool_contract(
     hydrated_tool_names: list[str] | None,
     frontdoor_stage_state: dict[str, Any] | None,
     visible_skill_ids: list[str] | None = None,
+    candidate_skill_ids: list[str] | None = None,
+    rbac_visible_tool_names: list[str] | None = None,
+    rbac_visible_skill_ids: list[str] | None = None,
     contract_revision: str | None = None,
 ) -> FrontdoorToolContract:
     callable_names = _normalized_name_list(callable_tool_names)
@@ -107,6 +116,9 @@ def build_frontdoor_tool_contract(
         hydrated_tool_names=_normalized_name_list(hydrated_tool_names),
         stage_summary=_active_stage_summary(frontdoor_stage_state),
         visible_skill_ids=_normalized_name_list(visible_skill_ids),
+        candidate_skill_ids=_normalized_name_list(candidate_skill_ids),
+        rbac_visible_tool_names=_normalized_name_list(rbac_visible_tool_names),
+        rbac_visible_skill_ids=_normalized_name_list(rbac_visible_skill_ids),
         contract_revision=str(contract_revision or '').strip(),
     )
 

@@ -46,6 +46,12 @@ class CeoPersistentState(TypedDict, total=False):
 
     visible_skill_ids: list[str]
 
+    candidate_skill_ids: list[str]
+
+    rbac_visible_tool_names: list[str]
+
+    rbac_visible_skill_ids: list[str]
+
     cache_family_revision: str
 
     used_tools: list[str]
@@ -179,6 +185,12 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "hydrated_tool_names": [],
 
         "visible_skill_ids": [],
+
+        "candidate_skill_ids": [],
+
+        "rbac_visible_tool_names": [],
+
+        "rbac_visible_skill_ids": [],
 
         "cache_family_revision": DEFAULT_CACHE_FAMILY_REVISION,
 

@@ -52,6 +52,9 @@ def _canonical_frontdoor_state(**overrides) -> dict[str, object]:
         "candidate_tool_names": [],
         "hydrated_tool_names": [],
         "visible_skill_ids": [],
+        "candidate_skill_ids": [],
+        "rbac_visible_tool_names": [],
+        "rbac_visible_skill_ids": [],
         "frontdoor_stage_state": {
             "active_stage_id": "",
             "transition_required": False,
@@ -596,7 +599,14 @@ async def test_create_agent_langchain_tool_emits_tool_result_progress(monkeypatc
 
 @pytest.mark.asyncio
 async def test_create_agent_graph_execute_tools_preserves_parallel_same_name_tool_call_ids(monkeypatch) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            tools=SimpleNamespace(
+                push_runtime_context=lambda context: object(),
+                pop_runtime_context=lambda token: None,
+            )
+        )
+    )
     progress_calls: list[tuple[str, str | None, dict[str, object]]] = []
 
     async def _on_progress(content: str, *, event_kind=None, event_data=None, **kwargs):
@@ -605,7 +615,7 @@ async def test_create_agent_graph_execute_tools_preserves_parallel_same_name_too
 
     monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"demo_tool": _DemoTool()})
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _on_progress})
-    async def _fake_execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
+    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
         _ = tool, runtime_context
         await on_progress(
             f"{tool_name} started for {arguments['value']}",
@@ -613,6 +623,7 @@ async def test_create_agent_graph_execute_tools_preserves_parallel_same_name_too
             event_data={"tool_name": tool_name, "tool_call_id": tool_call_id},
         )
         return (
+            {"value": arguments["value"]},
             json.dumps({"value": arguments["value"]}),
             "success",
             "2026-04-05T11:00:00",
@@ -620,7 +631,7 @@ async def test_create_agent_graph_execute_tools_preserves_parallel_same_name_too
             1.0,
         )
 
-    monkeypatch.setattr(runner, "_execute_tool_call", _fake_execute_tool_call)
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
 
     result = await runner._graph_execute_tools(
         {
@@ -1126,7 +1137,7 @@ async def test_create_agent_runner_resume_turn_wires_frontdoor_stage_and_compres
 
 
 @pytest.mark.asyncio
-async def test_create_agent_postprocess_promotes_loaded_tool_context_into_next_turn_state() -> None:
+async def test_create_agent_postprocess_does_not_promote_loaded_tool_context_into_next_turn_state() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
 
     result = await runner._postprocess_completed_tool_cycle(
@@ -1162,13 +1173,159 @@ async def test_create_agent_postprocess_promotes_loaded_tool_context_into_next_t
             "tool_names": ["load_tool_context"],
             "candidate_tool_names": ["filesystem_write", "agent_browser"],
             "hydrated_tool_names": [],
+            "candidate_skill_ids": [],
+            "visible_skill_ids": [],
+            "rbac_visible_tool_names": ["load_tool_context", "filesystem_write", "agent_browser"],
+            "rbac_visible_skill_ids": [],
         }
     )
 
     assert result is not None
+    assert result["hydrated_tool_names"] == []
+    assert result["tool_names"] == ["load_tool_context"]
+    assert result["candidate_tool_names"] == ["filesystem_write", "agent_browser"]
+
+
+@pytest.mark.asyncio
+async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_into_next_turn_state() -> None:
+    class _InlineLoadTool(Tool):
+        @property
+        def name(self) -> str:
+            return "load_tool_context"
+
+        @property
+        def description(self) -> str:
+            return "load tool context"
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {
+                "type": "object",
+                "properties": {"tool_id": {"type": "string"}},
+                "required": ["tool_id"],
+            }
+
+        async def execute(self, tool_id: str, **kwargs):
+            _ = kwargs
+            return {
+                "ok": True,
+                "tool_id": tool_id,
+                "callable_now": True,
+                "will_be_hydrated_next_turn": True,
+                "hydration_targets": [tool_id],
+            }
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            tools=SimpleNamespace(
+                push_runtime_context=lambda context: object(),
+                pop_runtime_context=lambda token: None,
+            )
+        )
+    )
+    runner._registered_tools_for_state = lambda state: {"load_tool_context": _InlineLoadTool()}
+    runner._build_tool_runtime_context = lambda **kwargs: {
+        "on_progress": None,
+        "actor_role": "ceo",
+        "session_key": "web:shared",
+        "tool_contract_enforced": True,
+        "candidate_tool_names": ["filesystem_write", "agent_browser"],
+        "candidate_skill_ids": [],
+    }
+
+    result = await runner._graph_execute_tools(
+        {
+            **_canonical_frontdoor_state(
+                tool_names=["load_tool_context"],
+                candidate_tool_names=["filesystem_write", "agent_browser"],
+                hydrated_tool_names=[],
+                visible_skill_ids=[],
+                candidate_skill_ids=[],
+                rbac_visible_tool_names=["load_tool_context", "filesystem_write", "agent_browser"],
+                rbac_visible_skill_ids=[],
+                dynamic_appendix_messages=[
+                    {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
+                ],
+            ),
+            "tool_call_payloads": [
+                {"id": "call-1", "name": "load_tool_context", "arguments": {"tool_id": "filesystem_write"}}
+            ],
+            "messages": [],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "parallel_enabled": False,
+            "max_parallel_tool_calls": 1,
+            "synthetic_tool_calls_used": False,
+            "response_payload": {"content": "", "tool_calls": []},
+            "compression_state": {"status": "running", "text": "compressing", "source": "user"},
+            "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    assert result["next_step"] == "call_model"
     assert result["hydrated_tool_names"] == ["filesystem_write"]
     assert result["tool_names"] == ["load_tool_context", "filesystem_write"]
     assert result["candidate_tool_names"] == ["agent_browser"]
+    assert result["candidate_skill_ids"] == []
+    assert result["dynamic_appendix_messages"][0] == {
+        "role": "assistant",
+        "content": "## Retrieved Context\n- authoritative memory",
+    }
+    contract_messages = [
+        item
+        for item in list(result["dynamic_appendix_messages"])
+        if _is_frontdoor_runtime_tool_contract_record(dict(item))
+    ]
+    assert len(contract_messages) == 1
+
+
+def test_frontdoor_stage_state_after_tool_cycle_ignores_raw_result_when_writing_round_tools() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    result = runner._frontdoor_stage_state_after_tool_cycle(
+        {
+            "session_key": "web:shared",
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_kind": "normal",
+                        "mode": "自主执行",
+                        "status": "active",
+                        "stage_goal": "inspect repository",
+                        "completed_stage_summary": "",
+                        "tool_round_budget": 4,
+                        "tool_rounds_used": 0,
+                        "created_at": "2026-04-14T20:20:54+08:00",
+                        "finished_at": "",
+                        "rounds": [],
+                    }
+                ],
+            },
+        },
+        tool_call_payloads=[
+            {"id": "call-load-1", "name": "load_tool_context", "arguments": {"tool_id": "filesystem_write"}},
+        ],
+        tool_results=[
+            {
+                "tool_name": "load_tool_context",
+                "status": "success",
+                "result_text": '{"ok":true,"tool_id":"filesystem_write","summary":"write file content"}',
+                "raw_result": {
+                    "ok": True,
+                    "tool_id": "filesystem_write",
+                    "hydration_targets": ["filesystem_write"],
+                },
+            },
+        ],
+    )
+
+    round_tool = result["stages"][0]["rounds"][0]["tools"][0]
+    assert "raw_result" not in round_tool
 
 
 @pytest.mark.asyncio

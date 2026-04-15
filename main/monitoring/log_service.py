@@ -3072,6 +3072,16 @@ class TaskLogService:
                     for item in list(next_frame.get('candidate_skill_ids') or [])
                     if str(item or '').strip()
                 ],
+                'rbac_visible_tool_names': [
+                    str(item or '').strip()
+                    for item in list(next_frame.get('rbac_visible_tool_names') or [])
+                    if str(item or '').strip()
+                ],
+                'rbac_visible_skill_ids': [
+                    str(item or '').strip()
+                    for item in list(next_frame.get('rbac_visible_skill_ids') or [])
+                    if str(item or '').strip()
+                ],
                 'hydrated_executor_state': [
                     str(item or '').strip()
                     for item in list(next_frame.get('hydrated_executor_state') or next_frame.get('hydrated_executor_names') or [])
@@ -3177,6 +3187,16 @@ class TaskLogService:
             'candidate_skill_ids': [
                 str(item or '').strip()
                 for item in list(payload.get('candidate_skill_ids') or [])
+                if str(item or '').strip()
+            ],
+            'rbac_visible_tool_names': [
+                str(item or '').strip()
+                for item in list(payload.get('rbac_visible_tool_names') or [])
+                if str(item or '').strip()
+            ],
+            'rbac_visible_skill_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('rbac_visible_skill_ids') or [])
                 if str(item or '').strip()
             ],
             'hydrated_executor_state': [

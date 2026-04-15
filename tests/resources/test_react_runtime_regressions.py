@@ -10,6 +10,7 @@ import yaml
 
 from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager
 from g3ku.agent.tools.base import Tool
+from g3ku.agent.tools.main_runtime import LoadSkillContextTool, LoadToolContextTool
 from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.resources.loader import ResourceLoader
@@ -118,6 +119,23 @@ def _submit_final_result_tool(*, node_kind: str = "execution") -> SubmitFinalRes
         return dict(payload)
 
     return SubmitFinalResultTool(_submit, node_kind=node_kind)
+
+
+class _RuntimeToolService:
+    def __init__(self) -> None:
+        self.load_tool_calls: list[dict[str, object]] = []
+        self.load_skill_calls: list[dict[str, object]] = []
+
+    async def startup(self) -> None:
+        return None
+
+    def load_tool_context_v2(self, **kwargs):
+        self.load_tool_calls.append(dict(kwargs))
+        return {"ok": True, "tool_id": str(kwargs.get("tool_id") or "")}
+
+    def load_skill_context_v2(self, **kwargs):
+        self.load_skill_calls.append(dict(kwargs))
+        return {"ok": True, "skill_id": str(kwargs.get("skill_id") or "")}
 
 
 @pytest.mark.parametrize(
@@ -2647,6 +2665,44 @@ async def test_react_loop_execute_tool_keeps_direct_load_payload_inline(tmp_path
         assert payload["content"].startswith("tool line 001")
     finally:
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_load_tool_context_tool_rejects_non_candidate_runtime_target() -> None:
+    service = _RuntimeToolService()
+    tool = LoadToolContextTool(lambda: service)
+
+    rendered = await tool.execute(
+        tool_id="filesystem_write",
+        _LoadToolContextTool__g3ku_runtime={
+            "session_key": "web:shared",
+            "actor_role": "execution",
+            "tool_contract_enforced": True,
+            "candidate_tool_names": ["agent_browser"],
+        },
+    )
+
+    assert rendered.startswith("Error:")
+    assert service.load_tool_calls == []
+
+
+@pytest.mark.asyncio
+async def test_load_skill_context_tool_rejects_non_candidate_runtime_target() -> None:
+    service = _RuntimeToolService()
+    tool = LoadSkillContextTool(lambda: service)
+
+    rendered = await tool.execute(
+        skill_id="find-skills",
+        _LoadSkillContextTool__g3ku_runtime={
+            "session_key": "web:shared",
+            "actor_role": "execution",
+            "tool_contract_enforced": True,
+            "candidate_skill_ids": ["repair-tool"],
+        },
+    )
+
+    assert rendered.startswith("Error:")
+    assert service.load_skill_calls == []
 
 
 @pytest.mark.asyncio

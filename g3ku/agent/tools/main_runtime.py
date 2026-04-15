@@ -17,6 +17,45 @@ def _runtime_actor_role(runtime: dict[str, Any] | None) -> str:
     return value or 'ceo'
 
 
+def _runtime_contract_enforced(runtime: dict[str, Any] | None) -> bool:
+    payload = runtime if isinstance(runtime, dict) else {}
+    return bool(payload.get('tool_contract_enforced'))
+
+
+def _normalized_runtime_names(values: Any) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw_value in list(values or []):
+        value = str(raw_value or '').strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def _candidate_gate_error(
+    *,
+    runtime: dict[str, Any] | None,
+    field_name: str,
+    requested_id: str,
+    label: str,
+) -> str:
+    if not _runtime_contract_enforced(runtime):
+        return ''
+    payload = runtime if isinstance(runtime, dict) else {}
+    raw_values = payload.get(field_name)
+    if not isinstance(raw_values, list):
+        return f'Error: 运行时工具合同损坏/缺失：{field_name} 缺失'
+    candidates = _normalized_runtime_names(raw_values)
+    target = str(requested_id or '').strip()
+    if not target:
+        return ''
+    if target in set(candidates):
+        return ''
+    return f'Error: 当前运行时候选{label}未包含 `{target}`，只能加载本轮候选{label}'
+
+
 class _MainRuntimeTool(Tool):
     def __init__(self, service_getter: Callable[[], Any]):
         self._service_getter = service_getter
@@ -66,6 +105,14 @@ class LoadSkillContextTool(_MainRuntimeTool):
         skill_name = str(skill_id or '').strip()
         if not skill_name:
             return json.dumps({'ok': False, 'error': 'skill_id_required'}, ensure_ascii=False)
+        gate_error = _candidate_gate_error(
+            runtime=__g3ku_runtime,
+            field_name='candidate_skill_ids',
+            requested_id=skill_name,
+            label='技能',
+        )
+        if gate_error:
+            return gate_error
         if hasattr(service, 'load_skill_context_v2'):
             kwargs_v2: dict[str, Any] = {
                 'actor_role': _runtime_actor_role(__g3ku_runtime),
@@ -115,6 +162,15 @@ class LoadToolContextTool(_MainRuntimeTool):
         service = await self._service()
         tool_name = str(tool_id or '').strip()
         search_text = str(search_query or '')
+        if tool_name:
+            gate_error = _candidate_gate_error(
+                runtime=__g3ku_runtime,
+                field_name='candidate_tool_names',
+                requested_id=tool_name,
+                label='工具',
+            )
+            if gate_error:
+                return gate_error
         if hasattr(service, 'load_tool_context_v2'):
             kwargs_v2: dict[str, Any] = {
                 'actor_role': _runtime_actor_role(__g3ku_runtime),

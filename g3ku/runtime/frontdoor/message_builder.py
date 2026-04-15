@@ -1492,6 +1492,13 @@ class CeoMessageBuilder:
                 for item in list(context_sources['selected_skills'] or [])
                 if self._skill_id(item)
             ],
+            candidate_skill_ids=[
+                self._skill_id(item)
+                for item in list(context_sources['selected_skills'] or [])
+                if self._skill_id(item)
+            ],
+            rbac_visible_tool_names=list(context_sources['capability_snapshot'].visible_tool_ids),
+            rbac_visible_skill_ids=list(context_sources['capability_snapshot'].visible_skill_ids),
             contract_revision=(
                 str(context_sources['capability_snapshot'].exposure_revision or '').strip()
                 or DEFAULT_CACHE_FAMILY_REVISION
