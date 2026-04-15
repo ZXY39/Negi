@@ -23,6 +23,28 @@ from g3ku.runtime.session_agent import RuntimeAgentSession
 from main.runtime.chat_backend import build_prompt_cache_diagnostics
 
 
+def _is_frontdoor_runtime_tool_contract_record(record: dict[str, object]) -> bool:
+    if str(record.get("role") or "").strip().lower() != "user":
+        return False
+    content = record.get("content")
+    if isinstance(content, dict):
+        payload = dict(content)
+    elif isinstance(content, str):
+        text = str(content or "").strip()
+        if not text:
+            return False
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return False
+        if not isinstance(parsed, dict):
+            return False
+        payload = dict(parsed)
+    else:
+        return False
+    return str(payload.get("message_type") or "").strip() == "frontdoor_runtime_tool_contract"
+
+
 class _FakeGraphOutput:
     def __init__(self, *, value, interrupts=()):
         self.value = dict(value or {})
@@ -1880,6 +1902,36 @@ def test_create_agent_prompt_cache_key_contract_preserves_fallback_system_prompt
     }
 
 
+def test_create_agent_request_render_serializes_frontdoor_tool_contract_message() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    system_message, request_messages = runner._render_request_records(
+        [
+            {"role": "system", "content": "stable system"},
+            {
+                "role": "user",
+                "content": {
+                    "message_type": "frontdoor_runtime_tool_contract",
+                    "callable_tool_names": ["exec"],
+                    "candidate_tool_names": ["filesystem_write"],
+                    "hydrated_tool_names": [],
+                    "visible_skill_ids": ["memory"],
+                    "stage_summary": {"active_stage_id": "stage:1", "transition_required": False},
+                    "contract_revision": "frontdoor:v1",
+                },
+            },
+        ]
+    )
+
+    assert str(getattr(system_message, "content", "") or "") == "stable system"
+    assert len(request_messages) == 1
+    rendered_content = str(getattr(request_messages[0], "content", "") or "")
+    payload = json.loads(rendered_content)
+    assert payload["message_type"] == "frontdoor_runtime_tool_contract"
+    assert payload["callable_tool_names"] == ["exec"]
+    assert payload["candidate_tool_names"] == ["filesystem_write"]
+
+
 @pytest.mark.asyncio
 async def test_create_agent_dynamic_appendix_request_preserves_live_assistant_and_tool_messages() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
@@ -1934,7 +1986,13 @@ async def test_create_agent_dynamic_appendix_request_preserves_live_assistant_an
 
     assert isinstance(response, ExtendedModelResponse)
     rendered_messages = list(seen_request["messages"] or [])
-    contents = [str(getattr(message, "content", "") or "") for message in rendered_messages]
+    contents = [
+        str(getattr(message, "content", "") or "")
+        for message in rendered_messages
+        if not _is_frontdoor_runtime_tool_contract_record(
+            {"role": "user", "content": getattr(message, "content", "")}
+        )
+    ]
 
     assert contents == [
         "start",
@@ -1992,7 +2050,13 @@ async def test_create_agent_dynamic_appendix_request_does_not_duplicate_when_sta
     )
 
     assert isinstance(response, ExtendedModelResponse)
-    contents = [str(getattr(message, "content", "") or "") for message in list(seen_request["messages"] or [])]
+    contents = [
+        str(getattr(message, "content", "") or "")
+        for message in list(seen_request["messages"] or [])
+        if not _is_frontdoor_runtime_tool_contract_record(
+            {"role": "user", "content": getattr(message, "content", "")}
+        )
+    ]
     assert contents == [
         "start",
         "working memory of the live turn",
@@ -2076,6 +2140,9 @@ async def test_create_agent_stable_prefix_request_coherent_after_dynamic_appendi
     assert [
         str(getattr(message, "content", "") or "")
         for message in list(seen_requests[0]["messages"] or [])
+        if not _is_frontdoor_runtime_tool_contract_record(
+            {"role": "user", "content": getattr(message, "content", "")}
+        )
     ] == [
         "start",
         "assistant drift A",
@@ -2084,6 +2151,9 @@ async def test_create_agent_stable_prefix_request_coherent_after_dynamic_appendi
     assert [
         str(getattr(message, "content", "") or "")
         for message in list(seen_requests[1]["messages"] or [])
+        if not _is_frontdoor_runtime_tool_contract_record(
+            {"role": "user", "content": getattr(message, "content", "")}
+        )
     ] == [
         "start",
         "assistant drift B",
@@ -2125,7 +2195,12 @@ def test_create_agent_prompt_contract_avoids_duplicate_history_when_live_message
         session_key="web:shared",
     )
 
-    assert contract.request_messages == [
+    non_contract_request_messages = [
+        item
+        for item in list(contract.request_messages or [])
+        if not _is_frontdoor_runtime_tool_contract_record(dict(item))
+    ]
+    assert non_contract_request_messages == [
         {"role": "system", "content": "stable system"},
         {"role": "assistant", "content": "[G3KU_LONG_CONTEXT_SUMMARY_V1]\nsummary body"},
         {"role": "assistant", "content": "latest assistant"},
@@ -2171,7 +2246,12 @@ def test_create_agent_prompt_contract_does_not_treat_plain_short_recap_text_as_c
         {"role": "assistant", "content": "a1"},
         {"role": "user", "content": "latest user"},
     ]
-    assert contract.request_messages == [
+    non_contract_request_messages = [
+        item
+        for item in list(contract.request_messages or [])
+        if not _is_frontdoor_runtime_tool_contract_record(dict(item))
+    ]
+    assert non_contract_request_messages == [
         {"role": "system", "content": "stable system"},
         {"role": "user", "content": "q1"},
         {"role": "assistant", "content": "a1"},
@@ -2454,6 +2534,48 @@ async def test_create_agent_prompt_middleware_emits_analysis_progress_for_model_
     assert progress_calls[0][2]["phase"] == "model_call"
     assert "重试" in progress_calls[1][0]
     assert progress_calls[1][2]["phase"] == "provider_retry"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_prompt_middleware_accepts_legacy_dict_tool_contract_message() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    middleware = ceo_agent_middleware.CeoPromptAssemblyMiddleware(runner=runner)
+
+    async def _handler(request):
+        _ = request
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    response = await middleware.awrap_model_call(
+        ModelRequest(
+            model=SimpleNamespace(),
+            system_message=SystemMessage(content="You are the CEO frontdoor agent."),
+            messages=[HumanMessage(content="hello")],
+            tools=[],
+            state={
+                "messages": [{"role": "user", "content": "hello"}],
+                "dynamic_appendix_messages": [
+                    {
+                        "role": "user",
+                        "content": {
+                            "message_type": "frontdoor_runtime_tool_contract",
+                            "callable_tool_names": ["exec"],
+                            "candidate_tool_names": ["filesystem_write"],
+                            "hydrated_tool_names": [],
+                            "visible_skill_ids": ["memory"],
+                            "stage_summary": {"active_stage_id": "", "transition_required": False},
+                            "contract_revision": "frontdoor:v1",
+                        },
+                    }
+                ],
+            },
+            runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
+        ),
+        _handler,
+    )
+
+    assert isinstance(response, ExtendedModelResponse)
+    assert response.model_response.result == [AIMessage(content="ok")]
 
 
 @pytest.mark.asyncio

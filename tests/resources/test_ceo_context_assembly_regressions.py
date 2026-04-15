@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,11 @@ from g3ku.runtime.context.types import RetrievedContextBundle
 from g3ku.runtime.frontdoor.capability_snapshot import build_capability_snapshot
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
+from g3ku.runtime.frontdoor.tool_contract import (
+    build_frontdoor_tool_contract,
+    is_frontdoor_tool_contract_message,
+    upsert_frontdoor_tool_contract_message,
+)
 from g3ku.session.manager import Session
 
 
@@ -1079,12 +1085,12 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
         for item in list(result.dynamic_appendix_messages or [])
         if isinstance(item, dict)
         and str(item.get("role") or "").strip().lower() == "user"
-        and isinstance(item.get("content"), dict)
-        and str((item.get("content") or {}).get("message_type") or "").strip() == "frontdoor_runtime_tool_contract"
+        and isinstance(item.get("content"), str)
+        and str(item.get("content") or "").strip()
     ]
 
     assert len(contract_messages) == 1
-    payload = dict(contract_messages[0]["content"])
+    payload = json.loads(contract_messages[0]["content"])
     assert "filesystem_write" in payload["callable_tool_names"]
     assert "filesystem_write" not in payload["candidate_tool_names"]
     assert payload["hydrated_tool_names"] == ["filesystem_write"]
@@ -1109,11 +1115,14 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
             "dynamic_appendix_messages": [
                 {
                     "role": "user",
-                    "content": {
-                        "message_type": "frontdoor_runtime_tool_contract",
-                        "callable_tool_names": ["exec"],
-                        "candidate_tool_names": ["filesystem_write"],
-                    },
+                    "content": json.dumps(
+                        {
+                            "message_type": "frontdoor_runtime_tool_contract",
+                            "callable_tool_names": ["exec"],
+                            "candidate_tool_names": ["filesystem_write"],
+                        },
+                        ensure_ascii=False,
+                    ),
                 }
             ],
         }
@@ -1123,14 +1132,49 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
         item
         for item in records
         if str(item.get("role") or "").strip().lower() == "user"
-        and isinstance(item.get("content"), dict)
-        and str((item.get("content") or {}).get("message_type") or "").strip() == "frontdoor_runtime_tool_contract"
+        and isinstance(item.get("content"), str)
+        and str(item.get("content") or "").strip()
     ]
 
     assert len(contract_messages) == 1
-    payload = dict(contract_messages[0]["content"])
+    payload = json.loads(contract_messages[0]["content"])
     assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
     assert payload["candidate_tool_names"] == []
+    assert payload["hydrated_tool_names"] == ["filesystem_write"]
+
+
+def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_json_string() -> None:
+    contract = build_frontdoor_tool_contract(
+        callable_tool_names=["submit_next_stage", "filesystem_write"],
+        candidate_tool_names=["agent_browser"],
+        hydrated_tool_names=["filesystem_write"],
+        frontdoor_stage_state={
+            "active_stage_id": "stage:1",
+            "transition_required": False,
+            "stages": [{"stage_id": "stage:1", "status": "active", "stage_goal": "write"}],
+        },
+        visible_skill_ids=["memory"],
+        contract_revision="frontdoor:v1",
+    )
+    legacy_message = {
+        "role": "user",
+        "content": {
+            "message_type": "frontdoor_runtime_tool_contract",
+            "callable_tool_names": ["exec"],
+            "candidate_tool_names": ["filesystem_write"],
+        },
+    }
+
+    assert is_frontdoor_tool_contract_message(legacy_message)
+    assert is_frontdoor_tool_contract_message(contract.to_message())
+
+    updated = upsert_frontdoor_tool_contract_message([legacy_message], contract)
+    assert len(updated) == 1
+    assert is_frontdoor_tool_contract_message(updated[0])
+    assert isinstance(updated[0]["content"], str)
+    payload = json.loads(updated[0]["content"])
+    assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
+    assert payload["candidate_tool_names"] == ["agent_browser"]
     assert payload["hydrated_tool_names"] == ["filesystem_write"]
 
 

@@ -288,7 +288,13 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         self,
         records: list[dict[str, Any]] | None,
     ) -> tuple[CoreSystemMessage | None, list[BaseMessage]]:
-        normalized_records = [self._message_record(item) for item in list(records or [])]
+        normalized_records: list[dict[str, Any]] = []
+        for item in list(records or []):
+            record = self._message_record(item)
+            content = record.get("content", "")
+            if isinstance(content, dict):
+                record["content"] = json.dumps(content, ensure_ascii=False, indent=2)
+            normalized_records.append(record)
         system_message = None
         if normalized_records and str(normalized_records[0].get("role") or "").strip().lower() == "system":
             system_message = CoreSystemMessage(content=normalized_records[0].get("content", ""))

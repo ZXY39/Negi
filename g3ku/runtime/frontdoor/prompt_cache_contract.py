@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
 from g3ku.runtime.semantic_context_summary import LONG_CONTEXT_SUMMARY_PREFIX
+from g3ku.runtime.frontdoor.tool_contract import FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND
 from main.runtime.chat_backend import (
     build_prompt_cache_diagnostics,
     build_session_prompt_cache_key,
@@ -11,6 +13,36 @@ from main.runtime.chat_backend import (
 )
 
 DEFAULT_CACHE_FAMILY_REVISION = "ceo_frontdoor:stable-prefix:v1"
+
+
+def _is_frontdoor_runtime_tool_contract_record(record: dict[str, Any]) -> bool:
+    if str(record.get("role") or "").strip().lower() != "user":
+        return False
+    content = record.get("content")
+    payload: dict[str, Any] | None = None
+    if isinstance(content, dict):
+        payload = dict(content)
+    elif isinstance(content, str):
+        text = str(content or "").strip()
+        if not text:
+            return False
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return False
+        if isinstance(parsed, dict):
+            payload = dict(parsed)
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("message_type") or "").strip() == FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND
+
+
+def _dynamic_appendix_overlap_records(dynamic_appendix_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        dict(item)
+        for item in list(dynamic_appendix_messages or [])
+        if isinstance(item, dict) and not _is_frontdoor_runtime_tool_contract_record(dict(item))
+    ]
 
 
 def _records_contain_slice(records: list[dict[str, Any]], target: list[dict[str, Any]]) -> bool:
@@ -105,7 +137,8 @@ def _effective_stable_messages(
     live_request_messages: list[dict[str, Any]],
     dynamic_appendix_messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    live_without_appendix = _strip_first_slice(live_request_messages, dynamic_appendix_messages)
+    appendix_for_overlap = _dynamic_appendix_overlap_records(dynamic_appendix_messages)
+    live_without_appendix = _strip_first_slice(live_request_messages, appendix_for_overlap)
     if live_without_appendix and _contains_long_context_summary(live_without_appendix):
         return live_without_appendix
     return list(stable_messages)
@@ -117,10 +150,11 @@ def _build_request_messages(
     live_request_messages: list[dict[str, Any]],
     dynamic_appendix_messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    appendix_for_overlap = _dynamic_appendix_overlap_records(dynamic_appendix_messages)
     if not live_request_messages:
         request_messages = list(stable_messages)
     else:
-        live_without_appendix = _strip_first_slice(live_request_messages, dynamic_appendix_messages)
+        live_without_appendix = _strip_first_slice(live_request_messages, appendix_for_overlap)
         prefix_length = _shared_prefix_length(stable_messages, live_without_appendix)
         request_messages = [
             *list(stable_messages[:prefix_length]),

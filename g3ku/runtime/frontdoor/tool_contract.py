@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,19 +47,43 @@ class FrontdoorToolContract:
     visible_skill_ids: list[str]
     contract_revision: str
 
+    def to_message_payload(self) -> dict[str, Any]:
+        return {
+            'message_type': FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND,
+            'callable_tool_names': list(self.callable_tool_names),
+            'candidate_tool_names': list(self.candidate_tool_names),
+            'hydrated_tool_names': list(self.hydrated_tool_names),
+            'visible_skill_ids': list(self.visible_skill_ids),
+            'stage_summary': dict(self.stage_summary),
+            'contract_revision': str(self.contract_revision or '').strip(),
+        }
+
     def to_message(self) -> dict[str, Any]:
         return {
             'role': 'user',
-            'content': {
-                'message_type': FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND,
-                'callable_tool_names': list(self.callable_tool_names),
-                'candidate_tool_names': list(self.candidate_tool_names),
-                'hydrated_tool_names': list(self.hydrated_tool_names),
-                'visible_skill_ids': list(self.visible_skill_ids),
-                'stage_summary': dict(self.stage_summary),
-                'contract_revision': str(self.contract_revision or '').strip(),
-            },
+            'content': json.dumps(self.to_message_payload(), ensure_ascii=False, indent=2),
         }
+
+
+def _frontdoor_tool_contract_payload_from_content(content: Any) -> dict[str, Any] | None:
+    payload: dict[str, Any] | None = None
+    if isinstance(content, dict):
+        payload = dict(content)
+    elif isinstance(content, str):
+        text = str(content or '').strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return None
+        if isinstance(parsed, dict):
+            payload = dict(parsed)
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get('message_type') or '').strip() != FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND:
+        return None
+    return payload
 
 
 def build_frontdoor_tool_contract(
@@ -90,9 +115,7 @@ def is_frontdoor_tool_contract_message(message: dict[str, Any]) -> bool:
     if str((message or {}).get('role') or '').strip().lower() != 'user':
         return False
     content = (message or {}).get('content')
-    if not isinstance(content, dict):
-        return False
-    return str(content.get('message_type') or '').strip() == FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND
+    return _frontdoor_tool_contract_payload_from_content(content) is not None
 
 
 def upsert_frontdoor_tool_contract_message(
@@ -111,4 +134,3 @@ def upsert_frontdoor_tool_contract_message(
     if not replaced:
         updated.append(contract.to_message())
     return updated
-
