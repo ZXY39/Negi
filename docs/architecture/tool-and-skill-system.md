@@ -180,6 +180,7 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - CEO/frontdoor 的 stage gate 现在由 `execute_tools` 真正执行，而不是只靠 prompt 约束。普通工具在无活动阶段或预算耗尽时会直接收到 gate error；`submit_next_stage` 与普通工具混在同一批 tool calls 里时，整批会被拒绝，要求模型先单独完成阶段切换。
 - CEO/frontdoor 现在还多了一层更前置的 contract 收紧：当当前没有“有效阶段”时，模型真正看到的 callable tool 列表只剩 `submit_next_stage`。这条规则同样适用于阶段预算已耗尽、必须换阶段的时刻。
 - 当前保留的特例是 `cron_internal`：为了继续支持 cron 自移除，这类内部轮次不会被收紧到只剩 `submit_next_stage`。
+- `submit_next_stage` 的阶段预算现在在 execution / acceptance / CEO-frontdoor 三条路径上统一为 `5-15`；运行时仍允许在预算未耗尽前提前切到下一阶段，因此预算应理解为“本阶段声明的上限窗口”，而不是“必须烧满的最小轮数”。
 - 这不影响 candidate 语义。`candidate_tool_names` / `candidate_skill_ids` 仍继续表达“RBAC 可见 ∩ 语义召回命中”的候选集合，只是这些候选在无有效阶段时不会同时出现在 callable tool schemas 里。
 - 维护时要区分两份前门工具集合：`tool_names` 继续保存阶段内可恢复的完整 callable pool，而“这一刻真正暴露给模型的 callable tools”要通过前门 callable-tool helper 结合 `frontdoor_stage_state` 再算一次。不要把前者直接当作当前轮的模型可见函数列表。
 - approval interrupt 在暂停前会把 `frontdoor_stage_state`、`compression_state`、`semantic_context_state`、`hydrated_tool_names`、`tool_call_payloads` 与 `frontdoor_selection_debug` 一并写进 interrupt payload；恢复后如果这些字段丢失，应按“frontdoor canonical runtime contract / runtime state 损坏”排查。

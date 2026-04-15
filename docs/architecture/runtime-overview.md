@@ -159,6 +159,7 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - `call_model` 和 `execute_tools` 现在共用同一份 frontdoor runtime tool bundle。像 `submit_next_stage` 这类运行时注入的 stage protocol tool，必须同时对模型“可见”并且在 `execute_tools` 里可真实执行；维护时不要再在执行环节单独从 `state.tool_names` 重建第二套工具表。
 - `execute_tools` 现在会在真正执行前落实 stage gate：普通工具在无活动阶段或阶段预算耗尽时会直接得到 gate error；如果同一批 tool calls 里把 `submit_next_stage` 和其他普通工具混在一起，整个批次会被拒绝，要求模型先单独完成阶段切换。
 - 成功的 `submit_next_stage` 会在同一轮 `execute_tools` 完成后立刻写回 `frontdoor_stage_state`；下一次 `call_model` 看到的已经是 promotion 后、阶段已推进后的 runtime state，而不是等额外的后处理链再补写。
+- CEO websocket 现在会把当前 visible turn 的权威 final `execution_trace_summary` 直接附到 `ceo.reply.final`；维护时不要再假设前端必须等后续 `state_snapshot` 才能拼出收尾阶段视图。
 - 新的前门暴露边界是：只要当前没有“有效阶段”（`active_stage_id` 为空，或当前阶段已 `transition_required=true`），真正下发给模型的 callable tool schemas 就只剩 `submit_next_stage`；候选 tool/skill 列表仍继续显示，供模型先看能力边界、再开阶段。
 - 当前唯一保留的例外是 `cron_internal`。这类内部轮次仍保留自己的 callable tool 集合，以便按既有协议继续调用 `cron(action="remove")` 完成自移除；维护时不要把这个 internal lane 与普通 CEO user turn 混为一谈。
 - 维护上不要把这个规则误读成“前门内部状态已经只剩 `submit_next_stage`”。`tool_names` 仍保存阶段内可恢复的完整工具池，供同一 turn 成功开阶段后的下一次 model call 立即恢复完整 callable 列表；真正决定“此刻给模型看到什么”的，是前门的 callable-tool helper 与动态合同消息。
@@ -182,6 +183,7 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - `load_tool_context` / `load_skill_context` 会照常进入 round 记录与执行轨迹，但它们现在不再增加 `tool_rounds_used`。
 - 这条规则同时适用于 execution/acceptance 节点和 CEO/frontdoor；如果维护者看到很多 loader 调用，不要据此直接推断阶段预算已经被吃掉。
 - 排查预算问题时，应优先检查 `rounds[*].budget_counted`、阶段快照和 runtime messages artifact，而不是按工具名手算。
+- execution、acceptance 与 CEO/frontdoor 现在共用同一条阶段预算合同：`submit_next_stage.tool_round_budget` 必须落在 `5-15` 之间；这表示单阶段允许声明的上限窗口，而不是要求模型必须把预算耗尽后才能提前切到下一阶段。
 
 ### Canonical Tool Contract Notes
 

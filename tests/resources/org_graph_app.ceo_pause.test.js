@@ -313,6 +313,55 @@ test("discard and final match the target pending turn by turn_id before source",
     assert.equal(S.ceoPendingTurns.length, 0);
 });
 
+test("finalize uses final execution trace summary instead of stale inflight trace", () => {
+    const context = loadApp();
+    const { S, patchCeoInflightTurn, finalizeCeoTurn } = context;
+    const turn = makeTurn({ text: PROCESSING_LABEL, source: "user", steps: 1 });
+    turn.turnId = "turn-final";
+
+    S.ceoPendingTurns = [turn];
+    S.ceoTurnActive = true;
+
+    patchCeoInflightTurn({
+        turn_id: "turn-final",
+        source: "user",
+        status: "running",
+        execution_trace_summary: {
+            stages: [
+                {
+                    stage_id: "frontdoor-stage-4",
+                    stage_goal: "write file",
+                    rounds: [],
+                },
+            ],
+        },
+    });
+
+    finalizeCeoTurn("done", {
+        source: "user",
+        turn_id: "turn-final",
+        execution_trace_summary: {
+            stages: [
+                {
+                    stage_id: "frontdoor-stage-4",
+                    stage_goal: "write file",
+                    rounds: [
+                        {
+                            round_id: "frontdoor-stage-4:round-1",
+                            tools: [{ tool_name: "filesystem_write", status: "success" }],
+                        },
+                    ],
+                },
+            ],
+        },
+    });
+
+    assert.equal(turn.finalized, true);
+    assert.equal(turn.renderMode, "stage");
+    assert.equal(turn.lastExecutionTraceSummary.stages[0].rounds.length, 1);
+    assert.equal(turn.lastExecutionTraceSummary.stages[0].rounds[0].tools[0].tool_name, "filesystem_write");
+});
+
 test("running state without source does not create a phantom pending turn", () => {
     const { applyCeoState, S } = loadApp();
 

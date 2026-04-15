@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -258,7 +258,7 @@ def _create_pending_tool_round(
         task_id,
         node_id,
         stage_goal="recovery test stage",
-        tool_round_budget=1,
+        tool_round_budget=5,
     )
     round_payload = service.log_service.record_execution_stage_round(
         task_id,
@@ -4270,7 +4270,7 @@ def test_get_node_detail_payload_summary_mode_rebuilds_flattened_execution_trace
         record.task_id,
         record.root_node_id,
         stage_goal="inspect repository structure",
-        tool_round_budget=2,
+        tool_round_budget=6,
     )
     service.log_service.record_execution_stage_round(
         record.task_id,
@@ -4288,7 +4288,7 @@ def test_get_node_detail_payload_summary_mode_rebuilds_flattened_execution_trace
         "stages": [
             {
                 "stage_goal": "inspect repository structure",
-                "tool_round_budget": 2,
+                "tool_round_budget": 6,
                 "tool_rounds_used": 1,
                 "tool_calls": [
                     {
@@ -5233,7 +5233,7 @@ async def test_continue_task_retry_in_place_restores_failed_runtime_context(tmp_
             record.task_id,
             root.node_id,
             stage_goal="Continue validating the remaining high-signal candidates.",
-            tool_round_budget=3,
+            tool_round_budget=7,
         )
         service.log_service.record_execution_stage_round(
             record.task_id,
@@ -5605,7 +5605,7 @@ def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: P
         record.task_id,
         root.node_id,
         stage_goal="鏍归樁娈电洰鏍?",
-        tool_round_budget=1,
+        tool_round_budget=5,
     )
     child = service.node_runner._create_execution_child(
         task=task,
@@ -5616,7 +5616,7 @@ def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: P
         record.task_id,
         child.node_id,
         stage_goal="瀛愰樁娈电洰鏍?",
-        tool_round_budget=1,
+        tool_round_budget=5,
     )
     acceptance = service.node_runner.create_acceptance_node(
         task=task,
@@ -5666,7 +5666,7 @@ def test_view_progress_tree_text_shows_acceptance_stage_goal_when_present(tmp_pa
         record.task_id,
         acceptance.node_id,
         stage_goal="validate cited evidence before final verdict",
-        tool_round_budget=1,
+        tool_round_budget=5,
     )
 
     progress = service.query_service.view_progress(record.task_id, mark_read=False)
@@ -5700,7 +5700,7 @@ def test_view_progress_tree_text_prefers_live_stage_goal_over_historical_goal(tm
         record.task_id,
         root.node_id,
         stage_goal="鏃ч樁娈电洰鏍?",
-        tool_round_budget=1,
+        tool_round_budget=5,
     )
     service.log_service.replace_runtime_frames(
         record.task_id,
@@ -5796,7 +5796,7 @@ def test_exec_output_ref_is_persisted_and_full_detail_hydrates_tool_output(tmp_p
         record.task_id,
         root.node_id,
         stage_goal="capture exec output",
-        tool_round_budget=1,
+        tool_round_budget=5,
     )
     service.log_service.record_execution_stage_round(
         record.task_id,
@@ -6202,7 +6202,7 @@ async def test_pause_during_model_call_keeps_task_resumable_and_resume_finishes_
                         ToolCallRequest(
                             id="call:stage",
                             name="submit_next_stage",
-                            arguments={"stage_goal": "resume after pause", "tool_round_budget": 1},
+                            arguments={"stage_goal": "resume after pause", "tool_round_budget": 5},
                         )
                     ],
                     finish_reason="tool_calls",
@@ -7225,8 +7225,8 @@ async def test_spawn_review_request_uses_root_to_parent_path_tree_and_stage_goal
             parent=parent,
             spec=SpawnChildSpec(goal="existing child", prompt="existing child prompt", execution_policy=_execution_policy()),
         )
-        service.log_service.submit_next_stage(record.task_id, root.node_id, stage_goal="root stage goal", tool_round_budget=1)
-        service.log_service.submit_next_stage(record.task_id, parent.node_id, stage_goal="parent stage goal", tool_round_budget=1)
+        service.log_service.submit_next_stage(record.task_id, root.node_id, stage_goal="root stage goal", tool_round_budget=5)
+        service.log_service.submit_next_stage(record.task_id, parent.node_id, stage_goal="parent stage goal", tool_round_budget=5)
 
         async def _fake_run_node(task_id: str, node_id: str):
             node = service.get_node(node_id)

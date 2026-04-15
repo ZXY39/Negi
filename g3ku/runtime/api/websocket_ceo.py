@@ -512,6 +512,36 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
     return items
 
 
+def _resolve_final_execution_trace_summary(
+    *,
+    payload: dict[str, Any] | None,
+    session: Any,
+    persisted_session: Any,
+) -> dict[str, Any]:
+    data = payload if isinstance(payload, dict) else {}
+    direct_summary = data.get("execution_trace_summary")
+    if isinstance(direct_summary, dict) and direct_summary:
+        return dict(direct_summary)
+    snapshot_supplier = getattr(session, "_frontdoor_execution_trace_summary_snapshot", None)
+    if callable(snapshot_supplier):
+        try:
+            summary = snapshot_supplier()
+        except Exception:
+            summary = None
+        if isinstance(summary, dict) and summary:
+            return dict(summary)
+    persisted_messages = getattr(persisted_session, "messages", None)
+    for raw in reversed(list(persisted_messages or [])):
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("role") or "").strip().lower() != "assistant":
+            continue
+        summary = raw.get("execution_trace_summary")
+        if isinstance(summary, dict) and summary:
+            return dict(summary)
+    return {}
+
+
 def _should_forward_tool_event(*, session_id: str, event: AgentEvent) -> bool:
     _ = session_id
     if event.type not in {'tool_execution_start', 'tool_execution_update', 'tool_execution_end'}:
@@ -830,6 +860,12 @@ async def ceo_websocket(websocket: WebSocket):
             text = str(payload.get('text') or '').strip()
             source = str(payload.get('source') or 'user').strip().lower() or 'user'
             turn_id = str(payload.get('turn_id') or '').strip()
+            persisted = transcript_store.get_or_create(session_id)
+            execution_trace_summary = _resolve_final_execution_trace_summary(
+                payload=payload,
+                session=session,
+                persisted_session=persisted,
+            )
             if not turn_id:
                 snapshot = None
                 inflight_supplier = getattr(session, 'inflight_turn_snapshot', None)
@@ -861,9 +897,9 @@ async def ceo_websocket(websocket: WebSocket):
                     'text': text,
                     'source': source,
                     'turn_id': turn_id,
+                    **({'execution_trace_summary': execution_trace_summary} if execution_trace_summary else {}),
                 },
             )
-            persisted = transcript_store.get_or_create(session_id)
             _publish_ceo_session_patch(
                 agent=agent,
                 transcript_store=transcript_store,

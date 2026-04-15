@@ -6,7 +6,12 @@ from typing import Any
 
 from g3ku.agent.tools.base import Tool
 from main.models import NodeEvidenceItem, SpawnChildResult, SpawnChildSpec, build_execution_policy_schema
-from main.runtime.stage_budget import FINAL_RESULT_TOOL_NAME, STAGE_TOOL_NAME
+from main.runtime.stage_budget import (
+    FINAL_RESULT_TOOL_NAME,
+    STAGE_TOOL_NAME,
+    STAGE_TOOL_ROUND_BUDGET_MAX,
+    STAGE_TOOL_ROUND_BUDGET_MIN,
+)
 
 
 def build_detail_level_schema(*, description: str) -> dict[str, Any]:
@@ -51,9 +56,12 @@ class SubmitNextStageTool(Tool):
                 },
                 'tool_round_budget': {
                     'type': 'integer',
-                    'description': 'How many ordinary tool rounds this stage may use. Must be between 1 and 10.',
-                    'minimum': 1,
-                    'maximum': 10,
+                    'description': (
+                        f'How many ordinary tool rounds this stage may use. '
+                        f'Must be between {STAGE_TOOL_ROUND_BUDGET_MIN} and {STAGE_TOOL_ROUND_BUDGET_MAX}.'
+                    ),
+                    'minimum': STAGE_TOOL_ROUND_BUDGET_MIN,
+                    'maximum': STAGE_TOOL_ROUND_BUDGET_MAX,
                 },
                 'completed_stage_summary': {
                     'type': 'string',
@@ -107,7 +115,12 @@ class SubmitNextStageTool(Tool):
                 },
                 'tool_round_budget': {
                     'type': 'integer',
-                    'description': 'Allowed ordinary tool calls for this stage.',
+                    'description': (
+                        f'Allowed ordinary tool calls for this stage. '
+                        f'Choose between {STAGE_TOOL_ROUND_BUDGET_MIN} and {STAGE_TOOL_ROUND_BUDGET_MAX}.'
+                    ),
+                    'minimum': STAGE_TOOL_ROUND_BUDGET_MIN,
+                    'maximum': STAGE_TOOL_ROUND_BUDGET_MAX,
                 },
                 'completed_stage_summary': {
                     'type': 'string',

@@ -188,7 +188,7 @@ test("ceo inflight snapshot renders stage -> round -> tool structure", () => {
                 stage_id: "stage-1",
                 stage_goal: "inspect repository",
                 status: "running",
-                tool_round_budget: 2,
+                tool_round_budget: 6,
                 rounds: [
                     {
                         round_id: "round-1",
@@ -226,7 +226,7 @@ test("ceo stage trace with no rounds still signals caller to keep stage view", (
                 stage_id: "stage-no-rounds",
                 stage_goal: "inspect repository",
                 status: "running",
-                tool_round_budget: 3,
+                tool_round_budget: 7,
                 rounds: [],
             },
         ],
@@ -246,7 +246,7 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
                 stage_id: "inflight-stage-1",
                 stage_goal: "synthetic carryover",
                 status: "running",
-                tool_round_budget: 1,
+                tool_round_budget: 5,
                 system_generated: true,
                 stage_kind: "normal",
                 rounds: [
@@ -265,7 +265,7 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
                 stage_id: "frontdoor-stage-1",
                 stage_goal: "\u67e5\u770b\u5f53\u524d\u53ef\u68c0\u7d22\u7684\u957f\u671f\u8bb0\u5fc6\uff0c\u5e76\u5411\u7528\u6237\u6309\u7c7b\u522b\u6e05\u6670\u6c47\u603b\u6211\u5df2\u8bb0\u4f4f\u7684\u5185\u5bb9\u3002",
                 status: "running",
-                tool_round_budget: 3,
+                tool_round_budget: 7,
                 rounds: [
                     {
                         round_id: "round-1",
@@ -283,7 +283,7 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
     });
 
     assert.match(turn.listEl.innerHTML, /\u67e5\u770b\u5f53\u524d\u53ef\u68c0\u7d22\u7684\u957f\u671f\u8bb0\u5fc6/);
-    assert.match(turn.listEl.innerHTML, /2\/3/);
+    assert.match(turn.listEl.innerHTML, /2\/7/);
     assert.doesNotMatch(turn.listEl.innerHTML, /\u6700\u5927\u8f6e\u6570/);
     assert.match(turn.listEl.innerHTML, /loaded context/);
     assert.match(turn.listEl.innerHTML, /memory_search/);

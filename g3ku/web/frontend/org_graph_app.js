@@ -4138,6 +4138,7 @@ function finalizeCeoTurn(text, meta = {}) {
     syncCeoPrimaryButton();
     const normalizedSource = normalizeCeoTurnSource(meta?.source || "user");
     const normalizedTurnId = normalizeCeoTurnId(meta?.turn_id || "");
+    const finalExecutionTraceSummary = normalizeCeoSnapshotExecutionTraceSummary(meta?.execution_trace_summary || null);
     const turn = pullActiveCeoTurn(normalizedSource, normalizedTurnId);
     if (!turn?.textEl || !turn.flowEl) {
         addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
@@ -4154,11 +4155,15 @@ function finalizeCeoTurn(text, meta = {}) {
                 || (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId ? false : true)
                 || !inflightSource
                 || normalizeCeoTurnSource(inflightSource) === normalizedSource;
+            const persistedExecutionTraceSummary = resolvePreferredCeoStageTraceSummary(
+                finalExecutionTraceSummary,
+                inflightMatchesSource ? inflightTurn?.execution_trace_summary || null : null
+            );
             const messages = appendCeoSessionSnapshotMessage(entry?.messages, {
                 role: "assistant",
                 content: String(text || "").trim() || "Done.",
-                tool_events: inflightMatchesSource ? inflightTurn?.tool_events || [] : [],
-                execution_trace_summary: inflightMatchesSource ? inflightTurn?.execution_trace_summary || null : null,
+                tool_events: persistedExecutionTraceSummary ? [] : (inflightMatchesSource ? inflightTurn?.tool_events || [] : []),
+                execution_trace_summary: persistedExecutionTraceSummary,
             });
             return {
                 ...(entry || {}),
@@ -4173,6 +4178,7 @@ function finalizeCeoTurn(text, meta = {}) {
         turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
         turn.textEl.classList.remove("pending");
         turn.textEl.classList.add("markdown-content");
+        if (finalExecutionTraceSummary) renderCeoStageTraceIntoTurn(turn, finalExecutionTraceSummary);
         if (turn.steps > 0) {
             const hasRunningStep = hasRunningCeoToolStep(turn);
             turn.flowEl.hidden = false;
@@ -4194,9 +4200,13 @@ function finalizeCeoTurn(text, meta = {}) {
     patchCeoSessionSnapshotCache(sessionId, (entry) => {
         const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
         const inflightTurnId = normalizeCeoTurnId(inflightTurn?.turn_id);
-        const persistedExecutionTraceSummary = resolvePreferredCeoStageTraceSummary(
+        const fallbackExecutionTraceSummary = resolvePreferredCeoStageTraceSummary(
             inflightTurn?.execution_trace_summary || null,
             turn?.lastExecutionTraceSummary || null
+        );
+        const persistedExecutionTraceSummary = resolvePreferredCeoStageTraceSummary(
+            finalExecutionTraceSummary,
+            fallbackExecutionTraceSummary
         );
         let messages = trimCeoSessionSnapshotMessages(entry?.messages);
         const inflightSource = normalizeCeoTurnSource(inflightTurn?.source || "user");
@@ -4214,7 +4224,7 @@ function finalizeCeoTurn(text, meta = {}) {
         messages = appendCeoSessionSnapshotMessage(messages, {
             role: "assistant",
             content: String(text || "").trim() || "Done.",
-            tool_events: inflightTurn?.tool_events || [],
+            tool_events: persistedExecutionTraceSummary ? [] : (inflightTurn?.tool_events || []),
             execution_trace_summary: persistedExecutionTraceSummary,
         });
         return {

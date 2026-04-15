@@ -28,6 +28,8 @@ from main.protocol import now_iso
 from main.runtime.internal_tools import SubmitNextStageTool
 from main.runtime.stage_budget import (
     STAGE_TOOL_NAME,
+    STAGE_TOOL_ROUND_BUDGET_MAX,
+    STAGE_TOOL_ROUND_BUDGET_MIN,
     response_tool_calls_count_against_stage_budget,
     stage_gate_error_for_tool,
     visible_tools_for_stage_iteration,
@@ -876,8 +878,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         normalized_key_refs = [dict(item) for item in list(key_refs or []) if isinstance(item, dict)]
         if not normalized_goal:
             raise ValueError("stage_goal must not be empty")
-        if normalized_budget < 1 or normalized_budget > 10:
-            raise ValueError("tool_round_budget must be between 1 and 10")
+        if normalized_budget < STAGE_TOOL_ROUND_BUDGET_MIN or normalized_budget > STAGE_TOOL_ROUND_BUDGET_MAX:
+            raise ValueError(
+                f"tool_round_budget must be between "
+                f"{STAGE_TOOL_ROUND_BUDGET_MIN} and {STAGE_TOOL_ROUND_BUDGET_MAX}"
+            )
 
         active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
         active_stage = next(

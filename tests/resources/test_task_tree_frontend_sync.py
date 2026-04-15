@@ -798,7 +798,7 @@ def test_build_node_execution_trace_preserves_summary_round_boundaries() -> None
               stages: [
                 {
                   stage_goal: "inspect repository",
-                  tool_round_budget: 4,
+                  tool_round_budget: 8,
                   tool_rounds_used: 2,
                   rounds: [
                     {
@@ -1169,7 +1169,7 @@ def test_build_execution_trace_steps_label_mixed_full_round_as_with_children() -
                   mode: "包含派生",
                   status: "完成",
                   stage_goal: "mixed stage",
-                  tool_round_budget: 3,
+                  tool_round_budget: 7,
                   tool_rounds_used: 1,
                   rounds: [
                     {

@@ -7,6 +7,8 @@ from main.runtime.stage_budget import (
     CONTROL_STAGE_TOOL_NAMES,
     FINAL_RESULT_TOOL_NAME,
     STAGE_TOOL_NAME,
+    STAGE_TOOL_ROUND_BUDGET_MAX,
+    STAGE_TOOL_ROUND_BUDGET_MIN,
 )
 
 _STAGE_BUDGET_NODE_KINDS = {'execution', 'acceptance'}
@@ -72,7 +74,8 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
     if not isinstance(active, dict):
         return (
             '当前没有有效的 CEO 阶段。'
-            '如果本轮需要使用任何工具，你现在必须先调用 `submit_next_stage`，并传入简洁的 `stage_goal` 和 1 到 10 的 `tool_round_budget`。'
+            f'如果本轮需要使用任何工具，你现在必须先调用 `submit_next_stage`，并传入简洁的 `stage_goal` 和 '
+            f'{STAGE_TOOL_ROUND_BUDGET_MIN} 到 {STAGE_TOOL_ROUND_BUDGET_MAX} 的 `tool_round_budget`。'
             '如果本轮不需要使用工具，可以直接回复。'
         )
     used = int(active.get('tool_rounds_used') or 0)
@@ -126,12 +129,12 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
         if normalized_kind == 'acceptance':
             return (
                 '当前没有活动阶段。你必须先调用 `submit_next_stage` 创建第一个验收阶段，'
-                '填写清晰的 `stage_goal` 和 1 到 10 的 `tool_round_budget`，'
+                f'填写清晰的 `stage_goal` 和 {STAGE_TOOL_ROUND_BUDGET_MIN} 到 {STAGE_TOOL_ROUND_BUDGET_MAX} 的 `tool_round_budget`，'
                 '并在 `stage_goal` 中说明本阶段要重点核验哪些证据、结论和 skills。'
             )
         return (
             '当前没有活动阶段。你必须先调用 `submit_next_stage` 创建第一个阶段，'
-            '填写清晰的 `stage_goal` 和 1 到 10 的 `tool_round_budget`，'
+            f'填写清晰的 `stage_goal` 和 {STAGE_TOOL_ROUND_BUDGET_MIN} 到 {STAGE_TOOL_ROUND_BUDGET_MAX} 的 `tool_round_budget`，'
             '并在 `stage_goal` 中说明哪些工作优先派生子节点、哪些工作由当前节点自行完成。'
         )
     used = int(active.get('tool_rounds_used') or 0)
@@ -154,7 +157,7 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
                 '你现在必须先总结本阶段已经核验的证据、结论和仍未确认的点，'
                 '再调用 `submit_next_stage` 创建下一验收阶段；'
                 f'创建下一阶段时要结合已检查结果，不能机械重复上一阶段预算 {previous_budget or budget}；'
-                '如果上一阶段仍未收敛，应根据剩余核验工作适当放大预算，但不能超过 10；'
+                f'如果上一阶段仍未收敛，应根据剩余核验工作适当放大预算，但不能超过 {STAGE_TOOL_ROUND_BUDGET_MAX}；'
                 '在此之前不能继续使用普通工具，也不能直接输出最终验收结论。'
                 f'{_execution_stage_budget_accounting_note(active)}'
             )
@@ -162,7 +165,7 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
             f'当前阶段【{mode}】已达到工具轮次预算 {used}/{budget}，阶段目标是：{goal}。'
             '你现在必须先总结当前阶段并调用 `submit_next_stage` 创建下一阶段；'
             f'创建下一阶段时要结合总目标和已完成阶段结果，不能机械重复上一阶段预算 {previous_budget or budget}；'
-            '如果上一阶段仍未收敛，应根据剩余工作适当放大预算，但不能超过 10；'
+            f'如果上一阶段仍未收敛，应根据剩余工作适当放大预算，但不能超过 {STAGE_TOOL_ROUND_BUDGET_MAX}；'
             '在此之前不能继续使用普通工具，也不能继续派生子节点。'
             f'{_execution_stage_budget_accounting_note(active)}'
             f'{final_note}'

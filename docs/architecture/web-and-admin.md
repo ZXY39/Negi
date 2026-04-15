@@ -84,6 +84,7 @@ The backend contract behind that UI behavior is:
 - CEO/frontdoor runtime writes precise round tool entries into `frontdoor_stage_state.stages[].rounds[].tools` when a tool cycle finishes.
 - Session snapshot assembly trusts stored `round.tools` first and only backfills legacy rounds by exact `tool_call_id`.
 - A `tool_name`-only fallback is considered a regression because it can make a later same-name tool appear inside an earlier stage round after refresh or transcript reload.
+- `ceo.reply.final` 现在会在有可展示阶段摘要时携带权威 final `execution_trace_summary`；浏览器收尾 live turn 时应优先使用这份 final payload，而不是沿用旧的 `inflight_turn.execution_trace_summary` 快照。
 
 ### Heartbeat Compatibility
 

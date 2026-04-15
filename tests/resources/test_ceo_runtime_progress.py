@@ -141,6 +141,36 @@ class _FakeLiveSession:
     def __init__(self) -> None:
         self.state = SimpleNamespace(status="idle", is_running=False)
         self._listeners = set()
+        self._final_trace = {
+            "active_stage_id": "",
+            "transition_required": False,
+            "stages": [
+                {
+                    "stage_id": "frontdoor-stage-1",
+                    "stage_index": 1,
+                    "stage_goal": "install the requested skill",
+                    "tool_round_budget": 5,
+                    "tool_rounds_used": 1,
+                    "status": "completed",
+                    "rounds": [
+                        {
+                            "round_id": "frontdoor-stage-1:round-1",
+                            "round_index": 1,
+                            "tool_names": ["skill-installer"],
+                            "tool_call_ids": ["skill-installer:1"],
+                            "budget_counted": True,
+                            "tools": [
+                                {
+                                    "tool_call_id": "skill-installer:1",
+                                    "tool_name": "skill-installer",
+                                    "status": "success",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
 
     def subscribe(self, listener):
         self._listeners.add(listener)
@@ -155,6 +185,9 @@ class _FakeLiveSession:
 
     def inflight_turn_snapshot(self):
         return None
+
+    def _frontdoor_execution_trace_summary_snapshot(self):
+        return dict(self._final_trace)
 
     async def _emit(self, event_type: str, **payload) -> None:
         event = AgentEvent(type=event_type, timestamp="2026-03-18T12:00:00", payload=payload)
@@ -3827,6 +3860,7 @@ def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monke
     final_events = [item for item in messages if item["type"] == "ceo.reply.final"]
     assert len(final_events) == 1
     assert final_events[0]["data"]["text"] == "I will keep waiting for the install."
+    assert final_events[0]["data"]["execution_trace_summary"]["stages"][0]["stage_goal"] == "install the requested skill"
 
 
 def test_ceo_websocket_forwards_cron_heartbeat_ok_as_internal_ack(tmp_path: Path, monkeypatch) -> None:

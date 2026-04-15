@@ -848,7 +848,7 @@ def test_main_runtime_service_node_detail_compacts_execution_trace_for_tool_outp
                     {
                         'stage_id': 'stage-1',
                         'stage_goal': 'inspect repository',
-                        'tool_round_budget': 2,
+                        'tool_round_budget': 6,
                         'tool_rounds_used': 1,
                         'rounds': [
                             {

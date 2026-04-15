@@ -15,7 +15,12 @@ from main.protocol import now_iso
 from main.runtime.chat_backend import build_stable_prompt_cache_key
 from main.runtime.node_runner import NodeRunner
 from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool, SubmitNextStageTool
-from main.runtime.stage_budget import STAGE_TOOL_NAME, visible_tools_for_stage_iteration
+from main.runtime.node_prompt_contract import NodeRuntimeToolContract, extract_node_dynamic_contract_payload
+from main.runtime.stage_budget import (
+    STAGE_TOOL_NAME,
+    STAGE_TOOL_ROUND_BUDGET_MIN,
+    visible_tools_for_stage_iteration,
+)
 from main.runtime.stage_messages import build_execution_stage_overlay
 from main.service.runtime_service import MainRuntimeService
 
@@ -221,7 +226,7 @@ async def test_execution_stage_blocks_other_tools_before_stage_and_after_budget(
             record.task_id,
             record.root_node_id,
             stage_goal='完成当前阶段；优先派生：复杂子任务；自行完成：直接读取与整理',
-            tool_round_budget=1,
+            tool_round_budget=STAGE_TOOL_ROUND_BUDGET_MIN,
         )
 
         allowed = await service._react_loop._execute_tool(
@@ -232,12 +237,13 @@ async def test_execution_stage_blocks_other_tools_before_stage_and_after_budget(
         )
         assert allowed == 'ok'
 
-        service.log_service.record_execution_stage_round(
-            record.task_id,
-            record.root_node_id,
-            tool_calls=[{'id': 'call:ordinary', 'name': 'ordinary_tool', 'arguments': {}}],
-            created_at=now_iso(),
-        )
+        for index in range(STAGE_TOOL_ROUND_BUDGET_MIN):
+            service.log_service.record_execution_stage_round(
+                record.task_id,
+                record.root_node_id,
+                tool_calls=[{'id': f'call:ordinary:{index}', 'name': 'ordinary_tool', 'arguments': {}}],
+                created_at=now_iso(),
+            )
 
         exhausted_ordinary = await service._react_loop._execute_tool(
             tools={'ordinary_tool': ordinary},
@@ -321,7 +327,7 @@ async def test_acceptance_stage_blocks_other_tools_before_stage_and_after_budget
             record.task_id,
             acceptance.node_id,
             stage_goal='inspect evidence lines and final verdict consistency',
-            tool_round_budget=1,
+            tool_round_budget=STAGE_TOOL_ROUND_BUDGET_MIN,
         )
 
         allowed = await service._react_loop._execute_tool(
@@ -332,12 +338,13 @@ async def test_acceptance_stage_blocks_other_tools_before_stage_and_after_budget
         )
         assert allowed == 'ok'
 
-        service.log_service.record_execution_stage_round(
-            record.task_id,
-            acceptance.node_id,
-            tool_calls=[{'id': 'call:ordinary', 'name': 'ordinary_tool', 'arguments': {}}],
-            created_at=now_iso(),
-        )
+        for index in range(STAGE_TOOL_ROUND_BUDGET_MIN):
+            service.log_service.record_execution_stage_round(
+                record.task_id,
+                acceptance.node_id,
+                tool_calls=[{'id': f'call:ordinary:{index}', 'name': 'ordinary_tool', 'arguments': {}}],
+                created_at=now_iso(),
+            )
 
         exhausted = await service._react_loop._execute_tool(
             tools={'ordinary_tool': ordinary},
@@ -419,9 +426,10 @@ async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrich
     assert selection.selected_tool_names == ["content"]
     assert list(provided) == ["content"]
     assert len(selector_calls) == 1
-    user_payload = json.loads(str(enriched[1]["content"] or ""))
-    assert user_payload["callable_tool_names"] == ["content"]
-    assert user_payload["visible_skills"] == [
+    contract_payload = extract_node_dynamic_contract_payload(enriched)
+    assert contract_payload is not None
+    assert contract_payload["callable_tool_names"] == ["content"]
+    assert contract_payload["visible_skills"] == [
         {
             "skill_id": "tmux",
             "display_name": "tmux",
@@ -594,6 +602,12 @@ async def test_prepare_node_context_selection_restores_callable_tools_from_persi
     )
     service.log_service = SimpleNamespace(
         read_runtime_frame=lambda task_id, node_id: {
+            "callable_tool_names": ["content"],
+            "candidate_tool_names": [],
+            "selected_skill_ids": [],
+            "candidate_skill_ids": [],
+            "rbac_visible_tool_names": ["content", "filesystem"],
+            "rbac_visible_skill_ids": [],
             "messages": [
                 {"role": "system", "content": "base prompt"},
                 {
@@ -610,11 +624,22 @@ async def test_prepare_node_context_selection_restores_callable_tools_from_persi
                                     "description": "terminal workflow",
                                 }
                             ],
-                            "callable_tool_names": ["content"],
                         },
                         ensure_ascii=False,
                     ),
                 },
+                NodeRuntimeToolContract(
+                    node_id="node-1",
+                    node_kind="execution",
+                    callable_tool_names=["content"],
+                    candidate_tool_names=[],
+                    visible_skills=[],
+                    candidate_skill_ids=[],
+                    stage_payload={},
+                    hydrated_executor_names=[],
+                    lightweight_tool_ids=[],
+                    selection_trace={"mode": "persisted_frame_restore"},
+                ).to_message(),
             ]
         }
     )
@@ -732,7 +757,7 @@ async def test_stage_round_counts_once_and_spawn_promotes_stage_mode_in_trace(tm
             record.task_id,
             record.root_node_id,
             stage_goal='完成当前阶段；优先派生：模块A；自行完成：模块B',
-            tool_round_budget=2,
+            tool_round_budget=6,
         )
         tool_calls = [
             {'id': 'call:one', 'name': 'filesystem', 'arguments': {'path': 'a'}},
@@ -788,7 +813,7 @@ async def test_execution_trace_uses_tool_result_records_for_completed_stage_step
             record.task_id,
             record.root_node_id,
             stage_goal='load skills first',
-            tool_round_budget=3,
+            tool_round_budget=7,
         )
         tool_calls = [
             ToolCallRequest(
@@ -841,7 +866,7 @@ async def test_execution_trace_uses_tool_result_records_for_completed_stage_step
             record.task_id,
             record.root_node_id,
             stage_goal='plan child collection',
-            tool_round_budget=2,
+            tool_round_budget=6,
             completed_stage_summary='skills loaded',
         )
 
@@ -896,7 +921,7 @@ async def test_persisted_tool_result_output_ref_stays_canonical_while_execution_
             record.task_id,
             record.root_node_id,
             stage_goal='inspect wrapped tool result output refs',
-            tool_round_budget=1,
+            tool_round_budget=5,
         )
         tool_calls = [
             ToolCallRequest(
@@ -977,7 +1002,7 @@ async def test_inline_content_json_tool_results_preserve_structured_refs(tmp_pat
             record.task_id,
             record.root_node_id,
             stage_goal='inspect inline content.open payload output refs',
-            tool_round_budget=1,
+            tool_round_budget=5,
         )
         tool_calls = [
             ToolCallRequest(
@@ -1039,7 +1064,7 @@ async def test_ref_based_content_reads_now_consume_stage_budget(tmp_path: Path):
             record.task_id,
             record.root_node_id,
             stage_goal='回读已有 ref；优先派生：无；自行完成：读取已外置内容',
-            tool_round_budget=2,
+            tool_round_budget=6,
         )
         tool_calls = [
             {
@@ -1090,7 +1115,7 @@ async def test_mixed_ref_reads_and_regular_tools_still_consume_stage_budget(tmp_
             record.task_id,
             record.root_node_id,
             stage_goal='混合读取；优先派生：无；自行完成：ref 回读 + 仓库探索',
-            tool_round_budget=2,
+            tool_round_budget=6,
         )
         tool_calls = [
             {
@@ -1151,7 +1176,7 @@ async def test_loader_tools_do_not_consume_stage_budget(tmp_path: Path, tool_nam
             record.task_id,
             record.root_node_id,
             stage_goal='加载上下文工具本身不应消耗当前阶段预算',
-            tool_round_budget=2,
+            tool_round_budget=6,
         )
         tool_calls = []
         for index, tool_name in enumerate(tool_names, start=1):
@@ -1202,7 +1227,7 @@ async def test_final_budgeted_round_is_allowed_and_next_turn_is_blocked(tmp_path
             record.task_id,
             record.root_node_id,
             stage_goal='最后一轮应允许执行；优先派生：无；自行完成：读取文件',
-            tool_round_budget=1,
+            tool_round_budget=STAGE_TOOL_ROUND_BUDGET_MIN,
         )
         runtime_context = {
             'task_id': record.task_id,
@@ -1211,12 +1236,13 @@ async def test_final_budgeted_round_is_allowed_and_next_turn_is_blocked(tmp_path
             'actor_role': 'execution',
             'stage_turn_granted': True,
         }
-        service.log_service.record_execution_stage_round(
-            record.task_id,
-            record.root_node_id,
-            tool_calls=[{'id': 'call:last', 'name': 'filesystem', 'arguments': {}}],
-            created_at=now_iso(),
-        )
+        for index in range(STAGE_TOOL_ROUND_BUDGET_MIN):
+            service.log_service.record_execution_stage_round(
+                record.task_id,
+                record.root_node_id,
+                tool_calls=[{'id': f'call:last:{index}', 'name': 'filesystem', 'arguments': {}}],
+                created_at=now_iso(),
+            )
         allowed = await service._react_loop._execute_tool(
             tools={'filesystem': ordinary},
             tool_name='filesystem',
@@ -1261,7 +1287,7 @@ async def test_react_loop_uses_stable_prompt_cache_key_despite_dynamic_stage_ove
                             name='submit_next_stage',
                             arguments={
                                 'stage_goal': '第一阶段；优先派生：无；自行完成：读取文件',
-                                'tool_round_budget': 2,
+                                'tool_round_budget': 6,
                             },
                         )
                     ],
@@ -1341,7 +1367,7 @@ async def test_submit_next_stage_closes_previous_stage_and_starts_new_stage(tmp_
             record.task_id,
             record.root_node_id,
             stage_goal='第一阶段；优先派生：无；自行完成：整理上下文',
-            tool_round_budget=3,
+            tool_round_budget=7,
         )
         service.log_service.record_execution_stage_round(
             record.task_id,
@@ -1353,7 +1379,7 @@ async def test_submit_next_stage_closes_previous_stage_and_starts_new_stage(tmp_
             record.task_id,
             record.root_node_id,
             stage_goal='第二阶段；优先派生：复杂验证；自行完成：整合结果',
-            tool_round_budget=4,
+            tool_round_budget=8,
             completed_stage_summary='finished stage one summary',
             key_refs=[{'ref': 'artifact:artifact:stage-one', 'note': 'stage one note'}],
         )
@@ -1429,7 +1455,7 @@ async def test_submit_next_stage_rejects_zero_progress_stage_switch(tmp_path: Pa
             record.task_id,
             record.root_node_id,
             stage_goal='第一阶段；优先派生：无；自行完成：整理上下文',
-            tool_round_budget=3,
+            tool_round_budget=7,
         )
 
         with pytest.raises(ValueError, match='current active stage has no substantive progress yet'):
@@ -1437,7 +1463,7 @@ async def test_submit_next_stage_rejects_zero_progress_stage_switch(tmp_path: Pa
                 record.task_id,
                 record.root_node_id,
                 stage_goal='第二阶段；优先派生：复杂验证；自行完成：整合结果',
-                tool_round_budget=4,
+                tool_round_budget=8,
             )
 
         detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
@@ -1467,7 +1493,7 @@ async def test_submit_next_stage_allows_switch_after_spawn_only_progress(tmp_pat
             record.task_id,
             record.root_node_id,
             stage_goal='第一阶段；优先派生：并行采集；自行完成：整合上下文',
-            tool_round_budget=3,
+            tool_round_budget=7,
         )
         service.log_service.record_execution_stage_round(
             record.task_id,
@@ -1479,7 +1505,7 @@ async def test_submit_next_stage_allows_switch_after_spawn_only_progress(tmp_pat
             record.task_id,
             record.root_node_id,
             stage_goal='第二阶段；优先派生：复杂验证；自行完成：整合结果',
-            tool_round_budget=4,
+            tool_round_budget=8,
             completed_stage_summary='spawn-only progress is still substantive',
         )
 
@@ -1512,7 +1538,7 @@ async def test_submit_next_stage_appends_latest_spawn_result_ref_to_completed_st
             record.task_id,
             record.root_node_id,
             stage_goal='first stage: spawn children',
-            tool_round_budget=3,
+            tool_round_budget=7,
         )
         service.log_service.record_execution_stage_round(
             record.task_id,
@@ -1549,7 +1575,7 @@ async def test_submit_next_stage_appends_latest_spawn_result_ref_to_completed_st
             record.task_id,
             record.root_node_id,
             stage_goal='second stage: synthesize child outputs',
-            tool_round_budget=4,
+            tool_round_budget=8,
             completed_stage_summary='spawn round finished',
             key_refs=[{'ref': 'artifact:artifact:user-supplied', 'note': 'manual note'}],
         )
@@ -1578,7 +1604,7 @@ def test_execution_stage_overlay_warns_before_zero_progress_stage_switch() -> No
                 'mode': '自主执行',
                 'status': '进行中',
                 'stage_goal': '整理上下文后继续推进',
-                'tool_round_budget': 3,
+                'tool_round_budget': 7,
                 'tool_rounds_used': 0,
                 'rounds': [],
             },
@@ -1600,7 +1626,7 @@ def test_execution_stage_overlay_exposes_budget_accounting_rules_and_latest_roun
                 'mode': '自主执行',
                 'status': '进行中',
                 'stage_goal': '整理 anomaly_dirs_report 的最终证据',
-                'tool_round_budget': 3,
+                'tool_round_budget': 7,
                 'tool_rounds_used': 1,
                 'rounds': [
                     {
@@ -1647,7 +1673,7 @@ async def test_final_execution_stage_does_not_require_transition_when_budget_is_
             record.task_id,
             record.root_node_id,
             stage_goal='final synthesis for current evidence only',
-            tool_round_budget=1,
+            tool_round_budget=5,
             completed_stage_summary='',
             key_refs=[],
             final=True,
@@ -1689,7 +1715,7 @@ async def test_final_execution_stage_blocks_spawn_child_nodes(tmp_path: Path):
             record.task_id,
             record.root_node_id,
             stage_goal='final synthesis for current evidence only',
-            tool_round_budget=1,
+            tool_round_budget=5,
             completed_stage_summary='',
             key_refs=[],
             final=True,
@@ -1736,7 +1762,7 @@ async def test_stage_summary_is_exposed_in_live_runtime_frame(tmp_path: Path):
         await service.close()
 
 
-def test_submit_next_stage_tool_schema_budget_max_is_ten() -> None:
+def test_submit_next_stage_tool_schema_budget_max_is_fifteen() -> None:
     async def _submit(
         stage_goal: str,
         tool_round_budget: int,
@@ -1752,8 +1778,8 @@ def test_submit_next_stage_tool_schema_budget_max_is_ten() -> None:
 
     tool = SubmitNextStageTool(_submit)
 
-    assert tool.parameters['properties']['tool_round_budget']['minimum'] == 1
-    assert tool.parameters['properties']['tool_round_budget']['maximum'] == 10
+    assert tool.parameters['properties']['tool_round_budget']['minimum'] == 5
+    assert tool.parameters['properties']['tool_round_budget']['maximum'] == 15
     assert 'completed_stage_summary' in tool.parameters['properties']
     assert 'key_refs' in tool.parameters['properties']
     assert tool.parameters['properties']['key_refs']['items']['required'] == ['ref', 'note']
@@ -1795,7 +1821,7 @@ def test_submit_final_result_tool_schema_is_hard_switched_to_final_or_blocked() 
 
 
 @pytest.mark.asyncio
-async def test_submit_next_stage_rejects_budget_above_ten(tmp_path: Path):
+async def test_submit_next_stage_rejects_budget_outside_five_to_fifteen(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / 'runtime.sqlite3',
@@ -1806,12 +1832,35 @@ async def test_submit_next_stage_rejects_budget_above_ten(tmp_path: Path):
     )
     try:
         record = await _create_web_task(service)
-        with pytest.raises(ValueError, match='tool_round_budget must be between 1 and 10'):
+        with pytest.raises(ValueError, match='tool_round_budget must be between 5 and 15'):
             service.log_service.submit_next_stage(
                 record.task_id,
                 record.root_node_id,
                 stage_goal='预算校验；优先派生：无；自行完成：拒绝超出上限的阶段预算',
-                tool_round_budget=11,
+                tool_round_budget=16,
+            )
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_next_stage_rejects_budget_below_five(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        with pytest.raises(ValueError, match='tool_round_budget must be between 5 and 15'):
+            service.log_service.submit_next_stage(
+                record.task_id,
+                record.root_node_id,
+                stage_goal='budget validation lower bound',
+                tool_round_budget=4,
             )
     finally:
         await service.close()
@@ -1833,7 +1882,7 @@ async def test_submit_next_stage_ignores_completed_recap_without_active_stage(tm
             record.task_id,
             record.root_node_id,
             stage_goal='first stage only',
-            tool_round_budget=2,
+            tool_round_budget=6,
             completed_stage_summary='ignored summary',
             key_refs=[{'ref': 'artifact:artifact:ignored', 'note': 'ignored note'}],
         )
@@ -1865,7 +1914,7 @@ async def test_completed_stage_archives_oldest_ten_and_inserts_compression_stage
             record.task_id,
             record.root_node_id,
             stage_goal='stage 1',
-            tool_round_budget=1,
+            tool_round_budget=5,
         )
         for index in range(2, 23):
             previous = index - 1
@@ -1879,7 +1928,7 @@ async def test_completed_stage_archives_oldest_ten_and_inserts_compression_stage
                 record.task_id,
                 record.root_node_id,
                 stage_goal=f'stage {index}',
-                tool_round_budget=1,
+                tool_round_budget=5,
                 completed_stage_summary=f'finished stage {previous}',
                 key_refs=[{'ref': f'artifact:artifact:stage-{previous}', 'note': f'note {previous}'}],
             )
@@ -2271,7 +2320,7 @@ async def test_submit_next_stage_only_loop_fails_after_five_turns(tmp_path: Path
                         name='submit_next_stage',
                         arguments={
                             'stage_goal': f'stage only loop {self.turn}',
-                            'tool_round_budget': 1,
+                            'tool_round_budget': 5,
                         },
                     )
                 ],
@@ -2385,7 +2434,7 @@ async def test_submit_next_stage_does_not_trip_repeated_action_breaker(tmp_path:
                             name='submit_next_stage',
                             arguments={
                                 'stage_goal': '重复阶段切换；优先派生：无；自行完成：验证重复阶段提交不会触发 repeated-action breaker',
-                                'tool_round_budget': 1,
+                                'tool_round_budget': 5,
                             },
                         )
                     ],
@@ -2581,7 +2630,7 @@ async def test_current_task_progress_after_spawn_fails_after_three_ignored_repai
                             name='submit_next_stage',
                             arguments={
                                 'stage_goal': '验证 spawn_child_nodes 后不允许对当前任务自轮询 task_progress',
-                                'tool_round_budget': 4,
+                                'tool_round_budget': 8,
                             },
                         )
                     ],

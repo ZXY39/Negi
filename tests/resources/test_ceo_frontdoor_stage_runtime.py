@@ -89,7 +89,7 @@ def _completed_frontdoor_stage(index: int) -> dict[str, object]:
         "stage_id": f"frontdoor-stage-{index}",
         "stage_index": index,
         "stage_goal": f"Stage {index}",
-        "tool_round_budget": 2,
+        "tool_round_budget": 6,
         "tool_rounds_used": 1,
         "status": "completed",
         "mode": "鑷富鎵ц",
@@ -117,7 +117,7 @@ def _active_progress_stage(index: int) -> dict[str, object]:
         "stage_id": f"frontdoor-stage-{index}",
         "stage_index": index,
         "stage_goal": f"Stage {index}",
-        "tool_round_budget": 2,
+        "tool_round_budget": 6,
         "tool_rounds_used": 1,
         "status": "active",
         "mode": "鑷富鎵ц",
@@ -216,7 +216,7 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
     stage_result = await tools_by_name[STAGE_TOOL_NAME].ainvoke(
         {
             "stage_goal": "Inspect the current request",
-            "tool_round_budget": 1,
+            "tool_round_budget": 5,
         }
     )
     stage_payload = json.loads(str(stage_result["result_text"]))
@@ -231,7 +231,7 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
                     tool_name=STAGE_TOOL_NAME,
                     arguments={
                         "stage_goal": "Inspect the current request",
-                        "tool_round_budget": 1,
+                        "tool_round_budget": 5,
                     },
                 )
             ],
@@ -242,7 +242,7 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
                     tool_name=STAGE_TOOL_NAME,
                     arguments={
                         "stage_goal": "Inspect the current request",
-                        "tool_round_budget": 1,
+                        "tool_round_budget": 5,
                     },
                 ),
                 _tool_message(
@@ -255,7 +255,7 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
     )
 
     assert stage_payload["stage_goal"] == "Inspect the current request"
-    assert stage_payload["tool_round_budget"] == 1
+    assert stage_payload["tool_round_budget"] == 5
     assert result is not None
     assert result["frontdoor_stage_state"] == {
         "active_stage_id": stage_payload["stage_id"],
@@ -459,7 +459,7 @@ def test_frontdoor_submit_next_stage_marks_final_stage() -> None:
     next_state, stage = runner._submit_frontdoor_next_stage_state(
         {"active_stage_id": "", "transition_required": False, "stages": []},
         stage_goal="final synthesis only",
-        tool_round_budget=1,
+        tool_round_budget=5,
         completed_stage_summary="",
         key_refs=[],
         final=True,
@@ -473,7 +473,7 @@ def test_frontdoor_final_stage_does_not_require_transition_when_budget_is_exhaus
     stage_state, _stage = runner._submit_frontdoor_next_stage_state(
         {"active_stage_id": "", "transition_required": False, "stages": []},
         stage_goal="final synthesis only",
-        tool_round_budget=1,
+        tool_round_budget=5,
         completed_stage_summary="",
         key_refs=[],
         final=True,
@@ -522,7 +522,7 @@ async def test_completed_frontdoor_stage_archives_oldest_ten_and_inserts_compres
                         tool_name=STAGE_TOOL_NAME,
                         arguments={
                             "stage_goal": "Stage 23",
-                            "tool_round_budget": 2,
+                            "tool_round_budget": 6,
                             "completed_stage_summary": "finished stage 22",
                             "key_refs": [{"ref": "artifact:artifact:stage-22", "note": "note 22"}],
                         },
@@ -535,7 +535,7 @@ async def test_completed_frontdoor_stage_archives_oldest_ten_and_inserts_compres
                         tool_name=STAGE_TOOL_NAME,
                         arguments={
                             "stage_goal": "Stage 23",
-                            "tool_round_budget": 2,
+                            "tool_round_budget": 6,
                             "completed_stage_summary": "finished stage 22",
                             "key_refs": [{"ref": "artifact:artifact:stage-22", "note": "note 22"}],
                         },

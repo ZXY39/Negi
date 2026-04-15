@@ -34,6 +34,8 @@ from main.runtime.stage_budget import (
     CONTROL_STAGE_TOOL_NAMES,
     FINAL_RESULT_TOOL_NAME,
     STAGE_TOOL_NAME,
+    STAGE_TOOL_ROUND_BUDGET_MAX,
+    STAGE_TOOL_ROUND_BUDGET_MIN,
     response_tool_calls_count_against_stage_budget,
     tool_call_counts_against_stage_budget,
 )
@@ -1717,8 +1719,11 @@ class TaskLogService:
             normalized_key_refs = self._canonicalize_stage_key_refs(self._normalize_stage_key_refs(key_refs))
             if not normalized_goal:
                 raise ValueError('stage_goal must not be empty')
-            if normalized_budget < 1 or normalized_budget > 10:
-                raise ValueError('tool_round_budget must be between 1 and 10')
+            if normalized_budget < STAGE_TOOL_ROUND_BUDGET_MIN or normalized_budget > STAGE_TOOL_ROUND_BUDGET_MAX:
+                raise ValueError(
+                    f'tool_round_budget must be between '
+                    f'{STAGE_TOOL_ROUND_BUDGET_MIN} and {STAGE_TOOL_ROUND_BUDGET_MAX}'
+                )
             state = self._execution_stage_state(node)
             active = self._active_execution_stage(state)
             if (

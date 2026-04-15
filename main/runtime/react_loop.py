@@ -44,6 +44,8 @@ from main.runtime.stage_budget import (
     DEFAULT_NON_BUDGET_STAGE_TOOLS,
     FINAL_RESULT_TOOL_NAME,
     STAGE_TOOL_NAME,
+    STAGE_TOOL_ROUND_BUDGET_MAX,
+    STAGE_TOOL_ROUND_BUDGET_MIN,
     stage_gate_error_for_tool,
     visible_tools_for_stage_iteration,
 )
@@ -3580,7 +3582,7 @@ class ReActToolLoop:
                 stage_goal = f'{stage_goal} 当前焦点：{focus_text}'
             return {
                 'stage_goal': stage_goal,
-                'tool_round_budget': 4,
+                'tool_round_budget': STAGE_TOOL_ROUND_BUDGET_MIN,
             }
         previous_goal = str((active_stage or {}).get('stage_goal') or '').strip()
         previous_budget = int((active_stage or {}).get('tool_round_budget') or 0)
@@ -3595,7 +3597,13 @@ class ReActToolLoop:
             next_goal = f'{next_goal} 当前焦点：{focus_text}'
         return {
             'stage_goal': next_goal,
-            'tool_round_budget': min(10, previous_budget if previous_budget > 0 else 4),
+            'tool_round_budget': min(
+                STAGE_TOOL_ROUND_BUDGET_MAX,
+                max(
+                    STAGE_TOOL_ROUND_BUDGET_MIN,
+                    previous_budget if previous_budget > 0 else STAGE_TOOL_ROUND_BUDGET_MIN,
+                ),
+            ),
             'completed_stage_summary': (
                 f'自动阶段切换：上一阶段预算 {used_budget}/{previous_budget or used_budget or 0} '
                 '已耗尽，但模型未显式创建下一阶段。'
