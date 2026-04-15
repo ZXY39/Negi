@@ -9,6 +9,7 @@ from typing import Any
 class ExecutionToolSelectionResult:
     lightweight_tool_ids: list[str]
     hydrated_tool_names: list[str]
+    candidate_tool_names: list[str]
     schema_chars: int
     trace: dict[str, Any] = field(default_factory=dict)
 
@@ -70,9 +71,16 @@ def build_execution_tool_selection(
         if tool_id and tool_id not in lightweight_tool_ids:
             lightweight_tool_ids.append(tool_id)
 
+    candidate_tool_names = [
+        name
+        for name in normalized_visible_names
+        if name not in set(hydrated_tool_names)
+    ]
+
     return ExecutionToolSelectionResult(
         lightweight_tool_ids=lightweight_tool_ids,
         hydrated_tool_names=hydrated_tool_names,
+        candidate_tool_names=candidate_tool_names,
         schema_chars=sum(
             max(0, int((schema_size_by_executor or {}).get(name, 0) or 0))
             for name in hydrated_tool_names
@@ -85,6 +93,7 @@ def build_execution_tool_selection(
             "promoted_tool_names": list(promoted_tool_names or []),
             "selected_always_callable_tool_names": selected_always_callable_tool_names,
             "selected_promoted_tool_names": selected_promoted_tool_names,
+            "candidate_tool_names": list(candidate_tool_names),
             "candidate_executor_scores": [],
             "selected_executor_scores": [],
             "top_k": max(1, int(top_k or 1)),

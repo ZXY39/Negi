@@ -269,6 +269,22 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         state: dict[str, Any],
         overlay_text: str = "",
     ) -> list[dict[str, Any]]:
+        required_list_fields = (
+            "tool_names",
+            "candidate_tool_names",
+            "hydrated_tool_names",
+            "visible_skill_ids",
+        )
+        missing_fields = [
+            field
+            for field in required_list_fields
+            if field not in state or not isinstance(state.get(field), list)
+        ]
+        if missing_fields:
+            raise RuntimeError(
+                "运行时工具合同损坏/缺失：前门状态缺少 canonical 合同字段 "
+                + ", ".join(missing_fields)
+            )
         raw_dynamic_messages = list(state.get("dynamic_appendix_messages") or [])
         normalized_dynamic_messages = [self._message_record(item) for item in raw_dynamic_messages]
         normalized_overlay_text = str(overlay_text or "").strip()
@@ -447,7 +463,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         state: dict[str, Any],
         tool_results: list[dict[str, Any]],
     ) -> list[str]:
-        hydrated_tool_names = self._normalized_tool_name_state_list(state.get("hydrated_tool_names"))
+        promotion_targets: list[str] = []
         for tool_result in list(tool_results or []):
             tool_name = str(tool_result.get("tool_name") or "").strip()
             if tool_name not in {"load_tool_context", "load_tool_context_v2"}:
@@ -455,14 +471,20 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             if not bool(tool_result.get("ok")):
                 continue
             targets = self._normalized_tool_name_state_list(tool_result.get("hydration_targets"))
-            if not targets and bool(tool_result.get("will_be_hydrated_next_turn")):
-                tool_id = str(tool_result.get("tool_id") or "").strip()
-                if tool_id:
-                    targets = [tool_id]
             for name in targets:
-                if name not in hydrated_tool_names:
-                    hydrated_tool_names.append(name)
-        return hydrated_tool_names
+                if name not in promotion_targets:
+                    promotion_targets.append(name)
+        visible_tool_names = self._normalized_tool_name_state_list(
+            [
+                *list(state.get("tool_names") or []),
+                *list(state.get("candidate_tool_names") or []),
+            ]
+        )
+        return self._frontdoor_hydrated_tool_lru(
+            existing_tool_names=state.get("hydrated_tool_names"),
+            incoming_tool_names=promotion_targets,
+            visible_tool_names=visible_tool_names,
+        )
 
     def _frontdoor_tool_state_after_hydration(
         self,

@@ -45,6 +45,23 @@ def _is_frontdoor_runtime_tool_contract_record(record: dict[str, object]) -> boo
     return str(payload.get("message_type") or "").strip() == "frontdoor_runtime_tool_contract"
 
 
+def _canonical_frontdoor_state(**overrides) -> dict[str, object]:
+    state: dict[str, object] = {
+        "messages": [],
+        "tool_names": [],
+        "candidate_tool_names": [],
+        "hydrated_tool_names": [],
+        "visible_skill_ids": [],
+        "frontdoor_stage_state": {
+            "active_stage_id": "",
+            "transition_required": False,
+            "stages": [],
+        },
+    }
+    state.update(dict(overrides))
+    return state
+
+
 class _FakeGraphOutput:
     def __init__(self, *, value, interrupts=()):
         self.value = dict(value or {})
@@ -1154,6 +1171,66 @@ async def test_create_agent_postprocess_promotes_loaded_tool_context_into_next_t
     assert result["candidate_tool_names"] == ["agent_browser"]
 
 
+@pytest.mark.asyncio
+async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_tools() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._frontdoor_hydrated_tool_names = ["filesystem_write"]
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            sessions=SimpleNamespace(get_or_create=lambda session_key: SimpleNamespace(session_key=session_key)),
+            main_task_service=None,
+            tools=SimpleNamespace(get=lambda *_: None, tool_names=[]),
+            provider_name="openai",
+            model="gpt-test",
+        )
+    )
+    async def _resolve_for_actor(**kwargs):
+        _ = kwargs
+        return {
+            "skills": [],
+            "tool_families": [],
+            "tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+        }
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            model_messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "hello"},
+            ],
+            stable_messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "hello"},
+            ],
+            dynamic_appendix_messages=[],
+            tool_names=["submit_next_stage", "load_tool_context", "filesystem_write"],
+            candidate_tool_names=[],
+            trace={"selected_skills": []},
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    runner._resolver = SimpleNamespace(resolve_for_actor=_resolve_for_actor)
+    runner._builder = SimpleNamespace(build_for_ceo=_build_for_ceo)
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    runner._selected_tool_schemas = lambda tool_names: [{"name": name, "parameters": {"type": "object"}} for name in list(tool_names or [])]
+
+    prepared = await runner._graph_prepare_turn(
+        state=initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
+        runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
+    )
+
+    assert prepared["hydrated_tool_names"] == ["filesystem_write"]
+    assert "filesystem_write" in prepared["tool_names"]
+
+
 def test_runtime_agent_session_inflight_snapshot_keeps_frontdoor_hydrated_tool_names() -> None:
     session = RuntimeAgentSession(
         SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
@@ -1792,9 +1869,9 @@ async def test_create_agent_prompt_middleware_records_prompt_cache_diagnostics_f
             system_message=SystemMessage(content="You are the CEO frontdoor agent."),
             messages=[HumanMessage(content="hello")],
             tools=[initial_tool_schema],
-            state={
-                "messages": [{"role": "user", "content": "hello"}],
-            },
+            state=_canonical_frontdoor_state(
+                messages=[{"role": "user", "content": "hello"}],
+            ),
             runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
             model_settings={"temperature": 0.2},
         )
@@ -1856,10 +1933,10 @@ async def test_create_agent_prompt_cache_key_contract_ignores_dynamic_appendix_m
                 system_message=SystemMessage(content="You are the CEO frontdoor agent."),
                 messages=[HumanMessage(content="原始用户问题")],
                 tools=[],
-                state={
-                    "messages": [{"role": "user", "content": "原始用户问题"}],
-                    "turn_overlay_text": overlay_text,
-                },
+                state=_canonical_frontdoor_state(
+                    messages=[{"role": "user", "content": "原始用户问题"}],
+                    turn_overlay_text=overlay_text,
+                ),
                 runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
             )
         )
@@ -1879,12 +1956,12 @@ def test_create_agent_prompt_cache_key_contract_preserves_fallback_system_prompt
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
     contract = runner._frontdoor_prompt_contract(
-        state={
-            "messages": [
+        state=_canonical_frontdoor_state(
+            messages=[
                 {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": "working"},
             ],
-        },
+        ),
         provider_model="openai:gpt-4.1",
         tool_schemas=[],
         fallback_system_message=SystemMessage(content="You are the CEO frontdoor agent."),
@@ -1960,8 +2037,8 @@ async def test_create_agent_dynamic_appendix_request_preserves_live_assistant_an
             system_message=SystemMessage(content="You are the CEO frontdoor agent."),
             messages=[HumanMessage(content="fallback message should not define continuity")],
             tools=[],
-            state={
-                "messages": [
+            state=_canonical_frontdoor_state(
+                messages=[
                     {"role": "system", "content": "stable system"},
                     {"role": "user", "content": "start"},
                     {"role": "assistant", "content": "working memory of the live turn"},
@@ -1972,14 +2049,14 @@ async def test_create_agent_dynamic_appendix_request_preserves_live_assistant_an
                         "content": "{\"result_text\": \"tool finished\", \"status\": \"success\"}",
                     },
                 ],
-                "stable_messages": [
+                stable_messages=[
                     {"role": "system", "content": "stable system"},
                     {"role": "user", "content": "start"},
                 ],
-                "dynamic_appendix_messages": [
+                dynamic_appendix_messages=[
                     {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
                 ],
-            },
+            ),
             runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
         )
     )
@@ -2030,21 +2107,21 @@ async def test_create_agent_dynamic_appendix_request_does_not_duplicate_when_sta
             system_message=SystemMessage(content="You are the CEO frontdoor agent."),
             messages=[HumanMessage(content="fallback")],
             tools=[],
-            state={
-                "messages": [
+            state=_canonical_frontdoor_state(
+                messages=[
                     {"role": "system", "content": "stable system"},
                     {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
                     {"role": "user", "content": "start"},
                     {"role": "assistant", "content": "working memory of the live turn"},
                 ],
-                "stable_messages": [
+                stable_messages=[
                     {"role": "system", "content": "stable system"},
                     {"role": "user", "content": "start"},
                 ],
-                "dynamic_appendix_messages": [
+                dynamic_appendix_messages=[
                     {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
                 ],
-            },
+            ),
             runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
         )
     )
@@ -2097,16 +2174,16 @@ async def test_create_agent_stable_prefix_request_coherent_after_dynamic_appendi
                 system_message=SystemMessage(content="You are the CEO frontdoor agent."),
                 messages=[HumanMessage(content="fallback")],
                 tools=[],
-                state={
-                    "messages": messages,
-                    "stable_messages": [
+                state=_canonical_frontdoor_state(
+                    messages=messages,
+                    stable_messages=[
                         {"role": "system", "content": "stable system"},
                         {"role": "user", "content": "start"},
                     ],
-                    "dynamic_appendix_messages": [
+                    dynamic_appendix_messages=[
                         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
                     ],
-                },
+                ),
                 runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
             )
         )
@@ -2170,8 +2247,8 @@ def test_create_agent_prompt_contract_avoids_duplicate_history_when_live_message
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
     contract = runner._frontdoor_prompt_contract(
-        state={
-            "messages": [
+        state=_canonical_frontdoor_state(
+            messages=[
                 {"role": "system", "content": "stable system"},
                 {
                     "role": "assistant",
@@ -2180,16 +2257,16 @@ def test_create_agent_prompt_contract_avoids_duplicate_history_when_live_message
                 {"role": "assistant", "content": "latest assistant"},
                 {"role": "user", "content": "latest user"},
             ],
-            "stable_messages": [
+            stable_messages=[
                 {"role": "system", "content": "stable system"},
                 {"role": "assistant", "content": "[G3KU_LONG_CONTEXT_SUMMARY_V1]\nsummary body"},
                 {"role": "assistant", "content": "latest assistant"},
                 {"role": "user", "content": "latest user"},
             ],
-            "dynamic_appendix_messages": [
+            dynamic_appendix_messages=[
                 {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
             ],
-        },
+        ),
         provider_model="openai:gpt-4.1",
         tool_schemas=[],
         session_key="web:shared",
@@ -2219,22 +2296,22 @@ def test_create_agent_prompt_contract_does_not_treat_plain_short_recap_text_as_c
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
     contract = runner._frontdoor_prompt_contract(
-        state={
-            "messages": [
+        state=_canonical_frontdoor_state(
+            messages=[
                 {"role": "system", "content": "stable system"},
                 {"role": "assistant", "content": "Short recap: here's the answer you asked for."},
                 {"role": "user", "content": "latest user"},
             ],
-            "stable_messages": [
+            stable_messages=[
                 {"role": "system", "content": "stable system"},
                 {"role": "user", "content": "q1"},
                 {"role": "assistant", "content": "a1"},
                 {"role": "user", "content": "latest user"},
             ],
-            "dynamic_appendix_messages": [
+            dynamic_appendix_messages=[
                 {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
             ],
-        },
+        ),
         provider_model="openai:gpt-4.1",
         tool_schemas=[],
         session_key="web:shared",
@@ -2287,21 +2364,21 @@ async def test_create_agent_prompt_cache_diagnostics_hash_tracks_actual_dynamic_
                 system_message=SystemMessage(content="You are the CEO frontdoor agent."),
                 messages=[HumanMessage(content="fallback")],
                 tools=[],
-                state={
-                    "messages": [
+                state=_canonical_frontdoor_state(
+                    messages=[
                         {"role": "system", "content": "stable system"},
                         {"role": "user", "content": "start"},
                     ],
-                    "stable_messages": [
+                    stable_messages=[
                         {"role": "system", "content": "stable system"},
                         {"role": "user", "content": "start"},
                     ],
-                    "dynamic_appendix_messages": [
+                    dynamic_appendix_messages=[
                         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
                     ],
-                    "repair_overlay_text": repair_overlay_text,
-                    "cache_family_revision": DEFAULT_CACHE_FAMILY_REVISION,
-                },
+                    repair_overlay_text=repair_overlay_text,
+                    cache_family_revision=DEFAULT_CACHE_FAMILY_REVISION,
+                ),
                 runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
             )
         )
@@ -2521,7 +2598,7 @@ async def test_create_agent_prompt_middleware_emits_analysis_progress_for_model_
             system_message=SystemMessage(content="You are the CEO frontdoor agent."),
             messages=[HumanMessage(content="hello")],
             tools=[],
-            state={"messages": [{"role": "user", "content": "hello"}]},
+            state=_canonical_frontdoor_state(messages=[{"role": "user", "content": "hello"}]),
             runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared", on_progress=_on_progress)),
         ),
         _handler,
@@ -2552,9 +2629,18 @@ async def test_create_agent_prompt_middleware_accepts_legacy_dict_tool_contract_
             system_message=SystemMessage(content="You are the CEO frontdoor agent."),
             messages=[HumanMessage(content="hello")],
             tools=[],
-            state={
-                "messages": [{"role": "user", "content": "hello"}],
-                "dynamic_appendix_messages": [
+            state=_canonical_frontdoor_state(
+                messages=[{"role": "user", "content": "hello"}],
+                tool_names=["submit_next_stage"],
+                candidate_tool_names=["filesystem_write"],
+                hydrated_tool_names=[],
+                visible_skill_ids=["memory"],
+                frontdoor_stage_state={
+                    "active_stage_id": "",
+                    "transition_required": False,
+                    "stages": [],
+                },
+                dynamic_appendix_messages=[
                     {
                         "role": "user",
                         "content": {
@@ -2568,7 +2654,7 @@ async def test_create_agent_prompt_middleware_accepts_legacy_dict_tool_contract_
                         },
                     }
                 ],
-            },
+            ),
             runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared")),
         ),
         _handler,

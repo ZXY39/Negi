@@ -1466,7 +1466,6 @@ class RuntimeAgentSession:
                 # Fresh user turns should never inherit previous turn stage/compression snapshots.
                 self._frontdoor_stage_state = {}
                 self._compression_state = {}
-                self._frontdoor_hydrated_tool_names = []
             self._state.is_running = True
             self._state.paused = False
             self._state.status = "running"

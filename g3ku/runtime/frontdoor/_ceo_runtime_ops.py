@@ -482,6 +482,49 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 normalized.append(name)
         return normalized
 
+    def _frontdoor_hydrated_tool_limit_value(self) -> int:
+        main_service = getattr(self._loop, "main_task_service", None)
+        supplier = getattr(main_service, "_hydrated_tool_limit_value", None) if main_service is not None else None
+        if callable(supplier):
+            try:
+                return max(1, int(supplier() or 8))
+            except Exception:
+                pass
+        try:
+            value = int(
+                getattr(main_service, "_hydrated_tool_limit", getattr(self, "_hydrated_tool_limit", 8)) or 8
+            )
+        except Exception:
+            value = 8
+        return max(1, value)
+
+    def _frontdoor_hydrated_tool_lru(
+        self,
+        *,
+        existing_tool_names: Any,
+        incoming_tool_names: Any,
+        visible_tool_names: list[str] | None = None,
+    ) -> list[str]:
+        visible_name_set = {
+            str(item or "").strip()
+            for item in list(visible_tool_names or [])
+            if str(item or "").strip()
+        }
+        existing = self._normalized_hydrated_tool_names(existing_tool_names)
+        incoming = self._normalized_hydrated_tool_names(incoming_tool_names)
+        if visible_name_set:
+            existing = [name for name in existing if name in visible_name_set]
+            incoming = [name for name in incoming if name in visible_name_set]
+        if not incoming:
+            limit = self._frontdoor_hydrated_tool_limit_value()
+            return existing[-limit:]
+        next_state = [name for name in existing if name not in incoming]
+        next_state.extend(incoming)
+        limit = self._frontdoor_hydrated_tool_limit_value()
+        if len(next_state) > limit:
+            next_state = next_state[-limit:]
+        return next_state
+
     @classmethod
     def _runtime_session_frontdoor_state(
         cls,
@@ -1392,7 +1435,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         cron_internal = bool(metadata.get("cron_internal"))
         retrieval_query = str(metadata.get("heartbeat_retrieval_query") or "").strip()
         builder_query_text = retrieval_query if heartbeat_internal and retrieval_query else query_text
-        hydrated_tool_names: list[str] = []
         runtime_session = self._loop.sessions.get_or_create(session.state.session_key)
         main_service = getattr(self._loop, "main_task_service", None)
         if main_service is not None:
@@ -1419,6 +1461,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         exposure = await self._resolver.resolve_for_actor(
             actor_role="ceo",
             session_id=session.state.session_key,
+        )
+        hydrated_tool_names = self._frontdoor_hydrated_tool_lru(
+            existing_tool_names=(
+                list(getattr(session, "_frontdoor_hydrated_tool_names", []) or [])
+                or list(state.get("hydrated_tool_names") or [])
+            ),
+            incoming_tool_names=[],
+            visible_tool_names=list(exposure.get("tool_names") or []),
         )
         assembly = await self._builder.build_for_ceo(
             session=session,

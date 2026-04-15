@@ -220,6 +220,17 @@ class ReActToolLoop:
                 tool_schema_selection=tool_schema_selection,
                 stage_gate=stage_gate,
             )
+            dynamic_contract_payload = extract_node_dynamic_contract_payload(message_history) or {}
+            selected_skill_ids = self._normalized_name_list(
+                [
+                    item.get('skill_id')
+                    for item in list(dynamic_contract_payload.get('visible_skills') or [])
+                    if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
+                ]
+            )
+            candidate_skill_ids = self._normalized_name_list(
+                list(dynamic_contract_payload.get('candidate_skills') or [])
+            )
             model_messages = self._prepare_messages(message_history, runtime_context=runtime_context)
             overlay_parts = [
                 build_execution_stage_overlay(node_kind=node.node_kind, stage_gate=stage_gate),
@@ -255,7 +266,10 @@ class ReActToolLoop:
                     'child_pipelines': [],
                     'callable_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
                     'candidate_tool_names': list(tool_schema_selection.get('candidate_tool_names') or []),
+                    'selected_skill_ids': list(selected_skill_ids),
+                    'candidate_skill_ids': list(candidate_skill_ids),
                     'lightweight_tool_ids': list(tool_schema_selection.get('lightweight_tool_ids') or []),
+                    'hydrated_executor_state': list(tool_schema_selection.get('hydrated_executor_names') or []),
                     'hydrated_executor_names': list(tool_schema_selection.get('hydrated_executor_names') or []),
                     'model_visible_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
                     'model_visible_tool_selection_trace': dict(tool_schema_selection.get('trace') or {}),

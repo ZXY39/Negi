@@ -4490,10 +4490,11 @@ class MainRuntimeService:
             for name in list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
             if str(name or '').strip()
         }
+        raw_hydrated_names = list(frame.get('hydrated_executor_state') or []) or list(frame.get('hydrated_executor_names') or [])
         if not visible_tool_names:
-            return self._normalized_hydrated_executor_names(list(frame.get('hydrated_executor_names') or []))
+            return self._normalized_hydrated_executor_names(raw_hydrated_names)
         hydrated: list[str] = []
-        for raw_name in list(frame.get('hydrated_executor_names') or []):
+        for raw_name in raw_hydrated_names:
             name = str(raw_name or '').strip()
             if name and name in visible_tool_names and name not in hydrated:
                 hydrated.append(name)
@@ -6047,52 +6048,44 @@ class MainRuntimeService:
             return None
         payload = self._node_message_payload(messages) or {}
         dynamic_contract_payload = extract_node_dynamic_contract_payload(messages) or {}
-        callable_tool_names = self._normalized_tool_name_list(
-            list(frame.get('callable_tool_names') or frame.get('model_visible_tool_names') or [])
+        required_list_fields = (
+            'callable_tool_names',
+            'candidate_tool_names',
+            'selected_skill_ids',
+            'candidate_skill_ids',
         )
-        if not callable_tool_names:
-            callable_tool_names = self._normalized_tool_name_list(
-                list(dynamic_contract_payload.get('callable_tool_names') or [])
+        missing_fields = [
+            field
+            for field in required_list_fields
+            if field not in frame or not isinstance(frame.get(field), list)
+        ]
+        if missing_fields:
+            raise RuntimeError(
+                '运行时工具合同损坏/缺失：节点运行时 frame 缺少 canonical 合同字段 '
+                + ', '.join(missing_fields)
             )
+        callable_tool_names = self._normalized_tool_name_list(list(frame.get('callable_tool_names') or []))
         if not callable_tool_names:
-            callable_tool_names = self._normalized_tool_name_list(list(payload.get('callable_tool_names') or []))
+            raise RuntimeError('运行时工具合同损坏/缺失：节点运行时 frame 的 callable_tool_names 为空')
         visible_skills = [
             dict(item)
-            for item in list(dynamic_contract_payload.get('visible_skills') or payload.get('visible_skills') or [])
+            for item in list(dynamic_contract_payload.get('visible_skills') or [])
             if isinstance(item, dict)
         ]
-        if 'candidate_skill_ids' in frame:
-            raw_candidate_skill_ids = list(frame.get('candidate_skill_ids') or [])
-        elif 'candidate_skills' in dynamic_contract_payload:
-            raw_candidate_skill_ids = list(dynamic_contract_payload.get('candidate_skills') or [])
-        else:
-            raw_candidate_skill_ids = list(payload.get('candidate_skills') or [])
+        raw_candidate_skill_ids = list(frame.get('candidate_skill_ids') or [])
         candidate_skill_ids = [
             str(item or '').strip()
             for item in raw_candidate_skill_ids
             if str(item or '').strip()
         ]
-        if 'candidate_tool_names' in frame:
-            raw_candidate_tool_names = list(frame.get('candidate_tool_names') or [])
-        elif 'candidate_tools' in dynamic_contract_payload:
-            raw_candidate_tool_names = list(dynamic_contract_payload.get('candidate_tools') or [])
-        else:
-            raw_candidate_tool_names = list(payload.get('candidate_tools') or [])
-        candidate_tool_names = self._normalized_tool_name_list(raw_candidate_tool_names)
+        candidate_tool_names = self._normalized_tool_name_list(list(frame.get('candidate_tool_names') or []))
         visible_tool_names = list(
             self.list_effective_tool_names(
                 actor_role=self._actor_role_for_node(node),
                 session_id=str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared',
             ) or []
         )
-        if 'selected_skill_ids' in frame:
-            raw_selected_skill_ids = list(frame.get('selected_skill_ids') or [])
-        else:
-            raw_selected_skill_ids = [
-                item.get('skill_id')
-                for item in visible_skills
-                if str(item.get('skill_id') or '').strip()
-            ]
+        raw_selected_skill_ids = list(frame.get('selected_skill_ids') or [])
         selected_skill_ids = [
             str(item or '').strip()
             for item in raw_selected_skill_ids
@@ -6288,15 +6281,12 @@ class MainRuntimeService:
         used_selector_selected_as_callable = not bool(callable_tool_names)
         if used_selector_selected_as_callable:
             callable_tool_names = self._normalized_tool_name_list(list(getattr(selection, 'selected_tool_names', []) or []))
-        candidate_tool_names = self._normalized_tool_name_list(list(getattr(selection, 'candidate_tool_names', []) or []))
-        if not candidate_tool_names:
-            candidate_tool_names = [
-                name
-                for name in self._normalized_tool_name_list(list(getattr(selection, 'selected_tool_names', []) or []))
-                if name not in set(callable_tool_names)
-            ]
-        elif not used_selector_selected_as_callable:
-            candidate_tool_names = [name for name in candidate_tool_names if name not in set(callable_tool_names)]
+        candidate_tool_names = self._candidate_tool_names_for_node(
+            task=task,
+            node=node,
+            selection=selection,
+            visible_tool_names=list(inputs.get('visible_tool_names') or []),
+        )
         stage_payload = {}
         log_service = getattr(self, 'log_service', None)
         stage_payload_supplier = getattr(log_service, 'execution_stage_prompt_payload', None)

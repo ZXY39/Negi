@@ -1143,6 +1143,23 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
     assert payload["hydrated_tool_names"] == ["filesystem_write"]
 
 
+def test_frontdoor_dynamic_appendix_records_require_canonical_tool_state_fields() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    with pytest.raises(RuntimeError, match="运行时工具合同"):
+        runner._dynamic_appendix_message_records_for_state(
+            state={
+                "tool_names": ["submit_next_stage"],
+                "candidate_tool_names": [],
+                "frontdoor_stage_state": {
+                    "active_stage_id": "stage:1",
+                    "transition_required": False,
+                    "stages": [{"stage_id": "stage:1", "stage_goal": "write the file", "status": "active"}],
+                },
+            }
+        )
+
+
 def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_json_string() -> None:
     contract = build_frontdoor_tool_contract(
         callable_tool_names=["submit_next_stage", "filesystem_write"],

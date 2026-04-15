@@ -3221,6 +3221,11 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_after
                     {"role": "system", "content": "system"},
                     {"role": "user", "content": json.dumps({"prompt": "write file"}, ensure_ascii=False)},
                 ],
+                "callable_tool_names": ["submit_next_stage", "submit_final_result", "spawn_child_nodes", "load_tool_context"],
+                "candidate_tool_names": [],
+                "selected_skill_ids": [],
+                "candidate_skill_ids": [],
+                "hydrated_executor_state": ["filesystem_write"],
                 "hydrated_executor_names": ["filesystem_write"],
             },
             publish_snapshot=False,
@@ -3276,6 +3281,11 @@ async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_afte
                     {"role": "system", "content": "system"},
                     {"role": "user", "content": json.dumps({"prompt": "verify file"}, ensure_ascii=False)},
                 ],
+                "callable_tool_names": ["submit_next_stage", "submit_final_result", "load_tool_context", "content_open"],
+                "candidate_tool_names": [],
+                "selected_skill_ids": [],
+                "candidate_skill_ids": [],
+                "hydrated_executor_state": ["content_open"],
                 "hydrated_executor_names": ["content_open"],
             },
             publish_snapshot=False,
@@ -3346,6 +3356,56 @@ async def test_restore_node_context_selection_prefers_frame_contract_over_stale_
         assert restored["selection"].selected_tool_names == ["filesystem_write"]
         assert restored["selection"].candidate_tool_names == []
         assert restored["selection"].selected_skill_ids == ["memory"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_restore_node_context_selection_raises_when_frame_missing_canonical_contract_fields(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "messages": [
+                    {"role": "system", "content": "system"},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "prompt": "stable bootstrap",
+                                "callable_tool_names": ["exec"],
+                                "candidate_tools": ["filesystem_write"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+            },
+            publish_snapshot=False,
+        )
+
+        with pytest.raises(RuntimeError, match="运行时工具合同"):
+            service._restore_node_context_selection_entry(task=task, node=root)
     finally:
         await service.close()
 

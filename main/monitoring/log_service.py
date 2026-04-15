@@ -318,6 +318,7 @@ class TaskLogService:
             'candidate_tool_names': [],
             'selected_skill_ids': [],
             'candidate_skill_ids': [],
+            'hydrated_executor_state': [],
             'last_error': '',
         }
 
@@ -370,6 +371,11 @@ class TaskLogService:
                 or []
             ),
             'model_visible_tool_names': cls._normalized_name_list(snapshot.get('model_visible_tool_names') or []),
+            'hydrated_executor_state': cls._normalized_name_list(
+                snapshot.get('hydrated_executor_state')
+                or snapshot.get('hydrated_executor_names')
+                or []
+            ),
             'hydrated_executor_names': cls._normalized_name_list(snapshot.get('hydrated_executor_names') or []),
             'lightweight_tool_ids': cls._normalized_name_list(snapshot.get('lightweight_tool_ids') or []),
             'model_visible_tool_selection_trace': dict(snapshot.get('model_visible_tool_selection_trace') or {}),
@@ -419,6 +425,11 @@ class TaskLogService:
                     or []
                 ),
                 'model_visible_tool_names': list(frame.get('model_visible_tool_names') or []),
+                'hydrated_executor_state': list(
+                    frame.get('hydrated_executor_state')
+                    or frame.get('hydrated_executor_names')
+                    or []
+                ),
                 'hydrated_executor_names': list(frame.get('hydrated_executor_names') or []),
                 'lightweight_tool_ids': list(frame.get('lightweight_tool_ids') or []),
                 'model_visible_tool_selection_trace': dict(frame.get('model_visible_tool_selection_trace') or {}),
@@ -3061,6 +3072,11 @@ class TaskLogService:
                     for item in list(next_frame.get('candidate_skill_ids') or [])
                     if str(item or '').strip()
                 ],
+                'hydrated_executor_state': [
+                    str(item or '').strip()
+                    for item in list(next_frame.get('hydrated_executor_state') or next_frame.get('hydrated_executor_names') or [])
+                    if str(item or '').strip()
+                ],
                 'model_visible_tool_names': [
                     str(item or '').strip()
                     for item in list(next_frame.get('model_visible_tool_names') or [])
@@ -3161,6 +3177,11 @@ class TaskLogService:
             'candidate_skill_ids': [
                 str(item or '').strip()
                 for item in list(payload.get('candidate_skill_ids') or [])
+                if str(item or '').strip()
+            ],
+            'hydrated_executor_state': [
+                str(item or '').strip()
+                for item in list(payload.get('hydrated_executor_state') or payload.get('hydrated_executor_names') or [])
                 if str(item or '').strip()
             ],
             'model_visible_tool_names': [
@@ -3711,6 +3732,11 @@ class TaskLogService:
                 for item in list(payload.get('candidate_skill_ids') or [])
                 if str(item or '').strip()
             ],
+            'hydrated_executor_state': [
+                str(item or '').strip()
+                for item in list(payload.get('hydrated_executor_state') or payload.get('hydrated_executor_names') or [])
+                if str(item or '').strip()
+            ],
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])
@@ -3767,6 +3793,11 @@ class TaskLogService:
             'candidate_skill_ids': [
                 str(item or '').strip()
                 for item in list(payload.get('candidate_skill_ids') or [])
+                if str(item or '').strip()
+            ],
+            'hydrated_executor_state': [
+                str(item or '').strip()
+                for item in list(payload.get('hydrated_executor_state') or payload.get('hydrated_executor_names') or [])
                 if str(item or '').strip()
             ],
             'model_visible_tool_names': [

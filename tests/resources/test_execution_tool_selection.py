@@ -52,6 +52,7 @@ def test_selector_keeps_only_internal_protocol_and_fixed_builtin_tools_callable(
         "spawn_child_nodes",
         "exec",
     ]
+    assert result.candidate_tool_names == ["filesystem_write"]
 
 
 def test_selector_does_not_promote_non_builtin_candidates_without_hydration() -> None:
@@ -85,6 +86,12 @@ def test_selector_does_not_promote_non_builtin_candidates_without_hydration() ->
         "submit_next_stage",
         "submit_final_result",
         "spawn_child_nodes",
+    ]
+    assert result.candidate_tool_names == [
+        "filesystem_write",
+        "filesystem_edit",
+        "memory_search",
+        "web_fetch",
     ]
     assert result.trace["selected_executor_scores"] == []
 
@@ -123,6 +130,7 @@ def test_selector_promoted_tools_remain_concrete_and_do_not_consume_top_k_budget
         "filesystem_propose_patch",
         "content_open",
     ]
+    assert result.candidate_tool_names == ["memory_search"]
     assert result.trace["selected_promoted_tool_names"] == [
         "filesystem_propose_patch",
         "content_open",
@@ -185,3 +193,4 @@ def test_selector_accepts_runtime_helper_dict_shape_families() -> None:
         "spawn_child_nodes",
         "exec",
     ]
+    assert result.candidate_tool_names == ["filesystem_write"]

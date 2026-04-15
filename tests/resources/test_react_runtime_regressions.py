@@ -1434,6 +1434,7 @@ def test_promote_tool_context_hydration_keeps_executor_requests_precise() -> Non
 
     promoted_frame = log_service.read_runtime_frame('task-hydration-precise', 'node-hydration-precise')
     assert promoted_frame['hydrated_executor_names'] == ['filesystem_write']
+    assert promoted_frame['hydrated_executor_state'] == ['filesystem_write']
 
 
 def test_promote_tool_context_hydration_rejects_family_names() -> None:
@@ -1505,6 +1506,11 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
         'memory_search',
         'web_fetch',
     ]
+    assert promoted_frame['hydrated_executor_state'] == [
+        'content_open',
+        'memory_search',
+        'web_fetch',
+    ]
 
     service._promote_tool_context_hydration(
         task_id='task-hydration-lru',
@@ -1516,6 +1522,11 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
 
     promoted_frame = log_service.read_runtime_frame('task-hydration-lru', 'node-hydration-lru')
     assert promoted_frame['hydrated_executor_names'] == [
+        'memory_search',
+        'web_fetch',
+        'content_open',
+    ]
+    assert promoted_frame['hydrated_executor_state'] == [
         'memory_search',
         'web_fetch',
         'content_open',
@@ -3001,8 +3012,9 @@ async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_sk
             "allowed_skill_record_ids": [],
         }
     ]
-    user_payload = json.loads(str(enriched[1]["content"] or ""))
-    assert user_payload["visible_skills"] == [
+    dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
+    assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
+    assert dynamic_payload["visible_skills"] == [
         {
             "skill_id": "skill-creator",
             "display_name": "skill-creator",
@@ -3039,7 +3051,7 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_onl
             selected_skill_ids=["tmux", "skill-creator"],
             selected_tool_names=["content"],
             candidate_skill_ids=["tmux", "skill-creator"],
-            candidate_tool_names=["content", "filesystem_write"],
+            candidate_tool_names=["content"],
             memory_query="Prompt: terminal workflow\nGoal: terminal workflow\nCore requirement: terminal workflow",
             retrieval_scope={
                 "search_context_types": ["memory"],
@@ -3094,8 +3106,9 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_onl
             "allowed_skill_record_ids": [],
         }
     ]
-    user_payload = json.loads(str(enriched[1]["content"] or ""))
-    assert user_payload["visible_skills"] == [
+    dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
+    assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
+    assert dynamic_payload["visible_skills"] == [
         {
             "skill_id": "tmux",
             "display_name": "tmux",
@@ -3107,8 +3120,8 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_onl
             "description": "skill creator",
         }
     ]
-    assert user_payload["candidate_skills"] == ["tmux", "skill-creator"]
-    assert user_payload["candidate_tools"] == ["content", "filesystem_write"]
+    assert dynamic_payload["candidate_skills"] == ["tmux", "skill-creator"]
+    assert dynamic_payload["candidate_tools"] == ["content"]
     assert "semantic block" in enriched[0]["content"]
 
 
@@ -3124,7 +3137,7 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
             selected_skill_ids=["tmux"],
             selected_tool_names=["content"],
             candidate_skill_ids=["tmux"],
-            candidate_tool_names=["content", "filesystem_write"],
+            candidate_tool_names=["content"],
             memory_query="",
             retrieval_scope={},
             trace={"mode": "dense_rerank"},
@@ -3174,9 +3187,10 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
         ],
     )
 
-    user_payload = json.loads(str(enriched[1]["content"] or ""))
-    assert user_payload["callable_tool_names"] == ["load_tool_context", "filesystem_write"]
-    assert user_payload["candidate_tools"] == ["content"]
+    dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
+    assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
+    assert dynamic_payload["callable_tool_names"] == ["load_tool_context", "filesystem_write"]
+    assert dynamic_payload["candidate_tools"] == ["content"]
 
 
 @pytest.mark.asyncio
@@ -3201,7 +3215,7 @@ async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_no
             selected_skill_ids=["tmux"],
             selected_tool_names=["filesystem"],
             candidate_skill_ids=["tmux"],
-            candidate_tool_names=["filesystem", "exec"],
+            candidate_tool_names=["filesystem"],
             memory_query="",
             retrieval_scope={
                 "search_context_types": [],
@@ -3245,8 +3259,9 @@ async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_no
     )
 
     user_messages = [message for message in enriched if message.get("role") == "user"]
-    assert len(user_messages) == 1
-    payload = json.loads(str(user_messages[0].get("content") or ""))
+    assert len(user_messages) == 2
+    payload = json.loads(str(user_messages[-1].get("content") or ""))
+    assert payload["message_type"] == "node_runtime_tool_contract"
     assert payload["visible_skills"] == [
         {
             "skill_id": "tmux",
@@ -3255,7 +3270,7 @@ async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_no
         }
     ]
     assert payload["candidate_skills"] == ["tmux"]
-    assert payload["candidate_tools"] == ["filesystem", "exec"]
+    assert payload["candidate_tools"] == ["filesystem"]
     assert retrieve_block_calls == []
 
 
@@ -3282,7 +3297,7 @@ async def test_enrich_node_messages_still_applies_selector_when_unified_context_
             selected_skill_ids=["tmux"],
             selected_tool_names=["content"],
             candidate_skill_ids=["tmux"],
-            candidate_tool_names=["content", "exec"],
+            candidate_tool_names=["content"],
             memory_query="Prompt: terminal workflow\nGoal: terminal workflow\nCore requirement: terminal workflow",
             retrieval_scope={
                 "search_context_types": ["memory"],
@@ -3325,16 +3340,17 @@ async def test_enrich_node_messages_still_applies_selector_when_unified_context_
         ],
     )
 
-    user_payload = json.loads(str(enriched[1]["content"] or ""))
-    assert user_payload["visible_skills"] == [
+    dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
+    assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
+    assert dynamic_payload["visible_skills"] == [
         {
             "skill_id": "tmux",
             "display_name": "tmux",
             "description": "terminal workflow",
         }
     ]
-    assert user_payload["candidate_skills"] == ["tmux"]
-    assert user_payload["candidate_tools"] == ["content", "exec"]
+    assert dynamic_payload["candidate_skills"] == ["tmux"]
+    assert dynamic_payload["candidate_tools"] == ["content"]
     assert retrieve_block_calls == []
 
 
