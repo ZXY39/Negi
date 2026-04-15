@@ -121,11 +121,10 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 
 ### 3.2 candidate tools
 
-?????????????
-
-- `candidate_tool_names` / `candidate_skill_ids` ?? `RBAC ?? ? ??????` ????????????? RBAC ?????
-- ?????? RBAC ?????????????????????? candidate ????
-- callable/hydrated ????????????????????? candidate ??????
+- `candidate_tool_names` / `candidate_skill_ids` 现在都采用同一语义：`RBAC 可见 ∩ 语义召回命中` 的当前候选集合。
+- 如果语义召回不可用，候选集合直接退化为 `RBAC 可见集合`，而不是停止运行。
+- 对 agent 来说，candidate 仍然是“可见但默认不可直接调用”的资源；candidate 不会自动进入 callable tool 集合。
+- `load_tool_context` / `load_skill_context` 现在也只允许命中当前 canonical candidate 集合，不再允许“RBAC 可见但不在 candidate 中”的旁路加载。
 
 候选工具是“本轮推荐给 agent 的具体工具列表”，但默认不能直接调用。
 
@@ -152,11 +151,9 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 
 ### 3.4 hydrated tools
 
-??? CEO/frontdoor ? hydration ????????????
-
-- ?? hydration ?????????canonical ????? runtime frame ? `hydrated_executor_state`??????????????pause/resume ? frame restore ???
-- CEO/frontdoor hydration ? session ??????canonical ????? `RuntimeAgentSession._frontdoor_hydrated_tool_names`???? turn ??????? turn ???? model call ????
-- ????? hydration LRU ???? concrete tool names?family id ???? canonical hydration state?
+- 节点的 hydration canonical state 在 runtime frame 中：`hydrated_executor_state` / `hydrated_executor_names`。这是节点生命周期级 LRU，会跨多轮、阶段切换、pause/resume、frame restore 保留。
+- CEO/frontdoor 的 hydration canonical state 在 session/frontdoor state 中：`RuntimeAgentSession._frontdoor_hydrated_tool_names` 与前门 persistent state 的 `hydrated_tool_names`。这是 session 生命周期级 LRU，会跨 turn 保留，但每轮都按当前 RBAC 可见集合过滤。
+- 节点与 CEO/frontdoor 的 hydration LRU 都只接受 concrete tool names；family id 不能进入 canonical hydration state。
 
 某工具在前一轮成功 `load_tool_context` 后，会进入节点级 hydration 状态。
 
@@ -172,6 +169,7 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - frontdoor 不再只把 hydration 当成提示词层面的“已读过契约”，而是会把成功 `load_tool_context` 的 concrete tool 写进自己的持久状态。
 - 这份 frontdoor hydration 状态会在同一用户 turn 的后续模型轮次里直接并入 callable tool 集合，而不只是继续停留在 candidate tool 列表里。
 - frontdoor approval interrupt、session inflight snapshot、paused execution context 也会带上这份 hydrated tool 状态；因此排查“load 成功但下一轮又看不见工具”时，不能只看 candidate tool 提示块，还要看 frontdoor 当前保存的 hydrated tool state。
+- CEO/frontdoor 现在也不再从 trailing `ToolMessage` / `result_text` 反推 hydration；tool promotion 的权威来源是执行循环里的 `raw_result.ok / raw_result.hydration_targets`。
 
 维护上还要再记住一个和阶段预算相关的边界：
 
@@ -203,6 +201,7 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - 对执行节点和检验节点，`callable_tool_names` / `candidate_tools` 现在不应再视为 bootstrap user JSON 的静态字段；它们属于每轮动态 `node_runtime_tool_contract`。
 - 对 CEO/frontdoor，当前 turn 的 callable/candidate tool 合同现在应只存在于 dynamic appendix 和持久状态；不要再从稳定 prompt 前缀或旧 transcript 文本恢复“当前可调用工具”。
 - 排查“load 成功但下一轮没调用”时，优先对照 canonical runtime frame / frontdoor state 与 runtime messages snapshot；如果旧 bootstrap 文本和当前 snapshot 冲突，应以当前 snapshot 为准。
+- 对 CEO/frontdoor，`frontdoor_stage_state`、`compression_state`、`semantic_context_state` 是受保护运行时状态；工具合同刷新不能覆盖、清空或重置这三份状态。
 
 对 CEO frontdoor 还要额外记住一个优先级边界：
 
@@ -210,7 +209,7 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - 因此前门动态提示里出现“如需完整 workflow 正文可调用 `load_skill_context`”或“如需工具契约可调用 `load_tool_context`”，其真实语义都应理解为“仅在活动阶段已经存在后，才进入下一步可执行顺序”。
 - 如果当前还没有活动阶段，前门模型即使已经看到了候选 skill 和候选 tool，也应该先走 `submit_next_stage`；否则运行时会在执行时返回 `no active stage` 门控错误。
 
-- restore / recovery ??????????? frame ? CEO/session state ?? canonical ??????????????????????/???????????? bootstrap ?????????
+- restore / recovery 现在只接受 frame 或 CEO/session state 中的 canonical callable/candidate/hydrated/skill 字段；缺失时直接视为“运行时工具合同损坏/缺失”，不再回退 bootstrap 或旧动态文本。
 
 ## 5. 当前系统为什么这么设计
 

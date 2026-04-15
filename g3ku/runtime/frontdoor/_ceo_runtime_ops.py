@@ -361,6 +361,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "emit_lifecycle": True,
             "actor_role": "ceo",
             "session_key": session.state.session_key,
+            "tool_contract_enforced": True,
+            "candidate_tool_names": list(state.get("candidate_tool_names") or []),
+            "candidate_skill_ids": list(state.get("candidate_skill_ids") or []),
+            "rbac_visible_tool_names": list(state.get("rbac_visible_tool_names") or []),
+            "rbac_visible_skill_ids": list(state.get("rbac_visible_skill_ids") or []),
             "channel": getattr(session, "_channel", "cli"),
             "chat_id": getattr(session, "_chat_id", session.state.session_key),
             "memory_channel": getattr(session, "_memory_channel", getattr(session, "_channel", "cli")),
@@ -482,6 +487,25 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 normalized.append(name)
         return normalized
 
+    @staticmethod
+    def _normalized_tool_name_state_list(raw: Any) -> list[str]:
+        return CeoFrontDoorRuntimeOps._normalized_hydrated_tool_names(raw)
+
+    @staticmethod
+    def _tool_context_hydration_payload(raw_result: Any) -> dict[str, Any] | None:
+        if isinstance(raw_result, dict):
+            return dict(raw_result)
+        if isinstance(raw_result, str):
+            text = str(raw_result or "").strip()
+            if not text or not text.startswith("{"):
+                return None
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return None
+            return dict(parsed) if isinstance(parsed, dict) else None
+        return None
+
     def _frontdoor_hydrated_tool_limit_value(self) -> int:
         main_service = getattr(self._loop, "main_task_service", None)
         supplier = getattr(main_service, "_hydrated_tool_limit_value", None) if main_service is not None else None
@@ -574,6 +598,86 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         setattr(target_session, "_compression_state", compression_state)
         setattr(target_session, "_semantic_context_state", semantic_context_state)
         setattr(target_session, "_frontdoor_hydrated_tool_names", list(hydrated_tool_names))
+
+    def _frontdoor_tool_state_after_tool_results(
+        self,
+        *,
+        state: dict[str, Any],
+        tool_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        tool_names = self._normalized_tool_name_state_list(state.get("tool_names"))
+        candidate_tool_names = self._normalized_tool_name_state_list(state.get("candidate_tool_names"))
+        hydrated_tool_names = self._normalized_tool_name_state_list(state.get("hydrated_tool_names"))
+        visible_tool_names = self._normalized_tool_name_state_list(
+            state.get("rbac_visible_tool_names")
+            or [*tool_names, *candidate_tool_names]
+        )
+        promotion_targets: list[str] = []
+        for tool_result in list(tool_results or []):
+            tool_name = str(tool_result.get("tool_name") or "").strip()
+            if tool_name not in {"load_tool_context", "load_tool_context_v2"}:
+                continue
+            raw_payload = self._tool_context_hydration_payload(tool_result.get("raw_result"))
+            if not isinstance(raw_payload, dict) or not bool(raw_payload.get("ok")):
+                continue
+            targets = self._normalized_tool_name_state_list(raw_payload.get("hydration_targets"))
+            for name in targets:
+                if name not in promotion_targets:
+                    promotion_targets.append(name)
+        hydrated_tool_names = self._frontdoor_hydrated_tool_lru(
+            existing_tool_names=hydrated_tool_names,
+            incoming_tool_names=promotion_targets,
+            visible_tool_names=visible_tool_names,
+        )
+        visible_name_set = set(visible_tool_names)
+        if visible_name_set:
+            tool_names = [name for name in tool_names if name in visible_name_set]
+            candidate_tool_names = [name for name in candidate_tool_names if name in visible_name_set]
+        for name in list(hydrated_tool_names or []):
+            if name not in tool_names:
+                tool_names.append(name)
+        hydrated_set = set(hydrated_tool_names)
+        candidate_tool_names = [
+            name
+            for name in candidate_tool_names
+            if name not in hydrated_set
+        ]
+        return {
+            "tool_names": list(tool_names),
+            "candidate_tool_names": list(candidate_tool_names),
+            "hydrated_tool_names": list(hydrated_tool_names),
+        }
+
+    def _refresh_frontdoor_dynamic_contract_state(
+        self,
+        *,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        refreshed = dict(state or {})
+        if not hasattr(self, "_frontdoor_prompt_contract"):
+            return refreshed
+        try:
+            model_refs = list(refreshed.get("model_refs") or [])
+            provider_model = str(model_refs[0] if model_refs else "").strip()
+            try:
+                tool_schemas = self._selected_tool_schemas(list(refreshed.get("tool_names") or []))
+            except Exception:
+                tool_schemas = []
+            contract = self._frontdoor_prompt_contract(
+                state=refreshed,
+                provider_model=provider_model,
+                tool_schemas=tool_schemas,
+                overlay_text=str(refreshed.get("turn_overlay_text") or "").strip(),
+                session_key=str(refreshed.get("session_key") or "").strip(),
+                overlay_section_count=len(list(refreshed.get("dynamic_appendix_messages") or [])),
+            )
+        except Exception:
+            return refreshed
+        refreshed["dynamic_appendix_messages"] = list(contract.dynamic_appendix_messages)
+        refreshed["cache_family_revision"] = contract.cache_family_revision
+        refreshed["prompt_cache_key"] = contract.prompt_cache_key
+        refreshed["prompt_cache_diagnostics"] = dict(contract.diagnostics)
+        return refreshed
 
     @classmethod
     def _frontdoor_stage_state_snapshot(cls, state: CeoGraphState | None) -> dict[str, Any]:
@@ -1589,6 +1693,21 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 for item in list(getattr(assembly, "trace", {}).get("selected_skills") or [])
                 if isinstance(item, dict) and str(item.get("skill_id") or "").strip()
             ],
+            "candidate_skill_ids": [
+                str(item.get("skill_id") or "").strip()
+                for item in list(getattr(assembly, "trace", {}).get("selected_skills") or [])
+                if isinstance(item, dict) and str(item.get("skill_id") or "").strip()
+            ],
+            "rbac_visible_tool_names": [
+                str(item or "").strip()
+                for item in list(getattr(assembly, "trace", {}).get("capability_snapshot", {}).get("visible_tool_ids") or [])
+                if str(item or "").strip()
+            ],
+            "rbac_visible_skill_ids": [
+                str(item or "").strip()
+                for item in list(getattr(assembly, "trace", {}).get("capability_snapshot", {}).get("visible_skill_ids") or [])
+                if str(item or "").strip()
+            ],
             "used_tools": [],
             "route_kind": "direct_reply",
             "verified_task_ids": [],
@@ -1889,8 +2008,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 }
             else:
                 async with semaphore:
-                    result_text, status, started_at, finished_at, elapsed_seconds = await _invoke_execute_tool_call_compat(
-                        self._execute_tool_call,
+                    raw_result, result_text, status, started_at, finished_at, elapsed_seconds = await self._execute_tool_call_with_raw_result(
                         tool=tool,
                         tool_name=tool_name,
                         arguments=dict(payload.get("arguments") or {}),
@@ -1899,6 +2017,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         tool_call_id=str(payload.get("id") or "").strip() or None,
                     )
                 result_payload = {
+                    "raw_result": raw_result,
                     "result_text": result_text,
                     "status": status,
                     "started_at": started_at,
@@ -1920,6 +2039,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return {
                 "tool_name": tool_name,
                 "status": status,
+                "raw_result": result_payload.get("raw_result"),
                 "result_text": result_text,
                 "tool_message": self._tool_result_message(
                     tool_call_id=str(payload.get("id") or ""),
@@ -1932,6 +2052,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             }
 
         tool_results = await asyncio.gather(*[_run_single(payload) for payload in tool_call_payloads])
+        updated_tool_contract_state = self._frontdoor_tool_state_after_tool_results(
+            state=dict(state or {}),
+            tool_results=tool_results,
+        )
         tool_messages = [dict(item.get("tool_message") or {}) for item in tool_results]
         response_payload = dict(state.get("response_payload") or {})
         assistant_message = {
@@ -1966,7 +2090,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if str(payload.get("name") or "").strip()
             and str(payload.get("name") or "").strip() not in self._CONTROL_TOOL_NAMES
         ]
-        return {
+        result = {
             "messages": messages,
             "used_tools": used_tools,
             "route_kind": route_kind,
@@ -1976,6 +2100,37 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "synthetic_tool_calls_used": False,
             "next_step": "call_model",
         }
+        result.update(updated_tool_contract_state)
+        result["candidate_skill_ids"] = [
+            str(item or "").strip()
+            for item in list(state.get("candidate_skill_ids") or [])
+            if str(item or "").strip()
+        ]
+        result["visible_skill_ids"] = [
+            str(item or "").strip()
+            for item in list(state.get("visible_skill_ids") or [])
+            if str(item or "").strip()
+        ]
+        result["rbac_visible_tool_names"] = [
+            str(item or "").strip()
+            for item in list(state.get("rbac_visible_tool_names") or [])
+            if str(item or "").strip()
+        ]
+        result["rbac_visible_skill_ids"] = [
+            str(item or "").strip()
+            for item in list(state.get("rbac_visible_skill_ids") or [])
+            if str(item or "").strip()
+        ]
+        result.update(
+            self._refresh_frontdoor_dynamic_contract_state(
+                state={
+                    **dict(state or {}),
+                    **result,
+                    "messages": messages,
+                }
+            )
+        )
+        return result
 
     async def _graph_finalize_turn(self, state: CeoGraphState) -> dict[str, Any]:
         output = str(state.get("final_output") or "").strip()

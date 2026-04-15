@@ -6053,6 +6053,8 @@ class MainRuntimeService:
             'candidate_tool_names',
             'selected_skill_ids',
             'candidate_skill_ids',
+            'rbac_visible_tool_names',
+            'rbac_visible_skill_ids',
         )
         missing_fields = [
             field

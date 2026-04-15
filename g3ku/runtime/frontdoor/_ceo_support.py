@@ -519,15 +519,36 @@ class CeoFrontDoorSupport:
         on_progress,
         tool_call_id: str | None = None,
     ) -> tuple[str, str, str, str, float | None]:
+        _raw_result, rendered, status, started_at, finished_at, elapsed_seconds = await self._execute_tool_call_with_raw_result(
+            tool=tool,
+            tool_name=tool_name,
+            arguments=arguments,
+            runtime_context=runtime_context,
+            on_progress=on_progress,
+            tool_call_id=tool_call_id,
+        )
+        return rendered, status, started_at, finished_at, elapsed_seconds
+
+    async def _execute_tool_call_with_raw_result(
+        self,
+        *,
+        tool: Tool,
+        tool_name: str,
+        arguments: dict[str, Any],
+        runtime_context: dict[str, Any],
+        on_progress,
+        tool_call_id: str | None = None,
+    ) -> tuple[Any, str, str, str, str, float | None]:
         normalized_arguments = normalize_runtime_tool_arguments_dict(arguments)
         normalized_tool_call_id = str(tool_call_id or "").strip()
         try:
             errors = tool.validate_params(normalized_arguments)
         except Exception as exc:
             error_text = f"Error validating {tool_name}: {exc}"
-            return error_text, "error", "", "", None
+            return error_text, error_text, "error", "", "", None
         if errors:
-            return f"Error: {'; '.join(errors)}", "error", "", "", None
+            error_text = f"Error: {'; '.join(errors)}"
+            return error_text, error_text, "error", "", "", None
 
         started_at = now_iso()
         started_monotonic = time.monotonic()
@@ -592,7 +613,7 @@ class CeoFrontDoorSupport:
                     **({"tool_call_id": normalized_tool_call_id} if normalized_tool_call_id else {}),
                 },
             )
-            return error_text, "error", started_at, finished_at, elapsed_seconds
+            return error_text, error_text, "error", started_at, finished_at, elapsed_seconds
         finally:
             self._loop.tools.pop_runtime_context(token)
 
@@ -609,7 +630,7 @@ class CeoFrontDoorSupport:
         finished_at = now_iso()
         elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
         status = self._tool_status(rendered)
-        return rendered, status, started_at, finished_at, elapsed_seconds
+        return result, rendered, status, started_at, finished_at, elapsed_seconds
 
     @staticmethod
     def _parallel_slot_count(limit: int | None, item_count: int, *, enabled: bool) -> int:

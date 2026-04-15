@@ -172,10 +172,13 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 
 ### Canonical Tool Contract Notes
 
-- ??? CEO/frontdoor ? `candidate_tool_names` ???????????? `RBAC ?? ? ??????` ????????????????????? callable ???? candidate ????????? callable ???? candidate?
-- ??? hydration ? canonical ??? runtime frame ?? `hydrated_executor_state`??????????????`hydrated_executor_names` ?????????
-- CEO/frontdoor ? canonical hydration ??? `RuntimeAgentSession._frontdoor_hydrated_tool_names`??????? session ???????? turn ?????????? session LRU???????????????????
-- restore / recovery ????? canonical frame ? session state ??????????? `callable/candidate/hydrated/skill` ???????????????????????????/????????? bootstrap ????????????????????
+- 节点与 CEO/frontdoor 的 `candidate_tool_names` / `candidate_skill_ids` 现在都表示“`RBAC 可见 ∩ 语义召回命中` 的当前候选集合”；语义召回不可用时，候选集合退化为 `RBAC 可见集合`，而不是报错中断。
+- `load_tool_context` / `load_skill_context` 的准入只认当前 canonical candidate 集合；不再允许“RBAC 可见但不在 candidate 中”的旁路加载。
+- 节点的 hydration canonical state 继续落在 runtime frame：`hydrated_executor_state` / `hydrated_executor_names`。这是节点生命周期级 LRU，跨多轮、阶段切换、pause/resume、restore 保留。
+- CEO/frontdoor 的 hydration canonical state 继续落在 session/frontdoor state：`RuntimeAgentSession._frontdoor_hydrated_tool_names` 加上前门 persistent state 中的 `hydrated_tool_names`。这是 session 生命周期级 LRU，跨 turn 保留，但每轮都会按当前 RBAC 可见集合过滤。
+- 节点与 CEO/frontdoor 都只允许 concrete tool names 进入 hydration LRU；family id 不能进入 promoted callable 集合。
+- restore / recovery 只认 canonical frame / session state 中的 callable/candidate/hydrated/skill 字段；缺失时直接报“运行时工具合同损坏/缺失”，不再回退 bootstrap 文本、旧 transcript 或旧动态消息。
+- 对 CEO/frontdoor，`frontdoor_stage_state`、`compression_state`、`semantic_context_state` 属于受保护运行时状态。工具合同刷新不能覆盖、清空或重置这三份状态。
 
 ### CEO Frontdoor Round Tool Ownership
 
@@ -192,6 +195,14 @@ When `RuntimeAgentSession` rebuilds `execution_trace_summary`, the intended cont
 - Matching by `tool_name` alone is a regression risk because it can steal a later same-name tool result into an earlier round.
 
 If a maintainer sees a CEO stage trace where a later `exec` appears inside an earlier round, first inspect whether the stored round was missing `tools` and whether the persisted `tool_call_ids` are stable and unique. Do not reintroduce any `tool_name`-only round fill path in session snapshot assembly.
+
+这次前门工具合同收敛还明确了另一个边界：
+
+- CEO/frontdoor 的 tool promotion 已改为执行循环直接基于 `raw_result` 处理 `load_tool_context` 的成功返回，而不是再从 trailing `ToolMessage` / `result_text` 反推 hydration。
+- `_frontdoor_stage_state_after_tool_cycle()` 仍然只负责 round 记账和 `round.tools` 落盘；它不参与 tool promotion。
+- 因此前门的“tool contract 更新”和“阶段工具显示”是两条平行链路：
+  - promotion 改动只影响 callable/candidate/hydrated contract
+  - `round.tools` 与 `execution_trace_summary` 继续只依赖 `tool_call_payloads + tool_results` 的显示字段
 
 维护上一个容易误判的点是：动态 skill/tool 提示块里虽然会出现“如何读取 skill 正文”或“如何读取 tool 契约”的说明，但这些说明不能覆盖 `ceo_frontdoor.md` 里的 stage-first 协议。当前前门的权威顺序是：
 
