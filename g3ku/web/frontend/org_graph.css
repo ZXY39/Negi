@@ -3642,10 +3642,11 @@ textarea {
     left: calc(var(--ceo-input-leading-width) + var(--ceo-input-row-gap));
     right: 0;
     bottom: calc(var(--ceo-input-leading-width) + 12px);
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 8px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, max-content));
+    align-items: start;
+    column-gap: 10px;
+    row-gap: 8px;
     pointer-events: none;
     z-index: 4;
 }
@@ -3667,7 +3668,15 @@ textarea {
     overflow-wrap: anywhere;
     box-shadow: var(--shadow-sm);
     transform-origin: 12% 100%;
-    animation: ceo-context-load-tag 5000ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    animation: ceo-context-load-tag 10000ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.ceo-context-load-notice-item.is-tool {
+    grid-column: 1;
+}
+
+.ceo-context-load-notice-item.is-skill {
+    grid-column: 2;
 }
 
 .ceo-context-load-notice-item::before {
@@ -3707,7 +3716,7 @@ textarea {
 
 @media (prefers-reduced-motion: reduce) {
     .ceo-context-load-notice-item {
-        animation: ceo-context-load-tag-reduced 5000ms linear forwards;
+        animation: ceo-context-load-tag-reduced 10000ms linear forwards;
     }
 }
 

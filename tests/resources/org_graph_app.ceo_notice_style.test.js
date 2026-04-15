@@ -8,6 +8,10 @@ const CSS = fs.readFileSync(CSS_PATH, "utf8");
 test("ceo context load notice uses minimal tag styling instead of cloud decoration", () => {
     assert.match(
         CSS,
+        /\.ceo-context-load-notice\s*\{[\s\S]*display:\s*grid;[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*max-content\)\)/,
+    );
+    assert.match(
+        CSS,
         /\.ceo-context-load-notice-item\s*\{[\s\S]*background:\s*color-mix\(in srgb,\s*var\(--bg-panel\)/,
     );
     assert.match(
@@ -18,6 +22,9 @@ test("ceo context load notice uses minimal tag styling instead of cloud decorati
         CSS,
         /\.ceo-context-load-notice-item::before\s*\{[\s\S]*width:\s*6px;[\s\S]*height:\s*6px;/,
     );
+    assert.match(CSS, /\.ceo-context-load-notice-item\.is-tool\s*\{[\s\S]*grid-column:\s*1/);
+    assert.match(CSS, /\.ceo-context-load-notice-item\.is-skill\s*\{[\s\S]*grid-column:\s*2/);
+    assert.match(CSS, /ceo-context-load-tag 10000ms/);
     assert.doesNotMatch(CSS, /\.ceo-context-load-notice-item::after/);
     assert.doesNotMatch(CSS, /radial-gradient\(/);
 });

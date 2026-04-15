@@ -25,7 +25,7 @@ const CEO_SESSION_SNAPSHOT_CACHE_KEY = "g3ku.ceo.session-snapshots.v2";
 const CEO_SESSION_SNAPSHOT_CACHE_LIMIT = 6;
 const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
 const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
-const CEO_CONTEXT_LOAD_NOTICE_DURATION_MS = 5000;
+const CEO_CONTEXT_LOAD_NOTICE_DURATION_MS = 10000;
 const CEO_COMPRESSION_TOAST_TEXT = "上下文压缩中";
 const CEO_COMPOSER_DRAFT_CACHE_KEY = "g3ku.ceo.composer-drafts.v1";
 const CEO_COMPOSER_DRAFT_CACHE_LIMIT = 24;
@@ -3720,7 +3720,7 @@ function hideCeoContextLoadNotice() {
     syncCeoContextLoadNoticeVisibility();
 }
 
-function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOTICE_DURATION_MS } = {}) {
+function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOTICE_DURATION_MS, kind = "" } = {}) {
     const normalizedText = String(text || "").trim();
     if (!normalizedText) {
         hideCeoContextLoadNotice();
@@ -3732,6 +3732,11 @@ function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOT
     S.ceoContextLoadNoticeSeq = (Number(S.ceoContextLoadNoticeSeq) || 0) + 1;
     const item = document.createElement("div");
     item.className = "ceo-context-load-notice-item";
+    const normalizedKind = String(kind || "").trim().toLowerCase();
+    if (normalizedKind === "tool" || normalizedKind === "skill") {
+        item.classList?.add?.(`is-${normalizedKind}`);
+        item.dataset.noticeKind = normalizedKind;
+    }
     item.dataset.noticeId = noticeId;
     const textEl = document.createElement("span");
     textEl.className = "ceo-context-load-notice-text";
@@ -3815,7 +3820,9 @@ function maybeShowCeoContextLoadNotice(turn, { toolName = "", status = "", detai
     const signature = `${normalizedTool}:${targetId || noticeText}`;
     if (keys?.has(signature)) return true;
     keys?.add(signature);
-    showCeoContextLoadNotice(noticeText);
+    showCeoContextLoadNotice(noticeText, {
+        kind: normalizedTool === "load_skill_context" ? "skill" : "tool",
+    });
     return true;
 }
 

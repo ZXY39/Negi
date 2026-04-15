@@ -363,6 +363,7 @@ test("ceo stage trace does not count successful loader-only rounds toward displa
     assert.match(turn.listEl.innerHTML, /0\/5/);
     assert.doesNotMatch(turn.listEl.innerHTML, /load_skill_context/);
     assert.equal(U.ceoContextLoadNotice.children.length, 1);
+    assert.match(String(U.ceoContextLoadNotice.children[0].className || ""), /is-skill/);
     assert.match(noticeText(U.ceoContextLoadNotice.children[0]), /skill-creator/);
 });
 
@@ -382,7 +383,7 @@ test("ceo legacy tool flow hides submit_next_stage events until stage trace arri
     assert.deepEqual(events, []);
 });
 
-test("ceo loader tool events stack floating composer notices for five seconds", () => {
+test("ceo loader tool events stack tool and skill notices in separate columns for ten seconds", () => {
     const { applyCeoToolEventToTurn, U, __context } = loadApp();
     const turn = makeTurn({ text: "" });
     const scheduled = [];
@@ -415,9 +416,11 @@ test("ceo loader tool events stack floating composer notices for five seconds", 
     assert.equal(turn.listEl.children.length, 0);
     assert.equal(U.ceoContextLoadNotice.hidden, false);
     assert.equal(U.ceoContextLoadNotice.children.length, 2);
+    assert.match(String(U.ceoContextLoadNotice.children[0].className || ""), /is-tool/);
+    assert.match(String(U.ceoContextLoadNotice.children[1].className || ""), /is-skill/);
     assert.match(noticeText(U.ceoContextLoadNotice.children[0]), /filesystem_write/);
     assert.match(noticeText(U.ceoContextLoadNotice.children[1]), /find-skills/);
-    assert.deepEqual(scheduled.map((item) => item.delay), [5000, 5000]);
+    assert.deepEqual(scheduled.map((item) => item.delay), [10000, 10000]);
 
     scheduled[0].callback();
 
