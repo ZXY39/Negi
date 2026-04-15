@@ -511,15 +511,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         supplier = getattr(main_service, "_hydrated_tool_limit_value", None) if main_service is not None else None
         if callable(supplier):
             try:
-                return max(1, int(supplier() or 8))
+                return max(1, int(supplier() or 16))
             except Exception:
                 pass
         try:
             value = int(
-                getattr(main_service, "_hydrated_tool_limit", getattr(self, "_hydrated_tool_limit", 8)) or 8
+                getattr(main_service, "_hydrated_tool_limit", getattr(self, "_hydrated_tool_limit", 16)) or 16
             )
         except Exception:
-            value = 8
+            value = 16
         return max(1, value)
 
     def _frontdoor_hydrated_tool_lru(
@@ -579,6 +579,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         return frontdoor_stage_state, compression_state, semantic_context_state, hydrated_tool_names
 
+    @classmethod
+    def _frontdoor_selection_debug_snapshot(cls, state: CeoGraphState | None) -> dict[str, Any]:
+        if not isinstance(state, dict):
+            return {}
+        raw_value = state.get("frontdoor_selection_debug")
+        return dict(raw_value) if isinstance(raw_value, dict) else {}
+
     def _sync_runtime_session_frontdoor_state(
         self,
         *,
@@ -598,6 +605,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         setattr(target_session, "_compression_state", compression_state)
         setattr(target_session, "_semantic_context_state", semantic_context_state)
         setattr(target_session, "_frontdoor_hydrated_tool_names", list(hydrated_tool_names))
+        setattr(
+            target_session,
+            "_frontdoor_selection_debug",
+            self._frontdoor_selection_debug_snapshot(state),
+        )
 
     def _frontdoor_tool_state_after_tool_results(
         self,
@@ -1527,6 +1539,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "messages": list(state.get("messages") or []),
                 "frontdoor_stage_state": self._frontdoor_stage_state_snapshot(state),
                 "compression_state": dict(state.get("compression_state") or self._default_compression_state()),
+                "frontdoor_selection_debug": self._frontdoor_selection_debug_snapshot(state),
             }
 
         user_input = _persistent_user_input_payload(state.get("user_input"))
@@ -1586,6 +1599,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             semantic_context_state=dict(state.get("semantic_context_state") or {}),
             hydrated_tool_names=list(hydrated_tool_names),
         )
+        frontdoor_selection_debug = {
+            "query_text": str(builder_query_text or "").strip(),
+            "raw_turn_query_text": str(query_text or "").strip(),
+            "semantic_frontdoor": dict(getattr(assembly, "trace", {}).get("semantic_frontdoor") or {}),
+            "tool_selection": dict(getattr(assembly, "trace", {}).get("tool_selection") or {}),
+            "selected_skills": list(getattr(assembly, "trace", {}).get("selected_skills") or []),
+            "capability_snapshot": dict(getattr(assembly, "trace", {}).get("capability_snapshot") or {}),
+            "callable_tool_names": list(getattr(assembly, "tool_names", None) or getattr(assembly, "callable_tool_names", None) or []),
+            "candidate_tool_names": list(getattr(assembly, "candidate_tool_names", []) or []),
+            "hydrated_tool_names": list(hydrated_tool_names),
+        }
         tool_names = list(
             getattr(assembly, "tool_names", None)
             or getattr(assembly, "callable_tool_names", None)
@@ -1685,6 +1709,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 or {}
             ),
             "turn_overlay_text": str(getattr(assembly, "turn_overlay_text", "") or "").strip() or None,
+            "frontdoor_selection_debug": frontdoor_selection_debug,
             "tool_names": list(tool_names),
             "candidate_tool_names": list(getattr(assembly, "candidate_tool_names", []) or []),
             "hydrated_tool_names": list(hydrated_tool_names),

@@ -448,6 +448,78 @@ async def test_build_frontdoor_catalog_selection_reranks_visible_dense_hits_and_
 
 
 @pytest.mark.asyncio
+async def test_build_frontdoor_catalog_selection_accepts_concrete_tool_record_ids_without_family_expansion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory_manager = _MemoryManagerRecorder()
+    memory_manager.set_response(
+        context_type="resource",
+        records=[
+            {"record_id": "tool:filesystem_write"},
+            {"record_id": "tool:filesystem_copy"},
+        ],
+    )
+
+    async def _rewrite_queries(**kwargs) -> dict[str, str]:
+        _ = kwargs
+        return {
+            "raw_query": "write a markdown file",
+            "skill_query": "write a markdown file",
+            "tool_query": "write a markdown file",
+            "status": "rewritten",
+            "model": "frontdoor-query-rewriter",
+        }
+
+    async def _rerank_passthrough(**kwargs) -> dict[str, Any]:
+        records = kwargs.get("records")
+        return {
+            "records": list(records if isinstance(records, list) else []),
+            "trace": {
+                "status": "passthrough",
+                "model": "",
+                "top_n": int(kwargs.get("top_n") or 0),
+                "scores": [],
+            },
+        }
+
+    monkeypatch.setattr(selection_module, "rewrite_frontdoor_catalog_queries", _rewrite_queries)
+    monkeypatch.setattr(selection_module, "rerank_frontdoor_catalog_records", _rerank_passthrough)
+
+    result = await selection_module.build_frontdoor_catalog_selection(
+        loop=object(),
+        memory_manager=memory_manager,
+        query_text="write a markdown file",
+        visible_skills=[],
+        visible_families=[
+            SimpleNamespace(
+                tool_id="filesystem",
+                actions=[SimpleNamespace(executor_names=["filesystem_copy", "filesystem_write"])],
+            )
+        ],
+        skill_limit=4,
+        tool_limit=4,
+    )
+
+    assert result["tool_ids"] == ["filesystem_write", "filesystem_copy"]
+    assert result["trace"]["dense"]["tools"] == [
+        {
+            "record_id": "tool:filesystem_write",
+            "tool_id": "filesystem_write",
+            "executor_name": "filesystem_write",
+            "family_id": "filesystem",
+            "dense_rank": 1,
+        },
+        {
+            "record_id": "tool:filesystem_copy",
+            "tool_id": "filesystem_copy",
+            "executor_name": "filesystem_copy",
+            "family_id": "filesystem",
+            "dense_rank": 2,
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_build_frontdoor_catalog_selection_enforces_unavailable_when_dense_backend_missing() -> None:
     memory_manager = _MemoryManagerRecorder()
     memory_manager.store = SimpleNamespace(_dense_enabled=False)

@@ -1328,6 +1328,12 @@ def test_frontdoor_stage_state_after_tool_cycle_ignores_raw_result_when_writing_
     assert "raw_result" not in round_tool
 
 
+def test_frontdoor_default_hydrated_tool_limit_is_16() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    assert runner._frontdoor_hydrated_tool_limit_value() == 16
+
+
 @pytest.mark.asyncio
 async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_tools() -> None:
     session = RuntimeAgentSession(
@@ -1369,7 +1375,28 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
             dynamic_appendix_messages=[],
             tool_names=["submit_next_stage", "load_tool_context", "filesystem_write"],
             candidate_tool_names=[],
-            trace={"selected_skills": []},
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {
+                    "queries": {
+                        "raw_query": "hello",
+                        "skill_query": "hello skill",
+                        "tool_query": "hello tool",
+                    },
+                    "dense": {
+                        "skills": [{"record_id": "skill:demo"}],
+                        "tools": [{"record_id": "tool:filesystem", "tool_id": "filesystem_write"}],
+                    },
+                },
+                "tool_selection": {
+                    "mode": "dense_only",
+                    "candidate_tool_names": [],
+                },
+                "capability_snapshot": {
+                    "visible_tool_ids": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+                    "visible_skill_ids": [],
+                },
+            },
             cache_family_revision="frontdoor:v1",
             turn_overlay_text="",
         )
@@ -1386,6 +1413,33 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
 
     assert prepared["hydrated_tool_names"] == ["filesystem_write"]
     assert "filesystem_write" in prepared["tool_names"]
+    assert prepared["frontdoor_selection_debug"] == {
+        "query_text": "hello",
+        "raw_turn_query_text": "hello",
+        "semantic_frontdoor": {
+            "queries": {
+                "raw_query": "hello",
+                "skill_query": "hello skill",
+                "tool_query": "hello tool",
+            },
+            "dense": {
+                "skills": [{"record_id": "skill:demo"}],
+                "tools": [{"record_id": "tool:filesystem", "tool_id": "filesystem_write"}],
+            },
+        },
+        "tool_selection": {
+            "mode": "dense_only",
+            "candidate_tool_names": [],
+        },
+        "capability_snapshot": {
+            "visible_tool_ids": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+            "visible_skill_ids": [],
+        },
+        "selected_skills": [],
+        "callable_tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+        "candidate_tool_names": [],
+        "hydrated_tool_names": ["filesystem_write"],
+    }
 
 
 def test_runtime_agent_session_inflight_snapshot_keeps_frontdoor_hydrated_tool_names() -> None:
@@ -1404,6 +1458,59 @@ def test_runtime_agent_session_inflight_snapshot_keeps_frontdoor_hydrated_tool_n
 
     assert isinstance(snapshot, dict)
     assert snapshot["hydrated_tool_names"] == ["filesystem_write"]
+
+
+def test_create_agent_runner_syncs_frontdoor_selection_debug_into_inflight_snapshot() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._state.latest_message = "working"
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    runner._sync_runtime_session_frontdoor_state(
+        state={
+            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
+            "semantic_context_state": {},
+            "hydrated_tool_names": ["filesystem_write"],
+            "frontdoor_selection_debug": {
+                "query_text": "create a markdown file",
+                "semantic_frontdoor": {
+                    "queries": {
+                        "raw_query": "create a markdown file",
+                        "tool_query": "filesystem write markdown file",
+                    },
+                    "dense": {
+                        "tools": [{"record_id": "tool:filesystem", "tool_id": "filesystem_write"}],
+                    },
+                },
+                "tool_selection": {"candidate_tool_names": ["filesystem_write"]},
+            },
+        },
+        session=session,
+    )
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert isinstance(snapshot, dict)
+    assert snapshot["frontdoor_selection_debug"] == {
+        "query_text": "create a markdown file",
+        "semantic_frontdoor": {
+            "queries": {
+                "raw_query": "create a markdown file",
+                "tool_query": "filesystem write markdown file",
+            },
+            "dense": {
+                "tools": [{"record_id": "tool:filesystem", "tool_id": "filesystem_write"}],
+            },
+        },
+        "tool_selection": {"candidate_tool_names": ["filesystem_write"]},
+    }
 
 
 @pytest.mark.asyncio

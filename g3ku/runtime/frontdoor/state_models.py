@@ -84,6 +84,8 @@ class CeoPersistentState(TypedDict, total=False):
 
     prompt_cache_diagnostics: dict[str, Any]
 
+    frontdoor_selection_debug: dict[str, Any]
+
     parallel_enabled: bool
 
     max_parallel_tool_calls: int | None
@@ -193,6 +195,8 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "rbac_visible_skill_ids": [],
 
         "cache_family_revision": DEFAULT_CACHE_FAMILY_REVISION,
+
+        "frontdoor_selection_debug": {},
 
         "route_kind": "direct_reply",
 

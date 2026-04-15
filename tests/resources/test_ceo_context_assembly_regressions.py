@@ -940,6 +940,58 @@ async def test_message_builder_keeps_callable_and_candidate_tools_separate() -> 
 
 
 @pytest.mark.asyncio
+async def test_message_builder_defaults_to_16_skill_and_tool_candidates_when_assembly_top_k_fields_are_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    loop = SimpleNamespace(
+        main_task_service=None,
+        memory_manager=memory_manager,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                core_tools=[],
+            )
+        ),
+    )
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
+
+    async def _semantic_rankings(**kwargs):
+        _ = kwargs
+        return {
+            "mode": "dense_only",
+            "available": True,
+            "skill_ids": [f"skill-{index:02d}" for index in range(20)],
+            "tool_ids": [f"tool-{index:02d}" for index in range(20)],
+            "trace": {},
+        }
+
+    monkeypatch.setattr(message_builder_module, "semantic_catalog_rankings", _semantic_rankings)
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="rank the most relevant concrete tools and skills",
+        exposure={
+            "skills": [
+                _skill(f"skill-{index:02d}", f"skill description {index:02d}")
+                for index in range(20)
+            ],
+            "tool_families": [
+                _tool_resource_record(f"tool-{index:02d}", f"tool description {index:02d}")
+                for index in range(20)
+            ],
+            "tool_names": [f"tool-{index:02d}" for index in range(20)],
+        },
+        persisted_session=None,
+    )
+
+    assert len(result.trace["selected_skills"]) == 16
+    assert len(result.candidate_tool_names) == 16
+    assert result.trace["selected_skills"][0]["skill_id"] == "skill-00"
+    assert result.candidate_tool_names[0] == "tool-00"
+
+
+@pytest.mark.asyncio
 async def test_message_builder_promotes_hydrated_tools_into_callable_list() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _MemoryManager(response="")

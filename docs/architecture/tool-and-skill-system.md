@@ -125,6 +125,9 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - 如果语义召回不可用，候选集合直接退化为 `RBAC 可见集合`，而不是停止运行。
 - 对 agent 来说，candidate 仍然是“可见但默认不可直接调用”的资源；candidate 不会自动进入 callable tool 集合。
 - `load_tool_context` / `load_skill_context` 现在也只允许命中当前 canonical candidate 集合，不再允许“RBAC 可见但不在 candidate 中”的旁路加载。
+- 节点路径里，语义可用时的 candidate skills / candidate tools 上限都固定为 16；语义不可用时，直接退化为全部 RBAC 可见集合。
+- CEO/frontdoor 路径里，语义可用时默认也按 16 取候选：`skill_inventory_top_k=16`、`extension_tool_top_k=16`；这两个值的实际来源是 `tools/memory_runtime/resource.yaml` / `MemoryAssemblyConfig`，而不是前门内的额外 6/8 fallback。
+- frontdoor 的 `extension_tool_top_k` 现在只控制“最终候选工具数”，不等于 dense 检索宽度；前门会先用更宽的 `tool_limit` 做 dense/rerank，再在最后一层把 candidate 工具收敛到 `extension_tool_top_k`。
 
 候选工具是“本轮推荐给 agent 的具体工具列表”，但默认不能直接调用。
 
@@ -154,6 +157,7 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - 节点的 hydration canonical state 在 runtime frame 中：`hydrated_executor_state` / `hydrated_executor_names`。这是节点生命周期级 LRU，会跨多轮、阶段切换、pause/resume、frame restore 保留。
 - CEO/frontdoor 的 hydration canonical state 在 session/frontdoor state 中：`RuntimeAgentSession._frontdoor_hydrated_tool_names` 与前门 persistent state 的 `hydrated_tool_names`。这是 session 生命周期级 LRU，会跨 turn 保留，但每轮都按当前 RBAC 可见集合过滤。
 - 节点与 CEO/frontdoor 的 hydration LRU 都只接受 concrete tool names；family id 不能进入 canonical hydration state。
+- 节点与 CEO/frontdoor 的默认 hydration LRU 上限现在都是 16；如果维护者看到 promoted tool 在第 17 个之后被逐出，优先检查各自运行时对象上的 `_hydrated_tool_limit` 是否被显式改小。
 
 某工具在前一轮成功 `load_tool_context` 后，会进入节点级 hydration 状态。
 
@@ -169,6 +173,7 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - frontdoor 不再只把 hydration 当成提示词层面的“已读过契约”，而是会把成功 `load_tool_context` 的 concrete tool 写进自己的持久状态。
 - 这份 frontdoor hydration 状态会在同一用户 turn 的后续模型轮次里直接并入 callable tool 集合，而不只是继续停留在 candidate tool 列表里。
 - frontdoor approval interrupt、session inflight snapshot、paused execution context 也会带上这份 hydrated tool 状态；因此排查“load 成功但下一轮又看不见工具”时，不能只看 candidate tool 提示块，还要看 frontdoor 当前保存的 hydrated tool state。
+- frontdoor 现在还会把候选生成诊断同步到 session snapshot 里的 `frontdoor_selection_debug`。这份结构化调试信息至少应包含：当前 raw query、rewrite 后的 `skill_query` / `tool_query`、dense 命中、rerank 结果、tool selection trace，以及最终 callable/candidate/hydrated 集合。
 - CEO/frontdoor 现在也不再从 trailing `ToolMessage` / `result_text` 反推 hydration；tool promotion 的权威来源是执行循环里的 `raw_result.ok / raw_result.hydration_targets`。
 
 维护上还要再记住一个和阶段预算相关的边界：
@@ -201,6 +206,9 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - 对执行节点和检验节点，`callable_tool_names` / `candidate_tools` 现在不应再视为 bootstrap user JSON 的静态字段；它们属于每轮动态 `node_runtime_tool_contract`。
 - 对 CEO/frontdoor，当前 turn 的 callable/candidate tool 合同现在应只存在于 dynamic appendix 和持久状态；不要再从稳定 prompt 前缀或旧 transcript 文本恢复“当前可调用工具”。
 - 排查“load 成功但下一轮没调用”时，优先对照 canonical runtime frame / frontdoor state 与 runtime messages snapshot；如果旧 bootstrap 文本和当前 snapshot 冲突，应以当前 snapshot 为准。
+- 排查“某个工具为什么没进前门候选集”时，优先看 `frontdoor_selection_debug.semantic_frontdoor` 与 `frontdoor_selection_debug.tool_selection`：
+  - `semantic_frontdoor` 负责回答 rewrite 后 query 是什么、dense/rerank 命中了哪些 tool/skill
+  - `tool_selection` 负责回答这些命中项为什么最终没有进入 `candidate_tool_names`
 - 对 CEO/frontdoor，`frontdoor_stage_state`、`compression_state`、`semantic_context_state` 是受保护运行时状态；工具合同刷新不能覆盖、清空或重置这三份状态。
 
 对 CEO frontdoor 还要额外记住一个优先级边界：
@@ -299,7 +307,9 @@ Tool/skill semantic retrieval depends on the unified context catalog under the `
 Current catalog summary rules:
 
 - For skills, the catalog summary source is `display_name + description + SKILL.md body` when the body exists. If `SKILL.md` is missing, the description becomes the body fallback.
-- For tools, the catalog summary source is `display_name + description + toolskills/SKILL.md body` when the toolskill body exists. If the toolskill body is missing, the family description becomes the body fallback.
+- For tools, the catalog is now written per concrete executor, not per tool family. A `filesystem` family with `filesystem_copy` / `filesystem_write` now produces separate records such as `tool:filesystem_copy` and `tool:filesystem_write`.
+- Each concrete tool record still carries its family context through tags such as `family:<tool_id>`; this lets targeted refresh/removal continue to work when a whole family changes.
+- The tool catalog summary source is the concrete executor's toolskill body when present; if a concrete toolskill body is missing, the runtime falls back to the family description.
 - `l0` stays the one-line semantic label; `l1` stays the short structured overview used by retrieval and prompt injection.
 
 This matters because metadata-only edits now count as real catalog changes:
@@ -307,6 +317,7 @@ This matters because metadata-only edits now count as real catalog changes:
 - Changing only `display_name` or `description` is enough to invalidate the existing catalog hash.
 - The runtime no longer assumes "body unchanged" means the catalog summary is still current.
 - Dense vectors still index `l1` first and fall back to `l0`, so refreshing `l0` / `l1` is what keeps the vector projection aligned.
+- Because tools are now indexed by concrete executor, dense/rerank and frontdoor candidate selection no longer depend on “family hit后再按 family 里的 executor 顺序展开”。如果某个 concrete tool 没进候选，优先看它自己的 `tool:<executor_name>` record 是否命中，而不是先看 family 级命中。
 
 ## 12. External Disk Edits Without A Watcher
 

@@ -650,9 +650,9 @@ class MemoryCostConfig(Base):
 class MemoryAssemblyConfig(Base):
     """Frontdoor dynamic tool and skill selection controls."""
 
-    skill_inventory_top_k: int = 8
-    extension_tool_top_k: int = 8
-    node_tool_top_k: int = 8
+    skill_inventory_top_k: int = 16
+    extension_tool_top_k: int = 16
+    node_tool_top_k: int = 16
     frontdoor_interrupt_approval_enabled: bool = False
     frontdoor_interrupt_tool_names: list[str] = Field(
         default_factory=lambda: ["message", "create_async_task", "continue_task"]

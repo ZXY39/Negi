@@ -42,6 +42,9 @@ from g3ku.runtime.web_ceo_sessions import (
 )
 from main.runtime.stage_budget import STAGE_TOOL_NAME
 
+DEFAULT_FRONTDOOR_SKILL_INVENTORY_TOP_K = 16
+DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K = 16
+
 
 def _context_window_from_model_parameters(model_parameters: dict[str, Any] | None) -> int:
     payload = dict(model_parameters or {})
@@ -508,6 +511,23 @@ class CeoMessageBuilder:
     def _assembly_cfg(loop: Any) -> Any:
         return getattr(getattr(loop, "_memory_runtime_settings", None), "assembly", None)
 
+    @staticmethod
+    def _tool_family_by_executor_name(visible_families: list[Any]) -> dict[str, Any]:
+        family_by_executor: dict[str, Any] = {}
+        for family in list(visible_families or []):
+            tool_id = str(getattr(family, "tool_id", "") or "").strip()
+            executor_names: list[str] = []
+            for action in list(getattr(family, "actions", []) or []):
+                for raw_name in list(getattr(action, "executor_names", []) or []):
+                    name = str(raw_name or "").strip()
+                    if name and name not in executor_names:
+                        executor_names.append(name)
+            if not executor_names and tool_id:
+                executor_names.append(tool_id)
+            for executor_name in executor_names:
+                family_by_executor.setdefault(executor_name, family)
+        return family_by_executor
+
     @classmethod
     def _global_summary_settings(cls, loop: Any) -> dict[str, Any]:
         assembly_cfg = cls._assembly_cfg(loop)
@@ -830,52 +850,60 @@ class CeoMessageBuilder:
                 'candidate_tool_names': picked_extension,
             }
 
-        ext_scored: list[tuple[float, list[str], str]] = []
-        for family in visible_families:
-            family_names = []
-            for action in list(getattr(family, 'actions', []) or []):
-                for executor_name in list(getattr(action, 'executor_names', []) or []):
-                    name = str(executor_name or '').strip()
-                    if (
-                        name
-                        and name in visible_set
-                        and name not in core_resolution.executor_names
-                        and name not in raw_core_entries
-                        and name not in reserved_set
-                    ):
-                        family_names.append(name)
-            family_names = sorted(set(family_names))
-            if not family_names:
+        visible_index = {
+            str(name or '').strip(): index
+            for index, name in enumerate(list(visible_names or []))
+            if str(name or '').strip()
+        }
+        executor_family_map = self._tool_family_by_executor_name(visible_families)
+        ext_scored: list[tuple[float, int, str]] = []
+        for name in visible_names:
+            normalized = str(name or '').strip()
+            if (
+                not normalized
+                or normalized not in visible_set
+                or normalized in core_resolution.executor_names
+                or normalized in raw_core_entries
+                or normalized in reserved_set
+            ):
                 continue
+            family = executor_family_map.get(normalized)
+            family_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+            family_display_name = str(getattr(family, 'display_name', '') or '').strip()
+            family_description = str(getattr(family, 'description', '') or '').strip()
             score = score_query(
                 query_text,
-                getattr(family, 'tool_id', ''),
-                getattr(family, 'display_name', ''),
-                getattr(family, 'description', ''),
-                ' '.join(family_names),
+                normalized,
+                family_display_name or normalized,
+                family_description,
+                family_tool_id,
             )
-            for name in family_names:
-                for hint in self.EXTENSION_TOOL_HINTS.get(name, ()):
+            for hint_owner in (normalized, family_tool_id):
+                for hint in self.EXTENSION_TOOL_HINTS.get(hint_owner, ()):
                     if hint and hint.lower() in str(query_text or '').lower():
                         score += 5.0
-            ext_scored.append((score, family_names, str(getattr(family, 'tool_id', '') or '')))
-        ext_scored.sort(key=lambda item: (item[0], item[2]), reverse=True)
+            ext_scored.append((score, visible_index.get(normalized, len(visible_index) + 10_000), normalized))
+        ext_scored.sort(key=lambda item: (-item[0], item[1], item[2]))
 
         picked_extension: list[str] = []
-        for _score, names, _tool_id in ext_scored:
+        for _score, _visible_rank, name in ext_scored:
             if len(picked_extension) >= extension_top_k:
                 break
-            for name in names:
-                if name in selected or name in picked_extension:
-                    continue
-                picked_extension.append(name)
-                if len(picked_extension) >= extension_top_k:
-                    break
+            if name in selected or name in picked_extension:
+                continue
+            picked_extension.append(name)
         if not picked_extension:
-            for name in sorted(visible_set - selected):
-                if name in reserved_set:
+            for name in visible_names:
+                normalized = str(name or '').strip()
+                if (
+                    not normalized
+                    or normalized not in visible_set
+                    or normalized in selected
+                    or normalized in picked_extension
+                    or normalized in reserved_set
+                ):
                     continue
-                picked_extension.append(name)
+                picked_extension.append(normalized)
                 if len(picked_extension) >= extension_top_k:
                     break
 
@@ -947,8 +975,14 @@ class CeoMessageBuilder:
         main_service = getattr(self._loop, 'main_task_service', None)
         memory_manager = getattr(self._loop, 'memory_manager', None)
         assembly_cfg = getattr(getattr(self._loop, '_memory_runtime_settings', None), 'assembly', None)
-        inventory_top_k = max(1, int(getattr(assembly_cfg, 'skill_inventory_top_k', 8) or 8))
-        extension_top_k = max(0, int(getattr(assembly_cfg, 'extension_tool_top_k', 6) or 6))
+        inventory_top_k = max(
+            1,
+            int(getattr(assembly_cfg, 'skill_inventory_top_k', DEFAULT_FRONTDOOR_SKILL_INVENTORY_TOP_K) or DEFAULT_FRONTDOOR_SKILL_INVENTORY_TOP_K),
+        )
+        extension_top_k = max(
+            0,
+            int(getattr(assembly_cfg, 'extension_tool_top_k', DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K) or DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K),
+        )
         visible_tool_names = [
             str(name or '').strip()
             for name in list(exposure.get('tool_names') or [])

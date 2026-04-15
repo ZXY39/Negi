@@ -4,6 +4,21 @@ import asyncio
 from types import SimpleNamespace
 
 
+def test_frontdoor_query_rewrite_enabled_defaults_true_and_honors_explicit_disable(monkeypatch) -> None:
+    from g3ku.runtime.context import frontdoor_catalog_selection as selection
+
+    monkeypatch.delenv("G3KU_ENABLE_FRONTDOOR_QUERY_REWRITE", raising=False)
+    assert selection._frontdoor_query_rewrite_enabled() is True
+
+    for disabled_value in ("0", "false", "no", "off", "FALSE", " Off "):
+        monkeypatch.setenv("G3KU_ENABLE_FRONTDOOR_QUERY_REWRITE", disabled_value)
+        assert selection._frontdoor_query_rewrite_enabled() is False
+
+    for enabled_value in ("1", "true", "yes", "on", "TRUE", " On "):
+        monkeypatch.setenv("G3KU_ENABLE_FRONTDOOR_QUERY_REWRITE", enabled_value)
+        assert selection._frontdoor_query_rewrite_enabled() is True
+
+
 def test_build_query_rewrite_cache_key_depends_only_on_raw_query_and_revision_inputs() -> None:
     from g3ku.runtime.context.frontdoor_query_rewriter import build_query_rewrite_cache_key
 

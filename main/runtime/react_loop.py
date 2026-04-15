@@ -251,7 +251,7 @@ class ReActToolLoop:
                         call_ids=tool_history.orphan_tool_result_ids,
                         strike_count=orphan_tool_result_strikes,
                     )
-                self._log_service.upsert_frame(
+            self._log_service.upsert_frame(
                 task.task_id,
                 {
                     'node_id': node.node_id,
@@ -1866,6 +1866,13 @@ class ReActToolLoop:
                 enabled=self._parallel_tool_calls_enabled,
             )
         )
+        current_frame = self._runtime_frame(str(task.task_id or ''), str(node.node_id or '')) or {}
+        candidate_tool_names = self._normalized_name_list(
+            list(runtime_context.get('candidate_tool_names') or current_frame.get('candidate_tool_names') or [])
+        )
+        candidate_skill_ids = self._normalized_name_list(
+            list(runtime_context.get('candidate_skill_ids') or current_frame.get('candidate_skill_ids') or [])
+        )
 
         async def _run_call(index: int, call: Any) -> dict[str, Any]:
             async with semaphore:
@@ -1899,7 +1906,7 @@ class ReActToolLoop:
                             **runtime_context,
                             'current_tool_call_id': call.id,
                             'tool_contract_enforced': True,
-                            'candidate_tool_names': list(tool_schema_selection.get('candidate_tool_names') or []),
+                            'candidate_tool_names': list(candidate_tool_names),
                             'candidate_skill_ids': list(candidate_skill_ids),
                             'allowed_content_refs': allowed_content_refs,
                             'enforce_content_ref_allowlist': str(runtime_context.get('node_kind') or '').strip().lower() == 'acceptance',

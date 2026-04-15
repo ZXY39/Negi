@@ -94,6 +94,8 @@
 - `inflight_turn_snapshot`、`message_end`、heartbeat discard/final reply 都会沿这个 `turn_id` 传递
 - 前端不应再仅靠 `source=user|heartbeat` 去猜“当前该收口的是哪个 pending bubble”
 - 对 Web CEO/frontdoor 来说，session 侧还会同步保存当前 turn 的 hydrated tool state；它和 stage trace 一样属于“当前进行中 turn 的运行时事实”，不是长期 transcript。
+- session 侧现在还会同步保存 `frontdoor_selection_debug`，用于记录当前 turn 的 frontdoor 候选生成诊断：原始 query、rewrite 后的 skill/tool query、dense/rerank trace、tool selection trace，以及当轮 callable/candidate/hydrated 合同快照。
+- 维护上还要记住两个默认上限：CEO/frontdoor 的默认 candidate skills / candidate tools 上限现在都是 16；frontdoor 与节点的默认 hydrated tool LRU 上限也都是 16。若线上行为不像 16，优先检查运行时状态或 `tools/memory_runtime/resource.yaml` 是否显式改写。
 
 这意味着 `RuntimeAgentSession` 不只是维护“session 是否正在运行”，还维护了“当前可显示 turn 的身份”。如果这里的 `turn_id` 传播断掉，典型回归就是：
 
@@ -158,11 +160,13 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 
 - `candidate_tool_names` 表示当前轮对模型可见、但默认仍需先 `load_tool_context` 的 concrete tools。
 - `hydrated_tool_names` 表示本 turn 里已经成功读过契约、并被提升为下一轮 callable 的 concrete tools。
+- frontdoor 的语义工具选择现在直接面向 concrete tool，而不是“先命中 family 再按 family 顺序展开 executor”；因此 `frontdoor_selection_debug.semantic_frontdoor` 里的 `tool_ids` 应直接是诸如 `filesystem_write` 这样的 concrete tool names。
 
 这两份状态都由 frontdoor persistent state 维护，而不是只存在于某一轮 prompt 文本里。其直接后果是：
 
 - 同一用户 turn 内，`load_tool_context` 成功后，下一轮真正发给模型的函数工具列表会并入对应 hydrated tool。
 - frontdoor approval interrupt、session inflight snapshot、paused execution context 也会携带这份 hydrated state，避免“暂停前已经 load 成功，恢复后又退回 candidate-only”。
+- 同一套 inflight snapshot / paused execution context 现在也会带上 `frontdoor_selection_debug`。排查“rewrite 后 query 不对”“向量召回打到了哪些 tool/skill”“为什么某个工具没进 candidate”时，优先查看这份 snapshot，而不是只看最终 assistant 文本。
 
 阶段预算上还有一个容易被误判的点：
 
@@ -310,6 +314,7 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - 执行节点与检验节点现在都应理解为“两层消息结构”：稳定 bootstrap user JSON 负责任务定义，单独的动态 `node_runtime_tool_contract` user 消息负责当前轮的 callable/candidate tool 合同。
 - 对节点运行时来说，`before_model` 当轮真正下发给模型的 schema 选择结果才是权威工具来源；runtime frame、restore/recovery 和 runtime messages artifact 都应从这份结果派生，而不是再从旧 bootstrap 文本反推。
 - CEO/frontdoor 也采用同样的分层思想：稳定会话前缀不再承担当前轮 callable/candidate tool 状态，当前轮工具合同放在 dynamic appendix，并随 turn state 刷新。
+- 对维护者来说，这还意味着前门里的 `extension_tool_top_k` 只约束“最终候选工具数”，不是 dense 检索宽度；排查某个工具为何没进 candidate 时，要把 dense/rerank 命中和最终 top-k 截断分开看。
 
 ## 7. 新人阅读顺序建议
 

@@ -138,6 +138,49 @@ class _RuntimeToolService:
         return {"ok": True, "skill_id": str(kwargs.get("skill_id") or "")}
 
 
+class _StageRuntimeProbeTool(Tool):
+    def __init__(self) -> None:
+        self.runtime_payloads: list[dict[str, object]] = []
+
+    @property
+    def name(self) -> str:
+        return "submit_next_stage"
+
+    @property
+    def description(self) -> str:
+        return "Capture runtime tool contract details during submit_next_stage execution."
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "stage_goal": {"type": "string"},
+                "tool_round_budget": {"type": "integer"},
+            },
+            "required": ["stage_goal", "tool_round_budget"],
+        }
+
+    async def execute(
+        self,
+        stage_goal: str,
+        tool_round_budget: int,
+        __g3ku_runtime: dict[str, object] | None = None,
+        **kwargs,
+    ):
+        runtime = dict(__g3ku_runtime or {}) if isinstance(__g3ku_runtime, dict) else {}
+        self.runtime_payloads.append(runtime)
+        _ = kwargs
+        return json.dumps(
+            {
+                "ok": True,
+                "stage_goal": str(stage_goal or ""),
+                "tool_round_budget": int(tool_round_budget or 0),
+            },
+            ensure_ascii=False,
+        )
+
+
 @pytest.mark.parametrize(
     "loader_tool_name",
     ["load_tool_context", "load_tool_context_v2", "load_skill_context", "load_skill_context_v2"],
@@ -1551,6 +1594,12 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
     ]
 
 
+def test_main_runtime_service_default_hydrated_tool_limit_is_16() -> None:
+    service = object.__new__(MainRuntimeService)
+
+    assert service._hydrated_tool_limit_value() == 16
+
+
 def test_promote_tool_context_hydration_uses_successful_result_without_matching_call_id() -> None:
     promoted_calls: list[dict[str, object]] = []
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
@@ -2601,6 +2650,53 @@ async def test_execute_tool_calls_marks_stage_history_archive_reads_ephemeral() 
 
 
 @pytest.mark.asyncio
+async def test_execute_tool_calls_allows_submit_next_stage_and_passes_runtime_contract_candidates() -> None:
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    tool = _StageRuntimeProbeTool()
+
+    results = await loop._execute_tool_calls(
+        task=SimpleNamespace(task_id="task-stage-probe"),
+        node=SimpleNamespace(node_id="node-stage-probe", depth=0, node_kind="execution"),
+        response_tool_calls=[
+            ToolCallRequest(
+                id="call-stage-probe",
+                name="submit_next_stage",
+                arguments={"stage_goal": "probe stage", "tool_round_budget": 1},
+            )
+        ],
+        tools={"submit_next_stage": tool},
+        allowed_content_refs=[],
+        runtime_context={
+            "task_id": "task-stage-probe",
+            "node_id": "node-stage-probe",
+            "actor_role": "execution",
+            "stage_turn_granted": True,
+            "candidate_tool_names": ["filesystem_write"],
+            "candidate_skill_ids": ["skill-creator"],
+        },
+    )
+
+    assert len(results) == 1
+    assert results[0]["live_state"]["status"] == "success"
+    assert '"stage_goal": "probe stage"' in str(results[0]["tool_message"]["content"])
+    assert tool.runtime_payloads == [
+        {
+            "task_id": "task-stage-probe",
+            "node_id": "node-stage-probe",
+            "actor_role": "execution",
+            "stage_turn_granted": True,
+            "candidate_tool_names": ["filesystem_write"],
+            "candidate_skill_ids": ["skill-creator"],
+            "current_tool_call_id": "call-stage-probe",
+            "tool_contract_enforced": True,
+            "allowed_content_refs": [],
+            "enforce_content_ref_allowlist": False,
+            "prior_overflow_signatures": [],
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_react_loop_orphan_tool_result_circuit_breaker_fails_current_node() -> None:
     calls: list[list[dict[str, object]]] = []
 
@@ -2637,6 +2733,70 @@ async def test_react_loop_orphan_tool_result_circuit_breaker_fails_current_node(
     assert "final result submission guard triggered" in result.summary
     assert "submit_final_result" in result.blocking_reason
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_react_loop_writes_before_model_frame_before_chat_dispatch() -> None:
+    log_service = _FakeLogService()
+    final_tool = _submit_final_result_tool()
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            frame = log_service.read_runtime_frame("task-before-model", "node-before-model")
+            assert frame.get("phase") == "before_model"
+            assert frame.get("callable_tool_names") == ["submit_final_result"]
+            assert frame.get("candidate_tool_names") == ["filesystem_write"]
+            assert frame.get("rbac_visible_tool_names") == ["submit_final_result", "filesystem_write"]
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "done",
+                            "answer": "done",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=2)
+    loop._visible_tools_for_iteration = lambda **kwargs: dict(kwargs.get("tools") or {})
+    loop._model_visible_tools_for_iteration = lambda **kwargs: (
+        {"submit_final_result": final_tool},
+        {
+            "tool_names": ["submit_final_result"],
+            "candidate_tool_names": ["filesystem_write"],
+            "lightweight_tool_ids": [],
+            "hydrated_executor_names": [],
+            "trace": {"rbac_visible_tool_names": ["submit_final_result", "filesystem_write"]},
+        },
+    )
+
+    result = await loop.run(
+        task=SimpleNamespace(task_id="task-before-model"),
+        node=SimpleNamespace(node_id="node-before-model", depth=0, node_kind="execution"),
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-before-model","goal":"demo"}'},
+        ],
+        tools={"submit_final_result": final_tool},
+        model_refs=["fake"],
+        runtime_context={"task_id": "task-before-model", "node_id": "node-before-model"},
+        max_iterations=2,
+    )
+
+    assert result.status == "success"
+    assert result.answer == "done"
 
 
 @pytest.mark.asyncio

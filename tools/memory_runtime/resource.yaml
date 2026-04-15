@@ -73,9 +73,9 @@ settings:
     recent_messages_limit: 24
     archive_summary_top_k: 2
     archive_summary_max_tokens: 320
-    skill_inventory_top_k: 8
+    skill_inventory_top_k: 16
     skill_inventory_max_tokens: 480
-    extension_tool_top_k: 6
+    extension_tool_top_k: 16
     core_tools:
     - content
     - create_async_task

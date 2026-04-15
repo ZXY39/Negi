@@ -23,11 +23,24 @@ def _visible_skill_ids(visible_skills: list[Any]) -> list[str]:
 
 
 def _visible_tool_ids(visible_families: list[Any]) -> list[str]:
-    return [
-        str(_item_value(item, 'tool_id') or '').strip()
-        for item in list(visible_families or [])
-        if str(_item_value(item, 'tool_id') or '').strip()
-    ]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for family in list(visible_families or []):
+        executor_names: list[str] = []
+        for action in list(_item_value(family, 'actions') or []):
+            for raw_name in list(_item_value(action, 'executor_names') or []):
+                name = str(raw_name or '').strip()
+                if name and name not in executor_names:
+                    executor_names.append(name)
+        tool_id = str(_item_value(family, 'tool_id') or '').strip()
+        if not executor_names and tool_id:
+            executor_names.append(tool_id)
+        for executor_name in executor_names:
+            if executor_name in seen:
+                continue
+            seen.add(executor_name)
+            ordered.append(executor_name)
+    return ordered
 
 
 def semantic_search_enabled(memory_manager: Any | None) -> bool:

@@ -4336,9 +4336,9 @@ class MainRuntimeService:
 
     def _hydrated_tool_limit_value(self) -> int:
         try:
-            value = int(getattr(self, '_hydrated_tool_limit', 8) or 8)
+            value = int(getattr(self, '_hydrated_tool_limit', 16) or 16)
         except Exception:
-            value = 8
+            value = 16
         return max(1, value)
 
     def _tool_context_hydration_targets(self, *, requested_tool_id: str, visible_family: Any) -> list[str]:

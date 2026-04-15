@@ -34,6 +34,19 @@ class ContextCatalogIndexer:
             sort_keys=True,
         )
 
+    @staticmethod
+    def _family_executor_names(family: Any) -> list[str]:
+        executor_names: list[str] = []
+        for action in list(getattr(family, "actions", []) or []):
+            for raw_name in list(getattr(action, "executor_names", []) or []):
+                name = str(raw_name or "").strip()
+                if name and name not in executor_names:
+                    executor_names.append(name)
+        tool_id = str(getattr(family, "tool_id", "") or "").strip()
+        if not executor_names and tool_id:
+            executor_names.append(tool_id)
+        return executor_names
+
     async def sync(
         self,
         *,
@@ -101,62 +114,89 @@ class ContextCatalogIndexer:
                 updated += 1
 
         for family in list(self._service.list_tool_resources() or []):
-            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-            if not tool_id:
+            family_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+            if not family_tool_id:
                 continue
-            if tool_filter and tool_id not in tool_filter:
-                continue
-            record_id = f'tool:{tool_id}'
-            seen.add(record_id)
-            display_name = str(getattr(family, 'display_name', '') or '').strip()
-            description = str(getattr(family, 'description', '') or '').strip()
-            toolskill = self._service.get_tool_toolskill(tool_id) or {}
-            path = str(toolskill.get('path') or '')
-            body = str(toolskill.get('content') or '')
-            if not body:
-                body = description
-            fingerprint_source = self._catalog_fingerprint_source(
-                title=display_name,
-                description=description,
-                body=body,
-            )
-            hash_tag = f"hash:{self._memory_manager._stable_text_hash(fingerprint_source)[:12]}"
-            tags = ['catalog', 'kind:tool', f'tool:{tool_id}', hash_tag]
-            current = existing.get(record_id)
-            if current is not None and hash_tag in set(current.tags or []):
-                continue
-            l0, l1 = await summarize_layered_model_first(
-                body,
-                title=display_name,
-                description=description,
-                model_key=self._catalog_summary_model_key(),
-            )
-            record = ContextRecordV2(
-                record_id=record_id,
-                context_type='resource',
-                uri=f'g3ku://resource/tool/{tool_id}',
-                parent_uri='g3ku://catalog/tools',
-                l0=l0 or summarize_l0(body, title=display_name, description=description),
-                l1=l1 or summarize_l1(body, title=display_name, description=description),
-                l2_ref=path or None,
-                tags=tags,
-                source='catalog',
-                confidence=1.0,
-                session_key='catalog:global',
-                channel='catalog',
-                chat_id='global',
-            )
-            await self._put(record)
-            if current is None:
-                created += 1
-            else:
-                updated += 1
+            family_display_name = str(getattr(family, 'display_name', '') or '').strip()
+            family_description = str(getattr(family, 'description', '') or '').strip()
+            for executor_name in self._family_executor_names(family):
+                if tool_filter and family_tool_id not in tool_filter and executor_name not in tool_filter:
+                    continue
+                record_id = f'tool:{executor_name}'
+                seen.add(record_id)
+                toolskill = (
+                    self._service.get_tool_toolskill(executor_name)
+                    or self._service.get_tool_toolskill(family_tool_id)
+                    or {}
+                )
+                display_name = str(toolskill.get('tool_id') or executor_name).strip() or executor_name
+                summary_title = (
+                    f"{family_display_name} / {display_name}"
+                    if family_display_name and family_display_name != display_name
+                    else display_name
+                )
+                description = str(toolskill.get('description') or family_description or '').strip()
+                path = str(toolskill.get('path') or '')
+                body = str(toolskill.get('content') or '')
+                if not body:
+                    body = description or family_description
+                fingerprint_source = self._catalog_fingerprint_source(
+                    title=summary_title,
+                    description=description,
+                    body=body,
+                )
+                hash_tag = f"hash:{self._memory_manager._stable_text_hash(fingerprint_source)[:12]}"
+                tags = [
+                    'catalog',
+                    'kind:tool',
+                    f'tool:{executor_name}',
+                    f'family:{family_tool_id}',
+                    hash_tag,
+                ]
+                current = existing.get(record_id)
+                if current is not None and hash_tag in set(current.tags or []):
+                    continue
+                l0, l1 = await summarize_layered_model_first(
+                    body,
+                    title=summary_title,
+                    description=description,
+                    model_key=self._catalog_summary_model_key(),
+                )
+                record = ContextRecordV2(
+                    record_id=record_id,
+                    context_type='resource',
+                    uri=f'g3ku://resource/tool/{executor_name}',
+                    parent_uri=f'g3ku://catalog/tool-family/{family_tool_id}',
+                    l0=l0 or summarize_l0(body, title=summary_title, description=description),
+                    l1=l1 or summarize_l1(body, title=summary_title, description=description),
+                    l2_ref=path or None,
+                    tags=tags,
+                    source='catalog',
+                    confidence=1.0,
+                    session_key='catalog:global',
+                    channel='catalog',
+                    chat_id='global',
+                )
+                await self._put(record)
+                if current is None:
+                    created += 1
+                else:
+                    updated += 1
 
         target_record_ids: set[str]
         if subset_mode:
-            target_record_ids = {f'skill:{skill_id}' for skill_id in skill_filter} | {
-                f'tool:{tool_id}' for tool_id in tool_filter
-            }
+            target_record_ids = {f'skill:{skill_id}' for skill_id in skill_filter}
+            for record_id, record in existing.items():
+                if not str(record_id or '').startswith('tool:'):
+                    continue
+                suffix = str(record_id or '')[len('tool:') :].strip()
+                tags = {
+                    str(item or '').strip()
+                    for item in list(getattr(record, 'tags', []) or [])
+                    if str(item or '').strip()
+                }
+                if suffix in tool_filter or any(f'family:{tool_id}' in tags for tool_id in tool_filter):
+                    target_record_ids.add(record_id)
         else:
             target_record_ids = set(existing)
         for record_id, record in existing.items():

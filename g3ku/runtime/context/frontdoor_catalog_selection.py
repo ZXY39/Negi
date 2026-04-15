@@ -36,7 +36,9 @@ def _normalized_text(value: Any) -> str:
 
 def _frontdoor_query_rewrite_enabled() -> bool:
     raw = _normalized_text(os.getenv("G3KU_ENABLE_FRONTDOOR_QUERY_REWRITE"))
-    return raw.lower() in {"1", "true", "yes", "on"}
+    if not raw:
+        return True
+    return raw.lower() not in {"0", "false", "no", "off"}
 
 
 def _visible_ids(items: list[Any], *, key: str) -> list[str]:
@@ -70,19 +72,39 @@ def _resource_record_executor_name(record: Any) -> str:
     return suffix.split("::", 1)[-1].strip()
 
 
-def _visible_family_executor_map(visible_families: list[Any]) -> dict[str, list[str]]:
-    family_map: dict[str, list[str]] = {}
+def _family_executor_names(family: Any) -> list[str]:
+    executor_names: list[str] = []
+    for action in list(_item_value(family, "actions") or []):
+        for raw_name in list(_item_value(action, "executor_names") or []):
+            name = _normalized_text(raw_name)
+            if name and name not in executor_names:
+                executor_names.append(name)
+    tool_id = _normalized_text(_item_value(family, "tool_id"))
+    if not executor_names and tool_id:
+        executor_names.append(tool_id)
+    return executor_names
+
+
+def _visible_tool_executor_names(visible_families: list[Any]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for family in list(visible_families or []):
+        for executor_name in _family_executor_names(family):
+            if executor_name in seen:
+                continue
+            seen.add(executor_name)
+            ordered.append(executor_name)
+    return ordered
+
+
+def _executor_family_map(visible_families: list[Any]) -> dict[str, str]:
+    family_map: dict[str, str] = {}
     for family in list(visible_families or []):
         tool_id = _normalized_text(_item_value(family, "tool_id"))
-        if not tool_id or tool_id in family_map:
+        if not tool_id:
             continue
-        executor_names: list[str] = []
-        for action in list(_item_value(family, "actions") or []):
-            for raw_name in list(_item_value(action, "executor_names") or []):
-                name = _normalized_text(raw_name)
-                if name and name not in executor_names:
-                    executor_names.append(name)
-        family_map[tool_id] = executor_names
+        for executor_name in _family_executor_names(family):
+            family_map.setdefault(executor_name, tool_id)
     return family_map
 
 
@@ -164,38 +186,30 @@ def _selected_executor_ids(
     records: list[Any],
     *,
     limit: int,
-    visible_families: list[Any],
+    executor_family_map: dict[str, str],
     dense_rank_by_record_id: dict[str, int],
 ) -> tuple[list[str], list[dict[str, Any]]]:
     selected_ids: list[str] = []
     trace: list[dict[str, Any]] = []
     seen: set[str] = set()
     capped_limit = max(int(limit or 0), 0)
-    family_executor_map = _visible_family_executor_map(visible_families)
     for rerank_rank, record in enumerate(list(records or []), start=1):
         record_id = _record_id(record)
-        family_id = _catalog_record_suffix(record_id, prefix="tool:")
-        executor_names = family_executor_map.get(family_id, [])
-        if not executor_names:
-            executor_name = _resource_record_executor_name(record)
-            executor_names = [executor_name] if executor_name else []
-        for executor_name in executor_names:
-            if not executor_name or executor_name in seen:
-                continue
-            seen.add(executor_name)
-            selected_ids.append(executor_name)
-            trace.append(
-                {
-                    "record_id": record_id,
-                    "tool_id": executor_name,
-                    "executor_name": executor_name,
-                    "family_id": family_id,
-                    "dense_rank": dense_rank_by_record_id.get(record_id),
-                    "rerank_rank": rerank_rank,
-                }
-            )
-            if capped_limit and len(selected_ids) >= capped_limit:
-                break
+        executor_name = _resource_record_executor_name(record)
+        if not executor_name or executor_name in seen:
+            continue
+        seen.add(executor_name)
+        selected_ids.append(executor_name)
+        trace.append(
+            {
+                "record_id": record_id,
+                "tool_id": executor_name,
+                "executor_name": executor_name,
+                "family_id": str(executor_family_map.get(executor_name) or ""),
+                "dense_rank": dense_rank_by_record_id.get(record_id),
+                "rerank_rank": rerank_rank,
+            }
+        )
         if capped_limit and len(selected_ids) >= capped_limit:
             break
     return selected_ids, trace
@@ -227,30 +241,24 @@ def _dense_trace(
 def _dense_executor_trace(
     records: list[Any],
     *,
-    visible_families: list[Any],
+    executor_family_map: dict[str, str],
     dense_rank_by_record_id: dict[str, int],
 ) -> list[dict[str, Any]]:
     trace: list[dict[str, Any]] = []
-    family_executor_map = _visible_family_executor_map(visible_families)
     for record in list(records or []):
         record_id = _record_id(record)
-        family_id = _catalog_record_suffix(record_id, prefix="tool:")
-        executor_names = family_executor_map.get(family_id, [])
-        if not executor_names:
-            executor_name = _resource_record_executor_name(record)
-            executor_names = [executor_name] if executor_name else []
-        if not executor_names:
+        executor_name = _resource_record_executor_name(record)
+        if not executor_name:
             continue
-        for executor_name in executor_names:
-            trace.append(
-                {
-                    "record_id": record_id,
-                    "tool_id": executor_name,
-                    "executor_name": executor_name,
-                    "family_id": family_id,
-                    "dense_rank": dense_rank_by_record_id.get(record_id),
-                }
-            )
+        trace.append(
+            {
+                "record_id": record_id,
+                "tool_id": executor_name,
+                "executor_name": executor_name,
+                "family_id": str(executor_family_map.get(executor_name) or ""),
+                "dense_rank": dense_rank_by_record_id.get(record_id),
+            }
+        )
     return trace
 
 
@@ -491,7 +499,7 @@ async def _rewrite_frontdoor_catalog_queries_sidecar(
 ) -> FrontdoorRewriteResult:
     query = _normalized_text(query_text)
     skill_ids = _visible_ids(visible_skills, key="skill_id")
-    tool_ids = _visible_ids(visible_families, key="tool_id")
+    tool_ids = _visible_tool_executor_names(visible_families)
     request = _build_frontdoor_query_rewrite_request(
         raw_query=query,
         visible_skill_ids=skill_ids,
@@ -749,7 +757,8 @@ async def build_frontdoor_catalog_selection(
     skill_query = query_trace["skill_query"]
     tool_query = query_trace["tool_query"]
     skill_visible_ids = set(_visible_ids(visible_skills, key="skill_id"))
-    tool_visible_ids = set(_visible_ids(visible_families, key="tool_id"))
+    tool_visible_ids = set(_visible_tool_executor_names(visible_families))
+    executor_family_map = _executor_family_map(visible_families)
 
     async def _search(*, search_query: str, limit: int, context_type: str) -> list[Any]:
         if (
@@ -822,7 +831,7 @@ async def build_frontdoor_catalog_selection(
     tool_ids, tool_trace = _selected_executor_ids(
         reranked_tool_hits,
         limit=tool_limit,
-        visible_families=visible_families,
+        executor_family_map=executor_family_map,
         dense_rank_by_record_id=tool_dense_rank,
     )
 
@@ -841,7 +850,7 @@ async def build_frontdoor_catalog_selection(
                 ),
                 "tools": _dense_executor_trace(
                     visible_tool_hits,
-                    visible_families=visible_families,
+                    executor_family_map=executor_family_map,
                     dense_rank_by_record_id=tool_dense_rank,
                 ),
             },

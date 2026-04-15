@@ -72,6 +72,7 @@ class RuntimeAgentSession:
         self._compression_state: dict[str, Any] = {}
         self._semantic_context_state: dict[str, Any] = default_semantic_context_state()
         self._frontdoor_hydrated_tool_names: list[str] = []
+        self._frontdoor_selection_debug: dict[str, Any] = {}
         self._active_turn_id: str | None = None
         self._active_batch_id: str | None = None
         self._active_user_batch_inputs: list[UserInputMessage] = []
@@ -900,6 +901,9 @@ class RuntimeAgentSession:
         ]
         if hydrated_tool_names:
             snapshot["hydrated_tool_names"] = hydrated_tool_names
+        frontdoor_selection_debug = getattr(self, "_frontdoor_selection_debug", None)
+        if isinstance(frontdoor_selection_debug, dict) and frontdoor_selection_debug:
+            snapshot["frontdoor_selection_debug"] = copy.deepcopy(frontdoor_selection_debug)
         if (
             not execution_trace_summary
             and not compression
@@ -908,6 +912,7 @@ class RuntimeAgentSession:
             and "last_error" not in snapshot
             and "tool_events" not in snapshot
             and "hydrated_tool_names" not in snapshot
+            and "frontdoor_selection_debug" not in snapshot
         ):
             return None
         return snapshot
@@ -1380,9 +1385,11 @@ class RuntimeAgentSession:
         frontdoor_stage_state = interrupt_values.get("frontdoor_stage_state")
         compression_state = interrupt_values.get("compression_state")
         hydrated_tool_names = interrupt_values.get("hydrated_tool_names")
+        frontdoor_selection_debug = interrupt_values.get("frontdoor_selection_debug")
         preserved_frontdoor_stage_state = getattr(self, "_frontdoor_stage_state", None)
         preserved_compression_state = getattr(self, "_compression_state", None)
         preserved_hydrated_tool_names = getattr(self, "_frontdoor_hydrated_tool_names", None)
+        preserved_frontdoor_selection_debug = getattr(self, "_frontdoor_selection_debug", None)
         self._frontdoor_stage_state = (
             dict(frontdoor_stage_state)
             if isinstance(frontdoor_stage_state, dict)
@@ -1402,6 +1409,13 @@ class RuntimeAgentSession:
             for item in list(hydrated_tool_names or preserved_hydrated_tool_names or [])
             if str(item or "").strip()
         ]
+        self._frontdoor_selection_debug = (
+            dict(frontdoor_selection_debug)
+            if isinstance(frontdoor_selection_debug, dict)
+            else dict(preserved_frontdoor_selection_debug)
+            if isinstance(preserved_frontdoor_selection_debug, dict)
+            else {}
+        )
         self._state.is_running = False
         self._state.paused = True
         self._state.status = "paused"
@@ -1466,6 +1480,7 @@ class RuntimeAgentSession:
                 # Fresh user turns should never inherit previous turn stage/compression snapshots.
                 self._frontdoor_stage_state = {}
                 self._compression_state = {}
+                self._frontdoor_selection_debug = {}
             self._state.is_running = True
             self._state.paused = False
             self._state.status = "running"
