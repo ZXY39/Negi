@@ -5,6 +5,7 @@ import json
 from main.runtime.node_prompt_contract import (
     NODE_DYNAMIC_CONTRACT_KIND,
     NodeRuntimeToolContract,
+    inject_node_dynamic_contract_message,
     upsert_node_dynamic_contract_message,
 )
 
@@ -30,9 +31,11 @@ def test_upsert_node_dynamic_contract_message_replaces_existing_contract_message
         node_kind="execution",
         callable_tool_names=["filesystem_write"],
         candidate_tool_names=[],
+        candidate_tool_items=[],
         visible_skills=[{"skill_id": "memory", "display_name": "memory", "description": ""}],
-        candidate_skill_ids=[],
-        stage_payload={"status": "进行中", "goal": "write file"},
+        candidate_skill_ids=["memory"],
+        candidate_skill_items=[{"skill_id": "memory", "description": "memory help"}],
+        stage_payload={"goal": "write file"},
         hydrated_executor_names=["filesystem_write"],
         lightweight_tool_ids=["filesystem"],
         selection_trace={"mode": "execution_tool_selection"},
@@ -45,20 +48,28 @@ def test_upsert_node_dynamic_contract_message_replaces_existing_contract_message
     assert payload["message_type"] == NODE_DYNAMIC_CONTRACT_KIND
     assert payload["callable_tool_names"] == ["filesystem_write"]
     assert payload["candidate_tools"] == []
-    assert payload["visible_skills"][0]["skill_id"] == "memory"
+    assert payload["candidate_skills"] == [{"skill_id": "memory", "description": "memory help"}]
+    assert "visible_skills" not in payload
+    assert "hydrated_executor_names" not in payload
+    assert "lightweight_tool_ids" not in payload
+    assert "model_visible_tool_selection_trace" not in payload
+    assert "node_id" not in payload
+    assert "node_kind" not in payload
 
 
-def test_node_runtime_contract_serializes_candidate_tools_as_structured_items() -> None:
+def test_node_runtime_contract_serializes_minimal_agent_facing_payload() -> None:
     contract = NodeRuntimeToolContract(
         node_id="node:test",
         node_kind="execution",
         callable_tool_names=["exec"],
         candidate_tool_names=["filesystem_write"],
-        visible_skills=[],
-        candidate_skill_ids=[],
+        candidate_tool_items=[{"tool_id": "filesystem_write", "description": ""}],
+        visible_skills=[{"skill_id": "tmux", "display_name": "tmux", "description": "terminal workflow"}],
+        candidate_skill_ids=["tmux"],
+        candidate_skill_items=[{"skill_id": "tmux", "description": "terminal workflow"}],
         stage_payload={},
-        hydrated_executor_names=[],
-        lightweight_tool_ids=[],
+        hydrated_executor_names=["filesystem_write"],
+        lightweight_tool_ids=["filesystem"],
         selection_trace={"mode": "execution_tool_selection"},
     )
 
@@ -70,3 +81,54 @@ def test_node_runtime_contract_serializes_candidate_tools_as_structured_items() 
             "description": "",
         }
     ]
+    assert payload["candidate_skills"] == [
+        {
+            "skill_id": "tmux",
+            "description": "terminal workflow",
+        }
+    ]
+    assert "visible_skills" not in payload
+    assert "hydrated_executor_names" not in payload
+    assert "lightweight_tool_ids" not in payload
+    assert "model_visible_tool_selection_trace" not in payload
+    assert "node_id" not in payload
+    assert "node_kind" not in payload
+
+
+def test_inject_node_dynamic_contract_message_appends_contract_to_request_tail() -> None:
+    contract = NodeRuntimeToolContract(
+        node_id="node-1",
+        node_kind="execution",
+        callable_tool_names=["submit_next_stage"],
+        candidate_tool_names=["filesystem_write"],
+        candidate_tool_items=[{"tool_id": "filesystem_write", "description": "write file"}],
+        visible_skills=[],
+        candidate_skill_ids=["tmux"],
+        candidate_skill_items=[{"skill_id": "tmux", "description": "terminal workflow"}],
+        stage_payload={
+            "has_active_stage": True,
+            "transition_required": False,
+            "active_stage": {
+                "stage_id": "stage-1",
+                "stage_goal": "inspect repo",
+                "tool_round_budget": 6,
+            },
+        },
+        hydrated_executor_names=[],
+        lightweight_tool_ids=[],
+        selection_trace={"mode": "execution_tool_selection"},
+    )
+
+    injected = inject_node_dynamic_contract_message(
+        [
+            {"role": "system", "content": "node system"},
+            {"role": "user", "content": '{"prompt":"inspect repo"}'},
+            {"role": "assistant", "content": "prior reasoning"},
+        ],
+        contract,
+    )
+
+    assert [item["role"] for item in injected] == ["system", "user", "assistant", "user"]
+    payload = json.loads(injected[-1]["content"])
+    assert payload["message_type"] == NODE_DYNAMIC_CONTRACT_KIND
+    assert payload["candidate_skills"] == [{"skill_id": "tmux", "description": "terminal workflow"}]

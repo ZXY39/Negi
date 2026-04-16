@@ -2984,7 +2984,7 @@ async def test_react_loop_writes_before_model_frame_before_chat_dispatch() -> No
 
 
 @pytest.mark.asyncio
-async def test_react_loop_writes_visible_skills_into_before_model_frame() -> None:
+async def test_react_loop_writes_candidate_skill_items_into_before_model_frame() -> None:
     log_service = _FakeLogService()
     final_tool = _submit_final_result_tool()
     node_id = "node-before-model-visible-skills"
@@ -3001,6 +3001,12 @@ async def test_react_loop_writes_visible_skills_into_before_model_frame() -> Non
             }
         ],
         candidate_skill_ids=["tmux"],
+        candidate_skill_items=[
+            {
+                "skill_id": "tmux",
+                "description": "terminal workflow",
+            }
+        ],
         stage_payload={},
         hydrated_executor_names=[],
         lightweight_tool_ids=[],
@@ -3011,10 +3017,9 @@ async def test_react_loop_writes_visible_skills_into_before_model_frame() -> Non
         async def chat(self, **kwargs):
             _ = kwargs
             frame = log_service.read_runtime_frame("task-before-model-visible-skills", node_id)
-            assert frame.get("visible_skills") == [
+            assert frame.get("candidate_skill_items") == [
                 {
                     "skill_id": "tmux",
-                    "display_name": "tmux",
                     "description": "terminal workflow",
                 }
             ]
@@ -3160,10 +3165,9 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
         task_id,
         {
             "node_id": node.node_id,
-            "visible_skills": [
+            "candidate_skill_items": [
                 {
                     "skill_id": "tmux",
-                    "display_name": "tmux",
                     "description": "terminal workflow",
                 }
             ],
@@ -3184,6 +3188,12 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
             }
         ],
         candidate_skill_ids=["tmux"],
+        candidate_skill_items=[
+            {
+                "skill_id": "tmux",
+                "description": "terminal workflow",
+            }
+        ],
         stage_payload={},
         hydrated_executor_names=[],
         lightweight_tool_ids=[],
@@ -3229,14 +3239,12 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
 
     payload = extract_node_dynamic_contract_payload(refreshed)
     assert payload is not None
-    assert payload["visible_skills"] == [
+    assert payload["candidate_skills"] == [
         {
             "skill_id": "tmux",
-            "display_name": "tmux",
             "description": "terminal workflow",
         }
     ]
-    assert payload["candidate_skills"] == ["tmux"]
 
 
 def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootstrap_prefix() -> None:
@@ -3253,6 +3261,12 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
             }
         ],
         candidate_skill_ids=["tmux"],
+        candidate_skill_items=[
+            {
+                "skill_id": "tmux",
+                "description": "terminal workflow",
+            }
+        ],
         stage_payload={
             "has_active_stage": True,
             "transition_required": False,
@@ -3283,7 +3297,7 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
         contract,
     )
 
-    assert [item["role"] for item in injected[:4]] == ["system", "user", "user", "assistant"]
+    assert [item["role"] for item in injected[:4]] == ["system", "user", "assistant", "user"]
     payload = extract_node_dynamic_contract_payload(injected)
     assert payload is not None
     assert payload["execution_stage"] == {
@@ -3297,11 +3311,13 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
             "final_stage": False,
         },
     }
-    assert payload["model_visible_tool_selection_trace"] == {
-        "mode": "execution_tool_selection",
-        "full_callable_tool_names": ["submit_next_stage", "filesystem_write"],
-        "stage_locked_to_submit_next_stage": True,
-    }
+    assert payload["candidate_skills"] == [
+        {
+            "skill_id": "tmux",
+            "description": "terminal workflow",
+        }
+    ]
+    assert "model_visible_tool_selection_trace" not in payload
 
 
 @pytest.mark.asyncio
@@ -3669,15 +3685,13 @@ async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_sk
     ]
     dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
-    assert dynamic_payload["visible_skills"] == [
+    assert dynamic_payload["candidate_skills"] == [
         {
             "skill_id": "skill-creator",
-            "display_name": "skill-creator",
             "description": "skill creator",
         },
         {
             "skill_id": "tmux",
-            "display_name": "tmux",
             "description": "terminal workflow",
         },
     ]
@@ -3763,19 +3777,16 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_onl
     ]
     dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
-    assert dynamic_payload["visible_skills"] == [
+    assert dynamic_payload["candidate_skills"] == [
         {
             "skill_id": "tmux",
-            "display_name": "tmux",
             "description": "terminal workflow",
         },
         {
             "skill_id": "skill-creator",
-            "display_name": "skill-creator",
             "description": "skill creator",
         }
     ]
-    assert dynamic_payload["candidate_skills"] == ["tmux", "skill-creator"]
     assert dynamic_payload["candidate_tools"] == [
         {
             "tool_id": "content",
@@ -3795,9 +3806,9 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
             mode="dense_rerank",
             memory_search_visible=False,
             selected_skill_ids=["tmux"],
-            selected_tool_names=["content"],
+            selected_tool_names=["content", "exec"],
             candidate_skill_ids=["tmux"],
-            candidate_tool_names=["content"],
+            candidate_tool_names=["content", "exec"],
             memory_query="",
             retrieval_scope={},
             trace={"mode": "dense_rerank"},
@@ -4012,11 +4023,7 @@ async def test_enrich_node_messages_locks_callable_tools_to_submit_next_stage_wi
             "description": "",
         }
     ]
-    assert dynamic_payload["model_visible_tool_selection_trace"]["full_callable_tool_names"] == [
-        "load_tool_context",
-        "filesystem_write",
-    ]
-    assert dynamic_payload["model_visible_tool_selection_trace"]["stage_locked_to_submit_next_stage"] is True
+    assert "model_visible_tool_selection_trace" not in dynamic_payload
 
 
 @pytest.mark.asyncio
@@ -4088,14 +4095,12 @@ async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_no
     assert len(user_messages) == 2
     payload = json.loads(str(user_messages[-1].get("content") or ""))
     assert payload["message_type"] == "node_runtime_tool_contract"
-    assert payload["visible_skills"] == [
+    assert payload["candidate_skills"] == [
         {
             "skill_id": "tmux",
-            "display_name": "tmux",
             "description": "terminal workflow",
         }
     ]
-    assert payload["candidate_skills"] == ["tmux"]
     assert payload["candidate_tools"] == [
         {
             "tool_id": "filesystem",
@@ -4173,14 +4178,12 @@ async def test_enrich_node_messages_still_applies_selector_when_unified_context_
 
     dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
-    assert dynamic_payload["visible_skills"] == [
+    assert dynamic_payload["candidate_skills"] == [
         {
             "skill_id": "tmux",
-            "display_name": "tmux",
             "description": "terminal workflow",
         }
     ]
-    assert dynamic_payload["candidate_skills"] == ["tmux"]
     assert dynamic_payload["candidate_tools"] == [
         {
             "tool_id": "content",

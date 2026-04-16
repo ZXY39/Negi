@@ -136,8 +136,8 @@ Maintenance note for surfaced fixed builtins:
 - `load_tool_context` / `load_skill_context` 现在也只允许命中当前 canonical candidate 集合，不再允许“RBAC 可见但不在 candidate 中”的旁路加载。
 - 对 CEO/frontdoor，`candidate_tool_names` / `candidate_skill_ids` 属于 internal canonical state；真正暴露给模型的当前轮显示合同只保留一份 `frontdoor_runtime_tool_contract`。
 - 这还意味着 frontdoor 的旧轮 candidate/tool/skill catalog 不应进入 durable history。后续轮次只能继承真实工具调用轨迹与上下文，而不是再次看到上一轮的候选列表。
-- 对执行/验收节点，skill 候选不再只依赖当前轮的 `node_runtime_tool_contract` user 消息存活；canonical `candidate_skill_ids` 继续落在 runtime frame，`visible_skills` 也会随 frame 一起持久化，供阶段切换、prompt compaction 之后的下一轮 contract 刷新从 frame 恢复。
-- 维护时如果看到 `load_skill_context` 报“当前运行时候选技能未包含 ...”，不要只检查模型当轮提示里是否还看得到那条 dynamic contract；先看节点 runtime frame 里的 `candidate_skill_ids` / `visible_skills` 是否仍在，若 frame 还在而动态消息丢了，说明是 contract 重建链路问题，而不是 selector 一开始没选中。
+- 对执行/验收节点，skill 候选不再只依赖当前轮的 `node_runtime_tool_contract` user 消息存活；canonical `candidate_skill_ids` 继续落在 runtime frame，`candidate_skill_items` 也会随 frame 一起持久化，供阶段切换、prompt compaction 之后的下一轮 contract 刷新从 frame 恢复。
+- 维护时如果看到 `load_skill_context` 报“当前运行时候选技能未包含 ...”，不要只检查模型当轮提示里是否还看得到那条 dynamic contract；先看节点 runtime frame 里的 `candidate_skill_ids` / `candidate_skill_items` 是否仍在，若 frame 还在而动态消息丢了，说明是 contract 重建链路问题，而不是 selector 一开始没选中。
 - 节点路径里，语义可用时的 candidate skills / candidate tools 上限都固定为 16；语义不可用时，直接退化为全部 RBAC 可见集合。
 - CEO/frontdoor 路径里，语义可用时默认也按 16 取候选：`skill_inventory_top_k=16`、`extension_tool_top_k=16`；这两个值的实际来源是 `tools/memory_runtime/resource.yaml` / `MemoryAssemblyConfig`，而不是前门内的额外 6/8 fallback。
 - frontdoor 的 `extension_tool_top_k` 现在只控制“最终候选工具数”，不等于 dense 检索宽度；前门会先用更宽的 `tool_limit` 做 dense/rerank，再在最后一层把 candidate 工具收敛到 `extension_tool_top_k`。
@@ -190,6 +190,7 @@ Maintenance note for hydration LRU:
 - 节点与 CEO/frontdoor 的 hydration LRU 都只接受 concrete tool names；family id 不能进入 canonical hydration state。
 - 节点与 CEO/frontdoor 的默认 hydration LRU 上限现在都是 16；如果维护者看到 promoted tool 在第 17 个之后被逐出，优先检查各自运行时对象上的 `_hydrated_tool_limit` 是否被显式改小。
 - 对 CEO/frontdoor，RBAC 可见集合本身仍会保留在 internal runtime state 里，供过滤 hydration 与恢复链路使用；但 `rbac_visible_tool_names` / `rbac_visible_skill_ids` 不再属于 agent-facing prompt contract。
+- 对执行/验收节点，同样的规则也成立：`rbac_visible_tool_names` / `rbac_visible_skill_ids`、`hydrated_executor_names`、`lightweight_tool_ids`、`model_visible_tool_selection_trace` 都属于本地 runtime state，不再进入 agent-facing `node_runtime_tool_contract`。
 
 某工具在前一轮成功 `load_tool_context` 后，会进入节点级 hydration 状态。
 
@@ -251,12 +252,13 @@ Maintenance note for hydration LRU:
   - 但真正驱动去重、hydration 排除与恢复的仍然是 persistent state 中的 `candidate_tool_names`
 - 如果维护者在排查 `load_tool_context` 成功后下一轮仍然只会 `exec` / 再次 `load_tool_context`，优先检查 frontdoor persistent state 里的 `hydrated_tool_names`、`tool_names`、`candidate_tool_names` 是否一起更新，而不是只检查 toolskill 内容。
 - 如果线上 frontdoor 表现与测试里的 graph helper 一致、却和实际会话不一致，先确认 runner 是否真的走显式 graph checkpoint，而不是怀疑还存在第二条生产 promotion 路径；当前生产路径已经不再以 `ceo_agent_middleware.py` 为权威。
-- 对执行节点和检验节点，`callable_tool_names` / `candidate_tools` 现在不应再视为 bootstrap user JSON 的静态字段；它们属于每轮动态 `node_runtime_tool_contract`。
-- 对执行节点和检验节点，`node_runtime_tool_contract` 里的 `candidate_tools` 现在也是 display-oriented 的结构化候选摘要；如需恢复 canonical candidate name 列表，优先读取 runtime frame 里的 `candidate_tool_names`
-- 对执行节点和检验节点，`visible_skills` / `candidate_skills` 也属于动态 `node_runtime_tool_contract` 的显示合同；但它们的恢复来源现在以 runtime frame 中的 canonical skill state 为准，而不是只靠旧的 dynamic contract user 消息。
-- 对执行节点和检验节点，还要再区分“当前轮对模型暴露的 callable 合同”和“内部可恢复的完整 callable pool”：前者在无有效阶段时会被收紧到 `submit_next_stage`，后者保留在 `model_visible_tool_selection_trace.full_callable_tool_names` 里供排障。
+- 对执行节点和检验节点，`callable_tool_names` / `candidate_tools` / `candidate_skills` 现在都不应再视为 bootstrap user JSON 的静态字段；它们属于每轮动态 `node_runtime_tool_contract`。
+- 对执行节点和检验节点，稳定 bootstrap user JSON 只保留稳定节点上下文；`execution_stage` 不再写进 bootstrap，而是只由当前轮尾部的 `node_runtime_tool_contract` 承载。
+- 对执行节点和检验节点，`node_runtime_tool_contract` 里的 `candidate_tools` 现在是 display-oriented 的结构化候选摘要；如需恢复 canonical candidate name 列表，优先读取 runtime frame 里的 `candidate_tool_names` / `candidate_tool_items`。
+- 对执行节点和检验节点，`node_runtime_tool_contract` 里的 `candidate_skills` 现在也是最小结构化摘要：`[{skill_id, description}]`。如需恢复 canonical skill state，优先读取 runtime frame 里的 `candidate_skill_ids` / `candidate_skill_items`。
+- 对执行节点和检验节点，还要再区分“当前轮对模型暴露的 callable 合同”和“内部可恢复的完整 callable pool”：前者在无有效阶段时会被收紧到 `submit_next_stage`，后者只保留在本地 `model_visible_tool_selection_trace.full_callable_tool_names` 里供排障。
 - 节点侧的 `runtime frame`、动态 `node_runtime_tool_contract` 与 `runtime-frame-messages:{node_id}` artifact 现在都必须写入同一份收紧后的 callable 列表；如果三者不一致，应按运行时合同分裂排查，而不是先怀疑 prompt 文本。
-- 同理，节点侧的 runtime frame 与重建后的 `node_runtime_tool_contract` 也必须对 skill 候选保持一致：`candidate_skill_ids` 与 `visible_skills` 若在 frame 中存在，就不应因为阶段压缩或 active window 裁剪而在下一轮 contract 中无故清空。
+- 同理，节点侧的 runtime frame 与重建后的 `node_runtime_tool_contract` 也必须对 skill 候选保持一致：`candidate_skill_ids` 与 `candidate_skill_items` 若在 frame 中存在，就不应因为阶段压缩或 active window 裁剪而在下一轮 contract 中无故清空。
 - 节点执行层的 `stage_gate_error_for_tool()` 仍然保留，它现在是 schema 收紧之外的兜底防线；如果模型通过恢复态或手工构造仍然尝试普通工具，执行层仍应返回 `no active stage` / `current stage budget is exhausted`。
 - 对 CEO/frontdoor，当前 turn 的 callable/candidate tool 合同现在应只存在于 dynamic appendix 和持久状态；不要再从稳定 prompt 前缀或旧 transcript 文本恢复“当前可调用工具”。
 - 对 CEO/frontdoor，当前轮 contract 的推荐排障顺序也变了：

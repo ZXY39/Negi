@@ -30,6 +30,7 @@ from g3ku.runtime.tool_watchdog import (
     actor_role_allows_watchdog,
     run_tool_with_watchdog,
 )
+from main.governance.exec_tool_policy import EXEC_TOOL_EXECUTOR_NAME, EXEC_TOOL_FAMILY_ID
 from main.errors import TaskPausedError, describe_exception
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_stable_prompt_cache_key
@@ -230,25 +231,28 @@ class ReActToolLoop:
             selected_skill_ids = self._normalized_name_list(
                 [
                     item.get('skill_id')
-                    for item in list(dynamic_contract_payload.get('visible_skills') or [])
+                    for item in list(dynamic_contract_payload.get('candidate_skills') or [])
                     if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
                 ]
             )
             candidate_skill_ids = self._normalized_name_list(
-                list(dynamic_contract_payload.get('candidate_skills') or [])
+                [
+                    item.get('skill_id') if isinstance(item, dict) else item
+                    for item in list(dynamic_contract_payload.get('candidate_skills') or [])
+                ]
             )
             model_messages = self._prepare_messages(message_history, runtime_context=runtime_context)
-            request_messages = inject_node_dynamic_contract_message(
-                model_messages,
-                dynamic_contract,
-            )
             overlay_parts = [
                 build_execution_stage_overlay(node_kind=node.node_kind, stage_gate=stage_gate),
                 repair_overlay_text,
             ]
             request_messages = self._apply_temporary_system_overlay(
-                request_messages,
+                model_messages,
                 overlay_text='\n\n'.join(str(part or '').strip() for part in overlay_parts if str(part or '').strip()),
+            )
+            request_messages = inject_node_dynamic_contract_message(
+                request_messages,
+                dynamic_contract,
             )
             repair_overlay_text = None
             allowed_content_refs = self._collect_content_refs(request_messages)
@@ -274,11 +278,20 @@ class ReActToolLoop:
                     'partial_child_results': [],
                     'tool_calls': [],
                     'child_pipelines': [],
-                    'visible_skills': [dict(item) for item in list(dynamic_contract_payload.get('visible_skills') or []) if isinstance(item, dict)],
                     'callable_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
                     'candidate_tool_names': list(tool_schema_selection.get('candidate_tool_names') or []),
+                    'candidate_tool_items': [
+                        dict(item)
+                        for item in list(dynamic_contract_payload.get('candidate_tools') or [])
+                        if isinstance(item, dict)
+                    ],
                     'selected_skill_ids': list(selected_skill_ids),
                     'candidate_skill_ids': list(candidate_skill_ids),
+                    'candidate_skill_items': [
+                        dict(item)
+                        for item in list(dynamic_contract_payload.get('candidate_skills') or [])
+                        if isinstance(item, dict)
+                    ],
                     'rbac_visible_tool_names': list(
                         (tool_schema_selection.get('trace') or {}).get('rbac_visible_tool_names') or []
                     ),
@@ -288,6 +301,11 @@ class ReActToolLoop:
                     'hydrated_executor_names': list(tool_schema_selection.get('hydrated_executor_names') or []),
                     'model_visible_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
                     'model_visible_tool_selection_trace': dict(tool_schema_selection.get('trace') or {}),
+                    'exec_runtime_policy': (
+                        dict(dynamic_contract_payload.get('exec_runtime_policy') or {})
+                        if isinstance(dynamic_contract_payload.get('exec_runtime_policy'), dict)
+                        else None
+                    ),
                     **self._execution_stage_frame_payload(node_kind=node.node_kind, stage_gate=stage_gate),
                     'last_error': '',
                 },
@@ -1713,41 +1731,61 @@ class ReActToolLoop:
         candidate_tool_names = self._normalized_name_list(
             [
                 item.get('tool_id') if isinstance(item, dict) else item
-                for item in list(tool_schema_selection.get('candidate_tool_names') or existing_payload.get('candidate_tools') or [])
+                for item in list(
+                    tool_schema_selection.get('candidate_tool_names')
+                    or existing_payload.get('candidate_tools')
+                    or current_frame.get('candidate_tool_items')
+                    or current_frame.get('candidate_tool_names')
+                    or []
+                )
             ]
         )
         candidate_tool_names = [name for name in candidate_tool_names if name not in set(callable_tool_names)]
-        visible_skills = [dict(item) for item in list(existing_payload.get('visible_skills') or []) if isinstance(item, dict)]
-        if not visible_skills:
-            visible_skills = [dict(item) for item in list(current_frame.get('visible_skills') or []) if isinstance(item, dict)]
-        if not visible_skills:
-            visible_skills = [
-                {
-                    'skill_id': skill_id,
-                    'display_name': skill_id,
-                    'description': '',
-                }
-                for skill_id in self._normalized_name_list(list(current_frame.get('selected_skill_ids') or []))
+        candidate_tool_items = [dict(item) for item in list(existing_payload.get('candidate_tools') or []) if isinstance(item, dict)]
+        if not candidate_tool_items:
+            candidate_tool_items = [dict(item) for item in list(current_frame.get('candidate_tool_items') or []) if isinstance(item, dict)]
+        if candidate_tool_items:
+            candidate_tool_items = [
+                dict(item)
+                for item in candidate_tool_items
+                if str(item.get('tool_id') or '').strip() and str(item.get('tool_id') or '').strip() not in set(callable_tool_names)
             ]
         candidate_skill_ids = self._normalized_name_list(
-            list(
-                existing_payload.get('candidate_skills')
-                or current_frame.get('candidate_skill_ids')
-                or current_frame.get('selected_skill_ids')
-                or []
-            )
+            [
+                item.get('skill_id') if isinstance(item, dict) else item
+                for item in list(
+                    existing_payload.get('candidate_skills')
+                    or current_frame.get('candidate_skill_items')
+                    or current_frame.get('candidate_skill_ids')
+                    or current_frame.get('selected_skill_ids')
+                    or []
+                )
+            ]
         )
+        candidate_skill_items = [dict(item) for item in list(existing_payload.get('candidate_skills') or []) if isinstance(item, dict)]
+        if not candidate_skill_items:
+            candidate_skill_items = [dict(item) for item in list(current_frame.get('candidate_skill_items') or []) if isinstance(item, dict)]
+        if not candidate_skill_items:
+            candidate_skill_items = [dict(item) for item in list(current_frame.get('visible_skills') or []) if isinstance(item, dict)]
+        exec_runtime_policy = None
+        if EXEC_TOOL_EXECUTOR_NAME in set(callable_tool_names + candidate_tool_names) or EXEC_TOOL_FAMILY_ID in set(callable_tool_names + candidate_tool_names):
+            raw_exec_runtime_policy = current_frame.get('exec_runtime_policy') or existing_payload.get('exec_runtime_policy')
+            if isinstance(raw_exec_runtime_policy, dict):
+                exec_runtime_policy = dict(raw_exec_runtime_policy)
         return NodeRuntimeToolContract(
             node_id=str(getattr(node, 'node_id', '') or '').strip(),
             node_kind=str(getattr(node, 'node_kind', '') or '').strip(),
             callable_tool_names=callable_tool_names,
             candidate_tool_names=candidate_tool_names,
-            visible_skills=visible_skills,
+            candidate_tool_items=candidate_tool_items,
+            visible_skills=[],
             candidate_skill_ids=candidate_skill_ids,
+            candidate_skill_items=candidate_skill_items,
             stage_payload=self._stage_prompt_payload_from_gate(stage_gate),
             hydrated_executor_names=self._normalized_name_list(list(tool_schema_selection.get('hydrated_executor_names') or [])),
             lightweight_tool_ids=self._normalized_name_list(list(tool_schema_selection.get('lightweight_tool_ids') or [])),
             selection_trace=dict(tool_schema_selection.get('trace') or {}),
+            exec_runtime_policy=exec_runtime_policy,
         )
 
     def _refresh_node_dynamic_contract_message(

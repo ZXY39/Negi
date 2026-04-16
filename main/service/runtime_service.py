@@ -6177,16 +6177,25 @@ class MainRuntimeService:
         callable_tool_names = self._normalized_tool_name_list(list(frame.get('callable_tool_names') or []))
         if not callable_tool_names:
             raise RuntimeError('运行时工具合同损坏/缺失：节点运行时 frame 的 callable_tool_names 为空')
-        visible_skills = [
+        candidate_skill_items = [
             dict(item)
-            for item in list(dynamic_contract_payload.get('visible_skills') or [])
+            for item in list(dynamic_contract_payload.get('candidate_skills') or [])
             if isinstance(item, dict)
         ]
-        if not visible_skills:
-            visible_skills = [
+        if not candidate_skill_items:
+            candidate_skill_items = [
                 dict(item)
-                for item in list(frame.get('visible_skills') or [])
+                for item in list(frame.get('candidate_skill_items') or [])
                 if isinstance(item, dict)
+            ]
+        if not candidate_skill_items:
+            candidate_skill_items = [
+                {
+                    'skill_id': str(self._skill_record_value(item, 'skill_id') or '').strip(),
+                    'description': str(self._skill_record_value(item, 'description') or '').strip(),
+                }
+                for item in list(frame.get('visible_skills') or [])
+                if str(self._skill_record_value(item, 'skill_id') or '').strip()
             ]
         raw_candidate_skill_ids = list(frame.get('candidate_skill_ids') or [])
         candidate_skill_ids = [
@@ -6195,6 +6204,17 @@ class MainRuntimeService:
             if str(item or '').strip()
         ]
         candidate_tool_names = self._normalized_tool_name_list(list(frame.get('candidate_tool_names') or []))
+        candidate_tool_items = [
+            dict(item)
+            for item in list(dynamic_contract_payload.get('candidate_tools') or [])
+            if isinstance(item, dict)
+        ]
+        if not candidate_tool_items:
+            candidate_tool_items = [
+                dict(item)
+                for item in list(frame.get('candidate_tool_items') or [])
+                if isinstance(item, dict)
+            ]
         visible_tool_names = list(
             self.list_effective_tool_names(
                 actor_role=self._actor_role_for_node(node),
@@ -6207,11 +6227,10 @@ class MainRuntimeService:
             for item in raw_selected_skill_ids
             if str(item or '').strip()
         ]
-        if not visible_skills:
-            visible_skills = [
+        if not candidate_skill_items:
+            candidate_skill_items = [
                 {
                     'skill_id': skill_id,
-                    'display_name': skill_id,
                     'description': '',
                 }
                 for skill_id in selected_skill_ids
@@ -6230,7 +6249,9 @@ class MainRuntimeService:
         return {
             'session_key': str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared',
             'actor_role': self._actor_role_for_node(node),
-            'visible_skills': visible_skills,
+            'visible_skills': [],
+            'candidate_tool_items': candidate_tool_items,
+            'candidate_skill_items': candidate_skill_items,
             'visible_tool_families': [],
             'visible_tool_names': visible_tool_names,
             'prompt': str(payload.get('prompt') or getattr(node, 'prompt', '') or '').strip(),
@@ -6381,6 +6402,7 @@ class MainRuntimeService:
         *,
         candidate_tool_names: list[str],
         visible_tool_families: list[Any],
+        preferred_items: list[Any] | None = None,
     ) -> list[dict[str, str]]:
         family_by_executor: dict[str, Any] = {}
         for family in list(visible_tool_families or []):
@@ -6396,6 +6418,18 @@ class MainRuntimeService:
             for executor_name in executor_names:
                 family_by_executor.setdefault(executor_name, family)
 
+        preferred_by_tool_id: dict[str, dict[str, str]] = {}
+        for item in list(preferred_items or []):
+            if not isinstance(item, dict):
+                continue
+            tool_id = str(item.get('tool_id') or '').strip()
+            if not tool_id or tool_id in preferred_by_tool_id:
+                continue
+            preferred_by_tool_id[tool_id] = {
+                'tool_id': tool_id,
+                'description': str(item.get('description') or '').strip(),
+            }
+
         items: list[dict[str, str]] = []
         seen: set[str] = set()
         for raw_name in list(candidate_tool_names or []):
@@ -6403,12 +6437,13 @@ class MainRuntimeService:
             if not tool_id or tool_id in seen:
                 continue
             seen.add(tool_id)
-            description = ''
-            try:
-                toolskill_payload = dict(self.get_tool_toolskill(tool_id) or {})
-            except Exception:
-                toolskill_payload = {}
-            description = str(toolskill_payload.get('description') or toolskill_payload.get('l0') or '').strip()
+            description = str((preferred_by_tool_id.get(tool_id) or {}).get('description') or '').strip()
+            if not description:
+                try:
+                    toolskill_payload = dict(self.get_tool_toolskill(tool_id) or {})
+                except Exception:
+                    toolskill_payload = {}
+                description = str(toolskill_payload.get('description') or toolskill_payload.get('l0') or '').strip()
             if not description:
                 family = family_by_executor.get(tool_id)
                 if family is None:
@@ -6429,28 +6464,76 @@ class MainRuntimeService:
             )
         return items
 
+    def _candidate_skill_prompt_items(
+        self,
+        *,
+        candidate_skill_ids: list[str],
+        visible_skills: list[Any],
+        preferred_items: list[Any] | None = None,
+    ) -> list[dict[str, str]]:
+        preferred_by_skill_id: dict[str, dict[str, str]] = {}
+        for item in list(preferred_items or []):
+            if not isinstance(item, dict):
+                continue
+            skill_id = str(item.get('skill_id') or '').strip()
+            if not skill_id or skill_id in preferred_by_skill_id:
+                continue
+            preferred_by_skill_id[skill_id] = {
+                'skill_id': skill_id,
+                'description': str(item.get('description') or '').strip(),
+            }
+
+        visible_by_skill_id: dict[str, dict[str, str]] = {}
+        for item in self._visible_skill_prompt_items(visible_skills):
+            skill_id = str(item.get('skill_id') or '').strip()
+            if not skill_id or skill_id in visible_by_skill_id:
+                continue
+            visible_by_skill_id[skill_id] = {
+                'skill_id': skill_id,
+                'description': str(item.get('description') or '').strip(),
+            }
+
+        items: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for raw_skill_id in list(candidate_skill_ids or []):
+            skill_id = str(raw_skill_id or '').strip()
+            if not skill_id or skill_id in seen:
+                continue
+            seen.add(skill_id)
+            preferred_item = preferred_by_skill_id.get(skill_id) or {}
+            visible_item = visible_by_skill_id.get(skill_id) or {}
+            items.append(
+                {
+                    'skill_id': skill_id,
+                    'description': (
+                        str(preferred_item.get('description') or '').strip()
+                        or str(visible_item.get('description') or '').strip()
+                    ),
+                }
+            )
+        return items
+
+    def _node_exec_runtime_policy_payload(
+        self,
+        *,
+        callable_tool_names: list[str],
+        candidate_tool_names: list[str],
+    ) -> dict[str, Any] | None:
+        exposed_tool_names = {
+            str(item or '').strip()
+            for item in [*list(callable_tool_names or []), *list(candidate_tool_names or [])]
+            if str(item or '').strip()
+        }
+        if EXEC_TOOL_EXECUTOR_NAME not in exposed_tool_names and EXEC_TOOL_FAMILY_ID not in exposed_tool_names:
+            return None
+        return self._current_exec_runtime_policy_payload()
+
     async def _enrich_node_messages(self, *, task, node: NodeRecord, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         selection = await self._prepare_node_context_selection(task=task, node=node)
         cached = self._cached_node_context_selection_entry(task=task, node=node)
         inputs = cached or self._node_context_selection_inputs(task=task, node=node)
         session_key = str(inputs.get('session_key') or getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         visible_skills = list(inputs.get('visible_skills') or [])
-        visible_skill_by_id: dict[str, Any] = {}
-        for record in visible_skills:
-            skill_id = str(self._skill_record_value(record, 'skill_id') or '').strip()
-            if skill_id and skill_id not in visible_skill_by_id:
-                visible_skill_by_id[skill_id] = record
-        selected_visible_skills: list[Any] = []
-        seen_selected_skill_ids: set[str] = set()
-        for skill_id in list(getattr(selection, 'selected_skill_ids', []) or []):
-            normalized_skill_id = str(skill_id or '').strip()
-            if not normalized_skill_id or normalized_skill_id in seen_selected_skill_ids:
-                continue
-            record = visible_skill_by_id.get(normalized_skill_id)
-            if record is None:
-                continue
-            seen_selected_skill_ids.add(normalized_skill_id)
-            selected_visible_skills.append(record)
         full_callable_tool_names = self._callable_tool_names_for_node(
             task=task,
             node=node,
@@ -6485,6 +6568,15 @@ class MainRuntimeService:
         candidate_tool_items = self._candidate_tool_prompt_items(
             candidate_tool_names=list(candidate_tool_names),
             visible_tool_families=list(inputs.get('visible_tool_families') or []),
+            preferred_items=list(inputs.get('candidate_tool_items') or []),
+        )
+        candidate_skill_ids = list(
+            getattr(selection, 'candidate_skill_ids', []) or getattr(selection, 'selected_skill_ids', []) or []
+        )
+        candidate_skill_items = self._candidate_skill_prompt_items(
+            candidate_skill_ids=candidate_skill_ids,
+            visible_skills=visible_skills,
+            preferred_items=list(inputs.get('candidate_skill_items') or []),
         )
         enriched = inject_node_dynamic_contract_message(
             list(messages or []),
@@ -6494,8 +6586,9 @@ class MainRuntimeService:
                 callable_tool_names=callable_tool_names,
                 candidate_tool_names=candidate_tool_names,
                 candidate_tool_items=candidate_tool_items,
-                visible_skills=self._visible_skill_prompt_items(selected_visible_skills),
-                candidate_skill_ids=list(getattr(selection, 'candidate_skill_ids', []) or []),
+                visible_skills=[],
+                candidate_skill_ids=candidate_skill_ids,
+                candidate_skill_items=candidate_skill_items,
                 stage_payload=stage_payload,
                 hydrated_executor_names=self._node_hydrated_executor_names(
                     task_id=str(getattr(task, 'task_id', '') or '').strip(),
@@ -6512,7 +6605,10 @@ class MainRuntimeService:
                         and list(full_callable_tool_names) != [STAGE_TOOL_NAME]
                     ),
                 },
-                exec_runtime_policy=self._current_exec_runtime_policy_payload(),
+                exec_runtime_policy=self._node_exec_runtime_policy_payload(
+                    callable_tool_names=callable_tool_names,
+                    candidate_tool_names=candidate_tool_names,
+                ),
             ),
         )
         manager = getattr(self, 'memory_manager', None)

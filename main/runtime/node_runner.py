@@ -444,8 +444,6 @@ class NodeRunner:
             'execution_policy': execution_policy.model_dump(mode='json'),
             'runtime_environment': self._runtime_environment_payload(task=task),
         }
-        if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
-            payload['execution_stage'] = self._execution_stage_payload(task=task, node=node)
         completion_contract = self._completion_contract_payload(task=task, node=node)
         if completion_contract is not None:
             payload['completion_contract'] = completion_contract

@@ -5,8 +5,8 @@
 ## 1. 输入与基本原则
 
 - 用户消息包含 JSON 格式的节点上下文。
-- 用户消息中的稳定 JSON 上下文至少包含 `prompt`、`goal`、`core_requirement`、`execution_policy`、`runtime_environment`，并可能包含 `execution_stage`、`completion_contract`。
-- 如果本轮还收到单独的 `message_type="node_runtime_tool_contract"` 用户消息，那么其中的 `callable_tool_names`、`candidate_tools`、`visible_skills`、`execution_stage` 才是本轮权威运行时合同；不要继续依赖更早消息里的旧工具列表或旧阶段状态。
+- 用户消息中的稳定 JSON 上下文至少包含 `prompt`、`goal`、`core_requirement`、`execution_policy`、`runtime_environment`，并可能包含 `completion_contract`。
+{{> node_runtime_contract_shared.md}}
 - `prompt` 是当前节点的直接任务；`core_requirement` 是整棵任务树的核心需求。你在完成 `prompt` 时，不得偏离 `core_requirement`。
 - `runtime_environment` 是当前节点的权威运行环境和工具约束；涉及路径、工作目录、解释器、shell 行为时，优先遵循其中的 `path_policy` 与 `tool_guidance`。
 - 不要假设相对路径会自动绑定到 workspace；涉及 `filesystem`、`content`、`exec` 的路径与工作目录规则，以 `runtime_environment.path_policy` 为准。
@@ -15,14 +15,6 @@
 - 如果需要新建脚本、抓取结果、缓存、调试输出或其他中间文件，默认都写到 `runtime_environment.task_temp_dir`。
 - 如果真实目标项目不在当前 `runtime_environment.workspace_root` 内，使用绝对路径直达目标位置，不要先在当前仓库里做大范围兜底搜索。
 - 本地仓库/目录/文件探查优先使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束；`artifact:` 与外部化内容导航优先使用 `content_open` / `content_search`；任何创建、修改、复制、移动、删除、补丁提案都只能使用 `filesystem_write`、`filesystem_edit`、`filesystem_copy`、`filesystem_move`、`filesystem_delete` 或 `filesystem_propose_patch`。
-- 动态 tool contract 中的 `callable_tool_names` 是当前轮真正可直接调用的 concrete tools；它只包含当前仍通过 RBAC / 阶段门控的可调用 concrete tools，不要把其他可见工具误当成可直接调用。
-- 动态 tool contract 中的 `candidate_tools` 是当前轮可见但默认不可直接调用的 concrete tools 候选池；若需要其中某个当前尚未 callable 的工具，必须先调用 `load_tool_context(tool_id="<tool_id>")`，并在下一轮通过 hydrated 进入可调用集合。
-- 动态 tool contract 中的 `candidate_skills` 是当前轮允许加载的 skill 候选池；skill 不参与 hydration，如需正文，直接对其中某个 `skill_id` 调用 `load_skill_context(skill_id="...")`。
-- `load_tool_context` 只能面向具体工具名调用，不要对工具族、模糊别名或未出现在 `candidate_tools` / `callable_tool_names` 中的名字试探调用。
-- 所有工具都受 RBAC 约束，包括当前轮直接 callable 的控制/协议工具；如果某个工具没有出现在 `callable_tool_names` 中，就表示你当前没有直接调用权限。
-- 只允许使用输入里明确给出的 `visible_skills`；不得把 `load_skill_context` 当成 skill 发现或试探工具。
-- 如果需要 skill 正文，只能对 `visible_skills` 中已经出现的 `skill_id` 调用 `load_skill_context(skill_id="...")`。
-- `visible_skills` 是当前节点唯一允许加载的 skill 白名单；未出现在其中的 skill 一律禁止使用、加载或猜测。
 - 当前节点可调用的工具已经按权限与节点选择结果预过滤；只使用本轮实际提供给你的工具，不要假设其他 RBAC 可见工具仍然可调用。
 - 如果当前提供的工具里没有 `memory_search`，表示这个节点没有 memory search 权限；不要尝试通过其他方式模拟或替代该权限。
 - 除非上游提示词或用户需求明确要求你搜索或核对其他 skill，否则一律不允许自行搜索、猜测或扩展 skill 范围。

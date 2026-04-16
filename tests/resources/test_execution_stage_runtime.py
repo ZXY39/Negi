@@ -430,10 +430,9 @@ async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrich
     contract_payload = extract_node_dynamic_contract_payload(enriched)
     assert contract_payload is not None
     assert contract_payload["callable_tool_names"] == ["content"]
-    assert contract_payload["visible_skills"] == [
+    assert contract_payload["candidate_skills"] == [
         {
             "skill_id": "tmux",
-            "display_name": "tmux",
             "description": "terminal workflow",
         }
     ]
@@ -1361,6 +1360,14 @@ async def test_react_loop_uses_stable_prompt_cache_key_despite_dynamic_stage_ove
     try:
         record = await service.create_task('react loop cache key task', session_id='web:shared')
         await service.wait_for_task(record.task_id)
+
+        def _overlay_message_content(messages: list[dict[str, object]]) -> str:
+            for message in reversed(list(messages or [])):
+                content = str((message or {}).get('content') or '')
+                if 'System note for this turn only:' in content:
+                    return content
+            return ''
+
         assert len(calls) == 3
         assert str(calls[0]['prompt_cache_key'] or '').strip()
         assert calls[1]['prompt_cache_key'] == calls[2]['prompt_cache_key']
@@ -1368,9 +1375,9 @@ async def test_react_loop_uses_stable_prompt_cache_key_despite_dynamic_stage_ove
         second_prefix = str((calls[1]['messages'][0] or {}).get('content') or '')
         third_prefix = str((calls[2]['messages'][0] or {}).get('content') or '')
         assert first_prefix == second_prefix == third_prefix
-        overlay_1 = str((calls[0]['messages'][-1] or {}).get('content') or '')
-        overlay_2 = str((calls[1]['messages'][-1] or {}).get('content') or '')
-        overlay_3 = str((calls[2]['messages'][-1] or {}).get('content') or '')
+        overlay_1 = _overlay_message_content(calls[0]['messages'])
+        overlay_2 = _overlay_message_content(calls[1]['messages'])
+        overlay_3 = _overlay_message_content(calls[2]['messages'])
         assert overlay_1 != overlay_2
         assert overlay_2 != overlay_3
     finally:

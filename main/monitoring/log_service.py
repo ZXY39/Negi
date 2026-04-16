@@ -3076,6 +3076,14 @@ class TaskLogService:
                     for item in list(next_frame.get('candidate_tool_names') or [])
                     if str(item or '').strip()
                 ],
+                'candidate_tool_items': [
+                    {
+                        'tool_id': str(item.get('tool_id') or '').strip(),
+                        'description': str(item.get('description') or '').strip(),
+                    }
+                    for item in list(next_frame.get('candidate_tool_items') or [])
+                    if isinstance(item, dict) and str(item.get('tool_id') or '').strip()
+                ],
                 'selected_skill_ids': [
                     str(item or '').strip()
                     for item in list(next_frame.get('selected_skill_ids') or [])
@@ -3085,6 +3093,14 @@ class TaskLogService:
                     str(item or '').strip()
                     for item in list(next_frame.get('candidate_skill_ids') or [])
                     if str(item or '').strip()
+                ],
+                'candidate_skill_items': [
+                    {
+                        'skill_id': str(item.get('skill_id') or '').strip(),
+                        'description': str(item.get('description') or '').strip(),
+                    }
+                    for item in list(next_frame.get('candidate_skill_items') or [])
+                    if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
                 ],
                 'rbac_visible_tool_names': [
                     str(item or '').strip()
@@ -3117,6 +3133,11 @@ class TaskLogService:
                     if str(item or '').strip()
                 ],
                 'model_visible_tool_selection_trace': dict(next_frame.get('model_visible_tool_selection_trace') or {}),
+                'exec_runtime_policy': (
+                    dict(next_frame.get('exec_runtime_policy') or {})
+                    if isinstance(next_frame.get('exec_runtime_policy'), dict)
+                    else {}
+                ),
                 'last_error': str(next_frame.get('last_error') or ''),
                 'messages_ref': str(next_frame.get('messages_ref') or ''),
                 'messages_count': int(next_frame.get('messages_count') or 0),
@@ -3202,6 +3223,14 @@ class TaskLogService:
                 for item in list(payload.get('candidate_tool_names') or [])
                 if str(item or '').strip()
             ],
+            'candidate_tool_items': [
+                {
+                    'tool_id': str(item.get('tool_id') or '').strip(),
+                    'description': str(item.get('description') or '').strip(),
+                }
+                for item in list(payload.get('candidate_tool_items') or [])
+                if isinstance(item, dict) and str(item.get('tool_id') or '').strip()
+            ],
             'selected_skill_ids': [
                 str(item or '').strip()
                 for item in list(payload.get('selected_skill_ids') or [])
@@ -3211,6 +3240,14 @@ class TaskLogService:
                 str(item or '').strip()
                 for item in list(payload.get('candidate_skill_ids') or [])
                 if str(item or '').strip()
+            ],
+            'candidate_skill_items': [
+                {
+                    'skill_id': str(item.get('skill_id') or '').strip(),
+                    'description': str(item.get('description') or '').strip(),
+                }
+                for item in list(payload.get('candidate_skill_items') or [])
+                if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
             ],
             'rbac_visible_tool_names': [
                 str(item or '').strip()
@@ -3243,6 +3280,11 @@ class TaskLogService:
                 if str(item or '').strip()
             ],
             'model_visible_tool_selection_trace': dict(payload.get('model_visible_tool_selection_trace') or {}),
+            'exec_runtime_policy': (
+                dict(payload.get('exec_runtime_policy') or {})
+                if isinstance(payload.get('exec_runtime_policy'), dict)
+                else {}
+            ),
             'last_error': str(payload.get('last_error') or ''),
         }
 

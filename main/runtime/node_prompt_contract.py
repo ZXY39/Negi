@@ -43,6 +43,30 @@ def _normalized_candidate_tool_items(
     return ordered
 
 
+def _normalized_candidate_skill_items(
+    items: list[Any] | None,
+    *,
+    fallback_ids: list[str] | None = None,
+) -> list[dict[str, str]]:
+    ordered: list[dict[str, str]] = []
+    seen: set[str] = set()
+    raw_items = list(items or [])
+    if not raw_items and fallback_ids:
+        raw_items = list(fallback_ids)
+    for item in raw_items:
+        if isinstance(item, dict):
+            skill_id = str(item.get('skill_id') or '').strip()
+            description = str(item.get('description') or '').strip()
+        else:
+            skill_id = str(item or '').strip()
+            description = ''
+        if not skill_id or skill_id in seen:
+            continue
+        seen.add(skill_id)
+        ordered.append({'skill_id': skill_id, 'description': description})
+    return ordered
+
+
 def _active_stage_prompt_view(active_stage: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(active_stage, dict):
         return None
@@ -91,42 +115,26 @@ class NodeRuntimeToolContract:
     lightweight_tool_ids: list[str]
     selection_trace: dict[str, Any]
     candidate_tool_items: list[dict[str, str]] | None = None
+    candidate_skill_items: list[dict[str, str]] | None = None
     exec_runtime_policy: dict[str, Any] | None = None
 
     def to_message_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             'message_type': NODE_DYNAMIC_CONTRACT_KIND,
-            'node_id': str(self.node_id or '').strip(),
-            'node_kind': str(self.node_kind or '').strip(),
             'callable_tool_names': list(self.callable_tool_names or []),
             'candidate_tools': _normalized_candidate_tool_items(
                 list(self.candidate_tool_items or []),
                 fallback_names=list(self.candidate_tool_names or []),
             ),
-            'visible_skills': [dict(item) for item in list(self.visible_skills or []) if isinstance(item, dict)],
-            'candidate_skills': [
-                str(item or '').strip()
-                for item in list(self.candidate_skill_ids or [])
-                if str(item or '').strip()
-            ],
-            'execution_stage': _stable_stage_payload(self.stage_payload),
-            'hydrated_executor_names': [
-                str(item or '').strip()
-                for item in list(self.hydrated_executor_names or [])
-                if str(item or '').strip()
-            ],
-            'lightweight_tool_ids': [
-                str(item or '').strip()
-                for item in list(self.lightweight_tool_ids or [])
-                if str(item or '').strip()
-            ],
-            'model_visible_tool_selection_trace': _stable_selection_trace(self.selection_trace),
-            'exec_runtime_policy': (
-                dict(self.exec_runtime_policy)
-                if isinstance(self.exec_runtime_policy, dict)
-                else None
+            'candidate_skills': _normalized_candidate_skill_items(
+                list(self.candidate_skill_items or []),
+                fallback_ids=list(self.candidate_skill_ids or []),
             ),
+            'execution_stage': _stable_stage_payload(self.stage_payload),
         }
+        if isinstance(self.exec_runtime_policy, dict):
+            payload['exec_runtime_policy'] = dict(self.exec_runtime_policy)
+        return payload
 
     def to_message(self) -> dict[str, str]:
         return {
@@ -153,17 +161,8 @@ def upsert_node_dynamic_contract_message(
     contract: NodeRuntimeToolContract,
 ) -> list[dict[str, Any]]:
     contract_message = contract.to_message()
-    updated: list[dict[str, Any]] = []
-    replaced = False
-    for message in list(messages or []):
-        if is_node_dynamic_contract_message(message):
-            if not replaced:
-                updated.append(contract_message)
-                replaced = True
-            continue
-        updated.append(dict(message))
-    if not replaced:
-        updated.append(contract_message)
+    updated = strip_node_dynamic_contract_messages(messages)
+    updated.append(contract_message)
     return updated
 
 
@@ -179,24 +178,10 @@ def inject_node_dynamic_contract_message(
     messages: list[dict[str, Any]] | None,
     contract: NodeRuntimeToolContract,
 ) -> list[dict[str, Any]]:
-    normalized_messages = strip_node_dynamic_contract_messages(messages)
-    insert_at = 0
-    if (
-        normalized_messages
-        and str(normalized_messages[0].get('role') or '').strip().lower() == 'system'
-    ):
-        insert_at = 1
-    if (
-        insert_at < len(normalized_messages)
-        and str(normalized_messages[insert_at].get('role') or '').strip().lower() == 'user'
-    ):
-        insert_at += 1
-    contract_message = contract.to_message()
-    return [
-        *normalized_messages[:insert_at],
-        contract_message,
-        *normalized_messages[insert_at:],
-    ]
+    return upsert_node_dynamic_contract_message(
+        strip_node_dynamic_contract_messages(messages),
+        contract,
+    )
 
 
 def extract_node_dynamic_contract_payload(messages: list[dict[str, Any]]) -> dict[str, Any] | None:

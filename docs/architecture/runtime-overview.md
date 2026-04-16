@@ -213,14 +213,14 @@ Additional maintenance note for fixed-builtin resource executors:
 - 节点与 CEO/frontdoor 的 `candidate_tool_names` / `candidate_skill_ids` 现在都表示“`RBAC 可见 ∩ 语义召回命中` 的当前候选集合”；语义召回不可用时，候选集合退化为 `RBAC 可见集合`，而不是报错中断。
 - `load_tool_context` / `load_skill_context` 的准入只认当前 canonical candidate 集合；不再允许“RBAC 可见但不在 candidate 中”的旁路加载。
 - 节点的 hydration canonical state 继续落在 runtime frame：`hydrated_executor_state` / `hydrated_executor_names`。这是节点生命周期级 LRU，跨多轮、阶段切换、pause/resume、restore 保留。
-- 节点的 skill candidate canonical state 也继续落在 runtime frame：至少包括 `candidate_skill_ids`，以及供 dynamic contract 重建使用的 `visible_skills` 摘要。阶段切换后的 prompt compaction 可以裁掉旧的 `node_runtime_tool_contract` user 消息，但下一轮 contract 刷新仍应从 frame 恢复这两份 skill 状态，而不是把 skill 候选清空。
+- 节点的 skill candidate canonical state 也继续落在 runtime frame：至少包括 `candidate_skill_ids`，以及供 dynamic contract 重建使用的 `candidate_skill_items` 显示缓存。阶段切换后的 prompt compaction 可以裁掉旧的 `node_runtime_tool_contract` user 消息，但下一轮 contract 刷新仍应从 frame 恢复这两份 skill 状态，而不是把 skill 候选清空。
 - CEO/frontdoor 的 hydration canonical state 继续落在 session/frontdoor state：`RuntimeAgentSession._frontdoor_hydrated_tool_names` 加上前门 persistent state 中的 `hydrated_tool_names`。这是 session 生命周期级 LRU，跨 turn 保留，但每轮都会按当前 RBAC 可见集合过滤。
 - 节点与 CEO/frontdoor 都只允许 concrete tool names 进入 hydration LRU；family id 不能进入 promoted callable 集合。
 - execution / acceptance 节点现在也采用与 CEO/frontdoor 对齐的“有效阶段”合同：只要 `has_active_stage=false`，或当前阶段已经 `transition_required=true`，当前轮真正暴露给模型的 callable tool schemas 就只剩 `submit_next_stage`。
 - 这条节点规则只收紧当前轮 callable，不收紧 candidate。`candidate_tool_names` / `candidate_skill_ids` 继续表达候选集合；维护时如果看到节点动态合同里 callable 只剩 `submit_next_stage`，不要据此误判 selector、hydration 或语义召回已经丢失。
-- 节点侧的完整 callable pool 现在通过 `model_visible_tool_selection_trace.full_callable_tool_names` 保留下来，并随 runtime frame、`node_runtime_tool_contract` 与 `runtime-frame-messages:{node_id}` artifact 一起落盘。排障时应先看这份 trace，再决定是阶段锁定还是工具选择真的出错。
+- 节点侧的完整 callable pool 现在只通过本地 `model_visible_tool_selection_trace.full_callable_tool_names` 保留下来，并随 runtime frame 与 `runtime-frame-messages:{node_id}` artifact 一起落盘；它不再属于 agent-facing `node_runtime_tool_contract`。排障时应先看这份 trace，再决定是阶段锁定还是工具选择真的出错。
 - restore / recovery 只认 canonical frame / session state 中的 callable/candidate/hydrated/skill 字段；缺失时直接报“运行时工具合同损坏/缺失”，不再回退 bootstrap 文本、旧 transcript 或旧动态消息。
-- 排查“首轮明明选中了某个 skill，`submit_next_stage` 之后再 `load_skill_context` 却报 not candidate”时，先看节点 runtime frame 是否仍保留该 skill 的 `candidate_skill_ids` / `visible_skills`。如果 frame 还在而当轮 dynamic contract 已空，优先判断为 contract 重建链路或阶段压缩边界问题，而不是 selector 没命中。
+- 排查“首轮明明选中了某个 skill，`submit_next_stage` 之后再 `load_skill_context` 却报 not candidate”时，先看节点 runtime frame 是否仍保留该 skill 的 `candidate_skill_ids` / `candidate_skill_items`。如果 frame 还在而当轮 dynamic contract 已空，优先判断为 contract 重建链路或阶段压缩边界问题，而不是 selector 没命中。
 - 对 CEO/frontdoor，`frontdoor_stage_state`、`compression_state`、`semantic_context_state` 属于受保护运行时状态。工具合同刷新不能覆盖、清空或重置这三份状态。
 - `exec` 的执行模式现在也是受保护的 runtime-owned state：`ExecTool` 会在每次调用时重新读取当前 `exec_runtime` family metadata，而不是只在工具实例初始化时拍死一份本地配置。因此 Tool Admin 修改 mode 后，后续新的 `exec` 调用会立即生效，不需要项目重启，也不依赖重建现有 tool 实例。
 
@@ -350,12 +350,12 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 关于节点运行帧还要额外记住一个新的维护语义：
 
 - `task_runtime_messages` / `runtime-frame-messages:{node_id}` artifact 不再只是当前 messages 列表；它现在还会在同一个 artifact 里累计 `callable_tool_snapshots`。
-- 每条快照代表一次 `before_model` 轮次下，模型真正看到的 callable/candidate/visible tool 截面，包括 `callable_tool_names`、`candidate_tool_names`、`model_visible_tool_names`、`hydrated_executor_names` 和选择 trace。
+- 每条快照代表一次 `before_model` 轮次下，本地运行时真正记录的 callable/candidate 截面，包括 `callable_tool_names`、`candidate_tool_names`、`candidate_tool_items`、`candidate_skill_ids`、`candidate_skill_items`、`model_visible_tool_names`、`hydrated_executor_names` 和选择 trace。
 - 对 execution / acceptance 节点，如果当轮没有有效阶段，那么这些快照里的 `callable_tool_names` 与 `model_visible_tool_names` 都应只剩 `submit_next_stage`；候选集合仍保留在 `candidate_tool_names`，完整 callable pool 则留在选择 trace 里。
 - 因此当维护者排查“为什么这一轮模型明明 load 过工具却没法调用”时，先看这个 artifact 里的最近一条快照，再去看 transcript 或 stage trace；它比只看最终 messages 更能说明当轮可调用集到底是什么。
-- 执行节点与检验节点现在都应理解为“两层消息结构”：稳定 bootstrap user JSON 负责任务定义，单独的动态 `node_runtime_tool_contract` user 消息负责当前轮的 callable/candidate tool 合同。
+- 执行节点与检验节点现在都应理解为“两层消息结构”：稳定 bootstrap user JSON 负责任务定义，只保留稳定节点上下文；`execution_stage` 不再写在 bootstrap 里。单独的动态 `node_runtime_tool_contract` user 消息负责当前轮的 callable/candidate tool/skill 合同，并且固定追加在当前 request 尾部。
 - 对节点运行时来说，`before_model` 当轮真正下发给模型的 schema 选择结果才是权威工具来源；runtime frame、restore/recovery 和 runtime messages artifact 都应从这份结果派生，而不是再从旧 bootstrap 文本反推。
-- 对节点运行时来说，skill 可见性也不能只绑定到“当前 prompt 里是否还保留着那条 dynamic contract user 消息”。`node_runtime_tool_contract` 仍是模型可见合同，但 runtime frame 才是 skill candidate/visible skill 的 canonical 恢复来源。
+- 对节点运行时来说，skill 可见性也不能只绑定到“当前 prompt 里是否还保留着那条 dynamic contract user 消息”。`node_runtime_tool_contract` 仍是模型可见合同，但 runtime frame 才是 `candidate_skill_ids` / `candidate_skill_items` 的 canonical 恢复来源。
 - CEO/frontdoor 也采用同样的分层思想：稳定会话前缀不再承担当前轮 callable/candidate tool 状态，当前轮工具合同放在 dynamic appendix，并随 turn state 刷新。
 - 对维护者来说，这还意味着前门里的 `extension_tool_top_k` 只约束“最终候选工具数”，不是 dense 检索宽度；排查某个工具为何没进 candidate 时，要把 dense/rerank 命中和最终 top-k 截断分开看。
 

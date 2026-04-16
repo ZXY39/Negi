@@ -3073,12 +3073,15 @@ async def test_execution_node_messages_include_visible_skill_inventory(tmp_path:
         assert node is not None
 
         messages = await service.node_runner._build_messages(task=task, node=node)
-        payload = json.loads(messages[1]['content'])
+        bootstrap_payload = json.loads(messages[1]['content'])
+        contract_payload = json.loads(messages[-1]['content'])
 
-        assert payload['visible_skills'] == [
+        assert 'visible_skills' not in bootstrap_payload
+        assert 'execution_stage' not in bootstrap_payload
+        assert contract_payload['message_type'] == 'node_runtime_tool_contract'
+        assert contract_payload['candidate_skills'] == [
             {
                 'skill_id': 'demo_visible_skill',
-                'display_name': 'demo_visible_skill',
                 'description': 'Demo skill for resource smoke tests.',
             }
         ]

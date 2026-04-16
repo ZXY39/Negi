@@ -3298,7 +3298,7 @@ async def test_execution_node_build_messages_locks_callable_tools_to_submit_next
         payload = json.loads(messages[-1]["content"])
         assert payload["message_type"] == "node_runtime_tool_contract"
         assert payload["callable_tool_names"] == ["submit_next_stage"]
-        assert payload["model_visible_tool_selection_trace"]["stage_locked_to_submit_next_stage"] is True
+        assert "model_visible_tool_selection_trace" not in payload
     finally:
         await service.close()
 
