@@ -7,6 +7,7 @@ from g3ku.runtime.tool_history import extract_call_id
 
 STAGE_COMPACT_PREFIX = "[G3KU_STAGE_COMPACT_V1]"
 STAGE_EXTERNALIZED_PREFIX = "[G3KU_STAGE_EXTERNALIZED_V1]"
+STAGE_RAW_PREFIX = "[G3KU_STAGE_RAW_V1]"
 
 
 def _stage_get(stage: Any, key: str, default: Any = None) -> Any:
@@ -37,7 +38,11 @@ def is_stage_context_message(message: dict[str, Any]) -> bool:
     if _message_role(message) != "assistant":
         return False
     content = str((message or {}).get("content") or "")
-    return content.startswith(STAGE_COMPACT_PREFIX) or content.startswith(STAGE_EXTERNALIZED_PREFIX)
+    return (
+        content.startswith(STAGE_COMPACT_PREFIX)
+        or content.startswith(STAGE_EXTERNALIZED_PREFIX)
+        or content.startswith(STAGE_RAW_PREFIX)
+    )
 
 
 def stage_prompt_prefix(
@@ -298,6 +303,7 @@ def decompose_stage_prompt_messages(
 __all__ = [
     "STAGE_COMPACT_PREFIX",
     "STAGE_EXTERNALIZED_PREFIX",
+    "STAGE_RAW_PREFIX",
     "completed_stage_blocks",
     "current_stage_active_window",
     "decompose_stage_prompt_messages",

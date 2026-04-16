@@ -2035,6 +2035,30 @@ async def test_message_builder_applies_frontdoor_stage_workset_compaction_to_his
         {"role": "assistant", "content": "active stage raw detail"},
     ]
 
+    def _tool_entry(
+        stage_index: int,
+        *,
+        tool_name: str,
+        arguments: dict[str, object],
+        output_text: str,
+    ) -> dict[str, object]:
+        return {
+            "tool_call_id": f"call-stage-{stage_index}-{tool_name}",
+            "tool_name": tool_name,
+            "arguments": dict(arguments),
+            "arguments_text": f"{tool_name} ({json.dumps(arguments, ensure_ascii=False, sort_keys=True)})",
+            "output_text": output_text,
+            "output_preview_text": "",
+            "output_ref": "",
+            "status": "success",
+            "started_at": f"2026-04-16T09:0{stage_index}:00+08:00",
+            "finished_at": f"2026-04-16T09:0{stage_index}:01+08:00",
+            "timestamp": f"2026-04-16T09:0{stage_index}:01+08:00",
+            "elapsed_seconds": 1.0,
+            "kind": "tool_result",
+            "source": "user",
+        }
+
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="continue",
@@ -2071,6 +2095,23 @@ async def test_message_builder_applies_frontdoor_stage_workset_compaction_to_his
                     "key_refs": [],
                     "tool_round_budget": 2,
                     "tool_rounds_used": 1,
+                    "rounds": [
+                        {
+                            "round_id": "frontdoor-stage-2:round-1",
+                            "round_index": 1,
+                            "tool_names": ["filesystem_write"],
+                            "tool_call_ids": ["call-stage-2-filesystem_write"],
+                            "budget_counted": True,
+                            "tools": [
+                                _tool_entry(
+                                    2,
+                                    tool_name="filesystem_write",
+                                    arguments={"path": "stage-two.txt", "content": "raw"},
+                                    output_text="stage two inline output",
+                                )
+                            ],
+                        }
+                    ],
                 },
                 {
                     "stage_id": "frontdoor-stage-3",
@@ -2084,6 +2125,23 @@ async def test_message_builder_applies_frontdoor_stage_workset_compaction_to_his
                     "key_refs": [],
                     "tool_round_budget": 2,
                     "tool_rounds_used": 1,
+                    "rounds": [
+                        {
+                            "round_id": "frontdoor-stage-3:round-1",
+                            "round_index": 1,
+                            "tool_names": ["filesystem_write"],
+                            "tool_call_ids": ["call-stage-3-filesystem_write"],
+                            "budget_counted": True,
+                            "tools": [
+                                _tool_entry(
+                                    3,
+                                    tool_name="filesystem_write",
+                                    arguments={"path": "stage-three.txt", "content": "raw"},
+                                    output_text="stage three inline output",
+                                )
+                            ],
+                        }
+                    ],
                 },
                 {
                     "stage_id": "frontdoor-stage-4",
@@ -2097,6 +2155,23 @@ async def test_message_builder_applies_frontdoor_stage_workset_compaction_to_his
                     "key_refs": [],
                     "tool_round_budget": 2,
                     "tool_rounds_used": 1,
+                    "rounds": [
+                        {
+                            "round_id": "frontdoor-stage-4:round-1",
+                            "round_index": 1,
+                            "tool_names": ["filesystem_write"],
+                            "tool_call_ids": ["call-stage-4-filesystem_write"],
+                            "budget_counted": True,
+                            "tools": [
+                                _tool_entry(
+                                    4,
+                                    tool_name="filesystem_write",
+                                    arguments={"path": "stage-four.txt", "content": "raw"},
+                                    output_text="stage four inline output",
+                                )
+                            ],
+                        }
+                    ],
                 },
                 {
                     "stage_id": "frontdoor-stage-5",
@@ -2110,6 +2185,23 @@ async def test_message_builder_applies_frontdoor_stage_workset_compaction_to_his
                     "key_refs": [],
                     "tool_round_budget": 2,
                     "tool_rounds_used": 0,
+                    "rounds": [
+                        {
+                            "round_id": "frontdoor-stage-5:round-1",
+                            "round_index": 1,
+                            "tool_names": ["filesystem_write"],
+                            "tool_call_ids": ["call-stage-5-filesystem_write"],
+                            "budget_counted": True,
+                            "tools": [
+                                _tool_entry(
+                                    5,
+                                    tool_name="filesystem_write",
+                                    arguments={"path": "stage-five.txt", "content": "raw"},
+                                    output_text="active stage inline output",
+                                )
+                            ],
+                        }
+                    ],
                 },
             ],
         },
@@ -2117,11 +2209,219 @@ async def test_message_builder_applies_frontdoor_stage_workset_compaction_to_his
 
     stable_contents = [str(item.get("content") or "") for item in result.stable_messages]
     rendered = "\n\n".join(stable_contents)
+    raw_blocks = [
+        json.loads(content.split("\n", 1)[1])
+        for content in stable_contents
+        if content.startswith("[G3KU_STAGE_RAW_V1]")
+    ]
     assert "stage one raw detail" not in rendered
-    assert "stage two raw detail" in rendered
-    assert "stage three raw detail" in rendered
-    assert "stage four raw detail" in rendered
-    assert "active stage raw detail" in rendered
+    assert "stage two raw detail" not in rendered
+    assert "stage three raw detail" not in rendered
+    assert "stage four raw detail" not in rendered
+    assert "active stage raw detail" not in rendered
+    assert [int(item["stage_index"]) for item in raw_blocks] == [2, 3, 4, 5]
+    assert raw_blocks[0]["rounds"][0]["tools"][0]["output_text"] == "stage two inline output"
+    assert raw_blocks[3]["rounds"][0]["tools"][0]["arguments"] == {
+        "path": "stage-five.txt",
+        "content": "raw",
+    }
+    assert any(content.startswith("[G3KU_STAGE_COMPACT_V1]") for content in stable_contents)
+
+
+@pytest.mark.asyncio
+async def test_message_builder_renders_retained_raw_stage_blocks_from_stage_state_without_active_stage() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    checkpoint_messages = [
+        {"role": "user", "content": "bootstrap request"},
+        {"role": "assistant", "content": "checkpoint stage one raw detail"},
+        {"role": "assistant", "content": "checkpoint stage two raw detail"},
+        {"role": "assistant", "content": "checkpoint stage three raw detail"},
+        {"role": "assistant", "content": "checkpoint stage four raw detail"},
+    ]
+
+    def _tool_entry(
+        stage_index: int,
+        *,
+        tool_name: str,
+        arguments: dict[str, object],
+        output_text: str,
+        output_preview_text: str = "",
+        output_ref: str = "",
+    ) -> dict[str, object]:
+        return {
+            "tool_call_id": f"call-stage-{stage_index}-{tool_name}",
+            "tool_name": tool_name,
+            "arguments": dict(arguments),
+            "arguments_text": f"{tool_name} ({json.dumps(arguments, ensure_ascii=False, sort_keys=True)})",
+            "output_text": output_text,
+            "output_preview_text": output_preview_text,
+            "output_ref": output_ref,
+            "status": "success",
+            "started_at": f"2026-04-16T10:0{stage_index}:00+08:00",
+            "finished_at": f"2026-04-16T10:0{stage_index}:01+08:00",
+            "timestamp": f"2026-04-16T10:0{stage_index}:01+08:00",
+            "elapsed_seconds": 1.0,
+            "kind": "tool_result",
+            "source": "user",
+        }
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="continue",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem_write", "content_open"]},
+        persisted_session=None,
+        checkpoint_messages=checkpoint_messages,
+        user_content="continue",
+        frontdoor_stage_state={
+            "active_stage_id": "",
+            "transition_required": False,
+            "stages": [
+                {
+                    "stage_id": "frontdoor-stage-1",
+                    "stage_index": 1,
+                    "stage_kind": "normal",
+                    "system_generated": False,
+                    "mode": "自主执行",
+                    "status": "completed",
+                    "stage_goal": "inspect stage one",
+                    "completed_stage_summary": "finished stage one",
+                    "key_refs": [],
+                    "tool_round_budget": 2,
+                    "tool_rounds_used": 1,
+                    "rounds": [
+                        {
+                            "round_id": "frontdoor-stage-1:round-1",
+                            "round_index": 1,
+                            "tool_names": ["content_open"],
+                            "tool_call_ids": ["call-stage-1-content_open"],
+                            "budget_counted": True,
+                            "tools": [
+                                _tool_entry(
+                                    1,
+                                    tool_name="content_open",
+                                    arguments={"path": "README.md"},
+                                    output_text="stage one inline output",
+                                )
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "stage_id": "frontdoor-stage-2",
+                    "stage_index": 2,
+                    "stage_kind": "normal",
+                    "system_generated": False,
+                    "mode": "自主执行",
+                    "status": "completed",
+                    "stage_goal": "inspect stage two",
+                    "completed_stage_summary": "finished stage two",
+                    "key_refs": [],
+                    "tool_round_budget": 2,
+                    "tool_rounds_used": 1,
+                    "rounds": [
+                        {
+                            "round_id": "frontdoor-stage-2:round-1",
+                            "round_index": 1,
+                            "tool_names": ["filesystem_write"],
+                            "tool_call_ids": ["call-stage-2-filesystem_write"],
+                            "budget_counted": True,
+                            "tools": [
+                                _tool_entry(
+                                    2,
+                                    tool_name="filesystem_write",
+                                    arguments={"path": "notes.txt", "content": "hello"},
+                                    output_text="stage two inline output",
+                                )
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "stage_id": "frontdoor-stage-3",
+                    "stage_index": 3,
+                    "stage_kind": "normal",
+                    "system_generated": False,
+                    "mode": "自主执行",
+                    "status": "completed",
+                    "stage_goal": "inspect stage three",
+                    "completed_stage_summary": "finished stage three",
+                    "key_refs": [],
+                    "tool_round_budget": 2,
+                    "tool_rounds_used": 1,
+                    "rounds": [
+                        {
+                            "round_id": "frontdoor-stage-3:round-1",
+                            "round_index": 1,
+                            "tool_names": ["content_open"],
+                            "tool_call_ids": ["call-stage-3-content_open"],
+                            "budget_counted": True,
+                            "tools": [
+                                _tool_entry(
+                                    3,
+                                    tool_name="content_open",
+                                    arguments={"path": "artifact.txt"},
+                                    output_text="",
+                                    output_preview_text="output captured in ref",
+                                    output_ref="artifact:artifact:stage-three",
+                                )
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "stage_id": "frontdoor-stage-4",
+                    "stage_index": 4,
+                    "stage_kind": "normal",
+                    "system_generated": False,
+                    "mode": "自主执行",
+                    "status": "completed",
+                    "stage_goal": "inspect stage four",
+                    "completed_stage_summary": "finished stage four",
+                    "key_refs": [],
+                    "tool_round_budget": 2,
+                    "tool_rounds_used": 1,
+                    "rounds": [
+                        {
+                            "round_id": "frontdoor-stage-4:round-1",
+                            "round_index": 1,
+                            "tool_names": ["filesystem_write"],
+                            "tool_call_ids": ["call-stage-4-filesystem_write"],
+                            "budget_counted": True,
+                            "tools": [
+                                _tool_entry(
+                                    4,
+                                    tool_name="filesystem_write",
+                                    arguments={"path": "summary.txt", "content": "done"},
+                                    output_text="stage four inline output",
+                                )
+                            ],
+                        }
+                    ],
+                },
+            ],
+        },
+    )
+
+    stable_contents = [str(item.get("content") or "") for item in result.stable_messages]
+    rendered = "\n\n".join(stable_contents)
+    raw_blocks = [
+        json.loads(content.split("\n", 1)[1])
+        for content in stable_contents
+        if content.startswith("[G3KU_STAGE_RAW_V1]")
+    ]
+
+    assert "checkpoint stage one raw detail" not in rendered
+    assert "checkpoint stage two raw detail" not in rendered
+    assert "checkpoint stage three raw detail" not in rendered
+    assert "checkpoint stage four raw detail" not in rendered
+    assert len(raw_blocks) == 3
+    assert [int(item["stage_index"]) for item in raw_blocks] == [2, 3, 4]
+    assert raw_blocks[0]["rounds"][0]["tools"][0]["arguments"] == {"path": "notes.txt", "content": "hello"}
+    assert raw_blocks[1]["rounds"][0]["tools"][0]["output_ref"] == "artifact:artifact:stage-three"
+    assert raw_blocks[2]["rounds"][0]["tools"][0]["output_text"] == "stage four inline output"
     assert any(content.startswith("[G3KU_STAGE_COMPACT_V1]") for content in stable_contents)
 
 
