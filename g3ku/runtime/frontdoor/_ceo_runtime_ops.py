@@ -58,7 +58,11 @@ from .state_models import (
     CeoPersistentState,
     CeoRuntimeContext,
 )
-from .tool_contract import build_frontdoor_tool_contract, upsert_frontdoor_tool_contract_message
+from .tool_contract import (
+    build_frontdoor_tool_contract,
+    normalize_frontdoor_candidate_tool_items,
+    upsert_frontdoor_tool_contract_message,
+)
 
 ToolExecutor = Callable[..., Awaitable[Any]]
 CeoGraphState = CeoPersistentState
@@ -558,6 +562,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return CeoFrontDoorRuntimeOps._normalized_hydrated_tool_names(raw)
 
     @staticmethod
+    def _normalized_candidate_tool_items(raw: Any, *, fallback_names: list[str] | None = None) -> list[dict[str, str]]:
+        return normalize_frontdoor_candidate_tool_items(raw, fallback_names=fallback_names)
+
+    @staticmethod
     def _tool_context_hydration_payload(raw_result: Any) -> dict[str, Any] | None:
         if isinstance(raw_result, dict):
             return dict(raw_result)
@@ -711,6 +719,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> dict[str, Any]:
         tool_names = self._normalized_tool_name_state_list(state.get("tool_names"))
         candidate_tool_names = self._normalized_tool_name_state_list(state.get("candidate_tool_names"))
+        candidate_tool_items = self._normalized_candidate_tool_items(
+            state.get("candidate_tool_items"),
+            fallback_names=candidate_tool_names,
+        )
         hydrated_tool_names = self._normalized_tool_name_state_list(state.get("hydrated_tool_names"))
         visible_tool_names = self._normalized_tool_name_state_list(
             state.get("rbac_visible_tool_names")
@@ -739,6 +751,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if visible_name_set:
             tool_names = [name for name in tool_names if name in visible_name_set]
             candidate_tool_names = [name for name in candidate_tool_names if name in visible_name_set]
+            candidate_tool_items = [
+                dict(item)
+                for item in list(candidate_tool_items or [])
+                if str(item.get("tool_id") or "").strip() in visible_name_set
+            ]
         for name in list(hydrated_tool_names or []):
             if name not in tool_names:
                 tool_names.append(name)
@@ -748,9 +765,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             for name in candidate_tool_names
             if name not in hydrated_set
         ]
+        candidate_name_set = set(candidate_tool_names)
+        candidate_tool_items = [
+            dict(item)
+            for item in list(candidate_tool_items or [])
+            if str(item.get("tool_id") or "").strip() in candidate_name_set
+        ]
         return {
             "tool_names": list(tool_names),
             "candidate_tool_names": list(candidate_tool_names),
+            "candidate_tool_items": list(candidate_tool_items),
             "hydrated_tool_names": list(hydrated_tool_names),
         }
 
@@ -1802,6 +1826,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(item, dict) and str(item.get("skill_id") or "").strip()
         ]
         candidate_tool_names = list(getattr(assembly, "candidate_tool_names", []) or [])
+        candidate_tool_items = self._normalized_candidate_tool_items(
+            getattr(assembly, "candidate_tool_items", None),
+            fallback_names=candidate_tool_names,
+        )
         rbac_visible_tool_names = [
             str(item or "").strip()
             for item in list(getattr(assembly, "trace", {}).get("capability_snapshot", {}).get("visible_tool_ids") or [])
@@ -1861,6 +1889,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             build_frontdoor_tool_contract(
                 callable_tool_names=list(callable_tool_names),
                 candidate_tool_names=list(candidate_tool_names),
+                candidate_tool_items=list(candidate_tool_items),
                 hydrated_tool_names=list(hydrated_tool_names),
                 frontdoor_stage_state=dict(current_frontdoor_stage_state or {}),
                 visible_skill_ids=list(selected_skill_ids),
@@ -1963,6 +1992,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "frontdoor_selection_debug": frontdoor_selection_debug,
             "tool_names": list(tool_names),
             "candidate_tool_names": list(candidate_tool_names),
+            "candidate_tool_items": list(candidate_tool_items),
             "hydrated_tool_names": list(hydrated_tool_names),
             "visible_skill_ids": list(selected_skill_ids),
             "candidate_skill_ids": list(selected_skill_ids),

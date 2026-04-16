@@ -24,7 +24,11 @@ from .state_models import (
     initial_persistent_state,
 )
 from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION, build_frontdoor_prompt_contract
-from .tool_contract import build_frontdoor_tool_contract, upsert_frontdoor_tool_contract_message
+from .tool_contract import (
+    build_frontdoor_tool_contract,
+    normalize_frontdoor_candidate_tool_items,
+    upsert_frontdoor_tool_contract_message,
+)
 
 
 class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
@@ -302,9 +306,15 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             state,
             tool_names=list(state.get("tool_names") or []),
         )
+        candidate_tool_names = list(state.get("candidate_tool_names") or [])
+        candidate_tool_items = normalize_frontdoor_candidate_tool_items(
+            state.get("candidate_tool_items"),
+            fallback_names=candidate_tool_names,
+        )
         frontdoor_tool_contract = build_frontdoor_tool_contract(
             callable_tool_names=list(callable_tool_names),
-            candidate_tool_names=list(state.get("candidate_tool_names") or []),
+            candidate_tool_names=list(candidate_tool_names),
+            candidate_tool_items=list(candidate_tool_items),
             hydrated_tool_names=list(state.get("hydrated_tool_names") or []),
             frontdoor_stage_state=dict(state.get("frontdoor_stage_state") or {}),
             visible_skill_ids=list(state.get("visible_skill_ids") or []),
@@ -573,6 +583,10 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         if should_update_frontdoor_tool_state:
             result["tool_names"] = self._normalized_tool_name_state_list(state.get("tool_names"))
             result["candidate_tool_names"] = self._normalized_tool_name_state_list(state.get("candidate_tool_names"))
+            result["candidate_tool_items"] = normalize_frontdoor_candidate_tool_items(
+                state.get("candidate_tool_items"),
+                fallback_names=result["candidate_tool_names"],
+            )
             result["hydrated_tool_names"] = self._normalized_tool_name_state_list(state.get("hydrated_tool_names"))
             result["visible_skill_ids"] = self._normalized_tool_name_state_list(state.get("visible_skill_ids"))
             result["candidate_skill_ids"] = self._normalized_tool_name_state_list(state.get("candidate_skill_ids"))

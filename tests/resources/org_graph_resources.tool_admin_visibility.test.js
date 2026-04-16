@@ -132,6 +132,9 @@ function loadResources() {
     vm.runInContext(
         `${RESOURCES_CODE}
         this.__testExports = {
+            applyExecToolExecutionMode,
+            execToolModeLabel,
+            execToolModeSummary,
             renderTools,
             renderToolDetail,
             saveTool,
@@ -263,9 +266,11 @@ test("renderToolDetail shows exec execution mode controls for exec_runtime", () 
 
     renderToolDetail();
 
-    assert.match(U.toolDetail.innerHTML, /Execution Mode/);
-    assert.match(U.toolDetail.innerHTML, /full_access/);
-    assert.match(U.toolDetail.innerHTML, /without exec-side guardrails/);
+    assert.match(U.toolDetail.innerHTML, /执行模式/);
+    assert.match(U.toolDetail.innerHTML, /全权限模式/);
+    assert.match(U.toolDetail.innerHTML, /不再应用 exec 侧护栏/);
+    assert.doesNotMatch(U.toolDetail.innerHTML, /Execution Mode/);
+    assert.doesNotMatch(U.toolDetail.innerHTML, /无需重启项目/);
 });
 
 test("saveTool sends execution_mode for exec_runtime", async () => {
@@ -311,4 +316,32 @@ test("saveTool sends execution_mode for exec_runtime", async () => {
     assert.equal(calls[0].payload.enabled, true);
     assert.deepEqual([...calls[0].payload.actions.run], ["ceo", "execution"]);
     assert.equal(calls[0].payload.execution_mode, "full_access");
+});
+
+test("applyExecToolExecutionMode updates localized summary for immediate rerender", () => {
+    const { S, U, renderToolDetail, applyExecToolExecutionMode, execToolModeLabel, execToolModeSummary } = loadResources();
+    S.selectedTool = {
+        tool_id: "exec_runtime",
+        display_name: "Exec Runtime",
+        description: "Execute shell commands.",
+        enabled: true,
+        available: true,
+        actions: [
+            { action_id: "run", label: "Run Command", allowed_roles: ["ceo", "execution"] },
+        ],
+        metadata: { execution_mode: "full_access" },
+        exec_runtime_policy: { mode: "full_access" },
+    };
+
+    assert.equal(execToolModeLabel("governed"), "监管模式");
+    assert.equal(execToolModeLabel("full_access"), "全权限模式");
+    assert.match(execToolModeSummary("governed"), /继续应用 exec 侧护栏/);
+    assert.match(execToolModeSummary("full_access"), /不再应用 exec 侧护栏/);
+
+    applyExecToolExecutionMode(S.selectedTool, "governed");
+    renderToolDetail();
+
+    assert.equal(S.selectedTool.metadata.execution_mode, "governed");
+    assert.equal(S.selectedTool.exec_runtime_policy.mode, "governed");
+    assert.match(U.toolDetail.innerHTML, /继续应用 exec 侧护栏/);
 });

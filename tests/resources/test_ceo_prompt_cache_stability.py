@@ -108,7 +108,7 @@ def test_frontdoor_prompt_cache_key_changes_when_exposure_revision_changes() -> 
         provider_model="openai:gpt-4.1",
         stable_messages=stable_messages,
         dynamic_appendix_messages=[
-            {"role": "assistant", "content": "## Visible Skills For This Turn\n- `focused-skill`"}
+            {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
         ],
         tool_schemas=tool_schemas,
         cache_family_revision="exp:rev-1",
@@ -121,7 +121,7 @@ def test_frontdoor_prompt_cache_key_changes_when_exposure_revision_changes() -> 
             {"role": "user", "content": "鍘熷鐢ㄦ埛闂"},
         ],
         dynamic_appendix_messages=[
-            {"role": "assistant", "content": "## Visible Skills For This Turn\n- `focused-skill`"}
+            {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
         ],
         tool_schemas=tool_schemas,
         cache_family_revision="exp:rev-2",
@@ -157,7 +157,7 @@ def test_frontdoor_prompt_cache_key_ignores_dynamic_tool_contract_changes() -> N
                     "callable_tool_names": ["exec"],
                     "candidate_tool_names": ["filesystem_write"],
                     "hydrated_tool_names": [],
-                    "visible_skill_ids": ["memory"],
+                    "candidate_skill_ids": ["memory"],
                     "stage_summary": {"active_stage_id": "stage:1", "transition_required": False},
                     "contract_revision": "frontdoor:v1",
                 },
@@ -178,7 +178,7 @@ def test_frontdoor_prompt_cache_key_ignores_dynamic_tool_contract_changes() -> N
                     "callable_tool_names": ["exec", "filesystem_write"],
                     "candidate_tool_names": [],
                     "hydrated_tool_names": ["filesystem_write"],
-                    "visible_skill_ids": ["memory"],
+                    "candidate_skill_ids": ["memory"],
                     "stage_summary": {"active_stage_id": "stage:1", "transition_required": False},
                     "contract_revision": "frontdoor:v1",
                 },
@@ -192,7 +192,7 @@ def test_frontdoor_prompt_cache_key_ignores_dynamic_tool_contract_changes() -> N
     assert _field(first, "request_messages") != _field(second, "request_messages")
 
 
-def test_frontdoor_prompt_contract_keeps_dynamic_appendix_directly_after_system_for_main_lane() -> None:
+def test_frontdoor_prompt_contract_appends_dynamic_appendix_at_tail_for_main_lane() -> None:
     from g3ku.runtime.frontdoor.prompt_cache_contract import build_frontdoor_prompt_contract
 
     contract = build_frontdoor_prompt_contract(
@@ -221,12 +221,12 @@ def test_frontdoor_prompt_contract_keeps_dynamic_appendix_directly_after_system_
     request_messages = list(_field(contract, "request_messages"))
     assert request_messages == [
         {"role": "system", "content": "stable system"},
-        {"role": "assistant", "content": "## Retrieved Context\n- memory"},
-        {"role": "user", "content": '{"message_type":"frontdoor_runtime_tool_contract"}'},
         {"role": "user", "content": "bootstrap user"},
         {"role": "assistant", "content": "live assistant tool call"},
         {"role": "tool", "name": "load_skill_context", "tool_call_id": "call-skill-1", "content": '{"ok": true}'},
         {"role": "assistant", "content": "old request-only appendix"},
+        {"role": "assistant", "content": "## Retrieved Context\n- memory"},
+        {"role": "user", "content": '{"message_type":"frontdoor_runtime_tool_contract"}'},
     ]
     assert list(_field(contract, "stable_messages")) == [
         {"role": "system", "content": "stable system"},

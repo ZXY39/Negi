@@ -43,6 +43,8 @@ class CeoPersistentState(TypedDict, total=False):
 
     candidate_tool_names: list[str]
 
+    candidate_tool_items: list[dict[str, Any]]
+
     hydrated_tool_names: list[str]
 
     visible_skill_ids: list[str]
@@ -185,6 +187,8 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "tool_names": [],
 
         "candidate_tool_names": [],
+
+        "candidate_tool_items": [],
 
         "hydrated_tool_names": [],
 

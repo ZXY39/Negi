@@ -137,6 +137,7 @@ def test_frontdoor_tool_state_after_tool_results_skips_fixed_builtin_hydration_t
     assert result == {
         "tool_names": ["load_tool_context", "exec"],
         "candidate_tool_names": ["agent_browser"],
+        "candidate_tool_items": [{"tool_id": "agent_browser", "description": ""}],
         "hydrated_tool_names": [],
     }
 

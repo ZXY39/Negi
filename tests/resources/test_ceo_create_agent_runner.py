@@ -52,6 +52,7 @@ def _canonical_frontdoor_state(**overrides) -> dict[str, object]:
         "messages": [],
         "tool_names": [],
         "candidate_tool_names": [],
+        "candidate_tool_items": [],
         "hydrated_tool_names": [],
         "visible_skill_ids": [],
         "candidate_skill_ids": [],
@@ -1301,6 +1302,10 @@ async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_int
             **_canonical_frontdoor_state(
                 tool_names=["load_tool_context"],
                 candidate_tool_names=["filesystem_write", "agent_browser"],
+                candidate_tool_items=[
+                    {"tool_id": "filesystem_write", "description": "Write file content to disk."},
+                    {"tool_id": "agent_browser", "description": "Browser automation via semantic shortlist."},
+                ],
                 hydrated_tool_names=[],
                 visible_skill_ids=[],
                 candidate_skill_ids=[],
@@ -1349,6 +1354,12 @@ async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_int
     assert result["hydrated_tool_names"] == ["filesystem_write"]
     assert result["tool_names"] == ["load_tool_context", "filesystem_write"]
     assert result["candidate_tool_names"] == ["agent_browser"]
+    assert result["candidate_tool_items"] == [
+        {
+            "tool_id": "agent_browser",
+            "description": "Browser automation via semantic shortlist.",
+        }
+    ]
     assert result["candidate_skill_ids"] == []
     assert result["dynamic_appendix_messages"][0] == {
         "role": "assistant",
@@ -1360,6 +1371,16 @@ async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_int
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
     assert len(contract_messages) == 1
+    payload = json.loads(str(contract_messages[0]["content"] or ""))
+    assert payload["candidate_tools"] == [
+        {
+            "tool_id": "agent_browser",
+            "description": "Browser automation via semantic shortlist.",
+        }
+    ]
+    assert "visible_skill_ids" not in payload
+    assert "rbac_visible_tool_names" not in payload
+    assert "rbac_visible_skill_ids" not in payload
 
 
 def test_frontdoor_stage_state_after_tool_cycle_ignores_raw_result_when_writing_round_tools() -> None:
@@ -1457,6 +1478,7 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
             dynamic_appendix_messages=[],
             tool_names=["submit_next_stage", "load_tool_context", "filesystem_write"],
             candidate_tool_names=[],
+            candidate_tool_items=[],
             trace={
                 "selected_skills": [],
                 "semantic_frontdoor": {
@@ -1531,6 +1553,9 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
     contract_payload = json.loads(str(contract_messages[0]["content"] or ""))
     assert contract_payload["callable_tool_names"] == ["submit_next_stage"]
     assert contract_payload["candidate_tools"] == []
+    assert "visible_skill_ids" not in contract_payload
+    assert "rbac_visible_tool_names" not in contract_payload
+    assert "rbac_visible_skill_ids" not in contract_payload
 
 
 @pytest.mark.asyncio
@@ -1574,6 +1599,7 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_candidate_tools_visi
             dynamic_appendix_messages=[],
             tool_names=["submit_next_stage", "load_tool_context", "filesystem_write"],
             candidate_tool_names=["filesystem_write"],
+            candidate_tool_items=[{"tool_id": "filesystem_write", "description": "Write file content to disk."}],
             trace={
                 "selected_skills": [{"skill_id": "memory"}],
                 "semantic_frontdoor": {},
@@ -1615,10 +1641,13 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_candidate_tools_visi
     assert contract_payload["candidate_tools"] == [
         {
             "tool_id": "filesystem_write",
-            "description": "",
+            "description": "Write file content to disk.",
         }
     ]
     assert contract_payload["candidate_skill_ids"] == ["memory"]
+    assert "visible_skill_ids" not in contract_payload
+    assert "rbac_visible_tool_names" not in contract_payload
+    assert "rbac_visible_skill_ids" not in contract_payload
 
 
 def test_runtime_agent_session_inflight_snapshot_keeps_frontdoor_hydrated_tool_names() -> None:
@@ -1764,9 +1793,9 @@ async def test_create_agent_middleware_syncs_real_stage_state_before_running_too
 
     assert lifecycle_update is not None
     assert isinstance(running_after_submit, dict)
-    assert running_after_submit["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
-    assert running_after_submit["execution_trace_summary"]["stages"][0]["stage_goal"] == "Inspect the repository structure"
-    assert running_after_submit["execution_trace_summary"]["stages"][0]["tool_round_budget"] == 5
+    assert running_after_submit["canonical_context"]["active_stage_id"] == "frontdoor-stage-1"
+    assert running_after_submit["canonical_context"]["stages"][0]["stage_goal"] == "Inspect the repository structure"
+    assert running_after_submit["canonical_context"]["stages"][0]["tool_round_budget"] == 5
     assert "tool_events" not in running_after_submit
     assert running_after_submit["compression"]["status"] == "running"
 
@@ -1824,14 +1853,12 @@ async def test_create_agent_middleware_syncs_real_stage_state_before_running_too
 
     assert isinstance(running_tool_snapshot, dict)
     assert "tool_events" not in running_tool_snapshot
-    stage = running_tool_snapshot["execution_trace_summary"]["stages"][0]
+    stage = running_tool_snapshot["canonical_context"]["stages"][0]
     assert stage["stage_goal"] == "Inspect the repository structure"
     assert stage["tool_round_budget"] == 5
     assert [round_item["tool_names"] for round_item in stage["rounds"]] == [["memory_search"]]
     assert [round_item["tool_call_ids"] for round_item in stage["rounds"]] == [["call-memory-1"]]
-    assert [tool["tool_name"] for tool in stage["rounds"][0]["tools"]] == ["memory_search"]
-    assert stage["rounds"][0]["tools"][0]["tool_call_id"] == "call-memory-1"
-    assert stage["rounds"][0]["tools"][0]["status"] == "running"
+    assert stage["rounds"][0]["tools"] == []
 
 
 @pytest.mark.asyncio
@@ -2981,8 +3008,6 @@ def test_create_agent_prompt_contract_does_not_treat_plain_short_recap_text_as_c
     ]
     assert non_contract_request_messages == [
         {"role": "system", "content": "stable system"},
-        {"role": "user", "content": "q1"},
-        {"role": "assistant", "content": "a1"},
         {"role": "assistant", "content": "Short recap: here's the answer you asked for."},
         {"role": "user", "content": "latest user"},
         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},

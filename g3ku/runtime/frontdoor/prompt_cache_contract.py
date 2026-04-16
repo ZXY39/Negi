@@ -65,6 +65,25 @@ def _with_dynamic_appendix_after_system(
     return [*normalized_dynamic_messages, *normalized_stable_messages]
 
 
+def _with_dynamic_appendix_at_tail(
+    request_messages: list[dict[str, Any]],
+    dynamic_appendix_messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized_request_messages = [dict(item) for item in list(request_messages or []) if isinstance(item, dict)]
+    normalized_dynamic_messages = [dict(item) for item in list(dynamic_appendix_messages or []) if isinstance(item, dict)]
+    if not normalized_dynamic_messages:
+        return normalized_request_messages
+    trimmed_request_messages = _strip_first_slice(normalized_request_messages, normalized_dynamic_messages)
+    if trimmed_request_messages == normalized_request_messages:
+        trimmed_request_messages = _strip_first_slice(
+            normalized_request_messages,
+            _dynamic_appendix_overlap_records(normalized_dynamic_messages),
+        )
+    if not _records_contain_slice(trimmed_request_messages, normalized_dynamic_messages):
+        trimmed_request_messages = [*trimmed_request_messages, *normalized_dynamic_messages]
+    return trimmed_request_messages
+
+
 def _records_contain_slice(records: list[dict[str, Any]], target: list[dict[str, Any]]) -> bool:
     if not target:
         return True
@@ -227,7 +246,7 @@ def build_frontdoor_prompt_contract(
     if normalized_scope == "ceo_frontdoor":
         normalized_effective_stable_messages = list(base_stable_messages)
         request_base_messages = list(normalized_live_request_messages or normalized_effective_stable_messages)
-        normalized_request_messages = _with_dynamic_appendix_after_system(
+        normalized_request_messages = _with_dynamic_appendix_at_tail(
             request_base_messages,
             normalized_dynamic_appendix_messages,
         )

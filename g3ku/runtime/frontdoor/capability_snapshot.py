@@ -68,24 +68,7 @@ def _stable_catalog_message(*, payload: dict[str, list[str]], exposure_revision:
         "## Capability Exposure Snapshot",
         f"- Exposure revision: `{exposure_revision}`",
         "- This snapshot is derived from CEO-visible capability exposure only; per-turn ranking must not mutate it.",
-        "",
-        *_render_id_section(
-            heading="## Visible Callable Tools",
-            intro="- The callable tool names below are visible in this session.",
-            ids=list(payload.get("visible_tool_names") or []),
-        ),
-        "",
-        *_render_id_section(
-            heading="## Visible Skills",
-            intro='- Call `load_skill_context` only with these visible skill ids.',
-            ids=list(payload.get("visible_skill_ids") or []),
-        ),
-        "",
-        *_render_id_section(
-            heading="## Visible Tool Context Ids",
-            intro='- Call `load_tool_context` only with these visible concrete tool ids.',
-            ids=list(payload.get("visible_tool_ids") or []),
-        ),
+        "- It is a stable exposure revision anchor, not the current turn's callable or candidate tool contract.",
     ]
     return "\n".join(sections).strip()
 

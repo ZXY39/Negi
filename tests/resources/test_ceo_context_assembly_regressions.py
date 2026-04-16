@@ -458,10 +458,8 @@ async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_ava
         "allowed_skill_record_ids": ["skill:focused-skill", "skill:secondary-skill"],
     }
     overlay = str(result.turn_overlay_text or "")
-    assert "## 本轮候选工具" in overlay
-    assert '"tool_id": "agent_browser"' in overlay
-    assert '"tool_id": "web_fetch"' in overlay
-    assert '"description": "Browser automation via semantic shortlist."' in overlay
+    assert "## 本轮候选工具" not in overlay
+    assert "candidate_tools = [" not in overlay
     assert result.tool_names == []
 
 
@@ -685,9 +683,9 @@ async def test_message_builder_dense_unavailable_renders_l0_only_skill_and_exter
 
     system_prompt = str(result.model_messages[0].get("content") or "")
     overlay = str(getattr(result, "turn_overlay_text", "") or "")
-    assert "L0 concise skill summary." in overlay
+    assert "L0 concise skill summary." not in overlay
     assert '`external_docs`' not in system_prompt
-    assert "## 本轮候选工具" in overlay
+    assert "## 本轮候选工具" not in overlay
     assert "Detail sentence should not appear." not in system_prompt
     assert "Detail sentence should not appear." not in overlay
 
@@ -731,7 +729,9 @@ async def test_message_builder_dense_unavailable_renders_l0_style_for_object_ski
     )
 
     overlay = str(getattr(result, "turn_overlay_text", "") or "")
-    assert "Object skill short summary." in overlay
+    system_prompt = str(result.model_messages[0].get("content") or "")
+    assert "Object skill short summary." not in overlay
+    assert "Object skill short summary." not in system_prompt
     assert "Object detail sentence should not appear." not in overlay
 
 
@@ -823,7 +823,10 @@ async def test_message_builder_dense_unavailable_renders_l0_only_for_unavailable
     )
 
     system_prompt = str(result.model_messages[0].get("content") or "")
-    assert "## Visible Tool Context Ids" in system_prompt
+    assert "## Capability Exposure Snapshot" in system_prompt
+    assert "## Visible Callable Tools" not in system_prompt
+    assert "## Visible Skills" not in system_prompt
+    assert "## Visible Tool Context Ids" not in system_prompt
     assert '`agent_browser`' not in system_prompt
     assert "Later sentence should not appear." not in system_prompt
     assert "Later l0 sentence should not appear." not in system_prompt
@@ -854,7 +857,10 @@ async def test_message_builder_renders_external_tool_context_for_unavailable_cal
         persisted_session=None,
     )
 
-    assert "## Visible Tool Context Ids" in result.system_prompt
+    assert "## Capability Exposure Snapshot" in result.system_prompt
+    assert "## Visible Callable Tools" not in result.system_prompt
+    assert "## Visible Skills" not in result.system_prompt
+    assert "## Visible Tool Context Ids" not in result.system_prompt
     assert '`agent_browser`' not in result.system_prompt
     assert "missing required bins" not in result.system_prompt
     assert [item["tool_id"] for item in result.trace["external_tools"]] == ["agent_browser"]
@@ -974,11 +980,29 @@ async def test_message_builder_renders_candidate_tools_as_structured_tool_id_and
     )
 
     overlay = str(result.turn_overlay_text or "")
-    assert "candidate_tools = [" in overlay
-    assert '"tool_id": "filesystem_write"' in overlay
-    assert '"description": "Write file content to disk."' in overlay
-    assert '"tool_id": "filesystem_edit"' in overlay
-    assert '"description": "Edit one file in text-replace or line-range mode."' in overlay
+    assert "candidate_tools = [" not in overlay
+
+    contract_messages = [
+        item
+        for item in list(result.dynamic_appendix_messages or [])
+        if isinstance(item, dict)
+        and str(item.get("role") or "").strip().lower() == "user"
+        and isinstance(item.get("content"), str)
+        and str(item.get("content") or "").strip()
+    ]
+
+    assert len(contract_messages) == 1
+    payload = json.loads(contract_messages[0]["content"])
+    assert payload["candidate_tools"] == [
+        {
+            "tool_id": "filesystem_edit",
+            "description": "Edit one file in text-replace or line-range mode.",
+        },
+        {
+            "tool_id": "filesystem_write",
+            "description": "Write file content to disk.",
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -1203,6 +1227,7 @@ async def test_message_builder_moves_turn_specific_context_into_overlay_for_stab
     assert "## Capability Exposure Snapshot" in contents[0]
     assert "## 已检索上下文" not in rendered_messages
     assert "## 本轮最相关的技能" not in rendered_messages
+    assert "## 本轮可见技能" not in rendered_messages
     assert "## 长期记忆写入提示" not in rendered_messages
     assert contents[-3:] == [
         "prior question",
@@ -1210,7 +1235,9 @@ async def test_message_builder_moves_turn_specific_context_into_overlay_for_stab
         "from now on default to the focused browser workflow",
     ]
     assert "## 已检索上下文" in overlay
-    assert "## 本轮最相关的技能" in overlay
+    assert "## 本轮最相关的技能" not in overlay
+    assert "## 本轮可见技能" not in overlay
+    assert "## 本轮候选工具" not in overlay
     assert "## 长期记忆写入提示" in overlay
     assert prompt_builder.base_calls == 1
     assert prompt_builder.skill_calls == []
@@ -1299,6 +1326,9 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
         if isinstance(item, dict)
     )
     assert payload["hydrated_tool_names"] == ["filesystem_write"]
+    assert "visible_skill_ids" not in payload
+    assert "rbac_visible_tool_names" not in payload
+    assert "rbac_visible_skill_ids" not in payload
 
 
 @pytest.mark.asyncio
@@ -1345,6 +1375,9 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_with_exec
         'guardrails_enabled': False,
         'summary': 'exec will execute shell commands without exec-side guardrails.',
     }
+    assert "visible_skill_ids" not in payload
+    assert "rbac_visible_tool_names" not in payload
+    assert "rbac_visible_skill_ids" not in payload
 
 
 def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stale_message() -> None:
@@ -1354,6 +1387,7 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
         state={
             "tool_names": ["submit_next_stage", "filesystem_write"],
             "candidate_tool_names": [],
+            "candidate_tool_items": [],
             "hydrated_tool_names": ["filesystem_write"],
             "visible_skill_ids": ["memory"],
             "candidate_skill_ids": ["memory"],
@@ -1395,6 +1429,10 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
     assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
     assert payload["candidate_tools"] == []
     assert payload["hydrated_tool_names"] == ["filesystem_write"]
+    assert payload["candidate_skill_ids"] == ["memory"]
+    assert "visible_skill_ids" not in payload
+    assert "rbac_visible_tool_names" not in payload
+    assert "rbac_visible_skill_ids" not in payload
 
 
 def test_frontdoor_dynamic_appendix_records_require_canonical_tool_state_fields() -> None:
@@ -1405,6 +1443,7 @@ def test_frontdoor_dynamic_appendix_records_require_canonical_tool_state_fields(
             state={
                 "tool_names": ["submit_next_stage"],
                 "candidate_tool_names": [],
+                "candidate_tool_items": [],
                 "frontdoor_stage_state": {
                     "active_stage_id": "stage:1",
                     "transition_required": False,
@@ -1436,6 +1475,7 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_json_stri
     contract = build_frontdoor_tool_contract(
         callable_tool_names=["submit_next_stage", "filesystem_write"],
         candidate_tool_names=["agent_browser"],
+        candidate_tool_items=[{"tool_id": "agent_browser", "description": "Browser automation"}],
         hydrated_tool_names=["filesystem_write"],
         frontdoor_stage_state={
             "active_stage_id": "stage:1",
@@ -1443,6 +1483,9 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_json_stri
             "stages": [{"stage_id": "stage:1", "status": "active", "stage_goal": "write"}],
         },
         visible_skill_ids=["memory"],
+        candidate_skill_ids=["memory"],
+        rbac_visible_tool_names=["submit_next_stage", "filesystem_write", "agent_browser"],
+        rbac_visible_skill_ids=["memory"],
         contract_revision="frontdoor:v1",
     )
     legacy_message = {
@@ -1466,10 +1509,14 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_json_stri
     assert payload["candidate_tools"] == [
         {
             "tool_id": "agent_browser",
-            "description": "",
+            "description": "Browser automation",
         }
     ]
     assert payload["hydrated_tool_names"] == ["filesystem_write"]
+    assert payload["candidate_skill_ids"] == ["memory"]
+    assert "visible_skill_ids" not in payload
+    assert "rbac_visible_tool_names" not in payload
+    assert "rbac_visible_skill_ids" not in payload
 
 
 @pytest.mark.asyncio
@@ -1538,13 +1585,15 @@ async def test_message_builder_keeps_capability_snapshot_stable_when_semantic_sk
     )
 
     assert first.trace["selected_skills"] != second.trace["selected_skills"]
-    assert first.turn_overlay_text != second.turn_overlay_text
+    assert first.turn_overlay_text == ""
+    assert second.turn_overlay_text == ""
+    assert first.dynamic_appendix_messages != second.dynamic_appendix_messages
     assert first.stable_messages[0] == second.stable_messages[0]
     assert first.trace["capability_snapshot"] == second.trace["capability_snapshot"]
     assert first.cache_family_revision == second.cache_family_revision
     assert "## Capability Exposure Snapshot" in str(first.stable_messages[0]["content"] or "")
-    assert "focused-skill" in str(first.turn_overlay_text or "")
-    assert "secondary-skill" in str(second.turn_overlay_text or "")
+    assert "focused-skill" not in str(first.turn_overlay_text or "")
+    assert "secondary-skill" not in str(second.turn_overlay_text or "")
 
 
 @pytest.mark.asyncio
@@ -1583,8 +1632,12 @@ async def test_message_builder_uses_exposure_revision_when_capability_snapshot_e
     )
 
     assert result.cache_family_revision == snapshot.exposure_revision
-    assert "## Capability Exposure Snapshot" in str(result.stable_messages[0]["content"] or "")
-    assert snapshot.stable_catalog_message in str(result.stable_messages[0]["content"] or "")
+    stable_system = str(result.stable_messages[0]["content"] or "")
+    assert "## Capability Exposure Snapshot" in stable_system
+    assert snapshot.exposure_revision in stable_system
+    assert "## Visible Callable Tools" not in stable_system
+    assert "## Visible Skills" not in stable_system
+    assert "## Visible Tool Context Ids" not in stable_system
 
 
 def test_context_assembly_result_dynamic_appendix_model_messages_stays_combined_compatibility_view() -> None:
@@ -1635,8 +1688,9 @@ async def test_message_builder_includes_retrieval_and_full_transcript_without_du
     contents = [str(item.get("content") or "") for item in result.model_messages]
     assert contents[0].startswith("BASE PROMPT")
     assert "## Capability Exposure Snapshot" in contents[0]
-    assert "## 本轮候选工具" in contents[1]
-    assert "## 已检索上下文" in contents[2]
+    assert "## 本轮候选工具" not in "\n\n".join(contents)
+    assert "## 本轮最相关的技能" not in "\n\n".join(contents)
+    assert "## 已检索上下文" in contents[1]
     assert contents.count("follow up question") == 1
     assert contents[-1] == "follow up question"
     assert result.trace["current_user_in_transcript"] is True

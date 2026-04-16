@@ -43,6 +43,14 @@ def _normalized_candidate_tool_items(
     return ordered
 
 
+def normalize_frontdoor_candidate_tool_items(
+    items: list[Any] | None,
+    *,
+    fallback_names: list[str] | None = None,
+) -> list[dict[str, str]]:
+    return _normalized_candidate_tool_items(items, fallback_names=fallback_names)
+
+
 def _active_stage_prompt_view(active_stage: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(active_stage, dict):
         return None
@@ -100,10 +108,7 @@ class FrontdoorToolContract:
                 fallback_names=list(self.candidate_tool_names),
             ),
             'hydrated_tool_names': list(self.hydrated_tool_names),
-            'visible_skill_ids': list(self.visible_skill_ids),
             'candidate_skill_ids': list(self.candidate_skill_ids),
-            'rbac_visible_tool_names': list(self.rbac_visible_tool_names),
-            'rbac_visible_skill_ids': list(self.rbac_visible_skill_ids),
             'stage_summary': dict(self.stage_summary),
             'contract_revision': str(self.contract_revision or '').strip(),
             'exec_runtime_policy': (

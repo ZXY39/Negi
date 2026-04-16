@@ -1216,11 +1216,6 @@ class CeoMessageBuilder:
             system_prompt = self._prompt_builder.build_base_prompt()
         else:
             system_prompt = self._prompt_builder.build(skills=[])
-        visible_skills_block = self._build_turn_skill_overlay(
-            selected_skills=list(selected_skills),
-            capability_snapshot=capability_snapshot,
-            visible_only_mode=visible_only_mode,
-        )
         if capability_snapshot.stable_catalog_message:
             system_prompt = f"{system_prompt}\n\n{capability_snapshot.stable_catalog_message}".strip()
         external_trace = self._trace_external_tool_families(
@@ -1234,8 +1229,6 @@ class CeoMessageBuilder:
             if str(name or '').strip()
         }
         turn_overlay_parts: list[str] = []
-        if visible_skills_block:
-            turn_overlay_parts.append(visible_skills_block)
         if memory_write_terms and memory_write_visible:
             turn_overlay_parts.append(self._memory_write_hint_block(memory_write_terms))
 
@@ -1295,14 +1288,6 @@ class CeoMessageBuilder:
             selected_tool_names=list(candidate_tool_names),
             visible_families=visible_families,
         )
-        candidate_tools_block = self._build_turn_tool_overlay(
-            selected_tool_items=list(candidate_tool_items),
-            capability_snapshot=capability_snapshot,
-            visible_only_mode=visible_only_mode,
-        )
-        if candidate_tools_block:
-            turn_overlay_parts.append(candidate_tools_block)
-
         retrieval_scope = plan_retrieval_scope(
             visible_skills=visible_skills,
             visible_families=visible_families,
@@ -1904,6 +1889,7 @@ class CeoMessageBuilder:
             dynamic_appendix_messages=dynamic_appendix_messages,
             tool_names=list(context_sources['callable_tool_names']),
             candidate_tool_names=list(context_sources['selected_tool_names']),
+            candidate_tool_items=list(context_sources.get('selected_tool_items') or []),
             trace=trace,
             turn_overlay_text=turn_overlay_text,
             cache_family_revision=(

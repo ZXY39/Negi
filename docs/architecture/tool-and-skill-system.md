@@ -134,6 +134,8 @@ Maintenance note for surfaced fixed builtins:
 - 如果语义召回不可用，候选集合直接退化为 `RBAC 可见集合`，而不是停止运行。
 - 对 agent 来说，candidate 仍然是“可见但默认不可直接调用”的资源；candidate 不会自动进入 callable tool 集合。
 - `load_tool_context` / `load_skill_context` 现在也只允许命中当前 canonical candidate 集合，不再允许“RBAC 可见但不在 candidate 中”的旁路加载。
+- 对 CEO/frontdoor，`candidate_tool_names` / `candidate_skill_ids` 属于 internal canonical state；真正暴露给模型的当前轮显示合同只保留一份 `frontdoor_runtime_tool_contract`。
+- 这还意味着 frontdoor 的旧轮 candidate/tool/skill catalog 不应进入 durable history。后续轮次只能继承真实工具调用轨迹与上下文，而不是再次看到上一轮的候选列表。
 - 对执行/验收节点，skill 候选不再只依赖当前轮的 `node_runtime_tool_contract` user 消息存活；canonical `candidate_skill_ids` 继续落在 runtime frame，`visible_skills` 也会随 frame 一起持久化，供阶段切换、prompt compaction 之后的下一轮 contract 刷新从 frame 恢复。
 - 维护时如果看到 `load_skill_context` 报“当前运行时候选技能未包含 ...”，不要只检查模型当轮提示里是否还看得到那条 dynamic contract；先看节点 runtime frame 里的 `candidate_skill_ids` / `visible_skills` 是否仍在，若 frame 还在而动态消息丢了，说明是 contract 重建链路问题，而不是 selector 一开始没选中。
 - 节点路径里，语义可用时的 candidate skills / candidate tools 上限都固定为 16；语义不可用时，直接退化为全部 RBAC 可见集合。
@@ -155,8 +157,12 @@ Maintenance note for surfaced fixed builtins:
 - 如果想用，先 `load_tool_context(tool_id="...")`
 - 维护上还要区分“canonical candidate state”和“prompt display shape”：
   - runtime frame / frontdoor persistent state 里的权威候选集合仍然是 concrete tool name 列表，例如 `candidate_tool_names=["filesystem_edit"]`
-  - 但真正注入给模型阅读的显示层，现在会把 candidate tools 包装成 display-only 的结构化摘要，例如 `candidate_tools=[{tool_id, description}]`
+  - CEO/frontdoor 真正注入给模型阅读的显示层，现在只通过当前轮 `frontdoor_runtime_tool_contract` 携带 display-only 的结构化摘要，例如 `candidate_tools=[{tool_id, description}]`
   - 这个显示层只服务于模型理解，不改变 `load_tool_context` 的准入规则，也不替代 canonical candidate name 列表
+- 对 CEO/frontdoor，维护者现在还要再区分 `candidate_tool_names` 与 `candidate_tool_items`：
+  - `candidate_tool_names` 是运行时去重、hydration 排除、恢复和 gate 判断用的 canonical name list
+  - `candidate_tool_items` 是当前轮显示层缓存，通常是 `{tool_id, description}`，用于保证 contract rebuild / refresh 之后仍能保留描述文本
+  - 这两者都可能存在于 runtime state，但 agent 只应看到结构化 `candidate_tools`，不应同时看到 `candidate_tool_names`
 - 当前前门的语义召回和 fallback 打分也都会优先面向 concrete executor，而不是泛化的 family：
   - 当 query 明显表达文件写入、改写、删除、移动、复制、补丁意图时，query rewrite fallback 与本地候选打分都会优先把 `filesystem_write`、`filesystem_edit`、`filesystem_delete`、`filesystem_move`、`filesystem_copy`、`filesystem_propose_patch` 这类 concrete ids 往前推
   - `exec` 仍可作为固定 builtin 保持可调用，但在这类 mutating intent 下，不应再被当成候选文件变更方案的首选
@@ -183,6 +189,7 @@ Maintenance note for hydration LRU:
 - CEO/frontdoor 的 hydration canonical state 在 session/frontdoor state 中：`RuntimeAgentSession._frontdoor_hydrated_tool_names` 与前门 persistent state 的 `hydrated_tool_names`。这是 session 生命周期级 LRU，会跨 turn 保留，但每轮都按当前 RBAC 可见集合过滤。
 - 节点与 CEO/frontdoor 的 hydration LRU 都只接受 concrete tool names；family id 不能进入 canonical hydration state。
 - 节点与 CEO/frontdoor 的默认 hydration LRU 上限现在都是 16；如果维护者看到 promoted tool 在第 17 个之后被逐出，优先检查各自运行时对象上的 `_hydrated_tool_limit` 是否被显式改小。
+- 对 CEO/frontdoor，RBAC 可见集合本身仍会保留在 internal runtime state 里，供过滤 hydration 与恢复链路使用；但 `rbac_visible_tool_names` / `rbac_visible_skill_ids` 不再属于 agent-facing prompt contract。
 
 某工具在前一轮成功 `load_tool_context` 后，会进入节点级 hydration 状态。
 
@@ -240,7 +247,7 @@ Maintenance note for hydration LRU:
 - frontdoor 的 callable tool 集合并不只来自 fixed builtin；它还会把当前 turn 内已经 hydration 的 concrete tools 合并进去。
 - frontdoor 的 `candidate_tool_names` 必须排除已经进入 hydrated state 的工具；如果一个工具同时出现在 candidate 列表和 callable tool schemas 里，通常表示状态推进漏了。
 - frontdoor 现在还要再区分“candidate display”与“candidate state”：
-  - dynamic appendix / turn overlay 会向模型显示结构化 `candidate_tools=[{tool_id, description}]`
+  - agent-facing 当前轮显示合同只剩一份 `frontdoor_runtime_tool_contract`；它向模型显示结构化 `candidate_tools=[{tool_id, description}]`
   - 但真正驱动去重、hydration 排除与恢复的仍然是 persistent state 中的 `candidate_tool_names`
 - 如果维护者在排查 `load_tool_context` 成功后下一轮仍然只会 `exec` / 再次 `load_tool_context`，优先检查 frontdoor persistent state 里的 `hydrated_tool_names`、`tool_names`、`candidate_tool_names` 是否一起更新，而不是只检查 toolskill 内容。
 - 如果线上 frontdoor 表现与测试里的 graph helper 一致、却和实际会话不一致，先确认 runner 是否真的走显式 graph checkpoint，而不是怀疑还存在第二条生产 promotion 路径；当前生产路径已经不再以 `ceo_agent_middleware.py` 为权威。
@@ -252,6 +259,10 @@ Maintenance note for hydration LRU:
 - 同理，节点侧的 runtime frame 与重建后的 `node_runtime_tool_contract` 也必须对 skill 候选保持一致：`candidate_skill_ids` 与 `visible_skills` 若在 frame 中存在，就不应因为阶段压缩或 active window 裁剪而在下一轮 contract 中无故清空。
 - 节点执行层的 `stage_gate_error_for_tool()` 仍然保留，它现在是 schema 收紧之外的兜底防线；如果模型通过恢复态或手工构造仍然尝试普通工具，执行层仍应返回 `no active stage` / `current stage budget is exhausted`。
 - 对 CEO/frontdoor，当前 turn 的 callable/candidate tool 合同现在应只存在于 dynamic appendix 和持久状态；不要再从稳定 prompt 前缀或旧 transcript 文本恢复“当前可调用工具”。
+- 对 CEO/frontdoor，当前轮 contract 的推荐排障顺序也变了：
+  - 先看 request 尾部那条唯一的 `frontdoor_runtime_tool_contract`
+  - 再看 internal state 中的 `tool_names` / `candidate_tool_names` / `candidate_tool_items` / `hydrated_tool_names`
+  - 不要再把稳定 prompt 前缀、旧 overlay 文本或旧 transcript 里的 tool/skill 名单当成当前轮权威合同
 - 排查“load 成功但下一轮没调用”时，优先对照 canonical runtime frame / frontdoor state 与 runtime messages snapshot；如果旧 bootstrap 文本和当前 snapshot 冲突，应以当前 snapshot 为准。
 - 排查“某个工具为什么没进前门候选集”时，优先看 `frontdoor_selection_debug.semantic_frontdoor` 与 `frontdoor_selection_debug.tool_selection`：
   - `semantic_frontdoor` 负责回答 rewrite 后 query 是什么、dense/rerank 命中了哪些 tool/skill

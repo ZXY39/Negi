@@ -142,6 +142,36 @@ function execToolExecutionMode(tool) {
     return "governed";
 }
 
+function execToolModeLabel(mode) {
+    return ({
+        governed: "监管模式",
+        full_access: "全权限模式",
+    }[String(mode || "").trim().toLowerCase()] || "监管模式");
+}
+
+function execToolModeSummary(mode) {
+    return ({
+        governed: "exec 将继续应用 exec 侧护栏，包括只读、路径与安全限制。",
+        full_access: "exec 将以全权限模式执行 shell 命令，不再应用 exec 侧护栏。",
+    }[String(mode || "").trim().toLowerCase()] || "exec 将继续应用 exec 侧护栏，包括只读、路径与安全限制。");
+}
+
+function applyExecToolExecutionMode(tool, mode) {
+    if (!tool || !isExecToolFamily(tool)) return tool;
+    const nextMode = String(mode || "governed").trim().toLowerCase() || "governed";
+    tool.metadata = {
+        ...(tool.metadata || {}),
+        execution_mode: nextMode,
+    };
+    tool.exec_runtime_policy = {
+        ...(tool.exec_runtime_policy || {}),
+        mode: nextMode,
+        guardrails_enabled: nextMode !== "full_access",
+        summary: execToolModeSummary(nextMode),
+    };
+    return tool;
+}
+
 function filterTools() {
     const q = String(U.toolSearch.value || "").trim().toLowerCase();
     return S.tools.filter((tool) => {
@@ -1148,9 +1178,6 @@ function renderToolDetail() {
     const availabilityState = resourceAvailabilityStatus(S.selectedTool);
     const unavailableReasons = resourceAvailabilityReasons(S.selectedTool);
     const execMode = execToolExecutionMode(S.selectedTool);
-    const execPolicy = S.selectedTool?.exec_runtime_policy && typeof S.selectedTool.exec_runtime_policy === "object"
-        ? S.selectedTool.exec_runtime_policy
-        : null;
     U.toolDetail.innerHTML = `
         <article class="resource-detail-card detail-modal-shell">
             <div class="detail-modal-header">
@@ -1186,21 +1213,20 @@ function renderToolDetail() {
                 ${isExecToolFamily(S.selectedTool) ? `
                 <div class="resource-section">
                     <div class="tool-permission-heading">
-                        <h3>Execution Mode</h3>
-                        <p class="subtitle">保存后后续新的 exec 调用会立即应用该模式，无需重启项目。</p>
+                        <h3>执行模式</h3>
                     </div>
                     <div class="tool-permission-card">
                         <div class="tool-role-toggle-group">
                             <label class="role-toggle tool-role-toggle ${execMode === "governed" ? "checked" : ""}">
                                 <input type="radio" class="exec-mode-input" name="exec-mode" value="governed" ${execMode === "governed" ? "checked" : ""}>
-                                <span>governed</span>
+                                <span>${esc(execToolModeLabel("governed"))}</span>
                             </label>
                             <label class="role-toggle tool-role-toggle ${execMode === "full_access" ? "checked" : ""}">
                                 <input type="radio" class="exec-mode-input" name="exec-mode" value="full_access" ${execMode === "full_access" ? "checked" : ""}>
-                                <span>full_access</span>
+                                <span>${esc(execToolModeLabel("full_access"))}</span>
                             </label>
                         </div>
-                        ${execPolicy?.summary ? `<div class="resource-copy-block">${esc(execPolicy.summary)}</div>` : ""}
+                        <div class="resource-copy-block">${esc(execToolModeSummary(execMode))}</div>
                     </div>
                 </div>
                 ` : ""}
@@ -1298,19 +1324,9 @@ function renderToolDetail() {
     U.toolDetail.querySelectorAll(".exec-mode-input").forEach((radio) => radio.addEventListener("change", (e) => {
         if (!e.target?.checked || !S.selectedTool) return;
         const nextMode = String(e.target.value || "governed").trim().toLowerCase() || "governed";
-        S.selectedTool.metadata = {
-            ...(S.selectedTool.metadata || {}),
-            execution_mode: nextMode,
-        };
-        S.selectedTool.exec_runtime_policy = {
-            ...(S.selectedTool.exec_runtime_policy || {}),
-            mode: nextMode,
-            guardrails_enabled: nextMode !== "full_access",
-            summary: nextMode === "full_access"
-                ? "exec will execute shell commands without exec-side guardrails."
-                : "exec will enforce exec-side guardrails before running shell commands.",
-        };
+        applyExecToolExecutionMode(S.selectedTool, nextMode);
         setToolDirty(true);
+        renderToolDetail();
         queueToolAutosave(120);
     }));
     U.toolDetail.querySelectorAll(".tool-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {

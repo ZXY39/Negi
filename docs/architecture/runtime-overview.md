@@ -167,7 +167,7 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 
 - `g3ku/runtime/prompts/ceo_frontdoor.md` 承载 CEO frontdoor 的稳定协议，包括角色规则、任务/工具通用约束，以及 stage-first 这类高优先级协议。
 - `g3ku/runtime/frontdoor/prompt_builder.py` 负责把稳定协议与少量环境提示装成 base prompt。
-- `g3ku/runtime/frontdoor/message_builder.py` 继续按本轮会话状态动态注入可见 skill 摘要、候选工具、retrieved context、memory hint、全局语义摘要等 turn 级内容。
+- `g3ku/runtime/frontdoor/message_builder.py` 继续按本轮会话状态动态注入 retrieved context、memory hint、全局语义摘要，以及当前轮运行时工具合同所需的数据。
 - CEO/frontdoor 的生产执行面现在是显式 `StateGraph`，入口到收尾固定经过 `prepare_turn -> call_model -> normalize_model_output -> review_tool_calls -> execute_tools -> finalize`。
 - `call_model` 和 `execute_tools` 现在共用同一份 frontdoor runtime tool bundle。像 `submit_next_stage` 这类运行时注入的 stage protocol tool，必须同时对模型“可见”并且在 `execute_tools` 里可真实执行；维护时不要再在执行环节单独从 `state.tool_names` 重建第二套工具表。
 - `execute_tools` 现在会在真正执行前落实 stage gate：普通工具在无活动阶段或阶段预算耗尽时会直接得到 gate error；如果同一批 tool calls 里把 `submit_next_stage` 和其他普通工具混在一起，整个批次会被拒绝，要求模型先单独完成阶段切换。
@@ -178,6 +178,9 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - 维护上不要把这个规则误读成“前门内部状态已经只剩 `submit_next_stage`”。`tool_names` 仍保存阶段内可恢复的完整工具池，供同一 turn 成功开阶段后的下一次 model call 立即恢复完整 callable 列表；真正决定“此刻给模型看到什么”的，是前门的 callable-tool helper 与动态合同消息。
 - `g3ku/runtime/frontdoor/_ceo_create_agent_impl.py` 仍是 runner 入口，但它不再把 `create_agent + middleware` 当作前门主执行链；维护时应把 `_graph_*` 节点看成唯一权威路径。
 - frontdoor 与节点动态合同现在还会携带 `exec_runtime_policy`。这让 prompt 中不再需要把 exec 的“只读/受监管”规则写死为静态事实；维护者应优先把当前 exec 模式视为 runtime contract 的一部分，而不是 prompt 文案的一部分。
+- CEO/frontdoor 的稳定 system prompt 现在只保留最小的 capability exposure revision 锚点，不再把可见 tool/skill 名单整块写进稳定前缀。
+- 对 CEO/frontdoor，当前轮真正给模型看的 tool/skill catalog 现在只有一份 `frontdoor_runtime_tool_contract` user 消息。它位于 request 尾部，也就是所有稳定前缀、持久化历史和当前 user message 之后。
+- 这份 frontdoor runtime tool contract 属于“当前轮临时合同”，不是 durable history。后续轮次的 `stable_messages` / transcript 不应再继承旧轮的 tool/skill 名单；如果维护者在下一轮历史里又看到旧 contract，优先排查 prompt contract 组装或 state replay 是否把 dynamic appendix 错写回了 stable history。
 
 维护上现在还要区分 frontdoor 的两份工具状态：
 
