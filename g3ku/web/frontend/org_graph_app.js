@@ -1530,6 +1530,18 @@ function cloneCeoSessionSnapshotCacheEntry(entry = null) {
     return normalizeCeoSessionSnapshotCacheEntry(entry.session_id, entry);
 }
 
+function ceoAssistantTurnAlreadyPersisted(turnId = "", { messages = null, sessionId = "" } = {}) {
+    const normalizedTurnId = normalizeCeoTurnId(turnId);
+    if (!normalizedTurnId) return false;
+    const sourceMessages = Array.isArray(messages)
+        ? messages
+        : (getCeoSessionSnapshotCache(sessionId || activeSessionId())?.messages || []);
+    return trimCeoSessionSnapshotMessages(sourceMessages).some((item) => (
+        String(item?.role || "").trim().toLowerCase() === "assistant"
+        && normalizeCeoTurnId(item?.turn_id || "") === normalizedTurnId
+    ));
+}
+
 function pruneCeoSessionSnapshotCache(cache = {}) {
     const items = Object.values(cache || {})
         .map((entry) => cloneCeoSessionSnapshotCacheEntry(entry))
@@ -3327,6 +3339,15 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
     }
     const source = normalizeCeoTurnSource(snapshot?.source || "user");
     const turnId = normalizeCeoTurnId(snapshot?.turn_id || "");
+    const targetSessionId = String(sessionId || activeSessionId()).trim();
+    if (
+        cacheField === "preserved_turn"
+        && turnId
+        && ceoAssistantTurnAlreadyPersisted(turnId, { sessionId: targetSessionId })
+    ) {
+        if (targetSessionId) setCeoSessionSnapshotCache(targetSessionId, { [cacheField]: null });
+        return false;
+    }
     const status = String(snapshot.status || "").trim().toLowerCase();
     const existingTurn = getActiveCeoTurn(source, turnId);
     if (!existingTurn && !ceoNeedsAssistantTurn(snapshot)) return false;
@@ -3352,7 +3373,6 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         }
         icons();
     }, { scrollMode: "preserve" });
-    const targetSessionId = String(sessionId || activeSessionId()).trim();
     if (targetSessionId) {
         const inflightTurn = preferredExecutionTraceSummary
             ? { ...(snapshot || {}), execution_trace_summary: preferredExecutionTraceSummary }
@@ -3419,6 +3439,10 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
     const shouldScrollToLatest = !!S.ceoScrollToLatestOnSnapshot;
     S.ceoScrollToLatestOnSnapshot = false;
     const targetSessionId = String(sessionId || activeSessionId()).trim();
+    const normalizedPreservedTurn = (
+        preservedTurn
+        && ceoAssistantTurnAlreadyPersisted(preservedTurn?.turn_id || "", { messages, sessionId: targetSessionId })
+    ) ? null : preservedTurn;
     hideCeoContextLoadNotice();
     withCeoFeedBatch(() => {
         resetCeoFeed();
@@ -3443,7 +3467,7 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
             }
         });
         restoreCeoInflightTurn(
-            dedupeInflightUserMessageAgainstMessages(messages, preservedTurn),
+            dedupeInflightUserMessageAgainstMessages(messages, normalizedPreservedTurn),
             { sessionId: targetSessionId, cacheField: "preserved_turn" }
         );
         restoreCeoInflightTurn(
@@ -3454,7 +3478,7 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
             setCeoSessionSnapshotCache(targetSessionId, {
                 messages,
                 inflight_turn: inflightTurn,
-                preserved_turn: preservedTurn,
+                preserved_turn: normalizedPreservedTurn,
             });
         }
     }, {

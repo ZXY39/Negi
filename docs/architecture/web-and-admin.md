@@ -113,6 +113,7 @@ The backend contract behind that UI behavior is:
 - Browser-side CEO websocket payloads may now carry both `inflight_turn` and `preserved_turn`.
 - `inflight_turn` is the current real running turn. For heartbeat this means the heartbeat turn itself, not the earlier user bubble that is being kept on screen temporarily.
 - `preserved_turn` is a live-only carryover bubble that should remain visible until a later `ceo.turn.discard` closes it.
+- `preserved_turn` only exists for an older bubble that has not yet been superseded by a persisted assistant transcript entry with the same `turn_id`. Once that assistant turn is durable history, the backend/frontend should stop surfacing the preserved copy.
 - Frontend rendering should treat these as two separate bubbles. It must not reuse `preserved_turn.execution_trace_summary` as the `Interaction Flow` for the current heartbeat bubble.
 - Frontend trace fallback is only safe within the same rendered turn identity. Reusing the previous bubble's trace across `turn_id` or across `source=user -> heartbeat` is a contract bug.
 

@@ -354,6 +354,7 @@ def _build_inflight_turn_snapshot(
 def _build_preserved_turn_snapshot(
     session: Any,
     session_id: str,
+    persisted_session: Any | None = None,
 ) -> dict[str, Any] | None:
     snapshot: dict[str, Any] | None = None
     getter = getattr(session, "preserved_inflight_turn_snapshot", None)
@@ -365,6 +366,8 @@ def _build_preserved_turn_snapshot(
     if not isinstance(snapshot, dict):
         return None
     preserved_turn_id = str(snapshot.get("turn_id") or "").strip()
+    if preserved_turn_id and _assistant_turn_already_persisted(persisted_session, turn_id=preserved_turn_id):
+        return None
     current_snapshot = _build_inflight_turn_snapshot(session, session_id)
     current_turn_id = str((current_snapshot or {}).get("turn_id") or "").strip()
     current_source = str((current_snapshot or {}).get("source") or "").strip().lower()
@@ -381,7 +384,7 @@ def _build_live_turn_payload(
     persisted_session: Any | None = None,
 ) -> dict[str, Any]:
     inflight_turn = _build_inflight_turn_snapshot(session, session_id, persisted_session)
-    preserved_turn = _build_preserved_turn_snapshot(session, session_id)
+    preserved_turn = _build_preserved_turn_snapshot(session, session_id, persisted_session)
     payload: dict[str, Any] = {"inflight_turn": inflight_turn}
     if preserved_turn is not None:
         payload["preserved_turn"] = preserved_turn
@@ -552,6 +555,32 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
             item['tool_events'] = legacy_tool_events
         items.append(item)
     return items
+
+
+def _snapshot_message_turn_id(message: dict[str, Any] | None) -> str:
+    if not isinstance(message, dict):
+        return ""
+    direct = str(message.get("turn_id") or "").strip()
+    if direct:
+        return direct
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    return str(metadata.get("_transcript_turn_id") or "").strip()
+
+
+def _assistant_turn_already_persisted(persisted_session: Any | None, *, turn_id: str) -> bool:
+    normalized_turn_id = str(turn_id or "").strip()
+    if not normalized_turn_id:
+        return False
+    persisted_messages = getattr(persisted_session, "messages", None)
+    for raw in reversed(list(persisted_messages or [])):
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("role") or "").strip().lower() != "assistant":
+            continue
+        if _snapshot_message_turn_id(raw) != normalized_turn_id:
+            continue
+        return True
+    return False
 
 
 def _resolve_final_execution_trace_summary(
@@ -783,7 +812,11 @@ async def ceo_websocket(websocket: WebSocket):
             return
 
     async def _push_turn_patch() -> None:
-        await _push_stream_event('ceo.turn.patch', _build_live_turn_payload(session, session_id))
+        try:
+            persisted_session = transcript_store.get_or_create(session_id)
+        except Exception:
+            persisted_session = None
+        await _push_stream_event('ceo.turn.patch', _build_live_turn_payload(session, session_id, persisted_session))
 
     def _current_session_is_running() -> bool:
         status = str(getattr(session.state, 'status', '') or '').strip().lower()

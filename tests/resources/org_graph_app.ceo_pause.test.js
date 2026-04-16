@@ -463,6 +463,48 @@ test("render snapshot keeps preserved user flow separate from current heartbeat 
     assert.equal(heartbeatTurn?.flowEl?.hidden, true);
 });
 
+test("preserved turn is not re-rendered when an assistant message with the same turn_id already exists", () => {
+    const { renderCeoSnapshot, S } = loadApp();
+
+    renderCeoSnapshot(
+        [
+            {
+                role: "assistant",
+                turn_id: "turn-user-preserved",
+                content: "Already persisted final reply",
+                execution_trace_summary: {
+                    stages: [{ stage_id: "frontdoor-stage-user", stage_goal: "install skill" }],
+                },
+            },
+        ],
+        {
+            source: "heartbeat",
+            turn_id: "turn-heartbeat-current",
+            status: "running",
+            assistant_text: "heartbeat processing",
+        },
+        {
+            sessionId: "web:test",
+            preservedTurn: {
+                source: "user",
+                turn_id: "turn-user-preserved",
+                status: "running",
+                user_message: { content: "Install the skill" },
+                assistant_text: "Still working on it...",
+                execution_trace_summary: {
+                    stages: [{ stage_id: "frontdoor-stage-user", stage_goal: "install skill" }],
+                },
+            },
+        },
+    );
+
+    const preservedTurns = S.ceoPendingTurns.filter((turn) => turn.turnId === "turn-user-preserved");
+    const heartbeatTurns = S.ceoPendingTurns.filter((turn) => turn.turnId === "turn-heartbeat-current");
+
+    assert.equal(preservedTurns.length, 0);
+    assert.equal(heartbeatTurns.length, 1);
+});
+
 test("queued follow-ups drain as one batch request and render multiple user bubbles", () => {
     const context = loadApp();
     const { maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, S } = context;
