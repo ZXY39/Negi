@@ -1721,6 +1721,17 @@ class CeoMessageBuilder:
                 str(context_sources['capability_snapshot'].exposure_revision or '').strip()
                 or DEFAULT_CACHE_FAMILY_REVISION
             ),
+            exec_runtime_policy=(
+                getattr(getattr(self, '_loop', None), 'main_task_service', None)._current_exec_runtime_policy_payload()
+                if callable(
+                    getattr(
+                        getattr(getattr(self, '_loop', None), 'main_task_service', None),
+                        '_current_exec_runtime_policy_payload',
+                        None,
+                    )
+                )
+                else None
+            ),
         )
         dynamic_appendix_messages = upsert_frontdoor_tool_contract_message(
             list(dynamic_appendix_messages),

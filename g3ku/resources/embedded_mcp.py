@@ -138,6 +138,10 @@ class EmbeddedMCPTool(Tool):
 
     @property
     def model_description(self) -> str:
+        if isinstance(self._handler, Tool):
+            runtime_description = str(getattr(self._handler, "model_description", "") or "").strip()
+            if runtime_description:
+                return runtime_description
         configured = str((self._descriptor.metadata or {}).get("model_description") or "").strip()
         return configured or self.description
 
@@ -147,6 +151,10 @@ class EmbeddedMCPTool(Tool):
 
     @property
     def model_parameters(self) -> dict[str, Any]:
+        if isinstance(self._handler, Tool):
+            runtime_parameters = getattr(self._handler, "model_parameters", None)
+            if isinstance(runtime_parameters, dict):
+                return _normalize_parameters(runtime_parameters)
         configured = (self._descriptor.metadata or {}).get("model_parameters")
         if isinstance(configured, dict):
             return _normalize_parameters(configured)

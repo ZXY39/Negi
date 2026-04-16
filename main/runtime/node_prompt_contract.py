@@ -91,6 +91,7 @@ class NodeRuntimeToolContract:
     lightweight_tool_ids: list[str]
     selection_trace: dict[str, Any]
     candidate_tool_items: list[dict[str, str]] | None = None
+    exec_runtime_policy: dict[str, Any] | None = None
 
     def to_message_payload(self) -> dict[str, Any]:
         return {
@@ -120,6 +121,11 @@ class NodeRuntimeToolContract:
                 if str(item or '').strip()
             ],
             'model_visible_tool_selection_trace': _stable_selection_trace(self.selection_trace),
+            'exec_runtime_policy': (
+                dict(self.exec_runtime_policy)
+                if isinstance(self.exec_runtime_policy, dict)
+                else None
+            ),
         }
 
     def to_message(self) -> dict[str, str]:

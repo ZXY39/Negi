@@ -1301,6 +1301,52 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
     assert payload["hydrated_tool_names"] == ["filesystem_write"]
 
 
+@pytest.mark.asyncio
+async def test_message_builder_appends_frontdoor_runtime_tool_contract_with_exec_runtime_policy() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    loop = _loop(memory_manager)
+    loop.main_task_service = SimpleNamespace(
+        _current_exec_runtime_policy_payload=lambda: {
+            'mode': 'full_access',
+            'guardrails_enabled': False,
+            'summary': 'exec will execute shell commands without exec-side guardrails.',
+        }
+    )
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="inspect the repo with exec",
+        exposure={
+            "skills": [],
+            "tool_families": [
+                _tool_resource_record("exec", "Shell execution helper."),
+            ],
+            "tool_names": ["exec", "load_tool_context"],
+        },
+        persisted_session=None,
+        hydrated_tool_names=["exec"],
+    )
+
+    contract_messages = [
+        item
+        for item in list(result.dynamic_appendix_messages or [])
+        if isinstance(item, dict)
+        and str(item.get("role") or "").strip().lower() == "user"
+        and isinstance(item.get("content"), str)
+        and str(item.get("content") or "").strip()
+    ]
+
+    assert len(contract_messages) == 1
+    payload = json.loads(contract_messages[0]["content"])
+    assert payload["exec_runtime_policy"] == {
+        'mode': 'full_access',
+        'guardrails_enabled': False,
+        'summary': 'exec will execute shell commands without exec-side guardrails.',
+    }
+
+
 def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stale_message() -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 

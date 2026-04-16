@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: exec
-description: Execute read-only shell commands with structured summaries plus content
+description: Execute shell commands with structured summaries plus content
   refs. Commands run in the host shell and default to the task-scoped temp directory
   when the runtime provides `task_temp_dir`, unless an explicit working_dir is provided.
 tool_result_delivery_contract: runtime_managed
@@ -10,8 +10,8 @@ source:
   url: ''
   ref: ''
 current_version:
-  summary: Resource-local exec tool. The manifest, handler, and read-only execution
-    contract together define the current behavior.
+  summary: Resource-local exec tool. The manifest, handler, and runtime execution
+    policy together define the current behavior.
   compare_rule: Treat manifest, main/, parameter contract, permissions, settings,
     and returned payload changes as version-relevant.
   source_of_truth: resource.yaml, main/, and toolskills together define the effective
@@ -32,6 +32,7 @@ settings:
   path_append: ''
   restrict_to_workspace: false
   enable_safety_guard: false
+  execution_mode: governed
 parameters:
   type: object
   properties:

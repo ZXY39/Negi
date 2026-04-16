@@ -7,6 +7,11 @@ from g3ku.json_schema_utils import (
     normalize_object_json_schema,
     render_parameter_contract_markdown,
 )
+from main.governance.exec_tool_policy import (
+    EXEC_TOOL_EXECUTOR_NAME,
+    EXEC_TOOL_FAMILY_ID,
+    resolve_exec_runtime_policy_payload,
+)
 
 
 def find_tool_family(
@@ -171,6 +176,12 @@ def build_tool_toolskill_payload(
         for item in list(parameters_schema.get("required") or [])
         if str(item or "").strip()
     ]
+    exec_runtime_policy = None
+    if requested_name in {EXEC_TOOL_FAMILY_ID, EXEC_TOOL_EXECUTOR_NAME} or family_tool_id == EXEC_TOOL_FAMILY_ID:
+        exec_runtime_policy = resolve_exec_runtime_policy_payload(
+            family=family,
+            descriptor=effective_descriptor,
+        )
 
     return {
         "tool_id": requested_name,
@@ -191,4 +202,5 @@ def build_tool_toolskill_payload(
         "example_arguments": build_example_from_schema(parameters_schema),
         "warnings": warnings,
         "errors": errors,
+        "exec_runtime_policy": exec_runtime_policy,
     }

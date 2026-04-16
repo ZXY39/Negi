@@ -44,6 +44,10 @@ from main.governance import (
     list_effective_skill_ids,
     list_effective_tool_names,
 )
+from main.governance.exec_tool_policy import (
+    exec_tool_supports_execution_mode,
+    merge_exec_execution_mode_metadata,
+)
 from main.governance.roles import normalize_public_allowed_roles
 from main.governance.tool_context import build_tool_toolskill_payload, resolve_primary_executor_name
 from main.protocol import now_iso
@@ -732,6 +736,7 @@ class _StandaloneResourceService:
         session_id: str = 'web:shared',
         enabled: bool | None = None,
         allowed_roles_by_action: dict[str, list[str]] | None = None,
+        execution_mode: str | None = None,
     ):
         _ = session_id
         family = self._raw_tool_family(tool_id)
@@ -767,10 +772,21 @@ class _StandaloneResourceService:
                 else normalize_public_allowed_roles([str(role) for role in list(roles or [])])
             )
             actions.append(action.model_copy(update={'allowed_roles': next_roles}))
+        if execution_mode is not None and not exec_tool_supports_execution_mode(target_tool_id):
+            raise _ResourceMutationBlockedError(
+                code='tool_execution_mode_unsupported',
+                message='execution_mode is only supported for exec_runtime.',
+                resource_kind='tool_family',
+                resource_id=target_tool_id,
+            )
         updated = family.model_copy(
             update={
                 'enabled': family.enabled if enabled is None else bool(enabled),
                 'actions': actions,
+                'metadata': merge_exec_execution_mode_metadata(
+                    getattr(family, 'metadata', {}) or {},
+                    execution_mode=execution_mode,
+                ),
             }
         )
         self._governance_store.upsert_tool_family(updated, updated_at=now_iso())
@@ -2544,7 +2560,13 @@ async def update_tool_policy(tool_id: str, payload: dict = Body(...), session_id
                 for action_id, roles in actions_payload.items()
             }
         try:
-            item = service.update_tool_policy(tool_id, session_id=session_id, enabled=payload.get('enabled'), allowed_roles_by_action=normalized_actions)
+            item = service.update_tool_policy(
+                tool_id,
+                session_id=session_id,
+                enabled=payload.get('enabled'),
+                allowed_roles_by_action=normalized_actions,
+                execution_mode=payload.get('execution_mode'),
+            )
         except ValueError as exc:
             raise _resource_delete_http_error(exc) from exc
         if item is None:

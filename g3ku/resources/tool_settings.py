@@ -17,6 +17,7 @@ class ExecToolSettings(Base):
     path_append: str = ""
     restrict_to_workspace: bool = False
     enable_safety_guard: bool = False
+    execution_mode: str = "governed"
 
 
 class FilesystemToolSettings(Base):

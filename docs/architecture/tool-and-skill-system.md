@@ -127,6 +127,8 @@ Maintenance note for surfaced fixed builtins:
 - These executors still remain directly callable through the fixed-builtin path when the runtime exposes them.
 - They no longer consume semantic top-k budget. CEO/frontdoor semantic narrowing now removes fixed builtin executors from the retrieval-side visible family/executor set before dense/rerank. Node context selection does the same before applying its 16-tool semantic candidate cap.
 - Treat semantic top-k as an extension-tool budget, not as a budget shared with fixed builtins. If an extension tool is missing from the shortlist, debug semantic recall against the filtered non-fixed executor set first.
+- `exec` now has a second contract axis besides RBAC: surfaced family `exec_runtime` may carry persisted `metadata.execution_mode`, and the runtime tool contract / `load_tool_context` payload is the authoritative place where the current mode is exposed to models.
+- The current supported modes are `governed` and `full_access`. `governed` keeps exec-side guardrails; `full_access` removes exec-side read-only / path / safety checks, but it does not bypass Tool Admin enablement or RBAC.
 
 - `candidate_tool_names` / `candidate_skill_ids` 现在都采用同一语义：`RBAC 可见 ∩ 语义召回命中` 的当前候选集合。
 - 如果语义召回不可用，候选集合直接退化为 `RBAC 可见集合`，而不是停止运行。
@@ -402,6 +404,13 @@ This changes how maintainers should reason about surfaced tools such as `exec`, 
 - If the executor belongs to a surfaced tool family, its model visibility now follows Tool Admin RBAC exactly.
 - A surfaced fixed-builtin executor may still be listed in frontdoor or execution fixed-builtin sets, but it only becomes actually visible/callable when the surfaced family/action RBAC allows it.
 - When debugging "the tool still appears after I removed all roles", inspect the persisted `tool_families` record and the derived `role_policy_matrix` first. Do not assume there is still any fallback to `ceo` or `execution`.
+
+### Exec Runtime Mode Contract
+
+- `exec_runtime` is currently the only surfaced tool family with an extra persisted mode field in Tool Admin: `tool_families.metadata.execution_mode`.
+- The resource manifest may still provide a default `settings.execution_mode`, but the persisted family metadata is the runtime source of truth once an operator saves an override.
+- Resource refresh must preserve that metadata override; otherwise Tool Admin would show one mode while runtime execution silently falls back to another.
+- `load_tool_context("exec")` / `load_tool_context("exec_runtime")`, node dynamic contracts, and frontdoor dynamic contracts should all agree on the same `exec_runtime_policy` payload. If they disagree, debug the persisted tool family record first, then the contract-injection path.
 
 Internal fixed tools that are not surfaced in Tool Admin remain outside this contract.
 

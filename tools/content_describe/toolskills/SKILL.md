@@ -9,4 +9,4 @@ Provide:
 
 Use it to get metadata, line counts, wrapper resolution details, and summary information without pulling the full body into context.
 
-Directories are not supported in path mode. Use read-only `exec` for local directory exploration and subtree searches.
+Directories are not supported in path mode. Use `exec` for local directory exploration and subtree searches, and follow the current runtime tool contract for its active execution mode.

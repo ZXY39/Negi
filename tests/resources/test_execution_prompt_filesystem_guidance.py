@@ -22,3 +22,19 @@ def test_execution_prompts_use_exec_for_reading_and_filesystem_for_mutation() ->
         assert "`filesystem_list`" not in prompt
         assert "`filesystem_search`" not in prompt
         assert "`filesystem_describe`" not in prompt
+
+
+def test_prompts_and_exec_manifest_do_not_hardcode_exec_as_read_only() -> None:
+    prompt_paths = (
+        "g3ku/runtime/prompts/ceo_frontdoor.md",
+        "main/prompts/node_execution.md",
+        "main/prompts/acceptance_execution.md",
+    )
+    for relative_path in prompt_paths:
+        prompt = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        assert "只读 `exec`" not in prompt
+        assert "read-only `exec`" not in prompt
+        assert "runtime tool contract" in prompt or "load_tool_context" in prompt
+
+    exec_manifest = (REPO_ROOT / "tools/exec/resource.yaml").read_text(encoding="utf-8")
+    assert "read-only shell commands" not in exec_manifest
