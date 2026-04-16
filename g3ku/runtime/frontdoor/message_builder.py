@@ -28,7 +28,11 @@ from g3ku.runtime.semantic_context_summary import (
     semantic_summary_refresh_decision,
     summarize_global_context_model_first,
 )
-from g3ku.runtime.stage_prompt_compaction import STAGE_EXTERNALIZED_PREFIX, decompose_stage_prompt_messages
+from g3ku.runtime.stage_prompt_compaction import (
+    STAGE_EXTERNALIZED_PREFIX,
+    completed_stage_blocks,
+    stage_prompt_prefix,
+)
 from g3ku.runtime.tool_visibility import (
     CEO_FIXED_BUILTIN_TOOL_NAMES,
     filter_tool_names_for_semantic_top_k,
@@ -36,6 +40,7 @@ from g3ku.runtime.tool_visibility import (
 )
 from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
+from g3ku.runtime.frontdoor.raw_stage_renderer import retained_raw_stage_messages
 from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
 from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract, upsert_frontdoor_tool_contract_message
 from g3ku.runtime.web_ceo_sessions import (
@@ -45,7 +50,6 @@ from g3ku.runtime.web_ceo_sessions import (
     normalize_task_memory,
     transcript_messages,
 )
-from main.runtime.stage_budget import STAGE_TOOL_NAME
 
 DEFAULT_FRONTDOOR_SKILL_INVENTORY_TOP_K = 16
 DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K = 16
@@ -1438,6 +1442,52 @@ class CeoMessageBuilder:
             'current_user_in_transcript': current_user_in_transcript,
         }
 
+    def _frontdoor_prompt_history(
+        self,
+        *,
+        history_state: dict[str, Any],
+        frontdoor_stage_state: dict[str, Any] | None,
+        query_text: str,
+        user_metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        has_stage_state = bool(list(dict(frontdoor_stage_state or {}).get("stages") or []))
+        history_source = str(history_state.get("history_source") or "").strip() or "transcript"
+        history_messages = [
+            dict(item)
+            for item in list(history_state.get("history_messages") or [])
+            if isinstance(item, dict)
+        ]
+        if has_stage_state and history_source == "checkpoint":
+            transcript_history = [
+                dict(item)
+                for item in list(history_state.get("transcript_history") or [])
+                if isinstance(item, dict)
+            ]
+            if transcript_history:
+                history_messages = transcript_history
+                history_source = "transcript"
+            else:
+                history_messages = [
+                    dict(item)
+                    for item in history_messages
+                    if message_role(item) == "user"
+                ]
+        _prefix, cleaned_messages = stage_prompt_prefix(
+            history_messages,
+            preserve_leading_system=False,
+            preserve_leading_user=False,
+        )
+        current_user_in_history = self._history_has_current_user(
+            history_messages=cleaned_messages,
+            query_text=query_text,
+            user_metadata=user_metadata,
+        )
+        return {
+            "history_messages": cleaned_messages,
+            "history_source": history_source,
+            "current_user_in_history": current_user_in_history,
+        }
+
     def _inject_turn_context(
         self,
         *,
@@ -1501,21 +1551,31 @@ class CeoMessageBuilder:
             user_metadata=user_metadata,
         )
         history_elapsed_ms = self._elapsed_ms(history_started_at)
-        raw_history_messages = list(history_state['history_messages'])
         normalized_frontdoor_stage_state = dict(frontdoor_stage_state or {})
-        stage_parts = decompose_stage_prompt_messages(
-            raw_history_messages,
-            stage_state=normalized_frontdoor_stage_state,
-            keep_latest_completed_stages=3,
-            stage_tool_name=STAGE_TOOL_NAME,
-            preserve_leading_system=False,
-            preserve_leading_user=False,
+        prompt_history_state = self._frontdoor_prompt_history(
+            history_state=history_state,
+            frontdoor_stage_state=normalized_frontdoor_stage_state,
+            query_text=query_text,
+            user_metadata=user_metadata,
         )
-        stage_workset_history = [*list(stage_parts["completed_blocks"]), *list(stage_parts["active_window"])]
-        compression_blocks_for_summary = _externalized_completed_blocks_for_global_summary(stage_parts["completed_blocks"])
+        raw_history_messages = list(prompt_history_state["history_messages"])
+        effective_history_source = str(prompt_history_state["history_source"] or "").strip() or str(
+            history_state["history_source"] or ""
+        )
+        current_user_in_history = bool(prompt_history_state["current_user_in_history"])
+        retained_raw_stage_blocks, retained_completed_stage_ids = retained_raw_stage_messages(
+            normalized_frontdoor_stage_state,
+            keep_latest_completed_stages=3,
+        )
+        completed_blocks = completed_stage_blocks(
+            normalized_frontdoor_stage_state,
+            skip_stage_ids=retained_completed_stage_ids,
+        )
+        stage_workset_history = [*list(completed_blocks), *list(retained_raw_stage_blocks)]
+        compression_blocks_for_summary = _externalized_completed_blocks_for_global_summary(completed_blocks)
         global_zone_source = [
             *list(compression_blocks_for_summary),
-            *list(stage_parts["global_zone_source"]),
+            *list(raw_history_messages),
             *self._hidden_internal_summary_messages(
                 persisted_session=persisted_session,
                 checkpoint_messages=checkpoint_messages,
@@ -1547,11 +1607,6 @@ class CeoMessageBuilder:
             **dict(semantic_context_state or {}),
         }
         global_summary_text = str(semantic_state.get("summary_text") or "").strip()
-        retained_completed_stage_ids = {
-            str(item or "").strip()
-            for item in set(stage_parts.get("retained_completed_stage_ids") or set())
-            if str(item or "").strip()
-        }
         completed_stage_index = max(
             (
                 int(item.get("stage_index") or 0)
@@ -1564,7 +1619,7 @@ class CeoMessageBuilder:
         )
         refresh_decision = semantic_summary_refresh_decision(
             semantic_state=semantic_state,
-            history_source=str(history_state["history_source"] or ""),
+            history_source=effective_history_source,
             prompt_tokens=prompt_estimate_tokens,
             trigger_tokens=int(thresholds["trigger_tokens"]),
             pressure_warn_tokens=int(thresholds["pressure_warn_tokens"]),
@@ -1620,12 +1675,12 @@ class CeoMessageBuilder:
             if str(global_summary_text or "").strip()
             else None
         )
-        covered_count = len(stage_parts["global_zone_source"])
+        covered_count = len(raw_history_messages)
         semantic_state = {
             **default_semantic_context_state(),
             **semantic_state,
             "summary_text": global_summary_text,
-            "coverage_history_source": str(history_state["history_source"] or ""),
+            "coverage_history_source": effective_history_source,
             "coverage_message_index": max(-1, covered_count - 1),
             "coverage_stage_index": max(
                 (
@@ -1646,7 +1701,7 @@ class CeoMessageBuilder:
         }
         semantic_state["summary_text"] = global_summary_text
         if summary_generated:
-            semantic_state["coverage_history_source"] = str(history_state["history_source"] or "")
+            semantic_state["coverage_history_source"] = effective_history_source
             semantic_state["coverage_message_index"] = max(-1, len(global_zone_source) - 1)
             semantic_state["coverage_stage_index"] = completed_stage_index
         else:
@@ -1679,9 +1734,12 @@ class CeoMessageBuilder:
         }
         staged_history_for_injection = [
             *([global_summary_message] if global_summary_message is not None else []),
+            *raw_history_messages,
             *stage_workset_history,
         ]
         history_state['history_messages'] = staged_history_for_injection
+        history_state['history_source'] = effective_history_source
+        history_state['current_user_in_history'] = current_user_in_history
         task_ledger_state = self._task_ledger_state(persisted_session)
         task_ledger_text = build_task_ledger_summary(task_ledger_state)
         turn_overlay_parts = list(context_sources['turn_overlay_parts'])
@@ -1778,7 +1836,7 @@ class CeoMessageBuilder:
                 'matched_terms': list(context_sources['memory_write_terms']),
                 'visible': bool(context_sources['memory_write_visible']),
             },
-            'history_source': str(history_state['history_source']),
+            'history_source': effective_history_source,
             'checkpoint_message_count': len(history_state['checkpoint_history']),
             'transcript_message_count': len(history_state['transcript_history']),
             'raw_history_message_count': len(raw_history_messages),
@@ -1797,7 +1855,7 @@ class CeoMessageBuilder:
             'semantic_context_state': dict(semantic_state),
             'compression_state_payload': dict(compression_state_payload),
             'current_user_in_checkpoint': bool(history_state['current_user_in_checkpoint']),
-            'current_user_in_history': bool(history_state['current_user_in_history']),
+            'current_user_in_history': current_user_in_history,
             'current_user_in_transcript': bool(history_state['current_user_in_transcript']),
             'task_ledger_present': bool(task_ledger_text),
             'task_ledger_task_count': len(list(task_ledger_state.get('task_ids') or [])),
@@ -1822,9 +1880,9 @@ class CeoMessageBuilder:
                 'retrieved_context_present': bool(context_sources['retrieved_markdown']),
             },
             'message_injection': {
-                'history_source': str(history_state['history_source']),
+                'history_source': effective_history_source,
                 'history_message_count': len(history_state['history_messages']),
-                'current_user_appended': not bool(history_state['current_user_in_history']),
+                'current_user_appended': not current_user_in_history,
                 'retrieved_context_in_model_messages': bool(
                     context_sources['retrieved_markdown'] and not context_sources['split_prompt_builder']
                 ),

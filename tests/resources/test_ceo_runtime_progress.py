@@ -1398,9 +1398,33 @@ def test_runtime_agent_session_separates_current_heartbeat_snapshot_from_preserv
 
 
 @pytest.mark.asyncio
-async def test_new_user_turn_clears_stale_frontdoor_stage_and_compression_before_first_running_snapshot(
+@pytest.mark.parametrize(
+    ("prompt_input", "expected_source"),
+    [
+        pytest.param("new prompt", None, id="user-turn"),
+        pytest.param(
+            UserInputMessage(
+                content="heartbeat prompt",
+                metadata={"heartbeat_internal": True, "heartbeat_reason": "tool_background"},
+            ),
+            "heartbeat",
+            id="heartbeat-turn",
+        ),
+        pytest.param(
+            UserInputMessage(
+                content="cron prompt",
+                metadata={"cron_internal": True, "cron_job_id": "job-77"},
+            ),
+            "cron",
+            id="cron-turn",
+        ),
+    ],
+)
+async def test_turn_start_clears_stale_frontdoor_stage_and_compression_before_first_running_snapshot(
     tmp_path: Path,
     monkeypatch,
+    prompt_input: str | UserInputMessage,
+    expected_source: str | None,
 ) -> None:
     async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
         _ = force, reason
@@ -1437,6 +1461,7 @@ async def test_new_user_turn_clears_stale_frontdoor_stage_and_compression_before
     session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
     session._frontdoor_stage_state = _sample_frontdoor_stage_state()
     session._compression_state = {"status": "running", "text": "旧压缩状态", "source": "user"}
+    session._frontdoor_selection_debug = {"selected_tool_names": ["filesystem_write"]}
     captured: dict[str, object] = {}
 
     async def _listener(event: AgentEvent) -> None:
@@ -1449,12 +1474,17 @@ async def test_new_user_turn_clears_stale_frontdoor_stage_and_compression_before
             captured["snapshot"] = session.inflight_turn_snapshot()
 
     session.subscribe(_listener)
-    await session.prompt("new prompt")
+    await session.prompt(prompt_input)
 
     snapshot = captured.get("snapshot")
     assert isinstance(snapshot, dict)
     assert snapshot.get("execution_trace_summary") == {}
     assert snapshot.get("compression") == {}
+    assert "frontdoor_selection_debug" not in snapshot
+    if expected_source is None:
+        assert "source" not in snapshot
+    else:
+        assert snapshot.get("source") == expected_source
 
 
 @pytest.mark.asyncio

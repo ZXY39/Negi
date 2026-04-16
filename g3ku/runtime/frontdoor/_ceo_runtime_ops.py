@@ -1160,6 +1160,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         item: dict[str, Any] = {
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
+            "arguments": arguments,
             "arguments_text": self._tool_invocation_hint(tool_name, arguments),
             "output_text": result_text,
             "output_ref": str(progress_payload.get("output_ref") or "").strip(),

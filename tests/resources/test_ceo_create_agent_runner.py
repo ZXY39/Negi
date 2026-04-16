@@ -771,6 +771,8 @@ def test_frontdoor_stage_state_after_tool_cycle_writes_precise_round_tools() -> 
     assert rounds[0]["tool_names"] == ["exec", "load_tool_context"]
     assert [tool["tool_call_id"] for tool in rounds[0]["tools"]] == ["call-exec-1", "call-load-1"]
     assert [tool["tool_name"] for tool in rounds[0]["tools"]] == ["exec", "load_tool_context"]
+    assert rounds[0]["tools"][0]["arguments"] == {"command": "pwd"}
+    assert rounds[0]["tools"][1]["arguments"] == {"tool_id": "filesystem_write"}
     assert rounds[0]["tools"][0]["arguments_text"] == "exec (command=pwd)"
     assert rounds[0]["tools"][0]["status"] == "success"
     assert rounds[0]["tools"][0]["output_text"] == '{"status":"success","head_preview":"D:\\\\NewProjects\\\\G3KU"}'

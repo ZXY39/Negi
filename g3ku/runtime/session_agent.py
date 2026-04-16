@@ -1061,6 +1061,8 @@ class RuntimeAgentSession:
         if (
             not execution_trace_summary
             and not compression
+            and "turn_id" not in snapshot
+            and "source" not in snapshot
             and "user_message" not in snapshot
             and "assistant_text" not in snapshot
             and "last_error" not in snapshot
@@ -1617,6 +1619,7 @@ class RuntimeAgentSession:
         internal_source = self._internal_prompt_source(user_input)
         heartbeat_internal = internal_source == "heartbeat"
         cron_internal = internal_source == "cron"
+        reset_frontdoor_turn_state = internal_source in {None, "heartbeat", "cron"}
         if internal_source is None:
             await self._archive_paused_execution_context_for_ui_history()
             self._clear_manual_pause_waiting_reason_for_user_turn()
@@ -1642,8 +1645,9 @@ class RuntimeAgentSession:
             self._pending_tool_call_names.clear()
             self._pending_tool_name_calls.clear()
             self._background_tool_targets.clear()
-            if internal_source is None:
-                # Fresh user turns should never inherit previous turn stage/compression snapshots.
+            if reset_frontdoor_turn_state:
+                # Fresh visible turns and internal heartbeat/cron turns each start from
+                # their own frontdoor runtime window.
                 self._frontdoor_stage_state = {}
                 self._compression_state = {}
                 self._frontdoor_selection_debug = {}

@@ -412,6 +412,14 @@ This leaves two distinct mechanisms only:
 - Stage workset compaction for the near-field prompt, shared with the execution-stage prompt logic.
 - Global semantic summary refresh for older context outside that near-field workset.
 
+For the CEO/frontdoor path, the near-field stage workset now has a stricter source-of-truth split:
+
+- Retained raw stage replay is rendered directly from the current turn `frontdoor_stage_state.stages[].rounds[].tools` snapshot.
+- Transcript / checkpoint history no longer serves as the authoritative source for uncompressed stage replay. It still carries non-stage conversational continuity and global-summary source material.
+- Older completed stages still enter the prompt as `STAGE_COMPACT` / `STAGE_EXTERNALIZED` blocks, but the retained raw window is now stage-scoped JSON blocks derived from `frontdoor_stage_state`, not recovered from historical tool messages.
+- The retained completed-stage window is computed from the current turn stage state itself. Even if there is no active stage, the latest completed normal stages can still stay in raw form.
+- Round-level tool records now preserve normalized raw `arguments` together with the existing output fields. Small outputs remain inline in `output_text`; large outputs still stay externalized as `output_ref` plus `output_preview_text`, and the prompt renderer does not read artifact bodies back inline.
+
 When a maintainer sees a prompt continuity issue, the first questions should now be:
 
 - Was the relevant context still inside the retained stage workset?
@@ -422,6 +430,8 @@ When a maintainer sees a prompt continuity issue, the first questions should now
 Heartbeat and cron turns now share the same strict internal-turn contract.
 
 - They still execute through `RuntimeAgentSession.prompt(...)` with their own internal source metadata.
+- Like a fresh visible user turn, each heartbeat / cron turn now clears the session-side `frontdoor_stage_state`, `compression_state`, and `frontdoor_selection_debug` before prompt assembly. They no longer inherit the previous visible turn's frontdoor stage window as a special case.
+- This means heartbeat / cron stage retention, recent-stage counting, and compaction windows are scoped to the current internal turn only.
 - Service-layer code must not auto-retry tasks or synthesize fallback assistant replies on behalf of the model.
 - An internal turn that ends with `HEARTBEAT_OK` may surface a live-only UI ACK event, but it does not become transcript history.
 - Maintainers should distinguish live UI state such as inflight snapshots and internal ACK bubbles from durable assistant transcript messages.
