@@ -1,0 +1,18 @@
+schema_version: 1
+kind: skill
+name: "web-access"
+description: "在开始联网操作前，先检查 CDP 模式可用性："
+trigger:
+  keywords:
+    - "web-access"
+    - "SKILL.md"
+  always: false
+requires:
+  tools: []
+  bins: []
+  env: []
+content:
+  main: SKILL.md
+exposure:
+  agent: true
+  main_runtime: true
