@@ -4517,6 +4517,65 @@ def test_update_tool_policy_endpoint_preserves_empty_action_role_lists():
     assert response.json()['item']['actions'][0]['allowed_roles'] == []
 
 
+def test_update_tool_policy_endpoint_forwards_exec_execution_mode():
+    captured: dict[str, object] = {}
+    family = ToolFamilyRecord(
+        tool_id='exec_runtime',
+        display_name='Exec Runtime',
+        description='Execute shell commands.',
+        primary_executor_name='exec',
+        enabled=True,
+        available=True,
+        source_path='tools/exec',
+        actions=[ToolActionRecord(action_id='run', label='Run Command', allowed_roles=['ceo', 'execution'])],
+        metadata={},
+    )
+
+    class _StubService:
+        async def startup(self) -> None:
+            return None
+
+        def update_tool_policy(
+            self,
+            tool_id: str,
+            *,
+            session_id: str,
+            enabled=None,
+            allowed_roles_by_action=None,
+            execution_mode=None,
+        ):
+            captured['tool_id'] = tool_id
+            captured['session_id'] = session_id
+            captured['enabled'] = enabled
+            captured['allowed_roles_by_action'] = allowed_roles_by_action
+            captured['execution_mode'] = execution_mode
+            return family.model_copy(
+                update={
+                    'metadata': {
+                        **dict(family.metadata or {}),
+                        'execution_mode': execution_mode,
+                    }
+                }
+            )
+
+    client = TestClient(_build_app(_StubService()))
+    response = client.put(
+        '/api/resources/tools/exec_runtime/policy',
+        params={'session_id': 'web:shared'},
+        json={'execution_mode': 'full_access'},
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        'tool_id': 'exec_runtime',
+        'session_id': 'web:shared',
+        'enabled': None,
+        'allowed_roles_by_action': None,
+        'execution_mode': 'full_access',
+    }
+    assert response.json()['item']['metadata']['execution_mode'] == 'full_access'
+
+
 @pytest.mark.asyncio
 async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_path: Path):
     workspace = tmp_path / 'workspace'
@@ -4856,6 +4915,103 @@ async def test_tool_policy_empty_roles_persist_across_reload_for_exec_runtime(tm
     finally:
         await service.close()
         manager.close()
+
+
+@pytest.mark.asyncio
+async def test_exec_execution_mode_persists_across_reload_and_is_exposed_in_tool_detail(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'exec', 'memory_runtime')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+        client = TestClient(_build_app(service))
+
+        policy_response = client.put(
+            '/api/resources/tools/exec_runtime/policy',
+            params={'session_id': 'web:shared'},
+            json={'execution_mode': 'full_access'},
+        )
+        assert policy_response.status_code == 200
+        assert policy_response.json()['item']['metadata']['execution_mode'] == 'full_access'
+
+        reloaded = client.post('/api/resources/reload', params={'session_id': 'web:shared'}, json={})
+        assert reloaded.status_code == 200
+        assert reloaded.json()['ok'] is True
+
+        detail = client.get('/api/resources/tools/exec_runtime')
+        assert detail.status_code == 200
+        assert detail.json()['item']['metadata']['execution_mode'] == 'full_access'
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_load_tool_context_includes_exec_runtime_policy(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'exec', 'load_tool_context')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-service-bind')
+    service.bind_resource_manager(manager)
+
+    try:
+        await service.startup()
+        updated = service.update_tool_policy(
+            'exec_runtime',
+            session_id='web:shared',
+            execution_mode='full_access',
+        )
+        assert updated is not None
+        service._visible_tool_family_map = lambda **kwargs: {  # type: ignore[method-assign]
+            'exec_runtime': updated,
+            'exec': updated,
+        }
+
+        payload = service.load_tool_context(
+            actor_role='ceo',
+            session_id='web:shared',
+            tool_id='exec',
+        )
+
+        assert payload['ok'] is True
+        assert payload['tool_id'] == 'exec'
+        assert payload['exec_runtime_policy'] == {
+            'mode': 'full_access',
+            'guardrails_enabled': False,
+            'summary': 'exec will execute shell commands without exec-side guardrails.',
+        }
+    finally:
+        await service.close()
+        manager.close()
+
 
 def test_china_bridge_channels_endpoint_ignores_stale_error_when_ceo_model_missing(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'

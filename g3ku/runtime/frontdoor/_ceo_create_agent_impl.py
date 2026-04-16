@@ -312,6 +312,11 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             rbac_visible_tool_names=list(state.get("rbac_visible_tool_names") or []),
             rbac_visible_skill_ids=list(state.get("rbac_visible_skill_ids") or []),
             contract_revision=self._prompt_cache_family_revision(state),
+            exec_runtime_policy=(
+                self._loop.main_task_service._current_exec_runtime_policy_payload()
+                if callable(getattr(getattr(self._loop, "main_task_service", None), "_current_exec_runtime_policy_payload", None))
+                else None
+            ),
         )
         return upsert_frontdoor_tool_contract_message(normalized_dynamic_messages, frontdoor_tool_contract)
 

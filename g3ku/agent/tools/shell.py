@@ -10,6 +10,12 @@ from typing import Any
 
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.project_environment import apply_project_environment, resolve_project_environment
+from main.governance.exec_tool_policy import (
+    EXEC_TOOL_FAMILY_ID,
+    EXECUTION_MODE_FULL_ACCESS,
+    normalize_exec_execution_mode,
+    resolve_exec_execution_mode,
+)
 
 
 class ExecTool(Tool):
@@ -27,6 +33,7 @@ class ExecTool(Tool):
         restrict_to_workspace: bool = False,
         enable_safety_guard: bool = False,
         path_append: str = "",
+        execution_mode_default: str = "governed",
         content_store: Any = None,
         main_task_service: Any = None,
     ):
@@ -50,6 +57,7 @@ class ExecTool(Tool):
         self.restrict_to_workspace = restrict_to_workspace
         self.enable_safety_guard = enable_safety_guard
         self.path_append = path_append
+        self.execution_mode_default = normalize_exec_execution_mode(execution_mode_default)
         self.content_store = content_store
         self.main_task_service = main_task_service
 
@@ -59,7 +67,14 @@ class ExecTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Execute a read-only shell command and return its output."
+        return "Execute a shell command and return its output."
+
+    @property
+    def model_description(self) -> str:
+        execution_mode = self._resolve_execution_mode()
+        if execution_mode == EXECUTION_MODE_FULL_ACCESS:
+            return "Execute shell commands without exec-side guardrails and return structured output."
+        return "Execute shell commands with exec-side guardrails and return structured output."
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -81,33 +96,35 @@ class ExecTool(Tool):
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
         runtime = kwargs.pop("__g3ku_runtime", None) or {}
         cwd = self._resolve_cwd(working_dir, runtime=runtime)
-        readonly_error = self._enforce_read_only_command(command)
-        if readonly_error:
-            return self._build_payload(
-                status="error",
-                exit_code=None,
-                stdout_text="",
-                stderr_text=readonly_error,
-                error=readonly_error,
-            )
-        policy_error = self._enforce_command_path_policy(command, cwd, runtime=runtime)
-        if policy_error:
-            return self._build_payload(
-                status="error",
-                exit_code=None,
-                stdout_text="",
-                stderr_text=policy_error,
-                error=policy_error,
-            )
-        guard_error = self._guard_command(command, cwd)
-        if guard_error:
-            return self._build_payload(
-                status="error",
-                exit_code=None,
-                stdout_text="",
-                stderr_text=guard_error,
-                error=guard_error,
-            )
+        execution_mode = self._resolve_execution_mode()
+        if execution_mode != EXECUTION_MODE_FULL_ACCESS:
+            readonly_error = self._enforce_read_only_command(command)
+            if readonly_error:
+                return self._build_payload(
+                    status="error",
+                    exit_code=None,
+                    stdout_text="",
+                    stderr_text=readonly_error,
+                    error=readonly_error,
+                )
+            policy_error = self._enforce_command_path_policy(command, cwd, runtime=runtime)
+            if policy_error:
+                return self._build_payload(
+                    status="error",
+                    exit_code=None,
+                    stdout_text="",
+                    stderr_text=policy_error,
+                    error=policy_error,
+                )
+            guard_error = self._guard_command(command, cwd)
+            if guard_error:
+                return self._build_payload(
+                    status="error",
+                    exit_code=None,
+                    stdout_text="",
+                    stderr_text=guard_error,
+                    error=guard_error,
+                )
 
         resource_state = self._capture_resource_tree_state()
         env = self._build_subprocess_env(runtime=runtime, cwd=cwd)
@@ -178,6 +195,21 @@ class ExecTool(Tool):
             )
         finally:
             self._notify_resource_change(resource_state, runtime=runtime, trigger="tool:exec")
+
+    def _resolve_execution_mode(self) -> str:
+        service = getattr(self, "main_task_service", None)
+        family = None
+        if service is not None:
+            get_tool_family = getattr(service, "get_tool_family", None)
+            if callable(get_tool_family):
+                try:
+                    family = get_tool_family(EXEC_TOOL_FAMILY_ID)
+                except Exception:
+                    family = None
+        return resolve_exec_execution_mode(
+            family=family,
+            settings_payload={'execution_mode': self.execution_mode_default},
+        )
 
     def _enforce_read_only_command(self, command: str) -> str | None:
         normalized = str(command or "").strip()

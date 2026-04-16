@@ -177,6 +177,7 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - 当前唯一保留的例外是 `cron_internal`。这类内部轮次仍保留自己的 callable tool 集合，以便按既有协议继续调用 `cron(action="remove")` 完成自移除；维护时不要把这个 internal lane 与普通 CEO user turn 混为一谈。
 - 维护上不要把这个规则误读成“前门内部状态已经只剩 `submit_next_stage`”。`tool_names` 仍保存阶段内可恢复的完整工具池，供同一 turn 成功开阶段后的下一次 model call 立即恢复完整 callable 列表；真正决定“此刻给模型看到什么”的，是前门的 callable-tool helper 与动态合同消息。
 - `g3ku/runtime/frontdoor/_ceo_create_agent_impl.py` 仍是 runner 入口，但它不再把 `create_agent + middleware` 当作前门主执行链；维护时应把 `_graph_*` 节点看成唯一权威路径。
+- frontdoor 与节点动态合同现在还会携带 `exec_runtime_policy`。这让 prompt 中不再需要把 exec 的“只读/受监管”规则写死为静态事实；维护者应优先把当前 exec 模式视为 runtime contract 的一部分，而不是 prompt 文案的一部分。
 
 维护上现在还要区分 frontdoor 的两份工具状态：
 
@@ -218,6 +219,7 @@ Additional maintenance note for fixed-builtin resource executors:
 - restore / recovery 只认 canonical frame / session state 中的 callable/candidate/hydrated/skill 字段；缺失时直接报“运行时工具合同损坏/缺失”，不再回退 bootstrap 文本、旧 transcript 或旧动态消息。
 - 排查“首轮明明选中了某个 skill，`submit_next_stage` 之后再 `load_skill_context` 却报 not candidate”时，先看节点 runtime frame 是否仍保留该 skill 的 `candidate_skill_ids` / `visible_skills`。如果 frame 还在而当轮 dynamic contract 已空，优先判断为 contract 重建链路或阶段压缩边界问题，而不是 selector 没命中。
 - 对 CEO/frontdoor，`frontdoor_stage_state`、`compression_state`、`semantic_context_state` 属于受保护运行时状态。工具合同刷新不能覆盖、清空或重置这三份状态。
+- `exec` 的执行模式现在也是受保护的 runtime-owned state：`ExecTool` 会在每次调用时重新读取当前 `exec_runtime` family metadata，而不是只在工具实例初始化时拍死一份本地配置。因此 Tool Admin 修改 mode 后，后续新的 `exec` 调用会立即生效，不需要项目重启，也不依赖重建现有 tool 实例。
 
 ### CEO Frontdoor Round Tool Ownership
 

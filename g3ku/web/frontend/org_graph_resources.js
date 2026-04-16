@@ -130,6 +130,18 @@ function toolActionsForDisplay(tool) {
     return actions.filter((action) => !hideToolAdminAction(tool, action));
 }
 
+function isExecToolFamily(tool) {
+    return String(tool?.tool_id || "").trim().toLowerCase() === "exec_runtime";
+}
+
+function execToolExecutionMode(tool) {
+    const policyMode = String(tool?.exec_runtime_policy?.mode || "").trim().toLowerCase();
+    if (policyMode) return policyMode;
+    const metadataMode = String(tool?.metadata?.execution_mode || "").trim().toLowerCase();
+    if (metadataMode) return metadataMode;
+    return "governed";
+}
+
 function filterTools() {
     const q = String(U.toolSearch.value || "").trim().toLowerCase();
     return S.tools.filter((tool) => {
@@ -1135,6 +1147,10 @@ function renderToolDetail() {
     const repairRequired = toolRepairRequired(S.selectedTool);
     const availabilityState = resourceAvailabilityStatus(S.selectedTool);
     const unavailableReasons = resourceAvailabilityReasons(S.selectedTool);
+    const execMode = execToolExecutionMode(S.selectedTool);
+    const execPolicy = S.selectedTool?.exec_runtime_policy && typeof S.selectedTool.exec_runtime_policy === "object"
+        ? S.selectedTool.exec_runtime_policy
+        : null;
     U.toolDetail.innerHTML = `
         <article class="resource-detail-card detail-modal-shell">
             <div class="detail-modal-header">
@@ -1167,6 +1183,27 @@ function renderToolDetail() {
                     <h3>描述</h3>
                     <div class="resource-copy-block">${esc(description || "暂无描述。")}</div>
                 </div>
+                ${isExecToolFamily(S.selectedTool) ? `
+                <div class="resource-section">
+                    <div class="tool-permission-heading">
+                        <h3>Execution Mode</h3>
+                        <p class="subtitle">保存后后续新的 exec 调用会立即应用该模式，无需重启项目。</p>
+                    </div>
+                    <div class="tool-permission-card">
+                        <div class="tool-role-toggle-group">
+                            <label class="role-toggle tool-role-toggle ${execMode === "governed" ? "checked" : ""}">
+                                <input type="radio" class="exec-mode-input" name="exec-mode" value="governed" ${execMode === "governed" ? "checked" : ""}>
+                                <span>governed</span>
+                            </label>
+                            <label class="role-toggle tool-role-toggle ${execMode === "full_access" ? "checked" : ""}">
+                                <input type="radio" class="exec-mode-input" name="exec-mode" value="full_access" ${execMode === "full_access" ? "checked" : ""}>
+                                <span>full_access</span>
+                            </label>
+                        </div>
+                        ${execPolicy?.summary ? `<div class="resource-copy-block">${esc(execPolicy.summary)}</div>` : ""}
+                    </div>
+                </div>
+                ` : ""}
                 <div class="resource-draft-hint${S.toolDirty ? " is-dirty" : ""}" ${S.toolDirty ? "" : "hidden"}></div>
                 <div class="resource-section">
                     <details class="resource-disclosure toolskill-disclosure">
@@ -1258,6 +1295,24 @@ function renderToolDetail() {
         queueToolAutosave(120);
     });
     U.toolDetail.querySelector("#tool-delete-btn")?.addEventListener("click", () => void requestDeleteTool());
+    U.toolDetail.querySelectorAll(".exec-mode-input").forEach((radio) => radio.addEventListener("change", (e) => {
+        if (!e.target?.checked || !S.selectedTool) return;
+        const nextMode = String(e.target.value || "governed").trim().toLowerCase() || "governed";
+        S.selectedTool.metadata = {
+            ...(S.selectedTool.metadata || {}),
+            execution_mode: nextMode,
+        };
+        S.selectedTool.exec_runtime_policy = {
+            ...(S.selectedTool.exec_runtime_policy || {}),
+            mode: nextMode,
+            guardrails_enabled: nextMode !== "full_access",
+            summary: nextMode === "full_access"
+                ? "exec will execute shell commands without exec-side guardrails."
+                : "exec will enforce exec-side guardrails before running shell commands.",
+        };
+        setToolDirty(true);
+        queueToolAutosave(120);
+    }));
     U.toolDetail.querySelectorAll(".tool-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
         const action = S.selectedTool.actions.find((item) => item.action_id === e.target.dataset.action);
         if (!action) return;
@@ -1287,6 +1342,7 @@ async function loadTools({ renderDetail = true } = {}) {
                     primary_executor_name: S.selectedTool?.primary_executor_name || next.primary_executor_name || "",
                     toolskill_content: S.selectedTool?.toolskill_content || "",
                     repair_required: next.repair_required ?? (next?.metadata?.repair_required === true),
+                    exec_runtime_policy: S.selectedTool?.exec_runtime_policy || next.exec_runtime_policy || null,
                 };
                 ensureToolPageForItem(selectedId);
             }
@@ -1321,6 +1377,7 @@ async function openTool(toolId, quiet = false) {
             primary_executor_name: toolskill?.primary_executor_name || tool?.primary_executor_name || "",
             toolskill_content: toolskill?.content || "",
             repair_required: toolskill?.repair_required ?? tool?.repair_required ?? (tool?.metadata?.repair_required === true),
+            exec_runtime_policy: toolskill?.exec_runtime_policy || tool?.exec_runtime_policy || null,
         };
         ensureToolPageForItem(toolId);
         S.toolDirty = false;
@@ -1348,6 +1405,7 @@ async function saveTool({
     const selectedId = String(S.selectedTool?.tool_id || "").trim();
     const displayName = String(S.selectedTool?.display_name || selectedId || "Tool").trim();
     const enabled = !!S.selectedTool?.enabled;
+    const execution_mode = isExecToolFamily(S.selectedTool) ? execToolExecutionMode(S.selectedTool) : undefined;
     const actions = Array.isArray(S.selectedTool?.actions)
         ? Object.fromEntries(
             S.selectedTool.actions.map((action) => [
@@ -1377,6 +1435,7 @@ async function saveTool({
         await ApiClient.updateToolPolicy(selectedId, {
             enabled,
             actions,
+            execution_mode,
         });
         await ApiClient.reloadResources();
         await loadTools({ renderDetail: false });

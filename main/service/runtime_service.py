@@ -54,6 +54,13 @@ from main.governance import (
     list_effective_tool_names,
 )
 from main.governance.action_mapper import get_governance_tool_id
+from main.governance.exec_tool_policy import (
+    EXEC_TOOL_EXECUTOR_NAME,
+    EXEC_TOOL_FAMILY_ID,
+    exec_tool_supports_execution_mode,
+    merge_exec_execution_mode_metadata,
+    resolve_exec_runtime_policy_payload,
+)
 from main.governance.roles import normalize_public_allowed_roles
 from main.governance.tool_context import build_tool_toolskill_payload, resolve_primary_executor_name
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
@@ -4416,11 +4423,33 @@ class MainRuntimeService:
             else []
         )
         callable_now = bool(callable_value) and bool(available_value)
+        requested_or_resolved_tool_id = str(requested_tool_id or '').strip() or str(resolved_tool_id or '').strip()
         return {
             'callable_now': callable_now,
             'will_be_hydrated_next_turn': callable_now and bool(hydration_targets),
             'hydration_targets': list(hydration_targets),
+            'exec_runtime_policy': (
+                self._current_exec_runtime_policy_payload()
+                if requested_or_resolved_tool_id in {EXEC_TOOL_FAMILY_ID, EXEC_TOOL_EXECUTOR_NAME}
+                or (
+                    visible_family is not None
+                    and exec_tool_supports_execution_mode(getattr(visible_family, 'tool_id', ''))
+                )
+                else None
+            ),
         }
+
+    def _current_exec_runtime_policy_payload(self) -> dict[str, Any]:
+        family = self._raw_tool_family(EXEC_TOOL_FAMILY_ID)
+        descriptor = (
+            self._resource_manager.get_tool_descriptor(EXEC_TOOL_EXECUTOR_NAME)
+            if self._resource_manager is not None and hasattr(self._resource_manager, 'get_tool_descriptor')
+            else None
+        )
+        return resolve_exec_runtime_policy_payload(
+            family=family,
+            descriptor=descriptor,
+        )
 
     def _promote_tool_context_hydration(
         self,
@@ -4889,6 +4918,7 @@ class MainRuntimeService:
             'example_arguments': toolskill.get('example_arguments') or {},
             'warnings': list(toolskill.get('warnings') or []),
             'errors': list(toolskill.get('errors') or []),
+            'exec_runtime_policy': toolskill.get('exec_runtime_policy'),
             **contract_payload,
         }
 
@@ -4954,6 +4984,7 @@ class MainRuntimeService:
             'example_arguments': toolskill.get('example_arguments') or {},
             'warnings': list(toolskill.get('warnings') or []),
             'errors': list(toolskill.get('errors') or []),
+            'exec_runtime_policy': toolskill.get('exec_runtime_policy'),
             **contract_payload,
         }
 
@@ -5632,7 +5663,15 @@ class MainRuntimeService:
         item.update(await self._sync_catalog_targets(tool_ids={target_tool_id}))
         return item
 
-    def update_tool_policy(self, tool_id: str, *, session_id: str = 'web:shared', enabled: bool | None = None, allowed_roles_by_action: dict[str, list[str]] | None = None):
+    def update_tool_policy(
+        self,
+        tool_id: str,
+        *,
+        session_id: str = 'web:shared',
+        enabled: bool | None = None,
+        allowed_roles_by_action: dict[str, list[str]] | None = None,
+        execution_mode: str | None = None,
+    ):
         family = self._raw_tool_family(tool_id)
         if family is None:
             return None
@@ -5666,7 +5705,23 @@ class MainRuntimeService:
                 else normalize_public_allowed_roles([str(role) for role in list(roles or [])])
             )
             actions.append(action.model_copy(update={'allowed_roles': next_roles}))
-        updated = family.model_copy(update={'enabled': family.enabled if enabled is None else bool(enabled), 'actions': actions})
+        if execution_mode is not None and not exec_tool_supports_execution_mode(target_tool_id):
+            raise ResourceMutationBlockedError(
+                code='tool_execution_mode_unsupported',
+                message='execution_mode is only supported for exec_runtime.',
+                resource_kind='tool_family',
+                resource_id=target_tool_id,
+            )
+        updated = family.model_copy(
+            update={
+                'enabled': family.enabled if enabled is None else bool(enabled),
+                'actions': actions,
+                'metadata': merge_exec_execution_mode_metadata(
+                    getattr(family, 'metadata', {}) or {},
+                    execution_mode=execution_mode,
+                ),
+            }
+        )
         self.governance_store.upsert_tool_family(updated, updated_at=now_iso())
         self.policy_engine.sync_default_role_policies()
         return self.get_tool_family(target_tool_id)
@@ -6457,6 +6512,7 @@ class MainRuntimeService:
                         and list(full_callable_tool_names) != [STAGE_TOOL_NAME]
                     ),
                 },
+                exec_runtime_policy=self._current_exec_runtime_policy_payload(),
             ),
         )
         manager = getattr(self, 'memory_manager', None)

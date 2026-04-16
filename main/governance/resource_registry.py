@@ -111,6 +111,10 @@ class MainRuntimeResourceRegistry:
                     update={
                         'enabled': existing.enabled,
                         'actions': merged_actions,
+                        'metadata': {
+                            **dict(getattr(existing, 'metadata', {}) or {}),
+                            **dict(getattr(record, 'metadata', {}) or {}),
+                        },
                         'primary_executor_name': _primary_executor_name(merged_actions),
                     }
                 )

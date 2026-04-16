@@ -106,13 +106,27 @@ function loadResources() {
         addNotice() {},
         showToast() {},
         openConfirm() {},
+        loadTools: async () => {},
+        openTool: async () => {},
         resourceDeleteErrorText(error) {
             return String(error?.message || error || "");
         },
-        ApiClient: {},
+        ApiClient: {
+            async updateToolPolicy() {
+                return { item: {} };
+            },
+            async reloadResources() {
+                return { ok: true };
+            },
+            async getTools() {
+                return [];
+            },
+        },
     };
     context.U.toolStatus.value = "all";
     context.U.toolRisk.value = "all";
+    context.setTimeout = setTimeout;
+    context.clearTimeout = clearTimeout;
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
@@ -120,6 +134,7 @@ function loadResources() {
         this.__testExports = {
             renderTools,
             renderToolDetail,
+            saveTool,
         };`,
         context,
     );
@@ -127,6 +142,7 @@ function loadResources() {
         ...context.__testExports,
         S: context.S,
         U: context.U,
+        ApiClient: context.ApiClient,
     };
 }
 
@@ -221,4 +237,78 @@ test("renderToolDetail hides Memory Runtime from Tool 管理 details", () => {
     assert.match(U.toolDetail.innerHTML, /Search Memory/);
     assert.match(U.toolDetail.innerHTML, /Write Memory/);
     assert.doesNotMatch(U.toolDetail.innerHTML, /Memory Runtime/);
+});
+
+test("renderToolDetail shows exec execution mode controls for exec_runtime", () => {
+    const { S, U, renderToolDetail } = loadResources();
+    S.selectedTool = {
+        tool_id: "exec_runtime",
+        display_name: "Exec Runtime",
+        description: "Execute shell commands.",
+        enabled: true,
+        available: true,
+        callable: true,
+        is_core: false,
+        metadata: { execution_mode: "full_access" },
+        exec_runtime_policy: {
+            mode: "full_access",
+            guardrails_enabled: false,
+            summary: "exec will execute shell commands without exec-side guardrails.",
+        },
+        actions: [
+            { action_id: "run", label: "Run Command", risk_level: "high", allowed_roles: ["ceo", "execution"] },
+        ],
+        toolskill_content: "",
+    };
+
+    renderToolDetail();
+
+    assert.match(U.toolDetail.innerHTML, /Execution Mode/);
+    assert.match(U.toolDetail.innerHTML, /full_access/);
+    assert.match(U.toolDetail.innerHTML, /without exec-side guardrails/);
+});
+
+test("saveTool sends execution_mode for exec_runtime", async () => {
+    const { S, saveTool, ApiClient } = loadResources();
+    const calls = [];
+    ApiClient.updateToolPolicy = async (toolId, payload) => {
+        calls.push({ toolId, payload });
+        return { item: { tool_id: toolId, metadata: { execution_mode: payload.execution_mode } } };
+    };
+    ApiClient.reloadResources = async () => ({ ok: true });
+    ApiClient.getTools = async () => [
+        {
+            tool_id: "exec_runtime",
+            display_name: "Exec Runtime",
+            description: "Execute shell commands.",
+            enabled: true,
+            available: true,
+            actions: [
+                { action_id: "run", label: "Run Command", allowed_roles: ["ceo", "execution"] },
+            ],
+            metadata: { execution_mode: "full_access" },
+        },
+    ];
+
+    S.selectedTool = {
+        tool_id: "exec_runtime",
+        display_name: "Exec Runtime",
+        description: "Execute shell commands.",
+        enabled: true,
+        available: true,
+        actions: [
+            { action_id: "run", label: "Run Command", allowed_roles: ["ceo", "execution"] },
+        ],
+        metadata: { execution_mode: "full_access" },
+        exec_runtime_policy: { mode: "full_access" },
+    };
+    S.toolDirty = true;
+
+    await saveTool({ showProgressToast: false, showSuccessToast: false, reopenDetail: false });
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].toolId, "exec_runtime");
+    assert.equal(calls[0].payload.enabled, true);
+    assert.deepEqual([...calls[0].payload.actions.run], ["ceo", "execution"]);
+    assert.equal(calls[0].payload.execution_mode, "full_access");
 });

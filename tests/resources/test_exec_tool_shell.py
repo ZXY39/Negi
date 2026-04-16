@@ -231,3 +231,81 @@ async def test_exec_tool_makes_python_available_from_project_environment_on_wind
 
     assert payload['status'] == 'success'
     assert payload['exit_code'] == 0
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_uses_governed_mode_by_default_and_blocks_guarded_commands(monkeypatch) -> None:
+    tool = ExecTool()
+
+    monkeypatch.setattr(tool, '_enforce_read_only_command', lambda command: 'blocked by governed mode')
+    monkeypatch.setattr(tool, '_enforce_command_path_policy', lambda command, cwd, runtime=None: None)
+    monkeypatch.setattr(tool, '_guard_command', lambda command, cwd: None)
+
+    payload = json.loads(await tool.execute(command='echo ok', __g3ku_runtime={'session_key': 'web:shared'}))
+
+    assert payload['status'] == 'error'
+    assert payload['error'] == 'blocked by governed mode'
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_full_access_mode_skips_exec_guardrails(monkeypatch) -> None:
+    class _StubProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return (b'ok\n', b'')
+
+        async def wait(self):
+            return 0
+
+        def kill(self):
+            return None
+
+    class _Service:
+        def get_tool_family(self, tool_id: str):
+            if tool_id != 'exec_runtime':
+                return None
+            return type(
+                'Family',
+                (),
+                {
+                    'tool_id': 'exec_runtime',
+                    'metadata': {'execution_mode': 'full_access'},
+                },
+            )()
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        return _StubProcess()
+
+    tool = ExecTool(main_task_service=_Service())
+
+    monkeypatch.setattr(tool, '_enforce_read_only_command', lambda command: 'blocked by governed mode')
+    monkeypatch.setattr(tool, '_enforce_command_path_policy', lambda command, cwd, runtime=None: 'blocked by path policy')
+    monkeypatch.setattr(tool, '_guard_command', lambda command, cwd: 'blocked by safety guard')
+    monkeypatch.setattr(shell_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    payload = json.loads(await tool.execute(command='echo ok', __g3ku_runtime={'session_key': 'web:shared'}))
+
+    assert payload['status'] == 'success'
+    assert payload['exit_code'] == 0
+    assert payload['head_preview'].strip() == 'ok'
+
+
+def test_exec_tool_model_description_reflects_full_access_mode() -> None:
+    class _Service:
+        def get_tool_family(self, tool_id: str):
+            if tool_id != 'exec_runtime':
+                return None
+            return type(
+                'Family',
+                (),
+                {
+                    'tool_id': 'exec_runtime',
+                    'metadata': {'execution_mode': 'full_access'},
+                },
+            )()
+
+    tool = ExecTool(main_task_service=_Service())
+
+    assert 'without exec-side guardrails' in tool.model_description
+    assert 'read-only' not in tool.model_description.lower()

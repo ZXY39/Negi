@@ -89,6 +89,7 @@ class FrontdoorToolContract:
     rbac_visible_skill_ids: list[str]
     contract_revision: str
     candidate_tool_items: list[dict[str, str]] | None = None
+    exec_runtime_policy: dict[str, Any] | None = None
 
     def to_message_payload(self) -> dict[str, Any]:
         return {
@@ -105,6 +106,11 @@ class FrontdoorToolContract:
             'rbac_visible_skill_ids': list(self.rbac_visible_skill_ids),
             'stage_summary': dict(self.stage_summary),
             'contract_revision': str(self.contract_revision or '').strip(),
+            'exec_runtime_policy': (
+                dict(self.exec_runtime_policy)
+                if isinstance(self.exec_runtime_policy, dict)
+                else None
+            ),
         }
 
     def to_message(self) -> dict[str, Any]:
@@ -147,6 +153,7 @@ def build_frontdoor_tool_contract(
     rbac_visible_tool_names: list[str] | None = None,
     rbac_visible_skill_ids: list[str] | None = None,
     contract_revision: str | None = None,
+    exec_runtime_policy: dict[str, Any] | None = None,
 ) -> FrontdoorToolContract:
     callable_names = _normalized_name_list(callable_tool_names)
     candidate_names = [
@@ -165,6 +172,7 @@ def build_frontdoor_tool_contract(
         rbac_visible_skill_ids=_normalized_name_list(rbac_visible_skill_ids),
         contract_revision=str(contract_revision or '').strip(),
         candidate_tool_items=_normalized_candidate_tool_items(candidate_tool_items, fallback_names=candidate_names),
+        exec_runtime_policy=dict(exec_runtime_policy) if isinstance(exec_runtime_policy, dict) else None,
     )
 
 

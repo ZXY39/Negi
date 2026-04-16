@@ -13,6 +13,7 @@ from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.main_runtime import LoadSkillContextTool, LoadToolContextTool
 from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.providers.base import LLMResponse, ToolCallRequest
+from g3ku.resources.embedded_mcp import EmbeddedMCPTool
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.loader import ManifestBackedTool
 from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
@@ -675,6 +676,59 @@ def test_tool_model_visible_schema_uses_override_without_changing_validation_con
     assert tool.to_model_schema()["function"]["description"] == "Compact model-facing contract."
     assert tool.to_model_schema()["function"]["parameters"]["required"] == ["summary"]
     assert tool.validate_params({"summary": "preview"}) == ["missing required full_value"]
+
+
+def test_embedded_mcp_tool_prefers_handler_model_visible_contract() -> None:
+    class _DynamicTool(Tool):
+        @property
+        def name(self) -> str:
+            return "dynamic_tool"
+
+        @property
+        def description(self) -> str:
+            return "Authoritative execution contract."
+
+        @property
+        def model_description(self) -> str:
+            return "Runtime model-facing contract."
+
+        @property
+        def parameters(self) -> dict[str, Any]:
+            return {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            }
+
+        @property
+        def model_parameters(self) -> dict[str, Any]:
+            return {
+                "type": "object",
+                "properties": {"summary": {"type": "string"}},
+                "required": ["summary"],
+            }
+
+        async def execute(self, **kwargs: Any) -> Any:
+            return kwargs
+
+    descriptor = ToolResourceDescriptor(
+        kind=ResourceKind.TOOL,
+        name="dynamic_tool",
+        description="Manifest description should not win.",
+        root=Path.cwd(),
+        manifest_path=Path.cwd() / "resource.yaml",
+        fingerprint="dynamic",
+        parameters={
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    )
+
+    tool = EmbeddedMCPTool(descriptor, _DynamicTool())
+
+    assert tool.to_model_schema()["function"]["description"] == "Runtime model-facing contract."
+    assert tool.to_model_schema()["function"]["parameters"]["required"] == ["summary"]
 
 
 def test_tool_model_visible_schema_api_docs_call_out_non_authoritative_contract() -> None:
@@ -3807,6 +3861,79 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
             "description": "",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_enrich_node_messages_includes_exec_runtime_policy_in_dynamic_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_build_node_context_selection(**kwargs):
+        _ = kwargs
+        return NodeContextSelectionResult(
+            mode="dense_rerank",
+            memory_search_visible=False,
+            selected_skill_ids=["tmux"],
+            selected_tool_names=["content"],
+            candidate_skill_ids=["tmux"],
+            candidate_tool_names=["content"],
+            memory_query="",
+            retrieval_scope={},
+            trace={"mode": "dense_rerank"},
+        )
+
+    monkeypatch.setattr(
+        runtime_service_module,
+        "build_node_context_selection",
+        _fake_build_node_context_selection,
+    )
+
+    service = object.__new__(MainRuntimeService)
+    service.memory_manager = SimpleNamespace(_feature_enabled=lambda _key: False)
+    service._node_context_selection_cache = {}
+    service.log_service = _FakeLogService()
+    service.log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
+        'has_active_stage': True,
+        'transition_required': False,
+        'active_stage': {'stage_id': 'stage-1'},
+    }
+    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='content'),
+        SimpleNamespace(tool_id='exec_runtime'),
+    ]
+    service.list_visible_skill_resources = lambda *, actor_role, session_id: [
+        SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
+    ]
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content', 'exec', 'load_tool_context']
+    service._current_exec_runtime_policy_payload = lambda: {
+        'mode': 'full_access',
+        'guardrails_enabled': False,
+        'summary': 'exec will execute shell commands without exec-side guardrails.',
+    }
+    task = SimpleNamespace(task_id='task-exec-policy', session_id="web:ceo-origin", metadata={})
+    node = SimpleNamespace(
+        task_id='task-exec-policy',
+        node_id='node-exec-policy',
+        prompt="inspect repo",
+        goal="inspect repo",
+        node_kind="execution",
+        can_spawn_children=False,
+    )
+
+    enriched = await service._enrich_node_messages(
+        task=task,
+        node=node,
+        messages=[
+            {"role": "system", "content": "base prompt"},
+            {"role": "user", "content": '{"prompt":"inspect repo"}'},
+        ],
+    )
+
+    dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
+    assert dynamic_payload["exec_runtime_policy"] == {
+        'mode': 'full_access',
+        'guardrails_enabled': False,
+        'summary': 'exec will execute shell commands without exec-side guardrails.',
+    }
 
 
 @pytest.mark.asyncio

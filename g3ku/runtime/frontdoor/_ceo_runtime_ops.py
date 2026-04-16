@@ -1798,6 +1798,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 rbac_visible_tool_names=list(rbac_visible_tool_names),
                 rbac_visible_skill_ids=list(rbac_visible_skill_ids),
                 contract_revision=cache_family_revision,
+                exec_runtime_policy=(
+                    self._loop.main_task_service._current_exec_runtime_policy_payload()
+                    if callable(getattr(getattr(self._loop, "main_task_service", None), "_current_exec_runtime_policy_payload", None))
+                    else None
+                ),
             ),
         )
         prompt_scope = "ceo_frontdoor"

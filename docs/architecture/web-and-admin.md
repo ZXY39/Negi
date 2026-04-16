@@ -192,6 +192,13 @@ The backend responsibilities are now:
 - derive runtime visibility for surfaced tools from that persisted RBAC state,
 - and keep internal non-Tool-Admin tools outside the Tool Admin contract.
 
+Exec runtime mode is now part of the same admin contract for `exec_runtime`:
+
+- `PUT /api/resources/tools/exec_runtime/policy` may carry `execution_mode` in addition to action-role edits.
+- Tool Admin is responsible for exposing and saving the operator's chosen mode, but the backend remains authoritative for validation and persistence.
+- Saving `execution_mode` must update the persisted surfaced family record immediately; operators should not need a project restart before later agent/tool calls observe the new mode.
+- Resource reload may still be used for catalog refresh, but it is no longer the mechanism that makes exec mode changes take effect. If a mode switch appears to require restart, first inspect the policy save payload and the persisted `tool_families` row before debugging frontend caching.
+
 If an operator reports "save succeeded but reopen restored the roles", first inspect:
 
 1. the Tool Admin save payload,

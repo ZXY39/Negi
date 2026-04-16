@@ -15,6 +15,7 @@ def build(runtime):
         restrict_to_workspace=settings.restrict_to_workspace,
         enable_safety_guard=settings.enable_safety_guard,
         path_append=settings.path_append,
+        execution_mode_default=settings.execution_mode,
         content_store=content_store,
         main_task_service=service,
     )
