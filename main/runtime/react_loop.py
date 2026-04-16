@@ -1711,7 +1711,10 @@ class ReActToolLoop:
         ) or {}
         callable_tool_names = self._normalized_name_list(list(tool_schema_selection.get('tool_names') or []))
         candidate_tool_names = self._normalized_name_list(
-            list(tool_schema_selection.get('candidate_tool_names') or existing_payload.get('candidate_tools') or [])
+            [
+                item.get('tool_id') if isinstance(item, dict) else item
+                for item in list(tool_schema_selection.get('candidate_tool_names') or existing_payload.get('candidate_tools') or [])
+            ]
         )
         candidate_tool_names = [name for name in candidate_tool_names if name not in set(callable_tool_names)]
         visible_skills = [dict(item) for item in list(existing_payload.get('visible_skills') or []) if isinstance(item, dict)]

@@ -97,12 +97,12 @@ def _externalized_completed_blocks_for_global_summary(messages: list[dict[str, A
 
 class CeoMessageBuilder:
     MEMORY_WRITE_STRONG_TERMS: tuple[str, ...] = (
-        '璁颁綇',
-        '璇疯浣?',
-        '涓嶈鍐?',
-        '鍒啀',
-        '榛樿',
-        '闀挎湡鎸夎繖涓潵',
+        '记住',
+        '请记住',
+        '不要再',
+        '别再',
+        '默认',
+        '长期按这个来',
         'please remember',
         'from now on',
         'going forward',
@@ -110,7 +110,7 @@ class CeoMessageBuilder:
         "don't use",
         'never use',
     )
-    MEMORY_WRITE_FUTURE_RE = re.compile(r'(浠ュ悗|浠婂悗).{0,24}(閮絴榛樿|涓嶈|鍒啀|鎸夎繖涓獆鐢?)')
+    MEMORY_WRITE_FUTURE_RE = re.compile(r'(以后|今后).{0,24}((?:都)?默认|不要|别再|按这个用?)')
     MEMORY_WRITE_REMEMBER_RE = re.compile(r'\bremember\b')
     MEMORY_WRITE_REMEMBER_EXCLUSION_RE = re.compile(r'\b(?:what|do)\s+you\s+remember\b')
     EXTENSION_TOOL_HINTS: dict[str, tuple[str, ...]] = {
@@ -118,6 +118,12 @@ class CeoMessageBuilder:
         'load_skill_context': ('skill', 'workflow', 'procedure', 'steps', 'context', 'details'),
         'load_tool_context': ('tool', 'api', 'parameters', 'usage', 'context', 'details'),
         'filesystem': ('file', 'path', 'write', 'edit', 'delete', 'patch'),
+        'filesystem_write': ('write', 'create', 'new file', 'save file', 'markdown file', '写入', '创建', '新建'),
+        'filesystem_edit': ('edit', 'modify', 'update', 'append', 'prepend', 'insert', 'replace', 'line', '编辑', '修改', '更新', '追加', '插入', '替换'),
+        'filesystem_copy': ('copy', 'duplicate', '复制', '拷贝'),
+        'filesystem_move': ('move', 'rename', 'relocate', '移动', '重命名'),
+        'filesystem_delete': ('delete', 'remove', 'cleanup', '删除', '移除', '清理'),
+        'filesystem_propose_patch': ('patch', 'diff', 'propose patch', '补丁', '差异'),
         'exec': ('shell', 'command', 'bash', 'powershell', 'terminal', 'run'),
         'model_config': ('model', 'provider', 'config', 'token', 'temperature'),
     }
@@ -164,10 +170,10 @@ class CeoMessageBuilder:
         ):
             matched.append('remember')
         if cls.MEMORY_WRITE_FUTURE_RE.search(text):
-            if '浠ュ悗' in text:
-                matched.append('浠ュ悗')
-            if '浠婂悗' in text:
-                matched.append('浠婂悗')
+            if '以后' in text:
+                matched.append('以后')
+            if '今后' in text:
+                matched.append('今后')
         deduped: list[str] = []
         for item in matched:
             if item not in deduped:
@@ -302,15 +308,19 @@ class CeoMessageBuilder:
     def _build_turn_tool_overlay(
         cls,
         *,
-        selected_tool_names: list[str],
+        selected_tool_items: list[dict[str, str]],
         capability_snapshot: CapabilitySnapshot,
         visible_only_mode: bool,
     ) -> str:
-        tool_names = [
-            str(item or '').strip()
-            for item in list(selected_tool_names or [])
-            if str(item or '').strip()
+        tool_items = [
+            {
+                'tool_id': str((item or {}).get('tool_id') or '').strip(),
+                'description': str((item or {}).get('description') or '').strip(),
+            }
+            for item in list(selected_tool_items or [])
+            if str((item or {}).get('tool_id') or '').strip()
         ]
+        tool_names = [str(item.get('tool_id') or '').strip() for item in tool_items if str(item.get('tool_id') or '').strip()]
         if not tool_names:
             return ''
         all_visible_tool_names = set(capability_snapshot.visible_tool_ids)
@@ -329,10 +339,20 @@ class CeoMessageBuilder:
                 '- 如果当前还没有活动阶段且你需要使用工具，第一步必须先调用 `submit_next_stage`。',
                 '- 对非内置候选工具，如需读取完整工具契约，仅在当前已经存在活动阶段后调用 `load_tool_context(tool_id="...")`。',
             ]
-        for tool_name in tool_names:
-            lines.append(
-                f'- `{tool_name}`。如需读取该工具的完整契约，仅在当前已经存在活动阶段后调用 `load_tool_context(tool_id="{tool_name}")`。'
+        lines.append(
+            'candidate_tools = '
+            + json.dumps(
+                [
+                    {
+                        'tool_id': str(item.get('tool_id') or '').strip(),
+                        'description': str(item.get('description') or '').strip(),
+                    }
+                    for item in tool_items
+                ],
+                ensure_ascii=False,
+                indent=2,
             )
+        )
         return '\n'.join(lines)
 
     @classmethod
@@ -527,6 +547,141 @@ class CeoMessageBuilder:
             for executor_name in executor_names:
                 family_by_executor.setdefault(executor_name, family)
         return family_by_executor
+
+    @staticmethod
+    def _query_contains_any(query_text: str, patterns: tuple[str, ...]) -> bool:
+        raw = str(query_text or '').strip()
+        lower = raw.lower()
+        for pattern in patterns:
+            token = str(pattern or '').strip()
+            if not token:
+                continue
+            if token.isascii():
+                if token.lower() in lower:
+                    return True
+                continue
+            if token in raw:
+                return True
+        return False
+
+    @classmethod
+    def _filesystem_intent_targets(cls, query_text: str) -> list[str]:
+        targets: list[str] = []
+
+        def _append(tool_id: str) -> None:
+            normalized = str(tool_id or '').strip()
+            if normalized and normalized not in targets:
+                targets.append(normalized)
+
+        if cls._query_contains_any(query_text, ('patch', 'diff', 'propose patch', '补丁', '差异')):
+            _append('filesystem_propose_patch')
+        if cls._query_contains_any(query_text, ('delete', 'remove', 'cleanup', '删除', '移除', '清理')):
+            _append('filesystem_delete')
+        if cls._query_contains_any(query_text, ('move', 'rename', 'relocate', '移动', '重命名')):
+            _append('filesystem_move')
+        if cls._query_contains_any(query_text, ('copy', 'duplicate', '复制', '拷贝')):
+            _append('filesystem_copy')
+        if cls._query_contains_any(
+            query_text,
+            (
+                'append',
+                'prepend',
+                'insert',
+                'replace',
+                'modify',
+                'update',
+                'edit',
+                'change',
+                'line',
+                '编辑',
+                '修改',
+                '更新',
+                '追加',
+                '插入',
+                '替换',
+                '改写',
+                '行',
+            ),
+        ):
+            _append('filesystem_edit')
+        if cls._query_contains_any(
+            query_text,
+            (
+                'write',
+                'create',
+                'new file',
+                'generate file',
+                'save file',
+                'markdown file',
+                '写入',
+                '创建',
+                '新建',
+                '生成文件',
+                '保存文件',
+            ),
+        ):
+            _append('filesystem_write')
+        return targets
+
+    @classmethod
+    def _tool_intent_bonus(cls, *, tool_name: str, family_tool_id: str, query_text: str) -> float:
+        mutating_targets = cls._filesystem_intent_targets(query_text)
+        if not mutating_targets:
+            return 0.0
+        normalized_tool_name = str(tool_name or '').strip()
+        normalized_family_tool_id = str(family_tool_id or '').strip()
+        if normalized_tool_name == 'exec':
+            return -8.0
+        if normalized_tool_name in mutating_targets:
+            return 12.0 - float(mutating_targets.index(normalized_tool_name))
+        if normalized_family_tool_id == 'filesystem':
+            return 3.0
+        return 0.0
+
+    def _candidate_tool_prompt_items(
+        self,
+        *,
+        selected_tool_names: list[str],
+        visible_families: list[Any],
+    ) -> list[dict[str, str]]:
+        family_by_executor = self._tool_family_by_executor_name(visible_families)
+        main_service = getattr(self._loop, 'main_task_service', None)
+        get_tool_toolskill = getattr(main_service, 'get_tool_toolskill', None) if main_service is not None else None
+        items: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for raw_name in list(selected_tool_names or []):
+            tool_id = str(raw_name or '').strip()
+            if not tool_id or tool_id in seen:
+                continue
+            seen.add(tool_id)
+            description = ''
+            if callable(get_tool_toolskill):
+                try:
+                    toolskill_payload = dict(get_tool_toolskill(tool_id) or {})
+                except Exception:
+                    toolskill_payload = {}
+                description = self._first_sentence(
+                    str(toolskill_payload.get('description') or toolskill_payload.get('l0') or '').strip()
+                )
+            if not description:
+                family = family_by_executor.get(tool_id)
+                if family is None:
+                    family = next(
+                        (
+                            item
+                            for item in list(visible_families or [])
+                            if str(getattr(item, 'tool_id', '') or '').strip() == tool_id
+                        ),
+                        None,
+                    )
+                description = self._first_sentence(str(getattr(family, 'description', '') or '').strip()) if family is not None else ''
+            items.append(
+                {
+                    'tool_id': tool_id,
+                    'description': description,
+                }
+            )
+        return items
 
     @classmethod
     def _global_summary_settings(cls, loop: Any) -> dict[str, Any]:
@@ -882,6 +1037,11 @@ class CeoMessageBuilder:
                 for hint in self.EXTENSION_TOOL_HINTS.get(hint_owner, ()):
                     if hint and hint.lower() in str(query_text or '').lower():
                         score += 5.0
+            score += self._tool_intent_bonus(
+                tool_name=normalized,
+                family_tool_id=family_tool_id,
+                query_text=query_text,
+            )
             ext_scored.append((score, visible_index.get(normalized, len(visible_index) + 10_000), normalized))
         ext_scored.sort(key=lambda item: (-item[0], item[1], item[2]))
 
@@ -1098,21 +1258,30 @@ class CeoMessageBuilder:
                 ],
             }
         else:
+            ranked_tool_ids = [
+                str(tool_id or '').strip()
+                for tool_id in list(semantic_frontdoor.get('tool_ids') or [])
+                if str(tool_id or '').strip()
+            ]
             selected_tool_names, tool_trace = self._select_tools(
                 query_text=query_text,
                 visible_names=visible_tool_names,
                 visible_families=visible_families,
                 core_tools=set(callable_tool_names),
                 extension_top_k=extension_top_k,
-                ranked_tool_ids=list(semantic_frontdoor.get('tool_ids') or []),
+                ranked_tool_ids=(ranked_tool_ids if ranked_tool_ids else None),
             )
         candidate_tool_names = [
             str(name or '').strip()
             for name in list(tool_trace.get('candidate_tool_names') or [])
             if str(name or '').strip()
         ]
-        candidate_tools_block = self._build_turn_tool_overlay(
+        candidate_tool_items = self._candidate_tool_prompt_items(
             selected_tool_names=list(candidate_tool_names),
+            visible_families=visible_families,
+        )
+        candidate_tools_block = self._build_turn_tool_overlay(
+            selected_tool_items=list(candidate_tool_items),
             capability_snapshot=capability_snapshot,
             visible_only_mode=visible_only_mode,
         )
@@ -1194,6 +1363,7 @@ class CeoMessageBuilder:
             'semantic_trace': semantic_trace,
             'external_trace': external_trace,
             'selected_tool_names': candidate_tool_names,
+            'selected_tool_items': candidate_tool_items,
             'callable_tool_names': callable_tool_names,
             'hydrated_tool_names': [
                 name
@@ -1519,6 +1689,7 @@ class CeoMessageBuilder:
         frontdoor_tool_contract = build_frontdoor_tool_contract(
             callable_tool_names=list(context_sources['callable_tool_names']),
             candidate_tool_names=list(context_sources['selected_tool_names']),
+            candidate_tool_items=list(context_sources.get('selected_tool_items') or []),
             hydrated_tool_names=list(context_sources['hydrated_tool_names']),
             frontdoor_stage_state=normalized_frontdoor_stage_state,
             visible_skill_ids=[

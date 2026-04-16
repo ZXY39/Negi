@@ -459,9 +459,9 @@ async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_ava
     }
     overlay = str(result.turn_overlay_text or "")
     assert "## 本轮候选工具" in overlay
-    assert '`agent_browser`' in overlay
-    assert '`web_fetch`' in overlay
-    assert 'load_tool_context(tool_id="agent_browser")' in overlay
+    assert '"tool_id": "agent_browser"' in overlay
+    assert '"tool_id": "web_fetch"' in overlay
+    assert '"description": "Browser automation via semantic shortlist."' in overlay
     assert result.tool_names == []
 
 
@@ -940,6 +940,95 @@ async def test_message_builder_keeps_callable_and_candidate_tools_separate() -> 
 
 
 @pytest.mark.asyncio
+async def test_message_builder_renders_candidate_tools_as_structured_tool_id_and_description_items() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+
+    class _MainService:
+        def get_tool_toolskill(self, tool_id: str) -> dict[str, object]:
+            payloads = {
+                "filesystem_write": {"description": "Write file content to disk."},
+                "filesystem_edit": {"description": "Edit one file in text-replace or line-range mode."},
+            }
+            return dict(payloads.get(str(tool_id or "").strip(), {}))
+
+    loop = _loop(memory_manager)
+    loop.main_task_service = _MainService()
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="update the file contents",
+        exposure={
+            "skills": [],
+            "tool_families": [
+                _tool_resource_record(
+                    "filesystem",
+                    "Write, edit, copy, move, delete, and propose patches for local files.",
+                    executor_names=["filesystem_write", "filesystem_edit"],
+                ),
+            ],
+            "tool_names": ["load_tool_context", "filesystem_write", "filesystem_edit"],
+        },
+        persisted_session=None,
+    )
+
+    overlay = str(result.turn_overlay_text or "")
+    assert "candidate_tools = [" in overlay
+    assert '"tool_id": "filesystem_write"' in overlay
+    assert '"description": "Write file content to disk."' in overlay
+    assert '"tool_id": "filesystem_edit"' in overlay
+    assert '"description": "Edit one file in text-replace or line-range mode."' in overlay
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query_text", "expected_tool_id"),
+    [
+        ("create a new markdown file for the summary", "filesystem_write"),
+        ("append a new line to the existing file", "filesystem_edit"),
+    ],
+)
+async def test_message_builder_prefers_specific_filesystem_candidates_for_write_intents(
+    query_text: str,
+    expected_tool_id: str,
+) -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text=query_text,
+        exposure={
+            "skills": [],
+            "tool_families": [
+                _tool_resource_record(
+                    "filesystem",
+                    "Write, edit, copy, move, delete, and propose patches for local files.",
+                    executor_names=[
+                        "filesystem_write",
+                        "filesystem_edit",
+                        "filesystem_delete",
+                    ],
+                ),
+            ],
+            "tool_names": [
+                "load_tool_context",
+                "exec",
+                "filesystem_write",
+                "filesystem_edit",
+                "filesystem_delete",
+            ],
+        },
+        persisted_session=None,
+    )
+
+    assert result.tool_names == ["load_tool_context", "exec"]
+    assert result.candidate_tool_names[0] == expected_tool_id
+
+
+@pytest.mark.asyncio
 async def test_message_builder_defaults_to_16_skill_and_tool_candidates_when_assembly_top_k_fields_are_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1144,7 +1233,11 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
     assert len(contract_messages) == 1
     payload = json.loads(contract_messages[0]["content"])
     assert "filesystem_write" in payload["callable_tool_names"]
-    assert "filesystem_write" not in payload["candidate_tool_names"]
+    assert all(
+        str(item.get("tool_id") or "").strip() != "filesystem_write"
+        for item in list(payload.get("candidate_tools") or [])
+        if isinstance(item, dict)
+    )
     assert payload["hydrated_tool_names"] == ["filesystem_write"]
 
 
@@ -1194,7 +1287,7 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
     assert len(contract_messages) == 1
     payload = json.loads(contract_messages[0]["content"])
     assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
-    assert payload["candidate_tool_names"] == []
+    assert payload["candidate_tools"] == []
     assert payload["hydrated_tool_names"] == ["filesystem_write"]
 
 
@@ -1213,6 +1306,24 @@ def test_frontdoor_dynamic_appendix_records_require_canonical_tool_state_fields(
                 },
             }
         )
+
+
+@pytest.mark.parametrize(
+    ("query_text", "expected_terms"),
+    [
+        ("请记住，今后都默认用中文回复。", {"请记住", "今后", "默认"}),
+        ("以后不要再自动改写我的提示词。", {"以后", "不要再"}),
+        ("今后别再自动创建新任务。", {"今后", "别再"}),
+        ("这个目录结构长期按这个来。", {"长期按这个来"}),
+    ],
+)
+def test_message_builder_detects_chinese_memory_write_phrases(
+    query_text: str,
+    expected_terms: set[str],
+) -> None:
+    matched = set(CeoMessageBuilder._detect_memory_write_intent(query_text))
+
+    assert expected_terms.issubset(matched)
 
 
 def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_json_string() -> None:
@@ -1246,7 +1357,12 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_json_stri
     assert isinstance(updated[0]["content"], str)
     payload = json.loads(updated[0]["content"])
     assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
-    assert payload["candidate_tool_names"] == ["agent_browser"]
+    assert payload["candidate_tools"] == [
+        {
+            "tool_id": "agent_browser",
+            "description": "",
+        }
+    ]
     assert payload["hydrated_tool_names"] == ["filesystem_write"]
 
 

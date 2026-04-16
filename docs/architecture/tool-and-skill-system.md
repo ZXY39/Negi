@@ -144,6 +144,13 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 
 - 这些工具和你当前目标相关
 - 如果想用，先 `load_tool_context(tool_id="...")`
+- 维护上还要区分“canonical candidate state”和“prompt display shape”：
+  - runtime frame / frontdoor persistent state 里的权威候选集合仍然是 concrete tool name 列表，例如 `candidate_tool_names=["filesystem_edit"]`
+  - 但真正注入给模型阅读的显示层，现在会把 candidate tools 包装成 display-only 的结构化摘要，例如 `candidate_tools=[{tool_id, description}]`
+  - 这个显示层只服务于模型理解，不改变 `load_tool_context` 的准入规则，也不替代 canonical candidate name 列表
+- 当前前门的语义召回和 fallback 打分也都会优先面向 concrete executor，而不是泛化的 family：
+  - 当 query 明显表达文件写入、改写、删除、移动、复制、补丁意图时，query rewrite fallback 与本地候选打分都会优先把 `filesystem_write`、`filesystem_edit`、`filesystem_delete`、`filesystem_move`、`filesystem_copy`、`filesystem_propose_patch` 这类 concrete ids 往前推
+  - `exec` 仍可作为固定 builtin 保持可调用，但在这类 mutating intent 下，不应再被当成候选文件变更方案的首选
 
 ### 3.3 candidate skills
 
@@ -216,9 +223,13 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 
 - frontdoor 的 callable tool 集合并不只来自 fixed builtin；它还会把当前 turn 内已经 hydration 的 concrete tools 合并进去。
 - frontdoor 的 `candidate_tool_names` 必须排除已经进入 hydrated state 的工具；如果一个工具同时出现在 candidate 列表和 callable tool schemas 里，通常表示状态推进漏了。
+- frontdoor 现在还要再区分“candidate display”与“candidate state”：
+  - dynamic appendix / turn overlay 会向模型显示结构化 `candidate_tools=[{tool_id, description}]`
+  - 但真正驱动去重、hydration 排除与恢复的仍然是 persistent state 中的 `candidate_tool_names`
 - 如果维护者在排查 `load_tool_context` 成功后下一轮仍然只会 `exec` / 再次 `load_tool_context`，优先检查 frontdoor persistent state 里的 `hydrated_tool_names`、`tool_names`、`candidate_tool_names` 是否一起更新，而不是只检查 toolskill 内容。
 - 如果线上 frontdoor 表现与测试里的 graph helper 一致、却和实际会话不一致，先确认 runner 是否真的走显式 graph checkpoint，而不是怀疑还存在第二条生产 promotion 路径；当前生产路径已经不再以 `ceo_agent_middleware.py` 为权威。
 - 对执行节点和检验节点，`callable_tool_names` / `candidate_tools` 现在不应再视为 bootstrap user JSON 的静态字段；它们属于每轮动态 `node_runtime_tool_contract`。
+- 对执行节点和检验节点，`node_runtime_tool_contract` 里的 `candidate_tools` 现在也是 display-oriented 的结构化候选摘要；如需恢复 canonical candidate name 列表，优先读取 runtime frame 里的 `candidate_tool_names`
 - 对执行节点和检验节点，`visible_skills` / `candidate_skills` 也属于动态 `node_runtime_tool_contract` 的显示合同；但它们的恢复来源现在以 runtime frame 中的 canonical skill state 为准，而不是只靠旧的 dynamic contract user 消息。
 - 对执行节点和检验节点，还要再区分“当前轮对模型暴露的 callable 合同”和“内部可恢复的完整 callable pool”：前者在无有效阶段时会被收紧到 `submit_next_stage`，后者保留在 `model_visible_tool_selection_trace.full_callable_tool_names` 里供排障。
 - 节点侧的 `runtime frame`、动态 `node_runtime_tool_contract` 与 `runtime-frame-messages:{node_id}` artifact 现在都必须写入同一份收紧后的 callable 列表；如果三者不一致，应按运行时合同分裂排查，而不是先怀疑 prompt 文本。

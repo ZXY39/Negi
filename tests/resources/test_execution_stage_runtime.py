@@ -437,6 +437,7 @@ async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrich
             "description": "terminal workflow",
         }
     ]
+    assert contract_payload["candidate_tools"] == []
 
 
 @pytest.mark.asyncio

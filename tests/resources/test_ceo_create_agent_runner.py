@@ -1528,7 +1528,7 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
     assert len(contract_messages) == 1
     contract_payload = json.loads(str(contract_messages[0]["content"] or ""))
     assert contract_payload["callable_tool_names"] == ["submit_next_stage"]
-    assert contract_payload["candidate_tool_names"] == []
+    assert contract_payload["candidate_tools"] == []
 
 
 @pytest.mark.asyncio
@@ -1610,7 +1610,12 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_candidate_tools_visi
     assert len(contract_messages) == 1
     contract_payload = json.loads(str(contract_messages[0]["content"] or ""))
     assert contract_payload["callable_tool_names"] == ["submit_next_stage"]
-    assert contract_payload["candidate_tool_names"] == ["filesystem_write"]
+    assert contract_payload["candidate_tools"] == [
+        {
+            "tool_id": "filesystem_write",
+            "description": "",
+        }
+    ]
     assert contract_payload["candidate_skill_ids"] == ["memory"]
 
 

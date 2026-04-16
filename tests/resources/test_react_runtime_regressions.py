@@ -3695,7 +3695,12 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_onl
         }
     ]
     assert dynamic_payload["candidate_skills"] == ["tmux", "skill-creator"]
-    assert dynamic_payload["candidate_tools"] == ["content"]
+    assert dynamic_payload["candidate_tools"] == [
+        {
+            "tool_id": "content",
+            "description": "",
+        }
+    ]
     assert "semantic block" in enriched[0]["content"]
 
 
@@ -3769,7 +3774,12 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
     dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
     assert dynamic_payload["callable_tool_names"] == ["load_tool_context", "filesystem_write"]
-    assert dynamic_payload["candidate_tools"] == ["content"]
+    assert dynamic_payload["candidate_tools"] == [
+        {
+            "tool_id": "content",
+            "description": "",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -3842,7 +3852,12 @@ async def test_enrich_node_messages_locks_callable_tools_to_submit_next_stage_wi
     dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
     assert dynamic_payload["callable_tool_names"] == ["submit_next_stage"]
-    assert dynamic_payload["candidate_tools"] == ["content"]
+    assert dynamic_payload["candidate_tools"] == [
+        {
+            "tool_id": "content",
+            "description": "",
+        }
+    ]
     assert dynamic_payload["model_visible_tool_selection_trace"]["full_callable_tool_names"] == [
         "load_tool_context",
         "filesystem_write",
@@ -3927,7 +3942,12 @@ async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_no
         }
     ]
     assert payload["candidate_skills"] == ["tmux"]
-    assert payload["candidate_tools"] == ["filesystem"]
+    assert payload["candidate_tools"] == [
+        {
+            "tool_id": "filesystem",
+            "description": "",
+        }
+    ]
     assert retrieve_block_calls == []
 
 
@@ -4007,7 +4027,12 @@ async def test_enrich_node_messages_still_applies_selector_when_unified_context_
         }
     ]
     assert dynamic_payload["candidate_skills"] == ["tmux"]
-    assert dynamic_payload["candidate_tools"] == ["content"]
+    assert dynamic_payload["candidate_tools"] == [
+        {
+            "tool_id": "content",
+            "description": "",
+        }
+    ]
     assert retrieve_block_calls == []
 
 

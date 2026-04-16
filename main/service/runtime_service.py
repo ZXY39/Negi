@@ -6312,6 +6312,59 @@ class MainRuntimeService:
             )
         return items
 
+    def _candidate_tool_prompt_items(
+        self,
+        *,
+        candidate_tool_names: list[str],
+        visible_tool_families: list[Any],
+    ) -> list[dict[str, str]]:
+        family_by_executor: dict[str, Any] = {}
+        for family in list(visible_tool_families or []):
+            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+            executor_names: list[str] = []
+            for action in list(getattr(family, 'actions', []) or []):
+                for raw_name in list(getattr(action, 'executor_names', []) or []):
+                    executor_name = str(raw_name or '').strip()
+                    if executor_name and executor_name not in executor_names:
+                        executor_names.append(executor_name)
+            if not executor_names and tool_id:
+                executor_names.append(tool_id)
+            for executor_name in executor_names:
+                family_by_executor.setdefault(executor_name, family)
+
+        items: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for raw_name in list(candidate_tool_names or []):
+            tool_id = str(raw_name or '').strip()
+            if not tool_id or tool_id in seen:
+                continue
+            seen.add(tool_id)
+            description = ''
+            try:
+                toolskill_payload = dict(self.get_tool_toolskill(tool_id) or {})
+            except Exception:
+                toolskill_payload = {}
+            description = str(toolskill_payload.get('description') or toolskill_payload.get('l0') or '').strip()
+            if not description:
+                family = family_by_executor.get(tool_id)
+                if family is None:
+                    family = next(
+                        (
+                            item
+                            for item in list(visible_tool_families or [])
+                            if str(getattr(item, 'tool_id', '') or '').strip() == tool_id
+                        ),
+                        None,
+                    )
+                description = str(getattr(family, 'description', '') or '').strip() if family is not None else ''
+            items.append(
+                {
+                    'tool_id': tool_id,
+                    'description': description,
+                }
+            )
+        return items
+
     async def _enrich_node_messages(self, *, task, node: NodeRecord, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         selection = await self._prepare_node_context_selection(task=task, node=node)
         cached = self._cached_node_context_selection_entry(task=task, node=node)
@@ -6365,6 +6418,10 @@ class MainRuntimeService:
             selection=selection,
             visible_tool_names=list(inputs.get('visible_tool_names') or []),
         )
+        candidate_tool_items = self._candidate_tool_prompt_items(
+            candidate_tool_names=list(candidate_tool_names),
+            visible_tool_families=list(inputs.get('visible_tool_families') or []),
+        )
         enriched = inject_node_dynamic_contract_message(
             list(messages or []),
             NodeRuntimeToolContract(
@@ -6372,6 +6429,7 @@ class MainRuntimeService:
                 node_kind=str(getattr(node, 'node_kind', '') or '').strip(),
                 callable_tool_names=callable_tool_names,
                 candidate_tool_names=candidate_tool_names,
+                candidate_tool_items=candidate_tool_items,
                 visible_skills=self._visible_skill_prompt_items(selected_visible_skills),
                 candidate_skill_ids=list(getattr(selection, 'candidate_skill_ids', []) or []),
                 stage_payload=stage_payload,

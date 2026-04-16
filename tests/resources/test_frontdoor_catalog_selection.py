@@ -141,6 +141,34 @@ async def test_rewrite_frontdoor_catalog_queries_fallback_does_not_claim_model_i
 
 
 @pytest.mark.asyncio
+async def test_rewrite_frontdoor_catalog_queries_fallback_prioritizes_concrete_filesystem_executor_ids_for_write_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(selection_module, "_frontdoor_query_rewrite_enabled", lambda: True)
+
+    async def _invoke_model_rewrite(**kwargs) -> dict[str, Any]:
+        raise RuntimeError("rewrite model unavailable")
+
+    monkeypatch.setattr(selection_module, "_invoke_frontdoor_catalog_rewrite_model", _invoke_model_rewrite)
+
+    result = await selection_module.rewrite_frontdoor_catalog_queries(
+        loop=SimpleNamespace(workspace="D:/NewProjects/G3KU"),
+        memory_manager=SimpleNamespace(store=SimpleNamespace(_dense_enabled=True), workspace="D:/NewProjects/G3KU"),
+        query_text="append a line to the file",
+        visible_skills=[],
+        visible_families=[
+            SimpleNamespace(
+                tool_id="filesystem",
+                actions=[SimpleNamespace(executor_names=["filesystem_write", "filesystem_edit", "filesystem_delete"])],
+            )
+        ],
+    )
+
+    assert result["status"] == "fallback"
+    assert "filesystem_edit" in result["tool_query"]
+
+
+@pytest.mark.asyncio
 async def test_rewrite_frontdoor_catalog_queries_keeps_valid_skill_side_when_tool_side_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -19,6 +19,30 @@ def _normalized_name_list(items: list[Any] | None) -> list[str]:
     return ordered
 
 
+def _normalized_candidate_tool_items(
+    items: list[Any] | None,
+    *,
+    fallback_names: list[str] | None = None,
+) -> list[dict[str, str]]:
+    ordered: list[dict[str, str]] = []
+    seen: set[str] = set()
+    raw_items = list(items or [])
+    if not raw_items and fallback_names:
+        raw_items = list(fallback_names)
+    for item in raw_items:
+        if isinstance(item, dict):
+            tool_id = str(item.get('tool_id') or '').strip()
+            description = str(item.get('description') or '').strip()
+        else:
+            tool_id = str(item or '').strip()
+            description = ''
+        if not tool_id or tool_id in seen:
+            continue
+        seen.add(tool_id)
+        ordered.append({'tool_id': tool_id, 'description': description})
+    return ordered
+
+
 def _active_stage_prompt_view(active_stage: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(active_stage, dict):
         return None
@@ -66,6 +90,7 @@ class NodeRuntimeToolContract:
     hydrated_executor_names: list[str]
     lightweight_tool_ids: list[str]
     selection_trace: dict[str, Any]
+    candidate_tool_items: list[dict[str, str]] | None = None
 
     def to_message_payload(self) -> dict[str, Any]:
         return {
@@ -73,7 +98,10 @@ class NodeRuntimeToolContract:
             'node_id': str(self.node_id or '').strip(),
             'node_kind': str(self.node_kind or '').strip(),
             'callable_tool_names': list(self.callable_tool_names or []),
-            'candidate_tools': list(self.candidate_tool_names or []),
+            'candidate_tools': _normalized_candidate_tool_items(
+                list(self.candidate_tool_items or []),
+                fallback_names=list(self.candidate_tool_names or []),
+            ),
             'visible_skills': [dict(item) for item in list(self.visible_skills or []) if isinstance(item, dict)],
             'candidate_skills': [
                 str(item or '').strip()

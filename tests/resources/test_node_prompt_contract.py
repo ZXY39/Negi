@@ -46,3 +46,27 @@ def test_upsert_node_dynamic_contract_message_replaces_existing_contract_message
     assert payload["callable_tool_names"] == ["filesystem_write"]
     assert payload["candidate_tools"] == []
     assert payload["visible_skills"][0]["skill_id"] == "memory"
+
+
+def test_node_runtime_contract_serializes_candidate_tools_as_structured_items() -> None:
+    contract = NodeRuntimeToolContract(
+        node_id="node:test",
+        node_kind="execution",
+        callable_tool_names=["exec"],
+        candidate_tool_names=["filesystem_write"],
+        visible_skills=[],
+        candidate_skill_ids=[],
+        stage_payload={},
+        hydrated_executor_names=[],
+        lightweight_tool_ids=[],
+        selection_trace={"mode": "execution_tool_selection"},
+    )
+
+    payload = contract.to_message_payload()
+
+    assert payload["candidate_tools"] == [
+        {
+            "tool_id": "filesystem_write",
+            "description": "",
+        }
+    ]

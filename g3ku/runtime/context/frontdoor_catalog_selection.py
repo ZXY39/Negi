@@ -351,6 +351,93 @@ def _truncate_chars(text: str, limit: int = 240) -> str:
     return value[: max(limit - 3, 0)].rstrip() + "..."
 
 
+def _query_contains_any(query_text: str, patterns: tuple[str, ...]) -> bool:
+    raw = _normalized_text(query_text)
+    lower = raw.lower()
+    for pattern in patterns:
+        token = _normalized_text(pattern)
+        if not token:
+            continue
+        if token.isascii():
+            if token.lower() in lower:
+                return True
+            continue
+        if token in raw:
+            return True
+    return False
+
+
+def _filesystem_intent_targets(raw_query: str, visible_ids: list[str]) -> list[str]:
+    visible = {
+        _normalized_text(item)
+        for item in list(visible_ids or [])
+        if _normalized_text(item)
+    }
+    if not visible:
+        return []
+
+    ordered_targets: list[str] = []
+
+    def _append_if_visible(*tool_ids: str) -> None:
+        for tool_id in tool_ids:
+            normalized = _normalized_text(tool_id)
+            if normalized and normalized in visible and normalized not in ordered_targets:
+                ordered_targets.append(normalized)
+
+    if _query_contains_any(raw_query, ("patch", "diff", "propose patch", "补丁", "差异")):
+        _append_if_visible("filesystem_propose_patch")
+    if _query_contains_any(raw_query, ("delete", "remove", "cleanup", "删除", "移除", "清理")):
+        _append_if_visible("filesystem_delete")
+    if _query_contains_any(raw_query, ("move", "rename", "relocate", "移动", "重命名")):
+        _append_if_visible("filesystem_move")
+    if _query_contains_any(raw_query, ("copy", "duplicate", "复制", "拷贝")):
+        _append_if_visible("filesystem_copy")
+    if _query_contains_any(
+        raw_query,
+        (
+            "append",
+            "prepend",
+            "insert",
+            "replace",
+            "modify",
+            "update",
+            "edit",
+            "change",
+            "line",
+            "append a line",
+            "insert a line",
+            "修改",
+            "更新",
+            "编辑",
+            "追加",
+            "插入",
+            "替换",
+            "改写",
+            "行",
+        ),
+    ):
+        _append_if_visible("filesystem_edit")
+    if _query_contains_any(
+        raw_query,
+        (
+            "write",
+            "create",
+            "new file",
+            "generate file",
+            "save file",
+            "markdown file",
+            "写入",
+            "创建",
+            "新建",
+            "生成文件",
+            "保存文件",
+        ),
+    ):
+        _append_if_visible("filesystem_write")
+
+    return ordered_targets
+
+
 def _compose_rewritten_query(
     *,
     raw_query: str,
@@ -363,6 +450,16 @@ def _compose_rewritten_query(
     focus_label = "visible skills/workflows" if kind == "skill" else "visible tools/resources"
     focus_ids = ", ".join(visible_ids[:6])
     kind_hint = "skill workflow capability selection" if kind == "skill" else "tool resource executor selection"
+    if kind == "tool":
+        concrete_filesystem_targets = _filesystem_intent_targets(query, visible_ids)
+        if concrete_filesystem_targets:
+            target_text = ", ".join(concrete_filesystem_targets[:4])
+            if focus_ids:
+                return (
+                    f"{query}; prioritize {kind_hint}; concrete filesystem executors: {target_text}; "
+                    f"{focus_label}: {focus_ids}"
+                )
+            return f"{query}; prioritize {kind_hint}; concrete filesystem executors: {target_text}"
     if focus_ids:
         return f"{query}; prioritize {kind_hint}; {focus_label}: {focus_ids}"
     return f"{query}; prioritize {kind_hint}"

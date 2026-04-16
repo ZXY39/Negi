@@ -19,6 +19,30 @@ def _normalized_name_list(items: list[Any] | None) -> list[str]:
     return ordered
 
 
+def _normalized_candidate_tool_items(
+    items: list[Any] | None,
+    *,
+    fallback_names: list[str] | None = None,
+) -> list[dict[str, str]]:
+    ordered: list[dict[str, str]] = []
+    seen: set[str] = set()
+    raw_items = list(items or [])
+    if not raw_items and fallback_names:
+        raw_items = list(fallback_names)
+    for item in raw_items:
+        if isinstance(item, dict):
+            tool_id = str(item.get('tool_id') or '').strip()
+            description = str(item.get('description') or '').strip()
+        else:
+            tool_id = str(item or '').strip()
+            description = ''
+        if not tool_id or tool_id in seen:
+            continue
+        seen.add(tool_id)
+        ordered.append({'tool_id': tool_id, 'description': description})
+    return ordered
+
+
 def _active_stage_prompt_view(active_stage: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(active_stage, dict):
         return None
@@ -64,12 +88,16 @@ class FrontdoorToolContract:
     rbac_visible_tool_names: list[str]
     rbac_visible_skill_ids: list[str]
     contract_revision: str
+    candidate_tool_items: list[dict[str, str]] | None = None
 
     def to_message_payload(self) -> dict[str, Any]:
         return {
             'message_type': FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND,
             'callable_tool_names': list(self.callable_tool_names),
-            'candidate_tool_names': list(self.candidate_tool_names),
+            'candidate_tools': _normalized_candidate_tool_items(
+                list(self.candidate_tool_items or []),
+                fallback_names=list(self.candidate_tool_names),
+            ),
             'hydrated_tool_names': list(self.hydrated_tool_names),
             'visible_skill_ids': list(self.visible_skill_ids),
             'candidate_skill_ids': list(self.candidate_skill_ids),
@@ -111,6 +139,7 @@ def build_frontdoor_tool_contract(
     *,
     callable_tool_names: list[str] | None,
     candidate_tool_names: list[str] | None,
+    candidate_tool_items: list[dict[str, str]] | None = None,
     hydrated_tool_names: list[str] | None,
     frontdoor_stage_state: dict[str, Any] | None,
     visible_skill_ids: list[str] | None = None,
@@ -135,6 +164,7 @@ def build_frontdoor_tool_contract(
         rbac_visible_tool_names=_normalized_name_list(rbac_visible_tool_names),
         rbac_visible_skill_ids=_normalized_name_list(rbac_visible_skill_ids),
         contract_revision=str(contract_revision or '').strip(),
+        candidate_tool_items=_normalized_candidate_tool_items(candidate_tool_items, fallback_names=candidate_names),
     )
 
 
