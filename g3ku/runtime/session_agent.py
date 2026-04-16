@@ -1074,14 +1074,16 @@ class RuntimeAgentSession:
     def _current_inflight_turn_snapshot(self) -> dict[str, Any] | None:
         return self._build_execution_context_snapshot()
 
+    def preserved_inflight_turn_snapshot(self) -> dict[str, Any] | None:
+        if self._preserved_inflight_turn is None:
+            return None
+        return copy.deepcopy(self._preserved_inflight_turn)
+
     def inflight_turn_snapshot(self) -> dict[str, Any] | None:
         if self.manual_pause_waiting_reason():
             return None
         snapshot = self._current_inflight_turn_snapshot()
         if snapshot is not None:
-            source = str(snapshot.get("source") or "").strip().lower()
-            if source == "heartbeat" and self._preserved_inflight_turn is not None:
-                return copy.deepcopy(self._preserved_inflight_turn)
             return snapshot
         if self._preserved_inflight_turn is not None:
             return copy.deepcopy(self._preserved_inflight_turn)

@@ -111,6 +111,7 @@ function loadApp() {
         globalThis.__renderFeedTexts = [];
         globalThis.__renderSessionPayloads = [];
         globalThis.__toolEvents = [];
+        globalThis.__patchCalls = [];
         renderCeoSnapshot = (messages, inflightTurn, options = {}) => {
             globalThis.__renderCalls.push({
                 sessionId: String(options?.sessionId || ""),
@@ -120,6 +121,7 @@ function loadApp() {
                 sessionId: String(options?.sessionId || ""),
                 messages,
                 inflightTurn,
+                preservedTurn: options?.preservedTurn || null,
             });
         };
         renderCeoSessions = () => {};
@@ -127,7 +129,9 @@ function loadApp() {
         syncCeoPrimaryButton = () => {};
         applyCeoState = () => {};
         handleCeoControlAck = () => {};
-        patchCeoInflightTurn = () => {};
+        patchCeoInflightTurn = (snapshot, options = {}) => {
+            globalThis.__patchCalls.push({ snapshot, options });
+        };
         appendCeoToolEvent = (event) => {
             globalThis.__toolEvents.push(event);
         };
@@ -203,6 +207,82 @@ test("snapshot.ceo for a different session does not render into the active feed"
     });
 
     assert.equal(__context.__renderCalls.length, 0);
+});
+
+test("snapshot.ceo forwards preserved_turn separately from current inflight turn", () => {
+    const { S, initCeoWs, __socket, __context, getCeoSessionSnapshotCache } = loadApp();
+
+    S.activeSessionId = "web:current";
+    initCeoWs();
+
+    const socket = __socket();
+    assert.ok(socket);
+
+    socket.onmessage({
+        data: JSON.stringify({
+            type: "snapshot.ceo",
+            session_id: "web:current",
+            data: {
+                messages: [],
+                inflight_turn: {
+                    source: "heartbeat",
+                    turn_id: "turn-heartbeat-current",
+                    status: "running",
+                    assistant_text: "heartbeat processing",
+                },
+                preserved_turn: {
+                    source: "user",
+                    turn_id: "turn-user-preserved",
+                    status: "running",
+                    user_message: { content: "Install skill" },
+                },
+            },
+        }),
+    });
+
+    assert.equal(__context.__renderSessionPayloads.length, 1);
+    assert.equal(__context.__renderSessionPayloads[0].inflightTurn.turn_id, "turn-heartbeat-current");
+    assert.equal(__context.__renderSessionPayloads[0].preservedTurn.turn_id, "turn-user-preserved");
+    const entry = getCeoSessionSnapshotCache("web:current");
+    assert.equal(entry?.inflight_turn?.turn_id, "turn-heartbeat-current");
+    assert.equal(entry?.preserved_turn?.turn_id, "turn-user-preserved");
+});
+
+test("ceo.turn.patch forwards preserved_turn and current inflight turn as separate patch calls", () => {
+    const { S, initCeoWs, __socket, __context } = loadApp();
+
+    S.activeSessionId = "web:current";
+    initCeoWs();
+
+    const socket = __socket();
+    assert.ok(socket);
+
+    socket.onmessage({
+        data: JSON.stringify({
+            type: "ceo.turn.patch",
+            session_id: "web:current",
+            data: {
+                inflight_turn: {
+                    source: "heartbeat",
+                    turn_id: "turn-heartbeat-current",
+                    status: "running",
+                    assistant_text: "heartbeat processing",
+                },
+                preserved_turn: {
+                    source: "user",
+                    turn_id: "turn-user-preserved",
+                    status: "running",
+                    user_message: { content: "Install skill" },
+                },
+            },
+        }),
+    });
+
+    assert.equal(__context.__patchCalls.length, 2);
+    assert.equal(__context.__patchCalls[0].snapshot.turn_id, "turn-user-preserved");
+    assert.equal(__context.__patchCalls[0].options.cacheField, "preserved_turn");
+    assert.equal(__context.__patchCalls[1].snapshot.turn_id, "turn-heartbeat-current");
+    assert.equal(__context.__patchCalls[1].options.cacheField, "inflight_turn");
 });
 
 test("ceo.agent.tool forwards live tool events into the active session feed", () => {

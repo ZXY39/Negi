@@ -351,6 +351,43 @@ def _build_inflight_turn_snapshot(
     return snapshot
 
 
+def _build_preserved_turn_snapshot(
+    session: Any,
+    session_id: str,
+) -> dict[str, Any] | None:
+    snapshot: dict[str, Any] | None = None
+    getter = getattr(session, "preserved_inflight_turn_snapshot", None)
+    if callable(getter):
+        try:
+            snapshot = getter()
+        except Exception:
+            snapshot = None
+    if not isinstance(snapshot, dict):
+        return None
+    preserved_turn_id = str(snapshot.get("turn_id") or "").strip()
+    current_snapshot = _build_inflight_turn_snapshot(session, session_id)
+    current_turn_id = str((current_snapshot or {}).get("turn_id") or "").strip()
+    current_source = str((current_snapshot or {}).get("source") or "").strip().lower()
+    preserved_source = str(snapshot.get("source") or "").strip().lower()
+    if preserved_turn_id and current_turn_id and preserved_turn_id == current_turn_id:
+        if not preserved_source or not current_source or preserved_source == current_source:
+            return None
+    return snapshot
+
+
+def _build_live_turn_payload(
+    session: Any,
+    session_id: str,
+    persisted_session: Any | None = None,
+) -> dict[str, Any]:
+    inflight_turn = _build_inflight_turn_snapshot(session, session_id, persisted_session)
+    preserved_turn = _build_preserved_turn_snapshot(session, session_id)
+    payload: dict[str, Any] = {"inflight_turn": inflight_turn}
+    if preserved_turn is not None:
+        payload["preserved_turn"] = preserved_turn
+    return payload
+
+
 @router.post('/ceo/uploads')
 async def upload_ceo_files(
     session_id: str = Query('web:shared'),
@@ -743,8 +780,7 @@ async def ceo_websocket(websocket: WebSocket):
             return
 
     async def _push_turn_patch() -> None:
-        inflight_turn = _build_inflight_turn_snapshot(session, session_id)
-        await _push_stream_event('ceo.turn.patch', {'inflight_turn': inflight_turn})
+        await _push_stream_event('ceo.turn.patch', _build_live_turn_payload(session, session_id))
 
     def _current_session_is_running() -> bool:
         status = str(getattr(session.state, 'status', '') or '').strip().lower()
@@ -918,14 +954,14 @@ async def ceo_websocket(websocket: WebSocket):
     global_sender_task = asyncio.create_task(sender(global_queue))
     stream_task = asyncio.create_task(sender(stream_queue))
     try:
-        inflight_turn = _build_inflight_turn_snapshot(session, session_id, persisted_session)
+        turn_payload = _build_live_turn_payload(session, session_id, persisted_session)
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='hello', data={'session_id': session_id}))
         await _safe_send(
             build_envelope(
                 channel='ceo',
                 session_id=session_id,
                 type='snapshot.ceo',
-                data={'messages': persisted_messages, 'inflight_turn': inflight_turn},
+                data={'messages': persisted_messages, **turn_payload},
             )
         )
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='ceo.state', data={'state': session.state_dict()}))

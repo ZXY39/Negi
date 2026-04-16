@@ -108,6 +108,14 @@ The backend contract behind that UI behavior is:
 - Queued follow-ups should not interrupt heartbeat execution.
 - Once heartbeat finishes and the session becomes dispatchable again, queued follow-ups may begin draining automatically.
 
+### Heartbeat Visible-Turn Contract
+
+- Browser-side CEO websocket payloads may now carry both `inflight_turn` and `preserved_turn`.
+- `inflight_turn` is the current real running turn. For heartbeat this means the heartbeat turn itself, not the earlier user bubble that is being kept on screen temporarily.
+- `preserved_turn` is a live-only carryover bubble that should remain visible until a later `ceo.turn.discard` closes it.
+- Frontend rendering should treat these as two separate bubbles. It must not reuse `preserved_turn.execution_trace_summary` as the `Interaction Flow` for the current heartbeat bubble.
+- Frontend trace fallback is only safe within the same rendered turn identity. Reusing the previous bubble's trace across `turn_id` or across `source=user -> heartbeat` is a contract bug.
+
 ### CEO Session List Interaction Contract
 
 - The session list distinguishes between "session switch is still settling" and "session catalog is being mutated".

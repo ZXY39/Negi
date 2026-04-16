@@ -1344,6 +1344,51 @@ async def test_inflight_snapshot_preserves_paused_user_turn_across_heartbeat_pro
     assert [item["tool_name"] for item in tools] == ["skill-installer"]
 
 
+def test_runtime_agent_session_separates_current_heartbeat_snapshot_from_preserved_visible_turn() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._state.latest_message = "heartbeat is processing"
+    session._last_prompt = UserInputMessage(
+        content="heartbeat",
+        metadata={"heartbeat_internal": True, "heartbeat_reason": "tool_background"},
+    )
+    session._preserved_inflight_turn = {
+        "source": "user",
+        "turn_id": "turn-user-preserved",
+        "status": "running",
+        "user_message": {"content": "Install the skill"},
+        "assistant_text": "Still working on the previous turn",
+        "execution_trace_summary": {
+            "stages": [
+                {
+                    "stage_id": "frontdoor-stage-user",
+                    "stage_goal": "install skill",
+                    "rounds": [],
+                }
+            ]
+        },
+    }
+
+    current_snapshot = session.inflight_turn_snapshot()
+    preserved_snapshot = session.preserved_inflight_turn_snapshot()
+
+    assert current_snapshot is not None
+    assert current_snapshot["source"] == "heartbeat"
+    assert current_snapshot["status"] == "running"
+    assert current_snapshot["assistant_text"] == "heartbeat is processing"
+    assert current_snapshot.get("turn_id") != "turn-user-preserved"
+    assert preserved_snapshot is not None
+    assert preserved_snapshot["source"] == "user"
+    assert preserved_snapshot["turn_id"] == "turn-user-preserved"
+    assert preserved_snapshot["execution_trace_summary"]["stages"][0]["stage_id"] == "frontdoor-stage-user"
+
+
 @pytest.mark.asyncio
 async def test_new_user_turn_clears_stale_frontdoor_stage_and_compression_before_first_running_snapshot(
     tmp_path: Path,

@@ -788,7 +788,9 @@ class WebSessionHeartbeatService:
     def _clear_preserved_inflight_turn(self, session_id: str, session: Any) -> tuple[str | None, str]:
         source: str | None = None
         turn_id = ""
-        getter = getattr(session, "inflight_turn_snapshot", None)
+        getter = getattr(session, "preserved_inflight_turn_snapshot", None)
+        if not callable(getter):
+            getter = getattr(session, "inflight_turn_snapshot", None)
         if callable(getter):
             try:
                 snapshot = getter()

@@ -93,6 +93,8 @@
 - 每个可显示的 inflight turn 现在都有稳定的 `turn_id`
 - `inflight_turn_snapshot`、`message_end`、heartbeat discard/final reply 都会沿这个 `turn_id` 传递
 - 前端不应再仅靠 `source=user|heartbeat` 去猜“当前该收口的是哪个 pending bubble”
+- `inflight_turn_snapshot()` 现在必须只表达“当前真实在跑的 turn”。如果 heartbeat / cron 在运行前需要暂时保留上一条可见 user bubble，运行时会把它放在单独的 preserved snapshot，而不是再让 preserved turn 覆盖当前 inflight turn。
+- 对 Web CEO websocket 来说，这意味着 live payload 里可能同时出现 `inflight_turn` 和 `preserved_turn`：前者是当前 heartbeat/cron/user turn，后者只是等待后续 `ceo.turn.discard` 收口的旧可见气泡。
 - 对 Web CEO/frontdoor 来说，session 侧还会同步保存当前 turn 的 hydrated tool state；它和 stage trace 一样属于“当前进行中 turn 的运行时事实”，不是长期 transcript。
 - session 侧现在还会同步保存 `frontdoor_selection_debug`，用于记录当前 turn 的 frontdoor 候选生成诊断：原始 query、rewrite 后的 skill/tool query、dense/rerank trace、tool selection trace，以及当轮 callable/candidate/hydrated 合同快照。
 - 维护上还要记住两个默认上限：CEO/frontdoor 的默认 candidate skills / candidate tools 上限现在都是 16；frontdoor 与节点的默认 hydrated tool LRU 上限也都是 16。若线上行为不像 16，优先检查运行时状态或 `tools/memory_runtime/resource.yaml` 是否显式改写。
@@ -102,6 +104,7 @@
 - 同 source 的多个 pending turn 被错误合并
 - heartbeat 清理时误删或漏删旧 turn
 - 前端残留一个只有“处理中...”的气泡
+- heartbeat 新气泡错误继承上一条 user bubble 的 `Interaction Flow`
 
 另外，手动 pause 之后的后续输入语义也有一个容易误改的点：
 

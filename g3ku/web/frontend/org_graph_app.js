@@ -1509,13 +1509,15 @@ function normalizeCeoSessionSnapshotCacheEntry(sessionId, entry = {}) {
     if (!key) return null;
     const messages = trimCeoSessionSnapshotMessages(entry?.messages);
     const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
-    if (!messages.length && !inflightTurn) return null;
+    const preservedTurn = normalizeCeoSnapshotInflight(entry?.preserved_turn);
+    if (!messages.length && !inflightTurn && !preservedTurn) return null;
     const next = {
         session_id: key,
         messages,
         cached_at: String(entry?.cached_at || "").trim() || new Date().toISOString(),
     };
     if (inflightTurn) next.inflight_turn = inflightTurn;
+    if (preservedTurn) next.preserved_turn = preservedTurn;
     const messageCount = Number(entry?.message_count);
     if (Number.isFinite(messageCount) && messageCount >= 0) next.message_count = Math.floor(messageCount);
     const updatedAt = String(entry?.updated_at || "").trim();
@@ -1707,7 +1709,7 @@ function renderCeoSessionSnapshotFromCache(sessionId, { scrollToLatest = true } 
     const entry = getCeoSessionSnapshotCache(sessionId);
     if (!entry) return false;
     if (scrollToLatest) S.ceoScrollToLatestOnSnapshot = true;
-    renderCeoSnapshot(entry.messages || [], entry.inflight_turn || null);
+    renderCeoSnapshot(entry.messages || [], entry.inflight_turn || null, { preservedTurn: entry.preserved_turn || null });
     return true;
 }
 
@@ -3317,8 +3319,12 @@ function renderCeoStageTraceIntoTurn(turn, executionTraceSummary = null) {
     return turn.steps;
 }
 
-function patchCeoInflightTurn(snapshot = null, { sessionId = "" } = {}) {
-    if (!snapshot || typeof snapshot !== "object") return false;
+function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "inflight_turn" } = {}) {
+    if (!snapshot || typeof snapshot !== "object") {
+        const targetSessionId = String(sessionId || activeSessionId()).trim();
+        if (targetSessionId) setCeoSessionSnapshotCache(targetSessionId, { [cacheField]: null });
+        return false;
+    }
     const source = normalizeCeoTurnSource(snapshot?.source || "user");
     const turnId = normalizeCeoTurnId(snapshot?.turn_id || "");
     const status = String(snapshot.status || "").trim().toLowerCase();
@@ -3351,12 +3357,12 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "" } = {}) {
         const inflightTurn = preferredExecutionTraceSummary
             ? { ...(snapshot || {}), execution_trace_summary: preferredExecutionTraceSummary }
             : snapshot;
-        setCeoSessionSnapshotCache(targetSessionId, { inflight_turn: inflightTurn });
+        setCeoSessionSnapshotCache(targetSessionId, { [cacheField]: inflightTurn });
     }
     return true;
 }
 
-function restoreCeoInflightTurn(snapshot = null, { sessionId = "" } = {}) {
+function restoreCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "inflight_turn" } = {}) {
     if (!snapshot || typeof snapshot !== "object") return;
     const source = normalizeCeoTurnSource(snapshot?.source || "");
     const isHeartbeat = source === "heartbeat";
@@ -3366,7 +3372,7 @@ function restoreCeoInflightTurn(snapshot = null, { sessionId = "" } = {}) {
         const text = hasRenderableText(userMessage.content) ? String(userMessage.content || "") : summarizeUploads(attachments);
         addMsg(text, "user", { attachments, scrollMode: "preserve" });
     }
-    patchCeoInflightTurn(snapshot, { sessionId });
+    patchCeoInflightTurn(snapshot, { sessionId, cacheField });
     const status = String(snapshot.status || "").trim().toLowerCase();
     const assistantText = String(snapshot.assistant_text || "").trim();
     if (status === "paused") {
@@ -3409,7 +3415,7 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     finalizeCeoTurn(content, { source: "history" });
 }
 
-function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "" } = {}) {
+function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "", preservedTurn = null } = {}) {
     const shouldScrollToLatest = !!S.ceoScrollToLatestOnSnapshot;
     S.ceoScrollToLatestOnSnapshot = false;
     const targetSessionId = String(sessionId || activeSessionId()).trim();
@@ -3437,13 +3443,18 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "" 
             }
         });
         restoreCeoInflightTurn(
+            dedupeInflightUserMessageAgainstMessages(messages, preservedTurn),
+            { sessionId: targetSessionId, cacheField: "preserved_turn" }
+        );
+        restoreCeoInflightTurn(
             dedupeInflightUserMessageAgainstMessages(messages, inflightTurn),
-            { sessionId: targetSessionId }
+            { sessionId: targetSessionId, cacheField: "inflight_turn" }
         );
         if (targetSessionId) {
             setCeoSessionSnapshotCache(targetSessionId, {
                 messages,
                 inflight_turn: inflightTurn,
+                preserved_turn: preservedTurn,
             });
         }
     }, {
@@ -3556,19 +3567,26 @@ function discardActiveCeoTurn({ source = "", turnId = "" } = {}) {
     if (discarded) {
         patchCeoSessionSnapshotCache(activeSessionId(), (entry) => {
             const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
-            if (!inflightTurn) return entry || {};
-            const inflightTurnId = normalizeCeoTurnId(inflightTurn?.turn_id);
-            if (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId) {
-                return entry || {};
-            }
-            const inflightSource = String(inflightTurn?.source || "").trim().toLowerCase();
-            if (normalizedSource && inflightSource && normalizeCeoTurnSource(inflightSource) !== normalizedSource) {
-                return entry || {};
-            }
-            return {
-                ...(entry || {}),
-                inflight_turn: null,
+            const preservedTurn = normalizeCeoSnapshotInflight(entry?.preserved_turn);
+            const matchesSnapshot = (snapshot) => {
+                if (!snapshot) return false;
+                const snapshotTurnId = normalizeCeoTurnId(snapshot?.turn_id);
+                if (normalizedTurnId && snapshotTurnId && snapshotTurnId !== normalizedTurnId) return false;
+                const snapshotSource = String(snapshot?.source || "").trim().toLowerCase();
+                if (normalizedSource && snapshotSource && normalizeCeoTurnSource(snapshotSource) !== normalizedSource) return false;
+                return true;
             };
+            const next = { ...(entry || {}) };
+            let changed = false;
+            if (matchesSnapshot(inflightTurn)) {
+                next.inflight_turn = null;
+                changed = true;
+            }
+            if (matchesSnapshot(preservedTurn)) {
+                next.preserved_turn = null;
+                changed = true;
+            }
+            return changed ? next : (entry || {});
         });
     }
     return discarded;
@@ -6981,13 +6999,14 @@ function initCeoWs() {
                 setCeoSessionSnapshotCache(effectiveSessionId, {
                     messages: payload.data?.messages || [],
                     inflight_turn: payload.data?.inflight_turn || null,
+                    preserved_turn: payload.data?.preserved_turn || null,
                 });
             }
             if (effectiveSessionId === activeSessionId()) {
                 renderCeoSnapshot(
                     payload.data?.messages || [],
                     payload.data?.inflight_turn || null,
-                    { sessionId: effectiveSessionId }
+                    { sessionId: effectiveSessionId, preservedTurn: payload.data?.preserved_turn || null }
                 );
             }
             S.ceoSessionBusy = false;
@@ -7013,9 +7032,17 @@ function initCeoWs() {
         if (payload.type === "ceo.control_ack") handleCeoControlAck(payload.data || {});
         if (payload.type === "ceo.turn.patch") {
             if (effectiveSessionId === activeSessionId()) {
-                patchCeoInflightTurn(payload.data?.inflight_turn || null, { sessionId: effectiveSessionId });
+                patchCeoInflightTurn(payload.data?.preserved_turn || null, {
+                    sessionId: effectiveSessionId,
+                    cacheField: "preserved_turn",
+                });
+                patchCeoInflightTurn(payload.data?.inflight_turn || null, {
+                    sessionId: effectiveSessionId,
+                    cacheField: "inflight_turn",
+                });
             } else if (effectiveSessionId) {
                 setCeoSessionSnapshotCache(effectiveSessionId, {
+                    preserved_turn: payload.data?.preserved_turn || null,
                     inflight_turn: payload.data?.inflight_turn || null,
                 });
             }

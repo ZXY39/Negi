@@ -129,7 +129,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, finalizePausedCeoTurn, renderPersistedCeoAssistantTurn, dedupeInflightUserMessageAgainstMessages, applyCeoState, maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, S, U, WebSocket, setAddMsg(fn) { addMsg = fn; }, setCreatePendingCeoTurn(fn) { createPendingCeoTurn = fn; }, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
+        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, finalizePausedCeoTurn, renderPersistedCeoAssistantTurn, renderCeoSnapshot, dedupeInflightUserMessageAgainstMessages, applyCeoState, maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, S, U, WebSocket, setAddMsg(fn) { addMsg = fn; }, setCreatePendingCeoTurn(fn) { createPendingCeoTurn = fn; }, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
         context
     );
     vm.runInContext(
@@ -424,6 +424,43 @@ test("stage trace stays visible when a later patch only carries fallback tool ev
 
     assert.equal(turn.renderMode, "stage");
     assert.equal(turn.listEl.innerHTML, "stage-trace");
+});
+
+test("render snapshot keeps preserved user flow separate from current heartbeat bubble", () => {
+    const { renderCeoSnapshot, S } = loadApp();
+
+    renderCeoSnapshot(
+        [],
+        {
+            source: "heartbeat",
+            turn_id: "turn-heartbeat-current",
+            status: "running",
+            assistant_text: "heartbeat processing",
+        },
+        {
+            sessionId: "web:test",
+            preservedTurn: {
+                source: "user",
+                turn_id: "turn-user-preserved",
+                status: "running",
+                user_message: { content: "Install the skill" },
+                assistant_text: "Still working on it...",
+                execution_trace_summary: {
+                    stages: [{ stage_id: "frontdoor-stage-user", stage_goal: "install skill" }],
+                },
+            },
+        },
+    );
+
+    assert.equal(S.ceoPendingTurns.length, 2);
+    const userTurn = S.ceoPendingTurns.find((turn) => turn.turnId === "turn-user-preserved");
+    const heartbeatTurn = S.ceoPendingTurns.find((turn) => turn.turnId === "turn-heartbeat-current");
+
+    assert.equal(userTurn?.renderMode, "stage");
+    assert.equal(userTurn?.listEl?.innerHTML, "stage-trace");
+    assert.equal(heartbeatTurn?.renderMode || "", "");
+    assert.equal(heartbeatTurn?.lastExecutionTraceSummary || null, null);
+    assert.equal(heartbeatTurn?.flowEl?.hidden, true);
 });
 
 test("queued follow-ups drain as one batch request and render multiple user bubbles", () => {
