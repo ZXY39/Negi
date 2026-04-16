@@ -226,8 +226,9 @@ def build_frontdoor_prompt_contract(
     base_stable_messages = list(normalized_stable_messages or normalized_live_request_messages)
     if normalized_scope == "ceo_frontdoor":
         normalized_effective_stable_messages = list(base_stable_messages)
+        request_base_messages = list(normalized_live_request_messages or normalized_effective_stable_messages)
         normalized_request_messages = _with_dynamic_appendix_after_system(
-            normalized_effective_stable_messages,
+            request_base_messages,
             normalized_dynamic_appendix_messages,
         )
     else:

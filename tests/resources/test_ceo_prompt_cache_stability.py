@@ -208,9 +208,11 @@ def test_frontdoor_prompt_contract_keeps_dynamic_appendix_directly_after_system_
             {"role": "user", "content": '{"message_type":"frontdoor_runtime_tool_contract"}'},
         ],
         live_request_messages=[
-            {"role": "system", "content": "unstable system ordering should be ignored"},
-            {"role": "assistant", "content": "old request-only appendix"},
+            {"role": "system", "content": "stable system"},
             {"role": "user", "content": "bootstrap user"},
+            {"role": "assistant", "content": "live assistant tool call"},
+            {"role": "tool", "name": "load_skill_context", "tool_call_id": "call-skill-1", "content": '{"ok": true}'},
+            {"role": "assistant", "content": "old request-only appendix"},
         ],
         tool_schemas=[],
         cache_family_revision="frontdoor:v1",
@@ -221,6 +223,13 @@ def test_frontdoor_prompt_contract_keeps_dynamic_appendix_directly_after_system_
         {"role": "system", "content": "stable system"},
         {"role": "assistant", "content": "## Retrieved Context\n- memory"},
         {"role": "user", "content": '{"message_type":"frontdoor_runtime_tool_contract"}'},
+        {"role": "user", "content": "bootstrap user"},
+        {"role": "assistant", "content": "live assistant tool call"},
+        {"role": "tool", "name": "load_skill_context", "tool_call_id": "call-skill-1", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "old request-only appendix"},
+    ]
+    assert list(_field(contract, "stable_messages")) == [
+        {"role": "system", "content": "stable system"},
         {"role": "user", "content": "bootstrap user"},
         {"role": "assistant", "content": "stable history"},
     ]
