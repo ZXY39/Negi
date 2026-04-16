@@ -220,9 +220,10 @@ The browser shell still receives `compression` snapshot data, but it now refers 
 
 The CEO browser/runtime integration now uses `canonical_context` as the only stage-trace protocol field.
 
-- Assistant transcript messages, `snapshot.ceo`, `ceo.turn.patch`, preserved-turn payloads, paused snapshots, and `ceo.reply.final` should carry `canonical_context`.
+- Assistant transcript messages, `snapshot.ceo`, `ceo.turn.patch`, preserved-turn payloads, paused snapshots, and `ceo.reply.final` should carry a turn-scoped `canonical_context`.
 - The frontend should not read or reconstruct CEO stage flow from `execution_trace_summary` or flat `tool_events`.
 - `canonical_context.stages[].rounds[].tools[]` is the authoritative render source for the stage trace.
+- The frontend should treat live/current-turn `canonical_context` as bubble-local trace data, not as the session's full durable stage history.
 
 Tool output rendering should follow the canonical payload directly:
 

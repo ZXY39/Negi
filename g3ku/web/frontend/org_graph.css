@@ -2649,7 +2649,7 @@ textarea {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: clamp(24px, 3vw, 36px) clamp(28px, 6vw, 80px) calc(var(--space-6) + 156px);
+    padding: clamp(24px, 3vw, 36px) clamp(28px, 6vw, 80px) calc(var(--space-6) + 156px) clamp(16px, 2.4vw, 32px);
     display: flex;
     flex-direction: column;
     align-items: stretch;

@@ -41,7 +41,7 @@ def test_resolve_final_canonical_context_keeps_current_turn_snapshot_context() -
         ]
     )
     session = SimpleNamespace(
-        _frontdoor_canonical_context_snapshot=lambda: current_context,
+        _frontdoor_visible_canonical_context_snapshot=lambda: current_context,
     )
 
     context = websocket_ceo._resolve_final_canonical_context(

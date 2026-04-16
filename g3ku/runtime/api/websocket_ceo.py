@@ -560,7 +560,7 @@ def _resolve_final_canonical_context(
     direct_context = data.get("canonical_context")
     if isinstance(direct_context, dict) and direct_context:
         return dict(direct_context)
-    snapshot_supplier = getattr(session, "_frontdoor_canonical_context_snapshot", None)
+    snapshot_supplier = getattr(session, "_frontdoor_visible_canonical_context_snapshot", None)
     if callable(snapshot_supplier):
         try:
             canonical_context = snapshot_supplier()

@@ -505,6 +505,42 @@ test("preserved turn is not re-rendered when an assistant message with the same 
     assert.equal(heartbeatTurns.length, 1);
 });
 
+test("anonymous user inflight turn does not reuse preserved user stage trace", () => {
+    const { renderCeoSnapshot, S } = loadApp();
+
+    renderCeoSnapshot(
+        [],
+        {
+            source: "user",
+            status: "running",
+            assistant_text: "new turn processing",
+        },
+        {
+            sessionId: "web:test",
+            preservedTurn: {
+                source: "user",
+                turn_id: "turn-user-preserved",
+                status: "running",
+                user_message: { content: "Install the skill" },
+                assistant_text: "Still working on it...",
+                canonical_context: {
+                    stages: [{ stage_id: "frontdoor-stage-user", stage_goal: "install skill" }],
+                },
+            },
+        },
+    );
+
+    assert.equal(S.ceoPendingTurns.length, 2);
+    const preservedTurn = S.ceoPendingTurns.find((turn) => turn.turnId === "turn-user-preserved");
+    const anonymousTurns = S.ceoPendingTurns.filter((turn) => !String(turn.turnId || "").trim());
+
+    assert.equal(preservedTurn?.renderMode, "stage");
+    assert.equal(preservedTurn?.listEl?.innerHTML, "stage-trace");
+    assert.equal(anonymousTurns.length, 1);
+    assert.equal(anonymousTurns[0]?.renderMode || "", "");
+    assert.equal(anonymousTurns[0]?.lastExecutionTraceSummary || null, null);
+});
+
 test("queued follow-ups drain as one batch request and render multiple user bubbles", () => {
     const context = loadApp();
     const { maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, S } = context;

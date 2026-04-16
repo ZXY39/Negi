@@ -208,6 +208,18 @@ test("removing a queued follow-up re-renders the visible queue", () => {
     assert.match(U.ceoFollowUpQueue.innerHTML, /second follow-up/);
 });
 
+test("queued follow-up list renders chips without a queue title block", () => {
+    const { U, setCeoQueuedFollowUps } = loadApp();
+
+    setCeoQueuedFollowUps("web:test", [
+        { id: "only", text: "only follow-up" },
+    ]);
+
+    assert.equal(U.ceoFollowUpQueue.hidden, false);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /only follow-up/);
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /ceo-follow-up-queue-title/);
+});
+
 test("primary button shows send when there is input during an active turn", () => {
     const { S, U, syncCeoPrimaryButton } = loadApp();
     S.ceoTurnActive = true;

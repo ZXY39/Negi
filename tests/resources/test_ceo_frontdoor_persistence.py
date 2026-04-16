@@ -23,6 +23,7 @@ if "litellm" not in sys.modules:
     sys.modules["litellm"] = litellm_stub
 
 from g3ku.agent.tools.base import Tool
+from g3ku.core.messages import UserInputMessage
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.api import websocket_ceo
@@ -36,6 +37,7 @@ from g3ku.runtime.frontdoor.state_models import (
     CeoPersistentState,
     CeoRuntimeContext,
 )
+from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import SessionManager
 
 
@@ -163,6 +165,58 @@ def test_execution_snapshot_history_uses_canonical_context_without_legacy_tool_e
     assert history[0] == {"role": "user", "content": "install weather skill"}
     assert history[1]["canonical_context"]["stages"][0]["rounds"][0]["tools"][0]["tool_name"] == "skill-installer"
     assert "tool_events" not in history[1]
+
+
+def test_inflight_snapshot_uses_current_turn_canonical_context_not_durable_history() -> None:
+    loop = SimpleNamespace(model="gpt-test", reasoning_effort=None)
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+    session._state.is_running = True
+    session._state.status = "running"
+    session._last_prompt = UserInputMessage(content="new request")
+    session._frontdoor_canonical_context = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-old",
+                "stage_index": 1,
+                "stage_goal": "old durable stage",
+                "representation": "raw",
+                "status": "completed",
+                "stage_kind": "normal",
+                "tool_round_budget": 2,
+                "tool_rounds_used": 1,
+                "rounds": [],
+            }
+        ],
+    }
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert isinstance(snapshot, dict)
+    assert "canonical_context" not in snapshot
+
+    session._frontdoor_stage_state = {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_goal": "current visible stage",
+                "status": "active",
+                "stage_kind": "normal",
+                "tool_round_budget": 3,
+                "tool_rounds_used": 0,
+                "rounds": [],
+            }
+        ],
+    }
+
+    snapshot_with_stage = session.inflight_turn_snapshot()
+
+    assert snapshot_with_stage["canonical_context"]["stages"][0]["stage_goal"] == "current visible stage"
+    assert snapshot_with_stage["canonical_context"]["stages"][0]["stage_id"] == "frontdoor-stage-1"
 
 
 class _CompiledGraphRecorder:

@@ -1332,7 +1332,6 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
         return;
     }
     U.ceoFollowUpQueue.innerHTML = `
-        <div class="ceo-follow-up-queue-title">待发送补充</div>
         ${items.map((item, index) => `
             <div class="ceo-follow-up-chip">
                 <span class="ceo-follow-up-chip-index">${index + 1}.</span>
@@ -2727,7 +2726,6 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
         return;
     }
     U.ceoFollowUpQueue.innerHTML = `
-        <div class="ceo-follow-up-queue-title">待发送补充</div>
         <div class="ceo-follow-up-chip-list" role="list">
             ${items.map((item, index) => `
                 <div class="ceo-follow-up-chip" role="listitem">
@@ -3328,8 +3326,16 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
     }
     const status = String(snapshot.status || "").trim().toLowerCase();
     const existingTurn = getActiveCeoTurn(source, turnId);
-    if (!existingTurn && !ceoNeedsAssistantTurn(snapshot)) return false;
-    const turn = existingTurn || ensureActiveCeoTurn({ source, turnId });
+    const shouldReuseExistingTurn = !!existingTurn && (
+        !!turnId || !normalizeCeoTurnId(existingTurn?.turnId || "")
+    );
+    if (!shouldReuseExistingTurn && !ceoNeedsAssistantTurn(snapshot)) return false;
+    let turn = shouldReuseExistingTurn ? existingTurn : null;
+    if (!turn) {
+        turn = createPendingCeoTurn(source, { scrollMode: "preserve" });
+        if (turnId && turn) turn.turnId = turnId;
+        if (turn) S.ceoPendingTurns.push(turn);
+    }
     if (!turn?.textEl || !turn?.flowEl) return false;
     if (turnId) turn.turnId = turnId;
     const preferredCanonicalContext = resolvePreferredCeoCanonicalContext(

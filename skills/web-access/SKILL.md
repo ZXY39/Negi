@@ -12,6 +12,8 @@ metadata:
 
 # web-access Skill
 
+**{CLAUDE_SKILL_DIR}为G3KU/skills/web-access的绝对路径**
+
 ## 前置检查
 
 在开始联网操作前，先检查 CDP 模式可用性：

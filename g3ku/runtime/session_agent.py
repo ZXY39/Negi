@@ -778,6 +778,12 @@ class RuntimeAgentSession:
         )
         return snapshot if list(snapshot.get("stages") or []) else {}
 
+    def _frontdoor_visible_canonical_context_snapshot(self) -> dict[str, Any]:
+        snapshot = normalize_frontdoor_canonical_context(
+            copy.deepcopy(getattr(self, "_frontdoor_stage_state", None) or {})
+        )
+        return snapshot if list(snapshot.get("stages") or []) else {}
+
     def _compression_snapshot(self) -> dict[str, Any]:
         raw = getattr(self, "_compression_state", None)
         if not isinstance(raw, dict):
@@ -858,7 +864,7 @@ class RuntimeAgentSession:
         status = str(status_override or self._state.status or "").strip().lower()
         if not (self._state.is_running or status in {"running", "paused", "error"}):
             return None
-        canonical_context = self._frontdoor_canonical_context_snapshot()
+        canonical_context = self._frontdoor_visible_canonical_context_snapshot()
         compression = self._compression_snapshot()
         snapshot: dict[str, Any] = {
             "status": status or ("running" if self._state.is_running else "idle"),
@@ -1050,7 +1056,7 @@ class RuntimeAgentSession:
                 if visible_user_texts:
                     user_text = visible_user_texts[-1]
             assistant_payload: dict[str, Any] = {}
-            canonical_context = self._frontdoor_canonical_context_snapshot()
+            canonical_context = self._frontdoor_visible_canonical_context_snapshot()
             compression = self._compression_snapshot()
             if canonical_context:
                 assistant_payload["canonical_context"] = canonical_context

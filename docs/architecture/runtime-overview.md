@@ -474,7 +474,8 @@ The CEO/frontdoor path now has a single cross-turn stage truth source: `frontdoo
 - `frontdoor_canonical_context` is the durable cross-turn stage/history view. Turn-finalization merges the current turn stage ledger into this canonical structure.
 - Prompt assembly no longer rebuilds retained stage history from transcript `execution_trace_summary` or flat `tool_events`.
 - The near-field stage workset is derived from `frontdoor_canonical_context + current frontdoor_stage_state`.
-- Session transcript assistant messages, inflight snapshots, paused snapshots, and websocket final replies now expose `canonical_context` rather than `execution_trace_summary` / `tool_events`.
+- Session state still owns the durable full `frontdoor_canonical_context`, but UI-facing turn payloads now expose a current-turn `canonical_context` slice rather than `execution_trace_summary` / `tool_events`.
+- In other words: prompt assembly reads the durable cross-turn canonical context, while inflight / paused / final-reply payloads should describe only the visible turn's own stage trace.
 
 Maintainers should treat the canonical context representation rules as the only allowed information-loss boundary:
 
