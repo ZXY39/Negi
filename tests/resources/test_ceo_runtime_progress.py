@@ -251,11 +251,16 @@ class _FakeErrorSession:
 
 
 class _FakeHeartbeatSession:
-    def __init__(self, *, output: str = HEARTBEAT_OK) -> None:
+    def __init__(
+        self,
+        *,
+        output: str = HEARTBEAT_OK,
+        outputs: list[str] | tuple[str, ...] | None = None,
+    ) -> None:
         self.state = SimpleNamespace(status="idle", is_running=False)
         self.prompts: list[UserInputMessage] = []
         self._listeners = set()
-        self._output = output
+        self._outputs = [str(item or "") for item in list(outputs or [output])]
         self.turn_id = "turn-heartbeat-default"
 
     def subscribe(self, listener):
@@ -276,16 +281,19 @@ class _FakeHeartbeatSession:
     async def prompt(self, user_message, persist_transcript: bool = False) -> SimpleNamespace:
         _ = persist_transcript
         self.prompts.append(user_message)
-        if self._output:
+        output = self._outputs.pop(0) if self._outputs else ""
+        heartbeat_reason = str((getattr(user_message, "metadata", None) or {}).get("heartbeat_reason") or "").strip()
+        if output:
             await self._emit(
                 "message_end",
                 role="assistant",
-                text=str(self._output),
+                text=str(output),
                 source="heartbeat",
                 heartbeat_internal=True,
+                heartbeat_reason=heartbeat_reason,
                 turn_id=self.turn_id,
             )
-        return SimpleNamespace(output=self._output)
+        return SimpleNamespace(output=output)
 
 
 class _FakeHeartbeatFinalSession(_FakeHeartbeatSession):
@@ -4669,6 +4677,12 @@ def test_ceo_websocket_filters_heartbeat_internal_message_end() -> None:
     assert websocket_ceo._should_forward_message_end(
         {"role": "assistant", "text": HEARTBEAT_OK}
     ) is False
+    assert websocket_ceo._is_internal_ack_message_end(
+        {"role": "assistant", "text": HEARTBEAT_OK, "source": "heartbeat", "heartbeat_reason": "task_terminal"}
+    ) is False
+    assert websocket_ceo._is_internal_ack_message_end(
+        {"role": "assistant", "text": HEARTBEAT_OK, "source": "heartbeat", "heartbeat_reason": "tool_background"}
+    ) is True
 
 
 def test_ceo_tool_event_serializers_preserve_source() -> None:
@@ -5041,12 +5055,12 @@ async def test_web_session_heartbeat_tool_only_terminal_uses_visible_reply_and_n
 
 
 @pytest.mark.asyncio
-async def test_web_session_heartbeat_emits_internal_ack_when_model_returns_heartbeat_ok_for_task_terminal(tmp_path: Path) -> None:
+async def test_web_session_heartbeat_repairs_task_terminal_when_model_returns_heartbeat_ok_then_text(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-task-terminal-fallback"
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, "整理后的最终结论"])
     task_service = _TaskService()
     service = WebSessionHeartbeatService(
         workspace=tmp_path,
@@ -5071,33 +5085,32 @@ async def test_web_session_heartbeat_emits_internal_ack_when_model_returns_heart
     next_delay = await service._run_session(session_id)
 
     assert next_delay is None
-    assert len(live_session.prompts) == 1
+    assert len(live_session.prompts) == 2
     assert service._events.peek(session_id) == []
     assert len(task_service.registry.published) == 1
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
-    assert envelope["type"] == "ceo.internal.ack"
+    assert envelope["type"] == "ceo.reply.final"
     assert envelope["data"]["source"] == "heartbeat"
-    assert envelope["data"]["reason"] == "task_terminal"
-    assert "task_terminal" in str(envelope["data"]["label"])
     assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
     assert len(task_service.delivered) == 1
     assert task_service.delivered[0][0] == "task-terminal:task:demo-terminal:success:2026-03-23T01:34:32+08:00"
+    assert "must not reply with HEARTBEAT_OK" in str(live_session.prompts[1].content)
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert reloaded.messages == []
-    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == []
-    assert reloaded.metadata.get("last_task_memory", {}).get("source") == ""
-    assert reloaded.metadata.get("last_task_memory", {}).get("reason") == ""
+    assert reloaded.messages[-1]["content"] == "整理后的最终结论"
+    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == ["task:demo-terminal"]
+    assert reloaded.metadata.get("last_task_memory", {}).get("source") == "heartbeat"
+    assert reloaded.metadata.get("last_task_memory", {}).get("reason") == "task_terminal"
 
 
 @pytest.mark.asyncio
-async def test_web_session_heartbeat_emits_internal_ack_for_unpassed_task_terminal_when_model_returns_heartbeat_ok(tmp_path: Path) -> None:
+async def test_web_session_heartbeat_repairs_unpassed_task_terminal_when_model_returns_heartbeat_ok_then_text(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-task-terminal-unpassed-continuation"
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, "虽然未通过验收，但结果已基本可交付。"])
     task_service = _TaskService()
     task_service.continuation_tasks[(session_id, "task:demo-unpassed")] = SimpleNamespace(task_id="task:cont-2")
     service = WebSessionHeartbeatService(
@@ -5128,25 +5141,24 @@ async def test_web_session_heartbeat_emits_internal_ack_for_unpassed_task_termin
     assert next_delay is None
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
-    assert envelope["type"] == "ceo.internal.ack"
+    assert envelope["type"] == "ceo.reply.final"
     assert envelope["data"]["source"] == "heartbeat"
-    assert envelope["data"]["reason"] == "task_terminal"
     assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
+    assert "must not reply with HEARTBEAT_OK" in str(live_session.prompts[1].content)
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert reloaded.messages == []
-    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == []
-    assert reloaded.metadata.get("last_task_memory", {}).get("source") == ""
-    assert reloaded.metadata.get("last_task_memory", {}).get("reason") == ""
+    assert reloaded.messages[-1]["content"] == "虽然未通过验收，但结果已基本可交付。"
+    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == ["task:demo-unpassed", "task:cont-2"]
+    assert reloaded.metadata.get("last_task_memory", {}).get("reason") == "task_terminal"
 
 
 @pytest.mark.asyncio
-async def test_web_session_heartbeat_emits_internal_ack_for_engine_failure_when_model_returns_heartbeat_ok(tmp_path: Path) -> None:
+async def test_web_session_heartbeat_uses_fixed_error_after_task_terminal_repair_attempt_limit(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-task-terminal-engine-failure"
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, HEARTBEAT_OK, HEARTBEAT_OK, HEARTBEAT_OK, HEARTBEAT_OK, HEARTBEAT_OK])
     task_service = _TaskService()
     task_service.continuation_tasks[(session_id, "task:demo-engine-failed")] = SimpleNamespace(task_id="task:cont-3")
     service = WebSessionHeartbeatService(
@@ -5177,9 +5189,13 @@ async def test_web_session_heartbeat_emits_internal_ack_for_engine_failure_when_
     assert len(task_service.registry.published) == 1
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
-    assert envelope["type"] == "ceo.internal.ack"
-    assert envelope["data"]["reason"] == "task_terminal"
+    assert envelope["type"] == "ceo.reply.final"
     assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
+    assert "系统在整理该结果时连续失败" in str(envelope["data"]["text"] or "")
+    assert "task:demo-engine-failed" in str(envelope["data"]["text"] or "")
+    assert len(live_session.prompts) == 6
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    assert reloaded.messages[-1]["content"]
 
 
 @pytest.mark.asyncio
@@ -5188,7 +5204,7 @@ async def test_web_session_heartbeat_does_not_auto_retry_engine_failure_in_place
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, "已读取 root 输出并整理回复。"])
     task_service = _TaskService()
     task_id = "task:demo-engine-retry"
     task_service.tasks[task_id] = SimpleNamespace(
@@ -5226,8 +5242,7 @@ async def test_web_session_heartbeat_does_not_auto_retry_engine_failure_in_place
     assert len(task_service.registry.published) == 1
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
-    assert envelope["type"] == "ceo.internal.ack"
-    assert envelope["data"]["reason"] == "task_terminal"
+    assert envelope["type"] == "ceo.reply.final"
     assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
 
 
@@ -5237,7 +5252,7 @@ async def test_web_session_heartbeat_does_not_retry_after_prior_in_place_retry_f
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, "已读取 root 输出并整理回复。"])
     task_service = _TaskService()
     task_id = "task:demo-engine-retry-again"
     task_service.tasks[task_id] = SimpleNamespace(
@@ -5286,8 +5301,7 @@ async def test_web_session_heartbeat_does_not_retry_after_prior_in_place_retry_f
     assert len(task_service.registry.published) == 1
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
-    assert envelope["type"] == "ceo.internal.ack"
-    assert envelope["data"]["reason"] == "task_terminal"
+    assert envelope["type"] == "ceo.reply.final"
     assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
 
 
@@ -5297,7 +5311,7 @@ async def test_web_session_heartbeat_skips_engine_failure_retry_after_recreated_
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, "已读取 root 输出并整理回复。"])
     task_service = _TaskService()
     task_id = "task:demo-engine-superseded"
     task_service.tasks[task_id] = SimpleNamespace(
@@ -5339,8 +5353,7 @@ async def test_web_session_heartbeat_skips_engine_failure_retry_after_recreated_
     assert len(task_service.registry.published) == 1
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
-    assert envelope["type"] == "ceo.internal.ack"
-    assert envelope["data"]["reason"] == "task_terminal"
+    assert envelope["type"] == "ceo.reply.final"
     assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
 
 
@@ -5350,7 +5363,7 @@ async def test_web_session_heartbeat_prompt_includes_terminal_root_output_and_me
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, "已读取 root 输出并整理回复。"])
     task_service = _TaskService()
     task_id = "task:demo-root-output"
     task_service.tasks[task_id] = SimpleNamespace(
@@ -5402,9 +5415,19 @@ async def test_web_session_heartbeat_prompt_includes_terminal_root_output_and_me
     assert "Result output ref: artifact:artifact:root-output" in prompt_text
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert reloaded.messages == []
-    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == []
-    assert reloaded.metadata["last_task_memory"]["task_results"] == []
+    assert reloaded.messages[-1]["content"] == "已读取 root 输出并整理回复。"
+    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == [task_id]
+    assert reloaded.metadata["last_task_memory"]["task_results"] == [
+        {
+            "task_id": task_id,
+            "node_id": "node:root",
+            "node_kind": "execution",
+            "node_reason": "root_terminal",
+            "output_excerpt": "Top 3 recommendation list",
+            "output_ref": "artifact:artifact:root-output",
+            "check_result": "accepted",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -5525,7 +5548,7 @@ async def test_web_session_heartbeat_prefers_acceptance_output_when_final_accept
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(output=HEARTBEAT_OK)
+    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, "已读取 acceptance 输出并整理回复。"])
     task_service = _TaskService()
     task_id = "task:demo-acceptance-output"
     task_service.tasks[task_id] = SimpleNamespace(
@@ -5586,9 +5609,20 @@ async def test_web_session_heartbeat_prefers_acceptance_output_when_final_accept
     assert "Result output ref: artifact:artifact:accept-output" in prompt_text
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert reloaded.messages == []
-    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == []
-    assert reloaded.metadata["last_task_memory"]["task_results"] == []
+    assert reloaded.messages[-1]["content"] == "已读取 acceptance 输出并整理回复。"
+    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == [task_id]
+    assert reloaded.metadata["last_task_memory"]["task_results"] == [
+        {
+            "task_id": task_id,
+            "node_id": "node:acceptance",
+            "node_kind": "acceptance",
+            "node_reason": "acceptance_failed",
+            "output_excerpt": "Acceptance node full output",
+            "output_ref": "artifact:artifact:accept-output",
+            "check_result": "acceptance failed",
+            "failure_reason": "Acceptance Failure: evidence mismatch",
+        }
+    ]
 
 
 @pytest.mark.asyncio

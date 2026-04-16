@@ -35,6 +35,8 @@ from main.service.task_terminal_callback import build_task_terminal_payload, enr
 HEARTBEAT_OK = "HEARTBEAT_OK"
 HeartbeatReplyNotifier = Callable[[str, str], Awaitable[None] | None]
 _TASK_TERMINAL_OUTPUT_INLINE_LIMIT = 4000
+_TASK_TERMINAL_REPAIR_ATTEMPT_LIMIT = 5
+_TASK_TERMINAL_INVALID_OUTPUT_LABEL = "<empty>"
 
 
 @lru_cache(maxsize=1)
@@ -516,14 +518,122 @@ class WebSessionHeartbeatService:
         except Exception:
             return False
 
-    def _build_prompt(self, events: list[SessionHeartbeatEvent]) -> str:
+    @staticmethod
+    def _task_terminal_output_requires_repair(output: Any) -> bool:
+        text = str(output or "").strip()
+        return not text or text == HEARTBEAT_OK
+
+    @staticmethod
+    def _task_terminal_invalid_output_label(output: Any) -> str:
+        text = str(output or "").strip()
+        return text if text else _TASK_TERMINAL_INVALID_OUTPUT_LABEL
+
+    def _task_terminal_repair_status_lines(self, events: list[SessionHeartbeatEvent]) -> list[str]:
+        lines: list[str] = []
+        seen: set[str] = set()
+        for event in self._task_terminal_events(events):
+            payload = dict(event.payload or {})
+            task_id = str(payload.get("task_id") or "").strip()
+            if not task_id or task_id in seen:
+                continue
+            seen.add(task_id)
+            continuation_task = self._find_continuation_task_for_event(event)
+            if continuation_task is not None:
+                lines.append(
+                    f"- A continuation task already exists for {task_id}: {str(getattr(continuation_task, 'task_id', '') or '').strip()}. "
+                    "You must explain this to the user in text."
+                )
+                continue
+            latest_task = self._event_current_task(event)
+            if latest_task is None:
+                continue
+            latest_status = str(getattr(latest_task, "status", "") or "").strip().lower()
+            metadata = (
+                getattr(latest_task, "metadata", None)
+                if isinstance(getattr(latest_task, "metadata", None), dict)
+                else {}
+            )
+            continuation_state = str(
+                (metadata or {}).get("continuation_state") or payload.get("continuation_state") or ""
+            ).strip().lower()
+            continuation_mode = str(
+                (metadata or {}).get("continuation_mode") or payload.get("continuation_mode") or ""
+            ).strip().lower()
+            continued_by_task_id = str(
+                (metadata or {}).get("continued_by_task_id") or payload.get("continued_by_task_id") or ""
+            ).strip()
+            if latest_status == "in_progress" and continuation_state == "retried_in_place":
+                lines.append(
+                    f"- Task {task_id} has already been resumed in place via {continuation_mode or 'retry_in_place'}. "
+                    "You must explain that to the user in text."
+                )
+            elif continued_by_task_id:
+                lines.append(
+                    f"- Task {task_id} was already taken over by continuation task {continued_by_task_id}. "
+                    "You must explain that to the user in text."
+                )
+        return lines
+
+    @staticmethod
+    def _task_terminal_fixed_error_text(events: list[SessionHeartbeatEvent]) -> str:
+        task_ids: list[str] = []
+        for event in list(events or []):
+            if str(event.reason or "").strip().lower() != "task_terminal":
+                continue
+            task_id = str((event.payload or {}).get("task_id") or "").strip()
+            if task_id and task_id not in task_ids:
+                task_ids.append(task_id)
+        if task_ids:
+            joined_ids = "、".join(task_ids)
+            return (
+                f"后台任务已完成或已到终态，但系统在整理该结果时连续失败。任务 ID：{joined_ids}。"
+                "你可以让我重新整理结果，或在任务面板查看/续跑该任务。"
+            )
+        return "后台任务已完成或已到终态，但系统在整理该结果时连续失败。你可以让我重新整理结果，或在任务面板查看该任务。"
+
+    def _build_prompt(
+        self,
+        events: list[SessionHeartbeatEvent],
+        *,
+        repair_attempt: int = 0,
+        invalid_output: str = "",
+    ) -> str:
         has_tool_background = any(str(event.reason or "").strip().lower() == "tool_background" for event in events)
         has_task_stall = any(str(event.reason or "").strip().lower() == "task_stall" for event in events)
+        has_task_terminal = bool(self._task_terminal_events(events))
         lines = [
             "This is a background heartbeat. Do not explain internal mechanics.",
-            f"If no user-facing update is needed, reply with exactly {HEARTBEAT_OK}.",
-            "If a user-facing update is needed, output only the text to show the user.",
         ]
+        if has_task_terminal:
+            lines.extend(
+                [
+                    f"For task_terminal events, you must not reply with {HEARTBEAT_OK} or empty text.",
+                    "You must finish this turn by doing one of the following:",
+                    "1. Output only the final text to show the user.",
+                    "2. Call tools to inspect or organize the result, then output the final text to show the user.",
+                    "3. Call continue_task when autonomous continuation is justified, then output a user-visible explanation of the continuation.",
+                    "If the task is already sufficiently complete for the user, summarize the usable conclusion now instead of staying silent.",
+                ]
+            )
+            if repair_attempt > 0:
+                lines.extend(
+                    [
+                        f"Repair attempt: {int(repair_attempt)}.",
+                        (
+                            "Your previous output was invalid for task_terminal because it was "
+                            f"{self._task_terminal_invalid_output_label(invalid_output)}."
+                        ),
+                        f"Do not reply with {HEARTBEAT_OK} or empty text in this repair turn.",
+                    ]
+                )
+                lines.extend(self._task_terminal_repair_status_lines(events))
+        else:
+            lines.extend(
+                [
+                    f"If no user-facing update is needed, reply with exactly {HEARTBEAT_OK}.",
+                    "If a user-facing update is needed, output only the text to show the user.",
+                ]
+            )
         if has_tool_background:
             lines.extend(
                 [
@@ -877,6 +987,46 @@ class WebSessionHeartbeatService:
         session.add_message("assistant", str(text or "").strip(), **assistant_payload)
         self._session_manager.save(session)
 
+    def _build_heartbeat_user_input(
+        self,
+        events: list[SessionHeartbeatEvent],
+        *,
+        heartbeat_reason: str,
+        normalized_metadata: dict[str, Any],
+        repair_attempt: int = 0,
+        invalid_output: str = "",
+    ) -> UserInputMessage:
+        heartbeat_prompt = self._build_prompt(
+            events,
+            repair_attempt=repair_attempt,
+            invalid_output=invalid_output,
+        )
+        stable_rules_text = str(heartbeat_prompt.partition("[SESSION EVENTS]")[0] or "").strip()
+        task_ledger_summary = build_task_ledger_summary(normalized_metadata.get("last_task_memory"))
+        heartbeat_lane = build_heartbeat_prompt_lane(
+            provider_model="",
+            stable_rules_text=stable_rules_text,
+            task_ledger_summary=task_ledger_summary,
+            events=[dict(event.payload or {}, reason=event.reason) for event in events],
+        )
+        metadata: dict[str, Any] = {
+            "heartbeat_internal": True,
+            "heartbeat_reason": heartbeat_reason,
+            "heartbeat_task_ids": [str((event.payload or {}).get("task_id") or "").strip() for event in events],
+            "heartbeat_prompt_lane": heartbeat_lane.scope,
+            "heartbeat_retrieval_query": heartbeat_lane.retrieval_query,
+            "heartbeat_stable_rules_text": stable_rules_text,
+            "heartbeat_task_ledger_summary": task_ledger_summary,
+            "history_visibility": "internal_event",
+        }
+        if repair_attempt > 0:
+            metadata["heartbeat_repair_attempt"] = int(repair_attempt)
+            metadata["heartbeat_invalid_output"] = self._task_terminal_invalid_output_label(invalid_output)
+        return UserInputMessage(
+            content=str((heartbeat_lane.request_messages[-1] if heartbeat_lane.request_messages else {}).get("content") or ""),
+            metadata=metadata,
+        )
+
     async def _run_session(self, session_id: str) -> float | None:
         key = str(session_id or "").strip()
         if not self._started or not key:
@@ -929,27 +1079,10 @@ class WebSessionHeartbeatService:
             return self._events.next_delay(key)
         reasons = sorted({str(event.reason or "").strip().lower() or "heartbeat" for event in events})
         heartbeat_reason = reasons[0] if len(reasons) == 1 else "mixed"
-        heartbeat_prompt = self._build_prompt(events)
-        stable_rules_text = str(heartbeat_prompt.partition("[SESSION EVENTS]")[0] or "").strip()
-        task_ledger_summary = build_task_ledger_summary(normalized_metadata.get("last_task_memory"))
-        heartbeat_lane = build_heartbeat_prompt_lane(
-            provider_model="",
-            stable_rules_text=stable_rules_text,
-            task_ledger_summary=task_ledger_summary,
-            events=[dict(event.payload or {}, reason=event.reason) for event in events],
-        )
-        user_input = UserInputMessage(
-            content=str((heartbeat_lane.request_messages[-1] if heartbeat_lane.request_messages else {}).get("content") or ""),
-            metadata={
-                "heartbeat_internal": True,
-                "heartbeat_reason": heartbeat_reason,
-                "heartbeat_task_ids": [str((event.payload or {}).get("task_id") or "").strip() for event in events],
-                "heartbeat_prompt_lane": heartbeat_lane.scope,
-                "heartbeat_retrieval_query": heartbeat_lane.retrieval_query,
-                "heartbeat_stable_rules_text": stable_rules_text,
-                "heartbeat_task_ledger_summary": task_ledger_summary,
-                "history_visibility": "internal_event",
-            },
+        user_input = self._build_heartbeat_user_input(
+            events,
+            heartbeat_reason=heartbeat_reason,
+            normalized_metadata=normalized_metadata,
         )
 
         heartbeat_turn_id = ""
@@ -968,14 +1101,22 @@ class WebSessionHeartbeatService:
             if serialized is not None:
                 self._publish_ceo(key, "ceo.agent.tool", serialized)
 
+        async def _run_prompt_attempt(prompt_input: UserInputMessage) -> Any:
+            prompt_task = asyncio.create_task(session.prompt(prompt_input, persist_transcript=False))
+            self._prompt_tasks[key] = prompt_task
+            register_task = getattr(self._agent, "_register_active_task", None)
+            if callable(register_task):
+                register_task(key, prompt_task)
+            try:
+                return await prompt_task
+            finally:
+                current = self._prompt_tasks.get(key)
+                if current is prompt_task:
+                    self._prompt_tasks.pop(key, None)
+
         unsubscribe = session.subscribe(_relay)
-        prompt_task = asyncio.create_task(session.prompt(user_input, persist_transcript=False))
-        self._prompt_tasks[key] = prompt_task
-        register_task = getattr(self._agent, "_register_active_task", None)
-        if callable(register_task):
-            register_task(key, prompt_task)
         try:
-            result = await prompt_task
+            result = await _run_prompt_attempt(user_input)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -984,12 +1125,37 @@ class WebSessionHeartbeatService:
             return 10.0
         finally:
             unsubscribe()
-            current = self._prompt_tasks.get(key)
-            if current is prompt_task:
-                self._prompt_tasks.pop(key, None)
 
         output = str(getattr(result, "output", "") or "").strip()
         task_terminal_events = self._task_terminal_events(events)
+        repair_attempt = 0
+        repair_failed = False
+        while task_terminal_events and self._task_terminal_output_requires_repair(output):
+            repair_attempt += 1
+            if repair_attempt > _TASK_TERMINAL_REPAIR_ATTEMPT_LIMIT:
+                output = self._task_terminal_fixed_error_text(events)
+                break
+            repair_input = self._build_heartbeat_user_input(
+                events,
+                heartbeat_reason=heartbeat_reason,
+                normalized_metadata=normalized_metadata,
+                repair_attempt=repair_attempt,
+                invalid_output=output,
+            )
+            unsubscribe = session.subscribe(_relay)
+            try:
+                result = await _run_prompt_attempt(repair_input)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("heartbeat repair session run failed for {} attempt {}", key, repair_attempt)
+                repair_failed = True
+                break
+            finally:
+                unsubscribe()
+            output = str(getattr(result, "output", "") or "").strip()
+        if repair_failed:
+            return 10.0
         event_reasons = {str(event.reason or "").strip().lower() for event in events}
         tool_only_events = bool(event_reasons) and event_reasons.issubset({"tool_background", "tool_terminal"})
         if tool_only_events:
@@ -1010,7 +1176,7 @@ class WebSessionHeartbeatService:
             self._ack_task_stall_events(popped)
             self.clear_session(key)
             return None
-        if not output or output == HEARTBEAT_OK:
+        if (not output or output == HEARTBEAT_OK) and not task_terminal_events:
             preserved_source, preserved_turn_id = self._clear_preserved_inflight_turn(key, session)
             if preserved_source:
                 discard_payload = {"source": preserved_source}

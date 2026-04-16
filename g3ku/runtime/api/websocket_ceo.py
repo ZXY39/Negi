@@ -638,7 +638,10 @@ def _is_internal_ack_message_end(payload: dict[str, Any] | None) -> bool:
     text = str(data.get("text") or "").strip()
     if text != _HEARTBEAT_OK:
         return False
-    return str(data.get("source") or "").strip().lower() in {"heartbeat", "cron"}
+    source = str(data.get("source") or "").strip().lower()
+    if source == "heartbeat" and str(data.get("heartbeat_reason") or "").strip().lower() == "task_terminal":
+        return False
+    return source in {"heartbeat", "cron"}
 
 
 def _internal_ack_label(*, source: str, reason: str) -> str:

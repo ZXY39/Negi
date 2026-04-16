@@ -143,6 +143,13 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - 判断当前这轮能直接回答，还是需要走任务运行时
 - 在必要时触发任务工具，如 `create_async_task`
 
+对于异步任务的回传，还要补一个当前维护边界：
+
+- 任务本身在 `main/` 中结束后，会通过 task terminal callback / heartbeat 回到原 CEO 会话。
+- 对 `task_terminal`，当前运行时合同已经不再允许 heartbeat 静默吞掉结果；正常路径必须形成一条用户可见回复，或明确告诉用户任务已续跑。
+- heartbeat 里的模型仍负责判断“已经基本完成可直接收尾”还是“仍有价值继续续跑”，但服务层会阻止 `task_terminal` 以空输出或 `HEARTBEAT_OK` 合法结束。
+- 因此维护者看到“任务面板成功，但会话没有最终回复”时，应优先把它视为 heartbeat repair / fallback 路径异常，而不是普通 UI 渲染问题。
+
 当前 frontdoor 的上下文组织需要按“双层模型”理解：
 
 - 内层是阶段工作集：

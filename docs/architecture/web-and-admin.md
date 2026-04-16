@@ -217,3 +217,5 @@ The browser now handles a dedicated live-only ACK event for silent internal turn
 - The frontend should render it as a distinct non-conversational bubble so operators can see that the internal turn was received and intentionally stayed silent.
 - That ACK bubble is intentionally ephemeral: it should not be appended to the CEO session snapshot `messages` list and should disappear on full refresh.
 - `ceo.turn.discard` still exists only to close a specific visible pending turn by `turn_id`.
+- `task_terminal` is now an explicit exception: heartbeat task-terminal turns should no longer reach the browser as `ceo.internal.ack`.
+- If the heartbeat model first produces `HEARTBEAT_OK` or empty text for a task terminal event, the backend now enters repair rounds and only sends `ceo.reply.final` once there is a user-visible result or the fixed fallback error is emitted.

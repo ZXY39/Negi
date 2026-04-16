@@ -1734,6 +1734,7 @@ class RuntimeAgentSession:
                     role="assistant",
                     text=output,
                     heartbeat_internal=heartbeat_internal,
+                    heartbeat_reason=str((user_input.metadata or {}).get("heartbeat_reason") or "").strip(),
                     source=internal_source or "user",
                     turn_id=self._current_turn_id(user_input),
                 )
@@ -1840,6 +1841,7 @@ class RuntimeAgentSession:
                 role="assistant",
                 text=output,
                 heartbeat_internal=heartbeat_internal,
+                heartbeat_reason=str((user_input.metadata or {}).get("heartbeat_reason") or "").strip(),
                 source=internal_source or "user",
                 turn_id=self._current_turn_id(user_input),
             )
