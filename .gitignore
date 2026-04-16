@@ -7,8 +7,7 @@ docs/
 !docs/
 docs/*
 !docs/architecture/
-docs/architecture/*
-!docs/architecture/china-channels.md
+!docs/architecture/**
 !docs/maintenance/
 docs/maintenance/*
 !docs/maintenance/openclaw-china-sync.md

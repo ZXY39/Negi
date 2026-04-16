@@ -144,6 +144,30 @@ class CeoMessageBuilder:
         self._loop = loop
         self._prompt_builder = prompt_builder
 
+    @staticmethod
+    def _prompt_message_records(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for raw in list(messages or []):
+            if not isinstance(raw, dict):
+                continue
+            role = str(raw.get("role") or "").strip().lower()
+            if not role:
+                continue
+            content = raw.get("content")
+            if isinstance(content, str):
+                content = content.strip()
+                if not content:
+                    continue
+            elif content is None:
+                continue
+            records.append(
+                {
+                    "role": role,
+                    "content": content,
+                }
+            )
+        return records
+
     @classmethod
     def _detect_memory_write_intent(cls, query_text: str) -> list[str]:
         text = str(query_text or '').strip()
@@ -1517,6 +1541,7 @@ class CeoMessageBuilder:
         frontdoor_canonical_context: dict[str, Any] | None = None,
         semantic_context_state: dict[str, Any] | None = None,
         hydrated_tool_names: list[str] | None = None,
+        ephemeral_tail_messages: list[dict[str, Any]] | None = None,
     ) -> ContextAssemblyResult:
         collect_started_at = time.perf_counter()
         context_sources = await self._collect_turn_context_sources(
@@ -1797,6 +1822,9 @@ class CeoMessageBuilder:
             ]
         else:
             model_messages = list(stable_messages)
+        ephemeral_tail = self._prompt_message_records(ephemeral_tail_messages)
+        if ephemeral_tail:
+            model_messages.extend(ephemeral_tail)
         effective_prompt_tokens = estimate_message_tokens(model_messages)
         inject_elapsed_ms = self._elapsed_ms(inject_started_at)
         frontdoor_spans_ms = {

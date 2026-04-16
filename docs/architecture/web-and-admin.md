@@ -247,3 +247,29 @@ The browser now handles a dedicated live-only ACK event for silent internal turn
 - `ceo.turn.discard` still exists only to close a specific visible pending turn by `turn_id`.
 - `task_terminal` is now an explicit exception: heartbeat task-terminal turns should no longer reach the browser as `ceo.internal.ack`.
 - If the heartbeat model first produces `HEARTBEAT_OK` or empty text for a task terminal event, the backend now enters repair rounds and only sends `ceo.reply.final` once there is a user-visible result or the fixed fallback error is emitted.
+
+## CEO Live Tool Reminder Contract
+
+The CEO browser/runtime integration now has a second live-only status lane for long-running direct tools: `ceo.tool.reminder`.
+
+This is intentionally different from both ordinary tool interaction steps and heartbeat turns.
+
+- Backend reminder events are emitted only as websocket live events.
+- The payload includes `turn_id`, `execution_id`, `tool_name`, `elapsed_seconds`, `reminder_count`, `decision`, `label`, `source="reminder"`, and optional `terminal`.
+- The frontend renders the reminder inside the active pending CEO turn, below the `Interaction Flow`, using a dedicated reminder block.
+- The frontend must update the existing reminder in place for the same `execution_id`; it must not create a new assistant bubble and must not append a new interaction step.
+
+### Persistence Rules
+
+- Reminder events are not part of `snapshot.ceo.messages`.
+- They must not be persisted into the transcript-backed CEO message list.
+- Refresh/reconnect should not restore an old reminder from cached snapshot state.
+- The reminder block should be cleared when the tool finishes, the turn finalizes, the turn is discarded, or a `terminal=true` reminder event arrives.
+
+### Decision Semantics
+
+- `decision=continue` means the sidecar reviewed the context and decided to keep waiting.
+- `decision=stop` means the sidecar requested `stop_tool_execution`; the main turn will later surface the actual tool failure through the ordinary tool-result path.
+- `decision=unavailable` means the reminder sidecar failed or could not make a valid stop decision, so the tool keeps running.
+
+Operators should therefore read the reminder block as live guidance only. The authoritative end state still arrives through the normal CEO tool/error/final-reply events.

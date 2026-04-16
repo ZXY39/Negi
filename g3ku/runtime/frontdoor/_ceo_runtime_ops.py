@@ -392,11 +392,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         metadata = _user_input_metadata(state.get("user_input"))
         heartbeat_internal = bool(state.get("heartbeat_internal", metadata.get("heartbeat_internal")))
         cron_internal = bool(state.get("cron_internal", metadata.get("cron_internal")))
+        turn_id_getter = getattr(session, "_current_turn_id", None)
+        turn_id = ""
+        if callable(turn_id_getter):
+            try:
+                turn_id = str(turn_id_getter() or "").strip()
+            except Exception:
+                turn_id = ""
         return {
             "on_progress": runtime.context.on_progress,
             "emit_lifecycle": True,
             "actor_role": "ceo",
             "session_key": session.state.session_key,
+            "turn_id": turn_id,
             "tool_contract_enforced": True,
             "candidate_tool_names": list(state.get("candidate_tool_names") or []),
             "candidate_skill_ids": list(state.get("candidate_skill_ids") or []),
@@ -412,6 +420,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ),
             "cancel_token": getattr(session, "_active_cancel_token", None),
             "tool_snapshot_supplier": getattr(session, "inflight_turn_snapshot", None),
+            "runtime_session": session,
             "temp_dir": str(getattr(self._loop, "temp_dir", "") or ""),
             "loop": self._loop,
             "task_defaults": self._session_task_defaults(runtime_session),

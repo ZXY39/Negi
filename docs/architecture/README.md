@@ -1,0 +1,31 @@
+# G3KU Architecture Docs
+
+Start here when you are new to the repository or when a change crosses subsystem boundaries.
+
+## Reading Order
+
+1. `runtime-overview.md`
+2. `tool-and-skill-system.md`
+3. `web-and-admin.md`
+4. `heartbeat-system.md` when the change touches heartbeat, long-running CEO tool wakeups, or live reminder behavior
+5. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
+6. `china-channels.md` when the change touches channel runtime or the Python/Node bridge
+
+## Topic Guide
+
+- `runtime-overview.md`
+  Use for session lifecycle, frontdoor/runtime flow, tool execution flow, and cross-module runtime behavior.
+- `tool-and-skill-system.md`
+  Use for candidate tools, hydrated tools, skill loading, tool RBAC, and runtime tool contracts.
+- `web-and-admin.md`
+  Use for websocket contracts, frontend/backend responsibility boundaries, and operator-visible UI behavior.
+- `heartbeat-system.md`
+  Use for heartbeat turns, task-terminal/stall wakeups, and the boundary between heartbeat and the CEO inline tool reminder sidecar.
+- `config-and-models.md`
+  Use for config source-of-truth rules and role-to-model resolution.
+- `china-channels.md`
+  Use for session key rules and the channel bridge boundary.
+
+## Current Maintenance Note
+
+The CEO long-running direct-tool reminder lane is now documented as a live-only sidecar, not as a heartbeat turn. If you are debugging reminder UI, timeout-stop failures, or `ceo.tool.reminder`, read `runtime-overview.md`, `web-and-admin.md`, and `heartbeat-system.md` together.

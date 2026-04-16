@@ -111,6 +111,7 @@ function loadApp() {
         globalThis.__renderFeedTexts = [];
         globalThis.__renderSessionPayloads = [];
         globalThis.__toolEvents = [];
+        globalThis.__reminderEvents = [];
         globalThis.__patchCalls = [];
         renderCeoSnapshot = (messages, inflightTurn, options = {}) => {
             globalThis.__renderCalls.push({
@@ -134,6 +135,9 @@ function loadApp() {
         };
         appendCeoToolEvent = (event) => {
             globalThis.__toolEvents.push(event);
+        };
+        handleCeoToolReminder = (event) => {
+            globalThis.__reminderEvents.push(event);
         };
         handleCeoError = () => {};
         finalizeCeoTurn = () => {};
@@ -310,4 +314,34 @@ test("ceo.agent.tool forwards live tool events into the active session feed", ()
     assert.equal(__context.__toolEvents.length, 1);
     assert.equal(__context.__toolEvents[0].tool_name, "load_tool_context");
     assert.equal(__context.__toolEvents[0].status, "success");
+});
+
+test("ceo.tool.reminder forwards live reminder events into the active session feed", () => {
+    const { S, initCeoWs, __socket, __context } = loadApp();
+
+    S.activeSessionId = "web:current";
+    initCeoWs();
+
+    const socket = __socket();
+    assert.ok(socket);
+
+    socket.onmessage({
+        data: JSON.stringify({
+            type: "ceo.tool.reminder",
+            session_id: "web:current",
+            data: {
+                turn_id: "turn-user-1",
+                execution_id: "inline-tool-exec:1",
+                tool_name: "exec",
+                elapsed_seconds: 120,
+                reminder_count: 2,
+                decision: "stop",
+                label: "stopped by reminder",
+            },
+        }),
+    });
+
+    assert.equal(__context.__reminderEvents.length, 1);
+    assert.equal(__context.__reminderEvents[0].execution_id, "inline-tool-exec:1");
+    assert.equal(__context.__reminderEvents[0].decision, "stop");
 });

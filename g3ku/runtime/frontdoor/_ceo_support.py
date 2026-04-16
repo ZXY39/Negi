@@ -15,6 +15,7 @@ from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.registry import find_by_name
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.frontdoor.exposure_resolver import CeoExposureResolver
+from g3ku.runtime.frontdoor.inline_tool_reminder import build_timeout_stop_error_text
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
@@ -546,6 +547,7 @@ class CeoFrontDoorSupport:
     ) -> tuple[Any, str, str, str, str, float | None]:
         normalized_arguments = normalize_runtime_tool_arguments_dict(arguments)
         normalized_tool_call_id = str(tool_call_id or "").strip()
+        inline_execution_id = ""
         try:
             errors = tool.validate_params(normalized_arguments)
         except Exception as exc:
@@ -577,6 +579,10 @@ class CeoFrontDoorSupport:
         if self._accepts_runtime_context(tool):
             execute_kwargs["__g3ku_runtime"] = per_call_runtime
 
+        def _set_inline_execution_id(execution_id: str) -> None:
+            nonlocal inline_execution_id
+            inline_execution_id = str(execution_id or "").strip()
+
         async def _invoke() -> Any:
             resource_manager = getattr(self._loop, "resource_manager", None)
             if resource_manager is not None and resource_manager.get_tool_descriptor(tool_name) is not None:
@@ -587,6 +593,7 @@ class CeoFrontDoorSupport:
         token = self._loop.tools.push_runtime_context(per_call_runtime)
         try:
             if actor_role_allows_watchdog(per_call_runtime) and str(tool_name or "").strip() != "continue_task":
+                inline_registry = getattr(self._loop, "inline_tool_execution_registry", None)
                 outcome = await run_tool_with_watchdog(
                     _invoke(),
                     tool_name=tool_name,
@@ -594,21 +601,42 @@ class CeoFrontDoorSupport:
                     runtime_context=per_call_runtime,
                     snapshot_supplier=runtime_context.get("tool_snapshot_supplier"),
                     manager=None,
-                    on_poll=(
-                        (lambda poll: self._emit_watchdog_progress(on_progress=on_progress, tool_name=tool_name, poll=poll))
-                        if on_progress
-                        else None
+                    inline_registry=inline_registry,
+                    on_inline_registered=lambda entry: self._capture_inline_execution_id(
+                        entry=entry,
+                        target=lambda execution_id: _set_inline_execution_id(execution_id),
                     ),
+                    on_poll=None,
                 )
                 result = outcome.value
             else:
                 result = await _invoke()
         except asyncio.CancelledError:
+            timeout_stop_error = self._inline_timeout_stop_error_text(
+                tool_name=tool_name,
+                execution_id=inline_execution_id,
+            )
+            if timeout_stop_error:
+                finished_at = now_iso()
+                elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
+                await self._emit_progress(
+                    on_progress,
+                    timeout_stop_error,
+                    event_kind="tool_error",
+                    event_data={
+                        "tool_name": tool_name,
+                        **({"tool_call_id": normalized_tool_call_id} if normalized_tool_call_id else {}),
+                    },
+                )
+                return timeout_stop_error, timeout_stop_error, "error", started_at, finished_at, elapsed_seconds
             raise
         except Exception as exc:
             finished_at = now_iso()
             elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
-            error_text = f"Error executing {tool_name}: {exc}"
+            error_text = self._inline_timeout_stop_error_text(
+                tool_name=tool_name,
+                execution_id=inline_execution_id,
+            ) or f"Error executing {tool_name}: {exc}"
             await self._emit_progress(
                 on_progress,
                 error_text,
@@ -621,6 +649,9 @@ class CeoFrontDoorSupport:
             return error_text, error_text, "error", started_at, finished_at, elapsed_seconds
         finally:
             self._loop.tools.pop_runtime_context(token)
+            inline_registry = getattr(self._loop, "inline_tool_execution_registry", None)
+            if inline_execution_id and inline_registry is not None and hasattr(inline_registry, "discard_execution"):
+                await inline_registry.discard_execution(inline_execution_id)
 
         rendered = self._render_tool_message_content(
             result,
@@ -636,6 +667,27 @@ class CeoFrontDoorSupport:
         elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
         status = self._tool_status(rendered)
         return result, rendered, status, started_at, finished_at, elapsed_seconds
+
+    @staticmethod
+    async def _capture_inline_execution_id(*, entry: Any, target) -> None:
+        execution_id = str(getattr(entry, "execution_id", "") or "").strip()
+        if execution_id:
+            target(execution_id)
+
+    def _inline_timeout_stop_error_text(self, *, tool_name: str, execution_id: str) -> str:
+        normalized_execution_id = str(execution_id or "").strip()
+        if not normalized_execution_id:
+            return ""
+        inline_registry = getattr(self._loop, "inline_tool_execution_registry", None)
+        if inline_registry is None or not hasattr(inline_registry, "stop_decision_metadata"):
+            return ""
+        metadata = inline_registry.stop_decision_metadata(normalized_execution_id)
+        if not isinstance(metadata, dict) or str(metadata.get("reason_code") or "").strip() != "sidecar_timeout_stop":
+            return ""
+        return build_timeout_stop_error_text(
+            tool_name=tool_name,
+            stop_decision_metadata=metadata,
+        )
 
     @staticmethod
     def _parallel_slot_count(limit: int | None, item_count: int, *, enabled: bool) -> int:

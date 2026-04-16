@@ -798,6 +798,35 @@ class RuntimeAgentSession:
             return {}
         return snapshot
 
+    def reminder_context_snapshot(self) -> dict[str, Any] | None:
+        status = str(self._state.status or "").strip().lower()
+        if not (self._state.is_running or status in {"running", "paused", "error"}):
+            return None
+        visible_canonical_context = self._frontdoor_visible_canonical_context_snapshot()
+        durable_canonical_context = self._frontdoor_canonical_context_snapshot()
+        compression = self._compression_snapshot()
+        user_message = self._pending_user_message_snapshot()
+        assistant_text = str(self._state.latest_message or "").strip()
+        snapshot: dict[str, Any] = {
+            "session_key": str(self._state.session_key or "").strip(),
+            "turn_id": self._current_turn_id(),
+            "source": self._internal_prompt_source() or "user",
+            "status": status or ("running" if self._state.is_running else "idle"),
+            "user_message": user_message or {},
+            "assistant_text": assistant_text,
+            "visible_canonical_context": visible_canonical_context,
+            "frontdoor_canonical_context": durable_canonical_context,
+            "compression": compression,
+            "semantic_context_state": copy.deepcopy(getattr(self, "_semantic_context_state", None) or {}),
+            "hydrated_tool_names": [
+                str(item or "").strip()
+                for item in list(getattr(self, "_frontdoor_hydrated_tool_names", []) or [])
+                if str(item or "").strip()
+            ],
+            "frontdoor_selection_debug": copy.deepcopy(getattr(self, "_frontdoor_selection_debug", None) or {}),
+        }
+        return snapshot
+
     def manual_pause_waiting_reason(self) -> bool:
         return False
 

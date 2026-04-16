@@ -490,3 +490,34 @@ The prompt token trace also changed:
 
 - `pre_summary_prompt_tokens` is the trigger-side estimate before long-context summary injection, and it must include the stage workset.
 - `effective_prompt_tokens` is the estimate for the final model request actually sent after prompt assembly.
+
+## CEO Inline Tool Reminder Sidecar
+
+CEO frontdoor direct long-running tools now have a separate inline reminder lane.
+
+- Direct CEO tool executions register in `InlineToolExecutionRegistry` when they run without a detached `ToolExecutionManager` handoff.
+- This registry is separate from detached/background tool execution semantics. Maintainers should not treat an inline execution id as a detached watchdog execution id.
+- Reminder windows are fixed at `30 / 60 / 120 / 240 / 600` seconds, then repeat every 600 seconds after that.
+- The old inline watchdog poll text is no longer the operator-facing mechanism for CEO direct tools. The direct tool keeps running inline, while reminder decisions happen in the sidecar lane.
+
+The reminder lane itself is deliberately read-only with respect to session persistence:
+
+- `CeoToolReminderService` does not call `session.prompt(...)`.
+- It does not take the normal turn lock or create a heartbeat/internal turn.
+- It rebuilds CEO context with `CeoMessageBuilder.build_for_ceo(..., ephemeral_tail_messages=...)` using a read-only reminder snapshot from `RuntimeAgentSession.reminder_context_snapshot()`.
+- That snapshot includes the current visible stage/canonical view, durable `frontdoor_canonical_context`, compression state, semantic summary state, hydrated tools, selection debug, and current visible user/assistant text.
+- The reminder text itself is live-only. It must not be written into transcript history, canonical context, semantic summary, or future prompt-history injection.
+
+### Timeout Stop Error Contract
+
+If the sidecar decides to stop a running tool, the main turn must see that as a normal tool failure with explicit provenance.
+
+- The registry stores `InlineToolStopDecisionMetadata` with `reason_code=sidecar_timeout_stop` and the elapsed runtime / reminder count at the stop point.
+- The direct CEO tool execution path checks that metadata and normalizes the tool result into `tool_error` / `status=error`.
+- The failure text is intentionally explanatory because the main agent does not share the sidecar reasoning context.
+
+Example shape:
+
+`Error executing exec: stopped by sidecar timeout decision after 120.4s (2 reminders).`
+
+This is distinct from user-requested cancel/pause behavior. Only sidecar reminder stops use the timeout-stop contract. If the tool finishes successfully before the stop lands, the runtime clears the sidecar stop metadata and preserves the successful result.

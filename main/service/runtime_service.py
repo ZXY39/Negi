@@ -6375,9 +6375,17 @@ class MainRuntimeService:
             def task_service_getter():
                 return self
 
+            def inline_registry_getter():
+                runtime_loop = getattr(self, "_runtime_loop", None)
+                return getattr(runtime_loop, "inline_tool_execution_registry", None) if runtime_loop is not None else None
+
             self._builtin_tool_cache = {
                 'wait_tool_execution': WaitToolExecutionTool(manager_getter),
-                'stop_tool_execution': StopToolExecutionTool(manager_getter, task_service_getter),
+                'stop_tool_execution': StopToolExecutionTool(
+                    manager_getter,
+                    task_service_getter,
+                    inline_registry_getter,
+                ),
             }
         return dict(self._builtin_tool_cache)
 

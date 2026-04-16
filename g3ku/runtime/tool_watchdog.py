@@ -613,6 +613,8 @@ async def run_tool_with_watchdog(
     snapshot_supplier: Callable[[], Any] | None = None,
     manager: ToolExecutionManager | None = None,
     on_poll: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+    inline_registry: Any | None = None,
+    on_inline_registered: Callable[[Any], Awaitable[None] | None] | None = None,
 ) -> ToolWatchdogRunResult:
     config = resolve_tool_watchdog_config(runtime_context)
     if not config.enabled:
@@ -631,9 +633,25 @@ async def run_tool_with_watchdog(
     cancel_token = runtime_context_value(runtime_context, "cancel_token", None)
     session_key = str(runtime_context_value(runtime_context, "session_key", "") or "").strip()
     terminal_notifier = resolve_terminal_notifier(runtime_context)
+    runtime_session = runtime_context_value(runtime_context, "runtime_session", None)
     started_at = time.monotonic()
+    inline_entry = None
 
     try:
+        if manager is None and inline_registry is not None and hasattr(inline_registry, "register_execution"):
+            inline_entry = await inline_registry.register_execution(
+                session_key=session_key,
+                turn_id=str(runtime_context_value(runtime_context, "turn_id", "") or "").strip(),
+                tool_name=tool_name,
+                tool_call_id=str(runtime_context_value(runtime_context, "tool_call_id", "") or "").strip(),
+                task=execution_task,
+                snapshot_supplier=supplier,
+                cancel_token=cancel_token,
+                started_at=started_at,
+                runtime_session=runtime_session,
+            )
+            if on_inline_registered is not None:
+                await _maybe_await(on_inline_registered(inline_entry))
         if manager is None:
             result = await _wait_for_task_window(
                 task=execution_task,

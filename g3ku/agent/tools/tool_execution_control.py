@@ -11,9 +11,11 @@ class _ToolExecutionControlTool(Tool):
         self,
         manager_getter: Callable[[], Any],
         task_service_getter: Callable[[], Any] | None = None,
+        inline_registry_getter: Callable[[], Any] | None = None,
     ) -> None:
         self._manager_getter = manager_getter
         self._task_service_getter = task_service_getter
+        self._inline_registry_getter = inline_registry_getter
 
     def _manager(self) -> Any:
         return self._manager_getter()
@@ -22,6 +24,11 @@ class _ToolExecutionControlTool(Tool):
         if self._task_service_getter is None:
             return None
         return self._task_service_getter()
+
+    def _inline_registry(self) -> Any:
+        if self._inline_registry_getter is None:
+            return None
+        return self._inline_registry_getter()
 
 
 class WaitToolExecutionTool(_ToolExecutionControlTool):
@@ -187,6 +194,15 @@ class StopToolExecutionTool(_ToolExecutionControlTool):
         payload: dict[str, Any] | None = None
         if manager is not None and hasattr(manager, "stop_execution"):
             payload = await manager.stop_execution(
+                normalized_identifier,
+                reason=str(reason or "agent_requested_stop").strip() or "agent_requested_stop",
+            )
+            if str((payload or {}).get("status") or "").strip().lower() != "not_found":
+                return json.dumps(payload, ensure_ascii=False)
+
+        inline_registry = self._inline_registry()
+        if inline_registry is not None and hasattr(inline_registry, "stop_execution"):
+            payload = await inline_registry.stop_execution(
                 normalized_identifier,
                 reason=str(reason or "agent_requested_stop").strip() or "agent_requested_stop",
             )

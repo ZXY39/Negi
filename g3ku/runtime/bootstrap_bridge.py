@@ -121,8 +121,15 @@ class RuntimeBootstrapBridge:
         self.init_resource_runtime()
         manager_getter = lambda: getattr(self._loop, "tool_execution_manager", None)
         task_service_getter = lambda: getattr(self._loop, "main_task_service", None)
+        inline_registry_getter = lambda: getattr(self._loop, "inline_tool_execution_registry", None)
         self._loop.tools.register(WaitToolExecutionTool(manager_getter))
-        self._loop.tools.register(StopToolExecutionTool(manager_getter, task_service_getter))
+        self._loop.tools.register(
+            StopToolExecutionTool(
+                manager_getter,
+                task_service_getter,
+                inline_registry_getter,
+            )
+        )
 
     def _resource_services(self) -> dict[str, object]:
         return {

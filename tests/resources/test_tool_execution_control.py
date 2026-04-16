@@ -53,6 +53,16 @@ class _FakeTaskService:
         return updated
 
 
+class _FakeInlineExecutionRegistry:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = dict(payload)
+        self.calls: list[tuple[str, str]] = []
+
+    async def stop_execution(self, execution_id: str, *, reason: str = "agent_requested_stop") -> dict[str, object]:
+        self.calls.append((str(execution_id or ""), str(reason or "")))
+        return dict(self.payload)
+
+
 @pytest.mark.asyncio
 async def test_stop_tool_execution_falls_back_to_async_task_cancel_when_execution_not_found() -> None:
     manager = _FakeToolExecutionManager(

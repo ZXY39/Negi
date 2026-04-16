@@ -3485,6 +3485,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
                         <button type="button" class="interaction-flow-toggle">展开全部</button>
                     </div>
                 </details>
+                <div class="ceo-tool-reminder" hidden></div>
             </div>
         `;
         U.ceoFeed.appendChild(el);
@@ -3497,6 +3498,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
             listEl: el.querySelector(".interaction-flow-list"),
             footerEl: el.querySelector(".interaction-flow-footer"),
             toggleEl: toggleButton,
+            reminderEl: el.querySelector(".ceo-tool-reminder"),
             steps: 0,
             hasError: false,
             finalized: false,
@@ -3504,6 +3506,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
             lastExecutionTraceSummary: null,
             contextLoadNoticeKeys: new Set(),
             turnId: "",
+            reminderExecutionId: "",
             source: String(source || "").trim().toLowerCase() || "user",
         };
         turn.textEl?.classList?.add?.("assistant-text-loading");
@@ -3565,6 +3568,7 @@ function discardActiveCeoTurn({ source = "", turnId = "" } = {}) {
     const turn = pullActiveCeoTurn(normalizedSource, normalizedTurnId);
     if (!turn) return false;
     const discarded = mutateCeoFeed(() => {
+        clearCeoToolReminder(turn, { force: true });
         turn.finalized = true;
         turn.el?.remove?.();
         return true;
@@ -3621,6 +3625,7 @@ function discardPendingCeoTurns({ force = false, source = null, turnId = "" } = 
     if (!removed.length) return false;
     return mutateCeoFeed(() => {
         removed.forEach((turn) => {
+            clearCeoToolReminder(turn, { force: true });
             turn.finalized = true;
             turn.el?.remove?.();
         });
@@ -3648,6 +3653,60 @@ function updateCeoTurnMeta(turn, stateLabel) {
     const stepLabel = turn.steps > 0 ? `${turn.steps} 个步骤` : "等待工具开始...";
     const nextStateLabel = String(stateLabel || "").trim();
     turn.metaEl.textContent = nextStateLabel && nextStateLabel !== stepLabel ? `${stepLabel} - ${nextStateLabel}` : stepLabel;
+}
+
+function clearCeoToolReminder(turn, { executionId = "", force = false } = {}) {
+    if (!turn) return false;
+    const expectedExecutionId = String(executionId || "").trim();
+    const currentExecutionId = String(turn.reminderExecutionId || "").trim();
+    if (!force && expectedExecutionId && currentExecutionId && currentExecutionId !== expectedExecutionId) return false;
+    turn.reminderExecutionId = "";
+    if (!turn.reminderEl) return false;
+    turn.reminderEl.textContent = "";
+    turn.reminderEl.hidden = true;
+    turn.reminderEl.setAttribute?.("aria-hidden", "true");
+    return true;
+}
+
+function findCeoReminderTurn({ turnId = "", executionId = "" } = {}) {
+    const normalizedTurnId = normalizeCeoTurnId(turnId);
+    const normalizedExecutionId = String(executionId || "").trim();
+    if (normalizedTurnId) {
+        const turn = getActiveCeoTurn(null, normalizedTurnId);
+        if (turn) return turn;
+    }
+    if (normalizedExecutionId) {
+        for (let index = S.ceoPendingTurns.length - 1; index >= 0; index -= 1) {
+            const turn = S.ceoPendingTurns[index];
+            if (!turn || turn.finalized) continue;
+            if (String(turn.reminderExecutionId || "").trim() === normalizedExecutionId) return turn;
+        }
+    }
+    const activeTurns = S.ceoPendingTurns.filter((turn) => turn && !turn.finalized);
+    return activeTurns.length === 1 ? activeTurns[0] : null;
+}
+
+function handleCeoToolReminder(payload = {}) {
+    const executionId = String(payload?.execution_id || "").trim();
+    const turn = findCeoReminderTurn({
+        turnId: payload?.turn_id || "",
+        executionId,
+    });
+    if (!turn) return;
+    const label = String(payload?.label || "").trim();
+    const terminal = Boolean(payload?.terminal);
+    mutateCeoFeed(() => {
+        if (terminal || !label) {
+            clearCeoToolReminder(turn, { executionId, force: terminal || !label });
+            return true;
+        }
+        if (!turn.reminderEl) return false;
+        turn.reminderExecutionId = executionId || String(turn.reminderExecutionId || "").trim();
+        turn.reminderEl.textContent = label;
+        turn.reminderEl.hidden = false;
+        turn.reminderEl.setAttribute?.("aria-hidden", "false");
+        return true;
+    }, { scrollMode: "preserve" });
 }
 
 function findCeoToolStep(turn, { toolCallId = "", toolName = "" } = {}) {
@@ -4473,6 +4532,7 @@ function finalizeCeoTurn(text, meta = {}) {
         return;
     }
     mutateCeoFeed(() => {
+        clearCeoToolReminder(turn, { force: true });
         turn.finalized = true;
         turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
         turn.textEl.classList.remove("pending");
@@ -7052,6 +7112,9 @@ function initCeoWs() {
         }
         if (payload.type === "ceo.agent.tool" && effectiveSessionId === activeSessionId()) {
             appendCeoToolEvent(payload.data || {});
+        }
+        if (payload.type === "ceo.tool.reminder" && effectiveSessionId === activeSessionId()) {
+            handleCeoToolReminder(payload.data || {});
         }
         if (payload.type === "ceo.error") handleCeoError(payload.data || {});
         if (payload.type === "ceo.internal.ack" && effectiveSessionId === activeSessionId()) {
