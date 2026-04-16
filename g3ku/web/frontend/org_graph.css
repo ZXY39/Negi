@@ -3643,7 +3643,7 @@ textarea {
     right: 0;
     bottom: calc(var(--ceo-input-leading-width) + 12px);
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, max-content));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     align-items: start;
     column-gap: 10px;
     row-gap: 8px;
@@ -3673,10 +3673,12 @@ textarea {
 
 .ceo-context-load-notice-item.is-tool {
     grid-column: 1;
+    justify-self: start;
 }
 
 .ceo-context-load-notice-item.is-skill {
     grid-column: 2;
+    justify-self: end;
 }
 
 .ceo-context-load-notice-item::before {
@@ -3693,6 +3695,28 @@ textarea {
 
 .ceo-context-load-notice-text {
     display: block;
+}
+
+.ceo-context-load-notice-risk-dot {
+    width: 8px;
+    height: 8px;
+    flex: 0 0 auto;
+    margin-left: 10px;
+    border-radius: 999px;
+    background: var(--text-muted);
+    box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.ceo-context-load-notice-risk-dot.risk-low {
+    background: #22c55e;
+}
+
+.ceo-context-load-notice-risk-dot.risk-medium {
+    background: #f59e0b;
+}
+
+.ceo-context-load-notice-risk-dot.risk-high {
+    background: #ef4444;
 }
 
 @keyframes ceo-context-load-tag {

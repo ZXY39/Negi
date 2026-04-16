@@ -108,6 +108,9 @@
 - Web 会话里，手动 pause 的语义现在是“冻结上一轮”，不是“等待下一条输入来补写原请求”
 - pause 当下的 user message、阶段状态、工具调用轨迹、压缩状态和中间 assistant 文本都会继续持久化，作为上一轮上下文保留
 - 因此前端/网关层在 session 处于 manual-pause 状态时，不应再走 `resume(additional_context=...)`；后续输入必须作为新一轮 user turn 发送
+- 新的真实 user turn 启动前，运行时现在还会把上一轮 paused assistant 气泡归档成 durable assistant transcript entry；这条记录会带 `status=paused`，并标记 `history_visible=false` 与 `source=manual_pause_archive`
+- 这条 archived paused assistant 的职责是让刷新/重连后的 UI 能重建上一轮暂停气泡，并保留审计痕迹；它不是下一轮 prompt 的可见原始历史
+- 因此下一轮 frontdoor/history compaction 仍应继续依赖 paused execution context 与可见 transcript；session 列表的 `preview_text` / `message_count` 这类 operator summary 也应继续过滤掉这条 hidden paused assistant
 - 如果用户在运行中连续补充多条消息，运行时会把它们作为“同一轮 LLM 调用前的一批独立 user message”一起持久化并一起注入模型，而不是拼接成一条 `补充要求` 文本
 
 如果这里被改回“pause 后仍把新输入合并回原 user message”，典型回归就是：

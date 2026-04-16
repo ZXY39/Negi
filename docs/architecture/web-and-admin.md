@@ -80,6 +80,9 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - Manual pause now freezes the current turn as the previous round context instead of waiting for a textual resume merge.
 - The next outbound user message after pause must start a new round.
 - The paused round's user message, execution trace, stage state, tool calls, and compression state are preserved in transcript and snapshot context so the next round can inherit them without rewriting the original user text.
+- Before that new user turn is dispatched, the backend now archives the previous paused assistant bubble into a persisted assistant message with `status=paused`.
+- That archived paused assistant is durable UI history for `snapshot.ceo` restore/reconnect, but it remains hidden from prompt-history assembly and session-summary counts via `history_visible=false`.
+- Browser-side restore should therefore render that persisted paused assistant as a paused bubble rather than a completed reply, while the next turn's actual prompt inheritance still comes from paused execution context and other visible history sources.
 
 ### CEO Stage Trace Round Rendering Contract
 

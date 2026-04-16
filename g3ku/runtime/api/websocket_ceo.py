@@ -29,6 +29,7 @@ from g3ku.runtime.web_ceo_sessions import (
     read_inflight_turn_snapshot,
     resolve_execution_snapshot,
     resolve_active_ceo_session_id,
+    transcript_messages,
     upload_dir_for_session,
     workspace_path,
 )
@@ -494,6 +495,10 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
         if not content and not attachments and not execution_trace_summary and not compression and not legacy_tool_events:
             continue
         item = {'role': role, 'content': content}
+        if role == 'assistant':
+            status = str(raw.get('status') or '').strip().lower()
+            if status:
+                item['status'] = status
         turn_id = str(raw.get('turn_id') or raw.get('metadata', {}).get('_transcript_turn_id') or '').strip() if isinstance(raw.get('metadata'), dict) else str(raw.get('turn_id') or '').strip()
         if turn_id:
             item['turn_id'] = turn_id
@@ -898,7 +903,6 @@ async def ceo_websocket(websocket: WebSocket):
                 state_store=state_store,
                 session_id=session_id,
                 preview_text=text,
-                message_count=len(list(getattr(persisted, 'messages', []) or [])),
                 is_running=False,
             )
             return
@@ -1032,7 +1036,7 @@ async def ceo_websocket(websocket: WebSocket):
                 state_store=state_store,
                 session_id=session_id,
                 preview_text=preview_text,
-                message_count=len(list(getattr(persisted, 'messages', []) or [])) + len(user_messages),
+                message_count=len(transcript_messages(persisted)) + len(user_messages),
                 is_running=True,
             )
             current_turn_task = asyncio.create_task(_run_user_turn(user_messages))

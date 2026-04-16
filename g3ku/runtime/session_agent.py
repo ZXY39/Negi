@@ -261,6 +261,33 @@ class RuntimeAgentSession:
         return task_ids
 
     @classmethod
+    def _task_ids_from_execution_trace_summary(cls, execution_trace_summary: dict[str, Any] | None) -> list[str]:
+        task_ids: list[str] = []
+        if not isinstance(execution_trace_summary, dict):
+            return task_ids
+        for stage in list(execution_trace_summary.get("stages") or []):
+            if not isinstance(stage, dict):
+                continue
+            for round_item in list(stage.get("rounds") or []):
+                if not isinstance(round_item, dict):
+                    continue
+                for tool in list(round_item.get("tools") or []):
+                    if not isinstance(tool, dict):
+                        continue
+                    for candidate in (
+                        tool.get("text"),
+                        tool.get("output_text"),
+                        tool.get("output_preview_text"),
+                        tool.get("output_preview"),
+                        tool.get("arguments_text"),
+                        tool.get("arguments_preview"),
+                    ):
+                        for task_id in cls._extract_task_ids_from_text(candidate):
+                            if task_id not in task_ids:
+                                task_ids.append(task_id)
+        return task_ids
+
+    @classmethod
     def _complete_active_frontdoor_stage_state(
         cls,
         stage_state: dict[str, Any] | None,
@@ -410,6 +437,30 @@ class RuntimeAgentSession:
             return index
         return None
 
+    @staticmethod
+    def _message_top_level_turn_id(message: dict[str, Any]) -> str:
+        return str(message.get("turn_id") or "").strip()
+
+    @classmethod
+    def _find_archived_paused_assistant_index(cls, persisted_session: Any, *, turn_id: str) -> int | None:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return None
+        messages = list(getattr(persisted_session, "messages", []) or [])
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "").strip().lower() != "assistant":
+                continue
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            if str(metadata.get("source") or "").strip().lower() != "manual_pause_archive":
+                continue
+            if cls._message_top_level_turn_id(message) != normalized_turn_id:
+                continue
+            return index
+        return None
+
     def _upsert_transcript_user_message(
         self,
         *,
@@ -445,6 +496,109 @@ class RuntimeAgentSession:
         persisted_session.messages[existing_index] = existing
         if hasattr(persisted_session, "updated_at"):
             persisted_session.updated_at = datetime.now()
+
+    async def _archive_paused_execution_context_for_ui_history(self) -> None:
+        snapshot = self.paused_execution_context_snapshot()
+        if not isinstance(snapshot, dict) or not snapshot:
+            return
+        if str(snapshot.get("status") or "").strip().lower() != "paused":
+            return
+        source = str(snapshot.get("source") or "").strip().lower()
+        if source in {"heartbeat", "cron", "approval"}:
+            return
+        user_message = snapshot.get("user_message") if isinstance(snapshot.get("user_message"), dict) else None
+        if not isinstance(user_message, dict):
+            return
+        if not str(user_message.get("content") or "").strip() and not list(user_message.get("attachments") or []):
+            return
+        turn_id = str(snapshot.get("turn_id") or "").strip()
+        if not turn_id:
+            return
+        assistant_text = str(snapshot.get("assistant_text") or "").strip() or "已暂停"
+        execution_trace_summary = (
+            copy.deepcopy(snapshot.get("execution_trace_summary"))
+            if isinstance(snapshot.get("execution_trace_summary"), dict)
+            else {}
+        )
+        compression = (
+            copy.deepcopy(snapshot.get("compression"))
+            if isinstance(snapshot.get("compression"), dict)
+            else {}
+        )
+        legacy_tool_events = [
+            copy.deepcopy(item)
+            for item in list(snapshot.get("tool_events") or [])
+            if isinstance(item, dict)
+        ]
+        metadata = {
+            "history_visible": False,
+            "source": "manual_pause_archive",
+            "archived_paused_turn": True,
+        }
+        archived_task_ids = self._task_ids_from_execution_trace_summary(execution_trace_summary)
+        if not archived_task_ids:
+            for item in legacy_tool_events:
+                if not isinstance(item, dict):
+                    continue
+                for task_id in self._extract_task_ids_from_text(item.get("text")):
+                    if task_id not in archived_task_ids:
+                        archived_task_ids.append(task_id)
+        if archived_task_ids:
+            metadata["task_ids"] = archived_task_ids
+        assistant_payload: dict[str, Any] = {
+            "turn_id": turn_id,
+            "status": "paused",
+            "metadata": metadata,
+        }
+        if execution_trace_summary:
+            assistant_payload["execution_trace_summary"] = execution_trace_summary
+        elif legacy_tool_events:
+            assistant_payload["tool_events"] = legacy_tool_events
+        if compression:
+            assistant_payload["compression"] = compression
+        try:
+            persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+            existing_index = self._find_archived_paused_assistant_index(persisted_session, turn_id=turn_id)
+            if existing_index is None:
+                persisted_session.add_message("assistant", assistant_text, **assistant_payload)
+            else:
+                archived_message = dict(persisted_session.messages[existing_index])
+                archived_message["content"] = assistant_text
+                archived_message["turn_id"] = turn_id
+                archived_message["status"] = "paused"
+                archived_message["metadata"] = metadata
+                if execution_trace_summary:
+                    archived_message["execution_trace_summary"] = execution_trace_summary
+                    archived_message.pop("tool_events", None)
+                elif legacy_tool_events:
+                    archived_message["tool_events"] = legacy_tool_events
+                    archived_message.pop("execution_trace_summary", None)
+                if compression:
+                    archived_message["compression"] = compression
+                else:
+                    archived_message.pop("compression", None)
+                persisted_session.messages[existing_index] = archived_message
+                if hasattr(persisted_session, "updated_at"):
+                    persisted_session.updated_at = datetime.now()
+            if self._state.session_key.startswith("web:"):
+                from g3ku.runtime.web_ceo_sessions import build_last_task_memory, ensure_ceo_session_metadata
+
+                changed = ensure_ceo_session_metadata(persisted_session)
+                metadata_payload = dict(getattr(persisted_session, "metadata", {}) or {})
+                next_task_memory = build_last_task_memory(persisted_session)
+                if metadata_payload.get("last_task_memory") != next_task_memory:
+                    metadata_payload["last_task_memory"] = next_task_memory
+                    changed = True
+                if changed:
+                    persisted_session.metadata = metadata_payload
+            self._loop.sessions.save(persisted_session)
+        except Exception:
+            await self._emit(
+                "message_delta",
+                channel="analysis",
+                kind="persistence_warning",
+                text="Paused assistant history archival failed; the paused bubble is still available in snapshot state.",
+            )
 
     async def _persist_pending_user_message(self, *, user_input: UserInputMessage, user_text: str) -> Any | None:
         return await self._persist_pending_user_messages(user_inputs=[user_input])
@@ -1462,6 +1616,7 @@ class RuntimeAgentSession:
         heartbeat_internal = internal_source == "heartbeat"
         cron_internal = internal_source == "cron"
         if internal_source is None:
+            await self._archive_paused_execution_context_for_ui_history()
             self._clear_manual_pause_waiting_reason_for_user_turn()
             if not self._active_user_batch_inputs or self._active_user_batch_inputs[-1] is not user_input:
                 self._configure_user_batch([user_input])

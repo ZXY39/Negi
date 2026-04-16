@@ -129,7 +129,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, dedupeInflightUserMessageAgainstMessages, applyCeoState, maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, S, U, WebSocket, setAddMsg(fn) { addMsg = fn; }, setCreatePendingCeoTurn(fn) { createPendingCeoTurn = fn; }, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
+        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, finalizePausedCeoTurn, renderPersistedCeoAssistantTurn, dedupeInflightUserMessageAgainstMessages, applyCeoState, maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, S, U, WebSocket, setAddMsg(fn) { addMsg = fn; }, setCreatePendingCeoTurn(fn) { createPendingCeoTurn = fn; }, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
         context
     );
     vm.runInContext(
@@ -256,6 +256,31 @@ test("paused inflight snapshot does not fall back to processing placeholder", ()
     assert.notEqual(turn.textEl.textContent, PROCESSING_LABEL);
     assert.equal(turn.textEl.classList.contains("pending"), false);
     assert.equal(turn.flowEl.hidden, false);
+});
+
+test("persisted paused assistant history renders as a paused bubble", () => {
+    const context = loadApp();
+    const { renderPersistedCeoAssistantTurn, setCreatePendingCeoTurn, S } = context;
+    const turn = makeTurn({ text: "", source: "history", steps: 0 });
+
+    setCreatePendingCeoTurn(() => turn);
+    S.ceoPendingTurns = [];
+
+    renderPersistedCeoAssistantTurn({
+        role: "assistant",
+        content: "",
+        status: "paused",
+        execution_trace_summary: {
+            stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo", rounds: [] }],
+        },
+    });
+
+    assert.equal(turn.textEl.textContent, PAUSED_LABEL);
+    assert.equal(turn.finalized, true);
+    assert.equal(turn.renderMode, "stage");
+    assert.equal(turn.flowEl.hidden, false);
+    assert.equal(turn.flowEl.open, false);
+    assert.equal(S.ceoPendingTurns.length, 0);
 });
 
 test("deduped running inflight snapshot is preserved so the assistant placeholder can render", () => {

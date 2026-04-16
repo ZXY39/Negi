@@ -1873,16 +1873,27 @@ async def test_runtime_agent_session_prompt_batch_after_manual_pause_preserves_p
     assert captured_inputs[0] == "Why no async task?"
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert [message["role"] for message in reloaded.messages] == ["user", "user", "user", "assistant"]
+    assert [message["role"] for message in reloaded.messages] == ["user", "assistant", "user", "user", "assistant"]
     assert reloaded.messages[0]["content"] == "Original paused request"
     assert reloaded.messages[0]["metadata"]["_transcript_state"] == "paused"
-    assert reloaded.messages[1]["content"] == "Please keep the original request context"
-    assert reloaded.messages[2]["content"] == "Why no async task?"
-    assert reloaded.messages[1]["metadata"]["_transcript_state"] == "completed"
+    assert reloaded.messages[1]["content"] == "已暂停"
+    assert reloaded.messages[1]["status"] == "paused"
+    assert reloaded.messages[1]["turn_id"] == reloaded.messages[0]["metadata"]["_transcript_turn_id"]
+    assert reloaded.messages[1]["metadata"]["history_visible"] is False
+    assert reloaded.messages[1]["metadata"]["source"] == "manual_pause_archive"
+    assert reloaded.messages[2]["content"] == "Please keep the original request context"
+    assert reloaded.messages[3]["content"] == "Why no async task?"
     assert reloaded.messages[2]["metadata"]["_transcript_state"] == "completed"
-    assert reloaded.messages[1]["metadata"]["_transcript_batch_id"] == reloaded.messages[2]["metadata"]["_transcript_batch_id"]
+    assert reloaded.messages[3]["metadata"]["_transcript_state"] == "completed"
+    assert reloaded.messages[2]["metadata"]["_transcript_batch_id"] == reloaded.messages[3]["metadata"]["_transcript_batch_id"]
+    assert [message["role"] for message in web_ceo_sessions.transcript_messages(reloaded)] == [
+        "user",
+        "user",
+        "user",
+        "assistant",
+    ]
     assert "补充要求" not in "".join(str(message["content"]) for message in reloaded.messages)
-    assert reloaded.messages[3]["content"] == "Because this follow-up only needed a direct explanation."
+    assert reloaded.messages[4]["content"] == "Because this follow-up only needed a direct explanation."
 
 
 @pytest.mark.asyncio
@@ -5766,6 +5777,44 @@ def test_web_ceo_session_summary_helpers_exclude_hidden_heartbeat_reply_surfaces
     assert web_ceo_sessions._channel_preview_text(hidden_only_session) == ""
     assert web_ceo_sessions._session_updated_at(hidden_only_session) == ""
     assert web_ceo_sessions._session_last_assistant_at(hidden_only_session) == ""
+
+
+def test_websocket_build_ceo_snapshot_keeps_archived_paused_assistant_status_for_ui_restore() -> None:
+    summary = {
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_goal": "inspect repository",
+                "rounds": [],
+            }
+        ]
+    }
+
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [
+            {
+                "role": "assistant",
+                "content": "已暂停",
+                "turn_id": "paused-turn-1",
+                "status": "paused",
+                "execution_trace_summary": summary,
+                "metadata": {
+                    "history_visible": False,
+                    "source": "manual_pause_archive",
+                },
+            }
+        ]
+    )
+
+    assert snapshot == [
+        {
+            "role": "assistant",
+            "content": "已暂停",
+            "turn_id": "paused-turn-1",
+            "status": "paused",
+            "execution_trace_summary": summary,
+        }
+    ]
 
 
 def test_context_assembly_always_keeps_tool_execution_control_tools_visible() -> None:

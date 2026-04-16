@@ -156,6 +156,12 @@ function noticeText(item) {
     return String(item.children[0].textContent || "");
 }
 
+function noticeRiskClass(item) {
+    const classes = String(item?.className || "");
+    const match = classes.match(/risk-(low|medium|high)/);
+    return match ? match[0] : "";
+}
+
 function loadApp() {
     const context = {
         console,
@@ -326,11 +332,12 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
 });
 
 test("ceo stage trace does not count successful loader-only rounds toward displayed budget progress", () => {
-    const { renderCeoStageTraceIntoTurn, U } = loadApp();
+    const { renderCeoStageTraceIntoTurn, U, S } = loadApp();
     const turn = makeTurn({ text: "" });
 
     U.ceoContextLoadNotice = new StubHTMLElement();
     U.ceoContextLoadNotice.hidden = true;
+    S.skills = [{ skill_id: "skill-creator", risk_level: "high" }];
 
     const renderedSteps = renderCeoStageTraceIntoTurn(turn, {
         stages: [
@@ -364,7 +371,9 @@ test("ceo stage trace does not count successful loader-only rounds toward displa
     assert.doesNotMatch(turn.listEl.innerHTML, /load_skill_context/);
     assert.equal(U.ceoContextLoadNotice.children.length, 1);
     assert.match(String(U.ceoContextLoadNotice.children[0].className || ""), /is-skill/);
+    assert.equal(noticeRiskClass(U.ceoContextLoadNotice.children[0]), "risk-high");
     assert.match(noticeText(U.ceoContextLoadNotice.children[0]), /skill-creator/);
+    assert.doesNotMatch(noticeText(U.ceoContextLoadNotice.children[0]), /\[/);
 });
 
 test("ceo legacy tool flow hides submit_next_stage events until stage trace arrives", () => {
@@ -384,9 +393,12 @@ test("ceo legacy tool flow hides submit_next_stage events until stage trace arri
 });
 
 test("ceo loader tool events stack tool and skill notices in separate columns for ten seconds", () => {
-    const { applyCeoToolEventToTurn, U, __context } = loadApp();
+    const { applyCeoToolEventToTurn, U, __context, S } = loadApp();
     const turn = makeTurn({ text: "" });
     const scheduled = [];
+
+    S.tools = [{ tool_id: "filesystem_write", actions: [{ risk_level: "high" }, { risk_level: "low" }] }];
+    S.skills = [{ skill_id: "find-skills", risk_level: "low" }];
 
     __context.setTimeout = (callback, delay) => {
         scheduled.push({ callback, delay });
@@ -418,8 +430,12 @@ test("ceo loader tool events stack tool and skill notices in separate columns fo
     assert.equal(U.ceoContextLoadNotice.children.length, 2);
     assert.match(String(U.ceoContextLoadNotice.children[0].className || ""), /is-tool/);
     assert.match(String(U.ceoContextLoadNotice.children[1].className || ""), /is-skill/);
+    assert.equal(noticeRiskClass(U.ceoContextLoadNotice.children[0]), "risk-high");
+    assert.equal(noticeRiskClass(U.ceoContextLoadNotice.children[1]), "risk-low");
     assert.match(noticeText(U.ceoContextLoadNotice.children[0]), /filesystem_write/);
     assert.match(noticeText(U.ceoContextLoadNotice.children[1]), /find-skills/);
+    assert.doesNotMatch(noticeText(U.ceoContextLoadNotice.children[0]), /\[/);
+    assert.doesNotMatch(noticeText(U.ceoContextLoadNotice.children[1]), /\[/);
     assert.deepEqual(scheduled.map((item) => item.delay), [10000, 10000]);
 
     scheduled[0].callback();
@@ -434,11 +450,12 @@ test("ceo loader tool events stack tool and skill notices in separate columns fo
 });
 
 test("ceo stage trace hides successful loader tools from interaction flow rendering", () => {
-    const { renderCeoStageTraceIntoTurn, U } = loadApp();
+    const { renderCeoStageTraceIntoTurn, U, S } = loadApp();
     const turn = makeTurn({ text: "" });
 
     U.ceoContextLoadNotice = new StubHTMLElement();
     U.ceoContextLoadNotice.hidden = true;
+    S.tools = [{ tool_id: "filesystem_write", actions: [{ risk_level: "medium" }] }];
 
     const renderedSteps = renderCeoStageTraceIntoTurn(turn, {
         stages: [
@@ -474,6 +491,7 @@ test("ceo stage trace hides successful loader tools from interaction flow render
     assert.doesNotMatch(turn.listEl.innerHTML, /load_tool_context/);
     assert.match(turn.listEl.innerHTML, /memory_search/);
     assert.equal(U.ceoContextLoadNotice.children.length, 1);
+    assert.equal(noticeRiskClass(U.ceoContextLoadNotice.children[0]), "risk-medium");
     assert.match(noticeText(U.ceoContextLoadNotice.children[0]), /filesystem_write/);
 });
 

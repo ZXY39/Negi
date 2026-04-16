@@ -1451,11 +1451,13 @@ function normalizeCeoSnapshotMessage(message = {}) {
     const attachments = role === "user" ? cloneCeoSnapshotAttachments(message?.attachments) : [];
     if (attachments.length) next.attachments = attachments;
     if (role === "assistant") {
+        const status = String(message?.status || "").trim().toLowerCase();
         const toolEvents = normalizeCeoSnapshotToolEvents(message?.tool_events);
         const executionTraceSummary = normalizeCeoSnapshotExecutionTraceSummary(message?.execution_trace_summary);
+        if (status) next.status = status;
         if (toolEvents.length) next.tool_events = toolEvents;
         if (executionTraceSummary) next.execution_trace_summary = executionTraceSummary;
-        if (!String(next.content || "").trim() && !toolEvents.length && !executionTraceSummary) return null;
+        if (!String(next.content || "").trim() && !toolEvents.length && !executionTraceSummary && status !== "paused") return null;
         return next;
     }
     if (role === "user" && !String(next.content || "").trim() && !attachments.length) return null;
@@ -3381,7 +3383,8 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     const executionTraceSummary = normalizeCeoSnapshotExecutionTraceSummary(item?.execution_trace_summary);
     const toolEvents = normalizeCeoSnapshotToolEvents(item?.tool_events);
     const content = String(item?.content || "");
-    if (!executionTraceSummary && !toolEvents.length) {
+    const status = String(item?.status || "").trim().toLowerCase();
+    if (status !== "paused" && !executionTraceSummary && !toolEvents.length) {
         addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
         return;
     }
@@ -3392,13 +3395,17 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     }
     S.ceoPendingTurns.push(turn);
     withCeoFeedBatch(() => {
-        renderCeoAssistantTextIntoTurn(turn, content);
+        renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
         const stageRoundCount = renderCeoStageTraceIntoTurn(turn, executionTraceSummary);
         if (!stageRoundCount) renderCeoToolEventsIntoTurn(turn, toolEvents, { source: "history" });
         turn.flowEl.hidden = false;
         turn.flowEl.open = false;
         icons();
     }, { scrollMode: "preserve" });
+    if (status === "paused") {
+        finalizePausedCeoTurn(content || "已暂停", { source: "history" });
+        return;
+    }
     finalizeCeoTurn(content, { source: "history" });
 }
 
@@ -3720,7 +3727,25 @@ function hideCeoContextLoadNotice() {
     syncCeoContextLoadNoticeVisibility();
 }
 
-function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOTICE_DURATION_MS, kind = "" } = {}) {
+function normalizeNoticeRiskLevel(level = "") {
+    const normalized = String(level || "").trim().toLowerCase();
+    return ["low", "medium", "high"].includes(normalized) ? normalized : "medium";
+}
+
+function noticeRiskRank(level = "") {
+    return ({ low: 1, medium: 2, high: 3 })[normalizeNoticeRiskLevel(level)] || 2;
+}
+
+function highestNoticeRiskLevel(levels = []) {
+    let highest = "medium";
+    (Array.isArray(levels) ? levels : []).forEach((level) => {
+        const normalized = normalizeNoticeRiskLevel(level);
+        if (noticeRiskRank(normalized) > noticeRiskRank(highest)) highest = normalized;
+    });
+    return highest;
+}
+
+function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOTICE_DURATION_MS, kind = "", riskLevel = "medium" } = {}) {
     const normalizedText = String(text || "").trim();
     if (!normalizedText) {
         hideCeoContextLoadNotice();
@@ -3737,11 +3762,18 @@ function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOT
         item.classList?.add?.(`is-${normalizedKind}`);
         item.dataset.noticeKind = normalizedKind;
     }
+    const normalizedRiskLevel = normalizeNoticeRiskLevel(riskLevel);
+    item.classList?.add?.(`risk-${normalizedRiskLevel}`);
+    item.dataset.riskLevel = normalizedRiskLevel;
     item.dataset.noticeId = noticeId;
     const textEl = document.createElement("span");
     textEl.className = "ceo-context-load-notice-text";
     textEl.textContent = normalizedText;
     item.appendChild(textEl);
+    const riskDotEl = document.createElement("span");
+    riskDotEl.className = `ceo-context-load-notice-risk-dot risk-${normalizedRiskLevel}`;
+    riskDotEl.setAttribute("aria-hidden", "true");
+    item.appendChild(riskDotEl);
     noticeEl.appendChild(item);
     syncCeoContextLoadNoticeVisibility();
     if (Number.isFinite(durationMs) && durationMs > 0) {
@@ -3791,12 +3823,37 @@ function buildCeoContextLoadNotice(toolName = "", targetId = "") {
     const normalizedTargetId = String(targetId || "").trim();
     if (normalizedTool === "load_skill_context") {
         return normalizedTargetId
-            ? `\u3010\u5df2\u52a0\u8f7d skill ${normalizedTargetId}\u3011`
-            : "\u3010\u5df2\u52a0\u8f7d skill\u3011";
+            ? `\u5df2\u52a0\u8f7d skill ${normalizedTargetId}`
+            : "\u5df2\u52a0\u8f7d skill";
     }
     return normalizedTargetId
-        ? `\u3010\u5df2\u52a0\u8f7d\u5de5\u5177 ${normalizedTargetId}\u3011`
-        : "\u3010\u5df2\u52a0\u8f7d\u5de5\u5177\u4e0a\u4e0b\u6587\u3011";
+        ? `\u5df2\u52a0\u8f7d\u5de5\u5177 ${normalizedTargetId}`
+        : "\u5df2\u52a0\u8f7d\u5de5\u5177\u4e0a\u4e0b\u6587";
+}
+
+function resolveCeoContextLoadNoticeRiskLevel(kind = "", targetId = "") {
+    const normalizedKind = String(kind || "").trim().toLowerCase();
+    const normalizedTargetId = String(targetId || "").trim();
+    if (normalizedKind === "skill") {
+        const match = (Array.isArray(S.skills) ? S.skills : []).find((item) => (
+            String(item?.skill_id || "").trim() === normalizedTargetId
+        ));
+        return normalizeNoticeRiskLevel(match?.risk_level || "medium");
+    }
+    if (normalizedKind === "tool") {
+        const match = (Array.isArray(S.tools) ? S.tools : []).find((item) => (
+            String(item?.tool_id || "").trim() === normalizedTargetId
+        ));
+        if (!match) return "medium";
+        const actionLevels = (Array.isArray(match?.actions) ? match.actions : [])
+            .map((action) => String(action?.risk_level || "").trim().toLowerCase())
+            .filter(Boolean);
+        return highestNoticeRiskLevel([
+            String(match?.risk_level || "").trim().toLowerCase(),
+            ...actionLevels,
+        ]);
+    }
+    return "medium";
 }
 
 function ensureCeoContextLoadNoticeKeys(turn) {
@@ -3820,8 +3877,10 @@ function maybeShowCeoContextLoadNotice(turn, { toolName = "", status = "", detai
     const signature = `${normalizedTool}:${targetId || noticeText}`;
     if (keys?.has(signature)) return true;
     keys?.add(signature);
+    const noticeKind = normalizedTool === "load_skill_context" ? "skill" : "tool";
     showCeoContextLoadNotice(noticeText, {
-        kind: normalizedTool === "load_skill_context" ? "skill" : "tool",
+        kind: noticeKind,
+        riskLevel: resolveCeoContextLoadNoticeRiskLevel(noticeKind, targetId),
     });
     return true;
 }
