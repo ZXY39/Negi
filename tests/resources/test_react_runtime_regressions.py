@@ -1666,12 +1666,12 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
 
     promoted_frame = log_service.read_runtime_frame('task-hydration-lru', 'node-hydration-lru')
     assert promoted_frame['hydrated_executor_names'] == [
-        'content_open',
+        'filesystem_write',
         'memory_search',
         'web_fetch',
     ]
     assert promoted_frame['hydrated_executor_state'] == [
-        'content_open',
+        'filesystem_write',
         'memory_search',
         'web_fetch',
     ]
@@ -1686,15 +1686,42 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
 
     promoted_frame = log_service.read_runtime_frame('task-hydration-lru', 'node-hydration-lru')
     assert promoted_frame['hydrated_executor_names'] == [
+        'filesystem_write',
         'memory_search',
         'web_fetch',
-        'content_open',
     ]
     assert promoted_frame['hydrated_executor_state'] == [
+        'filesystem_write',
         'memory_search',
         'web_fetch',
-        'content_open',
     ]
+
+
+def test_promote_tool_context_hydration_skips_fixed_builtin_executors() -> None:
+    log_service = _FakeLogService()
+    service = object.__new__(MainRuntimeService)
+    service.log_service = log_service
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
+        get_node=lambda node_id: SimpleNamespace(node_id=node_id, node_kind='execution'),
+    )
+    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='exec', actions=[SimpleNamespace(executor_names=['exec'])]),
+        SimpleNamespace(tool_id='agent_browser', actions=[SimpleNamespace(executor_names=['agent_browser'])]),
+    ]
+    log_service.upsert_frame('task-hydration-fixed-builtin', {'node_id': 'node-hydration-fixed-builtin'})
+
+    service._promote_tool_context_hydration(
+        task_id='task-hydration-fixed-builtin',
+        node_id='node-hydration-fixed-builtin',
+        tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': 'exec'}),
+        raw_result={'ok': True, 'tool_id': 'exec'},
+        runtime_context={'session_key': 'web:shared', 'actor_role': 'execution'},
+    )
+
+    promoted_frame = log_service.read_runtime_frame('task-hydration-fixed-builtin', 'node-hydration-fixed-builtin')
+    assert promoted_frame.get('hydrated_executor_names') in (None, [])
+    assert promoted_frame.get('hydrated_executor_state') in (None, [])
 
 
 def test_main_runtime_service_default_hydrated_tool_limit_is_16() -> None:

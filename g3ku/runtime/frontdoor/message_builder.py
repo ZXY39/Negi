@@ -29,6 +29,11 @@ from g3ku.runtime.semantic_context_summary import (
     summarize_global_context_model_first,
 )
 from g3ku.runtime.stage_prompt_compaction import STAGE_EXTERNALIZED_PREFIX, decompose_stage_prompt_messages
+from g3ku.runtime.tool_visibility import (
+    CEO_FIXED_BUILTIN_TOOL_NAMES,
+    filter_tool_names_for_semantic_top_k,
+    filter_visible_tool_families_for_semantic_top_k,
+)
 from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
@@ -128,21 +133,7 @@ class CeoMessageBuilder:
         'model_config': ('model', 'provider', 'config', 'token', 'temperature'),
     }
     RESERVED_INTERNAL_TOOLS: tuple[str, ...] = ("stop_tool_execution",)
-    FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
-        "create_async_task",
-        "continue_task",
-        "message",
-        "task_summary",
-        "task_list",
-        "task_progress",
-        "load_skill_context",
-        "load_tool_context",
-        "content_open",
-        "content_search",
-        "exec",
-        "memory_search",
-        "memory_write",
-    )
+    FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = CEO_FIXED_BUILTIN_TOOL_NAMES
 
     def __init__(self, *, loop, prompt_builder) -> None:
         self._loop = loop
@@ -234,6 +225,24 @@ class CeoMessageBuilder:
                 continue
             ids.append(tool_id)
         return ids
+
+    @classmethod
+    def _semantic_tool_selection_inputs(
+        cls,
+        *,
+        visible_families: list[Any],
+        visible_tool_names: list[str],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        excluded_tool_names = set(cls.FIXED_BUILTIN_TOOL_NAMES)
+        filtered_families = filter_visible_tool_families_for_semantic_top_k(
+            visible_families,
+            excluded_tool_names=excluded_tool_names,
+        )
+        filtered_tool_names = filter_tool_names_for_semantic_top_k(
+            visible_tool_names,
+            excluded_tool_names=excluded_tool_names,
+        )
+        return filtered_families, filtered_tool_names
 
     @staticmethod
     def _capability_snapshot(exposure: dict[str, Any]) -> CapabilitySnapshot:
@@ -1168,6 +1177,10 @@ class CeoMessageBuilder:
         memory_write_terms = self._detect_memory_write_intent(query_text)
         visible_skills = list(exposure.get('skills') or [])
         visible_families = list(exposure.get('tool_families') or [])
+        semantic_visible_families, semantic_visible_tool_names = self._semantic_tool_selection_inputs(
+            visible_families=visible_families,
+            visible_tool_names=visible_tool_names,
+        )
         capability_snapshot = self._capability_snapshot(exposure)
         semantic_started_at = time.perf_counter()
         semantic_frontdoor = await semantic_catalog_rankings(
@@ -1175,9 +1188,9 @@ class CeoMessageBuilder:
             memory_manager=memory_manager,
             query_text=query_text,
             visible_skills=visible_skills,
-            visible_families=visible_families,
+            visible_families=semantic_visible_families,
             skill_limit=max(inventory_top_k * 4, len(visible_skills), inventory_top_k, 8),
-            tool_limit=max(extension_top_k * 4, len(visible_families), extension_top_k, 8),
+            tool_limit=max(extension_top_k * 4, len(semantic_visible_tool_names), extension_top_k, 8),
         )
         semantic_elapsed_ms = self._elapsed_ms(semantic_started_at)
         semantic_trace = {

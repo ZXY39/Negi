@@ -116,6 +116,31 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
     assert payload["frontdoor_stage_state"]["stages"][0]["tool_round_budget"] == 2
 
 
+def test_frontdoor_tool_state_after_tool_results_skips_fixed_builtin_hydration_targets() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    result = runner._frontdoor_tool_state_after_tool_results(
+        state={
+            "tool_names": ["load_tool_context", "exec"],
+            "candidate_tool_names": ["agent_browser"],
+            "hydrated_tool_names": [],
+            "rbac_visible_tool_names": ["load_tool_context", "exec", "agent_browser"],
+        },
+        tool_results=[
+            {
+                "tool_name": "load_tool_context",
+                "raw_result": {"ok": True, "hydration_targets": ["exec"]},
+            }
+        ],
+    )
+
+    assert result == {
+        "tool_names": ["load_tool_context", "exec"],
+        "candidate_tool_names": ["agent_browser"],
+        "hydrated_tool_names": [],
+    }
+
+
 @pytest.mark.asyncio
 async def test_graph_execute_tools_executes_runtime_submit_next_stage_and_persists_stage_state(
     monkeypatch,
@@ -160,7 +185,7 @@ async def test_graph_execute_tools_executes_runtime_submit_next_stage_and_persis
                     "name": ceo_runtime_ops.STAGE_TOOL_NAME,
                     "arguments": {
                         "stage_goal": "Create a stage before using tools",
-                        "tool_round_budget": 2,
+                        "tool_round_budget": 5,
                     },
                 }
             ],
@@ -183,7 +208,7 @@ async def test_graph_execute_tools_executes_runtime_submit_next_stage_and_persis
             "stage_id": "frontdoor-stage-1",
             "stage_index": 1,
             "stage_goal": "Create a stage before using tools",
-            "tool_round_budget": 2,
+            "tool_round_budget": 5,
             "tool_rounds_used": 0,
             "status": "active",
             "mode": "自主执行",

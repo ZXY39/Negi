@@ -94,13 +94,13 @@ _TEXT_EXTENSIONS = {
 
 _DEFAULT_KNOWN_MOJIBAKE_TOKENS = (
     # Common mojibake from UTF-8 bytes mis-decoded as GBK/GB18030.
-    "\u7481\u9881\u7d87",  # 璁颁綇 -> 记住
-    "\u6d60\u30e5\u6097",  # 浠ュ悗 -> 以后
-    "\u6d60\u5a42\u6097",  # 浠婂悗 -> 今后
+    "\u7481\u9881\u7d87",  # mojibake marker (expected meaning: 记住)
+    "\u6d60\u30e5\u6097",  # mojibake marker (expected meaning: 以后)
+    "\u6d60\u5a42\u6097",  # mojibake marker (expected meaning: 今后)
     # Seen in some tool/resource YAMLs historically.
-    "\u95f5",  # 閵
-    "\u95ff",  # 閿
-    "\u9227",  # 鈧
+    "\u95f5",  # U+95F5
+    "\u95ff",  # U+95FF
+    "\u9227",  # U+9227
 )
 
 
@@ -506,4 +506,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

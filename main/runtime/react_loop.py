@@ -3950,8 +3950,8 @@ class ReActToolLoop:
         return (
             'result contract v' in lowered
             or FINAL_RESULT_TOOL_NAME in lowered
-            or content.startswith('浣犱笂涓€鏉″洖澶嶄笉绗﹀悎缁撴灉 JSON 鍗忚 v')
-            or content.startswith('浣犱笂涓€鏉″洖澶嶈櫧鐒惰兘瑙ｆ瀽鎴?JSON锛屼絾杩濆弽浜嗙粨鏋滃崗璁?v')
+            or content.startswith('你上一条回复不符合结果 JSON 协议 v')
+            or content.startswith('你上一条回复虽然能解析成 JSON，但违反了结果协议 v')
         )
 
     def _dedupe_tool_messages(self, tool_messages: list[dict[str, Any]], *, existing_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -23,6 +23,7 @@ from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.semantic_context_summary import default_semantic_context_state
+from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
 from main.models import normalize_execution_policy_metadata
 from main.protocol import now_iso
 from main.runtime.internal_tools import SubmitNextStageTool
@@ -687,6 +688,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 continue
             targets = self._normalized_tool_name_state_list(raw_payload.get("hydration_targets"))
             for name in targets:
+                if name in CEO_FIXED_BUILTIN_TOOL_NAMES:
+                    continue
                 if name not in promotion_targets:
                     promotion_targets.append(name)
         hydrated_tool_names = self._frontdoor_hydrated_tool_lru(
@@ -1096,7 +1099,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "stage_index": stage_index_end,
                 "stage_kind": "compression",
                 "system_generated": True,
-                "mode": "鑷富鎵ц",
+                "mode": "自主执行",
                 "status": "completed",
                 "stage_goal": f"Archive completed stage history {stage_index_start}-{stage_index_end}",
                 "completed_stage_summary": (

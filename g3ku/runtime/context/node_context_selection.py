@@ -4,6 +4,11 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from g3ku.runtime.context.frontdoor_catalog_selection import build_frontdoor_catalog_selection
+from g3ku.runtime.tool_visibility import (
+    NODE_FIXED_BUILTIN_TOOL_NAMES,
+    filter_tool_names_for_semantic_top_k,
+    filter_visible_tool_families_for_semantic_top_k,
+)
 
 
 TOOL_CANDIDATE_TOP_K = 16
@@ -97,6 +102,15 @@ async def build_node_context_selection(
 ) -> NodeContextSelectionResult:
     visible_skill_ids = _visible_ids(visible_skills, key="skill_id")
     normalized_tool_names = _tool_names(visible_tool_names)
+    semantic_visible_tool_names = filter_tool_names_for_semantic_top_k(
+        normalized_tool_names,
+        excluded_tool_names=NODE_FIXED_BUILTIN_TOOL_NAMES,
+    )
+    semantic_visible_tool_name_set = set(semantic_visible_tool_names)
+    semantic_visible_tool_families = filter_visible_tool_families_for_semantic_top_k(
+        visible_tool_families,
+        excluded_tool_names=NODE_FIXED_BUILTIN_TOOL_NAMES,
+    )
     memory_search_visible = "memory_search" in set(normalized_tool_names)
     selection_query = _build_memory_query(
         prompt=prompt,
@@ -142,9 +156,9 @@ async def build_node_context_selection(
         memory_manager=memory_manager,
         query_text=selection_query,
         visible_skills=visible_skills,
-        visible_families=visible_tool_families,
+        visible_families=semantic_visible_tool_families,
         skill_limit=min(max(len(visible_skill_ids), 1), SKILL_CANDIDATE_TOP_K),
-        tool_limit=min(max(len(normalized_tool_names), 1), TOOL_CANDIDATE_TOP_K),
+        tool_limit=min(max(len(semantic_visible_tool_names), 1), TOOL_CANDIDATE_TOP_K),
     )
     if not bool((dense_selection or {}).get("available")):
         return NodeContextSelectionResult(
@@ -168,7 +182,6 @@ async def build_node_context_selection(
             },
         )
 
-    visible_tool_name_set = set(normalized_tool_names)
     selected_skill_ids = _cap_ordered(
         _tool_names(list((dense_selection or {}).get("skill_ids") or [])),
         limit=SKILL_CANDIDATE_TOP_K,
@@ -176,7 +189,7 @@ async def build_node_context_selection(
     selected_tool_names = _cap_ordered([
         tool_name
         for tool_name in list((dense_selection or {}).get("tool_ids") or [])
-        if tool_name in visible_tool_name_set
+        if tool_name in semantic_visible_tool_name_set
     ], limit=TOOL_CANDIDATE_TOP_K)
     candidate_tool_names = list(selected_tool_names)
     return NodeContextSelectionResult(

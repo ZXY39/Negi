@@ -121,6 +121,13 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 
 ### 3.2 candidate tools
 
+Maintenance note for surfaced fixed builtins:
+
+- Some concrete executors are both resource-backed and fixed builtins, for example CEO `exec` / `memory_search` / `memory_write` and node `content_open` / `content_search` / `exec` / loader tools.
+- These executors still remain directly callable through the fixed-builtin path when the runtime exposes them.
+- They no longer consume semantic top-k budget. CEO/frontdoor semantic narrowing now removes fixed builtin executors from the retrieval-side visible family/executor set before dense/rerank. Node context selection does the same before applying its 16-tool semantic candidate cap.
+- Treat semantic top-k as an extension-tool budget, not as a budget shared with fixed builtins. If an extension tool is missing from the shortlist, debug semantic recall against the filtered non-fixed executor set first.
+
 - `candidate_tool_names` / `candidate_skill_ids` 现在都采用同一语义：`RBAC 可见 ∩ 语义召回命中` 的当前候选集合。
 - 如果语义召回不可用，候选集合直接退化为 `RBAC 可见集合`，而不是停止运行。
 - 对 agent 来说，candidate 仍然是“可见但默认不可直接调用”的资源；candidate 不会自动进入 callable tool 集合。
@@ -162,6 +169,13 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 - 不走 hydration 状态机
 
 ### 3.4 hydrated tools
+
+Maintenance note for hydration LRU:
+
+- The hydration LRU is still concrete-tool-only and still defaults to 16 entries.
+- Resource-backed fixed builtin executors no longer enter hydration LRU. Loading tool context for a tool that is already fixed-callable may still return contract/help text, but it should not spend a hydration slot or produce a promoted callable entry for the next turn.
+- This applies on both sides: node runtime frame hydration (`hydrated_executor_state` / `hydrated_executor_names`) and CEO/frontdoor session-state hydration (`hydrated_tool_names`).
+- When debugging a missing hydration promotion, first distinguish between "ordinary extension executor" and "resource-backed fixed builtin". The latter is expected to stay outside LRU by design.
 
 - 节点的 hydration canonical state 在 runtime frame 中：`hydrated_executor_state` / `hydrated_executor_names`。这是节点生命周期级 LRU，会跨多轮、阶段切换、pause/resume、frame restore 保留。
 - CEO/frontdoor 的 hydration canonical state 在 session/frontdoor state 中：`RuntimeAgentSession._frontdoor_hydrated_tool_names` 与前门 persistent state 的 `hydrated_tool_names`。这是 session 生命周期级 LRU，会跨 turn 保留，但每轮都按当前 RBAC 可见集合过滤。

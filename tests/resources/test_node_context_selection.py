@@ -199,3 +199,47 @@ async def test_node_selector_dense_rerank_applies_separate_tool_and_skill_top_k(
     assert len(result.candidate_tool_names) == 16
     assert result.candidate_skill_ids[0] == "skill-00"
     assert result.candidate_tool_names[0] == "tool-00"
+
+
+@pytest.mark.asyncio
+async def test_node_selector_dense_rerank_excludes_fixed_builtin_tools_from_candidate_top_k(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _node_context_selection_module()
+    build_node_context_selection = _build_node_context_selection()
+    memory_manager = _DenseMemoryManager()
+
+    async def _fake_frontdoor_catalog_selection(**kwargs):
+        return {
+            "available": True,
+            "skill_ids": [],
+            "tool_ids": [
+                "exec",
+                "content_open",
+                "load_tool_context",
+                *[f"tool-{index:02d}" for index in range(20)],
+            ],
+            "trace": {"queries": {"raw_query": str(kwargs.get("query_text") or "")}},
+        }
+
+    monkeypatch.setattr(module, "build_frontdoor_catalog_selection", _fake_frontdoor_catalog_selection)
+
+    visible_tools = [
+        "exec",
+        "content_open",
+        "load_tool_context",
+        *[f"tool-{index:02d}" for index in range(20)],
+    ]
+
+    result = await build_node_context_selection(
+        loop=SimpleNamespace(),
+        memory_manager=memory_manager,
+        prompt="inspect browser workflow",
+        goal="inspect browser workflow",
+        core_requirement="inspect browser workflow",
+        visible_skills=[],
+        visible_tool_families=[SimpleNamespace(tool_id=name) for name in visible_tools],
+        visible_tool_names=visible_tools,
+    )
+
+    assert result.candidate_tool_names == [f"tool-{index:02d}" for index in range(16)]

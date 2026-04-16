@@ -190,6 +190,12 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 
 ### Canonical Tool Contract Notes
 
+Additional maintenance note for fixed-builtin resource executors:
+
+- CEO/frontdoor and node execution now treat semantic top-k as an extension-tool budget. Resource-backed fixed builtin executors are filtered out before semantic narrowing so they do not consume dense/rerank shortlist capacity.
+- The same class of executors also stays out of hydration LRU. `load_tool_context` may still surface their contract/help payload, but a successful loader result should not promote an already fixed-callable executor into hydrated state.
+- In practice this means "resource-backed fixed builtin" is now a third debugging category between "pure internal builtin" and "ordinary extension executor": it is resource-backed for catalog/help/RBAC purposes, but it does not spend semantic top-k or hydration-LRU budget.
+
 - 节点与 CEO/frontdoor 的 `candidate_tool_names` / `candidate_skill_ids` 现在都表示“`RBAC 可见 ∩ 语义召回命中` 的当前候选集合”；语义召回不可用时，候选集合退化为 `RBAC 可见集合`，而不是报错中断。
 - `load_tool_context` / `load_skill_context` 的准入只认当前 canonical candidate 集合；不再允许“RBAC 可见但不在 candidate 中”的旁路加载。
 - 节点的 hydration canonical state 继续落在 runtime frame：`hydrated_executor_state` / `hydrated_executor_names`。这是节点生命周期级 LRU，跨多轮、阶段切换、pause/resume、restore 保留。

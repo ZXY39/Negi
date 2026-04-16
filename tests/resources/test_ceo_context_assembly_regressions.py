@@ -1081,6 +1081,66 @@ async def test_message_builder_defaults_to_16_skill_and_tool_candidates_when_ass
 
 
 @pytest.mark.asyncio
+async def test_message_builder_excludes_fixed_builtin_resource_tools_from_semantic_tool_selection_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    captured: dict[str, object] = {}
+
+    async def _semantic_rankings(**kwargs):
+        captured.update(kwargs)
+        return {
+            "mode": "dense_only",
+            "available": True,
+            "skill_ids": [],
+            "tool_ids": ["agent_browser"],
+            "trace": {},
+        }
+
+    monkeypatch.setattr(message_builder_module, "semantic_catalog_rankings", _semantic_rankings)
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="pick the best tool for browser work",
+        exposure={
+            "skills": [],
+            "tool_families": [
+                _tool_resource_record("exec", "Read-only shell helper."),
+                _tool_resource_record("memory", "Search, write, and delete long-term memory.", executor_names=["memory_search", "memory_write", "memory_delete"]),
+                _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
+            ],
+            "tool_names": [
+                "load_tool_context",
+                "exec",
+                "memory_search",
+                "memory_write",
+                "memory_delete",
+                "agent_browser",
+            ],
+        },
+        persisted_session=None,
+    )
+
+    semantic_visible_families = list(captured.get("visible_families") or [])
+    semantic_tool_ids = [str(getattr(item, "tool_id", "") or item.get("tool_id") or "").strip() for item in semantic_visible_families]
+    semantic_executor_names = []
+    for item in semantic_visible_families:
+        actions = list(getattr(item, "actions", None) or item.get("actions") or [])
+        for action in actions:
+            names = list(getattr(action, "executor_names", None) or action.get("executor_names") or [])
+            semantic_executor_names.extend(str(name or "").strip() for name in names if str(name or "").strip())
+
+    assert semantic_tool_ids == ["memory", "agent_browser"]
+    assert semantic_executor_names == ["memory_delete", "agent_browser"]
+    assert result.candidate_tool_names[0] == "agent_browser"
+    assert "exec" not in result.candidate_tool_names
+    assert "memory_search" not in result.candidate_tool_names
+    assert "memory_write" not in result.candidate_tool_names
+
+
+@pytest.mark.asyncio
 async def test_message_builder_promotes_hydrated_tools_into_callable_list() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _MemoryManager(response="")

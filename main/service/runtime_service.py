@@ -37,6 +37,10 @@ from g3ku.runtime.context.node_context_selection import (
 from g3ku.runtime.context.summarizer import layered_body_payload, score_query
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
+from g3ku.runtime.tool_visibility import (
+    NODE_FIXED_BUILTIN_TOOL_NAMES,
+    fixed_builtin_tool_name_set_for_actor_role,
+)
 from g3ku.runtime.tool_watchdog import ToolExecutionManager
 from g3ku.security import get_bootstrap_security_service
 from g3ku.utils.api_keys import parse_api_keys, resolve_api_key_concurrency_layout
@@ -166,17 +170,7 @@ _TASK_RECOVERY_NOTICE_KEY = 'recovery_notice'
 _TASK_RECOVERY_NOTICE_TEXT = '本任务遇到异常停止，已回退到稳定步骤继续。'
 _CONTINUATION_TASK_CREATED_BY_SOURCES = frozenset({'heartbeat_auto_continue', 'ceo_user_rebuild'})
 _TASK_RUNTIME_V3_MARKER = '.task-runtime-v3'
-_NODE_FIXED_BUILTIN_TOOL_NAMES = (
-    'submit_next_stage',
-    'submit_final_result',
-    'spawn_child_nodes',
-    'content_describe',
-    'content_open',
-    'content_search',
-    'exec',
-    'load_skill_context',
-    'load_tool_context',
-)
+_NODE_FIXED_BUILTIN_TOOL_NAMES = NODE_FIXED_BUILTIN_TOOL_NAMES
 
 
 def _prepare_task_runtime_v3_root(
@@ -3621,13 +3615,13 @@ class MainRuntimeService:
             return text
         text = re.sub(r'^鏈€缁堥獙鏀(?:讹細|:|：|\?)?', '最终验收:', text)
         replacements = (
-            ('鏍稿鏈€缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?', '核对最终结果是否满足要求。'),
-            ('妫€鏌ユ渶缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?', '检查最终结果是否满足要求。'),
+            ('鏍稿\ue1ee鏈€缁堢粨鏋滄槸鍚︽弧瓒宠\ue6e6姹傘€?', '核对最终结果是否满足要求。'),
+            ('妫€鏌ユ渶缁堢粨鏋滄槸鍚︽弧瓒宠\ue6e6姹傘€?', '检查最终结果是否满足要求。'),
             ('妫€鏌?child 杈撳嚭銆?', '检查 child 输出。'),
-            ('妫€鏌ュ叕鍛婅崏绋挎槸鍚︽弧瓒充氦浠樿姹傘€?', '检查公告草稿是否满足交付要求。'),
+            ('妫€鏌ュ叕鍛婅崏绋挎槸鍚︽弧瓒充氦浠樿\ue6e6姹傘€?', '检查公告草稿是否满足交付要求。'),
             ('楠屾敹閫氳繃', '验收通过'),
-            ('鑷富鎵ц', '自主执行'),
-            ('杩涜涓?', '进行中'),
+            ('鑷\ue043富鎵ц\ue511', '自主执行'),
+            ('杩涜\ue511涓?', '进行中'),
             ('鏈€鏂伴樁娈电洰鏍?', '最新阶段目标'),
         )
         for source, target in replacements:
@@ -4353,7 +4347,17 @@ class MainRuntimeService:
             value = 16
         return max(1, value)
 
-    def _tool_context_hydration_targets(self, *, requested_tool_id: str, visible_family: Any) -> list[str]:
+    @staticmethod
+    def _fixed_builtin_tool_name_set_for_actor_role(actor_role: str) -> set[str]:
+        return fixed_builtin_tool_name_set_for_actor_role(actor_role)
+
+    def _tool_context_hydration_targets(
+        self,
+        *,
+        requested_tool_id: str,
+        visible_family: Any,
+        actor_role: str = '',
+    ) -> list[str]:
         requested_name = str(requested_tool_id or '').strip()
         if not requested_name:
             return []
@@ -4362,6 +4366,9 @@ class MainRuntimeService:
             return []
         family_executors = self._family_executor_names(visible_family)
         if requested_name in family_executors:
+            fixed_builtin_names = self._fixed_builtin_tool_name_set_for_actor_role(actor_role)
+            if requested_name in fixed_builtin_names:
+                return []
             return [requested_name]
         return []
 
@@ -4403,6 +4410,7 @@ class MainRuntimeService:
             self._tool_context_hydration_targets(
                 requested_tool_id=str(requested_tool_id or '').strip() or str(resolved_tool_id or '').strip(),
                 visible_family=visible_family,
+                actor_role=actor_role,
             )
             if visible_family is not None
             else []
@@ -4452,6 +4460,7 @@ class MainRuntimeService:
         promoted_executor_names = self._tool_context_hydration_targets(
             requested_tool_id=requested_tool_id,
             visible_family=visible_family,
+            actor_role=actor_role,
         )
         if not promoted_executor_names:
             return
