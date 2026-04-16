@@ -352,7 +352,13 @@ class CeoModelOutputMiddleware(AgentMiddleware):
                 **current_state,
                 "tool_call_payloads": tool_call_payloads,
             }
-            preview_frontdoor_stage_state, preview_compression_state, preview_semantic_context_state, _preview_hydrated_tool_names = self._runner._runtime_session_frontdoor_state(
+            (
+                preview_frontdoor_stage_state,
+                preview_frontdoor_canonical_context,
+                preview_compression_state,
+                preview_semantic_context_state,
+                _preview_hydrated_tool_names,
+            ) = self._runner._runtime_session_frontdoor_state(
                 preview_state,
                 preview_pending_tool_round=True,
             )
@@ -380,6 +386,7 @@ class CeoModelOutputMiddleware(AgentMiddleware):
                     **current_state,
                     **update,
                     "frontdoor_stage_state": preview_frontdoor_stage_state,
+                    "frontdoor_canonical_context": preview_frontdoor_canonical_context,
                     "compression_state": preview_compression_state,
                     "semantic_context_state": preview_semantic_context_state,
                 },
@@ -452,13 +459,20 @@ class CeoApprovalMiddleware(AgentMiddleware):
             **current_state,
             "tool_call_payloads": list(current_state.get("tool_call_payloads") or []),
         }
-        preview_frontdoor_stage_state, preview_compression_state, preview_semantic_context_state, _preview_hydrated_tool_names = self._runner._runtime_session_frontdoor_state(
+        (
+            preview_frontdoor_stage_state,
+            preview_frontdoor_canonical_context,
+            preview_compression_state,
+            preview_semantic_context_state,
+            _preview_hydrated_tool_names,
+        ) = self._runner._runtime_session_frontdoor_state(
             preview_state,
             preview_pending_tool_round=True,
         )
         interrupt_payload = {
             **approval_request,
             "frontdoor_stage_state": preview_frontdoor_stage_state,
+            "frontdoor_canonical_context": preview_frontdoor_canonical_context,
             "compression_state": preview_compression_state,
             "semantic_context_state": preview_semantic_context_state,
             "hydrated_tool_names": list(current_state.get("hydrated_tool_names") or []),

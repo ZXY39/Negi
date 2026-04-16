@@ -607,7 +607,13 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         next_step = str(normalized.get("next_step") or "").strip()
         if next_step == "review_tool_calls":
             preview_state = {**current_state, **dict(normalized or {})}
-            preview_frontdoor_stage_state, preview_compression_state, preview_semantic_context_state, _preview_hydrated_tool_names = self._runtime_session_frontdoor_state(
+            (
+                preview_frontdoor_stage_state,
+                preview_frontdoor_canonical_context,
+                preview_compression_state,
+                preview_semantic_context_state,
+                _preview_hydrated_tool_names,
+            ) = self._runtime_session_frontdoor_state(
                 preview_state,
                 preview_pending_tool_round=True,
             )
@@ -615,6 +621,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 state={
                     **preview_state,
                     "frontdoor_stage_state": preview_frontdoor_stage_state,
+                    "frontdoor_canonical_context": preview_frontdoor_canonical_context,
                     "compression_state": preview_compression_state,
                     "semantic_context_state": preview_semantic_context_state,
                 },

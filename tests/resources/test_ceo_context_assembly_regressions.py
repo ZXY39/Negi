@@ -2439,7 +2439,7 @@ async def test_message_builder_injects_global_summary_block_and_includes_hidden_
     persisted_session.add_message(
         "assistant",
         "Heartbeat finished a background inspection.",
-        execution_trace_summary={"stages": [{"stage_goal": "inspect repo", "rounds": []}]},
+        canonical_context={"stages": [{"stage_goal": "inspect repo", "rounds": []}]},
         metadata={"source": "heartbeat", "history_visible": False},
     )
 
@@ -2481,6 +2481,54 @@ async def test_message_builder_injects_global_summary_block_and_includes_hidden_
     assert semantic_state.get("summary_text") == "## 长期目标\n继续当前任务"
     assert compression_state.get("status") == "ready"
     assert compression_state.get("source") == "semantic"
+
+
+@pytest.mark.asyncio
+async def test_message_builder_trace_reports_pre_summary_and_effective_prompt_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    monkeypatch.setattr(
+        "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
+        lambda messages: len(list(messages or [])) * 50,
+    )
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="continue",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=None,
+        user_content="continue",
+        frontdoor_canonical_context={
+            "active_stage_id": "",
+            "transition_required": False,
+            "stages": [
+                {
+                    "stage_id": f"frontdoor-stage-{index}",
+                    "stage_index": index,
+                    "stage_kind": "normal",
+                    "representation": "raw",
+                    "system_generated": False,
+                    "mode": "自主执行",
+                    "status": "completed",
+                    "stage_goal": f"inspect stage {index}",
+                    "completed_stage_summary": f"finished stage {index}",
+                    "key_refs": [],
+                    "tool_round_budget": 2,
+                    "tool_rounds_used": 1,
+                    "rounds": [],
+                }
+                for index in range(1, 5)
+            ],
+        },
+    )
+
+    assert "prompt_estimate_tokens" not in result.trace
+    assert result.trace["pre_summary_prompt_tokens"] == 300
+    assert result.trace["effective_prompt_tokens"] >= 300
 
 
 @pytest.mark.asyncio

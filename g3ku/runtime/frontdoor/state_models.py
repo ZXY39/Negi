@@ -12,6 +12,7 @@ from langgraph.graph.message import add_messages
 
 from typing_extensions import TypedDict
 
+from .canonical_context import default_frontdoor_canonical_context
 from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 from g3ku.runtime.semantic_context_summary import default_semantic_context_state
 
@@ -107,6 +108,7 @@ class CeoPersistentState(TypedDict, total=False):
     next_step: str
 
     frontdoor_stage_state: dict[str, Any]
+    frontdoor_canonical_context: dict[str, Any]
 
     compression_state: dict[str, Any]
 
@@ -211,6 +213,8 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
             "stages": [],
 
         },
+
+        "frontdoor_canonical_context": default_frontdoor_canonical_context(),
 
         "compression_state": {
 

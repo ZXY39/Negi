@@ -1358,30 +1358,6 @@ function cloneCeoSnapshotAttachments(items = []) {
     }).filter((item) => item.path);
 }
 
-function normalizeCeoSnapshotToolEvent(event = {}) {
-    if (!event || typeof event !== "object") return null;
-    const toolName = String(event?.tool_name || "").trim().toLowerCase();
-    if (toolName === "submit_next_stage") return null;
-    const next = {};
-    ["status", "tool_name", "text", "timestamp", "tool_call_id", "kind", "source", "output_ref"].forEach((key) => {
-        const value = String(event?.[key] || "").trim();
-        if (value) next[key] = value;
-    });
-    ["is_error", "is_update"].forEach((key) => {
-        if (typeof event?.[key] === "boolean") next[key] = event[key];
-    });
-    const elapsedSeconds = Number(event?.elapsed_seconds);
-    if (Number.isFinite(elapsedSeconds) && elapsedSeconds >= 0) next.elapsed_seconds = elapsedSeconds;
-    return Object.keys(next).length ? next : null;
-}
-
-function normalizeCeoSnapshotToolEvents(events = []) {
-    return (Array.isArray(events) ? events : [])
-        .map((item) => normalizeCeoSnapshotToolEvent(item))
-        .filter(Boolean)
-        .slice(-CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT);
-}
-
 function isRenderableCeoSnapshotStage(stage = null) {
     if (!stage || typeof stage !== "object") return false;
     const stageGoal = String(stage?.stage_goal || "").trim();
@@ -1393,9 +1369,9 @@ function isRenderableCeoSnapshotStage(stage = null) {
     return true;
 }
 
-function normalizeCeoSnapshotExecutionTraceSummary(summary = null) {
-    if (!summary || typeof summary !== "object") return null;
-    const rawStages = Array.isArray(summary?.stages) ? summary.stages : [];
+function normalizeCeoSnapshotCanonicalContext(context = null) {
+    if (!context || typeof context !== "object") return null;
+    const rawStages = Array.isArray(context?.stages) ? context.stages : [];
     const hasRenderableRealStages = rawStages.some((stage) => (
         isRenderableCeoSnapshotStage(stage) && stage?.system_generated !== true
     ));
@@ -1415,13 +1391,21 @@ function normalizeCeoSnapshotExecutionTraceSummary(summary = null) {
         })
         .filter(Boolean);
     if (!stages.length) return null;
-    return { stages };
+    const next = { stages };
+    const activeStageId = String(context?.active_stage_id || "").trim();
+    if (activeStageId) next.active_stage_id = activeStageId;
+    if (context?.transition_required === true) next.transition_required = true;
+    return next;
 }
 
-function resolvePreferredCeoStageTraceSummary(summary = null, previousSummary = null) {
-    return normalizeCeoSnapshotExecutionTraceSummary(summary)
-        || normalizeCeoSnapshotExecutionTraceSummary(previousSummary)
+function resolvePreferredCeoCanonicalContext(context = null, previousContext = null) {
+    return normalizeCeoSnapshotCanonicalContext(context)
+        || normalizeCeoSnapshotCanonicalContext(previousContext)
         || null;
+}
+
+function normalizeCeoSnapshotToolEvents() {
+    return [];
 }
 
 function normalizeCeoSnapshotCompression(compression = null) {
@@ -1452,12 +1436,10 @@ function normalizeCeoSnapshotMessage(message = {}) {
     if (attachments.length) next.attachments = attachments;
     if (role === "assistant") {
         const status = String(message?.status || "").trim().toLowerCase();
-        const toolEvents = normalizeCeoSnapshotToolEvents(message?.tool_events);
-        const executionTraceSummary = normalizeCeoSnapshotExecutionTraceSummary(message?.execution_trace_summary);
+        const canonicalContext = normalizeCeoSnapshotCanonicalContext(message?.canonical_context);
         if (status) next.status = status;
-        if (toolEvents.length) next.tool_events = toolEvents;
-        if (executionTraceSummary) next.execution_trace_summary = executionTraceSummary;
-        if (!String(next.content || "").trim() && !toolEvents.length && !executionTraceSummary && status !== "paused") return null;
+        if (canonicalContext) next.canonical_context = canonicalContext;
+        if (!String(next.content || "").trim() && !canonicalContext && status !== "paused") return null;
         return next;
     }
     if (role === "user" && !String(next.content || "").trim() && !attachments.length) return null;
@@ -1485,12 +1467,10 @@ function normalizeCeoSnapshotInflight(snapshot = null) {
             if (attachments.length) next.user_message.attachments = attachments;
         }
     }
-    const toolEvents = normalizeCeoSnapshotToolEvents(snapshot?.tool_events);
-    const executionTraceSummary = normalizeCeoSnapshotExecutionTraceSummary(snapshot?.execution_trace_summary);
+    const canonicalContext = normalizeCeoSnapshotCanonicalContext(snapshot?.canonical_context);
     const compression = normalizeCeoSnapshotCompression(snapshot?.compression);
     const errorMessage = String(snapshot?.last_error?.message || "").trim();
-    if (toolEvents.length) next.tool_events = toolEvents;
-    if (executionTraceSummary) next.execution_trace_summary = executionTraceSummary;
+    if (canonicalContext) next.canonical_context = canonicalContext;
     if (compression) next.compression = compression;
     if (errorMessage) next.last_error = { message: errorMessage };
     if (!ceoInflightTurnHasVisibleAssistantState(next) && !next.user_message && !next.compression) return null;
@@ -1685,8 +1665,7 @@ function appendCeoSessionSnapshotMessage(messages = [], message = null) {
         && sameAttachments
         && sameTurnId
     ) {
-        if (nextMessage.tool_events) previous.tool_events = nextMessage.tool_events;
-        if (nextMessage.execution_trace_summary) previous.execution_trace_summary = nextMessage.execution_trace_summary;
+        if (nextMessage.canonical_context) previous.canonical_context = nextMessage.canonical_context;
         return trimCeoSessionSnapshotMessages(next);
     }
     next.push(nextMessage);
@@ -3168,9 +3147,8 @@ function ceoInflightTurnHasVisibleAssistantState(snapshot = null) {
     const status = String(snapshot.status || "").trim().toLowerCase();
     const assistantText = String(snapshot.assistant_text || "").trim();
     const turnId = String(snapshot?.turn_id || "").trim();
-    const toolEvents = normalizeCeoSnapshotToolEvents(snapshot.tool_events);
-    const executionTraceSummary = normalizeCeoSnapshotExecutionTraceSummary(snapshot.execution_trace_summary);
-    return !!assistantText || toolEvents.length > 0 || !!executionTraceSummary || status === "paused" || status === "error";
+    const canonicalContext = normalizeCeoSnapshotCanonicalContext(snapshot.canonical_context);
+    return !!assistantText || !!canonicalContext || status === "paused" || status === "error";
 }
 
 function ceoNeedsAssistantTurn(snapshot = null) {
@@ -3287,10 +3265,10 @@ function renderCeoToolEventsIntoTurn(turn, toolEvents = [], { source = "" } = {}
     return events.length;
 }
 
-function renderCeoStageTraceIntoTurn(turn, executionTraceSummary = null) {
+function renderCeoStageTraceIntoTurn(turn, canonicalContext = null) {
     if (!turn?.listEl || !turn?.flowEl) return 0;
-    maybeShowCeoContextLoadNoticesFromSummary(turn, executionTraceSummary);
-    const summary = filterCeoInteractionFlowSummary(executionTraceSummary);
+    maybeShowCeoContextLoadNoticesFromSummary(turn, canonicalContext);
+    const summary = filterCeoInteractionFlowSummary(canonicalContext);
     if (!summary?.stages?.length) {
         resetCeoToolFlow(turn);
         updateCeoTurnMeta(turn, "绛夊緟宸ュ叿寮€濮?..");
@@ -3354,28 +3332,27 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
     const turn = existingTurn || ensureActiveCeoTurn({ source, turnId });
     if (!turn?.textEl || !turn?.flowEl) return false;
     if (turnId) turn.turnId = turnId;
-    const preferredExecutionTraceSummary = resolvePreferredCeoStageTraceSummary(
-        snapshot?.execution_trace_summary || null,
+    const preferredCanonicalContext = resolvePreferredCeoCanonicalContext(
+        snapshot?.canonical_context || null,
         turn?.lastExecutionTraceSummary || null
     );
     mutateCeoFeed(() => {
         renderCeoAssistantTextIntoTurn(turn, snapshot?.assistant_text || "", { status });
-        const stageRoundCount = renderCeoStageTraceIntoTurn(turn, preferredExecutionTraceSummary);
-        const toolCount = stageRoundCount || renderCeoToolEventsIntoTurn(turn, snapshot?.tool_events || [], { source });
-        if (!stageRoundCount && !toolCount) {
+        const stageRoundCount = renderCeoStageTraceIntoTurn(turn, preferredCanonicalContext);
+        if (!stageRoundCount) {
             if (status === "paused") updateCeoTurnMeta(turn, "已暂停");
             else if (status === "error") updateCeoTurnMeta(turn, "运行出错");
             else updateCeoTurnMeta(turn, "等待工具开始...");
         }
-        if (stageRoundCount || toolCount) {
+        if (stageRoundCount) {
             turn.flowEl.hidden = false;
             turn.flowEl.open = status !== "completed";
         }
         icons();
     }, { scrollMode: "preserve" });
     if (targetSessionId) {
-        const inflightTurn = preferredExecutionTraceSummary
-            ? { ...(snapshot || {}), execution_trace_summary: preferredExecutionTraceSummary }
+        const inflightTurn = preferredCanonicalContext
+            ? { ...(snapshot || {}), canonical_context: preferredCanonicalContext }
             : snapshot;
         setCeoSessionSnapshotCache(targetSessionId, { [cacheField]: inflightTurn });
     }
@@ -3406,11 +3383,10 @@ function restoreCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = 
 }
 
 function renderPersistedCeoAssistantTurn(item = {}) {
-    const executionTraceSummary = normalizeCeoSnapshotExecutionTraceSummary(item?.execution_trace_summary);
-    const toolEvents = normalizeCeoSnapshotToolEvents(item?.tool_events);
+    const canonicalContext = normalizeCeoSnapshotCanonicalContext(item?.canonical_context);
     const content = String(item?.content || "");
     const status = String(item?.status || "").trim().toLowerCase();
-    if (status !== "paused" && !executionTraceSummary && !toolEvents.length) {
+    if (status !== "paused" && !canonicalContext) {
         addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
         return;
     }
@@ -3422,8 +3398,7 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     S.ceoPendingTurns.push(turn);
     withCeoFeedBatch(() => {
         renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
-        const stageRoundCount = renderCeoStageTraceIntoTurn(turn, executionTraceSummary);
-        if (!stageRoundCount) renderCeoToolEventsIntoTurn(turn, toolEvents, { source: "history" });
+        renderCeoStageTraceIntoTurn(turn, canonicalContext);
         turn.flowEl.hidden = false;
         turn.flowEl.open = false;
         icons();
@@ -3928,7 +3903,7 @@ function maybeShowCeoContextLoadNotice(turn, { toolName = "", status = "", detai
 }
 
 function filterCeoInteractionFlowSummary(summary = null) {
-    const normalizedSummary = normalizeCeoSnapshotExecutionTraceSummary(summary);
+    const normalizedSummary = normalizeCeoSnapshotCanonicalContext(summary);
     if (!normalizedSummary?.stages?.length) return null;
     return {
         stages: normalizedSummary.stages.map((stage) => {
@@ -3955,7 +3930,7 @@ function filterCeoInteractionFlowSummary(summary = null) {
 }
 
 function maybeShowCeoContextLoadNoticesFromSummary(turn, summary = null) {
-    const normalizedSummary = normalizeCeoSnapshotExecutionTraceSummary(summary);
+    const normalizedSummary = normalizeCeoSnapshotCanonicalContext(summary);
     if (!normalizedSummary?.stages?.length) return;
     normalizedSummary.stages.forEach((stage) => {
         (Array.isArray(stage?.rounds) ? stage.rounds : []).forEach((round) => {
@@ -4457,7 +4432,7 @@ function finalizeCeoTurn(text, meta = {}) {
     syncCeoPrimaryButton();
     const normalizedSource = normalizeCeoTurnSource(meta?.source || "user");
     const normalizedTurnId = normalizeCeoTurnId(meta?.turn_id || "");
-    const finalExecutionTraceSummary = normalizeCeoSnapshotExecutionTraceSummary(meta?.execution_trace_summary || null);
+    const finalCanonicalContext = normalizeCeoSnapshotCanonicalContext(meta?.canonical_context || null);
     const turn = pullActiveCeoTurn(normalizedSource, normalizedTurnId);
     if (!turn?.textEl || !turn.flowEl) {
         addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
@@ -4474,15 +4449,14 @@ function finalizeCeoTurn(text, meta = {}) {
                 || (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId ? false : true)
                 || !inflightSource
                 || normalizeCeoTurnSource(inflightSource) === normalizedSource;
-            const persistedExecutionTraceSummary = resolvePreferredCeoStageTraceSummary(
-                finalExecutionTraceSummary,
-                inflightMatchesSource ? inflightTurn?.execution_trace_summary || null : null
+            const persistedCanonicalContext = resolvePreferredCeoCanonicalContext(
+                finalCanonicalContext,
+                inflightMatchesSource ? inflightTurn?.canonical_context || null : null
             );
             const messages = appendCeoSessionSnapshotMessage(entry?.messages, {
                 role: "assistant",
                 content: String(text || "").trim() || "Done.",
-                tool_events: persistedExecutionTraceSummary ? [] : (inflightMatchesSource ? inflightTurn?.tool_events || [] : []),
-                execution_trace_summary: persistedExecutionTraceSummary,
+                canonical_context: persistedCanonicalContext,
             });
             return {
                 ...(entry || {}),
@@ -4497,7 +4471,7 @@ function finalizeCeoTurn(text, meta = {}) {
         turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
         turn.textEl.classList.remove("pending");
         turn.textEl.classList.add("markdown-content");
-        if (finalExecutionTraceSummary) renderCeoStageTraceIntoTurn(turn, finalExecutionTraceSummary);
+        if (finalCanonicalContext) renderCeoStageTraceIntoTurn(turn, finalCanonicalContext);
         if (turn.steps > 0) {
             const hasRunningStep = hasRunningCeoToolStep(turn);
             turn.flowEl.hidden = false;
@@ -4519,13 +4493,13 @@ function finalizeCeoTurn(text, meta = {}) {
     patchCeoSessionSnapshotCache(sessionId, (entry) => {
         const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
         const inflightTurnId = normalizeCeoTurnId(inflightTurn?.turn_id);
-        const fallbackExecutionTraceSummary = resolvePreferredCeoStageTraceSummary(
+        const fallbackCanonicalContext = resolvePreferredCeoCanonicalContext(
             turn?.lastExecutionTraceSummary || null,
-            inflightTurn?.execution_trace_summary || null
+            inflightTurn?.canonical_context || null
         );
-        const persistedExecutionTraceSummary = resolvePreferredCeoStageTraceSummary(
-            finalExecutionTraceSummary,
-            fallbackExecutionTraceSummary
+        const persistedCanonicalContext = resolvePreferredCeoCanonicalContext(
+            finalCanonicalContext,
+            fallbackCanonicalContext
         );
         let messages = trimCeoSessionSnapshotMessages(entry?.messages);
         const inflightSource = normalizeCeoTurnSource(inflightTurn?.source || "user");
@@ -4543,8 +4517,7 @@ function finalizeCeoTurn(text, meta = {}) {
         messages = appendCeoSessionSnapshotMessage(messages, {
             role: "assistant",
             content: String(text || "").trim() || "Done.",
-            tool_events: persistedExecutionTraceSummary ? [] : (inflightTurn?.tool_events || []),
-            execution_trace_summary: persistedExecutionTraceSummary,
+            canonical_context: persistedCanonicalContext,
         });
         return {
             ...(entry || {}),

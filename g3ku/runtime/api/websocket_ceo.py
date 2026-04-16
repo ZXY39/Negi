@@ -474,32 +474,6 @@ def _normalize_snapshot_attachments(message: dict[str, Any]) -> list[dict[str, A
     return items
 
 
-def _normalize_snapshot_tool_events(raw_events: Any) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for raw in list(raw_events or []):
-        if not isinstance(raw, dict):
-            continue
-        status = str(raw.get('status') or '').strip().lower()
-        if status not in {'running', 'success', 'error'}:
-            status = 'error' if bool(raw.get('is_error')) else 'running' if bool(raw.get('is_update')) else 'success'
-        item = {
-            'status': status,
-            'tool_name': str(raw.get('tool_name') or 'tool').strip() or 'tool',
-            'text': str(raw.get('text') or '').strip(),
-            'timestamp': str(raw.get('timestamp') or '').strip(),
-            'tool_call_id': str(raw.get('tool_call_id') or '').strip(),
-            'is_error': bool(raw.get('is_error')),
-            'is_update': bool(raw.get('is_update')),
-            'kind': str(raw.get('kind') or '').strip(),
-            'source': str(raw.get('source') or '').strip().lower() or 'user',
-        }
-        elapsed_seconds = raw.get('elapsed_seconds')
-        if isinstance(elapsed_seconds, (int, float)):
-            item['elapsed_seconds'] = float(elapsed_seconds)
-        items.append(item)
-    return items
-
-
 def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for raw in list(messages or []):
@@ -517,9 +491,9 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
             if isinstance(raw_text, str) and raw_text.strip():
                 content = raw_text.strip()
         attachments = _normalize_snapshot_attachments(raw) if role == 'user' else []
-        execution_trace_summary = (
-            dict(raw.get('execution_trace_summary'))
-            if role == 'assistant' and isinstance(raw.get('execution_trace_summary'), dict)
+        canonical_context = (
+            dict(raw.get('canonical_context'))
+            if role == 'assistant' and isinstance(raw.get('canonical_context'), dict)
             else {}
         )
         compression = (
@@ -527,12 +501,7 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
             if role == 'assistant' and isinstance(raw.get('compression'), dict)
             else {}
         )
-        legacy_tool_events = (
-            _normalize_snapshot_tool_events(raw.get('tool_events'))
-            if role == 'assistant'
-            else []
-        )
-        if not content and not attachments and not execution_trace_summary and not compression and not legacy_tool_events:
+        if not content and not attachments and not canonical_context and not compression:
             continue
         item = {'role': role, 'content': content}
         if role == 'assistant':
@@ -547,12 +516,10 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
             item['timestamp'] = timestamp.strip()
         if attachments:
             item['attachments'] = attachments
-        if execution_trace_summary:
-            item['execution_trace_summary'] = execution_trace_summary
+        if canonical_context:
+            item['canonical_context'] = canonical_context
         if compression:
             item['compression'] = compression
-        if not execution_trace_summary and not compression and legacy_tool_events:
-            item['tool_events'] = legacy_tool_events
         items.append(item)
     return items
 
@@ -583,24 +550,24 @@ def _assistant_turn_already_persisted(persisted_session: Any | None, *, turn_id:
     return False
 
 
-def _resolve_final_execution_trace_summary(
+def _resolve_final_canonical_context(
     *,
     payload: dict[str, Any] | None,
     session: Any,
     persisted_session: Any,
 ) -> dict[str, Any]:
     data = payload if isinstance(payload, dict) else {}
-    direct_summary = data.get("execution_trace_summary")
-    if isinstance(direct_summary, dict) and direct_summary:
-        return dict(direct_summary)
-    snapshot_supplier = getattr(session, "_frontdoor_execution_trace_summary_snapshot", None)
+    direct_context = data.get("canonical_context")
+    if isinstance(direct_context, dict) and direct_context:
+        return dict(direct_context)
+    snapshot_supplier = getattr(session, "_frontdoor_canonical_context_snapshot", None)
     if callable(snapshot_supplier):
         try:
-            summary = snapshot_supplier()
+            canonical_context = snapshot_supplier()
         except Exception:
-            summary = None
-        if isinstance(summary, dict) and summary:
-            return dict(summary)
+            canonical_context = None
+        if isinstance(canonical_context, dict) and canonical_context:
+            return dict(canonical_context)
     return {}
 
 
@@ -929,7 +896,7 @@ async def ceo_websocket(websocket: WebSocket):
             source = str(payload.get('source') or 'user').strip().lower() or 'user'
             turn_id = str(payload.get('turn_id') or '').strip()
             persisted = transcript_store.get_or_create(session_id)
-            execution_trace_summary = _resolve_final_execution_trace_summary(
+            canonical_context = _resolve_final_canonical_context(
                 payload=payload,
                 session=session,
                 persisted_session=persisted,
@@ -965,7 +932,7 @@ async def ceo_websocket(websocket: WebSocket):
                     'text': text,
                     'source': source,
                     'turn_id': turn_id,
-                    **({'execution_trace_summary': execution_trace_summary} if execution_trace_summary else {}),
+                    **({'canonical_context': canonical_context} if canonical_context else {}),
                 },
             )
             _publish_ceo_session_patch(

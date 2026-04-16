@@ -19,8 +19,8 @@ if "litellm" not in sys.modules:
 from g3ku.runtime.api import websocket_ceo
 
 
-def test_resolve_final_execution_trace_summary_keeps_current_turn_snapshot_summary() -> None:
-    current_summary = {
+def test_resolve_final_canonical_context_keeps_current_turn_snapshot_context() -> None:
+    current_context = {
         "stages": [
             {
                 "stage_id": "frontdoor-stage-current",
@@ -34,42 +34,42 @@ def test_resolve_final_execution_trace_summary_keeps_current_turn_snapshot_summa
             {
                 "role": "assistant",
                 "content": "older reply",
-                "execution_trace_summary": {
+                "canonical_context": {
                     "stages": [{"stage_id": "frontdoor-stage-old", "stage_goal": "old stage", "rounds": []}]
                 },
             }
         ]
     )
     session = SimpleNamespace(
-        _frontdoor_execution_trace_summary_snapshot=lambda: current_summary,
+        _frontdoor_canonical_context_snapshot=lambda: current_context,
     )
 
-    summary = websocket_ceo._resolve_final_execution_trace_summary(
+    context = websocket_ceo._resolve_final_canonical_context(
         payload={"text": "done"},
         session=session,
         persisted_session=persisted_session,
     )
 
-    assert summary == current_summary
+    assert context == current_context
 
 
-def test_resolve_final_execution_trace_summary_does_not_reuse_previous_assistant_trace() -> None:
+def test_resolve_final_canonical_context_does_not_reuse_previous_assistant_context() -> None:
     persisted_session = SimpleNamespace(
         messages=[
             {
                 "role": "assistant",
                 "content": "older reply",
-                "execution_trace_summary": {
+                "canonical_context": {
                     "stages": [{"stage_id": "frontdoor-stage-old", "stage_goal": "old stage", "rounds": []}]
                 },
             }
         ]
     )
 
-    summary = websocket_ceo._resolve_final_execution_trace_summary(
+    context = websocket_ceo._resolve_final_canonical_context(
         payload={"text": "direct reply without stage"},
         session=SimpleNamespace(),
         persisted_session=persisted_session,
     )
 
-    assert summary == {}
+    assert context == {}

@@ -248,7 +248,9 @@ test("paused inflight snapshot does not fall back to processing placeholder", ()
         source: "user",
         status: "paused",
         assistant_text: "",
-        tool_events: [{ tool_name: "skill-installer", source: "user" }],
+        canonical_context: {
+            stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "install skill", rounds: [] }],
+        },
     });
 
     assert.equal(patched, true);
@@ -270,7 +272,7 @@ test("persisted paused assistant history renders as a paused bubble", () => {
         role: "assistant",
         content: "",
         status: "paused",
-        execution_trace_summary: {
+        canonical_context: {
             stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo", rounds: [] }],
         },
     });
@@ -314,7 +316,6 @@ test("discard and final match the target pending turn by turn_id before source",
         source: "user",
         status: "running",
         assistant_text: "Older turn is still active",
-        tool_events: [],
     });
 
     assert.match(older.textEl.innerHTML, /Older turn is still active/);
@@ -338,7 +339,7 @@ test("discard and final match the target pending turn by turn_id before source",
     assert.equal(S.ceoPendingTurns.length, 0);
 });
 
-test("finalize uses final execution trace summary instead of stale inflight trace", () => {
+test("finalize uses final canonical context instead of stale inflight trace", () => {
     const context = loadApp();
     const { S, patchCeoInflightTurn, finalizeCeoTurn } = context;
     const turn = makeTurn({ text: PROCESSING_LABEL, source: "user", steps: 1 });
@@ -351,7 +352,7 @@ test("finalize uses final execution trace summary instead of stale inflight trac
         turn_id: "turn-final",
         source: "user",
         status: "running",
-        execution_trace_summary: {
+        canonical_context: {
             stages: [
                 {
                     stage_id: "frontdoor-stage-4",
@@ -365,7 +366,7 @@ test("finalize uses final execution trace summary instead of stale inflight trac
     finalizeCeoTurn("done", {
         source: "user",
         turn_id: "turn-final",
-        execution_trace_summary: {
+        canonical_context: {
             stages: [
                 {
                     stage_id: "frontdoor-stage-4",
@@ -398,7 +399,7 @@ test("running state without source does not create a phantom pending turn", () =
     assert.equal(S.ceoPendingTurns.length, 0);
 });
 
-test("stage trace stays visible when a later patch only carries fallback tool events", () => {
+test("stage trace stays visible when a later patch only carries assistant text", () => {
     const { patchCeoInflightTurn, S } = loadApp();
     const turn = makeTurn({ text: "", steps: 0 });
 
@@ -407,7 +408,7 @@ test("stage trace stays visible when a later patch only carries fallback tool ev
     patchCeoInflightTurn({
         source: "user",
         status: "running",
-        execution_trace_summary: {
+        canonical_context: {
             stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo" }],
         },
     });
@@ -419,7 +420,6 @@ test("stage trace stays visible when a later patch only carries fallback tool ev
         source: "user",
         status: "running",
         assistant_text: "still working",
-        tool_events: [{ tool_name: "command_execution", source: "user" }],
     });
 
     assert.equal(turn.renderMode, "stage");
@@ -445,7 +445,7 @@ test("render snapshot keeps preserved user flow separate from current heartbeat 
                 status: "running",
                 user_message: { content: "Install the skill" },
                 assistant_text: "Still working on it...",
-                execution_trace_summary: {
+                canonical_context: {
                     stages: [{ stage_id: "frontdoor-stage-user", stage_goal: "install skill" }],
                 },
             },
@@ -472,7 +472,7 @@ test("preserved turn is not re-rendered when an assistant message with the same 
                 role: "assistant",
                 turn_id: "turn-user-preserved",
                 content: "Already persisted final reply",
-                execution_trace_summary: {
+                canonical_context: {
                     stages: [{ stage_id: "frontdoor-stage-user", stage_goal: "install skill" }],
                 },
             },
@@ -491,7 +491,7 @@ test("preserved turn is not re-rendered when an assistant message with the same 
                 status: "running",
                 user_message: { content: "Install the skill" },
                 assistant_text: "Still working on it...",
-                execution_trace_summary: {
+                canonical_context: {
                     stages: [{ stage_id: "frontdoor-stage-user", stage_goal: "install skill" }],
                 },
             },

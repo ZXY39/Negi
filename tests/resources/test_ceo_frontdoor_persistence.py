@@ -56,13 +56,13 @@ def _frontdoor_tool_contract_payload(message: dict[str, object]) -> dict[str, ob
     return dict(payload)
 
 
-def test_ceo_snapshot_keeps_execution_trace_summary_and_compression_payloads() -> None:
+def test_ceo_snapshot_keeps_canonical_context_and_compression_payloads() -> None:
     snapshot = websocket_ceo._build_ceo_snapshot(
         [
             {
                 "role": "assistant",
                 "content": "stage running",
-                "execution_trace_summary": {
+                "canonical_context": {
                     "active_stage_id": "frontdoor-stage-1",
                     "transition_required": False,
                     "stages": [
@@ -74,17 +74,17 @@ def test_ceo_snapshot_keeps_execution_trace_summary_and_compression_payloads() -
                     ],
                 },
                 "compression": {"status": "running", "text": "上下文压缩中", "source": "user"},
-                "tool_events": [{"tool_name": "skill-installer", "status": "running"}],
             }
         ]
     )
 
-    assert snapshot[0]["execution_trace_summary"]["stages"][0]["stage_goal"] == "inspect repository"
+    assert snapshot[0]["canonical_context"]["stages"][0]["stage_goal"] == "inspect repository"
     assert snapshot[0]["compression"]["status"] == "running"
+    assert "execution_trace_summary" not in snapshot[0]
     assert "tool_events" not in snapshot[0]
 
 
-def test_ceo_snapshot_keeps_legacy_tool_events_when_new_trace_fields_absent() -> None:
+def test_ceo_snapshot_ignores_legacy_tool_events_without_canonical_context() -> None:
     snapshot = websocket_ceo._build_ceo_snapshot(
         [
             {
@@ -103,26 +103,51 @@ def test_ceo_snapshot_keeps_legacy_tool_events_when_new_trace_fields_absent() ->
         ]
     )
 
-    assert len(snapshot) == 1
-    assert "execution_trace_summary" not in snapshot[0]
-    assert snapshot[0]["tool_events"][0]["tool_name"] == "skill-installer"
-    assert snapshot[0]["tool_events"][0]["status"] == "running"
+    assert snapshot == []
 
 
-def test_execution_snapshot_history_keeps_legacy_tool_events_without_stage_trace() -> None:
+def test_execution_snapshot_history_uses_canonical_context_without_legacy_tool_events() -> None:
     runtime_session = SimpleNamespace(
         inflight_turn_snapshot=lambda: {
             "status": "running",
             "user_message": {"content": "install weather skill"},
-            "tool_events": [
-                {
-                    "status": "success",
-                    "tool_name": "skill-installer",
-                    "text": "installed weather",
-                    "tool_call_id": "skill-installer:1",
-                    "source": "user",
-                }
-            ],
+            "canonical_context": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "install weather skill",
+                        "representation": "raw",
+                        "status": "active",
+                        "stage_kind": "normal",
+                        "tool_round_budget": 3,
+                        "tool_rounds_used": 1,
+                        "rounds": [
+                            {
+                                "round_index": 1,
+                                "budget_counted": True,
+                                "tool_names": ["skill-installer"],
+                                "tool_call_ids": ["skill-installer:1"],
+                                "tools": [
+                                    {
+                                        "tool_call_id": "skill-installer:1",
+                                        "tool_name": "skill-installer",
+                                        "status": "success",
+                                        "arguments": {"skill_id": "weather"},
+                                        "arguments_text": "{\"skill_id\": \"weather\"}",
+                                        "output_text": "installed weather",
+                                        "output_preview_text": "",
+                                        "output_ref": "",
+                                        "source": "user",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
         },
         paused_execution_context_snapshot=lambda: None,
         state=SimpleNamespace(session_key="web:shared"),
@@ -136,8 +161,8 @@ def test_execution_snapshot_history_keeps_legacy_tool_events_without_stage_trace
 
     assert source == "live_runtime"
     assert history[0] == {"role": "user", "content": "install weather skill"}
-    assert history[1]["tool_events"][0]["tool_name"] == "skill-installer"
-    assert "Recent tool results:" in history[1]["content"]
+    assert history[1]["canonical_context"]["stages"][0]["rounds"][0]["tools"][0]["tool_name"] == "skill-installer"
+    assert "tool_events" not in history[1]
 
 
 class _CompiledGraphRecorder:

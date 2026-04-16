@@ -17,10 +17,14 @@ from g3ku.core.events import AgentEvent
 from g3ku.core.messages import AssistantMessage, UserInputMessage
 from g3ku.core.results import RunResult
 from g3ku.core.state import AgentState, StructuredError
+from g3ku.runtime.frontdoor.canonical_context import (
+    canonical_context_tool_items,
+    default_frontdoor_canonical_context,
+    normalize_frontdoor_canonical_context,
+)
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
 from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.semantic_context_summary import default_semantic_context_state
-from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
 
 _CONTROL_TOOL_NAMES = {"stop_tool_execution"}
 _LEGACY_CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
@@ -69,6 +73,7 @@ class RuntimeAgentSession:
         self._preserved_inflight_turn: dict[str, Any] | None = None
         self._paused_execution_context: dict[str, Any] | None = None
         self._frontdoor_stage_state: dict[str, Any] = {}
+        self._frontdoor_canonical_context: dict[str, Any] = default_frontdoor_canonical_context()
         self._compression_state: dict[str, Any] = {}
         self._semantic_context_state: dict[str, Any] = default_semantic_context_state()
         self._frontdoor_hydrated_tool_names: list[str] = []
@@ -261,30 +266,21 @@ class RuntimeAgentSession:
         return task_ids
 
     @classmethod
-    def _task_ids_from_execution_trace_summary(cls, execution_trace_summary: dict[str, Any] | None) -> list[str]:
+    def _task_ids_from_canonical_context(cls, canonical_context: dict[str, Any] | None) -> list[str]:
         task_ids: list[str] = []
-        if not isinstance(execution_trace_summary, dict):
+        if not isinstance(canonical_context, dict):
             return task_ids
-        for stage in list(execution_trace_summary.get("stages") or []):
-            if not isinstance(stage, dict):
+        for tool in canonical_context_tool_items(canonical_context):
+            if not isinstance(tool, dict):
                 continue
-            for round_item in list(stage.get("rounds") or []):
-                if not isinstance(round_item, dict):
-                    continue
-                for tool in list(round_item.get("tools") or []):
-                    if not isinstance(tool, dict):
-                        continue
-                    for candidate in (
-                        tool.get("text"),
-                        tool.get("output_text"),
-                        tool.get("output_preview_text"),
-                        tool.get("output_preview"),
-                        tool.get("arguments_text"),
-                        tool.get("arguments_preview"),
-                    ):
-                        for task_id in cls._extract_task_ids_from_text(candidate):
-                            if task_id not in task_ids:
-                                task_ids.append(task_id)
+            for candidate in (
+                tool.get("output_text"),
+                tool.get("output_preview_text"),
+                tool.get("arguments_text"),
+            ):
+                for task_id in cls._extract_task_ids_from_text(candidate):
+                    if task_id not in task_ids:
+                        task_ids.append(task_id)
         return task_ids
 
     @classmethod
@@ -515,9 +511,9 @@ class RuntimeAgentSession:
         if not turn_id:
             return
         assistant_text = str(snapshot.get("assistant_text") or "").strip() or "已暂停"
-        execution_trace_summary = (
-            copy.deepcopy(snapshot.get("execution_trace_summary"))
-            if isinstance(snapshot.get("execution_trace_summary"), dict)
+        canonical_context = (
+            copy.deepcopy(snapshot.get("canonical_context"))
+            if isinstance(snapshot.get("canonical_context"), dict)
             else {}
         )
         compression = (
@@ -525,24 +521,12 @@ class RuntimeAgentSession:
             if isinstance(snapshot.get("compression"), dict)
             else {}
         )
-        legacy_tool_events = [
-            copy.deepcopy(item)
-            for item in list(snapshot.get("tool_events") or [])
-            if isinstance(item, dict)
-        ]
         metadata = {
             "history_visible": False,
             "source": "manual_pause_archive",
             "archived_paused_turn": True,
         }
-        archived_task_ids = self._task_ids_from_execution_trace_summary(execution_trace_summary)
-        if not archived_task_ids:
-            for item in legacy_tool_events:
-                if not isinstance(item, dict):
-                    continue
-                for task_id in self._extract_task_ids_from_text(item.get("text")):
-                    if task_id not in archived_task_ids:
-                        archived_task_ids.append(task_id)
+        archived_task_ids = self._task_ids_from_canonical_context(canonical_context)
         if archived_task_ids:
             metadata["task_ids"] = archived_task_ids
         assistant_payload: dict[str, Any] = {
@@ -550,10 +534,8 @@ class RuntimeAgentSession:
             "status": "paused",
             "metadata": metadata,
         }
-        if execution_trace_summary:
-            assistant_payload["execution_trace_summary"] = execution_trace_summary
-        elif legacy_tool_events:
-            assistant_payload["tool_events"] = legacy_tool_events
+        if canonical_context:
+            assistant_payload["canonical_context"] = canonical_context
         if compression:
             assistant_payload["compression"] = compression
         try:
@@ -567,12 +549,10 @@ class RuntimeAgentSession:
                 archived_message["turn_id"] = turn_id
                 archived_message["status"] = "paused"
                 archived_message["metadata"] = metadata
-                if execution_trace_summary:
-                    archived_message["execution_trace_summary"] = execution_trace_summary
-                    archived_message.pop("tool_events", None)
-                elif legacy_tool_events:
-                    archived_message["tool_events"] = legacy_tool_events
-                    archived_message.pop("execution_trace_summary", None)
+                if canonical_context:
+                    archived_message["canonical_context"] = canonical_context
+                else:
+                    archived_message.pop("canonical_context", None)
                 if compression:
                     archived_message["compression"] = compression
                 else:
@@ -778,51 +758,6 @@ class RuntimeAgentSession:
                 items[-1]["elapsed_seconds"] = float(elapsed_seconds)
         return items
 
-    def _legacy_tool_events_snapshot(self) -> list[dict[str, Any]]:
-        interaction_flow = self._interaction_flow_snapshot()
-        if not interaction_flow:
-            return []
-        tools_by_key: dict[str, dict[str, Any]] = {}
-        ordered_tools: list[dict[str, Any]] = []
-        for item in interaction_flow:
-            key = str(item.get("tool_call_id") or item.get("tool_name") or "").strip()
-            if not key:
-                continue
-            current = tools_by_key.get(key)
-            if current is None:
-                current = {
-                    "tool_name": str(item.get("tool_name") or "tool").strip() or "tool",
-                    "tool_call_id": str(item.get("tool_call_id") or "").strip(),
-                    "status": str(item.get("status") or "").strip(),
-                    "text": str(item.get("text") or "").strip(),
-                    "output_ref": str(item.get("output_ref") or "").strip(),
-                    "timestamp": str(item.get("timestamp") or "").strip(),
-                    "kind": str(item.get("kind") or "").strip(),
-                    "source": str(item.get("source") or "").strip().lower() or "user",
-                }
-                if isinstance(item.get("elapsed_seconds"), (int, float)):
-                    current["elapsed_seconds"] = float(item["elapsed_seconds"])
-                tools_by_key[key] = current
-                ordered_tools.append(current)
-                continue
-            current["status"] = str(item.get("status") or current.get("status") or "").strip()
-            current["timestamp"] = str(item.get("timestamp") or current.get("timestamp") or "").strip()
-            text = str(item.get("text") or "").strip()
-            if text:
-                current["text"] = text
-            output_ref = str(item.get("output_ref") or "").strip()
-            if output_ref:
-                current["output_ref"] = output_ref
-            kind = str(item.get("kind") or "").strip()
-            if kind:
-                current["kind"] = kind
-            source = str(item.get("source") or "").strip().lower()
-            if source:
-                current["source"] = source
-            if isinstance(item.get("elapsed_seconds"), (int, float)):
-                current["elapsed_seconds"] = float(item["elapsed_seconds"])
-        return ordered_tools
-
     def _has_renderable_frontdoor_stage_state(self) -> bool:
         stage_state = getattr(self, "_frontdoor_stage_state", None)
         stages = stage_state.get("stages") if isinstance(stage_state, dict) else None
@@ -837,111 +772,11 @@ class RuntimeAgentSession:
                 return True
         return False
 
-    def _frontdoor_execution_trace_summary_snapshot(self) -> dict[str, Any]:
-        stage_state = getattr(self, "_frontdoor_stage_state", None)
-        if self._has_renderable_frontdoor_stage_state():
-            snapshot = copy.deepcopy(stage_state)
-            interaction_flow = self._interaction_flow_snapshot()
-            tools_by_call_id: dict[str, dict[str, Any]] = {}
-            for item in interaction_flow:
-                call_id = str(item.get("tool_call_id") or "").strip()
-                if not call_id:
-                    continue
-                tool_item = {
-                    "tool_name": str(item.get("tool_name") or "tool").strip() or "tool",
-                    "tool_call_id": call_id,
-                    "arguments_text": str(item.get("arguments_text") or item.get("arguments_preview") or ""),
-                    "output_text": str(item.get("output_text") or ""),
-                    "output_preview_text": str(item.get("output_preview_text") or item.get("output_preview") or ""),
-                    "output_ref": str(item.get("output_ref") or "").strip(),
-                    "status": str(item.get("status") or "").strip(),
-                    "started_at": str(item.get("started_at") or "").strip(),
-                    "finished_at": str(item.get("finished_at") or "").strip(),
-                    "text": str(item.get("text") or "").strip(),
-                    "timestamp": str(item.get("timestamp") or "").strip(),
-                    "kind": str(item.get("kind") or "").strip(),
-                    "source": str(item.get("source") or "").strip().lower(),
-                    "recovery_decision": str(item.get("recovery_decision") or "").strip(),
-                    "lost_result_summary": str(item.get("lost_result_summary") or "").strip(),
-                    "related_tool_call_ids": [
-                        str(raw or "").strip()
-                        for raw in list(item.get("related_tool_call_ids") or [])
-                        if str(raw or "").strip()
-                    ],
-                    "attempted_tools": [
-                        str(raw or "").strip()
-                        for raw in list(item.get("attempted_tools") or [])
-                        if str(raw or "").strip()
-                    ],
-                    "evidence": [dict(entry) for entry in list(item.get("evidence") or []) if isinstance(entry, dict)],
-                }
-                if isinstance(item.get("elapsed_seconds"), (int, float)):
-                    tool_item["elapsed_seconds"] = float(item["elapsed_seconds"])
-                current = tools_by_call_id.get(call_id)
-                if current is None:
-                    tools_by_call_id[call_id] = tool_item
-                    continue
-                for field in (
-                    "tool_name",
-                    "tool_call_id",
-                    "arguments_text",
-                    "output_text",
-                    "output_preview_text",
-                    "output_ref",
-                    "status",
-                    "started_at",
-                    "finished_at",
-                    "text",
-                    "timestamp",
-                    "kind",
-                    "source",
-                    "recovery_decision",
-                    "lost_result_summary",
-                ):
-                    value = tool_item.get(field)
-                    if isinstance(value, str):
-                        if value:
-                            current[field] = value
-                        continue
-                    if value:
-                        current[field] = value
-                for field in ("related_tool_call_ids", "attempted_tools", "evidence"):
-                    value = tool_item.get(field)
-                    if value:
-                        current[field] = value
-                if "elapsed_seconds" in tool_item:
-                    current["elapsed_seconds"] = tool_item["elapsed_seconds"]
-            claimed_call_ids: set[str] = set()
-            for stage in list(snapshot.get("stages") or []):
-                if not isinstance(stage, dict):
-                    continue
-                for round_item in list(stage.get("rounds") or []):
-                    if not isinstance(round_item, dict):
-                        continue
-                    raw_tools = [dict(item) for item in list(round_item.get("tools") or []) if isinstance(item, dict)]
-                    if not raw_tools:
-                        selected: list[dict[str, Any]] = []
-                        round_call_ids = [
-                            str(raw or "").strip()
-                            for raw in list(round_item.get("tool_call_ids") or [])
-                            if str(raw or "").strip()
-                        ]
-                        for call_id in round_call_ids:
-                            if call_id in claimed_call_ids:
-                                continue
-                            matched = tools_by_call_id.get(call_id)
-                            if not isinstance(matched, dict):
-                                continue
-                            claimed_call_ids.add(call_id)
-                            selected.append(dict(matched))
-                        raw_tools = selected
-                    compact_tools = [
-                        compact_tool_step_for_summary(tool)
-                        for tool in raw_tools
-                    ]
-                    round_item["tools"] = [tool for tool in compact_tools if tool is not None]
-            return snapshot
-        return {}
+    def _frontdoor_canonical_context_snapshot(self) -> dict[str, Any]:
+        snapshot = normalize_frontdoor_canonical_context(
+            copy.deepcopy(getattr(self, "_frontdoor_canonical_context", None) or {})
+        )
+        return snapshot if list(snapshot.get("stages") or []) else {}
 
     def _compression_snapshot(self) -> dict[str, Any]:
         raw = getattr(self, "_compression_state", None)
@@ -1023,20 +858,17 @@ class RuntimeAgentSession:
         status = str(status_override or self._state.status or "").strip().lower()
         if not (self._state.is_running or status in {"running", "paused", "error"}):
             return None
-        execution_trace_summary = self._frontdoor_execution_trace_summary_snapshot()
-        has_real_stage_state = self._has_renderable_frontdoor_stage_state()
-        legacy_tool_events = [] if has_real_stage_state else self._legacy_tool_events_snapshot()
+        canonical_context = self._frontdoor_canonical_context_snapshot()
         compression = self._compression_snapshot()
         snapshot: dict[str, Any] = {
             "status": status or ("running" if self._state.is_running else "idle"),
-            "execution_trace_summary": execution_trace_summary,
             "compression": compression,
         }
+        if canonical_context:
+            snapshot["canonical_context"] = canonical_context
         turn_id = self._current_turn_id()
         if turn_id:
             snapshot["turn_id"] = turn_id
-        if legacy_tool_events:
-            snapshot["tool_events"] = legacy_tool_events
         prompt = self._last_prompt
         prompt_source = self._internal_prompt_source(prompt)
         if prompt_source is not None:
@@ -1059,14 +891,13 @@ class RuntimeAgentSession:
         if isinstance(frontdoor_selection_debug, dict) and frontdoor_selection_debug:
             snapshot["frontdoor_selection_debug"] = copy.deepcopy(frontdoor_selection_debug)
         if (
-            not execution_trace_summary
+            not canonical_context
             and not compression
             and "turn_id" not in snapshot
             and "source" not in snapshot
             and "user_message" not in snapshot
             and "assistant_text" not in snapshot
             and "last_error" not in snapshot
-            and "tool_events" not in snapshot
             and "hydrated_tool_names" not in snapshot
             and "frontdoor_selection_debug" not in snapshot
         ):
@@ -1219,16 +1050,12 @@ class RuntimeAgentSession:
                 if visible_user_texts:
                     user_text = visible_user_texts[-1]
             assistant_payload: dict[str, Any] = {}
-            execution_trace_summary = self._frontdoor_execution_trace_summary_snapshot()
+            canonical_context = self._frontdoor_canonical_context_snapshot()
             compression = self._compression_snapshot()
-            has_real_stage_state = self._has_renderable_frontdoor_stage_state()
-            legacy_tool_events = [] if has_real_stage_state else self._legacy_tool_events_snapshot()
-            if execution_trace_summary:
-                assistant_payload["execution_trace_summary"] = execution_trace_summary
+            if canonical_context:
+                assistant_payload["canonical_context"] = canonical_context
             if compression:
                 assistant_payload["compression"] = compression
-            if legacy_tool_events:
-                assistant_payload["tool_events"] = legacy_tool_events
             metadata_payload = dict(assistant_metadata or {})
             if internal_source is not None:
                 metadata_payload.setdefault("source", internal_source)
@@ -1541,11 +1368,13 @@ class RuntimeAgentSession:
         serialized_interrupts = self._serialize_pending_interrupts(exc.interrupts)
         interrupt_values = dict(exc.values or {}) if isinstance(exc.values, dict) else {}
         frontdoor_stage_state = interrupt_values.get("frontdoor_stage_state")
+        frontdoor_canonical_context = interrupt_values.get("frontdoor_canonical_context")
         compression_state = interrupt_values.get("compression_state")
         semantic_context_state = interrupt_values.get("semantic_context_state")
         hydrated_tool_names = interrupt_values.get("hydrated_tool_names")
         frontdoor_selection_debug = interrupt_values.get("frontdoor_selection_debug")
         preserved_frontdoor_stage_state = getattr(self, "_frontdoor_stage_state", None)
+        preserved_frontdoor_canonical_context = getattr(self, "_frontdoor_canonical_context", None)
         preserved_compression_state = getattr(self, "_compression_state", None)
         preserved_semantic_context_state = getattr(self, "_semantic_context_state", None)
         preserved_hydrated_tool_names = getattr(self, "_frontdoor_hydrated_tool_names", None)
@@ -1556,6 +1385,13 @@ class RuntimeAgentSession:
             else dict(preserved_frontdoor_stage_state)
             if isinstance(preserved_frontdoor_stage_state, dict)
             else {}
+        )
+        self._frontdoor_canonical_context = normalize_frontdoor_canonical_context(
+            frontdoor_canonical_context
+            if isinstance(frontdoor_canonical_context, dict)
+            else preserved_frontdoor_canonical_context
+            if isinstance(preserved_frontdoor_canonical_context, dict)
+            else default_frontdoor_canonical_context()
         )
         self._compression_state = (
             dict(compression_state)

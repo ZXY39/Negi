@@ -147,6 +147,7 @@ def build_frontdoor_replay_diagnostics(snapshot: dict[str, Any]) -> dict[str, An
     item = dict(snapshot or {})
     metadata = dict(item.get("metadata") or {})
     values = dict(item.get("values") or {})
+    canonical_context = _json_safe(dict(values.get("frontdoor_canonical_context") or {}))
     prompt_cache_diagnostics = _json_safe(dict(values.get("prompt_cache_diagnostics") or {}))
     configurable = {
         "thread_id": str(item.get("thread_id") or ""),
@@ -171,4 +172,6 @@ def build_frontdoor_replay_diagnostics(snapshot: dict[str, Any]) -> dict[str, An
     }
     if prompt_cache_diagnostics:
         result["prompt_cache_diagnostics"] = prompt_cache_diagnostics
+    if canonical_context:
+        result["canonical_context"] = canonical_context
     return result

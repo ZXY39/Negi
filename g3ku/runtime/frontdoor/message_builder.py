@@ -39,6 +39,7 @@ from g3ku.runtime.tool_visibility import (
     filter_visible_tool_families_for_semantic_top_k,
 )
 from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
+from g3ku.runtime.frontdoor.canonical_context import combine_canonical_context, normalize_frontdoor_canonical_context
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 from g3ku.runtime.frontdoor.raw_stage_renderer import retained_raw_stage_messages
 from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
@@ -733,19 +734,16 @@ class CeoMessageBuilder:
         content = str(message.get("content") or "").strip()
         if content:
             text_parts.append(content)
-        execution_trace_summary = (
-            dict(message.get("execution_trace_summary"))
-            if isinstance(message.get("execution_trace_summary"), dict)
+        canonical_context = (
+            dict(message.get("canonical_context"))
+            if isinstance(message.get("canonical_context"), dict)
             else {}
         )
-        if execution_trace_summary:
+        if canonical_context:
             text_parts.append(
-                "Execution trace summary:\n"
-                + json.dumps(execution_trace_summary, ensure_ascii=False, sort_keys=True)
+                "Canonical context:\n"
+                + json.dumps(canonical_context, ensure_ascii=False, sort_keys=True)
             )
-        tool_events = message.get("tool_events") if isinstance(message.get("tool_events"), list) else []
-        if tool_events:
-            text_parts.append("Tool events:\n" + json.dumps(tool_events, ensure_ascii=False, sort_keys=True))
         if not text_parts:
             return None
         return {"role": "assistant", "content": "\n\n".join(text_parts), "metadata": {"source": source}}
@@ -1531,6 +1529,7 @@ class CeoMessageBuilder:
         user_content: Any | None = None,
         user_metadata: dict[str, Any] | None = None,
         frontdoor_stage_state: dict[str, Any] | None = None,
+        frontdoor_canonical_context: dict[str, Any] | None = None,
         semantic_context_state: dict[str, Any] | None = None,
         hydrated_tool_names: list[str] | None = None,
     ) -> ContextAssemblyResult:
@@ -1552,9 +1551,16 @@ class CeoMessageBuilder:
         )
         history_elapsed_ms = self._elapsed_ms(history_started_at)
         normalized_frontdoor_stage_state = dict(frontdoor_stage_state or {})
+        normalized_frontdoor_canonical_context = normalize_frontdoor_canonical_context(
+            frontdoor_canonical_context or {}
+        )
+        combined_frontdoor_context = combine_canonical_context(
+            normalized_frontdoor_canonical_context,
+            normalized_frontdoor_stage_state,
+        )
         prompt_history_state = self._frontdoor_prompt_history(
             history_state=history_state,
-            frontdoor_stage_state=normalized_frontdoor_stage_state,
+            frontdoor_stage_state=combined_frontdoor_context,
             query_text=query_text,
             user_metadata=user_metadata,
         )
@@ -1564,11 +1570,11 @@ class CeoMessageBuilder:
         )
         current_user_in_history = bool(prompt_history_state["current_user_in_history"])
         retained_raw_stage_blocks, retained_completed_stage_ids = retained_raw_stage_messages(
-            normalized_frontdoor_stage_state,
+            combined_frontdoor_context,
             keep_latest_completed_stages=3,
         )
         completed_blocks = completed_stage_blocks(
-            normalized_frontdoor_stage_state,
+            combined_frontdoor_context,
             skip_stage_ids=retained_completed_stage_ids,
         )
         stage_workset_history = [*list(completed_blocks), *list(retained_raw_stage_blocks)]
@@ -1583,13 +1589,14 @@ class CeoMessageBuilder:
         ]
         global_summary_settings = self._global_summary_settings(self._loop)
         context_window_tokens = _resolve_ceo_context_window_tokens(self._loop)
-        prompt_estimate_tokens = estimate_message_tokens(
-            [
-                {"role": "system", "content": str(context_sources["system_prompt"] or "")},
-                *raw_history_messages,
-                {"role": "user", "content": str(context_sources["user_content"] or "")},
-            ]
-        )
+        pre_summary_messages = [
+            {"role": "system", "content": str(context_sources["system_prompt"] or "")},
+            *raw_history_messages,
+            *stage_workset_history,
+        ]
+        if not current_user_in_history:
+            pre_summary_messages.append({"role": "user", "content": str(context_sources["user_content"] or "")})
+        pre_summary_prompt_tokens = estimate_message_tokens(pre_summary_messages)
         compressed_zone_tokens = estimate_message_tokens(global_zone_source)
         thresholds = build_global_summary_thresholds(
             context_window_tokens=context_window_tokens,
@@ -1610,7 +1617,7 @@ class CeoMessageBuilder:
         completed_stage_index = max(
             (
                 int(item.get("stage_index") or 0)
-                for item in list(normalized_frontdoor_stage_state.get("stages") or [])
+                for item in list(combined_frontdoor_context.get("stages") or [])
                 if isinstance(item, dict)
                 and str(item.get("status") or "").strip().lower() != "active"
                 and str(item.get("stage_id") or "").strip() not in retained_completed_stage_ids
@@ -1620,7 +1627,7 @@ class CeoMessageBuilder:
         refresh_decision = semantic_summary_refresh_decision(
             semantic_state=semantic_state,
             history_source=effective_history_source,
-            prompt_tokens=prompt_estimate_tokens,
+            prompt_tokens=pre_summary_prompt_tokens,
             trigger_tokens=int(thresholds["trigger_tokens"]),
             pressure_warn_tokens=int(thresholds["pressure_warn_tokens"]),
             force_refresh_tokens=int(thresholds["force_refresh_tokens"]),
@@ -1685,7 +1692,7 @@ class CeoMessageBuilder:
             "coverage_stage_index": max(
                 (
                     int(item.get("stage_index") or 0)
-                    for item in list(normalized_frontdoor_stage_state.get("stages") or [])
+                    for item in list(combined_frontdoor_context.get("stages") or [])
                     if isinstance(item, dict)
                     and str(item.get("status") or "").strip().lower() != "active"
                 ),
@@ -1805,6 +1812,7 @@ class CeoMessageBuilder:
             ]
         else:
             model_messages = list(stable_messages)
+        effective_prompt_tokens = estimate_message_tokens(model_messages)
         inject_elapsed_ms = self._elapsed_ms(inject_started_at)
         frontdoor_spans_ms = {
             'collect_context_sources': collect_elapsed_ms,
@@ -1843,7 +1851,8 @@ class CeoMessageBuilder:
             'stage_workset_history_message_count': len(stage_workset_history),
             'global_zone_message_count': len(global_zone_source),
             'global_zone_tokens': compressed_zone_tokens,
-            'prompt_estimate_tokens': prompt_estimate_tokens,
+            'pre_summary_prompt_tokens': pre_summary_prompt_tokens,
+            'effective_prompt_tokens': effective_prompt_tokens,
             'global_summary_trigger_tokens': int(thresholds["trigger_tokens"]),
             'global_summary_pressure_warn_tokens': int(thresholds["pressure_warn_tokens"]),
             'global_summary_force_refresh_tokens': int(thresholds["force_refresh_tokens"]),

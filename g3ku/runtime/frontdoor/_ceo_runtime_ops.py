@@ -45,6 +45,12 @@ from main.runtime.tool_call_repair import (
 from g3ku.runtime.web_ceo_sessions import frontdoor_stage_archive_task_id
 
 from ._ceo_support import CeoFrontDoorSupport
+from .canonical_context import (
+    combine_canonical_context,
+    default_frontdoor_canonical_context,
+    merge_turn_stage_state_into_canonical_context,
+    normalize_frontdoor_canonical_context,
+)
 from .prompt_cache_contract import build_frontdoor_prompt_contract
 from .state_models import (
     CeoFrontdoorInterrupted,
@@ -352,6 +358,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                             values["tool_call_payloads"] = tool_call_payloads
             if isinstance(interrupt_state.get("frontdoor_stage_state"), dict):
                 values["frontdoor_stage_state"] = dict(interrupt_state.get("frontdoor_stage_state") or {})
+            if isinstance(interrupt_state.get("frontdoor_canonical_context"), dict):
+                values["frontdoor_canonical_context"] = dict(interrupt_state.get("frontdoor_canonical_context") or {})
             if isinstance(interrupt_state.get("compression_state"), dict):
                 values["compression_state"] = dict(interrupt_state.get("compression_state") or {})
             if isinstance(interrupt_state.get("semantic_context_state"), dict):
@@ -520,6 +528,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         }
 
     @staticmethod
+    def _default_frontdoor_canonical_context() -> dict[str, Any]:
+        return default_frontdoor_canonical_context()
+
+    @staticmethod
     def _default_compression_state() -> dict[str, Any]:
         return {
             "status": "",
@@ -609,7 +621,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: CeoGraphState | None,
         *,
         preview_pending_tool_round: bool = False,
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[str]]:
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], list[str]]:
+        frontdoor_canonical_context = cls._frontdoor_canonical_context_snapshot(state)
         frontdoor_stage_state = cls._frontdoor_stage_state_snapshot(state)
         if preview_pending_tool_round and isinstance(state, dict):
             frontdoor_stage_state = cls._record_frontdoor_stage_round(
@@ -631,7 +644,25 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(state, dict)
             else []
         )
-        return frontdoor_stage_state, compression_state, semantic_context_state, hydrated_tool_names
+        combined_canonical_context = combine_canonical_context(
+            frontdoor_canonical_context,
+            frontdoor_stage_state,
+        )
+        return (
+            frontdoor_stage_state,
+            combined_canonical_context,
+            compression_state,
+            semantic_context_state,
+            hydrated_tool_names,
+        )
+
+    @classmethod
+    def _frontdoor_canonical_context_snapshot(cls, state: CeoGraphState | None) -> dict[str, Any]:
+        if not isinstance(state, dict):
+            return cls._default_frontdoor_canonical_context()
+        return normalize_frontdoor_canonical_context(
+            state.get("frontdoor_canonical_context") or cls._default_frontdoor_canonical_context()
+        )
 
     @classmethod
     def _frontdoor_selection_debug_snapshot(cls, state: CeoGraphState | None) -> dict[str, Any]:
@@ -651,11 +682,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         target_session = session or getattr(getattr(runtime, "context", None), "session", None)
         if target_session is None:
             return
-        frontdoor_stage_state, compression_state, semantic_context_state, hydrated_tool_names = self._runtime_session_frontdoor_state(
+        (
+            frontdoor_stage_state,
+            frontdoor_canonical_context,
+            compression_state,
+            semantic_context_state,
+            hydrated_tool_names,
+        ) = self._runtime_session_frontdoor_state(
             state,
             preview_pending_tool_round=preview_pending_tool_round,
         )
         setattr(target_session, "_frontdoor_stage_state", frontdoor_stage_state)
+        setattr(target_session, "_frontdoor_canonical_context", frontdoor_canonical_context)
         setattr(target_session, "_compression_state", compression_state)
         setattr(target_session, "_semantic_context_state", semantic_context_state)
         setattr(target_session, "_frontdoor_hydrated_tool_names", list(hydrated_tool_names))
@@ -1131,6 +1169,34 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "transition_required": bool(normalized_state.get("transition_required")),
             "stages": stages,
         }
+
+    def _merged_frontdoor_canonical_context(
+        self,
+        *,
+        state: CeoGraphState,
+        frontdoor_stage_state: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        session_key = str(state.get("session_key") or "").strip()
+
+        def _externalize_batch(
+            stages: list[dict[str, Any]],
+            stage_index_start: int,
+            stage_index_end: int,
+        ) -> tuple[str, str]:
+            if not session_key:
+                return "", ""
+            return self._externalize_frontdoor_stage_archive(
+                session_key=session_key,
+                stage_index_start=stage_index_start,
+                stage_index_end=stage_index_end,
+                stages=stages,
+            )
+
+        return merge_turn_stage_state_into_canonical_context(
+            self._frontdoor_canonical_context_snapshot(state),
+            frontdoor_stage_state or self._default_frontdoor_stage_state(),
+            externalize_batch=_externalize_batch if session_key else None,
+        )
 
     def _frontdoor_round_tool_entry(
         self,
@@ -1664,7 +1730,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return {
                 "session_key": str(state.get("session_key") or "").strip(),
                 "messages": list(state.get("messages") or []),
-                "frontdoor_stage_state": self._frontdoor_stage_state_snapshot(state),
+                "frontdoor_stage_state": self._default_frontdoor_stage_state(),
+                "frontdoor_canonical_context": self._frontdoor_canonical_context_snapshot(state),
                 "compression_state": dict(state.get("compression_state") or self._default_compression_state()),
                 "frontdoor_selection_debug": self._frontdoor_selection_debug_snapshot(state),
             }
@@ -1706,6 +1773,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             actor_role="ceo",
             session_id=session.state.session_key,
         )
+        current_frontdoor_canonical_context = self._frontdoor_canonical_context_snapshot(state)
+        current_frontdoor_stage_state = self._default_frontdoor_stage_state()
         hydrated_tool_names = self._frontdoor_hydrated_tool_lru(
             existing_tool_names=(
                 list(getattr(session, "_frontdoor_hydrated_tool_names", []) or [])
@@ -1722,11 +1791,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             checkpoint_messages=list(state.get("messages") or []),
             user_content=self._model_content(user_content),
             user_metadata=metadata,
-            frontdoor_stage_state=self._frontdoor_stage_state_snapshot(state),
+            frontdoor_stage_state=current_frontdoor_stage_state,
+            frontdoor_canonical_context=current_frontdoor_canonical_context,
             semantic_context_state=dict(state.get("semantic_context_state") or {}),
             hydrated_tool_names=list(hydrated_tool_names),
         )
-        current_frontdoor_stage_state = self._frontdoor_stage_state_snapshot(state)
         selected_skill_ids = [
             str(item.get("skill_id") or "").strip()
             for item in list(getattr(assembly, "trace", {}).get("selected_skills") or [])
@@ -1879,6 +1948,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "query_text": query_text,
             "messages": persisted_messages,
             "frontdoor_stage_state": current_frontdoor_stage_state,
+            "frontdoor_canonical_context": current_frontdoor_canonical_context,
             "compression_state": dict(
                 getattr(assembly, "trace", {}).get("compression_state_payload")
                 or state.get("compression_state")
@@ -2174,13 +2244,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return {"next_step": "execute_tools"}
 
         preview_state = dict(state or {})
-        preview_frontdoor_stage_state, preview_compression_state, preview_semantic_context_state, _preview_hydrated_tool_names = self._runtime_session_frontdoor_state(
+        (
+            preview_frontdoor_stage_state,
+            preview_frontdoor_canonical_context,
+            preview_compression_state,
+            preview_semantic_context_state,
+            _preview_hydrated_tool_names,
+        ) = self._runtime_session_frontdoor_state(
             preview_state,
             preview_pending_tool_round=True,
         )
         interrupt_payload = {
             **approval_request,
             "frontdoor_stage_state": preview_frontdoor_stage_state,
+            "frontdoor_canonical_context": preview_frontdoor_canonical_context,
             "compression_state": preview_compression_state,
             "semantic_context_state": preview_semantic_context_state,
             "hydrated_tool_names": [
@@ -2444,21 +2521,32 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             messages = list(getattr(self, "_state_message_records")(messages))
         else:
             messages = [dict(message) for message in messages if isinstance(message, dict)]
+        finalized_stage_state = self._frontdoor_stage_state_snapshot(state)
         if output and route_kind == "direct_reply":
             last_role = str(messages[-1].get("role") or "").strip().lower() if messages else ""
             if last_role != "assistant":
                 messages.append({"role": "assistant", "content": output})
             result["messages"] = list(messages)
-            result["frontdoor_stage_state"] = self._complete_active_frontdoor_stage_state(
+            finalized_stage_state = self._complete_active_frontdoor_stage_state(
                 state.get("frontdoor_stage_state"),
                 completed_stage_summary=output,
+            )
+            result["frontdoor_stage_state"] = finalized_stage_state
+            result["frontdoor_canonical_context"] = self._merged_frontdoor_canonical_context(
+                state=state,
+                frontdoor_stage_state=finalized_stage_state,
             )
             return result
         if output:
-            result["frontdoor_stage_state"] = self._complete_active_frontdoor_stage_state(
+            finalized_stage_state = self._complete_active_frontdoor_stage_state(
                 state.get("frontdoor_stage_state"),
                 completed_stage_summary=output,
             )
+        result["frontdoor_stage_state"] = finalized_stage_state
+        result["frontdoor_canonical_context"] = self._merged_frontdoor_canonical_context(
+            state=state,
+            frontdoor_stage_state=finalized_stage_state,
+        )
         result["messages"] = list(messages)
         return result
 

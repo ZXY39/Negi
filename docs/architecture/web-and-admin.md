@@ -86,7 +86,7 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 
 ### CEO Stage Trace Round Rendering Contract
 
-- The browser CEO stage view should treat `execution_trace_summary.stages[].rounds[].tools` as the authoritative round-level tool list.
+- The browser CEO stage view should treat `canonical_context.stages[].rounds[].tools` as the authoritative round-level tool list.
 - Refreshing the page or reopening a completed session should reproduce the same round grouping that live inflight snapshots used; the frontend should not try to regroup same-name tools on its own.
 - `tool_names` and `tool_call_ids` may still be present for compatibility, but they are summary metadata rather than a second grouping algorithm.
 - The stage progress badge in both the CEO session view and the shared task-trace components must reflect budget-counted rounds rather than raw round history length.
@@ -99,8 +99,8 @@ The backend contract behind that UI behavior is:
 - Session snapshot assembly trusts stored `round.tools` first and only backfills legacy rounds by exact `tool_call_id`.
 - A `tool_name`-only fallback is considered a regression because it can make a later same-name tool appear inside an earlier stage round after refresh or transcript reload.
 - The browser still treats `round.tools` as authoritative input, but it filters successful `load_tool_context` / `load_skill_context` entries out of the visible stage-trace tool chips because those calls represent context acquisition rather than user-facing execution work.
-- `ceo.reply.final` 现在会在有可展示阶段摘要时携带权威 final `execution_trace_summary`；浏览器收尾 live turn 时应优先使用这份 final payload，而不是沿用旧的 `inflight_turn.execution_trace_summary` 快照。
-- If the current turn never produced a stage trace, `ceo.reply.final` must omit `execution_trace_summary` entirely rather than backfilling the previous persisted assistant trace. Reusing an older trace under a new direct-reply bubble is a frontend/backend contract bug.
+- `ceo.reply.final` now carries the authoritative final `canonical_context` when the completed turn has stage data; browsers should prefer that payload instead of reusing an older inflight snapshot.
+- If the current turn never produced a stage trace, `ceo.reply.final` must omit `canonical_context` entirely rather than backfilling the previous persisted assistant trace. Reusing an older trace under a new direct-reply bubble is a frontend/backend contract bug.
 
 ### Heartbeat Compatibility
 
@@ -114,7 +114,7 @@ The backend contract behind that UI behavior is:
 - `inflight_turn` is the current real running turn. For heartbeat this means the heartbeat turn itself, not the earlier user bubble that is being kept on screen temporarily.
 - `preserved_turn` is a live-only carryover bubble that should remain visible until a later `ceo.turn.discard` closes it.
 - `preserved_turn` only exists for an older bubble that has not yet been superseded by a persisted assistant transcript entry with the same `turn_id`. Once that assistant turn is durable history, the backend/frontend should stop surfacing the preserved copy.
-- Frontend rendering should treat these as two separate bubbles. It must not reuse `preserved_turn.execution_trace_summary` as the `Interaction Flow` for the current heartbeat bubble.
+- Frontend rendering should treat these as two separate bubbles. It must not reuse `preserved_turn.canonical_context` as the `Interaction Flow` for the current heartbeat bubble.
 - Frontend trace fallback is only safe within the same rendered turn identity. Reusing the previous bubble's trace across `turn_id` or across `source=user -> heartbeat` is a contract bug.
 
 ### CEO Session List Interaction Contract
@@ -215,6 +215,25 @@ The browser shell still receives `compression` snapshot data, but it now refers 
 - The UI should not assume there is any older message-count compaction stage behind this field.
 - `compression.status` now reflects semantic-summary lifecycle only.
 - The frontend may still display heartbeat / cron live execution and compression activity from snapshots, but later real user turns depend on the semantic summary path rather than any hidden legacy history compactor.
+
+## CEO Canonical Context UI Contract
+
+The CEO browser/runtime integration now uses `canonical_context` as the only stage-trace protocol field.
+
+- Assistant transcript messages, `snapshot.ceo`, `ceo.turn.patch`, preserved-turn payloads, paused snapshots, and `ceo.reply.final` should carry `canonical_context`.
+- The frontend should not read or reconstruct CEO stage flow from `execution_trace_summary` or flat `tool_events`.
+- `canonical_context.stages[].rounds[].tools[]` is the authoritative render source for the stage trace.
+
+Tool output rendering should follow the canonical payload directly:
+
+- if a tool entry has `output_text`, the browser should show that inline full text;
+- if a tool entry only has `output_ref`, the browser should show the preview text and keep the existing artifact-open path for the full body;
+- the frontend should not invent extra truncation or backfill old tool-event text when canonical context is present.
+
+The final-reply rule is now simpler:
+
+- `ceo.reply.final` may include `canonical_context` when the completed turn has stage data;
+- if the turn has no stage trace, omit `canonical_context` entirely rather than reusing an older turn's trace.
 
 ## Heartbeat/Cron ACK Contract
 

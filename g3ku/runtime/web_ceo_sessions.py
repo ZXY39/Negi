@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from g3ku.china_bridge.session_keys import build_session_key, parse_china_session_key
 from g3ku.config.loader import get_config_path, load_config
+from g3ku.runtime.frontdoor.canonical_context import canonical_context_tool_items
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.utils.helpers import ensure_dir, safe_filename
 
@@ -255,26 +256,20 @@ def _extract_task_ids_from_message(message: dict[str, Any], *, limit: int = _TAS
     task_ids.extend(_normalize_task_ids(metadata.get('task_ids'), limit=limit))
     if role != 'assistant' or not _looks_like_task_dispatch_claim(message.get('content')):
         task_ids.extend(_extract_task_ids_from_text(message.get('content'), limit=limit))
-    tool_events = message.get('tool_events') if isinstance(message.get('tool_events'), list) else []
-    for item in tool_events:
-        if not isinstance(item, dict):
-            continue
-        task_ids.extend(_extract_task_ids_from_text(item.get('text'), limit=limit))
-    execution_trace_summary = (
-        message.get('execution_trace_summary')
-        if isinstance(message.get('execution_trace_summary'), dict)
+    canonical_context = (
+        message.get('canonical_context')
+        if isinstance(message.get('canonical_context'), dict)
         else {}
     )
-    for stage in list(execution_trace_summary.get('stages') or []):
-        if not isinstance(stage, dict):
+    for tool in canonical_context_tool_items(canonical_context):
+        if not isinstance(tool, dict):
             continue
-        for round_item in list(stage.get('rounds') or []):
-            if not isinstance(round_item, dict):
-                continue
-            for tool in list(round_item.get('tools') or []):
-                if not isinstance(tool, dict):
-                    continue
-                task_ids.extend(_extract_task_ids_from_text(tool.get('text'), limit=limit))
+        for candidate in (
+            tool.get('output_text'),
+            tool.get('output_preview_text'),
+            tool.get('arguments_text'),
+        ):
+            task_ids.extend(_extract_task_ids_from_text(candidate, limit=limit))
     return _normalize_task_ids(task_ids, limit=limit)
 
 
@@ -344,10 +339,10 @@ def _normalize_execution_snapshot(snapshot: Any) -> dict[str, Any] | None:
     return dict(snapshot)
 
 
-def _snapshot_execution_trace_summary(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+def _snapshot_canonical_context(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
-    raw = snapshot.get("execution_trace_summary")
+    raw = snapshot.get("canonical_context")
     return dict(raw) if isinstance(raw, dict) else {}
 
 
@@ -358,30 +353,8 @@ def _snapshot_compression(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
 
-def _snapshot_tool_events(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if not isinstance(snapshot, dict):
-        return []
-    items: list[dict[str, Any]] = []
-    for raw in list(snapshot.get("tool_events") or []):
-        if isinstance(raw, dict):
-            items.append(dict(raw))
-    return items
-
-
-def _execution_trace_tool_items(execution_trace_summary: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if not isinstance(execution_trace_summary, dict):
-        return []
-    tools: list[dict[str, Any]] = []
-    for stage in list(execution_trace_summary.get("stages") or []):
-        if not isinstance(stage, dict):
-            continue
-        for round_item in list(stage.get("rounds") or []):
-            if not isinstance(round_item, dict):
-                continue
-            for item in list(round_item.get("tools") or []):
-                if isinstance(item, dict):
-                    tools.append(item)
-    return tools
+def _canonical_context_tool_items(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    return canonical_context_tool_items(snapshot or {})
 
 
 def _session_key_for_execution_sources(runtime_session: Any | None, persisted_session: Any | None) -> str:
@@ -439,20 +412,16 @@ def _execution_snapshot_history_messages(snapshot: dict[str, Any] | None) -> lis
     assistant_text = summarize_preview_text(normalized_snapshot.get('assistant_text') or '', max_chars=480)
     if assistant_text:
         assistant_message['content'] = assistant_text
-    execution_trace_summary = _snapshot_execution_trace_summary(normalized_snapshot)
-    if execution_trace_summary:
-        assistant_message['execution_trace_summary'] = execution_trace_summary
+    canonical_context = _snapshot_canonical_context(normalized_snapshot)
+    if canonical_context:
+        assistant_message['canonical_context'] = canonical_context
     compression = _snapshot_compression(normalized_snapshot)
     if compression:
         assistant_message['compression'] = compression
-    tool_events = _snapshot_tool_events(normalized_snapshot)
-    if tool_events:
-        assistant_message['tool_events'] = tool_events
     if (
         assistant_message.get('content')
-        or assistant_message.get('execution_trace_summary')
+        or assistant_message.get('canonical_context')
         or assistant_message.get('compression')
-        or assistant_message.get('tool_events')
     ):
         messages.append(_history_entry_from_message(assistant_message))
     return messages
@@ -469,12 +438,11 @@ def _snapshot_has_material_live_history(
     if require_active_stage:
         return False
     assistant_text = str(normalized_snapshot.get('assistant_text') or '').strip()
-    execution_trace_summary = _snapshot_execution_trace_summary(normalized_snapshot)
-    has_execution_trace = bool(_execution_trace_tool_items(execution_trace_summary))
+    canonical_context = _snapshot_canonical_context(normalized_snapshot)
+    has_canonical_context = bool(list((canonical_context or {}).get("stages") or []))
     compression = _snapshot_compression(normalized_snapshot)
     has_compression = bool(str(compression.get('text') or '').strip() or str(compression.get('status') or '').strip())
-    has_tool_events = bool(_snapshot_tool_events(normalized_snapshot))
-    if has_execution_trace or assistant_text or has_compression or has_tool_events:
+    if has_canonical_context or assistant_text or has_compression:
         return True
     return False
 
@@ -535,32 +503,23 @@ def _compact_task_meta_payload(message: dict[str, Any]) -> dict[str, Any] | None
 
 
 def _compact_tool_trace_payload(message: dict[str, Any]) -> list[dict[str, str]]:
-    tool_events = message.get('tool_events') if isinstance(message.get('tool_events'), list) else []
     summaries: list[dict[str, str]] = []
-    for item in tool_events:
-        if not isinstance(item, dict):
-            continue
-        tool_name = str(item.get('tool_name') or 'tool').strip() or 'tool'
-        status = str(item.get('status') or '').strip().lower()
-        if status not in {'success', 'error'}:
-            continue
-        text = summarize_preview_text(item.get('text') or '', max_chars=_RECENT_HISTORY_TOOL_TEXT_MAX_CHARS)
-        if not text:
-            continue
-        summaries.append({'tool': tool_name, 'status': status, 'text': text})
-    execution_trace_summary = (
-        message.get('execution_trace_summary')
-        if isinstance(message.get('execution_trace_summary'), dict)
+    canonical_context = (
+        message.get('canonical_context')
+        if isinstance(message.get('canonical_context'), dict)
         else {}
     )
-    for item in _execution_trace_tool_items(execution_trace_summary):
+    for item in canonical_context_tool_items(canonical_context):
         if not isinstance(item, dict):
             continue
         tool_name = str(item.get('tool_name') or 'tool').strip() or 'tool'
         status = str(item.get('status') or '').strip().lower()
         if status not in {'success', 'error'}:
             continue
-        text = summarize_preview_text(item.get('text') or '', max_chars=_RECENT_HISTORY_TOOL_TEXT_MAX_CHARS)
+        text = summarize_preview_text(
+            item.get('output_text') or item.get('output_preview_text') or '',
+            max_chars=_RECENT_HISTORY_TOOL_TEXT_MAX_CHARS,
+        )
         if not text:
             continue
         summaries.append({'tool': tool_name, 'status': status, 'text': text})
@@ -607,7 +566,7 @@ def _history_entry_from_message(message: dict[str, Any]) -> dict[str, Any]:
         "role": str(message.get("role") or ""),
         "content": _history_content_from_message(message),
     }
-    for key in ("tool_calls", "tool_call_id", "name", "execution_trace_summary", "compression", "tool_events"):
+    for key in ("tool_calls", "tool_call_id", "name", "canonical_context", "compression"):
         if key in message:
             entry[key] = message[key]
     return entry
@@ -1028,17 +987,11 @@ def _inflight_preview_text(snapshot: dict[str, Any] | None) -> str:
     assistant_preview = summarize_preview_text((snapshot or {}).get("assistant_text") or "")
     if assistant_preview:
         return assistant_preview
-    execution_trace_summary = _snapshot_execution_trace_summary(snapshot)
-    for item in reversed(_execution_trace_tool_items(execution_trace_summary)):
+    canonical_context = _snapshot_canonical_context(snapshot)
+    for item in reversed(_canonical_context_tool_items(canonical_context)):
         if not isinstance(item, dict):
             continue
-        preview = summarize_preview_text(item.get("text") or "")
-        if preview:
-            return preview
-    for item in reversed(list((snapshot or {}).get("tool_events") or [])):
-        if not isinstance(item, dict):
-            continue
-        preview = summarize_preview_text(item.get("text") or "")
+        preview = summarize_preview_text(item.get("output_text") or item.get("output_preview_text") or "")
         if preview:
             return preview
     return ""
@@ -1053,14 +1006,8 @@ def _inflight_updated_at(snapshot: dict[str, Any] | None) -> str:
         timestamp = str(user_message.get("timestamp") or "").strip()
         if timestamp:
             candidates.append(timestamp)
-    execution_trace_summary = _snapshot_execution_trace_summary(snapshot)
-    for item in _execution_trace_tool_items(execution_trace_summary):
-        if not isinstance(item, dict):
-            continue
-        timestamp = str(item.get("timestamp") or "").strip()
-        if timestamp:
-            candidates.append(timestamp)
-    for item in list(snapshot.get("tool_events") or []):
+    canonical_context = _snapshot_canonical_context(snapshot)
+    for item in _canonical_context_tool_items(canonical_context):
         if not isinstance(item, dict):
             continue
         timestamp = str(item.get("timestamp") or "").strip()

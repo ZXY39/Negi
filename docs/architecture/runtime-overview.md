@@ -172,7 +172,7 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - `call_model` 和 `execute_tools` 现在共用同一份 frontdoor runtime tool bundle。像 `submit_next_stage` 这类运行时注入的 stage protocol tool，必须同时对模型“可见”并且在 `execute_tools` 里可真实执行；维护时不要再在执行环节单独从 `state.tool_names` 重建第二套工具表。
 - `execute_tools` 现在会在真正执行前落实 stage gate：普通工具在无活动阶段或阶段预算耗尽时会直接得到 gate error；如果同一批 tool calls 里把 `submit_next_stage` 和其他普通工具混在一起，整个批次会被拒绝，要求模型先单独完成阶段切换。
 - 成功的 `submit_next_stage` 会在同一轮 `execute_tools` 完成后立刻写回 `frontdoor_stage_state`；下一次 `call_model` 看到的已经是 promotion 后、阶段已推进后的 runtime state，而不是等额外的后处理链再补写。
-- CEO websocket 现在会把当前 visible turn 的权威 final `execution_trace_summary` 直接附到 `ceo.reply.final`；维护时不要再假设前端必须等后续 `state_snapshot` 才能拼出收尾阶段视图。
+- CEO websocket now attaches the current visible turn's authoritative final `canonical_context` directly to `ceo.reply.final`; maintainers should not assume the frontend must wait for a later `state_snapshot` to reconstruct the closing stage view.
 - 新的前门暴露边界是：只要当前没有“有效阶段”（`active_stage_id` 为空，或当前阶段已 `transition_required=true`），真正下发给模型的 callable tool schemas 就只剩 `submit_next_stage`；候选 tool/skill 列表仍继续显示，供模型先看能力边界、再开阶段。
 - 当前唯一保留的例外是 `cron_internal`。这类内部轮次仍保留自己的 callable tool 集合，以便按既有协议继续调用 `cron(action="remove")` 完成自移除；维护时不要把这个 internal lane 与普通 CEO user turn 混为一谈。
 - 维护上不要把这个规则误读成“前门内部状态已经只剩 `submit_next_stage`”。`tool_names` 仍保存阶段内可恢复的完整工具池，供同一 turn 成功开阶段后的下一次 model call 立即恢复完整 callable 列表；真正决定“此刻给模型看到什么”的，是前门的 callable-tool helper 与动态合同消息。
@@ -229,7 +229,7 @@ For the CEO/frontdoor path, `frontdoor_stage_state.stages[].rounds[].tools` is n
 - Each stored tool entry should carry the stable identity (`tool_call_id`) together with the display-oriented fields used by snapshots and transcript summaries, such as `tool_name`, `status`, `arguments_text`, `output_preview_text` / `output_text`, `output_ref`, `timestamp`, `kind`, and `source`.
 - `tool_names` and `tool_call_ids` may still exist for compatibility or summary purposes, but maintainers should treat them as derived hints rather than a second source of truth.
 
-When `RuntimeAgentSession` rebuilds `execution_trace_summary`, the intended contract is:
+When `RuntimeAgentSession` rebuilds `canonical_context`, the intended contract is:
 
 - If a round already has `tools`, trust `round.tools` directly.
 - If an older round only has `tool_call_ids`, backfill only by exact `tool_call_id`.
@@ -243,7 +243,7 @@ If a maintainer sees a CEO stage trace where a later `exec` appears inside an ea
 - `_frontdoor_stage_state_after_tool_cycle()` 仍然只负责 round 记账和 `round.tools` 落盘；它不参与 tool promotion。
 - 因此前门的“tool contract 更新”和“阶段工具显示”是两条平行链路：
   - promotion 改动只影响 callable/candidate/hydrated contract
-  - `round.tools` 与 `execution_trace_summary` 继续只依赖 `tool_call_payloads + tool_results` 的显示字段
+- `round.tools` inside `canonical_context` still depends only on the display-oriented fields derived from `tool_call_payloads + tool_results`
 - `g3ku/runtime/frontdoor/ceo_agent_middleware.py` 现在只剩兼容/测试价值，不再是生产前门的权威执行链。若线上 frontdoor 行为与预期不符，优先检查显式图节点和 checkpoint state，而不是先检查 middleware hook 次序。
 
 维护上一个容易误判的点是：动态 skill/tool 提示块里虽然会出现“如何读取 skill 正文”或“如何读取 tool 契约”的说明，但这些说明不能覆盖 `ceo_frontdoor.md` 里的 stage-first 协议。当前前门的权威顺序是：
@@ -414,10 +414,10 @@ This leaves two distinct mechanisms only:
 
 For the CEO/frontdoor path, the near-field stage workset now has a stricter source-of-truth split:
 
-- Retained raw stage replay is rendered directly from the current turn `frontdoor_stage_state.stages[].rounds[].tools` snapshot.
+- Retained raw stage replay is rendered from `frontdoor_canonical_context` plus the current turn `frontdoor_stage_state`.
 - Transcript / checkpoint history no longer serves as the authoritative source for uncompressed stage replay. It still carries non-stage conversational continuity and global-summary source material.
-- Older completed stages still enter the prompt as `STAGE_COMPACT` / `STAGE_EXTERNALIZED` blocks, but the retained raw window is now stage-scoped JSON blocks derived from `frontdoor_stage_state`, not recovered from historical tool messages.
-- The retained completed-stage window is computed from the current turn stage state itself. Even if there is no active stage, the latest completed normal stages can still stay in raw form.
+- Older completed stages still enter the prompt as `STAGE_COMPACT` / `STAGE_EXTERNALIZED` blocks, but those blocks now come from the canonical context chain rather than from historical assistant trace payloads.
+- The retained completed-stage window is computed from the combined canonical stage view for the session, while the current turn stage ledger remains a separate runtime-only write log until turn finalization.
 - Round-level tool records now preserve normalized raw `arguments` together with the existing output fields. Small outputs remain inline in `output_text`; large outputs still stay externalized as `output_ref` plus `output_preview_text`, and the prompt renderer does not read artifact bodies back inline.
 
 When a maintainer sees a prompt continuity issue, the first questions should now be:
@@ -465,3 +465,24 @@ This gives maintainers a middle ground:
 - The resource runtime itself is still manual/release-triggered and does not promise instant discovery.
 - Runtime-facing semantic selection can still reconcile direct disk edits lazily on the next bounded generation check.
 - Metadata-only edits such as `display_name` / `description` changes now also invalidate the catalog summary hash, so catalog `l0` / `l1` no longer stay stale just because the正文 body stayed the same.
+
+## CEO Frontdoor Canonical Context Contract
+
+The CEO/frontdoor path now has a single cross-turn stage truth source: `frontdoor_canonical_context`.
+
+- `frontdoor_stage_state` is current-turn runtime bookkeeping only. It is reset at the start of every fresh user / heartbeat / cron turn.
+- `frontdoor_canonical_context` is the durable cross-turn stage/history view. Turn-finalization merges the current turn stage ledger into this canonical structure.
+- Prompt assembly no longer rebuilds retained stage history from transcript `execution_trace_summary` or flat `tool_events`.
+- The near-field stage workset is derived from `frontdoor_canonical_context + current frontdoor_stage_state`.
+- Session transcript assistant messages, inflight snapshots, paused snapshots, and websocket final replies now expose `canonical_context` rather than `execution_trace_summary` / `tool_events`.
+
+Maintainers should treat the canonical context representation rules as the only allowed information-loss boundary:
+
+- Latest 3 completed normal stages remain `raw`.
+- Older completed normal stages become `compact`.
+- When completed normal stages exceed 20, the oldest 10 are externalized into an archive-backed compression stage.
+
+The prompt token trace also changed:
+
+- `pre_summary_prompt_tokens` is the trigger-side estimate before long-context summary injection, and it must include the stage workset.
+- `effective_prompt_tokens` is the estimate for the final model request actually sent after prompt assembly.
