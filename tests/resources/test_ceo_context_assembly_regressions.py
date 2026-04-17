@@ -2641,6 +2641,59 @@ async def test_message_builder_reuses_covered_global_summary_without_recomputati
 
 
 @pytest.mark.asyncio
+async def test_message_builder_directly_continues_request_body_seed_without_stage_rebuild() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    _checkpoint_messages, frontdoor_stage_state = _stage_history_with_global_zone()
+    request_body_seed_messages = [
+        {"role": "system", "content": "BASE PROMPT"},
+        {"role": "user", "content": "previous user"},
+        {"role": "assistant", "content": "previous final answer"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-exec-1",
+                    "type": "function",
+                    "function": {"name": "exec", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "exec",
+            "tool_call_id": "call-exec-1",
+            "content": '{"status":"success"}',
+        },
+    ]
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="strict follow up",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=None,
+        checkpoint_messages=[],
+        request_body_seed_messages=request_body_seed_messages,
+        user_content="strict follow up",
+        frontdoor_stage_state=frontdoor_stage_state,
+    )
+
+    stable_contents = [str(item.get("content") or "") for item in result.stable_messages]
+    model_contents = [str(item.get("content") or "") for item in result.model_messages]
+    rendered = "\n\n".join(stable_contents)
+
+    assert stable_contents[0] == "BASE PROMPT"
+    assert "previous final answer" in rendered
+    assert stable_contents[-1] == '{"status":"success"}'
+    assert "strict follow up" in model_contents
+    assert "[G3KU_STAGE_COMPACT_V1]" not in rendered
+    assert "[G3KU_STAGE_RAW_V1]" not in rendered
+    assert result.trace["history_source"] == "session_window"
+
+
+@pytest.mark.asyncio
 async def test_message_builder_reuses_existing_summary_while_failure_cooldown_is_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

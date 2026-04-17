@@ -296,6 +296,8 @@ Maintenance note for hydration LRU:
 
 - CEO/frontdoor now persists a separate session-owned request-body baseline as `frontdoor_request_body_messages`.
 - This baseline is intentionally body-only: when it is written back to session state, dynamic `frontdoor_runtime_tool_contract` messages are stripped out so the next round can rebuild one fresh authoritative tail contract.
+- Fresh visible CEO/frontdoor turns now consume that baseline through a direct continuation path instead of feeding it back into the ordinary checkpoint-history selector. If maintainers see a fresh visible turn rebuilding from transcript/stage replay before any explicit shrink reason is recorded, that is now a frontdoor continuity bug.
+- Direct-reply turn finalization must preserve this authoritative body baseline and append the final assistant reply before the session sync runs. Otherwise the next visible turn will inherit a shorter transcript projection even though the prior provider-facing body was longer.
 - Maintainers should therefore distinguish three different things when debugging frontdoor prompt continuity:
   - `frontdoor_request_body_messages` = the next-round body baseline
   - `dynamic_appendix_messages` = the fresh tail contract to append for the current round

@@ -1532,6 +1532,258 @@ class CeoMessageBuilder:
                 ]
         return model_messages, stable_messages, dynamic_appendix_messages, turn_overlay_text
 
+    def _inject_direct_request_body_continuation(
+        self,
+        *,
+        request_body_seed_messages: list[dict[str, Any]],
+        user_content: Any,
+        turn_overlay_parts: list[str],
+        query_text: str,
+        user_metadata: dict[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str, bool]:
+        turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts)
+        stable_messages = self._prompt_message_records(request_body_seed_messages)
+        current_user_in_history = self._history_has_current_user(
+            history_messages=stable_messages,
+            query_text=query_text,
+            user_metadata=user_metadata,
+        )
+        live_messages = list(stable_messages)
+        if not current_user_in_history:
+            live_messages.append({"role": "user", "content": user_content})
+        dynamic_appendix_messages = [
+            {"role": "assistant", "content": part}
+            for part in turn_overlay_parts
+            if str(part or "").strip()
+        ]
+        model_messages = [*live_messages, *dynamic_appendix_messages]
+        return model_messages, stable_messages, dynamic_appendix_messages, turn_overlay_text, current_user_in_history
+
+    def _build_direct_request_body_continuation_result(
+        self,
+        *,
+        context_sources: dict[str, Any],
+        persisted_session: Any | None,
+        request_body_seed_messages: list[dict[str, Any]],
+        query_text: str,
+        user_metadata: dict[str, Any] | None,
+        semantic_context_state: dict[str, Any] | None,
+        ephemeral_tail_messages: list[dict[str, Any]] | None,
+        collect_elapsed_ms: float,
+        history_elapsed_ms: float,
+    ) -> ContextAssemblyResult:
+        task_ledger_state = self._task_ledger_state(persisted_session)
+        task_ledger_text = build_task_ledger_summary(task_ledger_state)
+        turn_overlay_parts = list(context_sources['turn_overlay_parts'])
+        if task_ledger_text:
+            insert_index = len(turn_overlay_parts)
+            if str(context_sources['retrieved_markdown'] or '').strip():
+                insert_index = max(0, insert_index - 1)
+            turn_overlay_parts.insert(insert_index, task_ledger_text)
+
+        inject_started_at = time.perf_counter()
+        (
+            model_messages,
+            stable_messages,
+            dynamic_appendix_messages,
+            turn_overlay_text,
+            current_user_in_history,
+        ) = self._inject_direct_request_body_continuation(
+            request_body_seed_messages=request_body_seed_messages,
+            user_content=context_sources['user_content'],
+            turn_overlay_parts=turn_overlay_parts,
+            query_text=query_text,
+            user_metadata=user_metadata,
+        )
+
+        frontdoor_tool_contract = build_frontdoor_tool_contract(
+            callable_tool_names=list(context_sources['callable_tool_names']),
+            candidate_tool_names=list(context_sources['selected_tool_names']),
+            candidate_tool_items=list(context_sources.get('selected_tool_items') or []),
+            hydrated_tool_names=list(context_sources['hydrated_tool_names']),
+            frontdoor_stage_state=dict(context_sources.get('frontdoor_stage_state') or {}),
+            visible_skill_ids=[
+                self._skill_id(item)
+                for item in list(context_sources['selected_skills'] or [])
+                if self._skill_id(item)
+            ],
+            candidate_skill_ids=[
+                self._skill_id(item)
+                for item in list(context_sources['selected_skills'] or [])
+                if self._skill_id(item)
+            ],
+            rbac_visible_tool_names=list(context_sources['capability_snapshot'].visible_tool_ids),
+            rbac_visible_skill_ids=list(context_sources['capability_snapshot'].visible_skill_ids),
+            contract_revision=(
+                str(context_sources['capability_snapshot'].exposure_revision or '').strip()
+                or DEFAULT_CACHE_FAMILY_REVISION
+            ),
+            exec_runtime_policy=(
+                getattr(getattr(self, '_loop', None), 'main_task_service', None)._current_exec_runtime_policy_payload()
+                if callable(
+                    getattr(
+                        getattr(getattr(self, '_loop', None), 'main_task_service', None),
+                        '_current_exec_runtime_policy_payload',
+                        None,
+                    )
+                )
+                else None
+            ),
+        )
+        dynamic_appendix_messages = upsert_frontdoor_tool_contract_message(
+            list(dynamic_appendix_messages),
+            frontdoor_tool_contract,
+        )
+
+        live_messages = list(stable_messages)
+        if not current_user_in_history:
+            live_messages.append({"role": "user", "content": context_sources['user_content']})
+        model_messages = [*live_messages, *list(dynamic_appendix_messages)]
+        ephemeral_tail = self._prompt_message_records(ephemeral_tail_messages)
+        if ephemeral_tail:
+            model_messages.extend(ephemeral_tail)
+
+        raw_history_messages = [
+            dict(item)
+            for item in list(stable_messages)
+            if isinstance(item, dict)
+            and str(item.get("role") or "").strip().lower() != "system"
+        ]
+        global_zone_source = list(raw_history_messages)
+        pre_summary_messages = list(stable_messages)
+        if not current_user_in_history:
+            pre_summary_messages.append({"role": "user", "content": str(context_sources["user_content"] or "")})
+        pre_summary_prompt_tokens = estimate_message_tokens(pre_summary_messages)
+        compressed_zone_tokens = estimate_message_tokens(global_zone_source)
+        global_summary_settings = self._global_summary_settings(self._loop)
+        context_window_tokens = _resolve_ceo_context_window_tokens(self._loop)
+        thresholds = build_global_summary_thresholds(
+            context_window_tokens=context_window_tokens,
+            compressed_zone_tokens=compressed_zone_tokens,
+            trigger_ratio=global_summary_settings["trigger_ratio"],
+            target_ratio=global_summary_settings["target_ratio"],
+            min_output_tokens=global_summary_settings["min_output_tokens"],
+            max_output_ratio=global_summary_settings["max_output_ratio"],
+            max_output_tokens_ceiling=global_summary_settings["max_output_tokens_ceiling"],
+            pressure_warn_ratio=global_summary_settings["pressure_warn_ratio"],
+            force_refresh_ratio=global_summary_settings["force_refresh_ratio"],
+        )
+        semantic_state = {
+            **default_semantic_context_state(),
+            **dict(semantic_context_state or {}),
+        }
+        global_summary_text = str(semantic_state.get("summary_text") or "").strip()
+        compression_state_payload = {
+            "status": "ready" if global_summary_text else "",
+            "text": "鍏ㄥ眬涓婁笅鏂囧凡鍘嬬缉" if global_summary_text else "",
+            "source": "semantic" if global_summary_text else "",
+            "needs_recheck": bool(semantic_state.get("needs_refresh")),
+        }
+        effective_prompt_tokens = estimate_message_tokens(model_messages)
+        inject_elapsed_ms = self._elapsed_ms(inject_started_at)
+        frontdoor_spans_ms = {
+            'collect_context_sources': collect_elapsed_ms,
+            'semantic_catalog_rankings': float((context_sources.get('span_timings_ms') or {}).get('semantic_catalog_rankings', 0.0) or 0.0),
+            'retrieve_context_bundle': float((context_sources.get('span_timings_ms') or {}).get('retrieve_context_bundle', 0.0) or 0.0),
+            'resolve_history_injection': history_elapsed_ms,
+            'inject_turn_context': inject_elapsed_ms,
+        }
+        trace = {
+            'selected_skills': list(context_sources['skill_trace']),
+            'tool_selection': dict(context_sources['tool_trace']),
+            'semantic_frontdoor': dict(context_sources['semantic_trace']),
+            'external_tools': list(context_sources['external_trace']),
+            'capability_snapshot': {
+                'exposure_revision': str(context_sources['capability_snapshot'].exposure_revision or ''),
+                'visible_skill_ids': list(context_sources['capability_snapshot'].visible_skill_ids),
+                'visible_tool_ids': list(context_sources['capability_snapshot'].visible_tool_ids),
+            },
+            'retrieval_scope': {
+                'mode': str(context_sources['retrieval_scope'].get('mode') or ''),
+                'search_context_types': list(context_sources['retrieval_scope']['search_context_types']),
+                'allowed_context_types': list(context_sources['retrieval_scope']['allowed_context_types']),
+                'allowed_resource_record_ids': list(context_sources['retrieval_scope']['allowed_resource_record_ids']),
+                'allowed_skill_record_ids': list(context_sources['retrieval_scope']['allowed_skill_record_ids']),
+            },
+            'memory_write_hint': {
+                'triggered': bool(context_sources['memory_write_terms'] and context_sources['memory_write_visible']),
+                'matched_terms': list(context_sources['memory_write_terms']),
+                'visible': bool(context_sources['memory_write_visible']),
+            },
+            'history_source': 'session_window',
+            'checkpoint_message_count': len(stable_messages),
+            'transcript_message_count': len(self._transcript_history(persisted_session)),
+            'raw_history_message_count': len(raw_history_messages),
+            'stage_workset_history_message_count': 0,
+            'global_zone_message_count': len(global_zone_source),
+            'global_zone_tokens': compressed_zone_tokens,
+            'pre_summary_prompt_tokens': pre_summary_prompt_tokens,
+            'effective_prompt_tokens': effective_prompt_tokens,
+            'global_summary_trigger_tokens': int(thresholds["trigger_tokens"]),
+            'global_summary_pressure_warn_tokens': int(thresholds["pressure_warn_tokens"]),
+            'global_summary_force_refresh_tokens': int(thresholds["force_refresh_tokens"]),
+            'global_summary_max_output_tokens': int(thresholds["max_output_tokens"]),
+            'global_summary_present': False,
+            'global_summary_trigger_reached': False,
+            'global_summary_warn_reached': False,
+            'global_summary_force_reached': False,
+            'semantic_context_state': dict(semantic_state),
+            'compression_state_payload': dict(compression_state_payload),
+            'frontdoor_history_shrink_reason': '',
+            'current_user_in_checkpoint': bool(current_user_in_history),
+            'current_user_in_history': current_user_in_history,
+            'current_user_in_transcript': self._transcript_has_current_user(
+                persisted_session=persisted_session,
+                query_text=query_text,
+                user_metadata=user_metadata,
+            ),
+            'task_ledger_present': bool(task_ledger_text),
+            'task_ledger_task_count': len(list(task_ledger_state.get('task_ids') or [])),
+            'task_ledger_result_count': len(list(task_ledger_state.get('task_results') or [])),
+            'retrieved_record_count': len(list(context_sources['retrieved_bundle'].records or [])),
+            'same_session_turn_memory_filtered_count': int(context_sources['same_session_turn_memory_filtered_count']),
+            'model_messages_count': len(model_messages),
+            'stable_prefix_message_count': len(stable_messages),
+            'dynamic_appendix_message_count': len(dynamic_appendix_messages),
+            'turn_overlay_present': bool(turn_overlay_text),
+            'turn_overlay_section_count': len(turn_overlay_parts),
+            'turn_overlay_character_count': len(turn_overlay_text),
+            'turn_overlay_text_hash': (
+                hashlib.sha256(turn_overlay_text.encode('utf-8')).hexdigest()
+                if turn_overlay_text
+                else ''
+            ),
+            'stable_prompt_split': False,
+            'context_collection': {
+                'retrieved_record_count': len(list(context_sources['retrieved_bundle'].records or [])),
+                'retrieval_scope_mode': str(context_sources['retrieval_scope'].get('mode') or ''),
+                'retrieved_context_present': bool(context_sources['retrieved_markdown']),
+            },
+            'message_injection': {
+                'history_source': 'session_window',
+                'history_message_count': len(stable_messages),
+                'current_user_appended': not current_user_in_history,
+                'retrieved_context_in_model_messages': bool(
+                    context_sources['retrieved_markdown']
+                ),
+            },
+            'frontdoor_spans_ms': frontdoor_spans_ms,
+        }
+        return ContextAssemblyResult(
+            model_messages=model_messages,
+            stable_messages=stable_messages,
+            dynamic_appendix_messages=dynamic_appendix_messages,
+            tool_names=list(context_sources['callable_tool_names']),
+            candidate_tool_names=list(context_sources['selected_tool_names']),
+            candidate_tool_items=list(context_sources.get('selected_tool_items') or []),
+            trace=trace,
+            turn_overlay_text=turn_overlay_text,
+            cache_family_revision=(
+                str(context_sources['capability_snapshot'].exposure_revision or '').strip()
+                or DEFAULT_CACHE_FAMILY_REVISION
+            ),
+        )
+
     async def build_for_ceo(
         self,
         *,
@@ -1540,6 +1792,7 @@ class CeoMessageBuilder:
         exposure: dict[str, Any],
         persisted_session: Any | None,
         checkpoint_messages: list[dict[str, Any]] | None = None,
+        request_body_seed_messages: list[dict[str, Any]] | None = None,
         user_content: Any | None = None,
         user_metadata: dict[str, Any] | None = None,
         frontdoor_stage_state: dict[str, Any] | None = None,
@@ -1557,6 +1810,23 @@ class CeoMessageBuilder:
             hydrated_tool_names=hydrated_tool_names,
         )
         collect_elapsed_ms = self._elapsed_ms(collect_started_at)
+        request_body_seed_records = self._prompt_message_records(request_body_seed_messages)
+        if request_body_seed_records:
+            context_sources = {
+                **dict(context_sources or {}),
+                "frontdoor_stage_state": dict(frontdoor_stage_state or {}),
+            }
+            return self._build_direct_request_body_continuation_result(
+                context_sources=context_sources,
+                persisted_session=persisted_session,
+                request_body_seed_messages=request_body_seed_records,
+                query_text=query_text,
+                user_metadata=user_metadata,
+                semantic_context_state=semantic_context_state,
+                ephemeral_tail_messages=ephemeral_tail_messages,
+                collect_elapsed_ms=collect_elapsed_ms,
+                history_elapsed_ms=0.0,
+            )
         history_started_at = time.perf_counter()
         history_state = self._resolve_history_injection(
             persisted_session=persisted_session,

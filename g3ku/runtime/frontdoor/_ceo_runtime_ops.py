@@ -2188,8 +2188,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             **dict(current_semantic_context_state or {}),
         }
         checkpoint_messages = list(state.get("messages") or [])
+        request_body_seed_messages: list[dict[str, Any]] = []
         if not checkpoint_messages and session_request_body_messages:
-            checkpoint_messages = list(session_request_body_messages)
+            if not heartbeat_internal and not cron_internal:
+                request_body_seed_messages = list(session_request_body_messages)
+            else:
+                checkpoint_messages = list(session_request_body_messages)
             builder_user_metadata["_frontdoor_history_seed"] = "session_window"
         seeded_hydrated_tool_names = (
             list(getattr(session, "_frontdoor_hydrated_tool_names", []) or [])
@@ -2212,6 +2216,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             exposure=exposure,
             persisted_session=runtime_session,
             checkpoint_messages=checkpoint_messages,
+            request_body_seed_messages=request_body_seed_messages,
             user_content=self._model_content(user_content),
             user_metadata=builder_user_metadata,
             frontdoor_stage_state=current_frontdoor_stage_state,
@@ -3025,10 +3030,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         request_body_messages, _tool_contract_messages = self._split_request_body_and_tool_contract_messages(messages)
         if request_body_messages:
             messages = list(request_body_messages)
+        authoritative_request_body_messages = [
+            dict(item)
+            for item in list(state.get("frontdoor_request_body_messages") or request_body_messages or messages)
+            if isinstance(item, dict)
+        ]
+        frontdoor_history_shrink_reason = str(state.get("frontdoor_history_shrink_reason") or "").strip()
         finalized_stage_state = self._frontdoor_stage_state_snapshot(state)
         if output and route_kind == "direct_reply":
             messages.append({"role": "assistant", "content": output})
+            authoritative_request_body_messages = [
+                *list(authoritative_request_body_messages),
+                {"role": "assistant", "content": output},
+            ]
             result["messages"] = list(messages)
+            result["frontdoor_request_body_messages"] = list(authoritative_request_body_messages)
+            result["frontdoor_history_shrink_reason"] = frontdoor_history_shrink_reason
             finalized_stage_state = self._complete_active_frontdoor_stage_state(
                 state.get("frontdoor_stage_state"),
                 completed_stage_summary=output,
@@ -3050,6 +3067,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             frontdoor_stage_state=finalized_stage_state,
         )
         result["messages"] = list(messages)
+        result["frontdoor_request_body_messages"] = list(authoritative_request_body_messages)
+        result["frontdoor_history_shrink_reason"] = frontdoor_history_shrink_reason
         return result
 
     @staticmethod
