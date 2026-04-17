@@ -6,6 +6,7 @@ import inspect
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from langchain_core.messages import AIMessage, convert_to_messages
@@ -370,6 +371,97 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> list[dict[str, Any]]:
         body_messages, _contract_messages = cls._split_request_body_and_tool_contract_messages(request_messages)
         return [dict(item) for item in list(body_messages or []) if isinstance(item, dict)]
+
+    @staticmethod
+    def _frontdoor_tool_schema_names(tool_schemas: list[dict[str, Any]] | None) -> list[str]:
+        names: list[str] = []
+        for item in list(tool_schemas or []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("function", {}).get("name") or "").strip()
+            if name:
+                names.append(name)
+        return names
+
+    @staticmethod
+    def _frontdoor_actual_request_record_from_path(path_text: str) -> dict[str, Any]:
+        path = Path(str(path_text or "").strip())
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    @classmethod
+    def _frontdoor_previous_actual_request_record(cls, session: Any | None) -> dict[str, Any]:
+        if session is None:
+            return {}
+        previous_history = [
+            dict(item)
+            for item in list(getattr(session, "_frontdoor_previous_actual_request_history", []) or [])
+            if isinstance(item, dict)
+        ]
+        previous_path = ""
+        if previous_history:
+            previous_path = str(previous_history[-1].get("path") or "").strip()
+        if not previous_path:
+            previous_path = str(getattr(session, "_frontdoor_previous_actual_request_path", "") or "").strip()
+        if not previous_path:
+            return {}
+        return cls._frontdoor_actual_request_record_from_path(previous_path)
+
+    @classmethod
+    def _fresh_turn_live_request_messages_from_previous_actual_request(
+        cls,
+        *,
+        session: Any | None,
+        stable_messages: list[dict[str, Any]] | None,
+        live_request_messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        previous_record = cls._frontdoor_previous_actual_request_record(session)
+        previous_request_messages = cls._prompt_message_records(previous_record.get("request_messages"))
+        if not previous_request_messages:
+            return cls._prompt_message_records(live_request_messages)
+        previous_request_body = cls._request_body_messages_without_tool_contracts(previous_request_messages)
+        stable_records = cls._prompt_message_records(stable_messages)
+        live_records = cls._prompt_message_records(live_request_messages)
+        body_len = len(previous_request_body)
+        stable_len = len(stable_records)
+        if body_len <= 0 or stable_len < body_len:
+            return live_records
+        if stable_records[:body_len] != previous_request_body:
+            return live_records
+        if len(live_records) < stable_len or live_records[:stable_len] != stable_records:
+            return live_records
+        stable_tail = list(stable_records[body_len:])
+        live_tail = list(live_records[stable_len:])
+        return [*list(previous_request_messages), *stable_tail, *live_tail]
+
+    @classmethod
+    def _fresh_turn_tool_schema_seed_from_previous_actual_request(
+        cls,
+        *,
+        session: Any | None,
+        tool_schemas: list[dict[str, Any]] | None,
+    ) -> tuple[list[dict[str, Any]], list[str] | None]:
+        current_tool_schemas = [dict(item) for item in list(tool_schemas or []) if isinstance(item, dict)]
+        previous_record = cls._frontdoor_previous_actual_request_record(session)
+        previous_tool_schemas = [
+            dict(item)
+            for item in list(previous_record.get("tool_schemas") or [])
+            if isinstance(item, dict)
+        ]
+        if not previous_tool_schemas or not current_tool_schemas:
+            return current_tool_schemas, None
+        current_names = cls._frontdoor_tool_schema_names(current_tool_schemas)
+        previous_names = cls._frontdoor_tool_schema_names(previous_tool_schemas)
+        if not previous_names:
+            return current_tool_schemas, None
+        if set(previous_names).issubset(set(current_names)):
+            return previous_tool_schemas, list(previous_names)
+        return current_tool_schemas, None
 
     """Shared CEO runtime operations reused by the create_agent frontdoor path."""
 
@@ -886,13 +978,28 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if isinstance(state, dict):
             diagnostics = dict(state.get("prompt_cache_diagnostics") or {})
             actual_request_path = str(state.get("frontdoor_actual_request_path") or "").strip()
-            if actual_request_path:
-                setattr(target_session, "_frontdoor_actual_request_path", actual_request_path)
             actual_request_history = [
                 dict(item)
                 for item in list(state.get("frontdoor_actual_request_history") or [])
                 if isinstance(item, dict)
             ]
+            incoming_has_authoritative_actual_request = bool(actual_request_path) or bool(actual_request_history)
+            existing_actual_request_path = str(
+                getattr(target_session, "_frontdoor_actual_request_path", "") or ""
+            ).strip()
+            existing_actual_request_history = [
+                dict(item)
+                for item in list(getattr(target_session, "_frontdoor_actual_request_history", []) or [])
+                if isinstance(item, dict)
+            ]
+            session_has_authoritative_actual_request = bool(existing_actual_request_path) or bool(
+                existing_actual_request_history
+            )
+            has_authoritative_actual_request = (
+                incoming_has_authoritative_actual_request or session_has_authoritative_actual_request
+            )
+            if actual_request_path:
+                setattr(target_session, "_frontdoor_actual_request_path", actual_request_path)
             if actual_request_history:
                 setattr(target_session, "_frontdoor_actual_request_history", actual_request_history)
             prompt_cache_key_hash = str(
@@ -902,27 +1009,28 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ).strip()
             if prompt_cache_key_hash:
                 setattr(target_session, "_frontdoor_prompt_cache_key_hash", prompt_cache_key_hash)
-            actual_request_hash = str(
-                state.get("frontdoor_actual_request_hash")
-                or diagnostics.get("actual_request_hash")
-                or ""
-            ).strip()
-            if actual_request_hash:
-                setattr(target_session, "_frontdoor_actual_request_hash", actual_request_hash)
-            actual_request_message_count = int(
-                state.get("frontdoor_actual_request_message_count")
-                or diagnostics.get("actual_request_message_count")
-                or 0
-            )
-            if actual_request_message_count:
-                setattr(target_session, "_frontdoor_actual_request_message_count", actual_request_message_count)
-            actual_tool_schema_hash = str(
-                state.get("frontdoor_actual_tool_schema_hash")
-                or diagnostics.get("actual_tool_schema_hash")
-                or ""
-            ).strip()
-            if actual_tool_schema_hash:
-                setattr(target_session, "_frontdoor_actual_tool_schema_hash", actual_tool_schema_hash)
+            if incoming_has_authoritative_actual_request:
+                actual_request_hash = str(
+                    state.get("frontdoor_actual_request_hash")
+                    or diagnostics.get("actual_request_hash")
+                    or ""
+                ).strip()
+                if actual_request_hash:
+                    setattr(target_session, "_frontdoor_actual_request_hash", actual_request_hash)
+                actual_request_message_count = int(
+                    state.get("frontdoor_actual_request_message_count")
+                    or diagnostics.get("actual_request_message_count")
+                    or 0
+                )
+                if actual_request_message_count:
+                    setattr(target_session, "_frontdoor_actual_request_message_count", actual_request_message_count)
+                actual_tool_schema_hash = str(
+                    state.get("frontdoor_actual_tool_schema_hash")
+                    or diagnostics.get("actual_tool_schema_hash")
+                    or ""
+                ).strip()
+                if actual_tool_schema_hash:
+                    setattr(target_session, "_frontdoor_actual_tool_schema_hash", actual_tool_schema_hash)
             request_body_messages = [
                 dict(item)
                 for item in list(state.get("frontdoor_request_body_messages") or [])
@@ -938,7 +1046,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     request_body_messages, _contract_messages = self._split_request_body_and_tool_contract_messages(
                         raw_messages
                     )
-            if "frontdoor_request_body_messages" in state or request_body_messages:
+            if has_authoritative_actual_request and (
+                "frontdoor_request_body_messages" in state or request_body_messages
+            ):
                 setattr(target_session, "_frontdoor_request_body_messages", request_body_messages)
             if "frontdoor_history_shrink_reason" in state:
                 setattr(
@@ -2417,6 +2527,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             prompt_cache_diagnostics = dict(contract.diagnostics)
         else:
             live_request_messages = self._prompt_message_records(messages)
+            if session_request_body_messages:
+                live_request_messages = self._fresh_turn_live_request_messages_from_previous_actual_request(
+                    session=session,
+                    stable_messages=stable_messages,
+                    live_request_messages=live_request_messages,
+                )
+                tool_schemas, seeded_provider_tool_names = (
+                    self._fresh_turn_tool_schema_seed_from_previous_actual_request(
+                        session=session,
+                        tool_schemas=tool_schemas,
+                    )
+                )
+                if seeded_provider_tool_names:
+                    runtime_visible_tool_names = list(seeded_provider_tool_names)
             contract = build_frontdoor_prompt_contract(
                 scope=prompt_scope,
                 provider_model=provider_model,
@@ -2508,6 +2632,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "model_refs": model_refs,
             "stable_messages": stable_messages,
             "dynamic_appendix_messages": persisted_dynamic_appendix_messages,
+            "frontdoor_live_request_messages": list(live_request_messages),
             "frontdoor_request_body_messages": persisted_messages,
             "frontdoor_history_shrink_reason": shrink_reason,
             "cache_family_revision": cache_family_revision,
@@ -2628,6 +2753,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "iteration": iteration,
             "repair_overlay_text": None,
             **message_state_update,
+            "frontdoor_live_request_messages": [],
             "prompt_cache_key": prompt_cache_key,
             "prompt_cache_diagnostics": prompt_cache_diagnostics,
             **actual_request_trace,

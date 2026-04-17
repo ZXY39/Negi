@@ -258,6 +258,12 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             fallback_system_message=fallback_system_message,
             fallback_messages=fallback_messages,
         )
+        raw_live_request_messages = list(state.get("frontdoor_live_request_messages") or [])
+        if raw_live_request_messages:
+            return self._with_effective_system_prefix(
+                records=[self._message_record(item) for item in raw_live_request_messages],
+                effective_system_record=effective_system_record,
+            )
         live_records = self._state_message_records(state)
         if live_records:
             return self._with_effective_system_prefix(

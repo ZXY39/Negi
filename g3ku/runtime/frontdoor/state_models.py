@@ -36,6 +36,7 @@ class CeoPersistentState(TypedDict, total=False):
     stable_messages: list[dict[str, Any]]
 
     dynamic_appendix_messages: list[dict[str, Any]]
+    frontdoor_live_request_messages: list[dict[str, Any]]
     frontdoor_request_body_messages: list[dict[str, Any]]
     frontdoor_history_shrink_reason: str
 
@@ -188,6 +189,7 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "stable_messages": [],
 
         "dynamic_appendix_messages": [],
+        "frontdoor_live_request_messages": [],
         "frontdoor_request_body_messages": [],
         "frontdoor_history_shrink_reason": "",
 

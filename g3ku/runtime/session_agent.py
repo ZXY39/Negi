@@ -82,6 +82,8 @@ class RuntimeAgentSession:
         self._frontdoor_history_shrink_reason: str = ""
         self._frontdoor_actual_request_path: str = ""
         self._frontdoor_actual_request_history: list[dict[str, Any]] = []
+        self._frontdoor_previous_actual_request_path: str = ""
+        self._frontdoor_previous_actual_request_history: list[dict[str, Any]] = []
         self._frontdoor_prompt_cache_key_hash: str = ""
         self._frontdoor_actual_request_hash: str = ""
         self._frontdoor_actual_request_message_count: int = 0
@@ -137,6 +139,17 @@ class RuntimeAgentSession:
     def clear_paused_execution_context(self) -> None:
         self._paused_execution_context = None
         self._sync_persisted_paused_execution_context()
+
+    def _preserve_frontdoor_actual_request_trace_for_next_visible_turn(self) -> None:
+        actual_request_path = str(getattr(self, "_frontdoor_actual_request_path", "") or "").strip()
+        actual_request_history = [
+            dict(item)
+            for item in list(getattr(self, "_frontdoor_actual_request_history", []) or [])
+            if isinstance(item, dict)
+        ]
+        if actual_request_path or actual_request_history:
+            self._frontdoor_previous_actual_request_path = actual_request_path
+            self._frontdoor_previous_actual_request_history = actual_request_history
 
     def _normalize_live_context(self, live_context: dict[str, str] | None) -> dict[str, str]:
         current_channel = str(getattr(self, "_channel", "") or "cli").strip() or "cli"
@@ -1618,6 +1631,8 @@ class RuntimeAgentSession:
             if reset_frontdoor_turn_state:
                 # Fresh visible turns and internal heartbeat/cron turns each start from
                 # their own frontdoor runtime window.
+                if internal_source is None:
+                    self._preserve_frontdoor_actual_request_trace_for_next_visible_turn()
                 self._frontdoor_selection_debug = {}
                 self._frontdoor_actual_request_path = ""
                 self._frontdoor_actual_request_history = []

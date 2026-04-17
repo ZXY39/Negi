@@ -2411,6 +2411,371 @@ def test_create_agent_runner_syncs_frontdoor_actual_request_trace_into_inflight_
     ]
 
 
+def test_create_agent_runner_sync_keeps_previous_actual_request_baseline_for_prepare_only_state() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._frontdoor_request_body_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+    ]
+    session._frontdoor_actual_request_path = ""
+    session._frontdoor_actual_request_history = []
+    session._frontdoor_prompt_cache_key_hash = ""
+    session._frontdoor_actual_request_hash = ""
+    session._frontdoor_actual_request_message_count = 0
+    session._frontdoor_actual_tool_schema_hash = ""
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    runner._sync_runtime_session_frontdoor_state(
+        state={
+            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
+            "semantic_context_state": {},
+            "hydrated_tool_names": [],
+            "frontdoor_request_body_messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "old question"},
+                {"role": "assistant", "content": "old answer"},
+                {"role": "user", "content": "new paused user"},
+            ],
+            "prompt_cache_diagnostics": {
+                "prompt_cache_key_hash": "family-hash-planned",
+                "actual_request_hash": "request-hash-planned",
+                "actual_request_message_count": 4,
+                "actual_tool_schema_hash": "tool-hash-planned",
+            },
+        },
+        session=session,
+    )
+
+    assert session._frontdoor_request_body_messages == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+    ]
+    assert session._frontdoor_actual_request_path == ""
+    assert session._frontdoor_actual_request_history == []
+    assert session._frontdoor_prompt_cache_key_hash == "family-hash-planned"
+    assert session._frontdoor_actual_request_hash == ""
+    assert session._frontdoor_actual_request_message_count == 0
+    assert session._frontdoor_actual_tool_schema_hash == ""
+
+
+def test_create_agent_runner_sync_allows_finalize_to_extend_existing_actual_request_baseline() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._frontdoor_request_body_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "tool thinking"},
+    ]
+    session._frontdoor_actual_request_path = str(Path("D:/tmp/frontdoor-request-current.json"))
+    session._frontdoor_actual_request_history = [
+        {
+            "path": str(Path("D:/tmp/frontdoor-request-current.json")),
+            "turn_id": "turn-frontdoor-current",
+            "actual_request_hash": "request-hash-current",
+            "actual_request_message_count": 3,
+            "actual_tool_schema_hash": "tool-hash-current",
+            "prompt_cache_key_hash": "family-hash-current",
+        }
+    ]
+    session._frontdoor_prompt_cache_key_hash = "family-hash-current"
+    session._frontdoor_actual_request_hash = "request-hash-current"
+    session._frontdoor_actual_request_message_count = 3
+    session._frontdoor_actual_tool_schema_hash = "tool-hash-current"
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    runner._sync_runtime_session_frontdoor_state(
+        state={
+            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
+            "semantic_context_state": {},
+            "hydrated_tool_names": [],
+            "frontdoor_request_body_messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "old question"},
+                {"role": "assistant", "content": "tool thinking"},
+                {"role": "assistant", "content": "final answer"},
+            ],
+        },
+        session=session,
+    )
+
+    assert session._frontdoor_request_body_messages == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "tool thinking"},
+        {"role": "assistant", "content": "final answer"},
+    ]
+    assert session._frontdoor_actual_request_path == str(Path("D:/tmp/frontdoor-request-current.json"))
+    assert session._frontdoor_actual_request_history == [
+        {
+            "path": str(Path("D:/tmp/frontdoor-request-current.json")),
+            "turn_id": "turn-frontdoor-current",
+            "actual_request_hash": "request-hash-current",
+            "actual_request_message_count": 3,
+            "actual_tool_schema_hash": "tool-hash-current",
+            "prompt_cache_key_hash": "family-hash-current",
+        }
+    ]
+    assert session._frontdoor_actual_request_hash == "request-hash-current"
+    assert session._frontdoor_actual_request_message_count == 3
+    assert session._frontdoor_actual_tool_schema_hash == "tool-hash-current"
+
+
+def test_runtime_agent_session_preserves_previous_actual_request_trace_for_next_visible_turn() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._frontdoor_actual_request_path = str(Path("D:/tmp/frontdoor-request-current.json"))
+    session._frontdoor_actual_request_history = [
+        {
+            "path": str(Path("D:/tmp/frontdoor-request-current.json")),
+            "turn_id": "turn-frontdoor-current",
+            "actual_request_hash": "request-hash-current",
+            "actual_request_message_count": 3,
+            "actual_tool_schema_hash": "tool-hash-current",
+            "prompt_cache_key_hash": "family-hash-current",
+        }
+    ]
+
+    session._preserve_frontdoor_actual_request_trace_for_next_visible_turn()
+
+    assert session._frontdoor_previous_actual_request_path == str(Path("D:/tmp/frontdoor-request-current.json"))
+    assert session._frontdoor_previous_actual_request_history == [
+        {
+            "path": str(Path("D:/tmp/frontdoor-request-current.json")),
+            "turn_id": "turn-frontdoor-current",
+            "actual_request_hash": "request-hash-current",
+            "actual_request_message_count": 3,
+            "actual_tool_schema_hash": "tool-hash-current",
+            "prompt_cache_key_hash": "family-hash-current",
+        }
+    ]
+
+
+def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix(tmp_path: Path) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    previous_record_path = tmp_path / "frontdoor-request-previous.json"
+    previous_record_path.write_text(
+        json.dumps(
+            {
+                "request_messages": [
+                    {"role": "system", "content": "SYSTEM"},
+                    {"role": "user", "content": "old question"},
+                    {"role": "assistant", "content": "old retrieved"},
+                    {
+                        "role": "user",
+                        "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["submit_next_stage"]}',
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "submit_next_stage", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "name": "submit_next_stage",
+                        "tool_call_id": "call-1",
+                        "content": '{"status":"success"}',
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    session = SimpleNamespace(
+        _frontdoor_previous_actual_request_path=str(previous_record_path),
+        _frontdoor_previous_actual_request_history=[
+            {
+                "path": str(previous_record_path),
+                "turn_id": "turn-frontdoor-previous",
+            }
+        ],
+    )
+
+    scaffold = runner._fresh_turn_live_request_messages_from_previous_actual_request(
+        session=session,
+        stable_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old retrieved"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "submit_next_stage",
+                "tool_call_id": "call-1",
+                "content": '{"status":"success"}',
+            },
+            {"role": "assistant", "content": "final answer"},
+        ],
+        live_request_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old retrieved"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "submit_next_stage",
+                "tool_call_id": "call-1",
+                "content": '{"status":"success"}',
+            },
+            {"role": "assistant", "content": "final answer"},
+            {"role": "user", "content": "next user"},
+        ],
+    )
+
+    assert scaffold == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old retrieved"},
+        {
+            "role": "user",
+            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["submit_next_stage"]}',
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "submit_next_stage",
+            "tool_call_id": "call-1",
+            "content": '{"status":"success"}',
+        },
+        {"role": "assistant", "content": "final answer"},
+        {"role": "user", "content": "next user"},
+    ]
+
+
+def test_fresh_turn_tool_schema_seed_reuses_previous_actual_request_schemas_when_current_is_superset(
+    tmp_path: Path,
+) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    previous_record_path = tmp_path / "frontdoor-request-previous.json"
+    previous_record_path.write_text(
+        json.dumps(
+            {
+                "tool_schemas": [
+                    {"type": "function", "function": {"name": "exec", "description": "", "parameters": {"type": "object"}}},
+                    {
+                        "type": "function",
+                        "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    session = SimpleNamespace(
+        _frontdoor_previous_actual_request_path=str(previous_record_path),
+        _frontdoor_previous_actual_request_history=[
+            {
+                "path": str(previous_record_path),
+                "turn_id": "turn-frontdoor-previous",
+            }
+        ],
+    )
+
+    seeded_schemas, seeded_names = runner._fresh_turn_tool_schema_seed_from_previous_actual_request(
+        session=session,
+        tool_schemas=[
+            {"type": "function", "function": {"name": "exec", "description": "", "parameters": {"type": "object"}}},
+            {
+                "type": "function",
+                "function": {"name": "message", "description": "", "parameters": {"type": "object"}},
+            },
+            {
+                "type": "function",
+                "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+            },
+        ],
+    )
+
+    assert seeded_names == ["exec", "submit_next_stage"]
+    assert seeded_schemas == [
+        {"type": "function", "function": {"name": "exec", "description": "", "parameters": {"type": "object"}}},
+        {
+            "type": "function",
+            "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+        },
+    ]
+
+
+def test_live_request_message_records_for_state_prefers_explicit_frontdoor_live_request_messages() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    records = runner._live_request_message_records_for_state(
+        state={
+            "messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "stable baseline"},
+            ],
+            "frontdoor_live_request_messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "previous actual request"},
+                {"role": "assistant", "content": "final answer"},
+                {"role": "user", "content": "next user"},
+            ],
+        }
+    )
+
+    assert records == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "previous actual request"},
+        {"role": "assistant", "content": "final answer"},
+        {"role": "user", "content": "next user"},
+    ]
+
+
 def test_create_agent_runner_sync_preserves_durable_frontdoor_canonical_context() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
     session = SimpleNamespace()
