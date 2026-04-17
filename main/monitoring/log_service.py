@@ -3781,8 +3781,6 @@ class TaskLogService:
             'status': task.status,
             'failure_class': normalize_failure_class(metadata.get('failure_class')),
             'final_acceptance': normalize_final_acceptance_metadata(metadata.get('final_acceptance')).model_dump(mode='json'),
-            'continuation_state': str(metadata.get('continuation_state') or '').strip(),
-            'continued_by_task_id': str(metadata.get('continued_by_task_id') or '').strip(),
             'retry_count': len(list(metadata.get('retry_history') or [])),
             'recovery_notice': str(metadata.get('recovery_notice') or '').strip(),
             'is_unread': bool(task.is_unread),

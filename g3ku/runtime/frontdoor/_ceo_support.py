@@ -243,8 +243,6 @@ class CeoFrontDoorSupport:
         normalized = [str(name or "").strip() for name in list(used_tools or []) if str(name or "").strip()]
         if "create_async_task" in normalized:
             return "task_dispatch"
-        if "continue_task" in normalized:
-            return "task_continuation"
         if normalized:
             return "self_execute"
         return str(default or "direct_reply")
@@ -256,19 +254,9 @@ class CeoFrontDoorSupport:
             for name in list(used_tools or [])
             if str(name or "").strip()
         }
-        continued_task = "continue_task" in {
-            str(name or "").strip()
-            for name in list(used_tools or [])
-            if str(name or "").strip()
-        }
         if created_task:
             return (
                 "The turn completed without any visible assistant text after creating an async task. "
-                "The system stopped instead of pretending a successful reply was produced."
-            )
-        if continued_task:
-            return (
-                "The turn completed without any visible assistant text after continuing an existing task. "
                 "The system stopped instead of pretending a successful reply was produced."
             )
         return (
@@ -582,7 +570,7 @@ class CeoFrontDoorSupport:
 
         token = self._loop.tools.push_runtime_context(per_call_runtime)
         try:
-            if actor_role_allows_watchdog(per_call_runtime) and str(tool_name or "").strip() != "continue_task":
+            if actor_role_allows_watchdog(per_call_runtime):
                 inline_registry = getattr(self._loop, "inline_tool_execution_registry", None)
                 outcome = await run_tool_with_watchdog(
                     _invoke(),

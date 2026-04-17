@@ -444,18 +444,6 @@ class ApiClient {
         return data.task || null;
     }
 
-    static async retryTask(taskId) {
-        const data = await this.post(`/api/tasks/${taskId}/retry`);
-        return data.task || null;
-    }
-
-    static async continueEvaluateTask(taskId) {
-        return this.post(`/api/tasks/${taskId}/continue-evaluate`);
-    }
-
-    static async continueTask(taskId, payload = {}) {
-        return this.post(`/api/tasks/${taskId}/continue`, payload);
-    }
 
     static async cancelTask(taskId) {
         const data = await this.post(`/api/tasks/${taskId}/cancel`);

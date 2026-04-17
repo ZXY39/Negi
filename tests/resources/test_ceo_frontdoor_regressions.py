@@ -141,10 +141,10 @@ class _CountTool(Tool):
         return json.dumps({"ok": True, "count": int(count)}, ensure_ascii=False)
 
 
-class _ContinuationTaskTool(Tool):
+class _TaskControlTool(Tool):
     @property
     def name(self) -> str:
-        return "continue_task"
+        return "task_control"
 
     @property
     def description(self) -> str:
@@ -155,24 +155,22 @@ class _ContinuationTaskTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "mode": {"type": "string", "enum": ["recreate", "retry_in_place"]},
+                "action": {"type": "string", "enum": ["pause", "resume"]},
                 "target_task_id": {"type": "string"},
-                "continuation_instruction": {"type": "string"},
-                "execution_policy": {"type": "object"},
-                "reuse_existing": {"type": "boolean"},
+                "reason": {"type": "string"},
+                "force": {"type": "boolean"},
             },
-            "required": ["mode", "target_task_id", "continuation_instruction"],
+            "required": ["action", "target_task_id"],
         }
 
     async def execute(
         self,
-        mode: str,
+        action: str,
         target_task_id: str,
-        continuation_instruction: str,
-        execution_policy: dict[str, object] | None = None,
+        reason: str = "",
         **kwargs,
     ) -> str:
-        _ = mode, target_task_id, continuation_instruction, execution_policy, kwargs
+        _ = action, target_task_id, reason, kwargs
         return '{"status":"completed"}'
 
 
@@ -248,28 +246,28 @@ def _nested_items_item_schema(schema: dict[str, object]) -> dict[str, object]:
 
 
 def test_build_args_schema_preserves_declared_json_types() -> None:
-    schema_model = _build_args_schema(_ContinuationTaskTool())
+    schema_model = _build_args_schema(_TaskControlTool())
     schema = schema_model.model_json_schema()
     properties = dict(schema.get("properties") or {})
 
     target_task_schema = dict(properties.get("target_task_id") or {})
-    reuse_schema = dict(properties.get("reuse_existing") or {})
-    mode_schema = dict(properties.get("mode") or {})
+    force_schema = dict(properties.get("force") or {})
+    action_schema = dict(properties.get("action") or {})
 
     target_task_types = {
         str(item.get("type") or "").strip()
         for item in list(target_task_schema.get("anyOf") or [])
         if isinstance(item, dict)
     }
-    reuse_types = {
+    force_types = {
         str(item.get("type") or "").strip()
-        for item in list(reuse_schema.get("anyOf") or [])
+        for item in list(force_schema.get("anyOf") or [])
         if isinstance(item, dict)
     }
 
-    assert set(mode_schema.get("enum") or []) == {"recreate", "retry_in_place"}
+    assert set(action_schema.get("enum") or []) == {"pause", "resume"}
     assert "string" in target_task_types or target_task_schema.get("type") == "string"
-    assert "boolean" in reuse_types or reuse_schema.get("type") == "boolean"
+    assert "boolean" in force_types or force_schema.get("type") == "boolean"
 
 
 def test_build_args_schema_preserves_nested_array_object_contracts() -> None:

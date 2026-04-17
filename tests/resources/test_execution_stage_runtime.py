@@ -676,9 +676,9 @@ async def test_create_task_assigns_distinct_task_temp_dirs_and_injects_runtime_e
     try:
         original = await _create_web_task(service)
         continuation = await service.create_task(
-            'continued task',
+            'second task',
             session_id='web:shared',
-            metadata={'continuation_of_task_id': original.task_id},
+            metadata={},
         )
         original_temp_dir = _task_temp_dir_for(service, original.task_id)
         continuation_temp_dir = _task_temp_dir_for(service, continuation.task_id)

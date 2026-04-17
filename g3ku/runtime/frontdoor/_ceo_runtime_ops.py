@@ -274,7 +274,7 @@ async def _invoke_execute_tool_call_compat(execute_tool_call: ToolExecutor, /, *
 
 def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     normalized = normalize_runtime_tool_arguments_dict(arguments)
-    if str(tool_name or "").strip() not in {"create_async_task", "continue_task"}:
+    if str(tool_name or "").strip() != "create_async_task":
         return normalized
     raw_policy = normalized.get("execution_policy")
     policy_payload: dict[str, Any]
@@ -1506,7 +1506,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not bool(getattr(assembly_cfg, "frontdoor_interrupt_approval_enabled", False)):
             return set()
         raw_names = list(
-            getattr(assembly_cfg, "frontdoor_interrupt_tool_names", ["message", "create_async_task", "continue_task"]) or []
+            getattr(assembly_cfg, "frontdoor_interrupt_tool_names", ["message", "create_async_task"]) or []
         )
         return {str(name).strip() for name in raw_names if str(name).strip()}
 

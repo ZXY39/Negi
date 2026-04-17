@@ -655,7 +655,7 @@ class MemoryAssemblyConfig(Base):
     node_tool_top_k: int = 16
     frontdoor_interrupt_approval_enabled: bool = False
     frontdoor_interrupt_tool_names: list[str] = Field(
-        default_factory=lambda: ["message", "create_async_task", "continue_task"]
+        default_factory=lambda: ["message", "create_async_task"]
     )
     frontdoor_global_summary_trigger_ratio: float = Field(default=0.50, ge=0.0, le=1.0)
     frontdoor_global_summary_target_ratio: float = Field(default=0.20, ge=0.0, le=1.0)
@@ -671,7 +671,6 @@ class MemoryAssemblyConfig(Base):
         default_factory=lambda: [
             'content',
             'create_async_task',
-            'continue_task',
             'task_summary',
             'task_list',
             'task_progress',

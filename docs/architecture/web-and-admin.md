@@ -108,6 +108,12 @@ The backend contract behind that UI behavior is:
 - Queued follow-ups should not interrupt heartbeat execution.
 - Once heartbeat finishes and the session becomes dispatchable again, queued follow-ups may begin draining automatically.
 
+### Task Hall Action Contract
+
+- The browser task hall now only exposes `pause`, `resume`, and `delete` task actions.
+- `retry`, `continue-evaluate`, and `open continuation` actions are removed from both the UI flow and the REST surface.
+- Task list and task detail status pills now derive from the current task `status` plus final-acceptance state; legacy continuation metadata fields are ignored even if older task records still carry them.
+
 ### Heartbeat Visible-Turn Contract
 
 - Browser-side CEO websocket payloads may now carry both `inflight_turn` and `preserved_turn`.
