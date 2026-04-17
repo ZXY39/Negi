@@ -2923,3 +2923,49 @@ async def test_message_builder_keeps_turn_memory_from_different_session_in_share
     assert "other session snippet" in overlay
     assert result.trace["same_session_turn_memory_filtered_count"] == 0
     assert result.trace["retrieved_record_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_ceo_context_assembly_injects_memory_snapshot_without_memory_search_overlay() -> None:
+    loop = SimpleNamespace(
+        memory_manager=SimpleNamespace(
+            snapshot_text=lambda **_: "---\n2026/4/17-self：\n完成任务必须说明任务总耗时\n",
+            sync_catalog=None,
+        ),
+        main_task_service=None,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                skill_inventory_top_k=16,
+                extension_tool_top_k=16,
+                core_tools=["memory_write", "memory_delete", "memory_note"],
+                frontdoor_global_summary_trigger_ratio=0.5,
+                frontdoor_global_summary_target_ratio=0.2,
+                frontdoor_global_summary_min_output_tokens=2000,
+                frontdoor_global_summary_max_output_ratio=0.05,
+                frontdoor_global_summary_max_output_tokens_ceiling=12000,
+                frontdoor_global_summary_pressure_warn_ratio=0.85,
+                frontdoor_global_summary_force_refresh_ratio=0.95,
+                frontdoor_global_summary_min_delta_tokens=2000,
+                frontdoor_global_summary_failure_cooldown_seconds=600,
+                frontdoor_global_summary_model="",
+            )
+        ),
+    )
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=_PromptBuilder())
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+    )
+
+    result = await builder._collect_turn_context_sources(
+        session=session,
+        query_text="记住这个规则",
+        exposure={"tool_names": ["memory_write", "memory_delete", "memory_note"], "tool_families": [], "skills": []},
+        user_content="记住这个规则",
+        hydrated_tool_names=[],
+    )
+
+    overlay = "\n\n".join(result["turn_overlay_parts"])
+    assert "2026/4/17-self：" in overlay
+    assert "memory_search" not in overlay

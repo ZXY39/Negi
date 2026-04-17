@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -2868,6 +2869,29 @@ async def test_memory_delete_builds_and_calls_precise_delete(tmp_path: Path):
     assert manager.last_call['channel'] == 'cli'
     assert manager.last_call['chat_id'] == 'demo'
     assert manager.last_call['fact_ids'] == ['fact-1']
+
+
+@pytest.mark.asyncio
+async def test_memory_note_loads_note_body_by_short_ref(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    note_dir = workspace / "memory" / "notes"
+    note_dir.mkdir(parents=True, exist_ok=True)
+    (note_dir / "note_a1b2.md").write_text("# note\n详细规则\n", encoding="utf-8")
+
+    assert importlib.util.find_spec("g3ku.agent.memory_agent_runtime") is not None
+    assert importlib.util.find_spec("g3ku.agent.tools.memory_note") is not None
+
+    from g3ku.agent.memory_agent_runtime import MemoryManager
+    from g3ku.agent.tools.memory_note import MemoryNoteTool
+    from g3ku.config.schema import MemoryToolsConfig
+
+    manager = MemoryManager(workspace, MemoryToolsConfig())
+    try:
+        tool = MemoryNoteTool(manager=manager)
+        payload = await tool.execute(ref="note_a1b2")
+        assert "详细规则" in payload
+    finally:
+        manager.close()
 
 
 def test_resource_manager_infers_memory_manager_from_main_task_service_for_memory_write(tmp_path: Path):
