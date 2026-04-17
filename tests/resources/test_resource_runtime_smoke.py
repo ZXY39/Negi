@@ -2635,6 +2635,7 @@ async def test_memory_search_reads_manifest_settings(tmp_path: Path):
     assert manager.last_call['limit'] == 11
 
 
+@pytest.mark.xfail(reason="memory_write contract is being replaced by queued markdown memory requests")
 @pytest.mark.asyncio
 async def test_memory_write_uses_structured_fact_contract(tmp_path: Path):
     workspace = tmp_path / 'workspace'
@@ -2692,6 +2693,7 @@ async def test_memory_write_uses_structured_fact_contract(tmp_path: Path):
     assert item_properties['merge_mode']['enum'] == ['merge']
 
 
+@pytest.mark.xfail(reason="memory_write no longer parses structured fact payloads")
 @pytest.mark.asyncio
 async def test_memory_write_restores_json_like_value_strings_before_upsert(tmp_path: Path):
     workspace = tmp_path / 'workspace'
@@ -2738,6 +2740,7 @@ async def test_memory_write_restores_json_like_value_strings_before_upsert(tmp_p
     assert manager.last_call['facts'][0]['merge_mode'] == 'merge'
 
 
+@pytest.mark.xfail(reason="memory_write no longer parses structured fact payloads")
 @pytest.mark.asyncio
 async def test_memory_write_parses_json_object_string_value_before_upsert(tmp_path: Path):
     workspace = tmp_path / 'workspace'
@@ -2788,6 +2791,7 @@ async def test_memory_write_parses_json_object_string_value_before_upsert(tmp_pa
     }
 
 
+@pytest.mark.xfail(reason="memory_write no longer parses structured fact payloads")
 @pytest.mark.asyncio
 async def test_memory_write_keeps_plain_string_value_unchanged(tmp_path: Path):
     workspace = tmp_path / 'workspace'
@@ -2834,6 +2838,7 @@ async def test_memory_write_keeps_plain_string_value_unchanged(tmp_path: Path):
     assert manager.last_call['facts'][0]['value'] == 'pnpm'
 
 
+@pytest.mark.xfail(reason="memory_delete contract is being replaced by queued visible-text deletion")
 @pytest.mark.asyncio
 async def test_memory_delete_builds_and_calls_precise_delete(tmp_path: Path):
     workspace = tmp_path / 'workspace'
@@ -3445,3 +3450,79 @@ async def test_agent_browser_missing_cli_returns_install_guidance(tmp_path: Path
     assert payload['install_root'] == str((workspace / 'externaltools' / 'agent_browser').resolve(strict=False))
     assert payload['temp_root'] == str((workspace / 'temp' / 'agent_browser').resolve(strict=False))
     assert 'load_tool_context(tool_id="agent_browser")' in payload['next_actions']
+
+
+@pytest.mark.asyncio
+async def test_memory_write_queues_explicit_memory_request(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'memory_write', workspace / 'tools' / 'memory_write')
+
+    class _FakeMemoryManager:
+        def __init__(self):
+            self.last_call = None
+
+        async def enqueue_write_request(self, **kwargs):
+            self.last_call = kwargs
+            return {'ok': True, 'request_id': 'write_req_1', 'status': 'queued'}
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    descriptor = registry.discover().tools['memory_write']
+    manager = _FakeMemoryManager()
+    tool = ResourceLoader(workspace).load_tool(
+        descriptor,
+        services={'loop': SimpleNamespace(_store_enabled=False), 'memory_manager': manager},
+    )
+
+    payload = json.loads(
+        await tool.execute(
+            content='默认创建文件时遵循项目格式要求',
+            __g3ku_runtime={'session_key': 'cli:demo'},
+        )
+    )
+
+    assert payload['ok'] is True
+    assert payload['status'] == 'queued'
+    assert manager.last_call['session_key'] == 'cli:demo'
+    assert manager.last_call['decision_source'] == 'user'
+    assert manager.last_call['trigger_source'] == 'memory_write_tool'
+    assert manager.last_call['payload_text'] == '默认创建文件时遵循项目格式要求'
+
+
+@pytest.mark.asyncio
+async def test_memory_delete_queues_visible_text_deletion_request(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'memory_delete', workspace / 'tools' / 'memory_delete')
+
+    class _FakeMemoryManager:
+        def __init__(self):
+            self.last_call = None
+
+        async def enqueue_delete_request(self, **kwargs):
+            self.last_call = kwargs
+            return {'ok': True, 'request_id': 'delete_req_1', 'status': 'queued'}
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    descriptor = registry.discover().tools['memory_delete']
+    manager = _FakeMemoryManager()
+    tool = ResourceLoader(workspace).load_tool(
+        descriptor,
+        services={'loop': SimpleNamespace(_store_enabled=False), 'memory_manager': manager},
+    )
+
+    payload = json.loads(
+        await tool.execute(
+            target_text='2026/4/17-user：创建文件默认格式要求，见 ref:note_a1b2',
+            __g3ku_runtime={'session_key': 'cli:demo'},
+        )
+    )
+
+    assert payload['ok'] is True
+    assert payload['status'] == 'queued'
+    assert manager.last_call['session_key'] == 'cli:demo'
+    assert manager.last_call['decision_source'] == 'user'
+    assert manager.last_call['trigger_source'] == 'memory_delete_tool'
+    assert manager.last_call['payload_text'] == '2026/4/17-user：创建文件默认格式要求，见 ref:note_a1b2'
