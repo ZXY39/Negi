@@ -5,16 +5,19 @@ Start here when you are new to the repository or when a change crosses subsystem
 ## Reading Order
 
 1. `runtime-overview.md`
-2. `tool-and-skill-system.md`
-3. `web-and-admin.md`
-4. `heartbeat-system.md` when the change touches heartbeat, long-running CEO tool wakeups, or live reminder behavior
-5. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
-6. `china-channels.md` when the change touches channel runtime or the Python/Node bridge
+2. `context-and-cache-troubleshooting.md` when the change touches prompt caching, context retention, append-only request growth, or request artifact forensics
+3. `tool-and-skill-system.md`
+4. `web-and-admin.md`
+5. `heartbeat-system.md` when the change touches heartbeat, long-running CEO tool wakeups, or live reminder behavior
+6. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
+7. `china-channels.md` when the change touches channel runtime or the Python/Node bridge
 
 ## Topic Guide
 
 - `runtime-overview.md`
   Use for session lifecycle, frontdoor/runtime flow, tool execution flow, and cross-module runtime behavior.
+- `context-and-cache-troubleshooting.md`
+  Use for prompt cache misses, context shrink/continuity regressions, actual-request artifact forensics, and before changing node or CEO context strategies.
 - `tool-and-skill-system.md`
   Use for candidate tools, hydrated tools, skill loading, tool RBAC, and runtime tool contracts.
 - `web-and-admin.md`

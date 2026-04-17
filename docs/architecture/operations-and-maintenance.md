@@ -2,6 +2,11 @@
 
 本文档从“接手项目后怎么跑、怎么验证、怎么排障”的角度总结维护要点。
 
+如果问题与 prompt cache 命中、跨 turn 上下文连续性、append-only request growth、或 actual request artifact 对账有关，请同时阅读：
+
+- `runtime-overview.md`
+- `context-and-cache-troubleshooting.md`
+
 ## 1. 基本启动方式
 
 ### CLI
@@ -136,6 +141,22 @@
 - `chunk_count`
 - `last_chunk_kind`
 - `stream_completed_ms` / `stream_failed_ms`
+
+### 缓存命中下降或上下文疑似丢失
+
+先看：
+
+- `docs/architecture/context-and-cache-troubleshooting.md`
+- `.g3ku/web-ceo-requests/`
+- `sessions/`
+- 相关的 paused / inflight snapshot
+
+排障时不要只盯 `Input Tokens`。优先区分：
+
+- `prompt_cache_key_hash` 是否 churn
+- `actual_request_hash` 是否变化
+- `provider_request_body.input` 的公共前缀是否提前断裂
+- usage 记录是否能和本地 actual request artifact 对得上
 
 ### 工具调用异常
 
