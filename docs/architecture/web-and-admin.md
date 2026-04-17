@@ -165,6 +165,18 @@ The current rule is:
 - The next real user turn still filters internal-only history from its local raw history injection.
 - To avoid forgetting that work, heartbeat / cron agent-side raw execution context is expected to flow into the global semantic summary path, so later user turns can recover the important meaning without replaying the entire internal turn transcript.
 
+## Actual Request Debugging Contract
+
+Node detail and latest-context views now expose two different debugging surfaces that maintainers must not mix up.
+
+- The existing node input / projected context view is still a projection-oriented operator surface. It is useful for understanding durable state and task intent, but it is not guaranteed to be the exact request body sent to the provider.
+- The actual provider request is represented separately through `actual_request_ref`, `actual_request_hash`, `actual_request_message_count`, and `actual_tool_schema_hash`.
+- `prompt_cache_key_hash` now means the caller-side cache family key for that turn, not the actual serialized request body.
+- When a cache miss happens, compare `prompt_cache_key_hash` with `actual_request_hash` first:
+  - same family key + different actual request usually means append-only growth, overlay differences, or tool-schema drift inside the same family;
+  - different family key means the stable caller-side family boundary moved.
+- For node troubleshooting, prefer `latest-context` or `actual_request_ref` when you need the exact provider-facing request, and treat the legacy projected input as a separate, compatibility-oriented lens.
+
 ## Verification Pointers
 
 Use these focused checks when validating i18n shell behavior:

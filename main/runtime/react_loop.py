@@ -33,7 +33,7 @@ from g3ku.runtime.tool_watchdog import (
 from main.governance.exec_tool_policy import EXEC_TOOL_EXECUTOR_NAME, EXEC_TOOL_FAMILY_ID
 from main.errors import TaskPausedError, describe_exception
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
-from main.runtime.chat_backend import build_stable_prompt_cache_key
+from main.runtime.chat_backend import build_actual_request_diagnostics, build_stable_prompt_cache_key
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
@@ -255,6 +255,20 @@ class ReActToolLoop:
                 dynamic_contract,
             )
             repair_overlay_text = None
+            actual_request_diagnostics = build_actual_request_diagnostics(
+                request_messages=request_messages,
+                tool_schemas=tool_schemas,
+            )
+            current_model_refs = list(
+                model_refs_supplier() if callable(model_refs_supplier) else model_refs
+            )
+            if not current_model_refs:
+                raise RuntimeError('no model refs configured for node runtime')
+            turn_prompt_cache_key = self._execution_prompt_cache_key(
+                model_messages=model_messages,
+                tool_schemas=tool_schemas,
+                model_refs=current_model_refs,
+            )
             allowed_content_refs = self._collect_content_refs(request_messages)
             self._log_service.update_node_input(task.task_id, node.node_id, json.dumps(model_messages, ensure_ascii=False, indent=2))
             tool_history = analyze_tool_call_history(request_messages)
@@ -306,16 +320,19 @@ class ReActToolLoop:
                         if isinstance(dynamic_contract_payload.get('exec_runtime_policy'), dict)
                         else None
                     ),
+                    'prompt_cache_key_hash': (
+                        hashlib.sha256(str(turn_prompt_cache_key).encode('utf-8')).hexdigest()
+                        if str(turn_prompt_cache_key or '').strip()
+                        else ''
+                    ),
+                    'actual_request_hash': str(actual_request_diagnostics.get('actual_request_hash') or ''),
+                    'actual_request_message_count': int(actual_request_diagnostics.get('actual_request_message_count') or 0),
+                    'actual_tool_schema_hash': str(actual_request_diagnostics.get('actual_tool_schema_hash') or ''),
                     **self._execution_stage_frame_payload(node_kind=node.node_kind, stage_gate=stage_gate),
                     'last_error': '',
                 },
                 publish_snapshot=True,
             )
-            current_model_refs = list(
-                model_refs_supplier() if callable(model_refs_supplier) else model_refs
-            )
-            if not current_model_refs:
-                raise RuntimeError('no model refs configured for node runtime')
             node_turn_lease = None
             node_turn_controller = getattr(self, '_node_turn_controller', None)
             primary_model_ref = str(current_model_refs[0] or '').strip()
@@ -330,11 +347,6 @@ class ReActToolLoop:
                         model_ref=primary_model_ref,
                     ),
                 )
-            turn_prompt_cache_key = self._execution_prompt_cache_key(
-                model_messages=model_messages,
-                tool_schemas=tool_schemas,
-                model_refs=current_model_refs,
-            )
             provider_retry_count = 0
             empty_response_retry_count = 0
             try:
@@ -508,6 +520,7 @@ class ReActToolLoop:
                 prompt_cache_key=turn_prompt_cache_key,
                 request_message_count=getattr(response, 'request_message_count', None),
                 request_message_chars=getattr(response, 'request_message_chars', None),
+                actual_tool_schemas=tool_schemas,
             )
             if response_tool_calls:
                 if xml_repair_attempt_count > 0:

@@ -51,6 +51,7 @@ from main.monitoring.models import (
 from main.monitoring.task_event_writer import TaskEventWriter
 from main.monitoring.task_projector import TaskProjector
 from main.protocol import build_envelope, now_iso
+from main.runtime.chat_backend import build_actual_request_diagnostics
 from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
 from main.token_usage import aggregate_node_token_usage, build_token_usage_from_attempts, merge_token_usage_by_model, merge_token_usage_records
 
@@ -318,9 +319,22 @@ class TaskLogService:
             'callable_tool_snapshots': [],
             'callable_tool_names': [],
             'candidate_tool_names': [],
+            'candidate_tool_items': [],
             'selected_skill_ids': [],
             'candidate_skill_ids': [],
+            'candidate_skill_items': [],
+            'rbac_visible_tool_names': [],
+            'rbac_visible_skill_ids': [],
             'hydrated_executor_state': [],
+            'model_visible_tool_names': [],
+            'hydrated_executor_names': [],
+            'lightweight_tool_ids': [],
+            'model_visible_tool_selection_trace': {},
+            'exec_runtime_policy': {},
+            'prompt_cache_key_hash': '',
+            'actual_request_hash': '',
+            'actual_request_message_count': 0,
+            'actual_tool_schema_hash': '',
             'last_error': '',
         }
 
@@ -875,6 +889,7 @@ class TaskLogService:
         prompt_cache_key: str | None = None,
         request_message_count: int | None = None,
         request_message_chars: int | None = None,
+        actual_tool_schemas: list[dict[str, Any]] | None = None,
     ) -> NodeRecord | None:
         with self._task_lock(task_id):
             current = self._store.get_node(node_id)
@@ -943,6 +958,7 @@ class TaskLogService:
                         delta_usage_by_model=delta_usage_by_model,
                         request_message_count=request_message_count,
                         request_message_chars=request_message_chars,
+                        actual_tool_schemas=actual_tool_schemas,
                     )
                     self._event_writer.append_task_model_call(
                         task_id=task_id,
@@ -1343,6 +1359,7 @@ class TaskLogService:
         delta_usage_by_model: list[Any],
         request_message_count: int | None,
         request_message_chars: int | None,
+        actual_tool_schemas: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         message_list = list(model_messages or [])
         request_list = list(request_messages or message_list)
@@ -1360,6 +1377,10 @@ class TaskLogService:
             model_payload = json.dumps(message_list, ensure_ascii=False, default=str)
         except Exception:
             model_payload = str(message_list)
+        actual_request_diagnostics = build_actual_request_diagnostics(
+            request_messages=request_list,
+            tool_schemas=actual_tool_schemas,
+        )
         return {
             'task_id': task_id,
             'node_id': node_id,
@@ -1376,6 +1397,8 @@ class TaskLogService:
             'prepared_message_hash': TaskLogService._short_hash(prepared_payload),
             'model_prefix_hash': TaskLogService._message_prefix_hash(message_list),
             'prepared_prefix_hash': TaskLogService._message_prefix_hash(request_list),
+            'tool_signature_hash': str(actual_request_diagnostics.get('actual_tool_schema_hash') or ''),
+            **actual_request_diagnostics,
             'delta_usage': delta_usage.model_dump(mode='json'),
             'delta_usage_by_model': [item.model_dump(mode='json') for item in list(delta_usage_by_model or [])],
         }
@@ -2337,6 +2360,15 @@ class TaskLogService:
             if current is not None:
                 payload = dict(current.payload or {})
                 latest_messages_ref = str(payload.get('messages_ref') or '').strip()
+                latest_prompt_cache_key_hash = str(payload.get('prompt_cache_key_hash') or '').strip()
+                latest_actual_request_hash = str(payload.get('actual_request_hash') or '').strip()
+                latest_actual_request_message_count = int(payload.get('actual_request_message_count') or 0)
+                latest_actual_tool_schema_hash = str(payload.get('actual_tool_schema_hash') or '').strip()
+            else:
+                latest_prompt_cache_key_hash = ''
+                latest_actual_request_hash = ''
+                latest_actual_request_message_count = 0
+                latest_actual_tool_schema_hash = ''
             if latest_messages_ref:
                 node = self._store.get_node(node_id)
                 if node is not None and str(node.task_id or '').strip() == str(task.task_id or '').strip():
@@ -2347,6 +2379,10 @@ class TaskLogService:
                                 'metadata': {
                                     **dict(record.metadata or {}),
                                     'latest_runtime_messages_ref': latest_messages_ref,
+                                    'latest_runtime_prompt_cache_key_hash': latest_prompt_cache_key_hash,
+                                    'latest_runtime_actual_request_hash': latest_actual_request_hash,
+                                    'latest_runtime_actual_request_message_count': latest_actual_request_message_count,
+                                    'latest_runtime_actual_tool_schema_hash': latest_actual_tool_schema_hash,
                                 },
                                 'updated_at': now_iso(),
                             }
@@ -2636,6 +2672,33 @@ class TaskLogService:
         latest_spawn_round_id, direct_child_results = self._latest_direct_child_results_payload(node)
         spawn_review_rounds = self._spawn_review_rounds_payload(node)
         execution_trace_ref = str(preserved_execution_trace_ref or '').strip()
+        runtime_frame = self.read_runtime_frame(node.task_id, node.node_id) or {}
+        node_metadata = dict(node.metadata or {})
+        actual_request_ref = str(
+            runtime_frame.get('messages_ref')
+            or node_metadata.get('latest_runtime_messages_ref')
+            or ''
+        ).strip()
+        prompt_cache_key_hash = str(
+            runtime_frame.get('prompt_cache_key_hash')
+            or node_metadata.get('latest_runtime_prompt_cache_key_hash')
+            or ''
+        ).strip()
+        actual_request_hash = str(
+            runtime_frame.get('actual_request_hash')
+            or node_metadata.get('latest_runtime_actual_request_hash')
+            or ''
+        ).strip()
+        actual_request_message_count = int(
+            runtime_frame.get('actual_request_message_count')
+            or node_metadata.get('latest_runtime_actual_request_message_count')
+            or 0
+        )
+        actual_tool_schema_hash = str(
+            runtime_frame.get('actual_tool_schema_hash')
+            or node_metadata.get('latest_runtime_actual_tool_schema_hash')
+            or ''
+        ).strip()
         if externalize_execution_trace:
             execution_trace_ref = self._externalize_execution_trace(node, execution_trace)
         return TaskProjectionNodeDetailRecord(
@@ -2674,6 +2737,11 @@ class TaskLogService:
                 'updated_at': str(node.updated_at or ''),
                 'execution_trace_summary': execution_trace_summary,
                 'execution_trace_ref': execution_trace_ref,
+                'actual_request_ref': actual_request_ref,
+                'prompt_cache_key_hash': prompt_cache_key_hash,
+                'actual_request_hash': actual_request_hash,
+                'actual_request_message_count': actual_request_message_count,
+                'actual_tool_schema_hash': actual_tool_schema_hash,
                 'latest_spawn_round_id': latest_spawn_round_id,
                 'direct_child_results': direct_child_results,
                 'spawn_review_rounds': spawn_review_rounds,
@@ -3138,6 +3206,10 @@ class TaskLogService:
                     if isinstance(next_frame.get('exec_runtime_policy'), dict)
                     else {}
                 ),
+                'prompt_cache_key_hash': str(next_frame.get('prompt_cache_key_hash') or '').strip(),
+                'actual_request_hash': str(next_frame.get('actual_request_hash') or '').strip(),
+                'actual_request_message_count': int(next_frame.get('actual_request_message_count') or 0),
+                'actual_tool_schema_hash': str(next_frame.get('actual_tool_schema_hash') or '').strip(),
                 'last_error': str(next_frame.get('last_error') or ''),
                 'messages_ref': str(next_frame.get('messages_ref') or ''),
                 'messages_count': int(next_frame.get('messages_count') or 0),
@@ -3285,6 +3357,10 @@ class TaskLogService:
                 if isinstance(payload.get('exec_runtime_policy'), dict)
                 else {}
             ),
+            'prompt_cache_key_hash': str(payload.get('prompt_cache_key_hash') or '').strip(),
+            'actual_request_hash': str(payload.get('actual_request_hash') or '').strip(),
+            'actual_request_message_count': int(payload.get('actual_request_message_count') or 0),
+            'actual_tool_schema_hash': str(payload.get('actual_tool_schema_hash') or '').strip(),
             'last_error': str(payload.get('last_error') or ''),
         }
 
@@ -3807,6 +3883,14 @@ class TaskLogService:
                 for item in list(payload.get('candidate_tool_names') or [])
                 if str(item or '').strip()
             ],
+            'candidate_tool_items': [
+                {
+                    'tool_id': str(item.get('tool_id') or '').strip(),
+                    'description': str(item.get('description') or '').strip(),
+                }
+                for item in list(payload.get('candidate_tool_items') or [])
+                if isinstance(item, dict) and str(item.get('tool_id') or '').strip()
+            ],
             'selected_skill_ids': [
                 str(item or '').strip()
                 for item in list(payload.get('selected_skill_ids') or [])
@@ -3815,6 +3899,24 @@ class TaskLogService:
             'candidate_skill_ids': [
                 str(item or '').strip()
                 for item in list(payload.get('candidate_skill_ids') or [])
+                if str(item or '').strip()
+            ],
+            'candidate_skill_items': [
+                {
+                    'skill_id': str(item.get('skill_id') or '').strip(),
+                    'description': str(item.get('description') or '').strip(),
+                }
+                for item in list(payload.get('candidate_skill_items') or [])
+                if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
+            ],
+            'rbac_visible_tool_names': [
+                str(item or '').strip()
+                for item in list(payload.get('rbac_visible_tool_names') or [])
+                if str(item or '').strip()
+            ],
+            'rbac_visible_skill_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('rbac_visible_skill_ids') or [])
                 if str(item or '').strip()
             ],
             'hydrated_executor_state': [
@@ -3838,6 +3940,15 @@ class TaskLogService:
                 if str(item or '').strip()
             ],
             'model_visible_tool_selection_trace': dict(payload.get('model_visible_tool_selection_trace') or {}),
+            'exec_runtime_policy': (
+                dict(payload.get('exec_runtime_policy') or {})
+                if isinstance(payload.get('exec_runtime_policy'), dict)
+                else {}
+            ),
+            'prompt_cache_key_hash': str(payload.get('prompt_cache_key_hash') or '').strip(),
+            'actual_request_hash': str(payload.get('actual_request_hash') or '').strip(),
+            'actual_request_message_count': int(payload.get('actual_request_message_count') or 0),
+            'actual_tool_schema_hash': str(payload.get('actual_tool_schema_hash') or '').strip(),
             'last_error': str(payload.get('last_error') or ''),
         }
 
@@ -3901,6 +4012,10 @@ class TaskLogService:
                 if str(item or '').strip()
             ],
             'model_visible_tool_selection_trace': dict(payload.get('model_visible_tool_selection_trace') or {}),
+            'prompt_cache_key_hash': str(payload.get('prompt_cache_key_hash') or '').strip(),
+            'actual_request_hash': str(payload.get('actual_request_hash') or '').strip(),
+            'actual_request_message_count': int(payload.get('actual_request_message_count') or 0),
+            'actual_tool_schema_hash': str(payload.get('actual_tool_schema_hash') or '').strip(),
         }
 
     def _notify_task_terminal(self, task: TaskRecord, *, previous_status: str) -> None:

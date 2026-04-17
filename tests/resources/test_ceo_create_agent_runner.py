@@ -395,7 +395,7 @@ def test_create_agent_runner_resolve_ceo_model_refs_prefers_cache_capable_refs(m
     ]
 
 
-def test_build_prompt_cache_diagnostics_surfaces_cache_capability_and_prefix_reason() -> None:
+def test_build_prompt_cache_diagnostics_surfaces_prefix_reason_and_actual_request_fields() -> None:
     diagnostics = build_prompt_cache_diagnostics(
         stable_messages=[{"role": "system", "content": "stable system"}],
         dynamic_appendix_messages=[{"role": "assistant", "content": "dynamic appendix"}],
@@ -406,14 +406,28 @@ def test_build_prompt_cache_diagnostics_surfaces_cache_capability_and_prefix_rea
         cache_family_revision="exp:rev-7",
         prompt_lane="ceo_frontdoor",
         prefix_invalidation_reason="cache_family_revision_changed",
+        actual_request_messages=[
+            {"role": "system", "content": "stable system"},
+            {"role": "assistant", "content": "dynamic appendix"},
+            {"role": "user", "content": "current user turn"},
+        ],
+        actual_tool_schemas=[
+            {
+                "name": "exec",
+                "description": "",
+                "parameters": {"type": "object"},
+            }
+        ],
     )
 
-    assert diagnostics["provider_cache_capable"] is True
     assert diagnostics["prompt_lane"] == "ceo_frontdoor"
     assert diagnostics["cache_family_revision"] == "exp:rev-7"
     assert diagnostics["stable_prefix_hash"]
     assert diagnostics["dynamic_appendix_hash"]
     assert diagnostics["prefix_invalidation_reason"] == "cache_family_revision_changed"
+    assert diagnostics["actual_request_message_count"] == 3
+    assert str(diagnostics["actual_request_hash"]).strip()
+    assert str(diagnostics["actual_tool_schema_hash"]).strip()
 
 
 def test_ceo_runner_always_selects_create_agent_impl(monkeypatch) -> None:

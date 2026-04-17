@@ -151,6 +151,11 @@ class TaskNodeDetail(Model):
     input: str = ''
     input_preview: str = ''
     input_ref: str = ''
+    actual_request_ref: str = ''
+    prompt_cache_key_hash: str = ''
+    actual_request_hash: str = ''
+    actual_request_message_count: int = 0
+    actual_tool_schema_hash: str = ''
     output: str = ''
     output_preview: str = ''
     output_ref: str = ''

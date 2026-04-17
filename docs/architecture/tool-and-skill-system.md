@@ -281,6 +281,13 @@ Maintenance note for hydration LRU:
 
 - restore / recovery 现在只接受 frame 或 CEO/session state 中的 canonical callable/candidate/hydrated/skill 字段；缺失时直接视为“运行时工具合同损坏/缺失”，不再回退 bootstrap 或旧动态文本。
 
+## Cache Diagnostics Versus Tool Drift
+
+- Callable/candidate/hydrated changes still affect the actual provider request and may change the observed tool schema hash for that round.
+- Those same changes no longer automatically rotate the caller-side prompt cache family. Family changes are reserved for stable-prefix rewrites, lane or model switches, explicit cache-family revision bumps, and other deliberate reset boundaries.
+- For CEO/frontdoor and node execution alike, treat `tool_signature_hash` or `actual_tool_schema_hash` as observability fields, not as proof that a new prompt-cache family should exist.
+- When debugging a cache drop, first separate "the family changed" from "the actual request changed". Tool exposure drift belongs to the second category unless it also rewrites the stable prefix.
+
 ## 5. 当前系统为什么这么设计
 
 从最近的 candidate pool / hydration 重构可以看出，旧模型存在几个问题：

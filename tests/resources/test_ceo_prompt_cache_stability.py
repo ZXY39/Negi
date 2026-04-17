@@ -192,6 +192,52 @@ def test_frontdoor_prompt_cache_key_ignores_dynamic_tool_contract_changes() -> N
     assert _field(first, "request_messages") != _field(second, "request_messages")
 
 
+def test_frontdoor_prompt_cache_key_ignores_tool_schema_changes_when_stable_prefix_matches() -> None:
+    from g3ku.runtime.frontdoor.prompt_cache_contract import build_frontdoor_prompt_contract
+
+    stable_messages = [
+        {"role": "system", "content": "stable system"},
+        {"role": "user", "content": "stable bootstrap"},
+    ]
+
+    first = build_frontdoor_prompt_contract(
+        scope="ceo_frontdoor",
+        provider_model="openai:gpt-4.1",
+        stable_messages=stable_messages,
+        dynamic_appendix_messages=[
+            {"role": "assistant", "content": "## Retrieved Context\n- memory"}
+        ],
+        tool_schemas=[
+            {
+                "name": "web_fetch",
+                "description": "",
+                "parameters": {"type": "object"},
+            }
+        ],
+        cache_family_revision="frontdoor:v1",
+    )
+    second = build_frontdoor_prompt_contract(
+        scope="ceo_frontdoor",
+        provider_model="openai:gpt-4.1",
+        stable_messages=stable_messages,
+        dynamic_appendix_messages=[
+            {"role": "assistant", "content": "## Retrieved Context\n- memory"}
+        ],
+        tool_schemas=[
+            {
+                "name": "filesystem_edit",
+                "description": "",
+                "parameters": {"type": "object"},
+            }
+        ],
+        cache_family_revision="frontdoor:v1",
+    )
+
+    assert _field(first, "request_messages") == _field(second, "request_messages")
+    assert _field(first, "prompt_cache_key") == _field(second, "prompt_cache_key")
+    assert _field(first, "diagnostics")["actual_tool_schema_hash"] != _field(second, "diagnostics")["actual_tool_schema_hash"]
+
+
 def test_frontdoor_prompt_contract_appends_dynamic_appendix_at_tail_for_main_lane() -> None:
     from g3ku.runtime.frontdoor.prompt_cache_contract import build_frontdoor_prompt_contract
 

@@ -729,6 +729,11 @@ async def test_ceo_frontdoor_call_model_rebuilds_request_messages_from_stable_an
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
     captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        prompt_cache_contract,
+        "build_session_prompt_cache_key",
+        lambda **kwargs: "rebuilt-cache-key",
+    )
 
     monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
 
@@ -805,8 +810,12 @@ async def test_ceo_frontdoor_call_model_rebuilds_request_messages_from_stable_an
         for message in request_messages
         if str(message.get("role") or "").strip().lower() == "user"
     )
-    assert captured["prompt_cache_key"] == "cache-key"
+    assert captured["prompt_cache_key"] == "rebuilt-cache-key"
     assert update["iteration"] == 1
+    assert update["prompt_cache_key"] == "rebuilt-cache-key"
+    assert str(update["prompt_cache_diagnostics"]["prompt_cache_key_hash"] or "").strip()
+    assert str(update["prompt_cache_diagnostics"]["actual_request_hash"] or "").strip()
+    assert update["prompt_cache_diagnostics"]["actual_request_message_count"] == len(request_messages)
 
 
 @pytest.mark.asyncio
@@ -1149,6 +1158,12 @@ async def test_ceo_frontdoor_prepare_turn_records_prompt_cache_diagnostics(
     assert diagnostics["overlay_present"] is True
     assert diagnostics["overlay_section_count"] == 1
     assert str(diagnostics["overlay_text_hash"] or "").strip()
+    assert str(diagnostics["actual_request_hash"] or "").strip()
+    assert diagnostics["actual_request_message_count"] == (
+        len(list(state_update["messages"] or []))
+        + len(list(state_update["dynamic_appendix_messages"] or []))
+    )
+    assert str(diagnostics["actual_tool_schema_hash"] or "") == str(diagnostics["tool_signature_hash"] or "")
 
 
 @pytest.mark.asyncio

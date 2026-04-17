@@ -1838,6 +1838,32 @@ def test_prompt_cache_key_changes_when_stage_context_blocks_change() -> None:
     assert first != second
 
 
+def test_prompt_cache_key_ignores_tool_schema_changes_when_messages_match() -> None:
+    messages = [
+        {'role': 'system', 'content': 'system'},
+        {'role': 'user', 'content': '{"task_id":"task-1","goal":"demo"}'},
+    ]
+    tools_a = [
+        {
+            'name': 'web_fetch',
+            'description': '',
+            'parameters': {'type': 'object'},
+        }
+    ]
+    tools_b = [
+        {
+            'name': 'filesystem_edit',
+            'description': '',
+            'parameters': {'type': 'object'},
+        }
+    ]
+
+    first = build_stable_prompt_cache_key(messages, tools_a, 'model-a')
+    second = build_stable_prompt_cache_key(messages, tools_b, 'model-a')
+
+    assert first == second
+
+
 def test_submit_final_result_tool_schema_is_hard_switched_to_final_or_blocked() -> None:
     tool = _submit_final_result_tool()
 

@@ -283,6 +283,8 @@ def build_frontdoor_prompt_contract(
         overlay_text=normalized_overlay_text,
         overlay_section_count=overlay_section_count,
         cache_family_revision=normalized_cache_family_revision,
+        actual_request_messages=normalized_request_messages,
+        actual_tool_schemas=list(tool_schemas or []),
     )
     return FrontdoorPromptContract(
         request_messages=normalized_request_messages,

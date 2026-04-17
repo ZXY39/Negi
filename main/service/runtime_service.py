@@ -5871,6 +5871,18 @@ class MainRuntimeService:
         if detail is None:
             return None
         item = self._repair_legacy_display_payload(detail.model_dump(mode='json'))
+        latest_context = self.get_node_latest_context_payload(normalized_task_id, node_id)
+        if latest_context is not None:
+            if not str(item.get('actual_request_ref') or '').strip():
+                item['actual_request_ref'] = str(latest_context.get('ref') or '').strip()
+            if not str(item.get('prompt_cache_key_hash') or '').strip():
+                item['prompt_cache_key_hash'] = str(latest_context.get('prompt_cache_key_hash') or '').strip()
+            if not str(item.get('actual_request_hash') or '').strip():
+                item['actual_request_hash'] = str(latest_context.get('actual_request_hash') or '').strip()
+            if not int(item.get('actual_request_message_count') or 0):
+                item['actual_request_message_count'] = int(latest_context.get('actual_request_message_count') or 0)
+            if not str(item.get('actual_tool_schema_hash') or '').strip():
+                item['actual_tool_schema_hash'] = str(latest_context.get('actual_tool_schema_hash') or '').strip()
         if normalized_detail_level == 'summary':
             item.pop('execution_trace', None)
         else:
@@ -5890,11 +5902,32 @@ class MainRuntimeService:
             return None
         frame = self.store.get_task_runtime_frame(normalized_task_id, node_id)
         ref = ''
+        prompt_cache_key_hash = ''
+        actual_request_hash = ''
+        actual_request_message_count = 0
+        actual_tool_schema_hash = ''
         if frame is not None:
-            ref = str((frame.payload or {}).get('messages_ref') or '').strip()
+            frame_payload = dict(frame.payload or {})
+            ref = str(frame_payload.get('messages_ref') or '').strip()
+            prompt_cache_key_hash = str(frame_payload.get('prompt_cache_key_hash') or '').strip()
+            actual_request_hash = str(frame_payload.get('actual_request_hash') or '').strip()
+            actual_request_message_count = int(frame_payload.get('actual_request_message_count') or 0)
+            actual_tool_schema_hash = str(frame_payload.get('actual_tool_schema_hash') or '').strip()
         if not ref:
             metadata = dict(node.metadata or {})
             ref = str(metadata.get('latest_runtime_messages_ref') or '').strip()
+            prompt_cache_key_hash = str(
+                prompt_cache_key_hash or metadata.get('latest_runtime_prompt_cache_key_hash') or ''
+            ).strip()
+            actual_request_hash = str(
+                actual_request_hash or metadata.get('latest_runtime_actual_request_hash') or ''
+            ).strip()
+            actual_request_message_count = int(
+                actual_request_message_count or metadata.get('latest_runtime_actual_request_message_count') or 0
+            )
+            actual_tool_schema_hash = str(
+                actual_tool_schema_hash or metadata.get('latest_runtime_actual_tool_schema_hash') or ''
+            ).strip()
         resolver = getattr(self.log_service, 'resolve_content_ref', None)
         content = str(resolver(ref) or '') if callable(resolver) and ref else ''
         return {
@@ -5907,6 +5940,10 @@ class MainRuntimeService:
             'updated_at': str(node.updated_at or ''),
             'ref': ref,
             'content': content,
+            'prompt_cache_key_hash': prompt_cache_key_hash,
+            'actual_request_hash': actual_request_hash,
+            'actual_request_message_count': actual_request_message_count,
+            'actual_tool_schema_hash': actual_tool_schema_hash,
         }
 
     def record_node_file_change(self, task_id: str, node_id: str, *, path: str, change_type: str) -> None:

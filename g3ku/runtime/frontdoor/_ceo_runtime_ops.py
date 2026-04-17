@@ -26,6 +26,7 @@ from g3ku.runtime.semantic_context_summary import default_semantic_context_state
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
 from main.models import normalize_execution_policy_metadata
 from main.protocol import now_iso
+from main.runtime.chat_backend import build_actual_request_diagnostics
 from main.runtime.internal_tools import SubmitNextStageTool
 from main.runtime.stage_budget import (
     STAGE_TOOL_NAME,
@@ -2046,6 +2047,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         langchain_tools = self._build_langchain_tools_for_state(state=state, runtime=runtime)
         request_messages = list(state.get("messages") or [])
+        prompt_cache_key = str(state.get("prompt_cache_key") or "")
+        prompt_cache_diagnostics = dict(state.get("prompt_cache_diagnostics") or {})
+        actual_tool_schemas: list[dict[str, Any]] = []
         if hasattr(self, "_frontdoor_prompt_contract"):
             try:
                 callable_tool_names = self._frontdoor_callable_tool_names_for_state(
@@ -2056,6 +2060,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     tool_schemas = self._selected_tool_schemas(list(callable_tool_names))
                 except Exception:
                     tool_schemas = []
+                actual_tool_schemas = list(tool_schemas or [])
                 request_contract = self._frontdoor_prompt_contract(
                     state=dict(state or {}),
                     provider_model=str((list(state.get("model_refs") or []) or [""])[0] or "").strip(),
@@ -2065,6 +2070,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     overlay_section_count=len(list(state.get("dynamic_appendix_messages") or [])),
                 )
                 request_messages = list(request_contract.request_messages)
+                prompt_cache_key = str(request_contract.prompt_cache_key or prompt_cache_key)
+                prompt_cache_diagnostics = dict(request_contract.diagnostics or {})
             except Exception:
                 if hasattr(self, "_state_message_records"):
                     request_messages = list(getattr(self, "_state_message_records")(request_messages))
@@ -2074,6 +2081,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             request_messages,
             overlay_text=str(state.get("repair_overlay_text") or "").strip(),
         )
+        prompt_cache_diagnostics = {
+            **prompt_cache_diagnostics,
+            **build_actual_request_diagnostics(
+                request_messages=request_messages,
+                tool_schemas=actual_tool_schemas,
+            ),
+        }
         provider_retry_count = 0
         empty_response_retry_count = 0
         while True:
@@ -2083,7 +2097,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     langchain_tools=langchain_tools,
                     model_refs=list(state.get("model_refs") or []),
                     parallel_tool_calls=(bool(state.get("parallel_enabled")) if langchain_tools else None),
-                    prompt_cache_key=str(state.get("prompt_cache_key") or ""),
+                    prompt_cache_key=prompt_cache_key,
                 )
             except Exception as exc:
                 if PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):
@@ -2100,6 +2114,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return {
             "iteration": iteration,
             "repair_overlay_text": None,
+            "prompt_cache_key": prompt_cache_key,
+            "prompt_cache_diagnostics": prompt_cache_diagnostics,
             "response_payload": self._checkpoint_safe_model_response_payload(message),
             "empty_response_retry_count": empty_response_retry_count,
         }

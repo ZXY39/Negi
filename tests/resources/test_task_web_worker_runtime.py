@@ -2173,6 +2173,13 @@ def test_task_model_call_event_includes_cache_diagnostics(tmp_path: Path) -> Non
         prompt_cache_key="stable-cache-key",
         request_message_count=len(request_messages),
         request_message_chars=321,
+        actual_tool_schemas=[
+            {
+                "name": "submit_next_stage",
+                "description": "",
+                "parameters": {"type": "object"},
+            }
+        ],
     )
 
     events = service.store.list_task_events(task_id=record.task_id, limit=20)
@@ -2185,6 +2192,10 @@ def test_task_model_call_event_includes_cache_diagnostics(tmp_path: Path) -> Non
     assert model_call["prepared_message_count"] == 2
     assert str(model_call["model_prefix_hash"]).strip()
     assert str(model_call["prepared_prefix_hash"]).strip()
+    assert str(model_call["actual_request_hash"]).strip()
+    assert model_call["actual_request_message_count"] == 2
+    assert str(model_call["actual_tool_schema_hash"]).strip()
+    assert model_call["tool_signature_hash"] == model_call["actual_tool_schema_hash"]
 
 
 def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path: Path):
@@ -4628,6 +4639,10 @@ def test_node_latest_context_uses_singleton_runtime_frame_artifact_and_freezes_o
             "node_kind": root.node_kind,
             "phase": "before_model",
             "messages": [{"role": "user", "content": "first context"}],
+            "prompt_cache_key_hash": "family-hash-1",
+            "actual_request_hash": "request-hash-1",
+            "actual_request_message_count": 1,
+            "actual_tool_schema_hash": "tool-hash-1",
         },
         publish_snapshot=False,
     )
@@ -4666,6 +4681,10 @@ def test_node_latest_context_uses_singleton_runtime_frame_artifact_and_freezes_o
     assert payload is not None
     assert payload["ref"] == second_ref
     assert "second context" in payload["content"]
+    assert payload["prompt_cache_key_hash"] == "family-hash-1"
+    assert payload["actual_request_hash"] == "request-hash-1"
+    assert payload["actual_request_message_count"] == 1
+    assert payload["actual_tool_schema_hash"] == "tool-hash-1"
 
 
 def test_latest_context_route_returns_payload(tmp_path: Path, monkeypatch):
@@ -4691,6 +4710,10 @@ def test_latest_context_route_returns_payload(tmp_path: Path, monkeypatch):
             "node_kind": root.node_kind,
             "phase": "before_model",
             "messages": [{"role": "user", "content": "route context"}],
+            "prompt_cache_key_hash": "family-hash-route",
+            "actual_request_hash": "request-hash-route",
+            "actual_request_message_count": 1,
+            "actual_tool_schema_hash": "tool-hash-route",
         },
         publish_snapshot=False,
     )
@@ -4707,6 +4730,10 @@ def test_latest_context_route_returns_payload(tmp_path: Path, monkeypatch):
     assert payload["node_id"] == root.node_id
     assert payload["ref"].startswith("artifact:")
     assert "route context" in payload["content"]
+    assert payload["prompt_cache_key_hash"] == "family-hash-route"
+    assert payload["actual_request_hash"] == "request-hash-route"
+    assert payload["actual_request_message_count"] == 1
+    assert payload["actual_tool_schema_hash"] == "tool-hash-route"
 
 
 def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_path: Path):
@@ -4903,6 +4930,10 @@ def test_node_detail_and_latest_context_repair_legacy_mojibake(tmp_path: Path):
             "node_kind": acceptance.node_kind,
             "phase": "before_model",
             "messages": [{"role": "user", "content": "legacy context"}],
+            "prompt_cache_key_hash": "family-hash-acceptance",
+            "actual_request_hash": "request-hash-acceptance",
+            "actual_request_message_count": 1,
+            "actual_tool_schema_hash": "tool-hash-acceptance",
         },
         publish_snapshot=False,
     )
@@ -4912,6 +4943,15 @@ def test_node_detail_and_latest_context_repair_legacy_mojibake(tmp_path: Path):
 
     assert detail_payload is not None
     assert latest_context is not None
+    assert str(detail_payload["item"]["actual_request_ref"]).startswith("artifact:")
+    assert detail_payload["item"]["prompt_cache_key_hash"] == "family-hash-acceptance"
+    assert detail_payload["item"]["actual_request_hash"] == "request-hash-acceptance"
+    assert detail_payload["item"]["actual_request_message_count"] == 1
+    assert detail_payload["item"]["actual_tool_schema_hash"] == "tool-hash-acceptance"
+    assert latest_context["prompt_cache_key_hash"] == "family-hash-acceptance"
+    assert latest_context["actual_request_hash"] == "request-hash-acceptance"
+    assert latest_context["actual_request_message_count"] == 1
+    assert latest_context["actual_tool_schema_hash"] == "tool-hash-acceptance"
     assert detail_payload["item"]["goal"] == f"最终验收:{root.goal}"
     assert detail_payload["item"]["check_result"] == "验收通过"
     assert latest_context["title"] == f"最终验收:{root.goal}"

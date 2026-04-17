@@ -361,6 +361,14 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - CEO/frontdoor 的普通 turn overlay 与 repair overlay 也应保持 append-only：它们属于当前 request 的尾部临时内容，不能再改写已有 stable/request 消息。维护时如果看到 prompt cache key 没变但缓存命中突然下跌，先检查是否有 overlay 被拼回了已有 user 消息。
 - 对维护者来说，这还意味着前门里的 `extension_tool_top_k` 只约束“最终候选工具数”，不是 dense 检索宽度；排查某个工具为何没进 candidate 时，要把 dense/rerank 命中和最终 top-k 截断分开看。
 
+## Prompt Cache Family And Actual Request
+
+- Caller-side prompt cache family is now defined only by the stable prefix plus explicit cache-family revision inputs.
+- Ordinary callable/candidate/hydrated tool drift, stage-gated schema shrink, and loader-driven hydration promotion may still change the actual provider request, but they must not rotate the caller family key by themselves.
+- CEO/frontdoor `call_model` must always send the request rebuilt for that exact turn together with the matching rebuilt `prompt_cache_key`. A rebuilt request paired with an older key is now considered a runtime bug because it hides whether a miss came from family churn or from the actual request changing.
+- Node execution follows the same rule: keep the static prefix append-only at the front, keep the runtime contract at the tail, and debug `prompt_cache_key_hash` separately from `actual_request_hash`.
+- When cache reuse drops while the family key stays stable, first inspect actual request growth or provider prefix reuse limits before blaming caller-side family churn.
+
 ## 7. 新人阅读顺序建议
 
 建议按下面顺序读运行时源码：

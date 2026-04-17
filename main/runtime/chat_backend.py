@@ -6,7 +6,6 @@ from typing import Any, Protocol
 
 from g3ku.config.schema import Config
 from g3ku.providers.provider_factory import build_provider_from_model_key
-from g3ku.providers.registry import find_by_model
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
@@ -64,6 +63,13 @@ def _message_content_signature(message: dict) -> str:
 
 
 def _dynamic_appendix_hash(messages: list[dict[str, Any]] | None) -> str:
+    normalized = sanitize_provider_messages(messages)
+    if not normalized:
+        return ''
+    return hashlib.sha256(_json_compact(normalized).encode('utf-8')).hexdigest()
+
+
+def _request_messages_hash(messages: list[dict[str, Any]] | None) -> str:
     normalized = sanitize_provider_messages(messages)
     if not normalized:
         return ''
@@ -168,6 +174,26 @@ def _tool_signature(tools: list[dict] | None) -> list[dict[str, object]]:
     return signatures
 
 
+def _tool_signature_hash(tools: list[dict] | None) -> str:
+    tool_signatures = _tool_signature(tools)
+    if not tool_signatures:
+        return ''
+    return hashlib.sha256(_json_compact(tool_signatures).encode('utf-8')).hexdigest()
+
+
+def build_actual_request_diagnostics(
+    *,
+    request_messages: list[dict[str, Any]] | None,
+    tool_schemas: list[dict[str, Any]] | None = None,
+) -> dict[str, object]:
+    normalized_request_messages = sanitize_provider_messages(request_messages)
+    return {
+        'actual_request_hash': _request_messages_hash(normalized_request_messages),
+        'actual_request_message_count': len(normalized_request_messages),
+        'actual_tool_schema_hash': _tool_signature_hash(tool_schemas),
+    }
+
+
 def _stage_context_digest(messages: list[dict]) -> str:
     found = False
     digest = hashlib.sha256()
@@ -186,6 +212,7 @@ def _stage_context_digest(messages: list[dict]) -> str:
 
 
 def build_stable_prompt_cache_key(messages: list[dict], tools: list[dict] | None, provider_model: str) -> str:
+    _ = tools
     system_prompt = ''
     bootstrap_user = ''
     for message in list(messages or []):
@@ -199,7 +226,6 @@ def build_stable_prompt_cache_key(messages: list[dict], tools: list[dict] | None
     payload = {
         'system': system_prompt,
         'bootstrap_user': bootstrap_user,
-        'tool_signatures': _tool_signature(tools),
         'provider_model': str(provider_model or '').strip(),
         'stage_context_digest': _stage_context_digest(messages),
     }
@@ -219,9 +245,10 @@ def build_prompt_cache_diagnostics(
     cache_family_revision: str | None = None,
     stable_prefix_hash: str | None = None,
     dynamic_appendix_hash: str | None = None,
-    provider_cache_capable: bool | None = None,
     prompt_lane: str | None = None,
     prefix_invalidation_reason: str | None = None,
+    actual_request_messages: list[dict] | None = None,
+    actual_tool_schemas: list[dict] | None = None,
 ) -> dict[str, object]:
     normalized_messages = list(stable_messages or [])
     normalized_tools = list(tool_schemas or []) or None
@@ -249,16 +276,21 @@ def build_prompt_cache_diagnostics(
         str(dynamic_appendix_hash or '').strip()
         or _dynamic_appendix_hash(normalized_dynamic_messages)
     )
-    if provider_cache_capable is None:
-        provider_spec = find_by_model(str(provider_model or '').strip())
-        resolved_provider_cache_capable = bool(getattr(provider_spec, 'supports_prompt_caching', False))
-    else:
-        resolved_provider_cache_capable = bool(provider_cache_capable)
+    normalized_actual_request_messages = sanitize_provider_messages(
+        actual_request_messages
+        if actual_request_messages is not None
+        else [*normalized_messages, *normalized_dynamic_messages]
+    )
+    normalized_actual_tool_schemas = list(actual_tool_schemas or normalized_tools or []) or None
+    tool_signature_hash = _tool_signature_hash(normalized_tools)
+    actual_request_diagnostics = build_actual_request_diagnostics(
+        request_messages=normalized_actual_request_messages,
+        tool_schemas=normalized_actual_tool_schemas,
+    )
     return {
         'scope': str(scope or '').strip(),
         'prompt_lane': str(prompt_lane or scope or '').strip(),
         'provider_model': str(provider_model or '').strip(),
-        'provider_cache_capable': resolved_provider_cache_capable,
         'cache_family_revision': str(cache_family_revision or '').strip(),
         'prefix_invalidation_reason': str(prefix_invalidation_reason or '').strip(),
         'stable_prompt_signature': resolved_stable_prefix_hash,
@@ -267,11 +299,7 @@ def build_prompt_cache_diagnostics(
         'stable_prefix_message_count': len(normalized_messages),
         'dynamic_appendix_message_count': len(normalized_dynamic_messages),
         'tool_signature_count': len(tool_signatures),
-        'tool_signature_hash': (
-            hashlib.sha256(_json_compact(tool_signatures).encode('utf-8')).hexdigest()
-            if tool_signatures
-            else ''
-        ),
+        'tool_signature_hash': tool_signature_hash,
         'overlay_present': bool(normalized_overlay),
         'overlay_section_count': max(
             len(normalized_overlay_sections),
@@ -287,6 +315,7 @@ def build_prompt_cache_diagnostics(
             if str(prompt_cache_key or '').strip()
             else ''
         ),
+        **actual_request_diagnostics,
     }
 
 
