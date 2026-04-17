@@ -647,6 +647,32 @@ class MemoryCostConfig(Base):
     max_increase_pct: int = 15
 
 
+class MemoryDocumentConfig(Base):
+    """Markdown memory document limits and paths."""
+
+    summary_max_chars: int = Field(default=100, ge=1)
+    document_max_chars: int = Field(default=10000, ge=1)
+    memory_file: str = "memory/MEMORY.md"
+    notes_dir: str = "memory/notes"
+
+
+class MemoryQueueConfig(Base):
+    """Queued memory worker controls."""
+
+    queue_file: str = "memory/queue.jsonl"
+    ops_file: str = "memory/ops.jsonl"
+    batch_max_chars: int = Field(default=50000, ge=1)
+    max_wait_seconds: int = Field(default=3, ge=0)
+    review_interval_turns: int = Field(default=10, ge=1)
+
+
+class MemoryAgentConfig(Base):
+    """Dedicated memory agent execution controls."""
+
+    model_key: str = ""
+    repair_attempt_limit: int = Field(default=1, ge=0)
+
+
 class MemoryAssemblyConfig(Base):
     """Frontdoor dynamic tool and skill selection controls."""
 
@@ -710,6 +736,9 @@ class MemoryToolsConfig(Base):
     catalog_summary: MemoryCatalogSummaryConfig = Field(default_factory=MemoryCatalogSummaryConfig)
     bootstrap_mode: Literal["new_only", "full", "none"] = "new_only"
     retention_days: int | None = None
+    document: MemoryDocumentConfig = Field(default_factory=MemoryDocumentConfig)
+    queue: MemoryQueueConfig = Field(default_factory=MemoryQueueConfig)
+    agent: MemoryAgentConfig = Field(default_factory=MemoryAgentConfig)
 
 
 

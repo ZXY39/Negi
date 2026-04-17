@@ -29,6 +29,20 @@ settings:
   mode: dual
   backend: rag
   arch_version: v2
+  document:
+    summary_max_chars: 100
+    document_max_chars: 10000
+    memory_file: memory/MEMORY.md
+    notes_dir: memory/notes
+  queue:
+    queue_file: memory/queue.jsonl
+    ops_file: memory/ops.jsonl
+    batch_max_chars: 50000
+    max_wait_seconds: 3
+    review_interval_turns: 10
+  agent:
+    model_key: ""
+    repair_attempt_limit: 1
   features:
     unified_context: true
     layered_loading: true
@@ -82,8 +96,9 @@ settings:
     - task_summary
     - task_list
     - task_progress
-    - memory_search
     - memory_write
+    - memory_delete
+    - memory_note
     - message
     - task_runtime
     - skill_access
