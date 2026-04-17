@@ -256,7 +256,7 @@ def test_memory_assembly_config_uses_frontdoor_global_summary_defaults() -> None
     assert not hasattr(cfg, "frontdoor_summarizer_trigger_message_count")
     assert not hasattr(cfg, "frontdoor_summarizer_keep_message_count")
     assert cfg.frontdoor_interrupt_approval_enabled is False
-    assert cfg.frontdoor_interrupt_tool_names == ["message", "create_async_task", "continue_task"]
+    assert cfg.frontdoor_interrupt_tool_names == ["message", "create_async_task"]
     assert cfg.frontdoor_global_summary_trigger_ratio == 0.50
     assert cfg.frontdoor_global_summary_target_ratio == 0.20
     assert cfg.frontdoor_global_summary_min_output_tokens == 2000
@@ -2161,38 +2161,6 @@ async def test_create_agent_runner_keeps_heartbeat_finalize_even_with_empty_acti
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runner_does_not_treat_continue_task_as_task_dispatch() -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(
-            main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id)),
-            tools=SimpleNamespace(get=lambda *_: None),
-        )
-    )
-
-    text = "原任务已切换为续跑模式，系统会继续推进。"
-    result = await runner._graph_normalize_model_output(
-        {
-            "response_payload": {
-                "content": text,
-                "tool_calls": [],
-                "finish_reason": "stop",
-                "error_text": "",
-                "reasoning_content": None,
-                "thinking_blocks": None,
-            },
-            "used_tools": ["continue_task"],
-            "route_kind": "task_continuation",
-            "verified_task_ids": ["task:demo-123"],
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
-
-    assert result["next_step"] == "finalize"
-    assert result["final_output"] == text
-    assert result["route_kind"] == "task_continuation"
-
-
-@pytest.mark.asyncio
 async def test_create_agent_runner_preserves_dispatch_text_for_unverified_task_id_even_when_verified_task_exists() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
@@ -2388,61 +2356,6 @@ async def test_create_agent_postprocess_continues_after_verified_async_dispatch(
     assert result["verified_task_ids"] == ["task:demo-123"]
     assert result["route_kind"] == "task_dispatch"
     assert result["tool_call_payloads"] == []
-
-
-@pytest.mark.asyncio
-async def test_create_agent_postprocess_verifies_continue_task_recreate_before_reply(monkeypatch) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(
-            main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id))
-        )
-    )
-
-    result = await runner._postprocess_completed_tool_cycle(
-        state={
-            "tool_call_payloads": [
-                {
-                    "id": "call-1",
-                    "name": "continue_task",
-                    "arguments": {
-                        "mode": "recreate",
-                        "target_task_id": "task:demo-old",
-                        "continuation_instruction": "Continue the old task with the recovered context.",
-                    },
-                }
-            ],
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "call-1",
-                            "type": "function",
-                            "function": {"name": "continue_task", "arguments": "{}"},
-                        }
-                    ],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": "call-1",
-                    "name": "continue_task",
-                    "content": '{"status":"completed","mode":"recreate","target_task_id":"task:demo-old","continuation_task":{"task_id":"task:demo-new"},"resumed_task":null}',
-                },
-            ],
-            "used_tools": [],
-            "route_kind": "direct_reply",
-            "tool_names": ["continue_task"],
-        }
-    )
-
-    assert result is not None
-    assert "jump_to" not in result
-    assert result["route_kind"] == "task_continuation"
-    assert result["tool_call_payloads"] == []
-    assert result.get("tool_names") in (None, [])
-    assert result.get("repair_overlay_text") in {None, ""}
-    assert result["verified_task_ids"] == []
 
 
 @pytest.mark.asyncio

@@ -200,7 +200,6 @@ def test_selected_tool_manifests_do_not_contain_known_mojibake_tokens() -> None:
         TOOLS_ROOT / 'model_config' / 'resource.yaml',
         TOOLS_ROOT / 'skill-installer' / 'resource.yaml',
         TOOLS_ROOT / 'web_fetch' / 'resource.yaml',
-        TOOLS_ROOT / 'continue_task_cn' / 'resource.yaml',
         TOOLS_ROOT / 'create_async_task_cn' / 'resource.yaml',
         TOOLS_ROOT / 'task_stats_cn' / 'resource.yaml',
     ]

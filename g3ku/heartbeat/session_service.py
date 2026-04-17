@@ -529,50 +529,7 @@ class WebSessionHeartbeatService:
         return text if text else _TASK_TERMINAL_INVALID_OUTPUT_LABEL
 
     def _task_terminal_repair_status_lines(self, events: list[SessionHeartbeatEvent]) -> list[str]:
-        lines: list[str] = []
-        seen: set[str] = set()
-        for event in self._task_terminal_events(events):
-            payload = dict(event.payload or {})
-            task_id = str(payload.get("task_id") or "").strip()
-            if not task_id or task_id in seen:
-                continue
-            seen.add(task_id)
-            continuation_task = self._find_continuation_task_for_event(event)
-            if continuation_task is not None:
-                lines.append(
-                    f"- A continuation task already exists for {task_id}: {str(getattr(continuation_task, 'task_id', '') or '').strip()}. "
-                    "You must explain this to the user in text."
-                )
-                continue
-            latest_task = self._event_current_task(event)
-            if latest_task is None:
-                continue
-            latest_status = str(getattr(latest_task, "status", "") or "").strip().lower()
-            metadata = (
-                getattr(latest_task, "metadata", None)
-                if isinstance(getattr(latest_task, "metadata", None), dict)
-                else {}
-            )
-            continuation_state = str(
-                (metadata or {}).get("continuation_state") or payload.get("continuation_state") or ""
-            ).strip().lower()
-            continuation_mode = str(
-                (metadata or {}).get("continuation_mode") or payload.get("continuation_mode") or ""
-            ).strip().lower()
-            continued_by_task_id = str(
-                (metadata or {}).get("continued_by_task_id") or payload.get("continued_by_task_id") or ""
-            ).strip()
-            if latest_status == "in_progress" and continuation_state == "retried_in_place":
-                lines.append(
-                    f"- Task {task_id} has already been resumed in place via {continuation_mode or 'retry_in_place'}. "
-                    "You must explain that to the user in text."
-                )
-            elif continued_by_task_id:
-                lines.append(
-                    f"- Task {task_id} was already taken over by continuation task {continued_by_task_id}. "
-                    "You must explain that to the user in text."
-                )
-        return lines
+        return []
 
     @staticmethod
     def _task_terminal_fixed_error_text(events: list[SessionHeartbeatEvent]) -> str:
@@ -611,7 +568,6 @@ class WebSessionHeartbeatService:
                     "You must finish this turn by doing one of the following:",
                     "1. Output only the final text to show the user.",
                     "2. Call tools to inspect or organize the result, then output the final text to show the user.",
-                    "3. Call continue_task when autonomous continuation is justified, then output a user-visible explanation of the continuation.",
                     "If the task is already sufficiently complete for the user, summarize the usable conclusion now instead of staying silent.",
                 ]
             )
@@ -764,46 +720,12 @@ class WebSessionHeartbeatService:
         except Exception:
             return None
 
-    def _event_is_business_unpassed(self, event: SessionHeartbeatEvent) -> bool:
-        payload = dict(event.payload or {})
-        failure_class = str(payload.get("failure_class") or "").strip().lower()
-        acceptance_status = str(payload.get("final_acceptance_status") or "").strip().lower()
-        if failure_class == "business_unpassed":
-            return True
-        if acceptance_status == "failed" and str(payload.get("status") or "").strip().lower() == "success":
-            return True
-        latest_task = self._event_current_task(event)
-        if latest_task is None:
-            return False
-        metadata = getattr(latest_task, "metadata", None) if isinstance(getattr(latest_task, "metadata", None), dict) else {}
-        final_acceptance = dict((metadata or {}).get("final_acceptance") or {}) if isinstance((metadata or {}).get("final_acceptance"), dict) else {}
-        return (
-            str((metadata or {}).get("failure_class") or "").strip().lower() == "business_unpassed"
-            or str(final_acceptance.get("status") or "").strip().lower() == "failed"
-        )
-
     @staticmethod
     def _internal_ack_label(*, source: str, reason: str) -> str:
         normalized_source = str(source or "").strip().lower() or "heartbeat"
         normalized_reason = str(reason or "").strip() or "heartbeat_ok"
         suffix = "cron" if normalized_source == "cron" else "心跳"
         return f"已接收来自类型：{normalized_reason}的{suffix}"
-
-    def _find_continuation_task_for_event(self, event: SessionHeartbeatEvent) -> TaskRecord | None:
-        if not self._event_is_business_unpassed(event):
-            return None
-        payload = dict(event.payload or {})
-        session_id = str(payload.get("session_id") or event.session_id or "").strip()
-        task_id = str(payload.get("task_id") or "").strip()
-        if not session_id or not task_id:
-            return None
-        finder = getattr(self._main_task_service, "find_reusable_continuation_task", None)
-        if not callable(finder):
-            return None
-        try:
-            return finder(session_id=session_id, continuation_of_task_id=task_id)
-        except Exception:
-            return None
 
     def _ack_task_terminal_events(self, events: list[SessionHeartbeatEvent]) -> None:
         task_events = self._task_terminal_events(events)
@@ -1206,11 +1128,6 @@ class WebSessionHeartbeatService:
             for event in events
             if str((event.payload or {}).get("task_id") or "").strip()
         ]
-        for event in task_terminal_events:
-            continuation_task = self._find_continuation_task_for_event(event)
-            continuation_task_id = str(getattr(continuation_task, "task_id", "") or "").strip()
-            if continuation_task_id and continuation_task_id not in task_ids:
-                task_ids.append(continuation_task_id)
         task_results = self._task_terminal_result_metadata(events)
         preserved_source, preserved_turn_id = self._clear_preserved_inflight_turn(key, session)
         if preserved_source:

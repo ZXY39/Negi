@@ -845,7 +845,7 @@ def test_memory_assembly_config_exposes_frontdoor_runtime_defaults() -> None:
     assert not hasattr(config, "frontdoor_summarizer_trigger_message_count")
     assert not hasattr(config, "frontdoor_summarizer_keep_message_count")
     assert config.frontdoor_interrupt_approval_enabled is False
-    assert config.frontdoor_interrupt_tool_names == ["message", "create_async_task", "continue_task"]
+    assert config.frontdoor_interrupt_tool_names == ["message", "create_async_task"]
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ const TASK_SUMMARY_IDLE_RECONCILE_MS = 15_000;
 
 
 function taskStatusLabel(task) {
-    return ({ in_progress: "Running", success: "Done", failed: "Failed", blocked: "Paused", continued: "\u5df2\u7eed\u8dd1", unpassed: "\u672a\u901a\u8fc7", unknown: "Unknown" })[taskStatusKey(task)] || "Unknown";
+    return ({ in_progress: "Running", success: "Done", failed: "Failed", blocked: "Paused", unpassed: "\u672a\u901a\u8fc7", unknown: "Unknown" })[taskStatusKey(task)] || "Unknown";
 }
 
 function statusBucketMatches(task, bucketKey) {
@@ -244,8 +244,6 @@ function taskCardPatchEligible(previousTask, nextTask) {
         && !!previousTask.is_unread === !!nextTask.is_unread
         && taskFailureClass(previousTask) === taskFailureClass(nextTask)
         && taskFinalAcceptanceStatus(previousTask) === taskFinalAcceptanceStatus(nextTask)
-        && taskContinuationState(previousTask) === taskContinuationState(nextTask)
-        && taskContinuedByTaskId(previousTask) === taskContinuedByTaskId(nextTask)
         && taskRetryCount(previousTask) === taskRetryCount(nextTask)
         && taskRecoveryNotice(previousTask) === taskRecoveryNotice(nextTask)
         && String(previousTask.title || "") === String(nextTask.title || "")
@@ -617,7 +615,6 @@ function renderTasks() {
             return `<div class="pc-metric${isIncreasing ? " is-increasing" : ""}" data-task-metric="${item.key}"><span class="pc-metric-label">${item.label}</span><strong class="pc-metric-value${isIncreasing ? " is-increasing" : ""}" data-task-metric-value="${item.key}">${esc(hasValue ? formatTokenCount(item.value) : "--")}</strong></div>`;
         }).join("");
         const cardActions = taskCardActions(task);
-        const continuationSummary = taskContinuationSummary(task);
         const el = document.createElement("div");
         el.className = `project-card${selected ? " is-selected" : ""}${S.multiSelectMode ? " is-multi-mode" : ""}`;
         el.dataset.taskId = taskId;
@@ -649,7 +646,6 @@ function renderTasks() {
             </div>
             <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title" data-task-title title="${esc(task.title || taskId)}">${esc(task.title || taskId)}</h3></div></div>
             <div class="pc-created-at"><span class="pc-field-label">创建时间</span><span class="pc-field-value">${esc(taskCreatedAtText(task))}</span></div>
-            ${continuationSummary ? `<div class="pc-continuation-summary">${esc(continuationSummary)}</div>` : ""}
             <div class="pc-metrics">${metricsMarkup}</div>
         `;
         const toggle = el.querySelector(".project-select-toggle");
@@ -733,14 +729,12 @@ function updateTaskToolbar() {
     const batchButtons = [...(U.taskBatchMenu?.querySelectorAll("[data-batch-action]") || [])];
     batchButtons.forEach((button) => {
         const action = button.dataset.batchAction;
-        const workerReady = !["pause", "resume", "retry"].includes(String(action || "")) || taskWorkerControlsAvailable();
+        const workerReady = !["pause", "resume"].includes(String(action || "")) || taskWorkerControlsAvailable();
         const enabled = workerReady && (action === "pause"
             ? selected.some((task) => canPause(task))
             : action === "resume"
                 ? selected.some((task) => canResume(task))
-                : action === "retry"
-                    ? selected.some((task) => canRetry(task))
-                    : selected.some((task) => canDelete(task)));
+                : selected.some((task) => canDelete(task)));
         button.disabled = S.taskBusy || !enabled;
     });
     setTaskMenuVisibility();
@@ -756,24 +750,18 @@ function taskCardActions(task) {
     const actions = [];
     if (taskWorkerControlsAvailable() && canPause(task)) actions.push("pause");
     if (taskWorkerControlsAvailable() && canResume(task)) actions.push("resume");
-    if (taskWorkerControlsAvailable() && canRetry(task)) actions.push("retry");
-    if (taskIsSuperseded(task)) actions.push("open-continuation");
-    if (canContinueEvaluate(task)) actions.push("continue-evaluate");
     if (canDelete(task)) actions.push("delete");
     return actions.map((action) => ({ action, label: taskActionText(action), tone: taskActionTone(action) }));
 }
 
 function primaryTaskAction(task) {
-    if (taskWorkerControlsAvailable() && canPause(task)) return { action: "pause", label: "暂停", tone: "warn" };
-    if (taskWorkerControlsAvailable() && canResume(task)) return { action: "resume", label: "开始", tone: "success" };
-    if (taskWorkerControlsAvailable() && canRetry(task)) return { action: "retry", label: "重试", tone: "success" };
-    if (taskIsSuperseded(task)) return { action: "open-continuation", label: "查看续跑任务", tone: "success" };
-    if (canContinueEvaluate(task)) return { action: "continue-evaluate", label: "\u8bc4\u4f30\u7eed\u8dd1", tone: "success" };
+    if (taskWorkerControlsAvailable() && canPause(task)) return { action: "pause", label: "\u6682\u505c", tone: "warn" };
+    if (taskWorkerControlsAvailable() && canResume(task)) return { action: "resume", label: "\u5f00\u59cb", tone: "success" };
     return null;
 }
 
 function taskActionText(action) {
-    return ({ pause: "暂停", resume: "开始", retry: "重试", "open-continuation": "查看续跑任务", "continue-evaluate": "\u8bc4\u4f30\u7eed\u8dd1", delete: "删除" }[action] || "操作");
+    return ({ pause: "\u6682\u505c", resume: "\u5f00\u59cb", delete: "\u5220\u9664" }[action] || "\u64cd\u4f5c");
 }
 
 function taskActionSuccessTitle(action) {
@@ -786,19 +774,6 @@ function taskActionFailureTitle(action) {
 
 function taskActionErrorText(action, error) {
     const message = String(error?.message || error || "").trim();
-    if (action === "retry") {
-        if (message.includes("task_not_failed")) return "仅失败任务可重试";
-        if (message.includes("task_not_retryable")) return "\u8be5\u4efb\u52a1\u4e0d\u5141\u8bb8\u91cd\u8bd5";
-        if (message.includes("task_not_found")) return "任务不存在或已被删除";
-    }
-    if (action === "open-continuation") {
-        if (message.includes("task_not_found")) return "续跑任务不存在或已被删除";
-        if (message.includes("continuation_task_missing")) return "该任务暂无已确认的续跑任务";
-    }
-    if (action === "continue-evaluate") {
-        if (message.includes("task_not_unpassed")) return "\u4ec5\u672a\u901a\u8fc7\u9a8c\u6536\u7684\u4efb\u52a1\u53ef\u8bc4\u4f30\u7eed\u8dd1";
-        if (message.includes("task_not_found")) return "任务不存在或已被删除";
-    }
     if (action === "delete") {
         if (message.includes("task_still_stopping")) return "任务仍在停止中，请稍后再删";
         if (message.includes("task_not_deletable") || message.includes("task_not_paused")) return "仅已暂停或已完成的任务可删除";
@@ -808,37 +783,18 @@ function taskActionErrorText(action, error) {
 }
 
 function taskActionRequiresWorker(action) {
-    return ["pause", "resume", "retry"].includes(String(action || "").trim().toLowerCase());
+    return ["pause", "resume"].includes(String(action || "").trim().toLowerCase());
 }
 
 async function requestTaskAction(taskId, action) {
     if (action === "pause") return ApiClient.pauseTask(taskId);
     if (action === "resume") return ApiClient.resumeTask(taskId);
-    if (action === "retry") return ApiClient.retryTask(taskId);
-    if (action === "continue-evaluate") return ApiClient.continueEvaluateTask(taskId);
     if (action === "delete") return ApiClient.deleteTask(taskId);
     throw new Error(`Unsupported task action: ${action}`);
 }
 
 async function runTaskAction(taskId, action, { returnFocus = null } = {}) {
     if (!taskId || !action) return;
-    if (action === "open-continuation") {
-        const normalizedTaskId = String(taskId || "").trim();
-        const task = S.tasksById?.[normalizedTaskId]
-            || (Array.isArray(S.tasks) ? S.tasks.find((item) => String(item?.task_id || "").trim() === normalizedTaskId) : null);
-        const continuationTaskId = taskContinuedByTaskId(task);
-        if (!continuationTaskId) {
-            showToast({ title: taskActionFailureTitle(action), text: taskActionErrorText(action, "continuation_task_missing"), kind: "warn" });
-            return;
-        }
-        try {
-            await openTask(continuationTaskId);
-            showToast({ title: taskActionSuccessTitle(action), text: continuationTaskId, kind: "success" });
-        } catch (e) {
-            showToast({ title: taskActionFailureTitle(action), text: taskActionErrorText(action, e), kind: "error" });
-        }
-        return;
-    }
     if (action === "delete") {
         openConfirm({
             title: "删除任务",
@@ -864,18 +820,11 @@ async function performTaskAction(taskId, action) {
     renderTasksIfVisible();
     try {
         const result = await requestTaskAction(taskId, action);
-        const successText = action === "retry"
-            ? (result?.task_id || taskId)
-            : action === "continue-evaluate"
-                ? (result?.continuation_task?.task_id || result?.task?.task_id || taskId)
-                : taskId;
+        const successText = taskId;
         showToast({ title: taskActionSuccessTitle(action), text: successText, kind: "success" });
         await loadTasks();
         if (action === "delete") {
             handleDeletedTasks([taskId]);
-        } else if (action === "continue-evaluate" && result?.continuation_task?.task_id) {
-            await loadTaskDetail(result.continuation_task.task_id, { preserveView: true, reopenSocket: false });
-            await loadTaskArtifacts();
         } else if (S.currentTaskId === taskId) {
             await loadTaskDetail(taskId, { preserveView: true, reopenSocket: false });
             await loadTaskArtifacts();
@@ -895,7 +844,6 @@ async function runTaskBatchAction(action, { returnFocus = null } = {}) {
     const eligible = selected.filter((task) => {
         if (action === "pause") return canPause(task);
         if (action === "resume") return canResume(task);
-        if (action === "retry") return canRetry(task);
         if (action === "delete") return canDelete(task);
         return false;
     });
@@ -960,10 +908,8 @@ async function performTaskBatchAction(action, eligible) {
             return;
         }
         const successText = action === "delete"
-            ? `已删除 ${succeeded.length} 个任务`
-            : action === "retry"
-                ? `已重试 ${succeeded.length} 个任务`
-                : `${succeeded.length} 个任务已更新`;
+            ? `??? ${succeeded.length} ???`
+            : `${succeeded.length} ??????`;
         showToast({
             title: taskActionSuccessTitle(action),
             text: successText,

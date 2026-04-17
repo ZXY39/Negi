@@ -12,8 +12,14 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 
 - Internal wake/enqueue/scheduling behavior for existing CEO sessions.
 - Session-visible internal turns that may end in `ceo.internal.ack`, `ceo.reply.final`, or `ceo.turn.discard`.
-- The repair/retry path for task-terminal cases that are not allowed to stay silent.
+- The repair/fallback path for task-terminal cases that are not allowed to stay silent.
 - The maintenance boundary between live UI state and durable transcript history for internal turns.
+
+## Task Terminal Repair Contract
+
+- Task-terminal heartbeat only repairs or produces the session reply for an existing terminal event.
+- It no longer auto-runs `continue_task`, no longer creates replacement tasks, and no longer retries failed tasks in place.
+- If a task still needs more work after terminalization, that must come from a later explicit frontdoor/user decision, typically via `create_async_task`.
 
 ## What Heartbeat Does Not Own
 

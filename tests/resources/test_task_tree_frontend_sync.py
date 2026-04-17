@@ -327,7 +327,7 @@ def test_sync_task_tree_header_counts_non_terminal_non_waiting_nodes() -> None:
     assert result["rootActiveNodeCount"] == 2
 
 
-def test_task_status_helpers_treat_unpassed_as_non_failed_and_show_continue_action() -> None:
+def test_task_status_helpers_treat_unpassed_as_non_failed_without_continue_action() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -367,7 +367,6 @@ def test_task_status_helpers_treat_unpassed_as_non_failed_and_show_continue_acti
         console.log(JSON.stringify({
           engineRetry: canRetry(engineFailed),
           unpassedRetry: canRetry(unpassed),
-          unpassedContinue: canContinueEvaluate(unpassed),
           unpassedStatus: taskStatusKey(unpassed),
           unpassedLabel: taskStatusLabel(unpassed),
           unpassedInFailedBucket: statusBucketMatches(unpassed, "failed"),
@@ -377,17 +376,16 @@ def test_task_status_helpers_treat_unpassed_as_non_failed_and_show_continue_acti
         """
     )
 
-    assert result["engineRetry"] is True
+    assert result["engineRetry"] is False
     assert result["unpassedRetry"] is False
-    assert result["unpassedContinue"] is True
     assert result["unpassedStatus"] == "unpassed"
     assert result["unpassedLabel"] == "未通过"
     assert result["unpassedInFailedBucket"] is False
-    assert result["primaryAction"]["action"] == "continue-evaluate"
-    assert result["actions"] == ["continue-evaluate", "delete"]
+    assert result["primaryAction"] is None
+    assert result["actions"] == ["delete"]
 
 
-def test_task_status_helpers_render_recreated_and_retry_in_place_states() -> None:
+def test_task_status_helpers_ignore_legacy_continuation_metadata() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -429,7 +427,7 @@ def test_task_status_helpers_render_recreated_and_retry_in_place_states() -> Non
           status: "in_progress",
           continuation_state: "retried_in_place",
           retry_count: 2,
-          recovery_notice: "本任务遇到异常停止，已回退到稳定步骤继续。",
+          recovery_notice: "legacy recovery notice",
         };
 
         console.log(JSON.stringify({
@@ -450,70 +448,17 @@ def test_task_status_helpers_render_recreated_and_retry_in_place_states() -> Non
     )
 
     assert result["recreatedRetry"] is False
-    assert result["recreatedStatus"] == "continued"
-    assert result["recreatedLabel"] == "已续跑"
-    assert result["recreatedSummary"] == "已续跑到 task:cont-1"
-    assert result["recreatedActions"] == ["open-continuation", "delete"]
-    assert result["recreatedPrimary"]["action"] == "open-continuation"
-    assert result["recreatedDetailLabel"] == "已续跑 · 已续跑到 task:cont-1"
+    assert result["recreatedStatus"] == "failed"
+    assert result["recreatedLabel"] == "Failed"
+    assert result["recreatedSummary"] == ""
+    assert result["recreatedActions"] == ["delete"]
+    assert result["recreatedPrimary"] is None
+    assert result["recreatedDetailLabel"] == "失败"
     assert result["retriedStatus"] == "in_progress"
     assert result["retriedLabel"] == "Running"
-    assert result["retriedSummary"] == "原任务内续跑中 · 第2次 · 恢复自失败快照"
-    assert result["retriedDetailLabel"] == "运行中 · 原任务内续跑中 · 第2次 · 恢复自失败快照"
+    assert result["retriedSummary"] == ""
+    assert result["retriedDetailLabel"] == "运行中"
     assert result["retriedPrimary"]["action"] == "pause"
-
-
-def test_retry_action_refreshes_current_task_detail_after_in_place_retry() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = {
-          taskBusy: false,
-          currentTaskId: "task:retry-me",
-          view: "task-details",
-        };
-        global.U = {};
-        const loadCalls = [];
-        global.taskWorkerControlsAvailable = () => true;
-        global.taskWorkerNoticeText = () => "offline";
-        global.renderTasksIfVisible = () => {};
-        global.refreshTaskWorkerStatus = () => {};
-        global.showToast = () => {};
-        global.loadTasks = async () => { loadCalls.push("loadTasks"); };
-        global.loadTaskDetail = async (taskId, options = {}) => {
-          loadCalls.push({ kind: "detail", taskId, options });
-        };
-        global.loadTaskArtifacts = async () => { loadCalls.push("artifacts"); };
-        global.handleDeletedTasks = () => {};
-        global.openConfirm = () => {};
-        global.ApiClient = {
-          retryTask: async (taskId) => ({ task_id: taskId, status: "in_progress" }),
-        };
-
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const actionStart = tasksCode.indexOf("function taskActionTone");
-        const actionEnd = tasksCode.indexOf("async function runTaskBatchAction");
-        vm.runInThisContext(tasksCode.slice(actionStart, actionEnd));
-
-        performTaskAction("task:retry-me", "retry").then(() => {
-          console.log(JSON.stringify({
-            loadCalls,
-            taskBusy: S.taskBusy,
-          }));
-        });
-        """
-    )
-
-    assert result["taskBusy"] is False
-    assert result["loadCalls"][0] == "loadTasks"
-    assert result["loadCalls"][1] == {
-        "kind": "detail",
-        "taskId": "task:retry-me",
-        "options": {"preserveView": True, "reopenSocket": False},
-    }
-    assert result["loadCalls"][2] == "artifacts"
 
 
 def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels() -> None:

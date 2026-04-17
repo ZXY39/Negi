@@ -600,9 +600,7 @@ function hasManualTreeRoundSelections() {
 }
 
 function taskDetailStatusLabel(task) {
-    const base = ({ in_progress: "运行中", success: "已完成", failed: "失败", blocked: "已暂停", continued: "已续跑", unpassed: "未通过", unknown: "未知" })[taskStatusKey(task)] || "未知";
-    const continuationSummary = typeof taskContinuationSummary === "function" ? taskContinuationSummary(task) : "";
-    return continuationSummary ? `${base} · ${continuationSummary}` : base;
+    return ({ in_progress: "\u8fd0\u884c\u4e2d", success: "\u5df2\u5b8c\u6210", failed: "\u5931\u8d25", blocked: "\u5df2\u6682\u505c", unpassed: "\u672a\u901a\u8fc7", unknown: "\u672a\u77e5" })[taskStatusKey(task)] || "\u672a\u77e5";
 }
 
 function taskInitialPromptText(task = null) {
