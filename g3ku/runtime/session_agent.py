@@ -980,6 +980,18 @@ class RuntimeAgentSession:
         ]
         if hydrated_tool_names:
             snapshot["hydrated_tool_names"] = hydrated_tool_names
+        frontdoor_request_body_messages = [
+            dict(item)
+            for item in list(getattr(self, "_frontdoor_request_body_messages", []) or [])
+            if isinstance(item, dict)
+        ]
+        if frontdoor_request_body_messages:
+            snapshot["frontdoor_request_body_messages"] = frontdoor_request_body_messages
+        frontdoor_history_shrink_reason = str(
+            getattr(self, "_frontdoor_history_shrink_reason", "") or ""
+        ).strip()
+        if frontdoor_history_shrink_reason:
+            snapshot["frontdoor_history_shrink_reason"] = frontdoor_history_shrink_reason
         frontdoor_selection_debug = getattr(self, "_frontdoor_selection_debug", None)
         if isinstance(frontdoor_selection_debug, dict) and frontdoor_selection_debug:
             snapshot["frontdoor_selection_debug"] = copy.deepcopy(frontdoor_selection_debug)
@@ -1013,6 +1025,8 @@ class RuntimeAgentSession:
             and "frontdoor_canonical_context" not in snapshot
             and "semantic_context_state" not in snapshot
             and "hydrated_tool_names" not in snapshot
+            and "frontdoor_request_body_messages" not in snapshot
+            and "frontdoor_history_shrink_reason" not in snapshot
             and "frontdoor_selection_debug" not in snapshot
             and "actual_request_path" not in snapshot
             and "prompt_cache_key_hash" not in snapshot

@@ -23,6 +23,8 @@ WEB_CEO_PAUSED_ROOT = Path(".g3ku") / "web-ceo-paused"
 WEB_CEO_REQUEST_ROOT = Path(".g3ku") / "web-ceo-requests"
 DEFAULT_TASK_MAX_DEPTH = 1
 DEFAULT_TASK_HARD_MAX_DEPTH = 4
+SESSION_TASK_DEFAULTS_SCOPE_KEY = "task_defaults_scope"
+SESSION_TASK_DEFAULTS_SCOPE_SESSION = "session"
 DEFAULT_LIVE_RAW_TAIL_TURNS = 4
 TASK_MEMORY_VERSION = 2
 _TASK_MEMORY_MAX_IDS = 3
@@ -738,6 +740,15 @@ def normalize_task_defaults(
     return {"max_depth": max_depth}
 
 
+def ceo_session_task_defaults_scope(metadata: Any) -> str:
+    payload = metadata if isinstance(metadata, dict) else {}
+    raw_scope = payload.get(SESSION_TASK_DEFAULTS_SCOPE_KEY, payload.get("taskDefaultsScope"))
+    normalized_scope = str(raw_scope or "").strip().lower()
+    if normalized_scope == SESSION_TASK_DEFAULTS_SCOPE_SESSION:
+        return SESSION_TASK_DEFAULTS_SCOPE_SESSION
+    return ""
+
+
 def normalize_ceo_metadata(
     metadata: Any,
     *,
@@ -746,6 +757,10 @@ def normalize_ceo_metadata(
 ) -> dict[str, Any]:
     payload = dict(metadata or {}) if isinstance(metadata, dict) else {}
     payload.pop("frontdoor_context", None)
+    raw_task_defaults = payload.pop("task_defaults", payload.pop("taskDefaults", None))
+    task_defaults_scope = ceo_session_task_defaults_scope(payload)
+    payload.pop(SESSION_TASK_DEFAULTS_SCOPE_KEY, None)
+    payload.pop("taskDefaultsScope", None)
     title = str(payload.get("title") or "").strip() or DEFAULT_CEO_SESSION_TITLE
     preview_text = summarize_preview_text(payload.get("last_preview_text") or payload.get("preview_text") or "")
     resolved_depth_limits = dict(depth_limits or main_runtime_depth_limits())
@@ -757,20 +772,22 @@ def normalize_ceo_metadata(
         )
     else:
         memory_scope = normalize_memory_scope(payload.get("memory_scope"), fallback_session_key=session_key)
-    task_defaults = normalize_task_defaults(
-        payload.get("task_defaults", payload.get("taskDefaults")),
-        default_max_depth=int(resolved_depth_limits.get("default_max_depth", DEFAULT_TASK_MAX_DEPTH) or DEFAULT_TASK_MAX_DEPTH),
-        hard_max_depth=int(resolved_depth_limits.get("hard_max_depth", DEFAULT_TASK_HARD_MAX_DEPTH) or DEFAULT_TASK_HARD_MAX_DEPTH),
-    )
     last_task_memory = normalize_task_memory(payload.get('last_task_memory', payload.get('lastTaskMemory')))
-    return {
+    normalized = {
         **payload,
         "title": title,
         "last_preview_text": preview_text,
         "memory_scope": memory_scope,
-        "task_defaults": task_defaults,
         'last_task_memory': last_task_memory,
     }
+    if task_defaults_scope == SESSION_TASK_DEFAULTS_SCOPE_SESSION:
+        normalized["task_defaults"] = normalize_task_defaults(
+            raw_task_defaults,
+            default_max_depth=int(resolved_depth_limits.get("default_max_depth", DEFAULT_TASK_MAX_DEPTH) or DEFAULT_TASK_MAX_DEPTH),
+            hard_max_depth=int(resolved_depth_limits.get("hard_max_depth", DEFAULT_TASK_HARD_MAX_DEPTH) or DEFAULT_TASK_HARD_MAX_DEPTH),
+        )
+        normalized[SESSION_TASK_DEFAULTS_SCOPE_KEY] = SESSION_TASK_DEFAULTS_SCOPE_SESSION
+    return normalized
 
 
 def ensure_ceo_session_metadata(session: Any) -> bool:

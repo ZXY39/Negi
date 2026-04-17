@@ -521,6 +521,8 @@ class ReActToolLoop:
                 request_message_count=getattr(response, 'request_message_count', None),
                 request_message_chars=getattr(response, 'request_message_chars', None),
                 actual_tool_schemas=tool_schemas,
+                provider_request_meta=getattr(response, 'provider_request_meta', None),
+                provider_request_body=getattr(response, 'provider_request_body', None),
             )
             if response_tool_calls:
                 if xml_repair_attempt_count > 0:

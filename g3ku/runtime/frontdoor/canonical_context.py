@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from typing import Any, Callable
 
 RAW_REPRESENTATION = "raw"
@@ -161,6 +162,16 @@ def _rebased_turn_stage_id(stage_kind: str, stage_index: int) -> str:
     return f"frontdoor-stage-{stage_index}"
 
 
+def _completed_stage_overlap_signature(stage: Any) -> str:
+    current = _normalize_stage(stage, fallback_index=0)
+    if _as_str(current.get("status")).lower() == "active":
+        return ""
+    current.pop("stage_id", None)
+    current.pop("stage_index", None)
+    current.pop("representation", None)
+    return json.dumps(current, ensure_ascii=False, sort_keys=True)
+
+
 def rebase_turn_stage_state_against_context(
     turn_stage_state: Any,
     canonical_context: Any,
@@ -168,17 +179,37 @@ def rebase_turn_stage_state_against_context(
     turn_state = normalize_frontdoor_canonical_context(turn_stage_state)
     if not list(turn_state.get("stages") or []):
         return default_frontdoor_canonical_context()
+    durable_context = normalize_frontdoor_canonical_context(canonical_context)
     base_index = max(
-        (int(stage.get("stage_index") or 0) for stage in list(normalize_frontdoor_canonical_context(canonical_context).get("stages") or [])),
+        (int(stage.get("stage_index") or 0) for stage in list(durable_context.get("stages") or [])),
         default=0,
     )
+    durable_overlaps = {
+        _completed_stage_overlap_signature(stage): dict(stage)
+        for stage in list(durable_context.get("stages") or [])
+        if _completed_stage_overlap_signature(stage)
+    }
+    overlapping_stage_ids: dict[str, str] = {}
+    overlapping_stage_indexes: list[int] = []
+    for stage in list(turn_state.get("stages") or []):
+        signature = _completed_stage_overlap_signature(stage)
+        durable_stage = durable_overlaps.get(signature)
+        if not signature or not isinstance(durable_stage, dict):
+            continue
+        overlapping_stage_ids[_as_str(stage.get("stage_id"))] = _as_str(durable_stage.get("stage_id"))
+        overlapping_stage_indexes.append(max(0, int(stage.get("stage_index") or 0)))
+    stage_index_offset = max(0, base_index - max(overlapping_stage_indexes, default=0))
     id_map: dict[str, str] = {}
     rebased_stages: list[dict[str, Any]] = []
     for stage in list(turn_state.get("stages") or []):
         local_stage = copy.deepcopy(stage)
-        new_stage_index = base_index + max(1, int(local_stage.get("stage_index") or 0))
-        new_stage_id = _rebased_turn_stage_id(str(local_stage.get("stage_kind") or "normal"), new_stage_index)
         previous_stage_id = _as_str(local_stage.get("stage_id"))
+        overlapped_stage_id = overlapping_stage_ids.get(previous_stage_id)
+        if overlapped_stage_id:
+            id_map[previous_stage_id] = overlapped_stage_id
+            continue
+        new_stage_index = stage_index_offset + max(1, int(local_stage.get("stage_index") or 0))
+        new_stage_id = _rebased_turn_stage_id(str(local_stage.get("stage_kind") or "normal"), new_stage_index)
         id_map[previous_stage_id] = new_stage_id
         local_stage["stage_index"] = new_stage_index
         local_stage["stage_id"] = new_stage_id

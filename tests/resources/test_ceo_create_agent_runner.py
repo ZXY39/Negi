@@ -17,6 +17,8 @@ from g3ku.json_schema_utils import get_attached_raw_parameters_schema
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor import ceo_agent_middleware, ceo_runner
+from g3ku.runtime.frontdoor import prompt_cache_contract
+from g3ku.runtime.frontdoor.canonical_context import combine_canonical_context
 from g3ku.runtime.frontdoor.prompt_cache_contract import (
     DEFAULT_CACHE_FAMILY_REVISION,
     FrontdoorPromptContract,
@@ -217,6 +219,46 @@ class _ModelVisibleSchemaOverrideTool(Tool):
                 "parameters": self.model_parameters,
             },
         }
+
+    async def execute(self, **kwargs):
+        return kwargs
+
+
+class _NamedSchemaTool(Tool):
+    def __init__(
+        self,
+        *,
+        name: str,
+        description: str,
+        parameters: dict[str, object],
+        model_description: str | None = None,
+        model_parameters: dict[str, object] | None = None,
+    ) -> None:
+        self._name = name
+        self._description = description
+        self._parameters = dict(parameters)
+        self._model_description = str(model_description or description)
+        self._model_parameters = dict(model_parameters or parameters)
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return self._description
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return dict(self._parameters)
+
+    @property
+    def model_description(self) -> str:
+        return self._model_description
+
+    @property
+    def model_parameters(self) -> dict[str, object]:
+        return dict(self._model_parameters)
 
     async def execute(self, **kwargs):
         return kwargs
@@ -733,6 +775,125 @@ async def test_create_agent_graph_execute_tools_preserves_parallel_same_name_too
     assert sorted(item[2]["tool_call_id"] for item in progress_calls if item[1] == "tool_result") == [
         "call-demo-tool-1",
         "call-demo-tool-2",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_graph_execute_tools_grows_authoritative_request_body_baseline() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            tools=SimpleNamespace(
+                push_runtime_context=lambda context: object(),
+                pop_runtime_context=lambda token: None,
+            )
+        )
+    )
+
+    async def _on_progress(content: str, *, event_kind=None, event_data=None, **kwargs):
+        _ = content, event_kind, event_data, kwargs
+
+    runner._build_tool_runtime_context = lambda **kwargs: {"on_progress": _on_progress}
+    runner._registered_tools_for_state = lambda state: {"demo_tool": _DemoTool()}
+
+    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
+        _ = tool, tool_name, runtime_context, on_progress, tool_call_id
+        return (
+            {"value": arguments["value"]},
+            json.dumps({"value": arguments["value"]}),
+            "success",
+            "2026-04-18T00:04:39+08:00",
+            "2026-04-18T00:04:40+08:00",
+            1.0,
+        )
+
+    runner._execute_tool_call_with_raw_result = _fake_execute_tool_call_with_raw_result
+
+    state = {
+        "tool_call_payloads": [
+            {"id": "call-demo-tool-1", "name": "demo_tool", "arguments": {"value": "alpha"}},
+        ],
+        "messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "retrieved context"},
+            {"role": "user", "content": "follow-up"},
+            {"role": "assistant", "content": "memory hint"},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "message_type": "frontdoor_runtime_tool_contract",
+                        "callable_tool_names": ["demo_tool"],
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+        "frontdoor_request_body_messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "retrieved context"},
+            {"role": "user", "content": "follow-up"},
+            {"role": "assistant", "content": "memory hint"},
+        ],
+        "frontdoor_history_shrink_reason": "",
+        "used_tools": [],
+        "route_kind": "direct_reply",
+        "parallel_enabled": False,
+        "max_parallel_tool_calls": 1,
+        "synthetic_tool_calls_used": False,
+        "response_payload": {"content": "", "tool_calls": []},
+        "frontdoor_stage_state": {
+            "active_stage_id": "frontdoor-stage-1",
+            "transition_required": False,
+            "stages": [
+                {
+                    "stage_id": "frontdoor-stage-1",
+                    "stage_index": 1,
+                    "stage_goal": "Run the selected tool calls",
+                    "tool_round_budget": 2,
+                    "tool_rounds_used": 0,
+                    "status": "active",
+                    "mode": "自主执行",
+                    "stage_kind": "normal",
+                    "completed_stage_summary": "",
+                    "key_refs": [],
+                    "rounds": [],
+                }
+            ],
+        },
+    }
+
+    result = await runner._graph_execute_tools(
+        state,
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    assert result["frontdoor_request_body_messages"] == [
+        *state["frontdoor_request_body_messages"],
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-demo-tool-1",
+                    "type": "function",
+                    "function": {
+                        "name": "demo_tool",
+                        "arguments": json.dumps({"value": "alpha"}, ensure_ascii=False),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-demo-tool-1",
+            "name": "demo_tool",
+            "content": json.dumps({"value": "alpha"}),
+            "started_at": "2026-04-18T00:04:39+08:00",
+            "finished_at": "2026-04-18T00:04:40+08:00",
+            "elapsed_seconds": 1.0,
+        },
     ]
 
 
@@ -1988,6 +2149,58 @@ def test_runtime_agent_session_paused_snapshot_keeps_frontdoor_runtime_context()
     assert snapshot["hydrated_tool_names"] == ["filesystem_write"]
 
 
+def test_runtime_agent_session_persists_paused_request_body_baseline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from g3ku.runtime import web_ceo_sessions
+
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._frontdoor_request_body_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "exec", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "exec",
+            "tool_call_id": "call-1",
+            "content": '{"status":"success"}',
+        },
+    ]
+    session._frontdoor_history_shrink_reason = "stage_compaction"
+
+    paused_snapshot = session._build_execution_context_snapshot(
+        allow_manual_pause=True,
+        status_override="paused",
+    )
+    session._set_paused_execution_context(paused_snapshot)
+
+    persisted = web_ceo_sessions.read_paused_execution_context("web:shared")
+
+    assert isinstance(persisted, dict)
+    assert persisted["frontdoor_request_body_messages"] == session._frontdoor_request_body_messages
+    assert persisted["frontdoor_history_shrink_reason"] == "stage_compaction"
+
+
 @pytest.mark.asyncio
 async def test_graph_finalize_turn_appends_direct_reply_after_runtime_context_assistant() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
@@ -2196,6 +2409,305 @@ def test_create_agent_runner_syncs_frontdoor_actual_request_trace_into_inflight_
             "prompt_cache_key_hash": "family-hash",
         }
     ]
+
+
+def test_create_agent_runner_sync_preserves_durable_frontdoor_canonical_context() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    session = SimpleNamespace()
+    durable_canonical_context = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_goal": "Completed context",
+                "representation": "raw",
+                "status": "completed",
+                "stage_kind": "normal",
+                "tool_round_budget": 6,
+                "tool_rounds_used": 1,
+                "rounds": [],
+            }
+        ],
+    }
+    current_stage_state = {
+        "active_stage_id": "frontdoor-stage-2",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-2",
+                "stage_index": 2,
+                "stage_goal": "Current active stage",
+                "representation": "raw",
+                "status": "active",
+                "stage_kind": "normal",
+                "tool_round_budget": 8,
+                "tool_rounds_used": 2,
+                "rounds": [],
+            }
+        ],
+    }
+
+    runner._sync_runtime_session_frontdoor_state(
+        state={
+            "frontdoor_stage_state": current_stage_state,
+            "frontdoor_canonical_context": durable_canonical_context,
+            "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
+            "semantic_context_state": {},
+            "hydrated_tool_names": [],
+        },
+        session=session,
+    )
+
+    assert session._frontdoor_stage_state["active_stage_id"] == "frontdoor-stage-2"
+    assert [stage["stage_id"] for stage in session._frontdoor_stage_state["stages"]] == ["frontdoor-stage-2"]
+    assert session._frontdoor_canonical_context["active_stage_id"] == ""
+    assert [stage["stage_id"] for stage in session._frontdoor_canonical_context["stages"]] == ["frontdoor-stage-1"]
+
+
+def test_combine_canonical_context_skips_overlapping_completed_stage_from_turn_state() -> None:
+    durable_canonical_context = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_goal": "Completed context",
+                "representation": "raw",
+                "status": "completed",
+                "stage_kind": "normal",
+                "tool_round_budget": 6,
+                "tool_rounds_used": 1,
+                "completed_stage_summary": "verified sources collected",
+                "created_at": "2026-04-17T22:49:22+08:00",
+                "finished_at": "2026-04-17T22:49:57+08:00",
+                "rounds": [
+                    {
+                        "round_id": "frontdoor-stage-1:round-1",
+                        "round_index": 1,
+                        "created_at": "2026-04-17T22:49:28+08:00",
+                        "budget_counted": True,
+                        "tool_names": ["content_search"],
+                        "tool_call_ids": ["call-1"],
+                        "tools": [],
+                    }
+                ],
+            }
+        ],
+    }
+    current_stage_state = {
+        "active_stage_id": "frontdoor-stage-2",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_goal": "Completed context",
+                "representation": "raw",
+                "status": "completed",
+                "stage_kind": "normal",
+                "tool_round_budget": 6,
+                "tool_rounds_used": 1,
+                "completed_stage_summary": "verified sources collected",
+                "created_at": "2026-04-17T22:49:22+08:00",
+                "finished_at": "2026-04-17T22:49:57+08:00",
+                "rounds": [
+                    {
+                        "round_id": "frontdoor-stage-1:round-1",
+                        "round_index": 1,
+                        "created_at": "2026-04-17T22:49:28+08:00",
+                        "budget_counted": True,
+                        "tool_names": ["content_search"],
+                        "tool_call_ids": ["call-1"],
+                        "tools": [],
+                    }
+                ],
+            },
+            {
+                "stage_id": "frontdoor-stage-2",
+                "stage_index": 2,
+                "stage_goal": "Active stage",
+                "representation": "raw",
+                "status": "active",
+                "stage_kind": "normal",
+                "tool_round_budget": 8,
+                "tool_rounds_used": 0,
+                "completed_stage_summary": "",
+                "created_at": "2026-04-17T22:50:30+08:00",
+                "finished_at": "",
+                "rounds": [],
+            },
+        ],
+    }
+
+    combined = combine_canonical_context(durable_canonical_context, current_stage_state)
+
+    assert combined["active_stage_id"] == "frontdoor-stage-2"
+    assert [stage["stage_id"] for stage in combined["stages"]] == [
+        "frontdoor-stage-1",
+        "frontdoor-stage-2",
+    ]
+    assert combined["stages"][0]["status"] == "completed"
+    assert combined["stages"][1]["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_prepare_turn_keeps_provider_schema_hash_stable_when_web_fetch_is_promoted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = "web:frontdoor-cache"
+    runtime_session = SimpleNamespace(session_key=session_key, messages=[])
+    tools = {
+        "message": _NamedSchemaTool(
+            name="message",
+            description="Send a message to the user over the external channel.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "Message content to send."},
+                },
+                "required": ["content"],
+            },
+        ),
+        "submit_next_stage": _NamedSchemaTool(
+            name="submit_next_stage",
+            description="Start the next stage for the current node.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "stage_goal": {"type": "string", "description": "Goal for the next stage."},
+                },
+                "required": ["stage_goal"],
+            },
+        ),
+        "web_fetch": _NamedSchemaTool(
+            name="web_fetch",
+            description="Lightweight HTTP fetch for reading public web pages.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Public http(s) URL to fetch."},
+                    "timeout_ms": {
+                        "type": "integer",
+                        "description": "Network timeout in milliseconds.",
+                    },
+                },
+                "required": ["url"],
+            },
+        ),
+    }
+    loop = SimpleNamespace(
+        sessions=SimpleNamespace(get_or_create=lambda key: runtime_session),
+        main_task_service=None,
+        tools=tools,
+        max_iterations=8,
+        workspace=None,
+        temp_dir="",
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=loop)
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(prompt_cache_contract, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai:gpt-test"])
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {
+            "skills": [],
+            "tool_families": [],
+            "tool_names": ["message", "submit_next_stage", "web_fetch"],
+        }
+
+    captured_builds: list[dict[str, object]] = []
+    assembly_tool_name_sets = [
+        ["message", "submit_next_stage"],
+        ["message", "submit_next_stage", "web_fetch"],
+    ]
+    assembly_candidate_sets = [
+        ["web_fetch"],
+        [],
+    ]
+    assembly_hydrated_sets = [
+        [],
+        ["web_fetch"],
+    ]
+
+    async def _build_for_ceo(**kwargs):
+        build_index = len(captured_builds)
+        captured_builds.append(dict(kwargs))
+        user_content = str(kwargs.get("user_content") or "")
+        return SimpleNamespace(
+            model_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": user_content},
+            ],
+            stable_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "bootstrap"},
+            ],
+            dynamic_appendix_messages=[],
+            tool_names=list(assembly_tool_name_sets[build_index]),
+            candidate_tool_names=list(assembly_candidate_sets[build_index]),
+            candidate_tool_items=[
+                {"tool_id": tool_name, "description": f"{tool_name} description"}
+                for tool_name in assembly_candidate_sets[build_index]
+            ],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["message", "submit_next_stage", "web_fetch"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    runner._resolver = SimpleNamespace(resolve_for_actor=_resolve_for_actor)
+    runner._builder = SimpleNamespace(build_for_ceo=_build_for_ceo)
+
+    def _session_with_hydrated_names(names: list[str]) -> SimpleNamespace:
+        return SimpleNamespace(
+            state=SimpleNamespace(session_key=session_key),
+            _memory_channel="web",
+            _memory_chat_id="shared",
+            _channel="web",
+            _chat_id="shared",
+            _active_cancel_token=None,
+            inflight_turn_snapshot=lambda: None,
+            _frontdoor_request_body_messages=[],
+            _frontdoor_history_shrink_reason="",
+            _frontdoor_stage_state={},
+            _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+            _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
+            _semantic_context_state={"summary_text": "", "needs_refresh": False},
+            _frontdoor_hydrated_tool_names=list(names),
+            _frontdoor_selection_debug={},
+        )
+
+    first_prepared = await runner._graph_prepare_turn(
+        initial_persistent_state(user_input={"content": "collect sources", "metadata": {}}),
+        runtime=SimpleNamespace(
+            context=SimpleNamespace(session=_session_with_hydrated_names(assembly_hydrated_sets[0]))
+        ),
+    )
+    second_prepared = await runner._graph_prepare_turn(
+        initial_persistent_state(user_input={"content": "collect sources", "metadata": {}}),
+        runtime=SimpleNamespace(
+            context=SimpleNamespace(session=_session_with_hydrated_names(assembly_hydrated_sets[1]))
+        ),
+    )
+
+    assert first_prepared["provider_tool_names"] == ["message", "submit_next_stage", "web_fetch"]
+    assert second_prepared["provider_tool_names"] == ["message", "submit_next_stage", "web_fetch"]
+    assert (
+        first_prepared["prompt_cache_diagnostics"]["actual_tool_schema_hash"]
+        == second_prepared["prompt_cache_diagnostics"]["actual_tool_schema_hash"]
+    )
 
 
 @pytest.mark.asyncio
@@ -3579,7 +4091,7 @@ async def test_create_agent_frontdoor_exposes_memory_write_with_stringified_valu
     assert isinstance(raw_schema, dict)
     fact_properties = raw_schema["properties"]["facts"]["items"]["properties"]
     assert fact_properties["value"]["type"] == "string"
-    assert "JSON-serialized string" in str(fact_properties["value"]["description"] or "")
+    assert "description" not in fact_properties["value"]
 
     prompt_schema = ceo_agent_middleware._tool_schema(langchain_tool)
     assert isinstance(prompt_schema, dict)
@@ -3599,20 +4111,27 @@ async def test_create_agent_frontdoor_exposes_model_visible_schema_overrides() -
 
     langchain_tool = ceo_runtime_ops._build_langchain_tool(tool, _executor)
 
-    assert langchain_tool.description == "model-visible description"
+    assert langchain_tool.description == ""
 
     raw_schema = get_attached_raw_parameters_schema(langchain_tool)
-    assert raw_schema == tool.model_parameters
+    assert raw_schema == {
+        "type": "object",
+        "properties": {
+            "model_only": {"type": "integer"},
+        },
+        "required": ["model_only"],
+    }
 
     prompt_schema = ceo_agent_middleware._tool_schema(langchain_tool)
     assert prompt_schema == {
         "name": tool.name,
-        "description": tool.model_description,
-        "parameters": tool.model_parameters,
+        "description": "",
+        "parameters": raw_schema,
     }
 
     assert "runtime_only" not in raw_schema["properties"]
     assert "model_only" in raw_schema["properties"]
+    assert "description" not in raw_schema["properties"]["model_only"]
 
 
 @pytest.mark.asyncio

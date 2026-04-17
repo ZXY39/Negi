@@ -114,6 +114,18 @@ The backend contract behind that UI behavior is:
 - `retry`, `continue-evaluate`, and `open continuation` actions are removed from both the UI flow and the REST surface.
 - Task list and task detail status pills now derive from the current task `status` plus final-acceptance state; legacy continuation metadata fields are ignored even if older task records still carry them.
 
+### Task Depth Default Contract
+
+- The task-hall "global task tree depth" control is a global main-runtime default, backed by `PUT /api/main-runtime/settings`.
+- New CEO/web sessions now inherit that global default lazily. The runtime must not freeze the current global depth into ordinary session metadata just because a session was created, listed, or reopened.
+- A CEO session only overrides the global task depth when the session has an explicit session-scoped override saved through `PATCH /api/ceo/sessions/{session_id}/task-defaults`.
+- That explicit override is persisted as session-owned metadata and remains authoritative for later `create_async_task` calls from that session until changed again.
+- Legacy session records that contain `task_defaults` without an explicit session-override marker must be treated as inherited/global, not as an override. Maintainers debugging "I changed global depth but new tasks still use an old value" should check for this distinction first.
+- The practical rule is:
+  - global task-hall updates should affect later new tasks immediately;
+  - explicit session overrides may intentionally diverge from the global default;
+  - unscoped legacy `task_defaults` should no longer pin later task creation to stale values.
+
 ### Heartbeat Visible-Turn Contract
 
 - Browser-side CEO websocket payloads may now carry both `inflight_turn` and `preserved_turn`.
@@ -177,10 +189,13 @@ Node detail and latest-context views now expose two different debugging surfaces
 
 - The existing node input / projected context view is still a projection-oriented operator surface. It is useful for understanding durable state and task intent, but it is not guaranteed to be the exact request body sent to the provider.
 - The actual provider request is represented separately through `actual_request_ref`, `actual_request_hash`, `actual_request_message_count`, and `actual_tool_schema_hash`.
+- For node runtime specifically, `actual_request_ref` is now a dedicated per-`call_model` artifact, not a reuse of runtime `messages_ref`. The artifact is the authority for request-forensics; projected input and runtime-frame messages remain separate lenses.
+- That node actual-request artifact stores both the runtime-side projection (`model_messages`, `request_messages`, `actual_tool_schemas`, cache-family hashes) and, when the provider adapter exposes them, the adapter-final transport payload (`provider_request_meta`, `provider_request_body`).
 - `prompt_cache_key_hash` now means the caller-side cache family key for that turn, not the actual serialized request body.
 - When a cache miss happens, compare `prompt_cache_key_hash` with `actual_request_hash` first:
   - same family key + different actual request usually means append-only growth, overlay differences, or tool-schema drift inside the same family;
   - different family key means the stable caller-side family boundary moved.
+- `latest-context` now prefers that dedicated node actual-request artifact and only falls back to `messages_ref` for legacy nodes that predate the split.
 - For node troubleshooting, prefer `latest-context` or `actual_request_ref` when you need the exact provider-facing request, and treat the legacy projected input as a separate, compatibility-oriented lens.
 
 CEO/frontdoor now follows a parallel debugging pattern, but with session-scoped files instead of task artifacts.

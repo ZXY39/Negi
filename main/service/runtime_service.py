@@ -5268,7 +5268,9 @@ class MainRuntimeService:
         latest_context = self.get_node_latest_context_payload(normalized_task_id, node_id)
         if latest_context is not None:
             if not str(item.get('actual_request_ref') or '').strip():
-                item['actual_request_ref'] = str(latest_context.get('ref') or '').strip()
+                item['actual_request_ref'] = str(
+                    latest_context.get('actual_request_ref') or latest_context.get('ref') or ''
+                ).strip()
             if not str(item.get('prompt_cache_key_hash') or '').strip():
                 item['prompt_cache_key_hash'] = str(latest_context.get('prompt_cache_key_hash') or '').strip()
             if not str(item.get('actual_request_hash') or '').strip():
@@ -5295,6 +5297,8 @@ class MainRuntimeService:
         if task is None or node is None or str(node.task_id or '').strip() != normalized_task_id:
             return None
         frame = self.store.get_task_runtime_frame(normalized_task_id, node_id)
+        actual_request_ref = ''
+        messages_ref = ''
         ref = ''
         prompt_cache_key_hash = ''
         actual_request_hash = ''
@@ -5302,26 +5306,29 @@ class MainRuntimeService:
         actual_tool_schema_hash = ''
         if frame is not None:
             frame_payload = dict(frame.payload or {})
-            ref = str(frame_payload.get('messages_ref') or '').strip()
+            actual_request_ref = str(frame_payload.get('actual_request_ref') or '').strip()
+            messages_ref = str(frame_payload.get('messages_ref') or '').strip()
             prompt_cache_key_hash = str(frame_payload.get('prompt_cache_key_hash') or '').strip()
             actual_request_hash = str(frame_payload.get('actual_request_hash') or '').strip()
             actual_request_message_count = int(frame_payload.get('actual_request_message_count') or 0)
             actual_tool_schema_hash = str(frame_payload.get('actual_tool_schema_hash') or '').strip()
+        metadata = dict(node.metadata or {})
+        if not actual_request_ref:
+            actual_request_ref = str(metadata.get('latest_runtime_actual_request_ref') or '').strip()
+        if not messages_ref:
+            messages_ref = str(metadata.get('latest_runtime_messages_ref') or '').strip()
+        if not prompt_cache_key_hash:
+            prompt_cache_key_hash = str(metadata.get('latest_runtime_prompt_cache_key_hash') or '').strip()
+        if not actual_request_hash:
+            actual_request_hash = str(metadata.get('latest_runtime_actual_request_hash') or '').strip()
+        if not actual_request_message_count:
+            actual_request_message_count = int(metadata.get('latest_runtime_actual_request_message_count') or 0)
+        if not actual_tool_schema_hash:
+            actual_tool_schema_hash = str(metadata.get('latest_runtime_actual_tool_schema_hash') or '').strip()
+        ref = actual_request_ref or messages_ref
         if not ref:
             metadata = dict(node.metadata or {})
             ref = str(metadata.get('latest_runtime_messages_ref') or '').strip()
-            prompt_cache_key_hash = str(
-                prompt_cache_key_hash or metadata.get('latest_runtime_prompt_cache_key_hash') or ''
-            ).strip()
-            actual_request_hash = str(
-                actual_request_hash or metadata.get('latest_runtime_actual_request_hash') or ''
-            ).strip()
-            actual_request_message_count = int(
-                actual_request_message_count or metadata.get('latest_runtime_actual_request_message_count') or 0
-            )
-            actual_tool_schema_hash = str(
-                actual_tool_schema_hash or metadata.get('latest_runtime_actual_tool_schema_hash') or ''
-            ).strip()
         resolver = getattr(self.log_service, 'resolve_content_ref', None)
         content = str(resolver(ref) or '') if callable(resolver) and ref else ''
         return {
@@ -5333,6 +5340,8 @@ class MainRuntimeService:
             'status': str(node.status or 'in_progress'),
             'updated_at': str(node.updated_at or ''),
             'ref': ref,
+            'actual_request_ref': actual_request_ref,
+            'messages_ref': messages_ref,
             'content': content,
             'prompt_cache_key_hash': prompt_cache_key_hash,
             'actual_request_hash': actual_request_hash,

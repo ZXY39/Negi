@@ -42,6 +42,7 @@ class CeoPersistentState(TypedDict, total=False):
     turn_overlay_text: str | None
 
     tool_names: list[str]
+    provider_tool_names: list[str]
 
     candidate_tool_names: list[str]
 
@@ -193,6 +194,7 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "used_tools": [],
 
         "tool_names": [],
+        "provider_tool_names": [],
 
         "candidate_tool_names": [],
 

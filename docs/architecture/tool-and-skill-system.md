@@ -476,3 +476,18 @@ Internal fixed tools that are not surfaced in Tool Admin remain outside this con
 - They keep their existing runtime-only visibility rules.
 - Do not try to model their access through Tool Admin `allowed_roles`.
 - If a behavior question involves stage protocol tools such as `submit_next_stage`, debug the stage/runtime path rather than Tool Admin RBAC.
+
+### CEO Provider Tool Surface
+
+For CEO/frontdoor prompt-cache debugging, maintainers now need to distinguish two tool surfaces:
+
+- `tool_names` still represent the current turn's agent-facing callable pool.
+- `provider_tool_names` represent the provider-facing stable superset used to build `tools[]` for function calling.
+
+The important rule is that hydration promotion and stage gating should change the tail `frontdoor_runtime_tool_contract`, but they should not churn the provider-facing `tools[]` bundle every round.
+
+The provider-facing bundle is also intentionally minimal:
+
+- Rich tool and skill descriptions stay in the tail runtime contract.
+- Provider `tools[]` should keep only the smallest callable schema required for function calling.
+- If cache misses correlate with a large `actual_tool_schema_hash` delta, first check whether provider schemas accidentally regressed from this minimal/stable form.

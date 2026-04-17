@@ -48,7 +48,6 @@ from g3ku.runtime.web_ceo_sessions import frontdoor_stage_archive_task_id, persi
 
 from ._ceo_support import CeoFrontDoorSupport
 from .canonical_context import (
-    combine_canonical_context,
     default_frontdoor_canonical_context,
     merge_turn_stage_state_into_canonical_context,
     normalize_frontdoor_canonical_context,
@@ -210,6 +209,25 @@ def _ceo_model_compatible_parameters_schema(tool_name: str, schema: dict[str, An
     return normalized
 
 
+def _strip_schema_descriptions(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _strip_schema_descriptions(item)
+            for key, item in value.items()
+            if str(key) != "description"
+        }
+    if isinstance(value, list):
+        return [_strip_schema_descriptions(item) for item in value]
+    return value
+
+
+def _provider_visible_tool_contract(tool: Tool) -> tuple[str, dict[str, Any] | None]:
+    _model_description, model_parameters = _model_visible_tool_contract(tool)
+    compatible_parameters = _ceo_model_compatible_parameters_schema(tool.name, model_parameters)
+    stripped_parameters = _strip_schema_descriptions(compatible_parameters)
+    return "", stripped_parameters if isinstance(stripped_parameters, dict) else compatible_parameters
+
+
 def _build_langchain_tool(tool: Tool, executor: ToolExecutor) -> BaseTool:
     executor_params = inspect.signature(executor).parameters
     executor_accepts_tool_call_id = "tool_call_id" in executor_params or any(
@@ -232,8 +250,7 @@ def _build_langchain_tool(tool: Tool, executor: ToolExecutor) -> BaseTool:
             )
         return await executor(tool.name, normalized_kwargs)
 
-    model_description, model_parameters = _model_visible_tool_contract(tool)
-    compatible_model_parameters = _ceo_model_compatible_parameters_schema(tool.name, model_parameters)
+    model_description, compatible_model_parameters = _provider_visible_tool_contract(tool)
     return attach_raw_parameters_schema(
         _CeoStructuredTool.from_function(
             coroutine=_invoke,
@@ -345,6 +362,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 continue
             body_messages.append(record)
         return body_messages, contract_messages
+
+    @classmethod
+    def _request_body_messages_without_tool_contracts(
+        cls,
+        request_messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        body_messages, _contract_messages = cls._split_request_body_and_tool_contract_messages(request_messages)
+        return [dict(item) for item in list(body_messages or []) if isinstance(item, dict)]
 
     """Shared CEO runtime operations reused by the create_agent frontdoor path."""
 
@@ -486,7 +511,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return self._registered_tools(
             self._frontdoor_runtime_visible_tool_names_for_state(
                 state,
-                tool_names=list(state.get("tool_names") or []),
+                tool_names=list(state.get("provider_tool_names") or state.get("tool_names") or []),
             )
         )
 
@@ -523,7 +548,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> list[str]:
         raw_names = tool_names
         if raw_names is None and isinstance(state, dict):
-            raw_names = list(state.get("tool_names") or [])
+            raw_names = list(state.get("provider_tool_names") or state.get("tool_names") or [])
         normalized = self._normalized_tool_name_state_list(raw_names)
         if isinstance(state, dict) and bool(state.get("cron_internal")):
             return normalized
@@ -538,7 +563,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if tool is None:
                 continue
             try:
-                schemas.append(tool.to_schema())
+                description, parameters = _provider_visible_tool_contract(tool)
+                schemas.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": description,
+                            "parameters": dict(parameters or {}),
+                        },
+                    }
+                )
             except Exception:
                 continue
         return schemas
@@ -723,13 +758,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(state, dict)
             else []
         )
-        combined_canonical_context = combine_canonical_context(
-            frontdoor_canonical_context,
-            frontdoor_stage_state,
-        )
         return (
             frontdoor_stage_state,
-            combined_canonical_context,
+            frontdoor_canonical_context,
             compression_state,
             semantic_context_state,
             hydrated_tool_names,
@@ -924,6 +955,24 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(item, dict)
         ]
         shrink_reason = str(getattr(session, "_frontdoor_history_shrink_reason", "") or "").strip()
+        if baseline:
+            return baseline, shrink_reason
+        paused_snapshot_supplier = getattr(session, "paused_execution_context_snapshot", None)
+        paused_snapshot = paused_snapshot_supplier() if callable(paused_snapshot_supplier) else None
+        if not isinstance(paused_snapshot, dict):
+            return baseline, shrink_reason
+        paused_baseline = [
+            dict(item)
+            for item in list(paused_snapshot.get("frontdoor_request_body_messages") or [])
+            if isinstance(item, dict)
+        ]
+        paused_shrink_reason = str(paused_snapshot.get("frontdoor_history_shrink_reason") or "").strip()
+        if paused_baseline:
+            setattr(session, "_frontdoor_request_body_messages", list(paused_baseline))
+        if paused_shrink_reason:
+            setattr(session, "_frontdoor_history_shrink_reason", paused_shrink_reason)
+        if paused_baseline or paused_shrink_reason:
+            return paused_baseline, paused_shrink_reason
         return baseline, shrink_reason
 
     def _persist_frontdoor_actual_request(
@@ -993,6 +1042,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         if not record:
             return {}
+        authoritative_request_body_messages = self._request_body_messages_without_tool_contracts(request_messages)
         existing_history = [
             dict(item)
             for item in list(
@@ -1007,6 +1057,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if target_session is not None:
             setattr(target_session, "_frontdoor_actual_request_path", str(record.get("path") or "").strip())
             setattr(target_session, "_frontdoor_actual_request_history", list(existing_history))
+            setattr(target_session, "_frontdoor_request_body_messages", list(authoritative_request_body_messages))
             setattr(target_session, "_frontdoor_prompt_cache_key_hash", str(record.get("prompt_cache_key_hash") or "").strip())
             setattr(target_session, "_frontdoor_actual_request_hash", str(record.get("actual_request_hash") or "").strip())
             setattr(target_session, "_frontdoor_actual_request_message_count", int(record.get("actual_request_message_count") or 0))
@@ -1014,6 +1065,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return {
             "frontdoor_actual_request_path": str(record.get("path") or "").strip(),
             "frontdoor_actual_request_history": list(existing_history),
+            "frontdoor_request_body_messages": list(authoritative_request_body_messages),
             "frontdoor_prompt_cache_key_hash": str(record.get("prompt_cache_key_hash") or "").strip(),
             "frontdoor_actual_request_hash": str(record.get("actual_request_hash") or "").strip(),
             "frontdoor_actual_request_message_count": int(record.get("actual_request_message_count") or 0),
@@ -1095,7 +1147,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         refreshed = dict(state or {})
         runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
             refreshed,
-            tool_names=list(refreshed.get("tool_names") or []),
+            tool_names=list(refreshed.get("provider_tool_names") or refreshed.get("tool_names") or []),
         )
         for legacy_field in ("summary_text", "summary_payload", "summary_model_key", "summary_version"):
             refreshed.pop(legacy_field, None)
@@ -2189,12 +2241,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         }
         checkpoint_messages = list(state.get("messages") or [])
         request_body_seed_messages: list[dict[str, Any]] = []
-        if not checkpoint_messages and session_request_body_messages:
+        if session_request_body_messages:
             if not heartbeat_internal and not cron_internal:
                 request_body_seed_messages = list(session_request_body_messages)
-            else:
+                checkpoint_messages = []
+                builder_user_metadata["_frontdoor_history_seed"] = "session_window"
+            elif not checkpoint_messages:
                 checkpoint_messages = list(session_request_body_messages)
-            builder_user_metadata["_frontdoor_history_seed"] = "session_window"
+                builder_user_metadata["_frontdoor_history_seed"] = "session_window"
         seeded_hydrated_tool_names = (
             list(getattr(session, "_frontdoor_hydrated_tool_names", []) or [])
             or list(state.get("hydrated_tool_names") or [])
@@ -2281,13 +2335,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         model_refs = self._resolve_ceo_model_refs()
         provider_model = str(model_refs[0] if model_refs else "").strip()
+        provider_tool_seed_names = (
+            list(tool_names)
+            if cron_internal
+            else [
+                str(item or "").strip()
+                for item in list(exposure.get("tool_names") or [])
+                if str(item or "").strip()
+            ]
+        )
         runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
             {
                 "frontdoor_stage_state": current_frontdoor_stage_state,
                 "cron_internal": cron_internal,
                 "heartbeat_internal": heartbeat_internal,
             },
-            tool_names=tool_names,
+            tool_names=provider_tool_seed_names,
         )
         tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
         stable_messages = self._prompt_message_records(getattr(assembly, "stable_messages", None)) or list(messages)
@@ -2423,6 +2486,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "turn_overlay_text": turn_overlay_text or None,
             "frontdoor_selection_debug": frontdoor_selection_debug,
             "tool_names": list(tool_names),
+            "provider_tool_names": list(runtime_visible_tool_names),
             "candidate_tool_names": list(candidate_tool_names),
             "candidate_tool_items": list(candidate_tool_items),
             "hydrated_tool_names": list(hydrated_tool_names),
@@ -2478,7 +2542,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             try:
                 runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
                     state,
-                    tool_names=list(state.get("tool_names") or []),
+                    tool_names=list(state.get("provider_tool_names") or state.get("tool_names") or []),
                 )
                 try:
                     tool_schemas = self._selected_tool_schemas(list(runtime_visible_tool_names))
@@ -2950,6 +3014,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             messages = list(getattr(self, "_state_message_records")(messages))
         messages.append(assistant_message)
         messages.extend(tool_messages)
+        authoritative_request_body_messages = self._request_body_messages_without_tool_contracts(messages)
 
         used_tools = list(state.get("used_tools") or [])
         used_tools.extend(
@@ -2972,6 +3037,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         ]
         result = {
             "messages": messages,
+            "frontdoor_request_body_messages": authoritative_request_body_messages,
             "used_tools": used_tools,
             "route_kind": route_kind,
             "analysis_text": "",

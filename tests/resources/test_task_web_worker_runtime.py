@@ -2198,6 +2198,87 @@ def test_task_model_call_event_includes_cache_diagnostics(tmp_path: Path) -> Non
     assert model_call["tool_signature_hash"] == model_call["actual_tool_schema_hash"]
 
 
+def test_task_model_call_event_persists_dedicated_actual_request_artifact(tmp_path: Path) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    model_messages = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "projected user prompt"},
+    ]
+    request_messages = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "projected user prompt\n\nSystem note for this turn only:\nstage overlay"},
+    ]
+    actual_tool_schemas = [
+        {
+            "name": "submit_next_stage",
+            "description": "",
+            "parameters": {"type": "object"},
+        }
+    ]
+    provider_request_meta = {"provider": "openai", "endpoint": "/responses"}
+    provider_request_body = {
+        "input": [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "provider body payload"},
+        ],
+        "tools": [{"name": "submit_next_stage"}],
+    }
+
+    service.log_service.append_node_output(
+        record.task_id,
+        record.root_node_id,
+        content='{"status":"success"}',
+        tool_calls=[],
+        usage_attempts=[
+            LLMModelAttempt(
+                model_key="sub gpt-5.4",
+                provider_id="openai",
+                provider_model="gpt-5.4",
+                usage={"input_tokens": 10, "output_tokens": 5, "cache_hit_tokens": 2},
+            )
+        ],
+        model_messages=model_messages,
+        request_messages=request_messages,
+        prompt_cache_key="stable-cache-key",
+        request_message_count=len(request_messages),
+        request_message_chars=321,
+        actual_tool_schemas=actual_tool_schemas,
+        provider_request_meta=provider_request_meta,
+        provider_request_body=provider_request_body,
+    )
+
+    events = service.store.list_task_events(task_id=record.task_id, limit=20)
+    model_call = [item for item in events if item["event_type"] == "task.model.call"][-1]["payload"]
+    actual_request_ref = str(model_call.get("actual_request_ref") or "")
+
+    assert actual_request_ref.startswith("artifact:")
+
+    actual_request_payload = json.loads(service.log_service.resolve_content_ref(actual_request_ref))
+    assert actual_request_payload["task_id"] == record.task_id
+    assert actual_request_payload["node_id"] == record.root_node_id
+    assert actual_request_payload["call_index"] == 1
+    assert actual_request_payload["model_messages"] == model_messages
+    assert actual_request_payload["request_messages"] == request_messages
+    assert actual_request_payload["prompt_cache_key"] == "stable-cache-key"
+    assert actual_request_payload["prompt_cache_key_hash"] == model_call["prompt_cache_key_hash"]
+    assert actual_request_payload["actual_tool_schemas"] == actual_tool_schemas
+    assert actual_request_payload["provider_request_meta"] == provider_request_meta
+    assert actual_request_payload["provider_request_body"] == provider_request_body
+    assert actual_request_payload["actual_request_hash"] == model_call["actual_request_hash"]
+    assert actual_request_payload["actual_request_message_count"] == model_call["actual_request_message_count"]
+    assert actual_request_payload["actual_tool_schema_hash"] == model_call["actual_tool_schema_hash"]
+    assert actual_request_payload["tool_signature_hash"] == model_call["actual_tool_schema_hash"]
+
+
 def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -4685,6 +4766,109 @@ def test_node_latest_context_uses_singleton_runtime_frame_artifact_and_freezes_o
     assert payload["actual_request_hash"] == "request-hash-1"
     assert payload["actual_request_message_count"] == 1
     assert payload["actual_tool_schema_hash"] == "tool-hash-1"
+
+
+def test_latest_context_prefers_dedicated_actual_request_ref_over_messages_ref(tmp_path: Path) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    service.log_service.upsert_frame(
+        record.task_id,
+        {
+            "node_id": root.node_id,
+            "depth": root.depth,
+            "node_kind": root.node_kind,
+            "phase": "before_model",
+            "messages": [{"role": "user", "content": "projected context only"}],
+            "prompt_cache_key_hash": "family-hash-2",
+            "actual_request_hash": "legacy-request-hash",
+            "actual_request_message_count": 1,
+            "actual_tool_schema_hash": "legacy-tool-hash",
+        },
+        publish_snapshot=False,
+    )
+    runtime_frame = service.store.get_task_runtime_frame(record.task_id, root.node_id)
+    assert runtime_frame is not None
+    messages_ref = str((runtime_frame.payload or {}).get("messages_ref") or "")
+    assert messages_ref.startswith("artifact:")
+
+    request_messages = [
+        {"role": "system", "content": "node system prompt"},
+        {"role": "user", "content": "actual provider request"},
+    ]
+    actual_tool_schemas = [
+        {
+            "name": "exec",
+            "description": "execute command",
+            "parameters": {"type": "object"},
+        }
+    ]
+
+    service.log_service.append_node_output(
+        record.task_id,
+        root.node_id,
+        content='{"status":"success"}',
+        tool_calls=[],
+        usage_attempts=[
+            LLMModelAttempt(
+                model_key="sub gpt-5.4",
+                provider_id="openai",
+                provider_model="gpt-5.4",
+                usage={"input_tokens": 4, "output_tokens": 2},
+            )
+        ],
+        model_messages=[{"role": "user", "content": "projected context only"}],
+        request_messages=request_messages,
+        prompt_cache_key="stable-family-key-2",
+        request_message_count=len(request_messages),
+        request_message_chars=123,
+        actual_tool_schemas=actual_tool_schemas,
+        provider_request_meta={"provider": "openai"},
+        provider_request_body={"input": request_messages, "tools": actual_tool_schemas},
+    )
+
+    updated_frame = service.store.get_task_runtime_frame(record.task_id, root.node_id)
+    assert updated_frame is not None
+    actual_request_ref = str((updated_frame.payload or {}).get("actual_request_ref") or "")
+    assert actual_request_ref.startswith("artifact:")
+    assert actual_request_ref != messages_ref
+
+    latest_context = service.get_node_latest_context_payload(record.task_id, root.node_id)
+    detail_payload = service.get_node_detail_payload(record.task_id, root.node_id)
+
+    assert latest_context is not None
+    assert detail_payload is not None
+    assert latest_context["ref"] == actual_request_ref
+    assert latest_context["actual_request_ref"] == actual_request_ref
+    assert latest_context["messages_ref"] == messages_ref
+    assert detail_payload["item"]["actual_request_ref"] == actual_request_ref
+
+    actual_request_payload = json.loads(latest_context["content"])
+    assert actual_request_payload["request_messages"] == request_messages
+    assert actual_request_payload["provider_request_body"]["input"] == request_messages
+
+    service.log_service.remove_frame(record.task_id, root.node_id, publish_snapshot=False)
+
+    latest_context_after = service.get_node_latest_context_payload(record.task_id, root.node_id)
+    node_after = service.get_node(root.node_id)
+
+    assert latest_context_after is not None
+    assert latest_context_after["ref"] == actual_request_ref
+    assert latest_context_after["actual_request_ref"] == actual_request_ref
+    assert latest_context_after["messages_ref"] == messages_ref
+    assert node_after is not None
+    assert dict(node_after.metadata or {}).get("latest_runtime_actual_request_ref") == actual_request_ref
 
 
 def test_latest_context_route_returns_payload(tmp_path: Path, monkeypatch):

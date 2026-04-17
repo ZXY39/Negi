@@ -11,8 +11,11 @@ from g3ku.runtime.frontdoor.checkpoint_inspection import (
     get_frontdoor_checkpoint_history,
 )
 from g3ku.runtime.web_ceo_sessions import (
+    SESSION_TASK_DEFAULTS_SCOPE_KEY,
+    SESSION_TASK_DEFAULTS_SCOPE_SESSION,
     WebCeoStateStore,
     build_ceo_session_catalog,
+    ceo_session_task_defaults_scope,
     ceo_session_family,
     clear_web_ceo_session_artifacts,
     create_web_ceo_session,
@@ -93,6 +96,19 @@ def _recreate_runtime_session(runtime_manager, session) -> object | None:
             setattr(state, "status", str(paused_snapshot.get("status") or "paused"))
         if hasattr(state, "paused"):
             setattr(state, "paused", str(paused_snapshot.get("status") or "paused").strip().lower() == "paused")
+    request_body_messages = [
+        dict(item)
+        for item in list(paused_snapshot.get("frontdoor_request_body_messages") or [])
+        if isinstance(item, dict)
+    ]
+    if request_body_messages or "frontdoor_request_body_messages" in paused_snapshot:
+        setattr(runtime_session, "_frontdoor_request_body_messages", request_body_messages)
+    if "frontdoor_history_shrink_reason" in paused_snapshot:
+        setattr(
+            runtime_session,
+            "_frontdoor_history_shrink_reason",
+            str(paused_snapshot.get("frontdoor_history_shrink_reason") or "").strip(),
+        )
     return runtime_session
 
 
@@ -257,8 +273,10 @@ def _session_task_delete_payload(service, session_id: str) -> dict:
 
 def _task_defaults_response(session) -> dict:
     depth_limits = main_runtime_depth_limits()
+    metadata = getattr(session, "metadata", None) or {}
+    scope = ceo_session_task_defaults_scope(metadata) or "global"
     task_defaults = normalize_task_defaults(
-        (getattr(session, "metadata", None) or {}).get("task_defaults"),
+        metadata.get("task_defaults") if scope == SESSION_TASK_DEFAULTS_SCOPE_SESSION else None,
         default_max_depth=depth_limits["default_max_depth"],
         hard_max_depth=depth_limits["hard_max_depth"],
     )
@@ -266,6 +284,7 @@ def _task_defaults_response(session) -> dict:
         "session_id": str(getattr(session, "key", "") or ""),
         "task_defaults": task_defaults,
         "main_runtime": depth_limits,
+        "scope": scope,
     }
 
 
@@ -441,6 +460,7 @@ async def update_ceo_session_task_defaults(session_id: str, payload: dict = Body
             default_max_depth=depth_limits["default_max_depth"],
             hard_max_depth=depth_limits["hard_max_depth"],
         ),
+        SESSION_TASK_DEFAULTS_SCOPE_KEY: SESSION_TASK_DEFAULTS_SCOPE_SESSION,
     }
     session.updated_at = datetime.now()
     session_manager.save(session)

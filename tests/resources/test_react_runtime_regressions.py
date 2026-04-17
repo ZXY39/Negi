@@ -2916,6 +2916,8 @@ async def test_react_loop_orphan_tool_result_circuit_breaker_fails_current_node(
     assert result.delivery_status == "blocked"
     assert "final result submission guard triggered" in result.summary
     assert "submit_final_result" in result.blocking_reason
+    assert "Detected orphan tool results" not in result.blocking_reason
+    assert "call-orphan|fc_orphan" not in result.blocking_reason
     assert len(calls) == 1
 
 

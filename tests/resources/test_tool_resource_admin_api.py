@@ -17,6 +17,7 @@ import g3ku.runtime.web_ceo_sessions as web_ceo_sessions
 from g3ku.china_bridge.registry import china_channel_template
 from g3ku.config.loader import ensure_startup_config_ready
 from g3ku.resources import ResourceManager
+from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
 from g3ku.security import get_bootstrap_security_service
 from g3ku.session.manager import Session
 from main.api import admin_rest
@@ -1099,13 +1100,78 @@ def test_ceo_session_task_defaults_endpoint_reads_and_updates_depth(tmp_path: Pa
     initial = client.get('/api/ceo/sessions/web:ceo-demo/task-defaults')
     assert initial.status_code == 200
     assert initial.json()['task_defaults']['max_depth'] == 2
+    assert 'task_defaults' not in manager.get_or_create('web:ceo-demo').metadata
+    assert 'task_defaults_scope' not in manager.get_or_create('web:ceo-demo').metadata
 
     updated = client.patch('/api/ceo/sessions/web:ceo-demo/task-defaults', json={'max_depth': 9})
     assert updated.status_code == 200
     assert updated.json()['task_defaults']['max_depth'] == 4
     assert manager.saved >= 1
     assert manager.get_or_create('web:ceo-demo').metadata['task_defaults']['max_depth'] == 4
+    assert manager.get_or_create('web:ceo-demo').metadata['task_defaults_scope'] == 'session'
     assert manager.get_or_create('web:ceo-demo').updated_at > original_updated_at
+
+
+def test_ceo_session_task_defaults_endpoint_ignores_legacy_unscoped_depth(tmp_path: Path):
+    class _SessionManager:
+        def __init__(self, session, path: Path):
+            self._session = session
+            self._path = path
+            self.saved = 0
+
+        def get_path(self, key: str) -> Path:
+            assert key == self._session.key
+            return self._path
+
+        def get_or_create(self, key: str):
+            assert key == self._session.key
+            return self._session
+
+        def save(self, session) -> None:
+            self._session = session
+            self.saved += 1
+
+        def list_sessions(self) -> list[dict[str, str]]:
+            return [{'key': self._session.key}]
+
+    session_path = tmp_path / 'sessions' / 'web_ceo_legacy.jsonl'
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+    session = Session(
+        key='web:ceo-legacy',
+        metadata={'task_defaults': {'max_depth': 39}},
+        updated_at=datetime(2026, 3, 18, 0, 0, 0),
+    )
+    manager = _SessionManager(session, session_path)
+
+    from g3ku.runtime import web_ceo_sessions
+    from g3ku.runtime.api import ceo_sessions
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix='/api')
+    ceo_sessions.get_agent = lambda: SimpleNamespace(sessions=manager)
+    ceo_sessions.get_runtime_manager = lambda _agent: SimpleNamespace(get=lambda _session_id: None)
+    ceo_sessions.workspace_path = lambda: tmp_path
+    ceo_sessions.main_runtime_depth_limits = lambda: {'default_max_depth': 1, 'hard_max_depth': 4}
+    web_ceo_sessions.main_runtime_depth_limits = lambda: {'default_max_depth': 1, 'hard_max_depth': 4}
+
+    client = TestClient(app)
+
+    response = client.get('/api/ceo/sessions/web:ceo-legacy/task-defaults')
+
+    assert response.status_code == 200
+    assert response.json()['task_defaults']['max_depth'] == 1
+    assert 'task_defaults' not in manager.get_or_create('web:ceo-legacy').metadata
+    assert 'task_defaults_scope' not in manager.get_or_create('web:ceo-legacy').metadata
+
+
+def test_ceo_frontdoor_support_ignores_unscoped_task_default_override():
+    assert CeoFrontDoorSupport._session_task_defaults(
+        SimpleNamespace(metadata={'task_defaults': {'max_depth': 4}})
+    ) == {}
+    assert CeoFrontDoorSupport._session_task_defaults(
+        SimpleNamespace(metadata={'task_defaults': {'max_depth': 4}, 'task_defaults_scope': 'session'})
+    ) == {'max_depth': 4}
 
 
 def test_main_runtime_settings_endpoint_reads_and_updates_global_depth(tmp_path: Path, monkeypatch):

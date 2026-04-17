@@ -1927,6 +1927,35 @@ async def test_message_builder_collects_retrieved_context_separately_from_histor
 
 
 @pytest.mark.asyncio
+async def test_message_builder_keeps_frozen_retrieved_memory_snapshot_single_block_per_turn() -> None:
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="durable preference")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="remembered preference",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=None,
+        checkpoint_messages=[
+            {"role": "user", "content": "prior user"},
+            {"role": "assistant", "content": "prior answer"},
+            {"role": "assistant", "content": "## 已检索上下文\n- stale retrieved memory"},
+        ],
+        user_content="remembered preference",
+    )
+
+    overlay_text = str(result.turn_overlay_text or "")
+    model_rendered = "\n\n".join(str(item.get("content") or "") for item in result.model_messages)
+
+    assert overlay_text.count("## 已检索上下文") == 1
+    assert "stale retrieved memory" not in overlay_text
+    assert "durable preference" in overlay_text
+    assert "durable preference" not in model_rendered
+    assert model_rendered.count("## 已检索上下文") == 1
+
+
+@pytest.mark.asyncio
 async def test_message_builder_trace_includes_frontdoor_context_span_timings() -> None:
     prompt_builder = _SplitPromptBuilder()
     memory_manager = _MemoryManager(response="durable preference")
@@ -2686,6 +2715,18 @@ async def test_message_builder_directly_continues_request_body_seed_without_stag
 
     assert stable_contents[0] == "BASE PROMPT"
     assert "previous final answer" in rendered
+    assert result.stable_messages[3]["role"] == "assistant"
+    assert result.stable_messages[3]["content"] == ""
+    assert result.stable_messages[3]["tool_calls"] == [
+        {
+            "id": "call-exec-1",
+            "type": "function",
+            "function": {"name": "exec", "arguments": "{}"},
+        }
+    ]
+    assert result.stable_messages[4]["role"] == "tool"
+    assert result.stable_messages[4]["tool_call_id"] == "call-exec-1"
+    assert result.stable_messages[4]["name"] == "exec"
     assert stable_contents[-1] == '{"status":"success"}'
     assert "strict follow up" in model_contents
     assert "[G3KU_STAGE_COMPACT_V1]" not in rendered

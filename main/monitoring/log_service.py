@@ -331,6 +331,7 @@ class TaskLogService:
             'lightweight_tool_ids': [],
             'model_visible_tool_selection_trace': {},
             'exec_runtime_policy': {},
+            'actual_request_ref': '',
             'prompt_cache_key_hash': '',
             'actual_request_hash': '',
             'actual_request_message_count': 0,
@@ -890,6 +891,8 @@ class TaskLogService:
         request_message_count: int | None = None,
         request_message_chars: int | None = None,
         actual_tool_schemas: list[dict[str, Any]] | None = None,
+        provider_request_meta: dict[str, Any] | None = None,
+        provider_request_body: dict[str, Any] | None = None,
     ) -> NodeRecord | None:
         with self._task_lock(task_id):
             current = self._store.get_node(node_id)
@@ -908,6 +911,48 @@ class TaskLogService:
                 display_name=f'node-output:{node_id}:{call_index}',
                 source_kind='node_output',
             )
+            actual_request_payload = self._actual_request_artifact_payload(
+                task_id=task_id,
+                node_id=node_id,
+                call_index=call_index,
+                created_at=changed_at,
+                model_messages=model_messages,
+                request_messages=request_messages,
+                prompt_cache_key=prompt_cache_key,
+                request_message_count=request_message_count,
+                request_message_chars=request_message_chars,
+                actual_tool_schemas=actual_tool_schemas,
+                provider_request_meta=provider_request_meta,
+                provider_request_body=provider_request_body,
+            )
+            actual_request_ref = self._persist_actual_request_artifact(
+                task_id=task_id,
+                node_id=node_id,
+                call_index=call_index,
+                payload=actual_request_payload,
+            )
+            current_frame = self._store.get_task_runtime_frame(task_id, node_id)
+            current_frame_payload = dict(current_frame.payload or {}) if current_frame is not None else {}
+            resolved_prompt_cache_key_hash = str(
+                current_frame_payload.get('prompt_cache_key_hash')
+                or ((actual_request_payload or {}).get('prompt_cache_key_hash') if actual_request_payload is not None else '')
+                or ''
+            ).strip()
+            resolved_actual_request_hash = str(
+                ((actual_request_payload or {}).get('actual_request_hash') if actual_request_payload is not None else '')
+                or current_frame_payload.get('actual_request_hash')
+                or ''
+            ).strip()
+            resolved_actual_request_message_count = int(
+                ((actual_request_payload or {}).get('actual_request_message_count') if actual_request_payload is not None else 0)
+                or current_frame_payload.get('actual_request_message_count')
+                or 0
+            )
+            resolved_actual_tool_schema_hash = str(
+                ((actual_request_payload or {}).get('actual_tool_schema_hash') if actual_request_payload is not None else '')
+                or current_frame_payload.get('actual_tool_schema_hash')
+                or ''
+            ).strip()
 
             def _mutate(record: NodeRecord) -> NodeRecord:
                 output = list(record.output)
@@ -921,6 +966,15 @@ class TaskLogService:
                     )
                 )
                 update: dict[str, Any] = {'output': output, 'updated_at': changed_at}
+                if actual_request_payload is not None:
+                    update['metadata'] = {
+                        **dict(record.metadata or {}),
+                        'latest_runtime_actual_request_ref': actual_request_ref,
+                        'latest_runtime_prompt_cache_key_hash': resolved_prompt_cache_key_hash,
+                        'latest_runtime_actual_request_hash': resolved_actual_request_hash,
+                        'latest_runtime_actual_request_message_count': resolved_actual_request_message_count,
+                        'latest_runtime_actual_tool_schema_hash': resolved_actual_tool_schema_hash,
+                    }
                 if delta_usage is not None and bool(getattr(record.token_usage, 'tracked', False)):
                     update['token_usage'] = merge_token_usage_records([record.token_usage, delta_usage], tracked=True)
                     update['token_usage_by_model'] = merge_token_usage_by_model(
@@ -932,6 +986,22 @@ class TaskLogService:
             updated = self._store.update_node(node_id, _mutate)
             task = self._store.get_task(task_id)
             if updated is not None and task is not None:
+                if actual_request_payload is not None and current_frame is not None:
+                    self.update_frame(
+                        task_id,
+                        node_id,
+                        lambda frame: {
+                            **frame,
+                            'actual_request_ref': actual_request_ref,
+                            'prompt_cache_key_hash': (
+                                str(frame.get('prompt_cache_key_hash') or '').strip() or resolved_prompt_cache_key_hash
+                            ),
+                            'actual_request_hash': resolved_actual_request_hash,
+                            'actual_request_message_count': resolved_actual_request_message_count,
+                            'actual_tool_schema_hash': resolved_actual_tool_schema_hash,
+                        },
+                        publish_snapshot=False,
+                    )
                 if delta_usage is not None and bool(getattr(task.token_usage, 'tracked', False)):
                     task = self._store.update_task(
                         task_id,
@@ -956,6 +1026,7 @@ class TaskLogService:
                         tool_calls=tool_calls,
                         delta_usage=delta_usage,
                         delta_usage_by_model=delta_usage_by_model,
+                        actual_request_ref=actual_request_ref,
                         request_message_count=request_message_count,
                         request_message_chars=request_message_chars,
                         actual_tool_schemas=actual_tool_schemas,
@@ -1346,6 +1417,125 @@ class TaskLogService:
             return None
 
     @staticmethod
+    def _json_safe_value(value: Any) -> Any:
+        try:
+            return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+        except Exception:
+            return str(value)
+
+    @classmethod
+    def _actual_request_artifact_payload(
+        cls,
+        *,
+        task_id: str,
+        node_id: str,
+        call_index: int,
+        created_at: str,
+        model_messages: list[dict[str, Any]] | None,
+        request_messages: list[dict[str, Any]] | None,
+        prompt_cache_key: str | None,
+        request_message_count: int | None,
+        request_message_chars: int | None,
+        actual_tool_schemas: list[dict[str, Any]] | None = None,
+        provider_request_meta: dict[str, Any] | None = None,
+        provider_request_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if not any(
+            (
+                model_messages is not None,
+                request_messages is not None,
+                actual_tool_schemas is not None,
+                bool(str(prompt_cache_key or '').strip()),
+                bool(provider_request_meta),
+                bool(provider_request_body),
+            )
+        ):
+            return None
+        message_list = list(model_messages or [])
+        request_list = list(request_messages or message_list)
+        tool_schemas = list(actual_tool_schemas or [])
+        try:
+            prepared_payload = json.dumps(request_list, ensure_ascii=False, default=str)
+        except Exception:
+            prepared_payload = str(request_list)
+        if request_message_count is None or request_message_chars is None:
+            prepared_message_count = len(request_list)
+            prepared_message_chars = len(prepared_payload)
+        else:
+            prepared_message_count = max(0, int(request_message_count or 0))
+            prepared_message_chars = max(0, int(request_message_chars or 0))
+        try:
+            model_payload = json.dumps(message_list, ensure_ascii=False, default=str)
+        except Exception:
+            model_payload = str(message_list)
+        actual_request_diagnostics = build_actual_request_diagnostics(
+            request_messages=request_list,
+            tool_schemas=tool_schemas,
+        )
+        normalized_provider_request_meta = cls._json_safe_value(dict(provider_request_meta or {}))
+        if not isinstance(normalized_provider_request_meta, dict):
+            normalized_provider_request_meta = {'value': normalized_provider_request_meta}
+        normalized_provider_request_body = cls._json_safe_value(dict(provider_request_body or {}))
+        if not isinstance(normalized_provider_request_body, dict):
+            normalized_provider_request_body = {'value': normalized_provider_request_body}
+        normalized_model_messages = cls._json_safe_value(message_list)
+        if not isinstance(normalized_model_messages, list):
+            normalized_model_messages = []
+        normalized_request_messages = cls._json_safe_value(request_list)
+        if not isinstance(normalized_request_messages, list):
+            normalized_request_messages = []
+        normalized_tool_schemas = cls._json_safe_value(tool_schemas)
+        if not isinstance(normalized_tool_schemas, list):
+            normalized_tool_schemas = []
+        return {
+            'task_id': task_id,
+            'node_id': node_id,
+            'call_index': int(call_index or 0),
+            'created_at': str(created_at or ''),
+            'model_messages': normalized_model_messages,
+            'request_messages': normalized_request_messages,
+            'prompt_cache_key': str(prompt_cache_key or ''),
+            'prompt_cache_key_hash': cls._short_hash(prompt_cache_key),
+            'request_overlay_applied': request_list != message_list,
+            'model_message_count': len(message_list),
+            'model_message_chars': len(model_payload),
+            'prepared_message_count': prepared_message_count,
+            'prepared_message_chars': prepared_message_chars,
+            'model_message_hash': cls._short_hash(model_payload),
+            'prepared_message_hash': cls._short_hash(prepared_payload),
+            'model_prefix_hash': cls._message_prefix_hash(message_list),
+            'prepared_prefix_hash': cls._message_prefix_hash(request_list),
+            'tool_signature_hash': str(actual_request_diagnostics.get('actual_tool_schema_hash') or ''),
+            'actual_request_hash': str(actual_request_diagnostics.get('actual_request_hash') or ''),
+            'actual_request_message_count': int(actual_request_diagnostics.get('actual_request_message_count') or 0),
+            'actual_tool_schema_hash': str(actual_request_diagnostics.get('actual_tool_schema_hash') or ''),
+            'actual_tool_schemas': normalized_tool_schemas,
+            'provider_request_meta': normalized_provider_request_meta,
+            'provider_request_body': normalized_provider_request_body,
+        }
+
+    def _persist_actual_request_artifact(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        call_index: int,
+        payload: dict[str, Any] | None,
+    ) -> str:
+        if not isinstance(payload, dict) or not payload:
+            return ''
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        _summary, ref = self._summarize_content(
+            serialized,
+            task_id=task_id,
+            node_id=node_id,
+            display_name=f'node-actual-request:{node_id}:{call_index}',
+            source_kind='task_actual_request',
+            force=True,
+        )
+        return str(ref or '').strip()
+
+    @staticmethod
     def _model_call_payload(
         *,
         task_id: str,
@@ -1360,6 +1550,7 @@ class TaskLogService:
         request_message_count: int | None,
         request_message_chars: int | None,
         actual_tool_schemas: list[dict[str, Any]] | None = None,
+        actual_request_ref: str = '',
     ) -> dict[str, Any]:
         message_list = list(model_messages or [])
         request_list = list(request_messages or message_list)
@@ -1390,6 +1581,7 @@ class TaskLogService:
             'prepared_message_count': prepared_message_count,
             'prepared_message_chars': prepared_message_chars,
             'response_tool_call_count': len(list(tool_calls or [])),
+            'actual_request_ref': str(actual_request_ref or '').strip(),
             'prompt_cache_key_present': bool(str(prompt_cache_key or '').strip()),
             'prompt_cache_key_hash': TaskLogService._short_hash(prompt_cache_key),
             'request_overlay_applied': request_list != message_list,
@@ -2357,19 +2549,29 @@ class TaskLogService:
             task = self._require_task(task_id)
             current = self._store.get_task_runtime_frame(task_id, node_id)
             latest_messages_ref = ''
+            latest_actual_request_ref = ''
             if current is not None:
                 payload = dict(current.payload or {})
                 latest_messages_ref = str(payload.get('messages_ref') or '').strip()
+                latest_actual_request_ref = str(payload.get('actual_request_ref') or '').strip()
                 latest_prompt_cache_key_hash = str(payload.get('prompt_cache_key_hash') or '').strip()
                 latest_actual_request_hash = str(payload.get('actual_request_hash') or '').strip()
                 latest_actual_request_message_count = int(payload.get('actual_request_message_count') or 0)
                 latest_actual_tool_schema_hash = str(payload.get('actual_tool_schema_hash') or '').strip()
             else:
+                latest_actual_request_ref = ''
                 latest_prompt_cache_key_hash = ''
                 latest_actual_request_hash = ''
                 latest_actual_request_message_count = 0
                 latest_actual_tool_schema_hash = ''
-            if latest_messages_ref:
+            if (
+                latest_messages_ref
+                or latest_actual_request_ref
+                or latest_prompt_cache_key_hash
+                or latest_actual_request_hash
+                or latest_actual_request_message_count
+                or latest_actual_tool_schema_hash
+            ):
                 node = self._store.get_node(node_id)
                 if node is not None and str(node.task_id or '').strip() == str(task.task_id or '').strip():
                     updated_node = self._store.update_node(
@@ -2379,6 +2581,7 @@ class TaskLogService:
                                 'metadata': {
                                     **dict(record.metadata or {}),
                                     'latest_runtime_messages_ref': latest_messages_ref,
+                                    'latest_runtime_actual_request_ref': latest_actual_request_ref,
                                     'latest_runtime_prompt_cache_key_hash': latest_prompt_cache_key_hash,
                                     'latest_runtime_actual_request_hash': latest_actual_request_hash,
                                     'latest_runtime_actual_request_message_count': latest_actual_request_message_count,
@@ -2675,7 +2878,9 @@ class TaskLogService:
         runtime_frame = self.read_runtime_frame(node.task_id, node.node_id) or {}
         node_metadata = dict(node.metadata or {})
         actual_request_ref = str(
-            runtime_frame.get('messages_ref')
+            runtime_frame.get('actual_request_ref')
+            or node_metadata.get('latest_runtime_actual_request_ref')
+            or runtime_frame.get('messages_ref')
             or node_metadata.get('latest_runtime_messages_ref')
             or ''
         ).strip()
@@ -3206,6 +3411,7 @@ class TaskLogService:
                     if isinstance(next_frame.get('exec_runtime_policy'), dict)
                     else {}
                 ),
+                'actual_request_ref': str(next_frame.get('actual_request_ref') or '').strip(),
                 'prompt_cache_key_hash': str(next_frame.get('prompt_cache_key_hash') or '').strip(),
                 'actual_request_hash': str(next_frame.get('actual_request_hash') or '').strip(),
                 'actual_request_message_count': int(next_frame.get('actual_request_message_count') or 0),
@@ -3357,6 +3563,7 @@ class TaskLogService:
                 if isinstance(payload.get('exec_runtime_policy'), dict)
                 else {}
             ),
+            'actual_request_ref': str(payload.get('actual_request_ref') or '').strip(),
             'prompt_cache_key_hash': str(payload.get('prompt_cache_key_hash') or '').strip(),
             'actual_request_hash': str(payload.get('actual_request_hash') or '').strip(),
             'actual_request_message_count': int(payload.get('actual_request_message_count') or 0),
@@ -3943,6 +4150,7 @@ class TaskLogService:
                 if isinstance(payload.get('exec_runtime_policy'), dict)
                 else {}
             ),
+            'actual_request_ref': str(payload.get('actual_request_ref') or '').strip(),
             'prompt_cache_key_hash': str(payload.get('prompt_cache_key_hash') or '').strip(),
             'actual_request_hash': str(payload.get('actual_request_hash') or '').strip(),
             'actual_request_message_count': int(payload.get('actual_request_message_count') or 0),
@@ -4010,6 +4218,7 @@ class TaskLogService:
                 if str(item or '').strip()
             ],
             'model_visible_tool_selection_trace': dict(payload.get('model_visible_tool_selection_trace') or {}),
+            'actual_request_ref': str(payload.get('actual_request_ref') or '').strip(),
             'prompt_cache_key_hash': str(payload.get('prompt_cache_key_hash') or '').strip(),
             'actual_request_hash': str(payload.get('actual_request_hash') or '').strip(),
             'actual_request_message_count': int(payload.get('actual_request_message_count') or 0),

@@ -20,6 +20,7 @@ from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
+from g3ku.runtime.web_ceo_sessions import SESSION_TASK_DEFAULTS_SCOPE_SESSION, ceo_session_task_defaults_scope
 from main.protocol import now_iso
 from main.runtime.chat_backend import ConfigChatBackend, sanitize_provider_messages
 from main.runtime.tool_call_repair import format_xml_repair_failure_reason
@@ -150,6 +151,8 @@ class CeoFrontDoorSupport:
     def _session_task_defaults(session_record: Any) -> dict[str, Any]:
         metadata = getattr(session_record, "metadata", None)
         if not isinstance(metadata, dict):
+            return {}
+        if ceo_session_task_defaults_scope(metadata) != SESSION_TASK_DEFAULTS_SCOPE_SESSION:
             return {}
         payload = metadata.get("task_defaults", metadata.get("taskDefaults"))
         if not isinstance(payload, dict):

@@ -169,6 +169,43 @@ class CeoMessageBuilder:
         return records
 
     @classmethod
+    def _request_body_seed_records(cls, messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for raw in list(messages or []):
+            if not isinstance(raw, dict):
+                continue
+            role = str(raw.get("role") or "").strip().lower()
+            if not role:
+                continue
+            tool_calls = raw.get("tool_calls")
+            structural_tool_call = isinstance(tool_calls, list) and bool(tool_calls)
+            tool_call_id = str(raw.get("tool_call_id") or "").strip()
+            tool_name = str(raw.get("name") or "").strip()
+            preserve_structural_record = structural_tool_call or bool(tool_call_id) or bool(tool_name)
+            content = raw.get("content")
+            if isinstance(content, str):
+                normalized_content = content.strip()
+                if not normalized_content and not preserve_structural_record:
+                    continue
+                content = normalized_content if normalized_content else ""
+            elif content is None:
+                if not preserve_structural_record:
+                    continue
+                content = ""
+            record: dict[str, Any] = {
+                "role": role,
+                "content": content,
+            }
+            if structural_tool_call:
+                record["tool_calls"] = list(tool_calls)
+            if tool_call_id:
+                record["tool_call_id"] = tool_call_id
+            if tool_name:
+                record["name"] = tool_name
+            records.append(record)
+        return records
+
+    @classmethod
     def _detect_memory_write_intent(cls, query_text: str) -> list[str]:
         text = str(query_text or '').strip()
         if not text:
@@ -1542,7 +1579,7 @@ class CeoMessageBuilder:
         user_metadata: dict[str, Any] | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str, bool]:
         turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts)
-        stable_messages = self._prompt_message_records(request_body_seed_messages)
+        stable_messages = self._request_body_seed_records(request_body_seed_messages)
         current_user_in_history = self._history_has_current_user(
             history_messages=stable_messages,
             query_text=query_text,
@@ -1810,7 +1847,7 @@ class CeoMessageBuilder:
             hydrated_tool_names=hydrated_tool_names,
         )
         collect_elapsed_ms = self._elapsed_ms(collect_started_at)
-        request_body_seed_records = self._prompt_message_records(request_body_seed_messages)
+        request_body_seed_records = self._request_body_seed_records(request_body_seed_messages)
         if request_body_seed_records:
             context_sources = {
                 **dict(context_sources or {}),
