@@ -78,6 +78,12 @@ class RuntimeAgentSession:
         self._semantic_context_state: dict[str, Any] = default_semantic_context_state()
         self._frontdoor_hydrated_tool_names: list[str] = []
         self._frontdoor_selection_debug: dict[str, Any] = {}
+        self._frontdoor_actual_request_path: str = ""
+        self._frontdoor_actual_request_history: list[dict[str, Any]] = []
+        self._frontdoor_prompt_cache_key_hash: str = ""
+        self._frontdoor_actual_request_hash: str = ""
+        self._frontdoor_actual_request_message_count: int = 0
+        self._frontdoor_actual_tool_schema_hash: str = ""
         self._active_turn_id: str | None = None
         self._active_batch_id: str | None = None
         self._active_user_batch_inputs: list[UserInputMessage] = []
@@ -925,6 +931,24 @@ class RuntimeAgentSession:
         frontdoor_selection_debug = getattr(self, "_frontdoor_selection_debug", None)
         if isinstance(frontdoor_selection_debug, dict) and frontdoor_selection_debug:
             snapshot["frontdoor_selection_debug"] = copy.deepcopy(frontdoor_selection_debug)
+        actual_request_path = str(getattr(self, "_frontdoor_actual_request_path", "") or "").strip()
+        if actual_request_path:
+            snapshot["actual_request_path"] = actual_request_path
+        prompt_cache_key_hash = str(getattr(self, "_frontdoor_prompt_cache_key_hash", "") or "").strip()
+        if prompt_cache_key_hash:
+            snapshot["prompt_cache_key_hash"] = prompt_cache_key_hash
+        actual_request_hash = str(getattr(self, "_frontdoor_actual_request_hash", "") or "").strip()
+        if actual_request_hash:
+            snapshot["actual_request_hash"] = actual_request_hash
+        actual_request_message_count = int(getattr(self, "_frontdoor_actual_request_message_count", 0) or 0)
+        if actual_request_message_count:
+            snapshot["actual_request_message_count"] = actual_request_message_count
+        actual_tool_schema_hash = str(getattr(self, "_frontdoor_actual_tool_schema_hash", "") or "").strip()
+        if actual_tool_schema_hash:
+            snapshot["actual_tool_schema_hash"] = actual_tool_schema_hash
+        actual_request_history = getattr(self, "_frontdoor_actual_request_history", None)
+        if isinstance(actual_request_history, list) and actual_request_history:
+            snapshot["actual_request_history"] = copy.deepcopy(actual_request_history)
         if (
             not canonical_context
             and not compression
@@ -935,6 +959,12 @@ class RuntimeAgentSession:
             and "last_error" not in snapshot
             and "hydrated_tool_names" not in snapshot
             and "frontdoor_selection_debug" not in snapshot
+            and "actual_request_path" not in snapshot
+            and "prompt_cache_key_hash" not in snapshot
+            and "actual_request_hash" not in snapshot
+            and "actual_request_message_count" not in snapshot
+            and "actual_tool_schema_hash" not in snapshot
+            and "actual_request_history" not in snapshot
         ):
             return None
         return snapshot
@@ -1522,6 +1552,12 @@ class RuntimeAgentSession:
                 self._frontdoor_stage_state = {}
                 self._compression_state = {}
                 self._frontdoor_selection_debug = {}
+                self._frontdoor_actual_request_path = ""
+                self._frontdoor_actual_request_history = []
+                self._frontdoor_prompt_cache_key_hash = ""
+                self._frontdoor_actual_request_hash = ""
+                self._frontdoor_actual_request_message_count = 0
+                self._frontdoor_actual_tool_schema_hash = ""
             self._state.is_running = True
             self._state.paused = False
             self._state.status = "running"

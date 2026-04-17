@@ -368,6 +368,8 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - CEO/frontdoor `call_model` must always send the request rebuilt for that exact turn together with the matching rebuilt `prompt_cache_key`. A rebuilt request paired with an older key is now considered a runtime bug because it hides whether a miss came from family churn or from the actual request changing.
 - Node execution follows the same rule: keep the static prefix append-only at the front, keep the runtime contract at the tail, and debug `prompt_cache_key_hash` separately from `actual_request_hash`.
 - When cache reuse drops while the family key stays stable, first inspect actual request growth or provider prefix reuse limits before blaming caller-side family churn.
+- CEO/frontdoor now also persists the full provider-facing request for every `call_model` round. The full payload is written under `.g3ku/web-ceo-requests/<session>/...json`, while the live session snapshot only keeps the latest file path plus a short metadata history.
+- This split is intentional: the per-round JSON file is the authority for exact request-forensics, while inflight / paused session snapshots stay compact enough for websocket restore and UI debugging.
 
 ## 7. 新人阅读顺序建议
 

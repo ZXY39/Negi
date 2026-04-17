@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1733,6 +1734,65 @@ def test_create_agent_runner_syncs_frontdoor_selection_debug_into_inflight_snaps
         },
         "tool_selection": {"candidate_tool_names": ["filesystem_write"]},
     }
+
+
+def test_create_agent_runner_syncs_frontdoor_actual_request_trace_into_inflight_snapshot() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._state.latest_message = "working"
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    runner._sync_runtime_session_frontdoor_state(
+        state={
+            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
+            "semantic_context_state": {},
+            "hydrated_tool_names": [],
+            "frontdoor_actual_request_path": str(Path("D:/tmp/frontdoor-request.json")),
+            "frontdoor_actual_request_history": [
+                {
+                    "path": str(Path("D:/tmp/frontdoor-request.json")),
+                    "turn_id": "turn-frontdoor-1",
+                    "actual_request_hash": "request-hash",
+                    "actual_request_message_count": 6,
+                    "actual_tool_schema_hash": "tool-hash",
+                    "prompt_cache_key_hash": "family-hash",
+                }
+            ],
+            "prompt_cache_diagnostics": {
+                "prompt_cache_key_hash": "family-hash",
+                "actual_request_hash": "request-hash",
+                "actual_request_message_count": 6,
+                "actual_tool_schema_hash": "tool-hash",
+            },
+        },
+        session=session,
+    )
+
+    snapshot = session.inflight_turn_snapshot()
+
+    assert isinstance(snapshot, dict)
+    assert snapshot["actual_request_path"] == str(Path("D:/tmp/frontdoor-request.json"))
+    assert snapshot["prompt_cache_key_hash"] == "family-hash"
+    assert snapshot["actual_request_hash"] == "request-hash"
+    assert snapshot["actual_request_message_count"] == 6
+    assert snapshot["actual_tool_schema_hash"] == "tool-hash"
+    assert snapshot["actual_request_history"] == [
+        {
+            "path": str(Path("D:/tmp/frontdoor-request.json")),
+            "turn_id": "turn-frontdoor-1",
+            "actual_request_hash": "request-hash",
+            "actual_request_message_count": 6,
+            "actual_tool_schema_hash": "tool-hash",
+            "prompt_cache_key_hash": "family-hash",
+        }
+    ]
 
 
 @pytest.mark.asyncio

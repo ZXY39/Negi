@@ -43,7 +43,7 @@ from main.runtime.tool_call_repair import (
     extract_tool_calls_from_xml_pseudo_content,
     recover_tool_calls_from_json_payload,
 )
-from g3ku.runtime.web_ceo_sessions import frontdoor_stage_archive_task_id
+from g3ku.runtime.web_ceo_sessions import frontdoor_stage_archive_task_id, persist_frontdoor_actual_request
 
 from ._ceo_support import CeoFrontDoorSupport
 from .canonical_context import (
@@ -720,6 +720,128 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "_frontdoor_selection_debug",
             self._frontdoor_selection_debug_snapshot(state),
         )
+        if isinstance(state, dict):
+            diagnostics = dict(state.get("prompt_cache_diagnostics") or {})
+            actual_request_path = str(state.get("frontdoor_actual_request_path") or "").strip()
+            if actual_request_path:
+                setattr(target_session, "_frontdoor_actual_request_path", actual_request_path)
+            actual_request_history = [
+                dict(item)
+                for item in list(state.get("frontdoor_actual_request_history") or [])
+                if isinstance(item, dict)
+            ]
+            if actual_request_history:
+                setattr(target_session, "_frontdoor_actual_request_history", actual_request_history)
+            prompt_cache_key_hash = str(
+                state.get("frontdoor_prompt_cache_key_hash")
+                or diagnostics.get("prompt_cache_key_hash")
+                or ""
+            ).strip()
+            if prompt_cache_key_hash:
+                setattr(target_session, "_frontdoor_prompt_cache_key_hash", prompt_cache_key_hash)
+            actual_request_hash = str(
+                state.get("frontdoor_actual_request_hash")
+                or diagnostics.get("actual_request_hash")
+                or ""
+            ).strip()
+            if actual_request_hash:
+                setattr(target_session, "_frontdoor_actual_request_hash", actual_request_hash)
+            actual_request_message_count = int(
+                state.get("frontdoor_actual_request_message_count")
+                or diagnostics.get("actual_request_message_count")
+                or 0
+            )
+            if actual_request_message_count:
+                setattr(target_session, "_frontdoor_actual_request_message_count", actual_request_message_count)
+            actual_tool_schema_hash = str(
+                state.get("frontdoor_actual_tool_schema_hash")
+                or diagnostics.get("actual_tool_schema_hash")
+                or ""
+            ).strip()
+            if actual_tool_schema_hash:
+                setattr(target_session, "_frontdoor_actual_tool_schema_hash", actual_tool_schema_hash)
+
+    def _persist_frontdoor_actual_request(
+        self,
+        *,
+        state: CeoGraphState,
+        runtime: Runtime[CeoRuntimeContext],
+        request_messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]] | None,
+        prompt_cache_key: str,
+        prompt_cache_diagnostics: dict[str, Any],
+        parallel_tool_calls: bool | None,
+    ) -> dict[str, Any]:
+        session_key = str(state.get("session_key") or getattr(getattr(runtime, "context", None), "session_key", "") or "").strip()
+        if not session_key:
+            return {}
+        target_session = getattr(getattr(runtime, "context", None), "session", None)
+        turn_id = ""
+        turn_id_getter = getattr(target_session, "_current_turn_id", None) if target_session is not None else None
+        if callable(turn_id_getter):
+            try:
+                turn_id = str(turn_id_getter()).strip()
+            except Exception:
+                turn_id = ""
+        if not turn_id:
+            turn_id = str(getattr(target_session, "_active_turn_id", "") or "").strip()
+        diagnostics = dict(prompt_cache_diagnostics or {})
+        provider_model = str((list(state.get("model_refs") or []) or [""])[0] or "").strip()
+        record = persist_frontdoor_actual_request(
+            session_key,
+            payload={
+                "type": "frontdoor_actual_request",
+                "session_key": session_key,
+                "turn_id": turn_id,
+                "created_at": now_iso(),
+                "provider_model": provider_model,
+                "model_refs": [
+                    str(item or "").strip()
+                    for item in list(state.get("model_refs") or [])
+                    if str(item or "").strip()
+                ],
+                "parallel_tool_calls": parallel_tool_calls,
+                "prompt_cache_key": str(prompt_cache_key or "").strip(),
+                "prompt_cache_key_hash": str(diagnostics.get("prompt_cache_key_hash") or "").strip(),
+                "actual_request_hash": str(diagnostics.get("actual_request_hash") or "").strip(),
+                "actual_request_message_count": int(diagnostics.get("actual_request_message_count") or 0),
+                "actual_tool_schema_hash": str(diagnostics.get("actual_tool_schema_hash") or "").strip(),
+                "tool_signature_hash": str(diagnostics.get("tool_signature_hash") or "").strip(),
+                "stable_prefix_hash": str(diagnostics.get("stable_prefix_hash") or "").strip(),
+                "dynamic_appendix_hash": str(diagnostics.get("dynamic_appendix_hash") or "").strip(),
+                "messages": [dict(item) for item in list(request_messages or []) if isinstance(item, dict)],
+                "request_messages": [dict(item) for item in list(request_messages or []) if isinstance(item, dict)],
+                "tool_schemas": [dict(item) for item in list(tool_schemas or []) if isinstance(item, dict)],
+            },
+        )
+        if not record:
+            return {}
+        existing_history = [
+            dict(item)
+            for item in list(
+                state.get("frontdoor_actual_request_history")
+                or getattr(target_session, "_frontdoor_actual_request_history", [])
+                or []
+            )
+            if isinstance(item, dict)
+        ]
+        existing_history.append(dict(record))
+        existing_history = existing_history[-32:]
+        if target_session is not None:
+            setattr(target_session, "_frontdoor_actual_request_path", str(record.get("path") or "").strip())
+            setattr(target_session, "_frontdoor_actual_request_history", list(existing_history))
+            setattr(target_session, "_frontdoor_prompt_cache_key_hash", str(record.get("prompt_cache_key_hash") or "").strip())
+            setattr(target_session, "_frontdoor_actual_request_hash", str(record.get("actual_request_hash") or "").strip())
+            setattr(target_session, "_frontdoor_actual_request_message_count", int(record.get("actual_request_message_count") or 0))
+            setattr(target_session, "_frontdoor_actual_tool_schema_hash", str(record.get("actual_tool_schema_hash") or "").strip())
+        return {
+            "frontdoor_actual_request_path": str(record.get("path") or "").strip(),
+            "frontdoor_actual_request_history": list(existing_history),
+            "frontdoor_prompt_cache_key_hash": str(record.get("prompt_cache_key_hash") or "").strip(),
+            "frontdoor_actual_request_hash": str(record.get("actual_request_hash") or "").strip(),
+            "frontdoor_actual_request_message_count": int(record.get("actual_request_message_count") or 0),
+            "frontdoor_actual_tool_schema_hash": str(record.get("actual_tool_schema_hash") or "").strip(),
+        }
 
     def _frontdoor_tool_state_after_tool_results(
         self,
@@ -2088,6 +2210,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 tool_schemas=actual_tool_schemas,
             ),
         }
+        actual_request_trace = self._persist_frontdoor_actual_request(
+            state=state,
+            runtime=runtime,
+            request_messages=request_messages,
+            tool_schemas=actual_tool_schemas,
+            prompt_cache_key=prompt_cache_key,
+            prompt_cache_diagnostics=prompt_cache_diagnostics,
+            parallel_tool_calls=(bool(state.get("parallel_enabled")) if langchain_tools else None),
+        )
         provider_retry_count = 0
         empty_response_retry_count = 0
         while True:
@@ -2116,6 +2247,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "repair_overlay_text": None,
             "prompt_cache_key": prompt_cache_key,
             "prompt_cache_diagnostics": prompt_cache_diagnostics,
+            **actual_request_trace,
             "response_payload": self._checkpoint_safe_model_response_payload(message),
             "empty_response_retry_count": empty_response_retry_count,
         }

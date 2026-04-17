@@ -87,6 +87,10 @@ class CeoPersistentState(TypedDict, total=False):
 
     prompt_cache_diagnostics: dict[str, Any]
 
+    frontdoor_actual_request_path: str
+
+    frontdoor_actual_request_history: list[dict[str, Any]]
+
     frontdoor_selection_debug: dict[str, Any]
 
     parallel_enabled: bool
@@ -201,6 +205,10 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "rbac_visible_skill_ids": [],
 
         "cache_family_revision": DEFAULT_CACHE_FAMILY_REVISION,
+
+        "frontdoor_actual_request_path": "",
+
+        "frontdoor_actual_request_history": [],
 
         "frontdoor_selection_debug": {},
 

@@ -177,6 +177,12 @@ Node detail and latest-context views now expose two different debugging surfaces
   - different family key means the stable caller-side family boundary moved.
 - For node troubleshooting, prefer `latest-context` or `actual_request_ref` when you need the exact provider-facing request, and treat the legacy projected input as a separate, compatibility-oriented lens.
 
+CEO/frontdoor now follows a parallel debugging pattern, but with session-scoped files instead of task artifacts.
+
+- Every CEO/frontdoor `call_model` round writes the full provider-facing request to `.g3ku/web-ceo-requests/<session>/...json`.
+- Inflight / paused CEO snapshots expose only the latest `actual_request_path`, `prompt_cache_key_hash`, `actual_request_hash`, `actual_request_message_count`, `actual_tool_schema_hash`, and a short `actual_request_history`.
+- When debugging CEO prompt shrinkage or cache drops, inspect the saved request JSON first rather than inferring the request from `canonical_context`, stage rounds, or transcript-visible assistant/tool bubbles.
+
 ## Verification Pointers
 
 Use these focused checks when validating i18n shell behavior:

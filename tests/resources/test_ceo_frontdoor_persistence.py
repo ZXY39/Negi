@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import sys
 import types
 from types import SimpleNamespace
@@ -816,6 +817,86 @@ async def test_ceo_frontdoor_call_model_rebuilds_request_messages_from_stable_an
     assert str(update["prompt_cache_diagnostics"]["prompt_cache_key_hash"] or "").strip()
     assert str(update["prompt_cache_diagnostics"]["actual_request_hash"] or "").strip()
     assert update["prompt_cache_diagnostics"]["actual_request_message_count"] == len(request_messages)
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_call_model_persists_actual_request_to_disk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(
+        runner,
+        "_selected_tool_schemas",
+        lambda tool_names: [
+            {
+                "name": str((list(tool_names or []) or ["submit_next_stage"])[0]),
+                "description": "",
+                "parameters": {"type": "object"},
+            }
+        ],
+    )
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+
+    async def _call_model_with_tools(**kwargs):
+        return AIMessage(content="plain reply", response_metadata={"finish_reason": "stop"})
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _active_turn_id="turn-frontdoor-1",
+        _frontdoor_actual_request_history=[],
+        _current_turn_id=lambda prompt=None: "turn-frontdoor-1",
+    )
+
+    update = await runner._graph_call_model(
+        {
+            "messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "hello"},
+            ],
+            "stable_messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "hello"},
+            ],
+            "dynamic_appendix_messages": [
+                {"role": "assistant", "content": "## Retrieved Context\n- memory"},
+                {"role": "user", "content": '{"message_type":"frontdoor_runtime_tool_contract"}'},
+            ],
+            "turn_overlay_text": "## Retrieved Context\n- memory",
+            "tool_names": ["submit_next_stage"],
+            "candidate_tool_names": [],
+            "candidate_tool_items": [],
+            "hydrated_tool_names": [],
+            "visible_skill_ids": [],
+            "candidate_skill_ids": [],
+            "rbac_visible_tool_names": ["submit_next_stage"],
+            "rbac_visible_skill_ids": [],
+            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "model_refs": ["openai_codex:gpt-test"],
+            "parallel_enabled": False,
+            "prompt_cache_key": "cache-key",
+            "iteration": 0,
+            "max_iterations": 4,
+            "session_key": "web:shared",
+        },
+        runtime=SimpleNamespace(context=CeoRuntimeContext(loop=None, session=session, session_key="web:shared", on_progress=None)),
+    )
+
+    request_path = Path(str(update["frontdoor_actual_request_path"]))
+    assert request_path.exists()
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+    assert payload["session_id"] == "web:shared"
+    assert payload["turn_id"] == "turn-frontdoor-1"
+    assert payload["prompt_cache_key"] == update["prompt_cache_key"]
+    assert payload["actual_request_hash"] == update["prompt_cache_diagnostics"]["actual_request_hash"]
+    assert payload["actual_request_message_count"] == update["prompt_cache_diagnostics"]["actual_request_message_count"]
+    assert payload["request_messages"]
+    assert payload["tool_schemas"]
+    assert update["frontdoor_actual_request_history"]
 
 
 @pytest.mark.asyncio

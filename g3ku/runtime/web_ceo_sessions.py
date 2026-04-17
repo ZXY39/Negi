@@ -20,6 +20,7 @@ WEB_CEO_STATE_FILE = Path(".g3ku") / "web-ceo-state.json"
 WEB_CEO_UPLOAD_ROOT = Path(".g3ku") / "web-ceo-uploads"
 WEB_CEO_INFLIGHT_ROOT = Path(".g3ku") / "web-ceo-inflight"
 WEB_CEO_PAUSED_ROOT = Path(".g3ku") / "web-ceo-paused"
+WEB_CEO_REQUEST_ROOT = Path(".g3ku") / "web-ceo-requests"
 DEFAULT_TASK_MAX_DEPTH = 1
 DEFAULT_TASK_HARD_MAX_DEPTH = 4
 DEFAULT_LIVE_RAW_TAIL_TURNS = 4
@@ -872,6 +873,51 @@ def paused_execution_context_path_for_session(session_id: str, *, create: bool =
     return directory / f"{safe_session}.json"
 
 
+def actual_request_dir_for_session(session_id: str, *, create: bool = True) -> Path:
+    safe_session = safe_filename(str(session_id or "web_shared").replace(":", "_")) or "web_shared"
+    root = workspace_path() / WEB_CEO_REQUEST_ROOT
+    directory = root / safe_session
+    return ensure_dir(directory) if create else directory
+
+
+def persist_frontdoor_actual_request(session_id: str, *, payload: dict[str, Any]) -> dict[str, Any]:
+    key = str(session_id or "").strip()
+    if not key:
+        return {}
+    directory = actual_request_dir_for_session(key, create=True)
+    created_at = str(payload.get("created_at") or datetime.now().isoformat()).strip() or datetime.now().isoformat()
+    persisted_at = datetime.now().isoformat()
+    request_id = str(payload.get("request_id") or f"frontdoor-request-{uuid.uuid4().hex[:12]}").strip()
+    timestamp_slug = datetime.now().strftime("%Y%m%dT%H%M%S_%f")
+    path = directory / f"{timestamp_slug}_{safe_filename(request_id) or request_id}.json"
+    record = {
+        **dict(payload or {}),
+        "session_id": key,
+        "request_id": request_id,
+        "created_at": created_at,
+        "persisted_at": persisted_at,
+    }
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "request_id": request_id,
+        "created_at": created_at,
+        "persisted_at": persisted_at,
+        "path": str(path.resolve()),
+        "turn_id": str(record.get("turn_id") or "").strip(),
+        "prompt_cache_key_hash": str(record.get("prompt_cache_key_hash") or "").strip(),
+        "actual_request_hash": str(record.get("actual_request_hash") or "").strip(),
+        "actual_request_message_count": int(record.get("actual_request_message_count") or 0),
+        "actual_tool_schema_hash": str(record.get("actual_tool_schema_hash") or "").strip(),
+        "provider_model": str(record.get("provider_model") or "").strip(),
+    }
+
+
+def clear_actual_request_history(session_id: str) -> None:
+    request_dir = actual_request_dir_for_session(session_id, create=False)
+    if request_dir.exists():
+        shutil.rmtree(request_dir, ignore_errors=True)
+
+
 def is_restorable_inflight_turn_snapshot(snapshot: Any) -> bool:
     if not isinstance(snapshot, dict) or not snapshot:
         return False
@@ -1492,6 +1538,7 @@ def create_web_ceo_session(session_manager: Any, *, session_id: str | None = Non
 def clear_web_ceo_session_artifacts(*, session_id: str, task_service: Any | None = None) -> None:
     clear_inflight_turn_snapshot(session_id)
     clear_paused_execution_context(session_id)
+    clear_actual_request_history(session_id)
     upload_dir = upload_dir_for_session(session_id, create=False)
     if upload_dir.exists():
         shutil.rmtree(upload_dir, ignore_errors=True)
