@@ -78,6 +78,8 @@ class RuntimeAgentSession:
         self._semantic_context_state: dict[str, Any] = default_semantic_context_state()
         self._frontdoor_hydrated_tool_names: list[str] = []
         self._frontdoor_selection_debug: dict[str, Any] = {}
+        self._frontdoor_request_body_messages: list[dict[str, Any]] = []
+        self._frontdoor_history_shrink_reason: str = ""
         self._frontdoor_actual_request_path: str = ""
         self._frontdoor_actual_request_history: list[dict[str, Any]] = []
         self._frontdoor_prompt_cache_key_hash: str = ""
@@ -1602,8 +1604,6 @@ class RuntimeAgentSession:
             if reset_frontdoor_turn_state:
                 # Fresh visible turns and internal heartbeat/cron turns each start from
                 # their own frontdoor runtime window.
-                self._frontdoor_stage_state = {}
-                self._compression_state = {}
                 self._frontdoor_selection_debug = {}
                 self._frontdoor_actual_request_path = ""
                 self._frontdoor_actual_request_history = []

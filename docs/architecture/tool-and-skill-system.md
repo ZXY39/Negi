@@ -292,6 +292,17 @@ Maintenance note for hydration LRU:
 
 - restore / recovery 现在只接受 frame 或 CEO/session state 中的 canonical callable/candidate/hydrated/skill 字段；缺失时直接视为“运行时工具合同损坏/缺失”，不再回退 bootstrap 或旧动态文本。
 
+## CEO Frontdoor Request Body Baseline
+
+- CEO/frontdoor now persists a separate session-owned request-body baseline as `frontdoor_request_body_messages`.
+- This baseline is intentionally body-only: when it is written back to session state, dynamic `frontdoor_runtime_tool_contract` messages are stripped out so the next round can rebuild one fresh authoritative tail contract.
+- Maintainers should therefore distinguish three different things when debugging frontdoor prompt continuity:
+  - `frontdoor_request_body_messages` = the next-round body baseline
+  - `dynamic_appendix_messages` = the fresh tail contract to append for the current round
+  - actual request JSON = the exact provider-facing payload for a specific `call_model` round
+- The paired `frontdoor_history_shrink_reason` field is now the only accepted explanation for a shorter next-round body baseline.
+- Only `token_compression` and `stage_compaction` are valid shrink reasons. If the next-round body baseline is shorter without one of those reasons, treat that as runtime context loss rather than as normal contract rebuilding.
+
 ## Cache Diagnostics Versus Tool Drift
 
 - Callable/candidate/hydrated changes still affect the actual provider request and may change the observed tool schema hash for that round.

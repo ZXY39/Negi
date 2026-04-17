@@ -377,6 +377,10 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - For CEO/frontdoor specifically, the saved actual request JSON is now the authoritative source of truth for provider-facing order. Session state may persist the request body without the current contract so the next round can rebuild a single fresh tail contract; that is expected, not evidence that the provider request lost the contract.
 - That same JSON now also stores the adapter-final request payload under `provider_request_meta` and `provider_request_body`. When debugging OpenAI `/responses` cache misses, treat those adapter fields as the final transport truth if they disagree with the higher-level `request_messages` / `tool_schemas` projection.
 - To preserve prefix reuse inside one visible CEO turn, same-turn request growth now follows: previous request body -> newly appended assistant/tool transcript -> newest contract snapshot. This means the actual request may contain multiple contract snapshots during one turn, but the durable post-turn transcript must still strip them back out.
+- `RuntimeAgentSession._frontdoor_request_body_messages` is now the session-owned request-body baseline for CEO/frontdoor continuity. It stores the rebuilt provider request body with dynamic contract messages stripped out, so the next round can append one fresh authoritative tail contract instead of replaying old catalogs as history.
+- Fresh CEO/frontdoor turns may seed prompt assembly from that session-owned body baseline when the graph state itself does not already carry a request body. This is the append-only continuity path for visible turns; it is not an old-session compatibility fallback.
+- The paired `frontdoor_history_shrink_reason` field is now part of the runtime contract between prompt assembly and session persistence. Only `token_compression` and `stage_compaction` are valid reasons for a shorter next-round baseline.
+- In practice, this means a visible CEO/frontdoor turn is now expected to keep growing or stay flat across turns unless the runtime explicitly records one of those two shrink reasons. A shorter baseline without an allowed reason should be treated as a runtime bug, not as normal prompt trimming.
 
 ## 7. 新人阅读顺序建议
 
@@ -452,8 +456,8 @@ When a maintainer sees a prompt continuity issue, the first questions should now
 Heartbeat and cron turns now share the same strict internal-turn contract.
 
 - They still execute through `RuntimeAgentSession.prompt(...)` with their own internal source metadata.
-- Like a fresh visible user turn, each heartbeat / cron turn now clears the session-side `frontdoor_stage_state`, `compression_state`, and `frontdoor_selection_debug` before prompt assembly. They no longer inherit the previous visible turn's frontdoor stage window as a special case.
-- This means heartbeat / cron stage retention, recent-stage counting, and compaction windows are scoped to the current internal turn only.
+- Heartbeat / cron turns still clear live-only frontdoor debug surfaces such as `frontdoor_selection_debug` and per-round actual-request pointers, but they no longer blindly zero the session-owned request-body / stage / compression continuity state before prompt assembly.
+- When an internal turn starts with no graph-local request body, CEO/frontdoor may seed prompt assembly from the session-owned `frontdoor_request_body_messages` baseline plus the saved stage/compression snapshots, subject to the same shrink guards as visible user turns.
 - Service-layer code must not auto-retry tasks or synthesize fallback assistant replies on behalf of the model.
 - An internal turn that ends with `HEARTBEAT_OK` may surface a live-only UI ACK event, but it does not become transcript history.
 - Maintainers should distinguish live UI state such as inflight snapshots and internal ACK bubbles from durable assistant transcript messages.
@@ -492,12 +496,20 @@ This gives maintainers a middle ground:
 
 The CEO/frontdoor path now has a single cross-turn stage truth source: `frontdoor_canonical_context`.
 
-- `frontdoor_stage_state` is current-turn runtime bookkeeping only. It is reset at the start of every fresh user / heartbeat / cron turn.
+- `frontdoor_stage_state`, `compression_state`, and `semantic_context_state` are still runtime working state, but CEO/frontdoor no longer assumes they must be blanked at every fresh user / heartbeat / cron turn before prompt assembly.
+- When graph-local state is empty, `prepare_turn` may now reuse the session-owned frontdoor request body plus these session snapshots to rebuild the next provider request window.
 - `frontdoor_canonical_context` is the durable cross-turn stage/history view. Turn-finalization merges the current turn stage ledger into this canonical structure.
 - Prompt assembly no longer rebuilds retained stage history from transcript `execution_trace_summary` or flat `tool_events`.
 - The near-field stage workset is derived from `frontdoor_canonical_context + current frontdoor_stage_state`.
 - Session state still owns the durable full `frontdoor_canonical_context`, but UI-facing turn payloads now expose a current-turn `canonical_context` slice rather than `execution_trace_summary` / `tool_events`.
 - In other words: prompt assembly reads the durable cross-turn canonical context, while inflight / paused / final-reply payloads should describe only the visible turn's own stage trace.
+
+There is now a second explicit continuity contract for prompt assembly:
+
+- `frontdoor_request_body_messages` is the canonical session-owned provider request body baseline for the next CEO/frontdoor round.
+- That baseline intentionally excludes `frontdoor_runtime_tool_contract` messages; dynamic tool/skill exposure must still be rebuilt as a fresh tail contract for each round.
+- Prompt assembly is allowed to reduce this baseline only at the two documented information-loss boundaries: `token_compression` and same-turn `stage_compaction`.
+- If the next baseline is shorter for any other reason, `prepare_turn` treats that as unexpected context loss and fails fast instead of silently continuing with a truncated request.
 
 Maintainers should treat the canonical context representation rules as the only allowed information-loss boundary:
 

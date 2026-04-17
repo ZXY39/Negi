@@ -1434,6 +1434,11 @@ class CeoMessageBuilder:
             query_text=query_text,
             user_metadata=user_metadata,
         )
+        history_seed = str((user_metadata or {}).get("_frontdoor_history_seed") or "").strip()
+        if use_checkpoint_history and history_seed == "session_window":
+            history_source = "session_window"
+        else:
+            history_source = "checkpoint" if use_checkpoint_history else "transcript"
         current_user_in_transcript = self._transcript_has_current_user(
             persisted_session=persisted_session,
             query_text=query_text,
@@ -1441,7 +1446,7 @@ class CeoMessageBuilder:
         )
         return {
             'history_messages': history_messages,
-            'history_source': 'checkpoint' if use_checkpoint_history else 'transcript',
+            'history_source': history_source,
             'checkpoint_history': checkpoint_history,
             'transcript_history': transcript_history,
             'current_user_in_checkpoint': current_user_in_checkpoint,
@@ -1749,6 +1754,11 @@ class CeoMessageBuilder:
             "source": compression_source,
             "needs_recheck": bool(semantic_state.get("needs_refresh")),
         }
+        frontdoor_history_shrink_reason = ""
+        if global_summary_message is not None:
+            frontdoor_history_shrink_reason = "token_compression"
+        elif completed_blocks:
+            frontdoor_history_shrink_reason = "stage_compaction"
         staged_history_for_injection = [
             *([global_summary_message] if global_summary_message is not None else []),
             *raw_history_messages,
@@ -1876,6 +1886,7 @@ class CeoMessageBuilder:
             'global_summary_force_reached': bool(force_reached),
             'semantic_context_state': dict(semantic_state),
             'compression_state_payload': dict(compression_state_payload),
+            'frontdoor_history_shrink_reason': frontdoor_history_shrink_reason,
             'current_user_in_checkpoint': bool(history_state['current_user_in_checkpoint']),
             'current_user_in_history': current_user_in_history,
             'current_user_in_transcript': bool(history_state['current_user_in_transcript']),
