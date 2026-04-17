@@ -23,6 +23,7 @@ from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.semantic_context_summary import default_semantic_context_state
+from g3ku.runtime.semantic_context_summary import estimate_message_tokens
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
 from main.models import normalize_execution_policy_metadata
 from main.protocol import now_iso
@@ -302,6 +303,8 @@ def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any
 
 
 class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
+    _ALLOWED_FRONTDOOR_SHRINK_REASONS = frozenset({"", "token_compression", "stage_compaction"})
+
     @staticmethod
     def _is_frontdoor_tool_contract_record(record: dict[str, Any] | None) -> bool:
         if not isinstance(record, dict):
@@ -889,6 +892,39 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ).strip()
             if actual_tool_schema_hash:
                 setattr(target_session, "_frontdoor_actual_tool_schema_hash", actual_tool_schema_hash)
+            request_body_messages = [
+                dict(item)
+                for item in list(state.get("frontdoor_request_body_messages") or [])
+                if isinstance(item, dict)
+            ]
+            if not request_body_messages:
+                raw_messages = [
+                    dict(item)
+                    for item in list(state.get("messages") or [])
+                    if isinstance(item, dict)
+                ]
+                if raw_messages:
+                    request_body_messages, _contract_messages = self._split_request_body_and_tool_contract_messages(
+                        raw_messages
+                    )
+            if "frontdoor_request_body_messages" in state or request_body_messages:
+                setattr(target_session, "_frontdoor_request_body_messages", request_body_messages)
+            if "frontdoor_history_shrink_reason" in state:
+                setattr(
+                    target_session,
+                    "_frontdoor_history_shrink_reason",
+                    str(state.get("frontdoor_history_shrink_reason") or "").strip(),
+                )
+
+    @staticmethod
+    def _session_frontdoor_context_window_snapshot(session: Any) -> tuple[list[dict[str, Any]], str]:
+        baseline = [
+            dict(item)
+            for item in list(getattr(session, "_frontdoor_request_body_messages", []) or [])
+            if isinstance(item, dict)
+        ]
+        shrink_reason = str(getattr(session, "_frontdoor_history_shrink_reason", "") or "").strip()
+        return baseline, shrink_reason
 
     def _persist_frontdoor_actual_request(
         self,
@@ -2043,6 +2079,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         user_content = _user_input_content(user_input)
         session = runtime.context.session
         metadata = _user_input_metadata(user_input)
+        builder_user_metadata = dict(metadata or {})
         batch_query_text = str(metadata.get("web_ceo_batch_query_text") or "").strip()
         query_text = batch_query_text or self._content_text(user_content)
         heartbeat_internal = bool(metadata.get("heartbeat_internal"))
@@ -2050,6 +2087,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         retrieval_query = str(metadata.get("heartbeat_retrieval_query") or "").strip()
         builder_query_text = retrieval_query if heartbeat_internal and retrieval_query else query_text
         runtime_session = self._loop.sessions.get_or_create(session.state.session_key)
+        session_request_body_messages, session_shrink_reason = self._session_frontdoor_context_window_snapshot(session)
         main_service = getattr(self._loop, "main_task_service", None)
         if main_service is not None:
             await main_service.startup()
@@ -2084,6 +2122,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if paused_manual_snapshot and not self._persisted_session_has_paused_user_turn(runtime_session):
             paused_manual_snapshot = {}
         current_frontdoor_stage_state = self._frontdoor_stage_state_snapshot(state)
+        if not list(current_frontdoor_stage_state.get("stages") or []):
+            current_frontdoor_stage_state = self._frontdoor_stage_state_snapshot(
+                {"frontdoor_stage_state": getattr(session, "_frontdoor_stage_state", {})}
+            )
         if not list(current_frontdoor_stage_state.get("stages") or []) and paused_manual_snapshot:
             paused_stage_source = (
                 paused_manual_snapshot.get("frontdoor_stage_state")
@@ -2095,6 +2137,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 {"frontdoor_stage_state": paused_stage_source}
             )
         current_frontdoor_canonical_context = self._frontdoor_canonical_context_snapshot(state)
+        if not list(current_frontdoor_canonical_context.get("stages") or []):
+            current_frontdoor_canonical_context = normalize_frontdoor_canonical_context(
+                getattr(session, "_frontdoor_canonical_context", {}) or {}
+            )
         if not list(current_frontdoor_canonical_context.get("stages") or []) and paused_manual_snapshot:
             paused_canonical_source = paused_manual_snapshot.get("frontdoor_canonical_context") or {}
             current_frontdoor_canonical_context = normalize_frontdoor_canonical_context(paused_canonical_source)
@@ -2110,6 +2156,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             else self._default_compression_state()
         )
         if not self._compression_state_has_material_content(current_compression_state):
+            current_compression_state = dict(getattr(session, "_compression_state", {}) or {})
+        if not self._compression_state_has_material_content(current_compression_state):
             paused_compression_state = (
                 dict(paused_manual_snapshot.get("compression") or {})
                 if paused_manual_snapshot
@@ -2122,6 +2170,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(state, dict)
             else {}
         )
+        if not self._semantic_context_state_has_material_content(current_semantic_context_state):
+            current_semantic_context_state = dict(getattr(session, "_semantic_context_state", {}) or {})
         if not self._semantic_context_state_has_material_content(current_semantic_context_state):
             paused_semantic_context_state = (
                 dict(paused_manual_snapshot.get("semantic_context_state") or {})
@@ -2137,6 +2187,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             **self._default_semantic_context_state(),
             **dict(current_semantic_context_state or {}),
         }
+        checkpoint_messages = list(state.get("messages") or [])
+        if not checkpoint_messages and session_request_body_messages:
+            checkpoint_messages = list(session_request_body_messages)
+            builder_user_metadata["_frontdoor_history_seed"] = "session_window"
         seeded_hydrated_tool_names = (
             list(getattr(session, "_frontdoor_hydrated_tool_names", []) or [])
             or list(state.get("hydrated_tool_names") or [])
@@ -2157,9 +2211,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             query_text=builder_query_text,
             exposure=exposure,
             persisted_session=runtime_session,
-            checkpoint_messages=list(state.get("messages") or []),
+            checkpoint_messages=checkpoint_messages,
             user_content=self._model_content(user_content),
-            user_metadata=metadata,
+            user_metadata=builder_user_metadata,
             frontdoor_stage_state=current_frontdoor_stage_state,
             frontdoor_canonical_context=current_frontdoor_canonical_context,
             semantic_context_state=dict(current_semantic_context_state or {}),
@@ -2330,6 +2384,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 cron_system_message,
                 *persisted_messages[insert_at:],
             ]
+        shrink_reason = str(
+            getattr(assembly, "trace", {}).get("frontdoor_history_shrink_reason")
+            or state.get("frontdoor_history_shrink_reason")
+            or session_shrink_reason
+            or ""
+        ).strip()
+        if session_request_body_messages:
+            previous_tokens = estimate_message_tokens(session_request_body_messages)
+            next_tokens = estimate_message_tokens(persisted_messages)
+            if next_tokens < previous_tokens and shrink_reason not in self._ALLOWED_FRONTDOOR_SHRINK_REASONS.difference({""}):
+                raise RuntimeError("frontdoor context shrank without an allowed reason")
         parallel_enabled, max_parallel_tool_calls = self._parallel_tool_settings()
         return {
             "session_key": str(getattr(session.state, "session_key", "") or ""),
@@ -2374,6 +2439,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "model_refs": model_refs,
             "stable_messages": stable_messages,
             "dynamic_appendix_messages": persisted_dynamic_appendix_messages,
+            "frontdoor_request_body_messages": persisted_messages,
+            "frontdoor_history_shrink_reason": shrink_reason,
             "cache_family_revision": cache_family_revision,
             "prompt_cache_key": prompt_cache_key,
             "prompt_cache_diagnostics": prompt_cache_diagnostics,
