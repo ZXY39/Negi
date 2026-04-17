@@ -4149,16 +4149,6 @@ class ReActToolLoop:
         if not text:
             return base_messages
         overlay_block = f'System note for this turn only:\n{text}'
-        if base_messages and str(base_messages[-1].get('role') or '').strip().lower() == 'user':
-            last_message = dict(base_messages[-1])
-            last_content = last_message.get('content')
-            if isinstance(last_content, str):
-                last_message['content'] = (
-                    f"{last_content.rstrip()}\n\n{overlay_block}"
-                    if last_content.strip()
-                    else overlay_block
-                )
-                return [*base_messages[:-1], last_message]
         return [*base_messages, {'role': 'user', 'content': overlay_block}]
 
     def _externalize_message_content(

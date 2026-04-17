@@ -254,6 +254,7 @@ Maintenance note for hydration LRU:
 - 如果线上 frontdoor 表现与测试里的 graph helper 一致、却和实际会话不一致，先确认 runner 是否真的走显式 graph checkpoint，而不是怀疑还存在第二条生产 promotion 路径；当前生产路径已经不再以 `ceo_agent_middleware.py` 为权威。
 - 对执行节点和检验节点，`callable_tool_names` / `candidate_tools` / `candidate_skills` 现在都不应再视为 bootstrap user JSON 的静态字段；它们属于每轮动态 `node_runtime_tool_contract`。
 - 对执行节点和检验节点，稳定 bootstrap user JSON 只保留稳定节点上下文；`execution_stage` 不再写进 bootstrap，而是只由当前轮尾部的 `node_runtime_tool_contract` 承载。
+- 对执行节点和检验节点，和运行时合同同轮出现的 overlay / repair overlay 也只允许作为 request-tail 临时消息追加；它们不应再原地改写 bootstrap user 或任何更早的持久化消息，否则会破坏稳定前缀与 prompt cache 命中。
 - 对执行节点和检验节点，`node_runtime_tool_contract` 里的 `candidate_tools` 现在是 display-oriented 的结构化候选摘要；如需恢复 canonical candidate name 列表，优先读取 runtime frame 里的 `candidate_tool_names` / `candidate_tool_items`。
 - 对执行节点和检验节点，`node_runtime_tool_contract` 里的 `candidate_skills` 现在也是最小结构化摘要：`[{skill_id, description}]`。如需恢复 canonical skill state，优先读取 runtime frame 里的 `candidate_skill_ids` / `candidate_skill_items`。
 - 对执行节点和检验节点，还要再区分“当前轮对模型暴露的 callable 合同”和“内部可恢复的完整 callable pool”：前者在无有效阶段时会被收紧到 `submit_next_stage`，后者只保留在本地 `model_visible_tool_selection_trace.full_callable_tool_names` 里供排障。
@@ -261,6 +262,7 @@ Maintenance note for hydration LRU:
 - 同理，节点侧的 runtime frame 与重建后的 `node_runtime_tool_contract` 也必须对 skill 候选保持一致：`candidate_skill_ids` 与 `candidate_skill_items` 若在 frame 中存在，就不应因为阶段压缩或 active window 裁剪而在下一轮 contract 中无故清空。
 - 节点执行层的 `stage_gate_error_for_tool()` 仍然保留，它现在是 schema 收紧之外的兜底防线；如果模型通过恢复态或手工构造仍然尝试普通工具，执行层仍应返回 `no active stage` / `current stage budget is exhausted`。
 - 对 CEO/frontdoor，当前 turn 的 callable/candidate tool 合同现在应只存在于 dynamic appendix 和持久状态；不要再从稳定 prompt 前缀或旧 transcript 文本恢复“当前可调用工具”。
+- 对 CEO/frontdoor，turn overlay / repair overlay 也属于 dynamic appendix 一侧的尾部临时内容；它们只能尾部追加，不能回写进已有 stable/request user 消息，否则会把原本 append-only 的稳定前缀变成每轮不同的文本。
 - 对 CEO/frontdoor，当前轮 contract 的推荐排障顺序也变了：
   - 先看 request 尾部那条唯一的 `frontdoor_runtime_tool_contract`
   - 再看 internal state 中的 `tool_names` / `candidate_tool_names` / `candidate_tool_items` / `hydrated_tool_names`
@@ -424,6 +426,19 @@ This changes how maintainers should reason about surfaced tools such as `exec`, 
 - The resource manifest may still provide a default `settings.execution_mode`, but the persisted family metadata is the runtime source of truth once an operator saves an override.
 - Resource refresh must preserve that metadata override; otherwise Tool Admin would show one mode while runtime execution silently falls back to another.
 - `load_tool_context("exec")` / `load_tool_context("exec_runtime")`, node dynamic contracts, and frontdoor dynamic contracts should all agree on the same `exec_runtime_policy` payload. If they disagree, debug the persisted tool family record first, then the contract-injection path.
+
+### Web Default: Disable `messaging` / `message`
+
+In the pure web UI path, the model should not need the external-channel messaging tool because replies are delivered through the websocket session timeline.
+
+To reduce accidental `message` executor calls (Tool Admin family `messaging`) in the CEO/frontdoor web chat, the web runtime applies a startup default:
+
+- When `G3KU_TASK_RUNTIME_ROLE=web`, the runtime auto-disables the surfaced `messaging` tool family on startup by default.
+- This is controlled by env var `G3KU_WEB_DISABLE_MESSAGE_TOOL`:
+  - empty/unset means enabled (default on; the tool is disabled),
+  - `0/false/no/off` disables the default (the tool stays enabled).
+- Tool Admin will show `messaging` as disabled when the default is applied.
+- To re-enable external-channel sending from the web runtime, set `G3KU_WEB_DISABLE_MESSAGE_TOOL=0` and restart the web process.
 
 Internal fixed tools that are not surfaced in Tool Admin remain outside this contract.
 

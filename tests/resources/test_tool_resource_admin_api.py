@@ -4733,6 +4733,72 @@ async def test_startup_reconciles_core_tool_family_visibility_and_enablement(tmp
 
 
 @pytest.mark.asyncio
+async def test_web_startup_auto_disables_message_tool_family_by_default(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'message', 'memory_runtime', 'load_skill_context', 'load_tool_context')
+
+    monkeypatch.delenv("G3KU_WEB_DISABLE_MESSAGE_TOOL", raising=False)
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+
+    try:
+        await service.startup()
+        family = service.get_tool_family('messaging')
+        assert family is not None
+        assert family.is_core is True
+        assert family.enabled is False
+        assert 'message' not in set(service.list_effective_tool_names(actor_role='ceo', session_id='web:shared'))
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_web_startup_keeps_message_enabled_when_disable_flag_off(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'message', 'memory_runtime', 'load_skill_context', 'load_tool_context')
+
+    monkeypatch.setenv("G3KU_WEB_DISABLE_MESSAGE_TOOL", "0")
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+
+    try:
+        await service.startup()
+        family = service.get_tool_family('messaging')
+        assert family is not None
+        assert family.enabled is True
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)

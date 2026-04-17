@@ -354,9 +354,11 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - 对 execution / acceptance 节点，如果当轮没有有效阶段，那么这些快照里的 `callable_tool_names` 与 `model_visible_tool_names` 都应只剩 `submit_next_stage`；候选集合仍保留在 `candidate_tool_names`，完整 callable pool 则留在选择 trace 里。
 - 因此当维护者排查“为什么这一轮模型明明 load 过工具却没法调用”时，先看这个 artifact 里的最近一条快照，再去看 transcript 或 stage trace；它比只看最终 messages 更能说明当轮可调用集到底是什么。
 - 执行节点与检验节点现在都应理解为“两层消息结构”：稳定 bootstrap user JSON 负责任务定义，只保留稳定节点上下文；`execution_stage` 不再写在 bootstrap 里。单独的动态 `node_runtime_tool_contract` user 消息负责当前轮的 callable/candidate tool/skill 合同，并且固定追加在当前 request 尾部。
+- 节点的 turn overlay / repair overlay 现在也必须遵守同一条 append-only 边界：它们只能作为新的 request-tail 消息追加，不能再把文本回写进任何已有的 bootstrap user 消息或持久化历史消息。排查缓存命中下降时，优先确认 stable prefix 是否仍保持逐轮不变。
 - 对节点运行时来说，`before_model` 当轮真正下发给模型的 schema 选择结果才是权威工具来源；runtime frame、restore/recovery 和 runtime messages artifact 都应从这份结果派生，而不是再从旧 bootstrap 文本反推。
 - 对节点运行时来说，skill 可见性也不能只绑定到“当前 prompt 里是否还保留着那条 dynamic contract user 消息”。`node_runtime_tool_contract` 仍是模型可见合同，但 runtime frame 才是 `candidate_skill_ids` / `candidate_skill_items` 的 canonical 恢复来源。
 - CEO/frontdoor 也采用同样的分层思想：稳定会话前缀不再承担当前轮 callable/candidate tool 状态，当前轮工具合同放在 dynamic appendix，并随 turn state 刷新。
+- CEO/frontdoor 的普通 turn overlay 与 repair overlay 也应保持 append-only：它们属于当前 request 的尾部临时内容，不能再改写已有 stable/request 消息。维护时如果看到 prompt cache key 没变但缓存命中突然下跌，先检查是否有 overlay 被拼回了已有 user 消息。
 - 对维护者来说，这还意味着前门里的 `extension_tool_top_k` 只约束“最终候选工具数”，不是 dense 检索宽度；排查某个工具为何没进 candidate 时，要把 dense/rerank 命中和最终 top-k 截断分开看。
 
 ## 7. 新人阅读顺序建议

@@ -274,3 +274,24 @@ def test_frontdoor_tool_contract_stage_summary_omits_round_counters_and_trace_fi
             "final_stage": False,
         },
     }
+
+
+def test_frontdoor_turn_overlay_appends_ephemeral_tail_message_without_mutating_existing_prefix() -> None:
+    from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
+
+    base_messages = [
+        {"role": "system", "content": "stable system"},
+        {"role": "user", "content": "stable bootstrap"},
+    ]
+
+    request_messages = CeoFrontDoorSupport._apply_turn_overlay(
+        base_messages,
+        overlay_text="repair only",
+    )
+
+    assert request_messages[:2] == base_messages
+    assert len(request_messages) == 3
+    assert request_messages[-1] == {
+        "role": "user",
+        "content": "System note for this turn only:\nrepair only",
+    }

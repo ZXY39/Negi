@@ -4311,10 +4311,10 @@ def test_apply_temporary_system_overlay_keeps_base_messages_untouched() -> None:
 
     assert base_messages[0]['content'] == 'base system'
     assert request_messages[0] == base_messages[0]
-    assert request_messages[1]['role'] == 'user'
-    assert 'System note for this turn only:' in str(request_messages[1]['content'])
-    assert overlay in str(request_messages[1]['content'])
-    assert 'base user' in str(request_messages[1]['content'])
+    assert request_messages[1] == base_messages[1]
+    assert len(request_messages) == 3
+    assert request_messages[-1]['role'] == 'user'
+    assert request_messages[-1]['content'] == 'System note for this turn only:\ntemporary system overlay'
 
 
 def test_detect_xml_pseudo_tool_call_matches_supported_shape_only() -> None:

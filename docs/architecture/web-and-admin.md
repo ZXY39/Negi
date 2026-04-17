@@ -193,6 +193,12 @@ The backend responsibilities are now:
 - derive runtime visibility for surfaced tools from that persisted RBAC state,
 - and keep internal non-Tool-Admin tools outside the Tool Admin contract.
 
+Web-only maintenance note:
+
+- When `G3KU_TASK_RUNTIME_ROLE=web`, the runtime auto-disables the `messaging` tool family (executor: `message`) on startup by default to prevent accidental external-channel sends in the pure browser chat UI.
+- This default is controlled by `G3KU_WEB_DISABLE_MESSAGE_TOOL` (unset means enabled; set to `0/false/no/off` to keep `messaging` enabled).
+- Tool Admin surfaces this as the `messaging` tool family being disabled in the catalog.
+
 Exec runtime mode is now part of the same admin contract for `exec_runtime`:
 
 - `PUT /api/resources/tools/exec_runtime/policy` may carry `execution_mode` in addition to action-role edits.

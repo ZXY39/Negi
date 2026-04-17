@@ -1176,6 +1176,10 @@ function renderToolDetail() {
     const isCoreTool = !!S.selectedTool.is_core;
     const repairRequired = toolRepairRequired(S.selectedTool);
     const availabilityState = resourceAvailabilityStatus(S.selectedTool);
+    const toolId = String(S.selectedTool.tool_id || "").trim().toLowerCase();
+    const webDefaultDisabled = !!S.selectedTool?.metadata?.web_default_disabled;
+    const webDefaultDisabledEnv = String(S.selectedTool?.metadata?.web_default_disabled_env || "").trim();
+    const isWebMessageTool = toolId === "messaging" && webDefaultDisabled;
     const unavailableReasons = resourceAvailabilityReasons(S.selectedTool);
     const execMode = execToolExecutionMode(S.selectedTool);
     U.toolDetail.innerHTML = `
@@ -1193,11 +1197,19 @@ function renderToolDetail() {
                 <div class="resource-status-row" style="margin-bottom: var(--space-4);">
                     <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedTool.enabled, S.selectedTool.available, repairRequired))}</span>
                     ${isCoreTool
-                        ? `<button type="button" class="toolbar-btn ghost" id="tool-disable-btn" disabled>核心工具不可禁用</button>`
+                        ? (isWebMessageTool
+                            ? `<button type="button" class="toolbar-btn ghost" id="tool-disable-btn" disabled>Web 默认禁用${webDefaultDisabledEnv ? ` (${esc(webDefaultDisabledEnv)}=0 可启用)` : ""}</button>`
+                            : `<button type="button" class="toolbar-btn ghost" id="tool-disable-btn" disabled>核心工具不可禁用</button>`)
                         : (S.selectedTool.enabled
                             ? `<button type="button" class="toolbar-btn danger" id="tool-disable-btn">禁用工具族</button>`
                             : `<button type="button" class="toolbar-btn success" id="tool-enable-btn">启用工具族</button>`)}
                 </div>
+                ${isWebMessageTool ? `
+                    <div class="resource-warning-banner" role="status" aria-live="polite">
+                        <div class="resource-warning-title">message 工具已在 Web 对话中默认禁用</div>
+                        <div class="resource-copy-block">这是为了减少纯 Web 对话场景下模型误调用外部发信工具。如需启用，请设置 ${esc(webDefaultDisabledEnv || "G3KU_WEB_DISABLE_MESSAGE_TOOL")}=0 并重启 Web。</div>
+                    </div>
+                ` : ""}
                 ${!repairRequired && S.selectedTool.available === false ? `
                     <div class="resource-warning-banner" role="status" aria-live="polite">
                         <div class="resource-warning-title">当前 Tool 不可用</div>

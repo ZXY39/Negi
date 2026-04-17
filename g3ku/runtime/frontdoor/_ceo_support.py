@@ -329,16 +329,6 @@ class CeoFrontDoorSupport:
             return list(messages or [])
         base_messages = list(messages or [])
         overlay_block = f"System note for this turn only:\n{text}"
-        if base_messages and str(base_messages[-1].get("role") or "").strip().lower() == "user":
-            last_message = dict(base_messages[-1])
-            last_content = last_message.get("content")
-            if isinstance(last_content, str) and not is_frontdoor_tool_contract_message(last_message):
-                last_message["content"] = (
-                    f"{last_content.rstrip()}\n\n{overlay_block}"
-                    if last_content.strip()
-                    else overlay_block
-                )
-                return [*base_messages[:-1], last_message]
         return [*base_messages, {"role": "user", "content": overlay_block}]
 
     @staticmethod
