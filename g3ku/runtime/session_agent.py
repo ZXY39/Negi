@@ -804,6 +804,43 @@ class RuntimeAgentSession:
             return {}
         return snapshot
 
+    @staticmethod
+    def _semantic_context_state_has_material_content(value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        if str(value.get("summary_text") or "").strip():
+            return True
+        if bool(value.get("needs_refresh")):
+            return True
+        if str(value.get("updated_at") or "").strip():
+            return True
+        if str(value.get("coverage_history_source") or "").strip():
+            return True
+        try:
+            coverage_message_index = int(value.get("coverage_message_index", -1) or -1)
+        except (TypeError, ValueError):
+            coverage_message_index = -1
+        if coverage_message_index >= 0:
+            return True
+        try:
+            coverage_stage_index = int(value.get("coverage_stage_index", 0) or 0)
+        except (TypeError, ValueError):
+            coverage_stage_index = 0
+        if coverage_stage_index > 0:
+            return True
+        if str(value.get("failure_cooldown_until") or "").strip():
+            return True
+        return False
+
+    def _semantic_context_state_snapshot(self) -> dict[str, Any]:
+        raw = getattr(self, "_semantic_context_state", None)
+        if not isinstance(raw, dict):
+            return {}
+        snapshot = copy.deepcopy(raw)
+        if not self._semantic_context_state_has_material_content(snapshot):
+            return {}
+        return snapshot
+
     def reminder_context_snapshot(self) -> dict[str, Any] | None:
         status = str(self._state.status or "").strip().lower()
         if not (self._state.is_running or status in {"running", "paused", "error"}):
@@ -900,13 +937,26 @@ class RuntimeAgentSession:
         if not (self._state.is_running or status in {"running", "paused", "error"}):
             return None
         canonical_context = self._frontdoor_visible_canonical_context_snapshot()
+        frontdoor_canonical_context = self._frontdoor_canonical_context_snapshot()
         compression = self._compression_snapshot()
+        semantic_context_state = self._semantic_context_state_snapshot()
+        frontdoor_stage_state = (
+            copy.deepcopy(getattr(self, "_frontdoor_stage_state", None) or {})
+            if self._has_renderable_frontdoor_stage_state()
+            else {}
+        )
         snapshot: dict[str, Any] = {
             "status": status or ("running" if self._state.is_running else "idle"),
             "compression": compression,
         }
         if canonical_context:
             snapshot["canonical_context"] = canonical_context
+        if frontdoor_stage_state:
+            snapshot["frontdoor_stage_state"] = frontdoor_stage_state
+        if frontdoor_canonical_context:
+            snapshot["frontdoor_canonical_context"] = frontdoor_canonical_context
+        if semantic_context_state:
+            snapshot["semantic_context_state"] = semantic_context_state
         turn_id = self._current_turn_id()
         if turn_id:
             snapshot["turn_id"] = turn_id
@@ -957,6 +1007,9 @@ class RuntimeAgentSession:
             and "user_message" not in snapshot
             and "assistant_text" not in snapshot
             and "last_error" not in snapshot
+            and "frontdoor_stage_state" not in snapshot
+            and "frontdoor_canonical_context" not in snapshot
+            and "semantic_context_state" not in snapshot
             and "hydrated_tool_names" not in snapshot
             and "frontdoor_selection_debug" not in snapshot
             and "actual_request_path" not in snapshot

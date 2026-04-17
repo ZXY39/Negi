@@ -60,6 +60,7 @@ from .state_models import (
     CeoRuntimeContext,
 )
 from .tool_contract import (
+    FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND,
     build_frontdoor_tool_contract,
     normalize_frontdoor_candidate_tool_items,
     upsert_frontdoor_tool_contract_message,
@@ -301,6 +302,47 @@ def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any
 
 
 class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
+    @staticmethod
+    def _is_frontdoor_tool_contract_record(record: dict[str, Any] | None) -> bool:
+        if not isinstance(record, dict):
+            return False
+        if str(record.get("role") or "").strip().lower() != "user":
+            return False
+        content = record.get("content")
+        payload: dict[str, Any] | None = None
+        if isinstance(content, dict):
+            payload = dict(content)
+        elif isinstance(content, str):
+            text = str(content or "").strip()
+            if not text:
+                return False
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return False
+            if isinstance(parsed, dict):
+                payload = dict(parsed)
+        if not isinstance(payload, dict):
+            return False
+        return str(payload.get("message_type") or "").strip() == FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND
+
+    @classmethod
+    def _split_request_body_and_tool_contract_messages(
+        cls,
+        request_messages: list[dict[str, Any]] | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        body_messages: list[dict[str, Any]] = []
+        contract_messages: list[dict[str, Any]] = []
+        for item in list(request_messages or []):
+            if not isinstance(item, dict):
+                continue
+            record = dict(item)
+            if cls._is_frontdoor_tool_contract_record(record):
+                contract_messages.append(record)
+                continue
+            body_messages.append(record)
+        return body_messages, contract_messages
+
     """Shared CEO runtime operations reused by the create_agent frontdoor path."""
 
     def __init__(self, *, loop) -> None:
@@ -439,7 +481,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     def _registered_tools_for_state(self, state: CeoGraphState) -> dict[str, Tool]:
         return self._registered_tools(
-            self._frontdoor_callable_tool_names_for_state(
+            self._frontdoor_runtime_visible_tool_names_for_state(
                 state,
                 tool_names=list(state.get("tool_names") or []),
             )
@@ -469,6 +511,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if self._frontdoor_has_valid_stage(state):
             return normalized
         return [STAGE_TOOL_NAME]
+
+    def _frontdoor_runtime_visible_tool_names_for_state(
+        self,
+        state: CeoGraphState | dict[str, Any] | None,
+        *,
+        tool_names: list[str] | None = None,
+    ) -> list[str]:
+        raw_names = tool_names
+        if raw_names is None and isinstance(state, dict):
+            raw_names = list(state.get("tool_names") or [])
+        normalized = self._normalized_tool_name_state_list(raw_names)
+        if isinstance(state, dict) and bool(state.get("cron_internal")):
+            return normalized
+        if STAGE_TOOL_NAME not in normalized:
+            return [*normalized, STAGE_TOOL_NAME]
+        return normalized
 
     def _selected_tool_schemas(self, tool_names: list[str] | None) -> list[dict[str, Any]]:
         schemas: list[dict[str, Any]] = []
@@ -689,6 +747,77 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         raw_value = state.get("frontdoor_selection_debug")
         return dict(raw_value) if isinstance(raw_value, dict) else {}
 
+    @staticmethod
+    def _compression_state_has_material_content(value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        return bool(
+            str(value.get("status") or "").strip()
+            or str(value.get("text") or "").strip()
+            or str(value.get("source") or "").strip()
+            or bool(value.get("needs_recheck"))
+        )
+
+    @staticmethod
+    def _semantic_context_state_has_material_content(value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        if str(value.get("summary_text") or "").strip():
+            return True
+        if bool(value.get("needs_refresh")):
+            return True
+        if str(value.get("updated_at") or "").strip():
+            return True
+        if str(value.get("coverage_history_source") or "").strip():
+            return True
+        try:
+            coverage_message_index = int(value.get("coverage_message_index", -1) or -1)
+        except (TypeError, ValueError):
+            coverage_message_index = -1
+        if coverage_message_index >= 0:
+            return True
+        try:
+            coverage_stage_index = int(value.get("coverage_stage_index", 0) or 0)
+        except (TypeError, ValueError):
+            coverage_stage_index = 0
+        if coverage_stage_index > 0:
+            return True
+        if str(value.get("failure_cooldown_until") or "").strip():
+            return True
+        return False
+
+    @classmethod
+    def _paused_manual_frontdoor_snapshot(cls, session: Any | None) -> dict[str, Any]:
+        snapshot_supplier = getattr(session, "paused_execution_context_snapshot", None)
+        if not callable(snapshot_supplier):
+            return {}
+        try:
+            snapshot = snapshot_supplier()
+        except Exception:
+            return {}
+        if not isinstance(snapshot, dict) or not snapshot:
+            return {}
+        if str(snapshot.get("status") or "").strip().lower() != "paused":
+            return {}
+        source = str(snapshot.get("source") or "").strip().lower()
+        if source in {"approval", "heartbeat", "cron"}:
+            return {}
+        return dict(snapshot)
+
+    @staticmethod
+    def _persisted_session_has_paused_user_turn(persisted_session: Any | None) -> bool:
+        for message in reversed(list(getattr(persisted_session, "messages", []) or [])):
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "").strip().lower() != "user":
+                continue
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            if metadata.get("history_visible") is False:
+                continue
+            if str(metadata.get("_transcript_state") or "").strip().lower() == "paused":
+                return True
+        return False
+
     def _sync_runtime_session_frontdoor_state(
         self,
         *,
@@ -771,6 +900,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         prompt_cache_key: str,
         prompt_cache_diagnostics: dict[str, Any],
         parallel_tool_calls: bool | None,
+        provider_request_meta: dict[str, Any] | None = None,
+        provider_request_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         session_key = str(state.get("session_key") or getattr(getattr(runtime, "context", None), "session_key", "") or "").strip()
         if not session_key:
@@ -812,6 +943,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "messages": [dict(item) for item in list(request_messages or []) if isinstance(item, dict)],
                 "request_messages": [dict(item) for item in list(request_messages or []) if isinstance(item, dict)],
                 "tool_schemas": [dict(item) for item in list(tool_schemas or []) if isinstance(item, dict)],
+                "provider_request_meta": (
+                    dict(provider_request_meta or {})
+                    if isinstance(provider_request_meta, dict)
+                    else {}
+                ),
+                "provider_request_body": (
+                    dict(provider_request_body or {})
+                    if isinstance(provider_request_body, dict)
+                    else {}
+                ),
             },
         )
         if not record:
@@ -916,7 +1057,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: dict[str, Any],
     ) -> dict[str, Any]:
         refreshed = dict(state or {})
-        callable_tool_names = self._frontdoor_callable_tool_names_for_state(
+        runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
             refreshed,
             tool_names=list(refreshed.get("tool_names") or []),
         )
@@ -928,7 +1069,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             model_refs = list(refreshed.get("model_refs") or [])
             provider_model = str(model_refs[0] if model_refs else "").strip()
             try:
-                tool_schemas = self._selected_tool_schemas(list(callable_tool_names))
+                tool_schemas = self._selected_tool_schemas(list(runtime_visible_tool_names))
             except Exception:
                 tool_schemas = []
             contract = self._frontdoor_prompt_contract(
@@ -1694,6 +1835,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "error_text": str(payload.get("error_text", "") or ""),
                     "reasoning_content": payload.get("reasoning_content"),
                     "thinking_blocks": payload.get("thinking_blocks"),
+                    "provider_request_meta": payload.get("provider_request_meta"),
+                    "provider_request_body": payload.get("provider_request_body"),
                 },
             )()
         response_metadata = dict(getattr(message, "response_metadata", {}) or {})
@@ -1708,6 +1851,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "error_text": str(response_metadata.get("error_text", "") or ""),
                 "reasoning_content": additional_kwargs.get("reasoning_content"),
                 "thinking_blocks": additional_kwargs.get("thinking_blocks"),
+                "provider_request_meta": response_metadata.get("provider_request_meta"),
+                "provider_request_body": response_metadata.get("provider_request_body"),
             },
         )()
 
@@ -1722,6 +1867,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "error_text": str(response_view.error_text or ""),
             "reasoning_content": _checkpoint_safe_value(response_view.reasoning_content),
             "thinking_blocks": _checkpoint_safe_value(response_view.thinking_blocks),
+            "provider_request_meta": _checkpoint_safe_value(response_view.provider_request_meta),
+            "provider_request_body": _checkpoint_safe_value(response_view.provider_request_body),
         }
 
     @staticmethod
@@ -1929,13 +2076,79 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             actor_role="ceo",
             session_id=session.state.session_key,
         )
+        paused_manual_snapshot = (
+            self._paused_manual_frontdoor_snapshot(session)
+            if not heartbeat_internal and not cron_internal
+            else {}
+        )
+        if paused_manual_snapshot and not self._persisted_session_has_paused_user_turn(runtime_session):
+            paused_manual_snapshot = {}
+        current_frontdoor_stage_state = self._frontdoor_stage_state_snapshot(state)
+        if not list(current_frontdoor_stage_state.get("stages") or []) and paused_manual_snapshot:
+            paused_stage_source = (
+                paused_manual_snapshot.get("frontdoor_stage_state")
+                or paused_manual_snapshot.get("visible_canonical_context")
+                or paused_manual_snapshot.get("canonical_context")
+                or {}
+            )
+            current_frontdoor_stage_state = self._frontdoor_stage_state_snapshot(
+                {"frontdoor_stage_state": paused_stage_source}
+            )
         current_frontdoor_canonical_context = self._frontdoor_canonical_context_snapshot(state)
-        current_frontdoor_stage_state = self._default_frontdoor_stage_state()
+        if not list(current_frontdoor_canonical_context.get("stages") or []) and paused_manual_snapshot:
+            paused_canonical_source = paused_manual_snapshot.get("frontdoor_canonical_context") or {}
+            current_frontdoor_canonical_context = normalize_frontdoor_canonical_context(paused_canonical_source)
+            if not list(current_frontdoor_canonical_context.get("stages") or []):
+                current_frontdoor_canonical_context = normalize_frontdoor_canonical_context(
+                    paused_manual_snapshot.get("canonical_context")
+                    or paused_manual_snapshot.get("visible_canonical_context")
+                    or {}
+                )
+        current_compression_state = (
+            dict(state.get("compression_state") or self._default_compression_state())
+            if isinstance(state, dict)
+            else self._default_compression_state()
+        )
+        if not self._compression_state_has_material_content(current_compression_state):
+            paused_compression_state = (
+                dict(paused_manual_snapshot.get("compression") or {})
+                if paused_manual_snapshot
+                else {}
+            )
+            if self._compression_state_has_material_content(paused_compression_state):
+                current_compression_state = paused_compression_state
+        current_semantic_context_state = (
+            dict(state.get("semantic_context_state") or {})
+            if isinstance(state, dict)
+            else {}
+        )
+        if not self._semantic_context_state_has_material_content(current_semantic_context_state):
+            paused_semantic_context_state = (
+                dict(paused_manual_snapshot.get("semantic_context_state") or {})
+                if paused_manual_snapshot
+                else {}
+            )
+            session_semantic_context_state = dict(getattr(session, "_semantic_context_state", None) or {})
+            if self._semantic_context_state_has_material_content(paused_semantic_context_state):
+                current_semantic_context_state = paused_semantic_context_state
+            elif self._semantic_context_state_has_material_content(session_semantic_context_state):
+                current_semantic_context_state = session_semantic_context_state
+        current_semantic_context_state = {
+            **self._default_semantic_context_state(),
+            **dict(current_semantic_context_state or {}),
+        }
+        seeded_hydrated_tool_names = (
+            list(getattr(session, "_frontdoor_hydrated_tool_names", []) or [])
+            or list(state.get("hydrated_tool_names") or [])
+        )
+        if not seeded_hydrated_tool_names and paused_manual_snapshot:
+            seeded_hydrated_tool_names = [
+                str(item or "").strip()
+                for item in list(paused_manual_snapshot.get("hydrated_tool_names") or [])
+                if str(item or "").strip()
+            ]
         hydrated_tool_names = self._frontdoor_hydrated_tool_lru(
-            existing_tool_names=(
-                list(getattr(session, "_frontdoor_hydrated_tool_names", []) or [])
-                or list(state.get("hydrated_tool_names") or [])
-            ),
+            existing_tool_names=seeded_hydrated_tool_names,
             incoming_tool_names=[],
             visible_tool_names=list(exposure.get("tool_names") or []),
         )
@@ -1949,7 +2162,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             user_metadata=metadata,
             frontdoor_stage_state=current_frontdoor_stage_state,
             frontdoor_canonical_context=current_frontdoor_canonical_context,
-            semantic_context_state=dict(state.get("semantic_context_state") or {}),
+            semantic_context_state=dict(current_semantic_context_state or {}),
             hydrated_tool_names=list(hydrated_tool_names),
         )
         selected_skill_ids = [
@@ -2009,7 +2222,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         model_refs = self._resolve_ceo_model_refs()
         provider_model = str(model_refs[0] if model_refs else "").strip()
-        tool_schemas = self._selected_tool_schemas(callable_tool_names)
+        runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
+            {
+                "frontdoor_stage_state": current_frontdoor_stage_state,
+                "cron_internal": cron_internal,
+                "heartbeat_internal": heartbeat_internal,
+            },
+            tool_names=tool_names,
+        )
+        tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
         stable_messages = self._prompt_message_records(getattr(assembly, "stable_messages", None)) or list(messages)
         dynamic_appendix_messages = self._prompt_message_records(
             getattr(assembly, "dynamic_appendix_messages", None)
@@ -2093,6 +2314,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             prompt_cache_key = contract.prompt_cache_key
             prompt_cache_diagnostics = dict(contract.diagnostics)
         persisted_messages = list(stable_messages)
+        persisted_dynamic_appendix_messages = list(dynamic_appendix_messages)
+        if prompt_scope == "ceo_frontdoor":
+            request_body_messages, tool_contract_messages = self._split_request_body_and_tool_contract_messages(messages)
+            if request_body_messages:
+                persisted_messages = list(request_body_messages)
+            if tool_contract_messages:
+                persisted_dynamic_appendix_messages = list(tool_contract_messages)
+            else:
+                persisted_dynamic_appendix_messages = []
         if cron_system_message is not None:
             insert_at = 1 if persisted_messages and str(persisted_messages[0].get("role") or "").strip().lower() == "system" else 0
             persisted_messages = [
@@ -2112,12 +2342,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "frontdoor_canonical_context": current_frontdoor_canonical_context,
             "compression_state": dict(
                 getattr(assembly, "trace", {}).get("compression_state_payload")
-                or state.get("compression_state")
+                or current_compression_state
                 or self._default_compression_state()
             ),
             "semantic_context_state": dict(
                 getattr(assembly, "trace", {}).get("semantic_context_state")
-                or state.get("semantic_context_state")
+                or current_semantic_context_state
                 or {}
             ),
             "turn_overlay_text": turn_overlay_text or None,
@@ -2143,7 +2373,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "cron_internal": cron_internal,
             "model_refs": model_refs,
             "stable_messages": stable_messages,
-            "dynamic_appendix_messages": dynamic_appendix_messages,
+            "dynamic_appendix_messages": persisted_dynamic_appendix_messages,
             "cache_family_revision": cache_family_revision,
             "prompt_cache_key": prompt_cache_key,
             "prompt_cache_diagnostics": prompt_cache_diagnostics,
@@ -2174,12 +2404,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         actual_tool_schemas: list[dict[str, Any]] = []
         if hasattr(self, "_frontdoor_prompt_contract"):
             try:
-                callable_tool_names = self._frontdoor_callable_tool_names_for_state(
+                runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
                     state,
                     tool_names=list(state.get("tool_names") or []),
                 )
                 try:
-                    tool_schemas = self._selected_tool_schemas(list(callable_tool_names))
+                    tool_schemas = self._selected_tool_schemas(list(runtime_visible_tool_names))
                 except Exception:
                     tool_schemas = []
                 actual_tool_schemas = list(tool_schemas or [])
@@ -2210,15 +2440,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 tool_schemas=actual_tool_schemas,
             ),
         }
-        actual_request_trace = self._persist_frontdoor_actual_request(
-            state=state,
-            runtime=runtime,
-            request_messages=request_messages,
-            tool_schemas=actual_tool_schemas,
-            prompt_cache_key=prompt_cache_key,
-            prompt_cache_diagnostics=prompt_cache_diagnostics,
-            parallel_tool_calls=(bool(state.get("parallel_enabled")) if langchain_tools else None),
-        )
         provider_retry_count = 0
         empty_response_retry_count = 0
         while True:
@@ -2242,9 +2463,35 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 await asyncio.sleep(float(min(10, max(1, empty_response_retry_count))))
                 continue
             break
+        response_view = self._model_response_view(message)
+        actual_request_trace = self._persist_frontdoor_actual_request(
+            state=state,
+            runtime=runtime,
+            request_messages=request_messages,
+            tool_schemas=actual_tool_schemas,
+            prompt_cache_key=prompt_cache_key,
+            prompt_cache_diagnostics=prompt_cache_diagnostics,
+            parallel_tool_calls=(bool(state.get("parallel_enabled")) if langchain_tools else None),
+            provider_request_meta=(
+                dict(response_view.provider_request_meta or {})
+                if isinstance(response_view.provider_request_meta, dict)
+                else {}
+            ),
+            provider_request_body=(
+                dict(response_view.provider_request_body or {})
+                if isinstance(response_view.provider_request_body, dict)
+                else {}
+            ),
+        )
+        message_state_update = (
+            self._replace_messages_update(list(request_messages))
+            if callable(getattr(self, "_replace_messages_update", None))
+            else {"messages": list(request_messages)}
+        )
         return {
             "iteration": iteration,
             "repair_overlay_text": None,
+            **message_state_update,
             "prompt_cache_key": prompt_cache_key,
             "prompt_cache_diagnostics": prompt_cache_diagnostics,
             **actual_request_trace,
@@ -2708,11 +2955,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             messages = list(getattr(self, "_state_message_records")(messages))
         else:
             messages = [dict(message) for message in messages if isinstance(message, dict)]
+        request_body_messages, _tool_contract_messages = self._split_request_body_and_tool_contract_messages(messages)
+        if request_body_messages:
+            messages = list(request_body_messages)
         finalized_stage_state = self._frontdoor_stage_state_snapshot(state)
         if output and route_kind == "direct_reply":
-            last_role = str(messages[-1].get("role") or "").strip().lower() if messages else ""
-            if last_role != "assistant":
-                messages.append({"role": "assistant", "content": output})
+            messages.append({"role": "assistant", "content": output})
             result["messages"] = list(messages)
             finalized_stage_state = self._complete_active_frontdoor_stage_state(
                 state.get("frontdoor_stage_state"),

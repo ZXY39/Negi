@@ -194,7 +194,7 @@ class ResponsesProvider(LLMProvider):
         url = self.api_base
         if not url.endswith("/responses"):
             url = url.rstrip("/") + "/responses"
-        self._trace_request_payload(
+        provider_request_meta, provider_request_body = self._capture_request_payload(
             provider="responses",
             endpoint=url,
             body=body,
@@ -223,6 +223,8 @@ class ResponsesProvider(LLMProvider):
                         tool_calls=tool_calls,
                         finish_reason=finish_reason,
                         usage=usage,
+                        provider_request_meta=provider_request_meta,
+                        provider_request_body=provider_request_body,
                     )
         except Exception as e:
             partial_content = str(getattr(e, "partial_content", "") or "").strip()
@@ -239,6 +241,8 @@ class ResponsesProvider(LLMProvider):
                     content=partial_content,
                     finish_reason="error",
                     error_text=error_text,
+                    provider_request_meta=provider_request_meta,
+                    provider_request_body=provider_request_body,
                 )
             if diagnostics_summary:
                 logger.warning(diagnostics_summary)

@@ -91,7 +91,7 @@ class OpenAICodexProvider(LLMProvider):
             )
 
         url = DEFAULT_CODEX_URL
-        self._trace_request_payload(
+        provider_request_meta, provider_request_body = self._capture_request_payload(
             provider="openai_codex",
             endpoint=url,
             body=body,
@@ -123,6 +123,8 @@ class OpenAICodexProvider(LLMProvider):
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
                 usage=usage,
+                provider_request_meta=provider_request_meta,
+                provider_request_body=provider_request_body,
             )
         except Exception as e:
             partial_content = str(getattr(e, "partial_content", "") or "").strip()
@@ -131,10 +133,14 @@ class OpenAICodexProvider(LLMProvider):
                 return LLMResponse(
                     content=partial_content,
                     finish_reason="error",
+                    provider_request_meta=provider_request_meta,
+                    provider_request_body=provider_request_body,
                 )
             return LLMResponse(
                 content=f"Error calling Codex: {str(e)}",
                 finish_reason="error",
+                provider_request_meta=provider_request_meta,
+                provider_request_body=provider_request_body,
             )
 
     def get_default_model(self) -> str:

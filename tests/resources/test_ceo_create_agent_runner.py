@@ -1665,6 +1665,244 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_candidate_tools_visi
     assert "rbac_visible_skill_ids" not in contract_payload
 
 
+@pytest.mark.asyncio
+async def test_create_agent_runner_graph_prepare_turn_persists_request_body_without_tool_contract() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            sessions=SimpleNamespace(get_or_create=lambda session_key: SimpleNamespace(session_key=session_key)),
+            main_task_service=None,
+            tools=SimpleNamespace(get=lambda *_: None, tool_names=[]),
+            provider_name="openai",
+            model="gpt-test",
+        )
+    )
+
+    async def _resolve_for_actor(**kwargs):
+        _ = kwargs
+        return {
+            "skills": [],
+            "tool_families": [],
+            "tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+        }
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            model_messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "hello"},
+            ],
+            stable_messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "hello"},
+            ],
+            dynamic_appendix_messages=[
+                {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
+            ],
+            tool_names=["submit_next_stage", "load_tool_context", "filesystem_write"],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {"mode": "dense_only", "candidate_tool_names": []},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="## Retrieved Context\n- authoritative memory",
+        )
+
+    runner._resolver = SimpleNamespace(resolve_for_actor=_resolve_for_actor)
+    runner._builder = SimpleNamespace(build_for_ceo=_build_for_ceo)
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    runner._selected_tool_schemas = (
+        lambda tool_names: [{"name": name, "parameters": {"type": "object"}} for name in list(tool_names or [])]
+    )
+
+    prepared = await runner._graph_prepare_turn(
+        state=initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
+        runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
+    )
+
+    assert prepared["messages"] == [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+    ]
+    assert len(prepared["dynamic_appendix_messages"]) == 1
+    contract_payload = json.loads(str(prepared["dynamic_appendix_messages"][0]["content"] or ""))
+    assert isinstance(contract_payload, dict)
+    assert contract_payload["message_type"] == "frontdoor_runtime_tool_contract"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_context_for_new_turn() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._set_paused_execution_context(
+        {
+            "status": "paused",
+            "user_message": {"content": "Original paused request"},
+            "canonical_context": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Continue the paused investigation",
+                        "representation": "raw",
+                        "status": "active",
+                        "stage_kind": "normal",
+                        "tool_round_budget": 6,
+                        "tool_rounds_used": 2,
+                        "rounds": [],
+                    }
+                ],
+            },
+            "frontdoor_canonical_context": {
+                "active_stage_id": "",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-0",
+                        "stage_index": 0,
+                        "stage_goal": "Earlier completed context",
+                        "representation": "summary",
+                        "status": "completed",
+                        "stage_kind": "normal",
+                        "tool_round_budget": 4,
+                        "tool_rounds_used": 4,
+                        "rounds": [],
+                    }
+                ],
+            },
+            "compression": {
+                "status": "ready",
+                "text": "Global context already summarized",
+                "source": "semantic",
+                "needs_recheck": False,
+            },
+            "semantic_context_state": {
+                "summary_text": "## Long Context\nKeep the paused findings",
+                "needs_refresh": False,
+            },
+            "hydrated_tool_names": ["filesystem_write"],
+        }
+    )
+    session._frontdoor_stage_state = {}
+    session._frontdoor_canonical_context = {}
+    session._compression_state = {}
+    session._semantic_context_state = {}
+    session._frontdoor_hydrated_tool_names = []
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            sessions=SimpleNamespace(
+                get_or_create=lambda session_key: SimpleNamespace(
+                    session_key=session_key,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": "Original paused request",
+                            "metadata": {"_transcript_state": "paused"},
+                        }
+                    ],
+                )
+            ),
+            main_task_service=None,
+            tools=SimpleNamespace(get=lambda *_: None, tool_names=[]),
+            provider_name="openai",
+            model="gpt-test",
+        )
+    )
+
+    async def _resolve_for_actor(**kwargs):
+        _ = kwargs
+        return {
+            "skills": [],
+            "tool_families": [],
+            "tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+        }
+
+    captured_builder_kwargs: dict[str, object] = {}
+
+    async def _build_for_ceo(**kwargs):
+        captured_builder_kwargs.update(kwargs)
+        return SimpleNamespace(
+            model_messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "continue"},
+            ],
+            stable_messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "continue"},
+            ],
+            dynamic_appendix_messages=[],
+            tool_names=["submit_next_stage", "load_tool_context", "filesystem_write"],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {"mode": "dense_only", "candidate_tool_names": []},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    runner._resolver = SimpleNamespace(resolve_for_actor=_resolve_for_actor)
+    runner._builder = SimpleNamespace(build_for_ceo=_build_for_ceo)
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    runner._selected_tool_schemas = (
+        lambda tool_names: [{"name": name, "parameters": {"type": "object"}} for name in list(tool_names or [])]
+    )
+
+    prepared = await runner._graph_prepare_turn(
+        state=initial_persistent_state(user_input={"content": "continue", "metadata": {}}),
+        runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
+    )
+
+    assert captured_builder_kwargs["frontdoor_stage_state"]["active_stage_id"] == "frontdoor-stage-1"
+    assert captured_builder_kwargs["frontdoor_canonical_context"]["stages"][0]["stage_id"] == "frontdoor-stage-0"
+    assert captured_builder_kwargs["semantic_context_state"]["summary_text"] == "## Long Context\nKeep the paused findings"
+    assert captured_builder_kwargs["hydrated_tool_names"] == ["filesystem_write"]
+    assert prepared["frontdoor_stage_state"]["active_stage_id"] == "frontdoor-stage-1"
+    assert prepared["compression_state"]["status"] == "ready"
+    assert prepared["semantic_context_state"]["summary_text"] == "## Long Context\nKeep the paused findings"
+    assert prepared["hydrated_tool_names"] == ["filesystem_write"]
+    contract_messages = [
+        dict(item)
+        for item in list(prepared["dynamic_appendix_messages"])
+        if _is_frontdoor_runtime_tool_contract_record(dict(item))
+    ]
+    assert len(contract_messages) == 1
+    contract_payload = json.loads(str(contract_messages[0]["content"] or ""))
+    assert contract_payload["callable_tool_names"] == [
+        "submit_next_stage",
+        "load_tool_context",
+        "filesystem_write",
+    ]
+
+
 def test_runtime_agent_session_inflight_snapshot_keeps_frontdoor_hydrated_tool_names() -> None:
     session = RuntimeAgentSession(
         SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
@@ -1681,6 +1919,171 @@ def test_runtime_agent_session_inflight_snapshot_keeps_frontdoor_hydrated_tool_n
 
     assert isinstance(snapshot, dict)
     assert snapshot["hydrated_tool_names"] == ["filesystem_write"]
+
+
+def test_runtime_agent_session_paused_snapshot_keeps_frontdoor_runtime_context() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._frontdoor_stage_state = {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_goal": "Continue the paused investigation",
+                "representation": "raw",
+                "status": "active",
+                "stage_kind": "normal",
+                "tool_round_budget": 6,
+                "tool_rounds_used": 2,
+                "rounds": [],
+            }
+        ],
+    }
+    session._frontdoor_canonical_context = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-0",
+                "stage_index": 0,
+                "stage_goal": "Earlier completed context",
+                "representation": "summary",
+                "status": "completed",
+                "stage_kind": "normal",
+                "tool_round_budget": 4,
+                "tool_rounds_used": 4,
+                "rounds": [],
+            }
+        ],
+    }
+    session._compression_state = {
+        "status": "ready",
+        "text": "Global context already summarized",
+        "source": "semantic",
+        "needs_recheck": False,
+    }
+    session._semantic_context_state = {
+        "summary_text": "## Long Context\nKeep the paused findings",
+        "needs_refresh": False,
+    }
+    session._frontdoor_hydrated_tool_names = ["filesystem_write"]
+
+    snapshot = session._build_execution_context_snapshot(
+        allow_manual_pause=True,
+        status_override="paused",
+    )
+
+    assert isinstance(snapshot, dict)
+    assert snapshot["canonical_context"]["active_stage_id"] == "frontdoor-stage-1"
+    assert snapshot["frontdoor_canonical_context"]["stages"][0]["stage_id"] == "frontdoor-stage-0"
+    assert snapshot["semantic_context_state"]["summary_text"] == "## Long Context\nKeep the paused findings"
+    assert snapshot["hydrated_tool_names"] == ["filesystem_write"]
+
+
+@pytest.mark.asyncio
+async def test_graph_finalize_turn_appends_direct_reply_after_runtime_context_assistant() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    result = await runner._graph_finalize_turn(
+        {
+            "messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "## Retrieved Context\n- memory"},
+            ],
+            "final_output": "final answer",
+            "route_kind": "direct_reply",
+            "heartbeat_internal": False,
+            "query_text": "hello",
+        }
+    )
+
+    assert result["messages"] == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "## Retrieved Context\n- memory"},
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_graph_finalize_turn_strips_all_frontdoor_tool_contract_snapshots_from_durable_messages() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    contract_text = json.dumps(
+        {
+            "message_type": "frontdoor_runtime_tool_contract",
+            "callable_tool_names": ["submit_next_stage"],
+            "candidate_tools": [],
+            "hydrated_tool_names": [],
+            "candidate_skill_ids": [],
+            "stage_summary": {"active_stage_id": "", "transition_required": False},
+            "contract_revision": "frontdoor:v1",
+        },
+        ensure_ascii=False,
+    )
+
+    result = await runner._graph_finalize_turn(
+        {
+            "messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "hello"},
+                {"role": "user", "content": contract_text},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "submit_next_stage", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "name": "submit_next_stage",
+                    "tool_call_id": "call-1",
+                    "content": '{"status":"success"}',
+                },
+                {"role": "user", "content": contract_text},
+            ],
+            "final_output": "final answer",
+            "route_kind": "direct_reply",
+            "heartbeat_internal": False,
+            "query_text": "hello",
+        }
+    )
+
+    assert result["messages"] == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "hello"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "submit_next_stage",
+            "tool_call_id": "call-1",
+            "content": '{"status":"success"}',
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
 
 
 def test_create_agent_runner_syncs_frontdoor_selection_debug_into_inflight_snapshot() -> None:
@@ -2999,6 +3402,108 @@ def test_create_agent_prompt_contract_does_not_treat_plain_short_recap_text_as_c
         {"role": "user", "content": "latest user"},
         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
     ]
+
+
+def test_create_agent_prompt_contract_keeps_request_body_prefix_before_same_turn_tool_growth() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    first = runner._frontdoor_prompt_contract(
+        state=_canonical_frontdoor_state(
+            messages=[
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "start"},
+                {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+            ],
+            stable_messages=[
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "start"},
+                {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+            ],
+            dynamic_appendix_messages=[
+                {"role": "user", "content": '{"message_type":"frontdoor_runtime_tool_contract"}'},
+            ],
+        ),
+        provider_model="openai:gpt-4.1",
+        tool_schemas=[],
+        session_key="web:shared",
+    )
+    second = runner._frontdoor_prompt_contract(
+        state=_canonical_frontdoor_state(
+            messages=[
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "start"},
+                {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "submit_next_stage", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "name": "submit_next_stage",
+                    "tool_call_id": "call-1",
+                    "content": '{"status":"success"}',
+                },
+            ],
+            stable_messages=[
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "start"},
+                {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+            ],
+            dynamic_appendix_messages=[
+                {"role": "user", "content": '{"message_type":"frontdoor_runtime_tool_contract"}'},
+            ],
+        ),
+        provider_model="openai:gpt-4.1",
+        tool_schemas=[],
+        session_key="web:shared",
+    )
+
+    first_non_contract_messages = [
+        dict(item)
+        for item in list(first.request_messages or [])
+        if not _is_frontdoor_runtime_tool_contract_record(dict(item))
+    ]
+    second_non_contract_messages = [
+        dict(item)
+        for item in list(second.request_messages or [])
+        if not _is_frontdoor_runtime_tool_contract_record(dict(item))
+    ]
+
+    assert first_non_contract_messages == [
+        {"role": "system", "content": "stable system"},
+        {"role": "user", "content": "start"},
+        {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+    ]
+    assert second_non_contract_messages == [
+        {"role": "system", "content": "stable system"},
+        {"role": "user", "content": "start"},
+        {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "submit_next_stage",
+            "tool_call_id": "call-1",
+            "content": '{"status":"success"}',
+        },
+    ]
+    assert second_non_contract_messages[: len(first_non_contract_messages)] == first_non_contract_messages
 
 
 @pytest.mark.asyncio

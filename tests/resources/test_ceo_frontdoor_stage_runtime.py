@@ -211,7 +211,7 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
     )
     tools_by_name = {str(getattr(tool, "name", "") or ""): tool for tool in tools}
 
-    assert set(tools_by_name) == {STAGE_TOOL_NAME}
+    assert set(tools_by_name) == {STAGE_TOOL_NAME, "record_tool"}
 
     stage_result = await tools_by_name[STAGE_TOOL_NAME].ainvoke(
         {
@@ -273,7 +273,7 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
 
 
 @pytest.mark.asyncio
-async def test_frontdoor_stage_gate_hides_ordinary_tools_before_first_stage(monkeypatch) -> None:
+async def test_frontdoor_stage_gate_keeps_ordinary_tools_visible_but_blocks_them_before_first_stage(monkeypatch) -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     executed: list[str] = []
 
@@ -301,8 +301,13 @@ async def test_frontdoor_stage_gate_hides_ordinary_tools_before_first_stage(monk
         runtime=SimpleNamespace(context=SimpleNamespace()),
     )
     tools_by_name = {str(getattr(tool, "name", "") or ""): tool for tool in tools}
+    blocked_result = await tools_by_name["record_tool"].ainvoke({"value": "alpha"})
 
-    assert set(tools_by_name) == {STAGE_TOOL_NAME}
+    assert set(tools_by_name) == {STAGE_TOOL_NAME, "record_tool"}
+    assert blocked_result["status"] == "error"
+    assert str(blocked_result["result_text"]).startswith(
+        "Error: no active stage; call submit_next_stage before using other tools"
+    )
     assert executed == []
 
 
@@ -379,11 +384,16 @@ async def test_frontdoor_stage_budget_exhaustion_updates_gate_and_blocks_next_or
         runtime=SimpleNamespace(context=SimpleNamespace()),
     )
     exhausted_tools_by_name = {str(getattr(tool, "name", "") or ""): tool for tool in exhausted_tools}
-    assert set(exhausted_tools_by_name) == {STAGE_TOOL_NAME}
+    blocked_after_exhaustion = await exhausted_tools_by_name["record_tool"].ainvoke({"value": "beta"})
+    assert set(exhausted_tools_by_name) == {STAGE_TOOL_NAME, "record_tool"}
+    assert blocked_after_exhaustion["status"] == "error"
+    assert str(blocked_after_exhaustion["result_text"]).startswith(
+        "Error: current stage budget is exhausted; call submit_next_stage before using other tools"
+    )
 
 
 @pytest.mark.asyncio
-async def test_frontdoor_without_valid_stage_only_exposes_submit_next_stage_to_model(monkeypatch) -> None:
+async def test_frontdoor_without_valid_stage_keeps_runtime_visible_tools_stable(monkeypatch) -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
     monkeypatch.setattr(
@@ -412,8 +422,8 @@ async def test_frontdoor_without_valid_stage_only_exposes_submit_next_stage_to_m
     )
     exhausted_tool_names = {str(getattr(tool, "name", "") or "") for tool in exhausted_tools}
 
-    assert no_stage_tool_names == {STAGE_TOOL_NAME}
-    assert exhausted_tool_names == {STAGE_TOOL_NAME}
+    assert no_stage_tool_names == {STAGE_TOOL_NAME, "record_tool"}
+    assert exhausted_tool_names == {STAGE_TOOL_NAME, "record_tool"}
 
 
 def test_frontdoor_stage_state_snapshot_preserves_archive_refs() -> None:

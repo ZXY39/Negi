@@ -412,7 +412,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
 
     def _refresh_prompt_cache_state(self, *, state: dict[str, Any]) -> dict[str, Any]:
         updated_state = dict(state or {})
-        callable_tool_names = self._frontdoor_callable_tool_names_for_state(
+        runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
             updated_state,
             tool_names=list(updated_state.get("tool_names") or []),
         )
@@ -420,7 +420,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         provider_model = str(model_refs[0] if model_refs else "").strip()
         tool_schemas = []
         try:
-            tool_schemas = self._selected_tool_schemas(list(callable_tool_names))
+            tool_schemas = self._selected_tool_schemas(list(runtime_visible_tool_names))
         except Exception:
             tool_schemas = []
         contract = self._frontdoor_prompt_contract(

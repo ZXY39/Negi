@@ -656,3 +656,38 @@ async def test_g3ku_chat_model_adapter_preserves_nested_tool_schema_when_sending
     assert parameters.get("required") == ["items"]
     assert nested_item.get("required") == ["kind", "value"]
     assert dict(nested_properties.get("kind") or {}).get("enum") == ["profile", "preference"]
+
+
+@pytest.mark.asyncio
+async def test_g3ku_chat_model_adapter_preserves_provider_request_payload_metadata() -> None:
+    class _Backend:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            return LLMResponse(
+                content="ok",
+                finish_reason="stop",
+                provider_request_meta={
+                    "provider": "responses",
+                    "endpoint": "https://example.test/v1/responses",
+                },
+                provider_request_body={
+                    "model": "gpt-5.4-mini",
+                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                    "tool_choice": "auto",
+                },
+            )
+
+    adapter = G3kuChatModelAdapter(chat_backend=_Backend(), default_model="demo:model")
+
+    result = await adapter._agenerate([HumanMessage(content="hello")])
+    message = result.generations[0].message
+
+    assert message.response_metadata["provider_request_meta"] == {
+        "provider": "responses",
+        "endpoint": "https://example.test/v1/responses",
+    }
+    assert message.response_metadata["provider_request_body"] == {
+        "model": "gpt-5.4-mini",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        "tool_choice": "auto",
+    }

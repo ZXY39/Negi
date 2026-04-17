@@ -47,6 +47,8 @@ class LLMResponse:
     thinking_blocks: list[dict] | None = None
     request_message_count: int | None = None
     request_message_chars: int | None = None
+    provider_request_meta: dict[str, Any] = field(default_factory=dict)
+    provider_request_body: dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_tool_calls(self) -> bool:
@@ -96,6 +98,36 @@ class LLMProvider(ABC):
             return
         del provider, endpoint
         logger.info(render_send_data_trace(self._trace_json(body)))
+
+    def _capture_request_payload(
+        self,
+        *,
+        provider: str,
+        endpoint: str | None = None,
+        body: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        normalized_body = self._normalize_request_payload(body)
+        self._trace_request_payload(
+            provider=provider,
+            endpoint=endpoint,
+            body=normalized_body,
+        )
+        return (
+            {
+                "provider": str(provider or "").strip(),
+                "endpoint": str(endpoint or "").strip(),
+            },
+            normalized_body,
+        )
+
+    @classmethod
+    def _normalize_request_payload(cls, payload: Any) -> dict[str, Any]:
+        source = payload if isinstance(payload, dict) else {"value": payload}
+        try:
+            normalized = json.loads(json.dumps(source, ensure_ascii=False, default=str))
+        except Exception:
+            normalized = {"value": str(payload)}
+        return normalized if isinstance(normalized, dict) else {"value": normalized}
 
     @staticmethod
     def _sanitize_empty_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command
 
 if "litellm" not in sys.modules:
@@ -686,7 +687,18 @@ async def test_ceo_frontdoor_call_model_returns_json_safe_response_payload(
         return AIMessage(
             content="tool reply",
             tool_calls=[{"id": "call-1", "name": "filesystem", "args": {"path": "."}}],
-            response_metadata={"finish_reason": "tool_calls"},
+            response_metadata={
+                "finish_reason": "tool_calls",
+                "provider_request_meta": {
+                    "provider": "responses",
+                    "endpoint": "https://example.test/v1/responses",
+                },
+                "provider_request_body": {
+                    "model": "gpt-5.4-mini",
+                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "list files"}]}],
+                    "tool_choice": "auto",
+                },
+            },
             additional_kwargs={
                 "reasoning_content": "reasoning trace",
                 "thinking_blocks": [{"type": "thinking", "text": "step one"}],
@@ -713,6 +725,9 @@ async def test_ceo_frontdoor_call_model_returns_json_safe_response_payload(
     assert update["repair_overlay_text"] is None
     assert "response_message" not in update
     assert "response_content" not in update
+    replaced_messages = list(update["messages"] or [])
+    assert getattr(replaced_messages[0], "id", "") == REMOVE_ALL_MESSAGES
+    assert replaced_messages[1:] == [{"role": "user", "content": "list files"}]
     assert update["response_payload"] == {
         "content": "tool reply",
         "tool_calls": [{"id": "call-1", "name": "filesystem", "arguments": {"path": "."}}],
@@ -720,8 +735,17 @@ async def test_ceo_frontdoor_call_model_returns_json_safe_response_payload(
         "error_text": "",
         "reasoning_content": "reasoning trace",
         "thinking_blocks": [{"type": "thinking", "text": "step one"}],
+        "provider_request_meta": {
+            "provider": "responses",
+            "endpoint": "https://example.test/v1/responses",
+        },
+        "provider_request_body": {
+            "model": "gpt-5.4-mini",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "list files"}]}],
+            "tool_choice": "auto",
+        },
     }
-    json.dumps(update)
+    json.dumps(update["response_payload"])
 
 
 @pytest.mark.asyncio
@@ -841,7 +865,22 @@ async def test_ceo_frontdoor_call_model_persists_actual_request_to_disk(
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
 
     async def _call_model_with_tools(**kwargs):
-        return AIMessage(content="plain reply", response_metadata={"finish_reason": "stop"})
+        return AIMessage(
+            content="plain reply",
+            response_metadata={
+                "finish_reason": "stop",
+                "provider_request_meta": {
+                    "provider": "responses",
+                    "endpoint": "https://example.test/v1/responses",
+                },
+                "provider_request_body": {
+                    "model": "gpt-5.4-mini",
+                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                    "prompt_cache_key": "cache-key",
+                    "tool_choice": "auto",
+                },
+            },
+        )
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
 
@@ -896,7 +935,206 @@ async def test_ceo_frontdoor_call_model_persists_actual_request_to_disk(
     assert payload["actual_request_message_count"] == update["prompt_cache_diagnostics"]["actual_request_message_count"]
     assert payload["request_messages"]
     assert payload["tool_schemas"]
+    assert payload["provider_request_meta"] == {
+        "provider": "responses",
+        "endpoint": "https://example.test/v1/responses",
+    }
+    assert payload["provider_request_body"] == {
+        "model": "gpt-5.4-mini",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        "prompt_cache_key": "cache-key",
+        "tool_choice": "auto",
+    }
     assert update["frontdoor_actual_request_history"]
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_inside_turn_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+
+    async def _call_model_with_tools(**kwargs):
+        _ = kwargs
+        return AIMessage(content="plain reply", response_metadata={"finish_reason": "stop"})
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+
+    contract_text = json.dumps(
+        {
+            "message_type": "frontdoor_runtime_tool_contract",
+            "callable_tool_names": ["submit_next_stage"],
+            "candidate_tools": [],
+            "hydrated_tool_names": [],
+            "candidate_skill_ids": [],
+            "stage_summary": {"active_stage_id": "", "transition_required": False},
+            "contract_revision": "frontdoor:v1",
+        },
+        ensure_ascii=False,
+    )
+
+    update = await runner._graph_call_model(
+        {
+            "messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "hello"},
+                {"role": "user", "content": contract_text},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "submit_next_stage", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "name": "submit_next_stage",
+                    "tool_call_id": "call-1",
+                    "content": '{"status":"success"}',
+                },
+            ],
+            "stable_messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "hello"},
+            ],
+            "dynamic_appendix_messages": [{"role": "user", "content": contract_text}],
+            "turn_overlay_text": "",
+            "tool_names": ["submit_next_stage"],
+            "candidate_tool_names": [],
+            "candidate_tool_items": [],
+            "hydrated_tool_names": [],
+            "visible_skill_ids": [],
+            "candidate_skill_ids": [],
+            "rbac_visible_tool_names": ["submit_next_stage"],
+            "rbac_visible_skill_ids": [],
+            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "model_refs": ["openai_codex:gpt-test"],
+            "parallel_enabled": False,
+            "prompt_cache_key": "cache-key",
+            "iteration": 1,
+            "max_iterations": 4,
+            "session_key": "web:shared",
+        },
+        runtime=SimpleNamespace(context=CeoRuntimeContext(loop=None, session=None, session_key="web:shared", on_progress=None)),
+    )
+
+    replaced_messages = list(update["messages"] or [])
+    expected_messages = [
+        {"role": "system", "content": "stable system"},
+        {"role": "user", "content": "hello"},
+        {"role": "user", "content": contract_text},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "submit_next_stage",
+            "tool_call_id": "call-1",
+            "content": '{"status":"success"}',
+        },
+    ]
+    assert replaced_messages == runner._replace_messages_update(
+        [*expected_messages, dict(replaced_messages[-1])]
+    )["messages"]
+    appended_contract = _frontdoor_tool_contract_payload(dict(replaced_messages[-1]))
+    assert appended_contract is not None
+    assert appended_contract["message_type"] == "frontdoor_runtime_tool_contract"
+    assert appended_contract["callable_tool_names"] == ["submit_next_stage"]
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_when_stage_transition_is_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+
+    selected_tool_schema_requests: list[list[str]] = []
+
+    def _capture_selected_tool_schemas(tool_names):
+        normalized = [str(name or "").strip() for name in list(tool_names or []) if str(name or "").strip()]
+        selected_tool_schema_requests.append(normalized)
+        return [{"name": name, "parameters": {"type": "object"}} for name in normalized]
+
+    monkeypatch.setattr(runner, "_selected_tool_schemas", _capture_selected_tool_schemas)
+
+    async def _call_model_with_tools(**kwargs):
+        _ = kwargs
+        return AIMessage(content="plain reply", response_metadata={"finish_reason": "stop"})
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+
+    update = await runner._graph_call_model(
+        {
+            "messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "hello"},
+            ],
+            "stable_messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "hello"},
+            ],
+            "dynamic_appendix_messages": [],
+            "turn_overlay_text": "",
+            "tool_names": ["message", "load_tool_context", "exec", "submit_next_stage"],
+            "candidate_tool_names": [],
+            "candidate_tool_items": [],
+            "hydrated_tool_names": [],
+            "visible_skill_ids": [],
+            "candidate_skill_ids": [],
+            "rbac_visible_tool_names": ["message", "load_tool_context", "exec", "submit_next_stage"],
+            "rbac_visible_skill_ids": [],
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": True,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Wrap up the current stage before continuing",
+                        "tool_round_budget": 5,
+                        "tool_rounds_used": 5,
+                        "status": "active",
+                        "mode": "自主执行",
+                        "completed_stage_summary": "",
+                        "key_refs": [],
+                        "rounds": [],
+                    }
+                ],
+            },
+            "model_refs": ["openai_codex:gpt-test"],
+            "parallel_enabled": False,
+            "prompt_cache_key": "cache-key",
+            "iteration": 0,
+            "max_iterations": 4,
+            "session_key": "web:shared",
+        },
+        runtime=SimpleNamespace(
+            context=CeoRuntimeContext(loop=None, session=None, session_key="web:shared", on_progress=None)
+        ),
+    )
+
+    assert selected_tool_schema_requests
+    assert selected_tool_schema_requests[-1] == ["message", "load_tool_context", "exec", "submit_next_stage"]
+    replaced_messages = [dict(item) for item in list(update["messages"] or []) if isinstance(item, dict)]
+    appended_contract = _frontdoor_tool_contract_payload(replaced_messages[-1])
+    assert appended_contract is not None
+    assert appended_contract["callable_tool_names"] == ["submit_next_stage"]
 
 
 @pytest.mark.asyncio
@@ -1234,8 +1472,8 @@ async def test_ceo_frontdoor_prepare_turn_records_prompt_cache_diagnostics(
 
     diagnostics = dict(state_update["prompt_cache_diagnostics"] or {})
     assert str(diagnostics["stable_prompt_signature"] or "").strip()
-    assert diagnostics["tool_signature_count"] == 0
-    assert str(diagnostics["tool_signature_hash"] or "").strip() == ""
+    assert diagnostics["tool_signature_count"] == 1
+    assert str(diagnostics["tool_signature_hash"] or "").strip()
     assert diagnostics["overlay_present"] is True
     assert diagnostics["overlay_section_count"] == 1
     assert str(diagnostics["overlay_text_hash"] or "").strip()

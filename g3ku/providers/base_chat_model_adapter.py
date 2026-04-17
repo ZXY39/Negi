@@ -157,15 +157,21 @@ class G3kuChatModelAdapter(BaseChatModel):
                 }
             )
 
+        response_metadata = {
+            "finish_reason": getattr(response, "finish_reason", "stop"),
+            "usage": getattr(response, "usage", {}),
+            "error_text": getattr(response, "error_text", None),
+        }
+        if isinstance(getattr(response, "provider_request_meta", None), dict) and response.provider_request_meta:
+            response_metadata["provider_request_meta"] = dict(response.provider_request_meta)
+        if isinstance(getattr(response, "provider_request_body", None), dict) and response.provider_request_body:
+            response_metadata["provider_request_body"] = dict(response.provider_request_body)
+
         ai_message = AIMessage(
             content=getattr(response, "content", None) or "",
             tool_calls=tool_calls_payload,
             additional_kwargs=additional_kwargs,
-            response_metadata={
-                "finish_reason": getattr(response, "finish_reason", "stop"),
-                "usage": getattr(response, "usage", {}),
-                "error_text": getattr(response, "error_text", None),
-            },
+            response_metadata=response_metadata,
         )
         return ChatResult(
             generations=[ChatGeneration(message=ai_message)],

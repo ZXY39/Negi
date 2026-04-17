@@ -73,15 +73,35 @@ def _with_dynamic_appendix_at_tail(
     normalized_dynamic_messages = [dict(item) for item in list(dynamic_appendix_messages or []) if isinstance(item, dict)]
     if not normalized_dynamic_messages:
         return normalized_request_messages
-    trimmed_request_messages = _strip_first_slice(normalized_request_messages, normalized_dynamic_messages)
-    if trimmed_request_messages == normalized_request_messages:
-        trimmed_request_messages = _strip_first_slice(
-            normalized_request_messages,
-            _dynamic_appendix_overlap_records(normalized_dynamic_messages),
-        )
-    if not _records_contain_slice(trimmed_request_messages, normalized_dynamic_messages):
-        trimmed_request_messages = [*trimmed_request_messages, *normalized_dynamic_messages]
-    return trimmed_request_messages
+    contract_messages = [
+        dict(item)
+        for item in normalized_dynamic_messages
+        if _is_frontdoor_runtime_tool_contract_record(dict(item))
+    ]
+    non_contract_messages = [
+        dict(item)
+        for item in normalized_dynamic_messages
+        if not _is_frontdoor_runtime_tool_contract_record(dict(item))
+    ]
+    merged_request_messages = list(normalized_request_messages)
+    if non_contract_messages:
+        merged_request_messages = _strip_first_slice(merged_request_messages, non_contract_messages)
+        if merged_request_messages == normalized_request_messages:
+            merged_request_messages = _strip_first_slice(
+                merged_request_messages,
+                _dynamic_appendix_overlap_records(non_contract_messages),
+            )
+        if not _records_contain_slice(merged_request_messages, non_contract_messages):
+            merged_request_messages = [*merged_request_messages, *non_contract_messages]
+    if contract_messages:
+        contract_len = len(contract_messages)
+        if not (
+            contract_len > 0
+            and len(merged_request_messages) >= contract_len
+            and merged_request_messages[-contract_len:] == contract_messages
+        ):
+            merged_request_messages = [*merged_request_messages, *contract_messages]
+    return merged_request_messages
 
 
 def _records_contain_slice(records: list[dict[str, Any]], target: list[dict[str, Any]]) -> bool:

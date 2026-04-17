@@ -174,14 +174,17 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - `execute_tools` 现在会在真正执行前落实 stage gate：普通工具在无活动阶段或阶段预算耗尽时会直接得到 gate error；如果同一批 tool calls 里把 `submit_next_stage` 和其他普通工具混在一起，整个批次会被拒绝，要求模型先单独完成阶段切换。
 - 成功的 `submit_next_stage` 会在同一轮 `execute_tools` 完成后立刻写回 `frontdoor_stage_state`；下一次 `call_model` 看到的已经是 promotion 后、阶段已推进后的 runtime state，而不是等额外的后处理链再补写。
 - CEO websocket now attaches the current visible turn's authoritative final `canonical_context` directly to `ceo.reply.final`; maintainers should not assume the frontend must wait for a later `state_snapshot` to reconstruct the closing stage view.
-- 新的前门暴露边界是：只要当前没有“有效阶段”（`active_stage_id` 为空，或当前阶段已 `transition_required=true`），真正下发给模型的 callable tool schemas 就只剩 `submit_next_stage`；候选 tool/skill 列表仍继续显示，供模型先看能力边界、再开阶段。
+- 新的前门暴露边界要分两层理解：只要当前没有“有效阶段”（`active_stage_id` 为空，或当前阶段已 `transition_required=true`），agent-facing `frontdoor_runtime_tool_contract.callable_tool_names` 会收紧到只剩 `submit_next_stage`；候选 tool/skill 列表仍继续显示，供模型先看能力边界、再开阶段。
+- 但 provider-facing `tools` schemas 现在不再随着 `transition_required=true` 收紧到只剩 `submit_next_stage`。前门会继续向 provider 发送稳定的 runtime-visible tool bundle，以减少阶段切换回合对 prompt cache 前缀命中的破坏。
 - 当前唯一保留的例外是 `cron_internal`。这类内部轮次仍保留自己的 callable tool 集合，以便按既有协议继续调用 `cron(action="remove")` 完成自移除；维护时不要把这个 internal lane 与普通 CEO user turn 混为一谈。
-- 维护上不要把这个规则误读成“前门内部状态已经只剩 `submit_next_stage`”。`tool_names` 仍保存阶段内可恢复的完整工具池，供同一 turn 成功开阶段后的下一次 model call 立即恢复完整 callable 列表；真正决定“此刻给模型看到什么”的，是前门的 callable-tool helper 与动态合同消息。
+- 维护上不要把这个规则误读成“前门内部状态已经只剩 `submit_next_stage`”。`tool_names` 仍保存阶段内可恢复的完整工具池，供同一 turn 成功开阶段后的下一次 model call 立即恢复完整 callable 列表；agent-facing 决策边界由前门的 callable-tool helper 与动态合同消息表达，而 provider-facing schema 稳定性由 runtime-visible tool bundle 保证。
 - `g3ku/runtime/frontdoor/_ceo_create_agent_impl.py` 仍是 runner 入口，但它不再把 `create_agent + middleware` 当作前门主执行链；维护时应把 `_graph_*` 节点看成唯一权威路径。
 - frontdoor 与节点动态合同现在还会携带 `exec_runtime_policy`。这让 prompt 中不再需要把 exec 的“只读/受监管”规则写死为静态事实；维护者应优先把当前 exec 模式视为 runtime contract 的一部分，而不是 prompt 文案的一部分。
 - CEO/frontdoor 的稳定 system prompt 现在只保留最小的 capability exposure revision 锚点，不再把可见 tool/skill 名单整块写进稳定前缀。
 - 对 CEO/frontdoor，当前轮真正给模型看的 tool/skill catalog 现在只有一份 `frontdoor_runtime_tool_contract` user 消息。它位于 request 尾部，也就是所有稳定前缀、持久化历史和当前 user message 之后。
 - 这份 frontdoor runtime tool contract 属于“当前轮临时合同”，不是 durable history。后续轮次的 `stable_messages` / transcript 不应再继承旧轮的 tool/skill 名单；如果维护者在下一轮历史里又看到旧 contract，优先排查 prompt contract 组装或 state replay 是否把 dynamic appendix 错写回了 stable history。
+- 对 CEO/frontdoor 主链路，`dynamic_appendix_messages` 的持久化形态仍然只保留“当前 authoritative 的 `frontdoor_runtime_tool_contract`”。但活动中的 turn state / provider-facing request 现在允许保留同一 turn 里更早轮次的 contract snapshots，目的不是持久化历史，而是让同一 turn 的 request body 保持 append-only。
+- 维护时要区分两层：`dynamic_appendix_messages` 表示“下一次重建时应追加的最新合同”，而活动中的 `messages` / actual request JSON 可能还包含更早轮次的 contract snapshot。若同一 turn 里出现多个 contract，最后一条才是权威；这些旧 snapshot 不应写入后续 durable history。
 
 维护上现在还要区分 frontdoor 的两份工具状态：
 
@@ -371,6 +374,9 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - When cache reuse drops while the family key stays stable, first inspect actual request growth or provider prefix reuse limits before blaming caller-side family churn.
 - CEO/frontdoor now also persists the full provider-facing request for every `call_model` round. The full payload is written under `.g3ku/web-ceo-requests/<session>/...json`, while the live session snapshot only keeps the latest file path plus a short metadata history.
 - This split is intentional: the per-round JSON file is the authority for exact request-forensics, while inflight / paused session snapshots stay compact enough for websocket restore and UI debugging.
+- For CEO/frontdoor specifically, the saved actual request JSON is now the authoritative source of truth for provider-facing order. Session state may persist the request body without the current contract so the next round can rebuild a single fresh tail contract; that is expected, not evidence that the provider request lost the contract.
+- That same JSON now also stores the adapter-final request payload under `provider_request_meta` and `provider_request_body`. When debugging OpenAI `/responses` cache misses, treat those adapter fields as the final transport truth if they disagree with the higher-level `request_messages` / `tool_schemas` projection.
+- To preserve prefix reuse inside one visible CEO turn, same-turn request growth now follows: previous request body -> newly appended assistant/tool transcript -> newest contract snapshot. This means the actual request may contain multiple contract snapshots during one turn, but the durable post-turn transcript must still strip them back out.
 
 ## 7. 新人阅读顺序建议
 

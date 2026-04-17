@@ -188,6 +188,15 @@ CEO/frontdoor now follows a parallel debugging pattern, but with session-scoped 
 - Every CEO/frontdoor `call_model` round writes the full provider-facing request to `.g3ku/web-ceo-requests/<session>/...json`.
 - Inflight / paused CEO snapshots expose only the latest `actual_request_path`, `prompt_cache_key_hash`, `actual_request_hash`, `actual_request_message_count`, `actual_tool_schema_hash`, and a short `actual_request_history`.
 - When debugging CEO prompt shrinkage or cache drops, inspect the saved request JSON first rather than inferring the request from `canonical_context`, stage rounds, or transcript-visible assistant/tool bubbles.
+- The corresponding session-state projection now has two different meanings:
+  - `dynamic_appendix_messages` keeps only the latest authoritative contract for rebuild purposes.
+  - The active-turn `messages` / saved actual request may still include earlier same-turn contract snapshots so the provider-facing body can remain append-only.
+- Those older contract snapshots are expected inside an active turn and should not be mistaken for durable-history leakage. After the turn closes, durable transcript messages must still be stripped back to non-contract history.
+- For `/responses`-style providers, that saved JSON now includes both layers:
+  - `request_messages` / `tool_schemas`: the runtime-side request projection before the provider adapter rewrites it
+  - `provider_request_meta` / `provider_request_body`: the adapter-final HTTP body that was actually prepared for transport
+- If cache accounting disagrees with the runtime projection, debug against `provider_request_body` first.
+- For stage-transition rounds specifically, it is now expected that the tail runtime contract may show `callable_tool_names=["submit_next_stage"]` while `provider_request_body.tools` still carries the stable runtime-visible tool bundle. That mismatch is intentional and no longer indicates a frontdoor contract leak.
 
 ## Verification Pointers
 
