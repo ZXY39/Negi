@@ -762,7 +762,7 @@ class CeoMessageBuilder:
     def _global_summary_settings(cls, loop: Any) -> dict[str, Any]:
         assembly_cfg = cls._assembly_cfg(loop)
         return {
-            "trigger_ratio": float(getattr(assembly_cfg, "frontdoor_global_summary_trigger_ratio", 0.50) or 0.50),
+            "trigger_ratio": float(getattr(assembly_cfg, "frontdoor_global_summary_trigger_ratio", 0.10) or 0.10),
             "target_ratio": float(getattr(assembly_cfg, "frontdoor_global_summary_target_ratio", 0.20) or 0.20),
             "min_output_tokens": int(getattr(assembly_cfg, "frontdoor_global_summary_min_output_tokens", 2000) or 2000),
             "max_output_ratio": float(getattr(assembly_cfg, "frontdoor_global_summary_max_output_ratio", 0.05) or 0.05),

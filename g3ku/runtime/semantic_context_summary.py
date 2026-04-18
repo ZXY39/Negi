@@ -6,8 +6,8 @@ from typing import Any
 
 from g3ku.runtime.context.summarizer import estimate_tokens, truncate_by_tokens
 
-G3KU_MIN_CONTEXT_FLOOR = 64_000
-HERMES_TRIGGER_RATIO = 0.50
+G3KU_MIN_CONTEXT_FLOOR = 20_000
+HERMES_TRIGGER_RATIO = 0.10
 HERMES_TARGET_RATIO = 0.20
 HERMES_MIN_OUTPUT_TOKENS = 2000
 HERMES_MAX_OUTPUT_RATIO = 0.05

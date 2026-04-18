@@ -300,7 +300,7 @@ def test_memory_assembly_config_uses_frontdoor_global_summary_defaults() -> None
     assert not hasattr(cfg, "frontdoor_summarizer_keep_message_count")
     assert cfg.frontdoor_interrupt_approval_enabled is False
     assert cfg.frontdoor_interrupt_tool_names == ["message", "create_async_task"]
-    assert cfg.frontdoor_global_summary_trigger_ratio == 0.50
+    assert cfg.frontdoor_global_summary_trigger_ratio == 0.10
     assert cfg.frontdoor_global_summary_target_ratio == 0.20
     assert cfg.frontdoor_global_summary_min_output_tokens == 2000
     assert cfg.frontdoor_global_summary_max_output_ratio == 0.05

@@ -2831,7 +2831,7 @@ async def test_message_builder_uses_resolved_ceo_context_window_instead_of_loop_
         user_content="continue",
     )
 
-    assert result.trace["global_summary_trigger_tokens"] == 64_000
+    assert result.trace["global_summary_trigger_tokens"] == 20_000
     assert result.trace["global_summary_pressure_warn_tokens"] == 54_400
     assert result.trace["global_summary_force_refresh_tokens"] == 60_800
 

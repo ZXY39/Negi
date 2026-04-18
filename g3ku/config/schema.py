@@ -657,7 +657,7 @@ class MemoryAssemblyConfig(Base):
     frontdoor_interrupt_tool_names: list[str] = Field(
         default_factory=lambda: ["message", "create_async_task"]
     )
-    frontdoor_global_summary_trigger_ratio: float = Field(default=0.50, ge=0.0, le=1.0)
+    frontdoor_global_summary_trigger_ratio: float = Field(default=0.10, ge=0.0, le=1.0)
     frontdoor_global_summary_target_ratio: float = Field(default=0.20, ge=0.0, le=1.0)
     frontdoor_global_summary_min_output_tokens: int = Field(default=2000, ge=1)
     frontdoor_global_summary_max_output_ratio: float = Field(default=0.05, ge=0.0, le=1.0)

@@ -20,8 +20,8 @@ def test_build_global_summary_thresholds_aligns_with_g3ku_defaults() -> None:
         compressed_zone_tokens=30_000,
     )
 
-    assert G3KU_MIN_CONTEXT_FLOOR == 64_000
-    assert thresholds["trigger_tokens"] == 100_000
+    assert G3KU_MIN_CONTEXT_FLOOR == 20_000
+    assert thresholds["trigger_tokens"] == 20_000
     assert thresholds["pressure_warn_tokens"] == 170_000
     assert thresholds["force_refresh_tokens"] == 190_000
     assert thresholds["max_output_tokens"] == 10_000
@@ -34,7 +34,7 @@ def test_build_global_summary_thresholds_respects_floor_and_ceiling() -> None:
         compressed_zone_tokens=2_000,
     )
 
-    assert thresholds["trigger_tokens"] == 64_000
+    assert thresholds["trigger_tokens"] == 20_000
     assert thresholds["max_output_tokens"] == 1_600
     assert thresholds["target_tokens"] == 2_000
 
@@ -60,7 +60,7 @@ def test_initial_persistent_state_tracks_semantic_context_state() -> None:
 def test_memory_assembly_config_exposes_global_summary_defaults() -> None:
     config = MemoryAssemblyConfig()
 
-    assert config.frontdoor_global_summary_trigger_ratio == 0.50
+    assert config.frontdoor_global_summary_trigger_ratio == 0.10
     assert config.frontdoor_global_summary_target_ratio == 0.20
     assert config.frontdoor_global_summary_min_output_tokens == 2000
     assert config.frontdoor_global_summary_max_output_ratio == 0.05
