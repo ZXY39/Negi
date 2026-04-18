@@ -242,21 +242,31 @@ class CeoFrontDoorSupport:
         return tools
 
     @staticmethod
-    def _route_kind_for_turn(*, used_tools: list[str], default: str) -> str:
-        normalized = [str(name or "").strip() for name in list(used_tools or []) if str(name or "").strip()]
-        if "create_async_task" in normalized:
+    def _route_kind_for_turn(*, used_tools: list[str], default: str, verified_task_ids: list[str] | None = None) -> str:
+        verified = [
+            str(task_id or "").strip()
+            for task_id in list(verified_task_ids or [])
+            if str(task_id or "").strip()
+        ]
+        if verified:
             return "task_dispatch"
-        if normalized:
+        normalized = [str(name or "").strip() for name in list(used_tools or []) if str(name or "").strip()]
+        non_dispatch_tools = [name for name in normalized if name != "create_async_task"]
+        if non_dispatch_tools:
             return "self_execute"
+        if "create_async_task" in normalized:
+            return "direct_reply"
         return str(default or "direct_reply")
 
     @staticmethod
-    def _empty_response_explanation(*, used_tools: list[str]) -> str:
-        created_task = "create_async_task" in {
-            str(name or "").strip()
-            for name in list(used_tools or [])
-            if str(name or "").strip()
-        }
+    def _empty_response_explanation(*, used_tools: list[str], verified_task_ids: list[str] | None = None) -> str:
+        created_task = bool(
+            [
+                str(task_id or "").strip()
+                for task_id in list(verified_task_ids or [])
+                if str(task_id or "").strip()
+            ]
+        )
         if created_task:
             return (
                 "The turn completed without any visible assistant text after creating an async task. "

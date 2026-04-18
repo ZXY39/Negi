@@ -4400,7 +4400,7 @@ async def test_create_agent_postprocess_allows_unverified_task_dispatch_reply(mo
 
     assert result is not None
     assert "jump_to" not in result
-    assert result["route_kind"] == "task_dispatch"
+    assert result["route_kind"] == "direct_reply"
     assert result["verified_task_ids"] == []
     assert "repair_overlay_text" not in result
 
@@ -4451,6 +4451,245 @@ async def test_create_agent_postprocess_continues_after_verified_async_dispatch(
     assert result["verified_task_ids"] == ["task:demo-123"]
     assert result["route_kind"] == "task_dispatch"
     assert result["tool_call_payloads"] == []
+
+
+@pytest.mark.asyncio
+async def test_create_agent_postprocess_duplicate_rejection_with_old_task_id_does_not_count_as_dispatch() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id))
+        )
+    )
+
+    result = await runner._postprocess_completed_tool_cycle(
+        state={
+            "tool_call_payloads": [
+                {"id": "call-1", "name": "create_async_task", "arguments": {"task": "demo"}}
+            ],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "create_async_task", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "create_async_task",
+                    "content": "任务未创建：与进行中任务 task:demo-123 高度重复。原因：core_requirement exact match",
+                },
+            ],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "tool_names": ["create_async_task"],
+        }
+    )
+
+    assert result["verified_task_ids"] == []
+    assert result["route_kind"] == "direct_reply"
+    assert "repair_overlay_text" not in result
+
+
+@pytest.mark.asyncio
+async def test_create_agent_postprocess_accumulates_multiple_verified_task_ids() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            main_task_service=SimpleNamespace(get_task=lambda task_id: SimpleNamespace(task_id=task_id))
+        )
+    )
+
+    result = await runner._postprocess_completed_tool_cycle(
+        state={
+            "tool_call_payloads": [
+                {"id": "call-1", "name": "create_async_task", "arguments": {"task": "demo-1"}},
+                {"id": "call-2", "name": "create_async_task", "arguments": {"task": "demo-2"}},
+            ],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "create_async_task", "arguments": "{}"},
+                        },
+                        {
+                            "id": "call-2",
+                            "type": "function",
+                            "function": {"name": "create_async_task", "arguments": "{}"},
+                        },
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "create_async_task",
+                    "content": "创建任务成功task:demo-123",
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-2",
+                    "name": "create_async_task",
+                    "content": "创建任务成功task:demo-456",
+                },
+            ],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "tool_names": ["create_async_task"],
+        }
+    )
+
+    assert result["verified_task_ids"] == ["task:demo-123", "task:demo-456"]
+    assert result["route_kind"] == "task_dispatch"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_graph_execute_tools_does_not_mark_duplicate_rejection_as_dispatch(monkeypatch) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            tools=SimpleNamespace(
+                push_runtime_context=lambda context: object(),
+                pop_runtime_context=lambda token: None,
+            )
+        )
+    )
+    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"create_async_task": _CreateAsyncTaskLikeTool()})
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
+
+    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
+        _ = tool, tool_name, arguments, runtime_context, on_progress, tool_call_id
+        return (
+            None,
+            "任务未创建：与进行中任务 task:demo-123 高度重复。原因：core_requirement exact match",
+            "success",
+            "2026-04-18T23:00:00",
+            "2026-04-18T23:00:01",
+            1.0,
+        )
+
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
+    monkeypatch.setattr(runner, "_task_id_exists", lambda task_id: True)
+
+    result = await runner._graph_execute_tools(
+        {
+            **_canonical_frontdoor_state(
+                tool_names=["create_async_task"],
+                rbac_visible_tool_names=["create_async_task"],
+                frontdoor_stage_state={
+                    "active_stage_id": "frontdoor-stage-1",
+                    "transition_required": False,
+                    "stages": [
+                        {
+                            "stage_id": "frontdoor-stage-1",
+                            "stage_index": 1,
+                            "stage_goal": "Dispatch the async task",
+                            "tool_round_budget": 2,
+                            "tool_rounds_used": 0,
+                            "status": "active",
+                            "mode": "自主执行",
+                            "stage_kind": "normal",
+                            "completed_stage_summary": "",
+                            "key_refs": [],
+                            "rounds": [],
+                        }
+                    ],
+                },
+            ),
+            "tool_call_payloads": [
+                {"id": "call-1", "name": "create_async_task", "arguments": {"task": "demo"}}
+            ],
+            "messages": [],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "parallel_enabled": False,
+            "max_parallel_tool_calls": 1,
+            "synthetic_tool_calls_used": False,
+            "response_payload": {"content": "", "tool_calls": []},
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    assert result["verified_task_ids"] == []
+    assert result["route_kind"] == "direct_reply"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_graph_execute_tools_accumulates_multiple_verified_task_ids(monkeypatch) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            tools=SimpleNamespace(
+                push_runtime_context=lambda context: object(),
+                pop_runtime_context=lambda token: None,
+            )
+        )
+    )
+    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"create_async_task": _CreateAsyncTaskLikeTool()})
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
+
+    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
+        _ = tool, tool_name, arguments, runtime_context, on_progress
+        result_text = "创建任务成功task:demo-123" if tool_call_id == "call-1" else "创建任务成功task:demo-456"
+        return (
+            None,
+            result_text,
+            "success",
+            "2026-04-18T23:00:00",
+            "2026-04-18T23:00:01",
+            1.0,
+        )
+
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
+    monkeypatch.setattr(runner, "_task_id_exists", lambda task_id: True)
+
+    result = await runner._graph_execute_tools(
+        {
+            **_canonical_frontdoor_state(
+                tool_names=["create_async_task"],
+                rbac_visible_tool_names=["create_async_task"],
+                frontdoor_stage_state={
+                    "active_stage_id": "frontdoor-stage-1",
+                    "transition_required": False,
+                    "stages": [
+                        {
+                            "stage_id": "frontdoor-stage-1",
+                            "stage_index": 1,
+                            "stage_goal": "Dispatch the async tasks",
+                            "tool_round_budget": 3,
+                            "tool_rounds_used": 0,
+                            "status": "active",
+                            "mode": "自主执行",
+                            "stage_kind": "normal",
+                            "completed_stage_summary": "",
+                            "key_refs": [],
+                            "rounds": [],
+                        }
+                    ],
+                },
+            ),
+            "tool_call_payloads": [
+                {"id": "call-1", "name": "create_async_task", "arguments": {"task": "demo-1"}},
+                {"id": "call-2", "name": "create_async_task", "arguments": {"task": "demo-2"}},
+            ],
+            "messages": [],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "parallel_enabled": False,
+            "max_parallel_tool_calls": 1,
+            "synthetic_tool_calls_used": False,
+            "response_payload": {"content": "", "tool_calls": []},
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    assert result["verified_task_ids"] == ["task:demo-123", "task:demo-456"]
+    assert result["route_kind"] == "task_dispatch"
 
 
 @pytest.mark.asyncio

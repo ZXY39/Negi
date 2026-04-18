@@ -2357,6 +2357,27 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         match = _TASK_ID_PATTERN.search(str(text or ""))
         return str(match.group(0) if match else "").strip()
 
+    @classmethod
+    def _parse_create_async_task_result(cls, result_text: str) -> dict[str, Any]:
+        text = str(result_text or "").strip()
+        if text.startswith("创建任务成功"):
+            return {
+                "created": True,
+                "created_task_ids": cls._normalize_task_ids(_TASK_ID_PATTERN.findall(text)),
+                "rejection_kind": "",
+            }
+        if text.startswith("任务未创建："):
+            return {
+                "created": False,
+                "created_task_ids": [],
+                "rejection_kind": "append_notice" if "追加通知" in text else "duplicate",
+            }
+        return {
+            "created": False,
+            "created_task_ids": [],
+            "rejection_kind": "",
+        }
+
     @staticmethod
     def _normalize_task_ids(values: Any) -> list[str]:
         items = list(values) if isinstance(values, (list, tuple, set)) else [values]
@@ -3133,7 +3154,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         tool_names=xml_repair_tool_names,
                         content_excerpt=xml_repair_excerpt,
                     ),
-                    "route_kind": self._route_kind_for_turn(used_tools=used_tools, default=current_route_kind),
+                    "route_kind": self._route_kind_for_turn(
+                        used_tools=used_tools,
+                        default=current_route_kind,
+                        verified_task_ids=list(state.get("verified_task_ids") or []),
+                    ),
                     "xml_repair_attempt_count": xml_repair_attempt_count,
                     "xml_repair_excerpt": xml_repair_excerpt,
                     "xml_repair_tool_names": xml_repair_tool_names,
@@ -3165,7 +3190,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         tool_names=list(state.get("xml_repair_tool_names") or []),
                         content_excerpt=str(response_view.content or ""),
                     ),
-                    "route_kind": self._route_kind_for_turn(used_tools=used_tools, default=current_route_kind),
+                    "route_kind": self._route_kind_for_turn(
+                        used_tools=used_tools,
+                        default=current_route_kind,
+                        verified_task_ids=list(state.get("verified_task_ids") or []),
+                    ),
                     "xml_repair_attempt_count": xml_repair_attempt_count,
                     "xml_repair_last_issue": xml_repair_last_issue,
                     "next_step": "finalize",
@@ -3196,7 +3225,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 }
             return {
                 "final_output": text.strip(),
-                "route_kind": self._route_kind_for_turn(used_tools=used_tools, default=current_route_kind),
+                "route_kind": self._route_kind_for_turn(
+                    used_tools=used_tools,
+                    default=current_route_kind,
+                    verified_task_ids=list(state.get("verified_task_ids") or []),
+                ),
                 "next_step": "finalize",
             }
 
@@ -3214,8 +3247,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             }
 
         return {
-            "final_output": self._empty_response_explanation(used_tools=used_tools),
-            "route_kind": self._route_kind_for_turn(used_tools=used_tools, default=current_route_kind),
+            "final_output": self._empty_response_explanation(
+                used_tools=used_tools,
+                verified_task_ids=list(state.get("verified_task_ids") or []),
+            ),
+            "route_kind": self._route_kind_for_turn(
+                used_tools=used_tools,
+                default=current_route_kind,
+                verified_task_ids=list(state.get("verified_task_ids") or []),
+            ),
             "next_step": "finalize",
         }
 
@@ -3441,9 +3481,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 and str(payload.get("name") or "").strip() not in self._CONTROL_TOOL_NAMES
             ]
         )
+        verified_task_ids: list[str] = []
+        for tool_result in tool_results:
+            tool_name = str(tool_result.get("tool_name") or "").strip()
+            result_text = str(tool_result.get("result_text") or "").strip()
+            if tool_name != "create_async_task":
+                continue
+            parsed = self._parse_create_async_task_result(result_text)
+            if not bool(parsed.get("created")):
+                continue
+            for task_id in list(parsed.get("created_task_ids") or []):
+                if not task_id or not self._task_id_exists(task_id) or task_id in verified_task_ids:
+                    continue
+                verified_task_ids.append(task_id)
         route_kind = self._route_kind_for_turn(
             used_tools=used_tools,
             default=str(state.get("route_kind") or "direct_reply"),
+            verified_task_ids=verified_task_ids,
         )
         substantive_tool_names = [
             str(payload.get("name") or "").strip()
@@ -3458,7 +3512,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "route_kind": route_kind,
             "analysis_text": "",
             "tool_call_payloads": [],
-            "verified_task_ids": [],
+            "verified_task_ids": list(verified_task_ids),
             "synthetic_tool_calls_used": False,
             "frontdoor_stage_state": frontdoor_stage_state,
             "next_step": "call_model",

@@ -529,10 +529,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 and str(payload.get("name") or "").strip() not in self._CONTROL_TOOL_NAMES
             ]
         )
-        route_kind = self._route_kind_for_turn(
-            used_tools=used_tools,
-            default=str(state.get("route_kind") or "direct_reply"),
-        )
 
         tool_results = [
             {
@@ -557,15 +553,29 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             result_text = str(tool_result.get("result_text") or "").strip()
             if tool_name != "create_async_task":
                 continue
-            task_id = self._extract_task_id(result_text)
-            if not task_id or not self._task_id_exists(task_id):
+            parsed = self._parse_create_async_task_result(result_text)
+            if not bool(parsed.get("created")):
                 continue
-            verified_task_ids = [task_id]
-            if route_kind == "task_dispatch":
+            for task_id in list(parsed.get("created_task_ids") or []):
+                if not task_id or not self._task_id_exists(task_id) or task_id in verified_task_ids:
+                    continue
+                verified_task_ids.append(task_id)
+        route_kind = self._route_kind_for_turn(
+            used_tools=used_tools,
+            default=str(state.get("route_kind") or "direct_reply"),
+            verified_task_ids=verified_task_ids,
+        )
+        if verified_task_ids and route_kind == "task_dispatch":
+            if len(verified_task_ids) == 1:
                 repair_overlay_text = (
-                    f"Dispatch result is already available. Reply naturally based on the verified task id {task_id}."
+                    f"Dispatch result is already available. Reply naturally based on the verified task id {verified_task_ids[0]}."
                 )
-            break
+            else:
+                repair_overlay_text = (
+                    "Dispatch result is already available. Reply naturally based on the verified task ids "
+                    + ", ".join(verified_task_ids)
+                    + "."
+                )
         substantive_tool_names = [
             str(payload.get("name") or "").strip()
             for payload in tool_call_payloads
