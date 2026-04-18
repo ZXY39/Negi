@@ -89,6 +89,14 @@ class TaskLiveFrame(Model):
     child_pipelines: list[TaskLiveChildPipeline] = Field(default_factory=list)
 
 
+class TaskDistributionState(Model):
+    active_epoch_id: str = ''
+    state: str = ''
+    frontier_node_ids: list[str] = Field(default_factory=list)
+    queued_epoch_count: int = 0
+    pending_mailbox_count: int = 0
+
+
 class TaskLiveState(Model):
     active_node_ids: list[str] = Field(default_factory=list)
     runnable_node_ids: list[str] = Field(default_factory=list)
@@ -97,6 +105,7 @@ class TaskLiveState(Model):
     dispatch_running: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
     dispatch_queued: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
     frames: list[TaskLiveFrame] = Field(default_factory=list)
+    distribution: TaskDistributionState = Field(default_factory=TaskDistributionState)
 
 
 class TaskSummaryResult(Model):
@@ -133,6 +142,7 @@ class TaskRuntimeSummary(Model):
     dispatch_running: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
     dispatch_queued: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
     frames: list[TaskLiveFrame] = Field(default_factory=list)
+    distribution: TaskDistributionState = Field(default_factory=TaskDistributionState)
 
 
 class TaskNodeDetail(Model):
