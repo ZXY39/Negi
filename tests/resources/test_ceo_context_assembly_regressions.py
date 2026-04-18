@@ -451,11 +451,11 @@ async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_ava
         "model": "frontdoor-query-rewriter",
     }
     assert result.trace["retrieval_scope"] == {
-        "mode": "dense_only",
-        "search_context_types": ["memory", "skill", "resource"],
-        "allowed_context_types": ["memory", "skill", "resource"],
-        "allowed_resource_record_ids": ["tool:agent_browser", "tool:web_fetch"],
-        "allowed_skill_record_ids": ["skill:focused-skill", "skill:secondary-skill"],
+        "mode": "disabled",
+        "search_context_types": [],
+        "allowed_context_types": [],
+        "allowed_resource_record_ids": [],
+        "allowed_skill_record_ids": [],
     }
     overlay = str(result.turn_overlay_text or "")
     assert "## 本轮候选工具" not in overlay
@@ -506,15 +506,9 @@ async def test_message_builder_dense_unavailable_exposes_all_visible_skills_and_
     assert result.tool_names == []
     assert result.candidate_tool_names == ["filesystem", "agent_browser", "web_fetch"]
     assert result.trace["semantic_frontdoor"]["mode"] == "visible_only"
-    assert result.trace["retrieval_scope"]["mode"] == "visible_only"
-    assert result.trace["retrieval_scope"]["allowed_skill_record_ids"] == [
-        "skill:focused-skill",
-        "skill:secondary-skill",
-    ]
-    assert result.trace["retrieval_scope"]["allowed_resource_record_ids"] == [
-        "tool:agent_browser",
-        "tool:web_fetch",
-    ]
+    assert result.trace["retrieval_scope"]["mode"] == "disabled"
+    assert result.trace["retrieval_scope"]["allowed_skill_record_ids"] == []
+    assert result.trace["retrieval_scope"]["allowed_resource_record_ids"] == []
 
 
 @pytest.mark.asyncio
@@ -554,7 +548,7 @@ async def test_message_builder_semantic_disabled_keeps_top_k_selection_and_non_v
     assert prompt_builder.calls == [[]]
     assert [item["skill_id"] for item in result.trace["selected_skills"]] == ["focused-skill"]
     assert result.trace["semantic_frontdoor"]["mode"] == "disabled"
-    assert result.trace["retrieval_scope"]["mode"] == "rbac_fallback"
+    assert result.trace["retrieval_scope"]["mode"] == "disabled"
     assert result.trace["tool_selection"].get("mode") != "visible_only"
     assert result.tool_names == []
     assert len(result.candidate_tool_names) == 1
@@ -598,11 +592,8 @@ async def test_message_builder_dense_unavailable_retrieval_scope_includes_dict_v
     )
 
     assert result.trace["semantic_frontdoor"]["mode"] == "visible_only"
-    assert result.trace["retrieval_scope"]["mode"] == "visible_only"
-    assert result.trace["retrieval_scope"]["allowed_skill_record_ids"] == [
-        "skill:dict-skill",
-        "skill:object-skill",
-    ]
+    assert result.trace["retrieval_scope"]["mode"] == "disabled"
+    assert result.trace["retrieval_scope"]["allowed_skill_record_ids"] == []
     assert [item["skill_id"] for item in result.trace["selected_skills"]] == [
         "dict-skill",
         "object-skill",
@@ -1131,15 +1122,15 @@ async def test_message_builder_excludes_fixed_builtin_resource_tools_from_semant
             "skills": [],
             "tool_families": [
                 _tool_resource_record("exec", "Read-only shell helper."),
-                _tool_resource_record("memory", "Search, write, and delete long-term memory.", executor_names=["memory_search", "memory_write", "memory_delete"]),
+                _tool_resource_record("memory", "Write, delete, and load long-term memory notes.", executor_names=["memory_write", "memory_delete", "memory_note"]),
                 _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
             ],
             "tool_names": [
                 "load_tool_context",
                 "exec",
-                "memory_search",
                 "memory_write",
                 "memory_delete",
+                "memory_note",
                 "agent_browser",
             ],
         },
@@ -1156,11 +1147,12 @@ async def test_message_builder_excludes_fixed_builtin_resource_tools_from_semant
             semantic_executor_names.extend(str(name or "").strip() for name in names if str(name or "").strip())
 
     assert semantic_tool_ids == ["memory", "agent_browser"]
-    assert semantic_executor_names == ["memory_delete", "agent_browser"]
+    assert semantic_executor_names == ["agent_browser"]
     assert result.candidate_tool_names[0] == "agent_browser"
     assert "exec" not in result.candidate_tool_names
-    assert "memory_search" not in result.candidate_tool_names
     assert "memory_write" not in result.candidate_tool_names
+    assert "memory_delete" not in result.candidate_tool_names
+    assert "memory_note" not in result.candidate_tool_names
 
 
 @pytest.mark.asyncio
@@ -1233,11 +1225,11 @@ async def test_message_builder_moves_turn_specific_context_into_overlay_for_stab
         "prior answer",
         "from now on default to the focused browser workflow",
     ]
-    assert "## 已检索上下文" in overlay
+    assert "## 已检索上下文" not in overlay
+    assert "## 长期记忆写入提示" in overlay
     assert "## 本轮最相关的技能" not in overlay
     assert "## 本轮可见技能" not in overlay
     assert "## 本轮候选工具" not in overlay
-    assert "## 长期记忆写入提示" in overlay
     assert prompt_builder.base_calls == 1
     assert prompt_builder.skill_calls == []
     assert result.trace["turn_overlay_present"] is True
@@ -1278,7 +1270,11 @@ async def test_message_builder_exposes_dynamic_appendix_messages_for_prompt_cach
     assert "prior answer" in stable_contents
     assert "from now on default to the focused browser workflow" in stable_contents
     assert any(
-        "## 已检索上下文" in str(item.get("content") or "")
+        "## 长期记忆写入提示" in str(item.get("content") or "")
+        for item in dynamic_appendix_messages
+    )
+    assert any(
+        "frontdoor_runtime_tool_contract" in str(item.get("content") or "")
         for item in dynamic_appendix_messages
     )
     assert "prior question" not in dynamic_contents
@@ -1689,7 +1685,7 @@ async def test_message_builder_includes_retrieval_and_full_transcript_without_du
     assert "## Capability Exposure Snapshot" in contents[0]
     assert "## 本轮候选工具" not in "\n\n".join(contents)
     assert "## 本轮最相关的技能" not in "\n\n".join(contents)
-    assert "## 已检索上下文" in contents[1]
+    assert "frontdoor_runtime_tool_contract" in contents[1]
     assert contents.count("follow up question") == 1
     assert contents[-1] == "follow up question"
     assert result.trace["current_user_in_transcript"] is True
@@ -1889,7 +1885,7 @@ async def test_message_builder_does_not_dedupe_same_text_when_turn_ids_mismatch(
 
 
 @pytest.mark.asyncio
-async def test_message_builder_collects_retrieved_context_separately_from_history_injection() -> None:
+async def test_message_builder_keeps_empty_memory_overlay_when_snapshot_reader_is_unavailable() -> None:
     prompt_builder = _SplitPromptBuilder()
     memory_manager = _MemoryManager(response="durable preference")
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
@@ -1907,9 +1903,9 @@ async def test_message_builder_collects_retrieved_context_separately_from_histor
     )
 
     assert result.trace["context_collection"] == {
-        "retrieved_record_count": 1,
-        "retrieval_scope_mode": "rbac_fallback",
-        "retrieved_context_present": True,
+        "retrieved_record_count": 0,
+        "retrieval_scope_mode": "disabled",
+        "retrieved_context_present": False,
     }
     assert result.trace["message_injection"] == {
         "history_source": "checkpoint",
@@ -1917,7 +1913,7 @@ async def test_message_builder_collects_retrieved_context_separately_from_histor
         "current_user_appended": True,
         "retrieved_context_in_model_messages": False,
     }
-    assert "## 已检索上下文" in str(result.turn_overlay_text or "")
+    assert str(result.turn_overlay_text or "") == ""
     assert result.model_messages[-3:] == [
         {"role": "user", "content": "prior user"},
         {"role": "assistant", "content": "prior answer"},
@@ -1926,7 +1922,7 @@ async def test_message_builder_collects_retrieved_context_separately_from_histor
 
 
 @pytest.mark.asyncio
-async def test_message_builder_keeps_frozen_retrieved_memory_snapshot_single_block_per_turn() -> None:
+async def test_message_builder_ignores_stale_retrieved_context_checkpoint_when_snapshot_reader_is_unavailable() -> None:
     prompt_builder = _SplitPromptBuilder()
     memory_manager = _MemoryManager(response="durable preference")
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
@@ -1947,11 +1943,10 @@ async def test_message_builder_keeps_frozen_retrieved_memory_snapshot_single_blo
     overlay_text = str(result.turn_overlay_text or "")
     model_rendered = "\n\n".join(str(item.get("content") or "") for item in result.model_messages)
 
-    assert overlay_text.count("## 已检索上下文") == 1
-    assert "stale retrieved memory" not in overlay_text
-    assert "durable preference" in overlay_text
+    assert overlay_text == ""
+    assert "stale retrieved memory" in model_rendered
+    assert "durable preference" not in overlay_text
     assert "durable preference" not in model_rendered
-    assert model_rendered.count("## 已检索上下文") == 1
 
 
 @pytest.mark.asyncio
