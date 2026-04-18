@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+from g3ku.agent.tools.memory_delete import MemoryDeleteTool
 from g3ku.agent.tools.memory_write import MemoryWriteTool
 
 
-def test_memory_write_schema_does_not_expose_scope() -> None:
+def test_memory_write_schema_exposes_content_only() -> None:
     tool = MemoryWriteTool(manager=object())
 
-    fact_schema = tool.parameters["properties"]["facts"]["items"]["properties"]
-    required_fields = list(tool.parameters["properties"]["facts"]["items"]["required"])
+    assert list(tool.parameters["properties"].keys()) == ["content"]
+    assert tool.parameters["required"] == ["content"]
 
-    assert "scope" not in fact_schema
-    assert "scope" not in required_fields
+
+def test_memory_delete_schema_exposes_id_or_ids() -> None:
+    tool = MemoryDeleteTool(manager=object())
+
+    assert set(tool.parameters["properties"].keys()) == {"id", "ids"}
+    assert tool.parameters["anyOf"] == [{"required": ["id"]}, {"required": ["ids"]}]

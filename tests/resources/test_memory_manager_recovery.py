@@ -29,7 +29,7 @@ def _memory_cfg():
         "ops_file": "memory/ops.jsonl",
         "batch_max_chars": 50,
         "max_wait_seconds": 3,
-        "review_interval_turns": 10,
+        "review_interval_turns": 5,
     }
     return MemoryToolsConfig.model_validate(payload)
 
@@ -136,6 +136,312 @@ def _read_jsonl(path: Path) -> list[dict[str, object]]:
     ]
 
 
+def test_memory_runtime_loads_memory_agent_and_assessor_prompts_from_main_prompts(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        system_prompt = manager._memory_agent_system_prompt()
+        assessor_prompt = manager._memory_assessor_system_prompt()
+    finally:
+        manager.close()
+
+    assert "记忆" in system_prompt
+    assert "null" in assessor_prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_v2_run_due_batch_once_applies_write_batch_with_memory_apply_batch(tmp_path: Path, monkeypatch) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="Prefer concise answers",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="write_1",
+            )
+        )
+        fake_model = _FakeToolCallingModel(
+            [
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "name": "memory_apply_batch",
+                            "args": {
+                                "adds": [
+                                    {
+                                        "content": "Prefer concise answers",
+                                        "decision_source": "user",
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                    usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
+                ),
+                _fake_response(content="done", usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0}),
+            ]
+        )
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/18", raising=False)
+        monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        snapshot_text = manager.snapshot_text()
+
+        assert report["status"] == "applied"
+        assert "id:" in snapshot_text
+        assert "2026/4/18-user：" in snapshot_text
+        assert "Prefer concise answers" in snapshot_text
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_run_due_batch_once_rewrite_preserves_id_and_source_but_refreshes_date(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        (tmp_path / "memory" / "MEMORY.md").write_text(
+            "---\nid:Ab12Z9\n2026/4/17-user：\nPrefer concise answers\n",
+            encoding="utf-8",
+        )
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="Update memory",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="write_1",
+            )
+        )
+        fake_model = _FakeToolCallingModel(
+            [
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "name": "memory_apply_batch",
+                            "args": {
+                                "rewrites": [
+                                    {
+                                        "id": "Ab12Z9",
+                                        "content": "Prefer concise English headings",
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                    usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
+                ),
+                _fake_response(content="done", usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0}),
+            ]
+        )
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/18", raising=False)
+        monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
+
+        await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        snapshot_text = manager.snapshot_text()
+
+        assert "id:Ab12Z9" in snapshot_text
+        assert "2026/4/18-user：" in snapshot_text
+        assert "Prefer concise English headings" in snapshot_text
+        assert "2026/4/17-user：" not in snapshot_text
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_run_due_batch_once_delete_batch_removes_memory_by_id(tmp_path: Path, monkeypatch) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        (tmp_path / "memory" / "MEMORY.md").write_text(
+            (
+                "---\nid:Ab12Z9\n2026/4/17-user：\nPrefer concise answers\n"
+                "---\nid:Cd34Ef\n2026/4/17-self：\nReport total elapsed time\n"
+            ),
+            encoding="utf-8",
+        )
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="delete",
+                decision_source="user",
+                payload_text="Ab12Z9",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="delete_1",
+            )
+        )
+        fake_model = _FakeToolCallingModel(
+            [
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "name": "memory_apply_batch",
+                            "args": {"deletes": ["Ab12Z9"]},
+                        }
+                    ],
+                    usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
+                ),
+                _fake_response(content="done", usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0}),
+            ]
+        )
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        snapshot_text = manager.snapshot_text()
+
+        assert report["status"] == "applied"
+        assert "id:Ab12Z9" not in snapshot_text
+        assert "id:Cd34Ef" in snapshot_text
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_run_due_batch_once_drops_assess_batch_when_assessor_returns_null(tmp_path: Path, monkeypatch) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="assess",
+                decision_source="self",
+                payload_text="window payload",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="assess_1",
+                session_key="web:shared",
+            )
+        )
+        assessor_model = _FakeToolCallingModel(
+            [
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "assess-call-1",
+                            "name": "memory_assessment_result",
+                            "args": {"content": "null"},
+                        }
+                    ],
+                    usage={"input_tokens": 2, "output_tokens": 1, "cache_read_tokens": 0},
+                )
+            ]
+        )
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: assessor_model, raising=False)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+
+        assert report["status"] == "assessed_null"
+        assert await manager.list_queue(limit=10) == []
+        assert _read_jsonl(tmp_path / "memory" / "ops.jsonl") == []
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_run_due_batch_once_processes_assess_batch_into_memory_write(tmp_path: Path, monkeypatch) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="assess",
+                decision_source="self",
+                payload_text="window payload",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="assess_1",
+                session_key="web:shared",
+            )
+        )
+        assessor_model = _FakeToolCallingModel(
+            [
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "assess-call-1",
+                            "name": "memory_assessment_result",
+                            "args": {"content": "User prefers concise answers"},
+                        }
+                    ],
+                    usage={"input_tokens": 2, "output_tokens": 1, "cache_read_tokens": 0},
+                )
+            ]
+        )
+        processor_model = _FakeToolCallingModel(
+            [
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "process-call-1",
+                            "name": "memory_apply_batch",
+                            "args": {
+                                "adds": [
+                                    {
+                                        "content": "User prefers concise answers",
+                                        "decision_source": "self",
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                    usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
+                ),
+                _fake_response(content="done", usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0}),
+            ]
+        )
+        models = iter([assessor_model, processor_model])
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/18", raising=False)
+        monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: next(models), raising=False)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        snapshot_text = manager.snapshot_text()
+        processed = _read_jsonl(tmp_path / "memory" / "ops.jsonl")
+
+        assert report["status"] == "applied"
+        assert "User prefers concise answers" in snapshot_text
+        assert "id:" in snapshot_text
+        assert processed[0]["source_op"] == "assess"
+        assert processed[0]["op"] == "write"
+    finally:
+        manager.close()
+
+
 @pytest.mark.asyncio
 async def test_processing_head_waits_until_retry_after(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
@@ -197,8 +503,15 @@ async def test_processing_head_retries_after_retry_after(tmp_path: Path, monkeyp
                     tool_calls=[
                         {
                             "id": "call-1",
-                            "name": "memory_write_document",
-                            "args": {"content": "---\n2026/4/17-self：\nReport total elapsed time\n"},
+                            "name": "memory_apply_batch",
+                            "args": {
+                                "adds": [
+                                    {
+                                        "content": "Report total elapsed time",
+                                        "decision_source": "self",
+                                    }
+                                ]
+                            },
                         }
                     ],
                     usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
@@ -212,6 +525,7 @@ async def test_processing_head_retries_after_retry_after(tmp_path: Path, monkeyp
             lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
             raising=False,
         )
+        monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/17", raising=False)
         monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
 
         report = await manager.run_due_batch_once(now_iso="2026-04-17T10:00:40+08:00")

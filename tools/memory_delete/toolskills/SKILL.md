@@ -1,6 +1,6 @@
 # memory_delete
 
-Queue a durable long-term memory delete request using memory text visible in the current `MEMORY.md` snapshot.
+Queue a durable long-term memory delete request using memory ids visible in the current `MEMORY.md` snapshot.
 
 ## Must Use
 
@@ -8,10 +8,10 @@ Queue a durable long-term memory delete request using memory text visible in the
 
 ## Input
 
-- Pass the visible memory text as `target_text`.
+- Pass one visible memory id as `id`.
+- Or pass multiple visible memory ids as `ids=[...]`.
 
 ## Do Not Use
 
 - Guessing at memories that are not currently visible.
-- Bulk deletion.
 - Removing memory when correction or replacement would be better.

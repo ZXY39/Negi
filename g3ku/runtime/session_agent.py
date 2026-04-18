@@ -2005,13 +2005,13 @@ class RuntimeAgentSession:
                         if self._history_text(item.content).strip()
                     ]
                     try:
-                        await self._loop.memory_manager.enqueue_autonomous_review(
+                        await self._loop.memory_manager.record_turn_for_review(
                             session_key=self._state.session_key,
-                            channel=self._memory_channel,
-                            chat_id=self._memory_chat_id,
+                            turn_id=self._current_turn_id(user_input),
                             user_messages=user_messages,
                             assistant_text=output,
-                            turn_id=self._current_turn_id(user_input),
+                            compression_summary=self._compression_snapshot(),
+                            canonical_summary=self._frontdoor_visible_canonical_context_snapshot(),
                         )
                     except Exception:
                         await self._emit(
@@ -2020,6 +2020,23 @@ class RuntimeAgentSession:
                             kind="persistence_warning",
                             text="Memory review enqueue failed; turn history is still available in session transcript.",
                         )
+                if getattr(self._loop, "memory_manager", None) is not None:
+                    shrink_reason = str(getattr(self, "_frontdoor_history_shrink_reason", "") or "").strip()
+                    if shrink_reason in {"token_compression", "stage_compaction"}:
+                        try:
+                            flush_result = await self._loop.memory_manager.flush_review_window(
+                                session_key=self._state.session_key,
+                                trigger_source=shrink_reason,
+                            )
+                            if str(flush_result.get("status") or "").strip() == "queued":
+                                await self._loop.memory_manager.run_due_batch_once()
+                        except Exception:
+                            await self._emit(
+                                "message_delta",
+                                channel="analysis",
+                                kind="persistence_warning",
+                                text="Memory compression flush failed; turn history is still available in session transcript.",
+                            )
             await self._emit(
                 "message_end",
                 role="assistant",

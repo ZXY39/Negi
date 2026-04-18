@@ -1,14 +1,14 @@
 schema_version: 1
 kind: tool
 name: memory_delete
-description: Queue durable long-term memory deletions using visible memory text.
+description: Queue durable long-term memory deletions using visible memory ids.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: Repository-managed queued memory delete tool for visible text removals.
+  summary: Repository-managed queued memory delete tool for id-based removals.
   compare_rule: Treat changes in main implementation, parameters, permissions, settings, or return payload shape as version changes.
   source_of_truth: This resource.yaml and the main implementation are authoritative; toolskills supplement usage guidance when present.
 protocol: mcp
@@ -24,11 +24,19 @@ permissions:
 parameters:
   type: object
   properties:
-    target_text:
+    id:
       type: string
-      description: Memory text visible in the current MEMORY snapshot that should be removed.
-  required:
-    - target_text
+      description: A single memory id visible in the current MEMORY snapshot that should be removed.
+    ids:
+      type: array
+      items:
+        type: string
+      description: A list of memory ids visible in the current MEMORY snapshot that should be removed.
+  anyOf:
+    - required:
+        - id
+    - required:
+        - ids
 exposure:
   agent: true
   main_runtime: true

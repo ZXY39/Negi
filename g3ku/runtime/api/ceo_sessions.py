@@ -555,12 +555,7 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
     memory_manager = getattr(agent, 'memory_manager', None) if agent is not None else None
     if memory_manager is not None:
         try:
-            await memory_manager.enqueue_session_boundary_flush(
-                session_key=session_key,
-                channel=('china' if is_channel_session else 'web'),
-                chat_id=str(session_id or '').strip(),
-                trigger_source=('session_cleared' if is_channel_session else 'session_deleted'),
-            )
+            memory_manager.clear_review_window(session_key=session_key)
         except Exception:
             pass
     if is_channel_session:

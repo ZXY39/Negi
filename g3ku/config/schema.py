@@ -675,7 +675,7 @@ class MemoryQueueConfig(Base):
     ops_file: str = "memory/ops.jsonl"
     batch_max_chars: int = Field(default=50000, ge=1)
     max_wait_seconds: int = Field(default=3, ge=0)
-    review_interval_turns: int = Field(default=10, ge=1)
+    review_interval_turns: int = Field(default=5, ge=1)
 
 
 class MemoryAgentConfig(Base):

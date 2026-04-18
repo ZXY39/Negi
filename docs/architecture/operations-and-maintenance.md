@@ -327,7 +327,7 @@
 For the queued Markdown memory runtime, the first operator checks should now be:
 
 1. Inspect `memory/MEMORY.md` for the currently committed long-term memory snapshot.
-2. Inspect `memory/queue.jsonl` for pending write/delete/autonomous-review requests.
+2. Inspect `memory/queue.jsonl` for pending `write` / `delete` / `assess` requests.
 3. Inspect `memory/ops.jsonl` for the last successfully applied batches.
 4. Use `g3ku memory current`, `g3ku memory queue`, and `g3ku memory flush` when you need a quick operator view without manually opening files.
 5. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend or the catalog bridge.
@@ -337,6 +337,7 @@ The important maintenance boundary is:
 - queue files are runtime metadata, not user memory content
 - `MEMORY.md` is the only committed long-term memory source
 - `notes/` contains optional detail bodies and should stay small and human-readable
+- `review_state.json` is per-session buffering metadata for the 5-turn ordinary review window; it is not committed user memory
 - `ops.jsonl` is not a complete failure ledger anymore; queue-head error fields are authoritative for in-flight engineering failures
 
 Operator debugging order for a stuck queue head:
@@ -399,6 +400,12 @@ Two queue-head recovery caveats matter during operations:
 - A `processing` head that survives restart is expected durable state. Do not assume it means a live worker is still attached.
 - If `retry_after` is still in the future, the restarted worker should leave that head untouched and keep later items blocked. Once `retry_after` has passed, the same head becomes eligible for retry.
 - `processing_started_at` is the first-claim timestamp for that head batch. It should remain stable across retries, so a new `last_error_at` with an old `processing_started_at` is normal.
+
+Operator interpretation of the three queue entry types:
+
+- `write`: explicit or already-refined memory text waiting for real memory processing
+- `delete`: id-based memory deletion waiting for real memory processing
+- `assess`: buffered ordinary-turn/compression window waiting for the assessor lane; if the assessor returns `null`, no committed memory change follows
 
 ## 10. Memory Reset Workflow
 

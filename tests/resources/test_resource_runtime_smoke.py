@@ -3455,7 +3455,7 @@ async def test_memory_write_queues_explicit_memory_request(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_memory_delete_queues_visible_text_deletion_request(tmp_path: Path):
+async def test_memory_delete_queues_id_deletion_request(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -3479,7 +3479,7 @@ async def test_memory_delete_queues_visible_text_deletion_request(tmp_path: Path
 
     payload = json.loads(
         await tool.execute(
-            target_text='2026/4/17-user：创建文件默认格式要求，见 ref:note_a1b2',
+            id='Ab12Z9',
             __g3ku_runtime={'session_key': 'cli:demo'},
         )
     )
@@ -3489,4 +3489,4 @@ async def test_memory_delete_queues_visible_text_deletion_request(tmp_path: Path
     assert manager.last_call['session_key'] == 'cli:demo'
     assert manager.last_call['decision_source'] == 'user'
     assert manager.last_call['trigger_source'] == 'memory_delete_tool'
-    assert manager.last_call['payload_text'] == '2026/4/17-user：创建文件默认格式要求，见 ref:note_a1b2'
+    assert manager.last_call['payload_text'] == '["Ab12Z9"]'

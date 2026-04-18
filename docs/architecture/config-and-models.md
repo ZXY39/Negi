@@ -260,7 +260,7 @@ If a user reports that frontdoor compaction settings stopped working after upgra
 `tools/memory_runtime/resource.yaml` is still the runtime settings anchor for long-term memory, but the meaning of that settings surface changed.
 
 - `document.*` now controls the Markdown notebook layout, including `memory/MEMORY.md`, `memory/notes/`, the summary character limit, and the full document character ceiling.
-- `queue.*` now controls the single durable queue, including `memory/queue.jsonl`, `memory/ops.jsonl`, batch size, and max wait time.
+- `queue.*` now controls the single durable queue, including `memory/queue.jsonl`, `memory/ops.jsonl`, batch size, max wait time, and the ordinary-turn review window size.
 - `agent.*` now controls the dedicated memory-maintenance worker behavior.
 - Older `store.*`, `retrieval.*`, and `embedding.*` sections still matter for the catalog bridge because tool/skill semantic narrowing still relies on that catalog-only projection, even though long-term memory正文 no longer depends on the old `rag_memory` runtime.
 - The earlier transition fields such as `mode`, `backend`, `bootstrap_mode`, and `compat.dual_write_legacy_files` are no longer part of the active memory runtime settings surface.
@@ -282,5 +282,10 @@ When debugging "memory queue stuck" reports, check both layers in order:
 
 1. `models.roles.memory` / `agents.roleIterations.memory` in `.g3ku/config.json`
 2. `tools/memory_runtime/resource.yaml` queue/document limits
+
+Two specific memory-runtime config semantics changed again:
+
+- `queue.review_interval_turns` now means the per-session ordinary-turn review window size, defaulting to `5`, not the earlier hashed sampling interval.
+- The internal memory prompts are now file-backed runtime assets under `main/prompts/memory_agent.md` and `main/prompts/memory_assessor.md`. If memory processing behavior looks wrong after prompt edits, inspect those files before changing Python code.
 
 Do not assume a valid CEO model chain implies a valid memory-agent chain. The memory worker no longer falls back to CEO.

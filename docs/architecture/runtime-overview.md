@@ -449,11 +449,12 @@ The long-term memory runtime is no longer journal-first or structured-fact-first
 
 The runtime boundary changed in five important ways:
 
-- CEO/frontdoor turns now read one frozen `MEMORY.md` snapshot at prompt-assembly time and inject it directly into the turn overlay.
+- CEO/frontdoor turns now read one frozen `MEMORY.md` snapshot at prompt-assembly time and inject it into the stable prefix immediately after the system prompt, not into the turn overlay.
 - Same-turn hot memory updates do not change the current prompt; newly committed memory only affects later turns.
 - `memory_write` and `memory_delete` now only enqueue requests into the single memory queue. They do not mutate committed memory inline.
-- `RuntimeAgentSession` and session-delete paths now enqueue autonomous review, pre-compression flush, and session-boundary flush requests instead of writing structured memory facts directly.
-- A dedicated internal memory agent now consumes the queue in FIFO same-op batches (`write` and `delete` never mix within one batch), runs with the `memory` model route, and only has a restricted tool surface for reading/writing `MEMORY.md` and note files.
+- `RuntimeAgentSession` now accumulates per-session review windows from ordinary user turns. Every 5 turns by default, or earlier when frontdoor history shrink triggers compression, it enqueues an `assess` request containing the buffered turn window.
+- The `assess` lane does not receive the committed memory snapshot. It evaluates only the buffered conversation window and either returns exact `null` or a refined memory text block. Non-`null` output flows immediately into the real memory-processing stage.
+- A dedicated internal memory agent now consumes `write` / `delete` / `assess` queue heads with the `memory` model route. The processing stage can read notes on demand and must commit through a single `memory_apply_batch` call; it no longer rewrites `MEMORY.md` by staging raw document text.
 
 Maintainers should read the queue state machine like this:
 
@@ -472,6 +473,15 @@ Maintainers should treat transient execution state as explicitly out of bounds f
 - runtime-only coordination notes
 
 Those belong in transcript, session, task, or stage runtime state, not in `MEMORY.md`.
+
+The committed notebook block shape also changed:
+
+- each entry is `---`
+- then `id:XXXXXX` where `XXXXXX` is a random six-character base62 id
+- then `YYYY/M/D-source：`
+- then one concise summary line
+
+The memory agent is not responsible for formatting that Markdown block exactly. It proposes semantic adds / rewrites / deletes, and the runtime normalizes the committed document shape, assigns ids for new entries, preserves ids for rewrites, and refreshes rewrite dates automatically.
 
 Tool/skill catalog narrowing now goes through a catalog-only bridge and no longer delegates to the old `rag_memory` runtime. However, the catalog projection still lives under the same `memory/` tree, so a destructive reset of `memory/` may still remove catalog retrieval data together with user memory content. Catalog sync must be rebuilt after startup.
 

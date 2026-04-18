@@ -22,6 +22,7 @@ def _load_memory_agent_runtime_module():
 def test_format_memory_entry_uses_minimal_block_shape() -> None:
     module = _load_markdown_memory_module()
     entry = module.MemoryEntry(
+        memory_id="Ab12Z9",
         date_text="2026/4/17",
         source="self",
         summary="完成任务必须说明任务总耗时",
@@ -30,6 +31,7 @@ def test_format_memory_entry_uses_minimal_block_shape() -> None:
 
     assert module.format_memory_entry(entry) == (
         "---\n"
+        "id:Ab12Z9\n"
         "2026/4/17-self：\n"
         "完成任务必须说明任务总耗时\n"
     )
@@ -39,9 +41,11 @@ def test_parse_memory_document_round_trips_user_and_self_entries() -> None:
     module = _load_markdown_memory_module()
     text = (
         "---\n"
+        "id:Ab12Z9\n"
         "2026/4/17-self：\n"
         "完成任务必须说明任务总耗时\n\n"
         "---\n"
+        "id:Cd34Ef\n"
         "2026/4/17-user：\n"
         "创建文件默认格式要求，见 ref:note_a1b2\n"
     )
@@ -49,6 +53,7 @@ def test_parse_memory_document_round_trips_user_and_self_entries() -> None:
     items = module.parse_memory_document(text)
 
     assert [item.source for item in items] == ["self", "user"]
+    assert [item.memory_id for item in items] == ["Ab12Z9", "Cd34Ef"]
     assert items[0].summary == "完成任务必须说明任务总耗时"
     assert items[1].note_ref == "note_a1b2"
 
@@ -57,6 +62,7 @@ def test_validate_memory_document_rejects_summary_over_100_chars() -> None:
     module = _load_markdown_memory_module()
     text = (
         "---\n"
+        "id:Ab12Z9\n"
         "2026/4/17-self：\n"
         f"{'x' * 101}\n"
     )
@@ -78,6 +84,53 @@ def test_validate_memory_document_rejects_document_over_10000_chars() -> None:
         module.validate_memory_document(oversized, summary_max_chars=100, document_max_chars=10000)
 
 
+def test_v2_memory_entry_requires_id_line_and_formats_four_line_block() -> None:
+    module = _load_markdown_memory_module()
+    entry = module.MemoryEntry(
+        memory_id="Ab12Z9",
+        date_text="2026/4/18",
+        source="user",
+        summary="Prefer concise answers",
+        note_ref="",
+    )
+
+    assert module.format_memory_entry(entry) == (
+        "---\n"
+        "id:Ab12Z9\n"
+        "2026/4/18-user：\n"
+        "Prefer concise answers\n"
+    )
+
+
+def test_v2_parse_memory_document_reads_id_line() -> None:
+    module = _load_markdown_memory_module()
+    text = (
+        "---\n"
+        "id:Ab12Z9\n"
+        "2026/4/18-user：\n"
+        "Prefer concise answers\n"
+    )
+
+    items = module.parse_memory_document(text)
+
+    assert len(items) == 1
+    assert items[0].memory_id == "Ab12Z9"
+    assert items[0].source == "user"
+    assert items[0].summary == "Prefer concise answers"
+
+
+def test_v2_validate_memory_document_rejects_legacy_blocks_without_id() -> None:
+    module = _load_markdown_memory_module()
+    text = (
+        "---\n"
+        "2026/4/18-user：\n"
+        "Prefer concise answers\n"
+    )
+
+    with pytest.raises(ValueError, match="memory document contains invalid blocks"):
+        module.validate_memory_document(text, summary_max_chars=100, document_max_chars=10000)
+
+
 def _memory_cfg():
     from g3ku.config.schema import MemoryToolsConfig
 
@@ -93,7 +146,7 @@ def _memory_cfg():
         "ops_file": "memory/ops.jsonl",
         "batch_max_chars": 50,
         "max_wait_seconds": 3,
-        "review_interval_turns": 10,
+        "review_interval_turns": 5,
     }
     return MemoryToolsConfig.model_validate(payload)
 
@@ -200,6 +253,18 @@ def _read_jsonl(path: Path) -> list[dict[str, object]]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def test_v2_memory_agent_tools_expose_read_note_and_apply_batch_only(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        session = module._MemoryToolSession(snapshot_text="", notes_dir=tmp_path / "memory" / "notes")
+        tool_names = [tool.name for tool in manager._memory_agent_tools(session)]
+    finally:
+        manager.close()
+
+    assert tool_names == ["memory_read_note", "memory_apply_batch"]
 
 
 def test_user_priority_classify_memory_payload_promotes_explicit_user_preference(tmp_path: Path) -> None:
@@ -384,16 +449,16 @@ async def test_self_pruning_enqueue_write_request_ignores_session_boundary_flush
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        result = await manager.enqueue_write_request(
+        result = await manager.enqueue_session_boundary_flush(
             session_key="session-1",
-            decision_source="self",
-            payload_text="session boundary flush",
+            channel="web",
+            chat_id="chat-1",
             trigger_source="session_boundary_flush",
         )
 
         assert result["ok"] is True
         assert result["status"] == "ignored"
-        assert result["reason"] == "self_memory_ignored"
+        assert result["reason"] == "session_boundary_flush_disabled"
         assert await manager.list_queue(limit=10) == []
     finally:
         manager.close()
@@ -437,10 +502,8 @@ async def test_autonomous_review_enqueue_promotes_direct_user_request_to_user_pr
         queue_items = await manager.list_queue(limit=10)
 
         assert result["ok"] is True
-        assert result["status"] == "queued"
-        assert len(queue_items) == 1
-        assert queue_items[0]["decision_source"] == "user"
-        assert queue_items[0]["trigger_source"] == "autonomous_review:turn-direct-memory"
+        assert result["status"] == "buffered"
+        assert queue_items == []
     finally:
         manager.close()
 
@@ -517,6 +580,83 @@ async def test_collect_due_batch_stops_at_mixed_operation_boundary(tmp_path: Pat
         assert batch.op == "write"
         assert [item.op for item in batch.items] == ["write", "write"]
         assert all(item.payload_text != "目标记忆" for item in batch.items)
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_record_turn_for_review_queues_assess_after_five_turns(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        for index in range(4):
+            result = await manager.record_turn_for_review(
+                session_key="web:shared",
+                turn_id=f"turn-{index + 1}",
+                user_messages=[f"user {index + 1}"],
+                assistant_text=f"assistant {index + 1}",
+                compression_summary={"status": ""},
+                canonical_summary={"stages": []},
+            )
+            assert result["status"] == "buffered"
+            assert await manager.list_queue(limit=10) == []
+
+        fifth = await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-5",
+            user_messages=["user 5"],
+            assistant_text="assistant 5",
+            compression_summary={"status": ""},
+            canonical_summary={"stages": []},
+        )
+        queue_items = await manager.list_queue(limit=10)
+
+        assert fifth["status"] == "queued"
+        assert len(queue_items) == 1
+        assert queue_items[0]["op"] == "assess"
+        assert queue_items[0]["session_key"] == "web:shared"
+
+        state = manager._read_review_state()
+        assert state["sessions"]["web:shared"]["pending_turns"] == []
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_flush_review_window_queues_assess_before_threshold_on_compression(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-1",
+            user_messages=["user 1"],
+            assistant_text="assistant 1",
+            compression_summary={"status": ""},
+            canonical_summary={"stages": []},
+        )
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-2",
+            user_messages=["user 2"],
+            assistant_text="assistant 2",
+            compression_summary={"status": ""},
+            canonical_summary={"stages": []},
+        )
+
+        result = await manager.flush_review_window(
+            session_key="web:shared",
+            trigger_source="token_compression",
+        )
+        queue_items = await manager.list_queue(limit=10)
+
+        assert result["status"] == "queued"
+        assert len(queue_items) == 1
+        assert queue_items[0]["op"] == "assess"
+        assert queue_items[0]["trigger_source"] == "token_compression"
+
+        state = manager._read_review_state()
+        assert state["sessions"]["web:shared"]["pending_turns"] == []
     finally:
         manager.close()
 
@@ -614,14 +754,17 @@ async def test_run_due_batch_once_records_successful_processed_batch_with_usage_
                     tool_calls=[
                         {
                             "id": "call-1",
-                            "name": "memory_write_note",
-                            "args": {"ref": "note_policy", "content": "创建文件默认格式要求"},
-                        },
-                        {
-                            "id": "call-2",
-                            "name": "memory_write_document",
+                            "name": "memory_apply_batch",
                             "args": {
-                                "content": "---\n2026/4/17-user：\n创建文件默认格式要求，见 ref:note_policy\n"
+                                "adds": [
+                                    {
+                                        "content": "创建文件默认格式要求，见 ref:note_policy",
+                                        "decision_source": "user",
+                                    }
+                                ],
+                                "note_upserts": {
+                                    "note_policy": "创建文件默认格式要求"
+                                },
                             },
                         },
                     ],
@@ -639,6 +782,7 @@ async def test_run_due_batch_once_records_successful_processed_batch_with_usage_
             lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
             raising=False,
         )
+        monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/17", raising=False)
         monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
 
         report = await manager.run_due_batch_once(now_iso="2026-04-17T10:00:04+08:00")
@@ -647,6 +791,7 @@ async def test_run_due_batch_once_records_successful_processed_batch_with_usage_
         assert report["ok"] is True
         assert report["status"] == "applied"
         assert report["attempt_count"] == 1
+        assert "id:" in manager.snapshot_text()
         assert "2026/4/17-user：" in manager.snapshot_text()
         assert "ref:note_policy" in manager.snapshot_text()
         assert (tmp_path / "memory" / "notes" / "note_policy.md").exists()
@@ -714,7 +859,7 @@ async def test_run_due_batch_once_applies_delete_batch_via_memory_agent(
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
         (tmp_path / "memory" / "MEMORY.md").write_text(
-            "---\n2026/4/17-self：\n完成任务必须说明任务总耗时\n",
+            "---\nid:Ab12Z9\n2026/4/17-self：\n完成任务必须说明任务总耗时\n",
             encoding="utf-8",
         )
         fake_model = _FakeToolCallingModel(
@@ -723,8 +868,8 @@ async def test_run_due_batch_once_applies_delete_batch_via_memory_agent(
                     tool_calls=[
                         {
                             "id": "call-1",
-                            "name": "memory_write_document",
-                            "args": {"content": ""},
+                            "name": "memory_apply_batch",
+                            "args": {"deletes": ["Ab12Z9"]},
                         }
                     ],
                     usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
@@ -736,7 +881,7 @@ async def test_run_due_batch_once_applies_delete_batch_via_memory_agent(
             module.MemoryQueueRequest(
                 op="delete",
                 decision_source="self",
-                payload_text="完成任务必须说明任务总耗时",
+                payload_text="Ab12Z9",
                 created_at="2026-04-17T10:00:05+08:00",
                 request_id="delete_1",
             )
@@ -772,8 +917,8 @@ async def test_run_due_batch_once_delete_only_removes_visible_snapshot_items(
     try:
         (tmp_path / "memory" / "MEMORY.md").write_text(
             (
-                "---\n2026/4/17-self：\nReport total elapsed time\n\n"
-                "---\n2026/4/17-user：\nPrefer Chinese replies\n"
+                "---\nid:Ab12Z9\n2026/4/17-self：\nReport total elapsed time\n"
+                "---\nid:Cd34Ef\n2026/4/17-user：\nPrefer Chinese replies\n"
             ),
             encoding="utf-8",
         )
@@ -781,7 +926,7 @@ async def test_run_due_batch_once_delete_only_removes_visible_snapshot_items(
             module.MemoryQueueRequest(
                 op="delete",
                 decision_source="self",
-                payload_text="Report total elapsed time",
+                payload_text="Ab12Z9",
                 created_at="2026-04-17T10:00:05+08:00",
                 request_id="delete_1",
             )
@@ -792,10 +937,8 @@ async def test_run_due_batch_once_delete_only_removes_visible_snapshot_items(
                     tool_calls=[
                         {
                             "id": "call-1",
-                            "name": "memory_write_document",
-                            "args": {
-                                "content": "---\n2026/4/17-user：\nPrefer Chinese replies\n"
-                            },
+                            "name": "memory_apply_batch",
+                            "args": {"deletes": ["Ab12Z9"]},
                         }
                     ],
                     usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
@@ -830,14 +973,14 @@ async def test_run_due_batch_once_repairs_delete_batch_that_keeps_non_snapshot_b
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
         (tmp_path / "memory" / "MEMORY.md").write_text(
-            "---\n2026/4/17-self：\nReport total elapsed time\n",
+            "---\nid:Ab12Z9\n2026/4/17-self：\nReport total elapsed time\n",
             encoding="utf-8",
         )
         await manager._append_queue_request(
             module.MemoryQueueRequest(
                 op="delete",
                 decision_source="self",
-                payload_text="Report total elapsed time",
+                payload_text="Ab12Z9",
                 created_at="2026-04-17T10:00:05+08:00",
                 request_id="delete_1",
             )
@@ -848,9 +991,14 @@ async def test_run_due_batch_once_repairs_delete_batch_that_keeps_non_snapshot_b
                     tool_calls=[
                         {
                             "id": "call-1",
-                            "name": "memory_write_document",
+                            "name": "memory_apply_batch",
                             "args": {
-                                "content": "---\n2026/4/17-self：\nInvented replacement block\n"
+                                "adds": [
+                                    {
+                                        "content": "Invented replacement block",
+                                        "decision_source": "self",
+                                    }
+                                ]
                             },
                         }
                     ],
@@ -861,8 +1009,8 @@ async def test_run_due_batch_once_repairs_delete_batch_that_keeps_non_snapshot_b
                     tool_calls=[
                         {
                             "id": "call-2",
-                            "name": "memory_write_document",
-                            "args": {"content": ""},
+                            "name": "memory_apply_batch",
+                            "args": {"deletes": ["Ab12Z9"]},
                         }
                     ],
                     usage={"input_tokens": 5, "output_tokens": 1, "cache_read_tokens": 0},
@@ -901,7 +1049,7 @@ async def test_run_due_batch_once_cleans_up_orphan_notes_after_commit(
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
         (tmp_path / "memory" / "MEMORY.md").write_text(
-            "---\n2026/4/17-user：\nDetailed workflow, see ref:orphan_note\n",
+            "---\nid:Ab12Z9\n2026/4/17-user：\nDetailed workflow, see ref:orphan_note\n",
             encoding="utf-8",
         )
         orphan_note = tmp_path / "memory" / "notes" / "orphan_note.md"
@@ -922,9 +1070,15 @@ async def test_run_due_batch_once_cleans_up_orphan_notes_after_commit(
                     tool_calls=[
                         {
                             "id": "call-1",
-                            "name": "memory_write_document",
+                            "name": "memory_apply_batch",
                             "args": {
-                                "content": "---\n2026/4/17-user：\nPrefer concise answers\n"
+                                "adds": [
+                                    {
+                                        "content": "Prefer concise answers",
+                                        "decision_source": "user",
+                                    }
+                                ],
+                                "deletes": ["Ab12Z9"],
                             },
                         }
                     ],
@@ -939,12 +1093,14 @@ async def test_run_due_batch_once_cleans_up_orphan_notes_after_commit(
             lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
             raising=False,
         )
+        monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/17", raising=False)
         monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
 
         report = await manager.run_due_batch_once(now_iso="2026-04-17T10:00:09+08:00")
 
         assert report["ok"] is True
-        assert manager.snapshot_text() == "---\n2026/4/17-user：\nPrefer concise answers"
+        assert "Prefer concise answers" in manager.snapshot_text()
+        assert "id:" in manager.snapshot_text()
         assert not orphan_note.exists()
     finally:
         manager.close()

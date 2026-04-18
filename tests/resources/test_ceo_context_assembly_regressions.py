@@ -3065,7 +3065,9 @@ async def test_ceo_context_assembly_injects_memory_snapshot_without_legacy_memor
     )
 
     overlay = "\n\n".join(result["turn_overlay_parts"])
-    assert "2026/4/17-self：" in overlay
+    assert "2026/4/17-self：" not in overlay
+    assert "完成任务必须说明任务总耗时" not in overlay
+    assert "完成任务必须说明任务总耗时" in str(result["memory_snapshot_text"] or "")
 
 
 @pytest.mark.asyncio
@@ -3123,5 +3125,58 @@ async def test_frontdoor_uses_frozen_memory_snapshot_only_once_per_turn() -> Non
 
     overlay = "\n\n".join(result["turn_overlay_parts"])
     assert len(snapshot_calls) == 1
-    assert "Use the first frozen snapshot" in overlay
-    assert "Do not hot-reload within the same turn" not in overlay
+    assert "Use the first frozen snapshot" not in overlay
+    assert "Use the first frozen snapshot" in str(result["memory_snapshot_text"] or "")
+    assert "Do not hot-reload within the same turn" not in str(result["memory_snapshot_text"] or "")
+
+
+@pytest.mark.asyncio
+async def test_ceo_context_assembly_keeps_memory_snapshot_out_of_turn_overlay_and_in_stable_prefix() -> None:
+    loop = SimpleNamespace(
+        memory_manager=SimpleNamespace(
+            snapshot_text=lambda **_: "---\nid:Ab12Z9\n2026/4/18-user：\nPrefer concise answers\n",
+            sync_catalog=None,
+        ),
+        main_task_service=None,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                skill_inventory_top_k=16,
+                extension_tool_top_k=16,
+                core_tools=["memory_write", "memory_delete", "memory_note"],
+                frontdoor_global_summary_trigger_ratio=0.5,
+                frontdoor_global_summary_target_ratio=0.2,
+                frontdoor_global_summary_min_output_tokens=2000,
+                frontdoor_global_summary_max_output_ratio=0.05,
+                frontdoor_global_summary_max_output_tokens_ceiling=12000,
+                frontdoor_global_summary_pressure_warn_ratio=0.85,
+                frontdoor_global_summary_force_refresh_ratio=0.95,
+                frontdoor_global_summary_min_delta_tokens=2000,
+                frontdoor_global_summary_failure_cooldown_seconds=600,
+                frontdoor_global_summary_model="",
+            )
+        ),
+    )
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=_PromptBuilder())
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+    )
+
+    result = await builder.build_for_ceo(
+        session=session,
+        query_text="remember this",
+        exposure={"tool_names": ["memory_write", "memory_delete", "memory_note"], "tool_families": [], "skills": []},
+        persisted_session=None,
+        user_content="remember this",
+    )
+
+    overlay = str(result.turn_overlay_text or "")
+    stable_messages = list(result.stable_messages or [])
+
+    assert "Prefer concise answers" not in overlay
+    assert len(stable_messages) >= 2
+    assert stable_messages[0]["role"] == "system"
+    assert stable_messages[1]["role"] == "assistant"
+    assert "id:Ab12Z9" in str(stable_messages[1]["content"] or "")
+    assert "Prefer concise answers" in str(stable_messages[1]["content"] or "")
