@@ -2698,10 +2698,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "rejection_kind": "",
             }
         if text.startswith("任务未创建："):
+            rejection_kind = "duplicate"
+            if "task_append_notice" in text or "追加通知" in text:
+                rejection_kind = "append_notice"
             return {
                 "created": False,
                 "created_task_ids": [],
-                "rejection_kind": "append_notice" if "追加通知" in text else "duplicate",
+                "rejection_kind": rejection_kind,
             }
         return {
             "created": False,

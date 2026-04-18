@@ -1076,6 +1076,7 @@ async def test_create_async_task_tool_returns_append_notice_guidance():
     assert '任务未创建' in result
     assert 'task:existing-2' in result
     assert '追加通知' in result
+    assert 'task_append_notice' in result
 
 
 def test_create_async_task_contract_no_longer_accepts_continuation_fields() -> None:

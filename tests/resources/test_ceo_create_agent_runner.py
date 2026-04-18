@@ -4503,6 +4503,16 @@ async def test_create_agent_postprocess_duplicate_rejection_with_old_task_id_doe
     assert "repair_overlay_text" not in result
 
 
+def test_parse_create_async_task_result_recognizes_task_append_notice_guidance() -> None:
+    parsed = ceo_runtime_ops.CeoFrontDoorRuntimeOps._parse_create_async_task_result(
+        "任务未创建：现有任务 task:demo-123 请改用 task_append_notice 更新该任务。原因：new constraints"
+    )
+
+    assert parsed["created"] is False
+    assert parsed["created_task_ids"] == []
+    assert parsed["rejection_kind"] == "append_notice"
+
+
 @pytest.mark.asyncio
 async def test_create_agent_postprocess_accumulates_multiple_verified_task_ids() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(

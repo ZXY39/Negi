@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES, NODE_FIXED_BUILTIN_TOOL_NAMES
 from main.models import TaskMessageDistributionEpoch, TaskNodeNotification
 from main.storage.sqlite_store import SQLiteTaskStore
 
@@ -94,3 +95,19 @@ def test_task_node_notification_storage_round_trip(tmp_path: Path) -> None:
         }
     finally:
         store.close()
+
+
+def test_task_append_notice_contract_supports_task_ids_and_node_ids() -> None:
+    from main.service.task_append_notice_contract import build_task_append_notice_parameters
+
+    schema = build_task_append_notice_parameters()
+    props = dict(schema.get("properties") or {})
+
+    assert "task_ids" in props
+    assert "node_ids" in props
+    assert "message" in props
+
+
+def test_ceo_fixed_builtin_tools_include_task_append_notice() -> None:
+    assert "task_append_notice" in set(CEO_FIXED_BUILTIN_TOOL_NAMES)
+    assert "task_append_notice" not in set(NODE_FIXED_BUILTIN_TOOL_NAMES)

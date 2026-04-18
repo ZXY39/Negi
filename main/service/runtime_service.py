@@ -103,6 +103,10 @@ from main.service.create_async_task_contract import (
     CREATE_ASYNC_TASK_DESCRIPTION,
     build_create_async_task_parameters,
 )
+from main.service.task_append_notice_contract import (
+    TASK_APPEND_NOTICE_DESCRIPTION,
+    build_task_append_notice_parameters,
+)
 from main.service.event_registry import TaskEventRegistry
 from main.service.task_event_callback import (
     TASK_EVENT_BATCH_CALLBACK_PATH,
@@ -2239,6 +2243,25 @@ class MainRuntimeService:
                 'decision_source': 'fallback',
             }
         return llm_decision
+
+    async def task_append_notice(
+        self,
+        *,
+        task_ids: list[str] | None,
+        node_ids: list[str] | None,
+        message: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        _ = task_ids, node_ids
+        normalized_message = str(message or '').strip()
+        normalized_session_id = self._normalize_session_key(session_id)
+        if not normalized_message:
+            raise ValueError('message_required')
+        return {
+            'ok': False,
+            'session_id': normalized_session_id,
+            'message': 'task_append_notice_not_implemented',
+        }
 
     def list_active_task_snapshots_for_session(self, session_id: str, *, limit: int = 3) -> list[dict[str, str]]:
         unfinished = list(self.list_unfinished_tasks_for_session(session_id))
@@ -6130,6 +6153,7 @@ class MainRuntimeService:
                     task_service_getter,
                     inline_registry_getter,
                 ),
+                'task_append_notice': TaskAppendNoticeTool(self),
             }
         return dict(self._builtin_tool_cache)
 
@@ -7320,6 +7344,40 @@ class TaskNodeDetailTool(Tool):
         return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
 
+class TaskAppendNoticeTool(Tool):
+    def __init__(self, service: MainRuntimeService):
+        self._service = service
+
+    @property
+    def name(self) -> str:
+        return 'task_append_notice'
+
+    @property
+    def description(self) -> str:
+        return TASK_APPEND_NOTICE_DESCRIPTION
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return build_task_append_notice_parameters()
+
+    async def execute(
+        self,
+        task_ids: list[str] | None = None,
+        node_ids: list[str] | None = None,
+        message: str = '',
+        __g3ku_runtime: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> str:
+        runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
+        result = await self._service.task_append_notice(
+            task_ids=list(task_ids or []),
+            node_ids=list(node_ids or []),
+            message=str(message or '').strip(),
+            session_id=str(runtime.get('session_key') or 'web:shared').strip() or 'web:shared',
+        )
+        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+
+
 class CreateAsyncTaskTool(Tool):
     def __init__(self, service: MainRuntimeService):
         self._service = service
@@ -7383,7 +7441,10 @@ class CreateAsyncTaskTool(Tool):
         if decision == 'reject_duplicate':
             return f'任务未创建：与进行中任务 {matched_task_id} 高度重复。原因：{reason}'
         if decision == 'reject_use_append_notice':
-            return f'任务未创建：现有任务 {matched_task_id} 需要追加通知而不是新建。原因：{reason}'
+            return (
+                f'任务未创建：现有任务 {matched_task_id} 需要追加通知而不是新建。'
+                f'请改用 task_append_notice。原因：{reason}'
+            )
         record = await self._service.create_task(
             str(task or ''),
             session_id=session_id,
