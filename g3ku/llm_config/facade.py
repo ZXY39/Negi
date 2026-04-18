@@ -50,6 +50,14 @@ def _runtime_model_parameters(parameters: dict[str, Any] | None) -> dict[str, An
     raw_reasoning = str(payload.get("reasoning_effort") or "").strip()
     if raw_reasoning:
         result["reasoning_effort"] = raw_reasoning
+    raw_context_window_tokens = payload.get("context_window_tokens")
+    if raw_context_window_tokens not in (None, ""):
+        try:
+            resolved = int(raw_context_window_tokens)
+        except Exception:
+            resolved = 0
+        if resolved > 0:
+            result["context_window_tokens"] = resolved
     return result
 
 
@@ -390,6 +398,7 @@ class LLMConfigFacade:
             "retry_count": int(getattr(binding, "retry_count", 0) or 0),
             "single_api_key_max_concurrency": getattr(binding, "single_api_key_max_concurrency", None),
             "description": binding.description,
+            "context_window_tokens": record.parameters.get("context_window_tokens"),
             "capability": record.capability.value,
             "auth_mode": record.auth_mode.value,
             "config_id": record.config_id,

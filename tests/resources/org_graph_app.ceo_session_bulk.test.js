@@ -79,7 +79,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { S, U, canCreateCeoSessions, syncCeoSessionActions, setCeoSessionTab, renderCeoSessionCard, toggleCeoBulkSelectAll, buildCeoBulkDeleteSummary, requestDeleteSelectedCeoSessions, requestDeleteCeoSession, requestProjectExit };`,
+        `${APP_CODE}\nthis.__testExports = { S, U, canCreateCeoSessions, syncCeoSessionActions, setCeoSessionTab, renderCeoSessionCard, toggleCeoBulkSelectAll, buildCeoBulkDeleteSummary, requestDeleteSelectedCeoSessions, requestDeleteCeoSession, requestProjectExit, displayChinaChannelLabel };`,
         context
     );
     vm.runInContext(
@@ -119,6 +119,27 @@ test("toggleCeoBulkSelectAll scopes selection to the current tab", () => {
     toggleCeoBulkSelectAll();
 
     assert.deepEqual([...S.ceoSelectedSessionIds], ["web:1", "web:2"]);
+});
+
+test("displayChinaChannelLabel returns readable labels for built-in china channels", () => {
+    const { displayChinaChannelLabel } = loadApp();
+
+    assert.deepEqual(
+        [
+            ["wecom", displayChinaChannelLabel("wecom")],
+            ["wecom-app", displayChinaChannelLabel("wecom-app")],
+            ["wecom-kf", displayChinaChannelLabel("wecom-kf")],
+            ["wechat-mp", displayChinaChannelLabel("wechat-mp")],
+            ["feishu-china", displayChinaChannelLabel("feishu-china")],
+        ],
+        [
+            ["wecom", "企业微信"],
+            ["wecom-app", "企业微信应用"],
+            ["wecom-kf", "企业微信客服"],
+            ["wechat-mp", "微信公众号"],
+            ["feishu-china", "飞书"],
+        ]
+    );
 });
 
 test("canCreateCeoSessions stays enabled during session switch busy", () => {

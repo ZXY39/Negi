@@ -302,6 +302,7 @@ class ManagedModelConfig(Base):
     retry_count: int = Field(default=0, ge=0)
     single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None
     description: str = ""
+    context_window_tokens: int | None = None
 
     @field_validator("key")
     @classmethod
@@ -352,6 +353,18 @@ class ManagedModelConfig(Base):
         if isinstance(value, str) and not value.strip():
             return 0
         return int(value)
+
+    @field_validator("context_window_tokens", mode="before")
+    @classmethod
+    def _normalize_context_window_tokens(cls, value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        resolved = int(value)
+        if resolved <= 25_000:
+            raise ValueError("models.catalog[].context_window_tokens must be > 25000")
+        return resolved
 
     @field_validator("single_api_key_max_concurrency", mode="before")
     @classmethod
@@ -697,16 +710,6 @@ class MemoryAssemblyConfig(Base):
     frontdoor_interrupt_tool_names: list[str] = Field(
         default_factory=lambda: ["message", "create_async_task"]
     )
-    frontdoor_global_summary_trigger_ratio: float = Field(default=0.10, ge=0.0, le=1.0)
-    frontdoor_global_summary_target_ratio: float = Field(default=0.20, ge=0.0, le=1.0)
-    frontdoor_global_summary_min_output_tokens: int = Field(default=2000, ge=1)
-    frontdoor_global_summary_max_output_ratio: float = Field(default=0.05, ge=0.0, le=1.0)
-    frontdoor_global_summary_max_output_tokens_ceiling: int = Field(default=12000, ge=1)
-    frontdoor_global_summary_pressure_warn_ratio: float = Field(default=0.85, ge=0.0, le=1.0)
-    frontdoor_global_summary_force_refresh_ratio: float = Field(default=0.95, ge=0.0, le=1.0)
-    frontdoor_global_summary_min_delta_tokens: int = Field(default=2000, ge=1)
-    frontdoor_global_summary_failure_cooldown_seconds: int = Field(default=600, ge=0)
-    frontdoor_global_summary_model: str = Field(default="")
     core_tools: list[str] = Field(
         default_factory=lambda: [
             'content',

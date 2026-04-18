@@ -1918,6 +1918,11 @@ async def create_model(payload: dict = Body(...)):
             retry_on=[str(item) for item in (payload.get('retry_on') or [])] if payload.get('retry_on') is not None else None,
             retry_count=raw_retry_count,
             description=str(payload.get('description') or ''),
+            context_window_tokens=(
+                payload.get('context_window_tokens')
+                if 'context_window_tokens' in payload
+                else payload.get('contextWindowTokens')
+            ),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1979,6 +1984,7 @@ async def update_model(model_key: str, payload: dict = Body(...)):
             ),
             retry_count=raw_retry_count if ('retry_count' in body or 'retryCount' in body) else _UNSET,
             description=_pick('description'),
+            context_window_tokens=_pick('context_window_tokens', 'contextWindowTokens'),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

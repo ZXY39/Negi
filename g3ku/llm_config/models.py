@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from g3ku.utils.api_keys import SingleAPIKeyMaxConcurrency, normalize_single_api_key_max_concurrency
 
@@ -72,6 +72,22 @@ class ProviderConfigDraft(StrictModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     extra_headers: dict[str, str] = Field(default_factory=dict)
     extra_options: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_chat_context_window_tokens(self) -> "ProviderConfigDraft":
+        if self.capability != Capability.CHAT:
+            return self
+        raw_value = dict(self.parameters or {}).get("context_window_tokens")
+        if raw_value in (None, ""):
+            raise ValueError("parameters.context_window_tokens is required for chat capability")
+        try:
+            resolved = int(raw_value)
+        except Exception as exc:
+            raise ValueError("parameters.context_window_tokens must be an integer") from exc
+        if resolved <= 25_000:
+            raise ValueError("parameters.context_window_tokens must be > 25000")
+        self.parameters["context_window_tokens"] = resolved
+        return self
 
 
 class NormalizedProviderConfig(StrictModel):

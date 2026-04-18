@@ -62,6 +62,7 @@ def _optional_chat_parameters(
     max_tokens: Any = None,
     temperature: Any = None,
     reasoning_effort: Any = None,
+    context_window_tokens: Any = None,
 ) -> dict[str, Any]:
     parameters: dict[str, Any] = {}
     if max_tokens not in (None, ""):
@@ -70,6 +71,8 @@ def _optional_chat_parameters(
         parameters["temperature"] = float(temperature)
     if str(reasoning_effort or "").strip():
         parameters["reasoning_effort"] = str(reasoning_effort).strip()
+    if context_window_tokens not in (None, ""):
+        parameters["context_window_tokens"] = int(context_window_tokens)
     return parameters
 
 
@@ -136,6 +139,7 @@ def _build_record(
     max_tokens: int | None = None,
     temperature: float | None = None,
     reasoning_effort: str | None = None,
+    context_window_tokens: int | None = None,
     capability: Capability | None = None,
     config_id: str | None = None,
 ) -> str:
@@ -161,6 +165,7 @@ def _build_record(
             max_tokens=max_tokens,
             temperature=temperature,
             reasoning_effort=reasoning_effort,
+            context_window_tokens=context_window_tokens,
         ),
         headers=dict(extra_headers or {}),
         extra_options={},
@@ -315,18 +320,28 @@ def migrate_raw_config_if_needed(raw_data: dict[str, Any], *, workspace: Path | 
             max_tokens=item.get("maxTokens", item.get("max_tokens")),
             temperature=item.get("temperature"),
             reasoning_effort=str(item.get("reasoningEffort", item.get("reasoning_effort", "")) or "").strip() or None,
+            context_window_tokens=item.get("contextWindowTokens", item.get("context_window_tokens")),
         )
-        next_catalog.append(
-            {
-                "key": key,
-                "llmConfigId": config_id,
-                "enabled": bool(item.get("enabled", True)),
-                "description": str(item.get("description") or "").strip(),
-                "retryOn": list(
-                    item.get("retryOn", item.get("retry_on", ["network", "429", "5xx"])) or ["network", "429", "5xx"]
-                ),
-            }
+        next_item = {
+            "key": key,
+            "llmConfigId": config_id,
+            "enabled": bool(item.get("enabled", True)),
+            "description": str(item.get("description") or "").strip(),
+            "retryOn": list(
+                item.get("retryOn", item.get("retry_on", ["network", "429", "5xx"])) or ["network", "429", "5xx"]
+            ),
+            "retryCount": int(item.get("retryCount", item.get("retry_count", 0)) or 0),
+        }
+        raw_context_window_tokens = item.get("contextWindowTokens", item.get("context_window_tokens"))
+        if raw_context_window_tokens not in (None, ""):
+            next_item["contextWindowTokens"] = int(raw_context_window_tokens)
+        raw_single_api_key_max_concurrency = item.get(
+            "singleApiKeyMaxConcurrency",
+            item.get("single_api_key_max_concurrency"),
         )
+        if raw_single_api_key_max_concurrency is not None:
+            next_item["singleApiKeyMaxConcurrency"] = raw_single_api_key_max_concurrency
+        next_catalog.append(next_item)
         changed = True
 
     next_data.setdefault("models", {})["catalog"] = next_catalog

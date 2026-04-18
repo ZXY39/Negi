@@ -480,13 +480,13 @@ Tool/skill catalog narrowing now goes through a catalog-only bridge and no longe
 The CEO frontdoor no longer keeps a separate legacy history-compaction layer.
 
 - The earlier `_summarize_messages()` compatibility hook has been removed from runtime execution paths.
-- Frontdoor history now reaches the model either as local workset stage windows/blocks or as the global semantic summary block.
+- Frontdoor history now reaches the model either as local workset stage windows/blocks or through a same-turn `token_compression` rewrite when request size approaches the selected model window.
 - If you are debugging long-context behavior, there is no intermediate "message-count compaction" stage to inspect anymore.
 
 This leaves two distinct mechanisms only:
 
 - Stage workset compaction for the near-field prompt, shared with the execution-stage prompt logic.
-- Global semantic summary refresh for older context outside that near-field workset.
+- Inline `token_compression` for older body-history when the final provider-bound request approaches the selected model's `context_window_tokens`.
 
 For the CEO/frontdoor path, the near-field stage workset now has a stricter source-of-truth split:
 
@@ -499,7 +499,7 @@ For the CEO/frontdoor path, the near-field stage workset now has a stricter sour
 When a maintainer sees a prompt continuity issue, the first questions should now be:
 
 - Was the relevant context still inside the retained stage workset?
-- If not, did the semantic summary coverage/cooldown/token-pressure decision allow a refresh or reuse?
+- If not, did inline `token_compression` or `stage_compaction` legitimately shorten the next-round baseline?
 
 ## Internal Turn Contract Notes
 
@@ -546,7 +546,7 @@ This gives maintainers a middle ground:
 
 The CEO/frontdoor path now has a single cross-turn stage truth source: `frontdoor_canonical_context`.
 
-- `frontdoor_stage_state`, `compression_state`, and `semantic_context_state` are still runtime working state, but CEO/frontdoor no longer assumes they must be blanked at every fresh user / heartbeat / cron turn before prompt assembly.
+- `frontdoor_stage_state` and `compression_state` are still runtime working state, but CEO/frontdoor no longer assumes they must be blanked at every fresh user / heartbeat / cron turn before prompt assembly.
 - When graph-local state is empty, `prepare_turn` may now reuse the session-owned frontdoor request body plus these session snapshots to rebuild the next provider request window.
 - `frontdoor_canonical_context` is the durable cross-turn stage/history view. Turn-finalization merges the current turn stage ledger into this canonical structure.
 - Session/runtime sync must not persist a request-local projection back into `frontdoor_canonical_context`. Only turn finalization is allowed to append completed-stage data into the durable canonical chain; anything derived from `frontdoor_canonical_context + current frontdoor_stage_state` is visible-workset data for the current request only.
@@ -572,7 +572,7 @@ Maintainers should treat the canonical context representation rules as the only 
 
 The prompt token trace also changed:
 
-- `pre_summary_prompt_tokens` is the trigger-side estimate before long-context summary injection, and it must include the stage workset.
+- `pre_request_prompt_tokens` is the pre-send estimate before any inline `token_compression`, and it must include the stage workset.
 - `effective_prompt_tokens` is the estimate for the final model request actually sent after prompt assembly.
 - CEO/frontdoor now also runs a final token preflight immediately before provider send. This happens after fresh-turn request seeding, completed-continuity bridge decisions, provider tool-schema seeding, and frozen `MEMORY.md` injection have already produced the authoritative request projection.
 - That preflight is the final gate for provider-bound request size. If it compacts the request, `frontdoor_history_shrink_reason` must be `token_compression`; the runtime must not invent a second competing shrink-reason field.
@@ -593,9 +593,9 @@ The reminder lane itself is deliberately read-only with respect to session persi
 - `CeoToolReminderService` does not call `session.prompt(...)`.
 - It does not take the normal turn lock or create a heartbeat/internal turn.
 - Its first choice is to reuse the latest persisted CEO actual-request artifact as the provider-facing scaffold so the sidecar request shares the same cacheable prefix as the main turn; only if that scaffold is missing does it fall back to `CeoMessageBuilder.build_for_ceo(..., ephemeral_tail_messages=...)`.
-- The reminder snapshot from `RuntimeAgentSession.reminder_context_snapshot()` therefore now needs to carry the latest actual-request pointer in addition to the current visible stage/canonical view, durable `frontdoor_canonical_context`, compression state, semantic summary state, hydrated tools, selection debug, and current visible user/assistant text.
+- The reminder snapshot from `RuntimeAgentSession.reminder_context_snapshot()` therefore now needs to carry the latest actual-request pointer in addition to the current visible stage/canonical view, durable `frontdoor_canonical_context`, compression state, hydrated tools, selection debug, and current visible user/assistant text.
 - Sidecar stop/continue decisions are now parsed from a text-only reminder reply (`STOP` / `CONTINUE`). Reusing the main turn's provider-visible tool bundle is a cache-stability tactic, not permission to execute arbitrary returned tool calls in the sidecar lane.
-- The reminder text itself is live-only. It must not be written into transcript history, canonical context, semantic summary, or future prompt-history injection.
+- The reminder text itself is live-only. It must not be written into transcript history, canonical context, or future prompt-history injection.
 
 ### Timeout Stop Error Contract
 
@@ -633,3 +633,33 @@ Maintainers should treat this as a request-construction scaffold only.
 - It does not replace the node's durable/compacted `message_history`.
 - It does not redefine which tools are callable.
 - It exists purely so the provider sees append-only growth instead of an early-prefix rewrite whenever stage compaction trims the active window.
+
+## Frontdoor Context Compression (Current Contract)
+
+The current CEO/frontdoor request-shrink model has only two information-loss boundaries:
+
+- `stage_compaction`
+- `token_compression`
+
+Anything else that shortens the next-round request baseline should be treated as a regression.
+
+### `token_compression`
+
+- `token_compression` is an inline same-turn LLM rewrite that runs immediately before the provider send.
+- It keeps the stable system prefix, the latest runtime tool-contract tail, and the most recent body-history tail, then rewrites only the older body-history zone into one `G3KU_TOKEN_COMPACT_V2` marker block.
+- The trigger threshold is tied to the runtime-selected model's `context_window_tokens`, not to a separate semantic-summary config.
+- If estimated request size is `<= 80%` of the selected model window, frontdoor sends directly.
+- If estimated request size is between `80%` and `100%`, frontdoor attempts one inline compression.
+- If estimated request size is already `> 100%`, frontdoor fails before compression because even the compression attempt would not fit safely in the current model window.
+
+### Removed Semantic Summary Path
+
+- The older semantic/global-summary lane is no longer part of prompt assembly.
+- `compression_state` now means live progress for inline `token_compression` only; it is no longer a durable "semantic summary ready" signal.
+- Continuity restore now depends on the authoritative frontdoor baseline, stage state, request traces, and shrink reason, not on a separate `semantic_context_state` handoff block.
+
+### Pause During Compression
+
+- Manual pause during inline compression is terminal for the visible turn.
+- The runtime cancels the active compression generation and discards any late compression result instead of letting it update baseline or continue into the main provider send.
+- The next activation (new user input, heartbeat wakeup, etc.) must re-run prepare -> estimate -> optional compression -> send using the then-current model chain and context window.

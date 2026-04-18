@@ -2683,7 +2683,7 @@ def _write_runtime_config(workspace: Path) -> None:
     (workspace / '.g3ku' / 'config.json').write_text(
         json.dumps({
             'agents': {'defaults': {'workspace': '.', 'runtime': 'langgraph', 'maxTokens': 1, 'temperature': 0.1, 'maxToolIterations': 1, 'memoryWindow': 1, 'reasoningEffort': 'low'}, 'roleIterations': {'ceo': 40, 'execution': 16, 'inspection': 16}, 'multiAgent': {'orchestratorModelKey': None}},
-            'models': {'catalog': [{'key': 'm', 'providerModel': 'openai:gpt-4.1', 'apiKey': 'demo-key', 'apiBase': None, 'extraHeaders': None, 'enabled': True, 'maxTokens': 1, 'temperature': 0.1, 'reasoningEffort': 'low', 'retryOn': [], 'description': ''}], 'roles': {'ceo': ['m'], 'execution': ['m'], 'inspection': ['m']}},
+            'models': {'catalog': [{'key': 'm', 'providerModel': 'openai:gpt-4.1', 'apiKey': 'demo-key', 'apiBase': None, 'extraHeaders': None, 'enabled': True, 'maxTokens': 1, 'temperature': 0.1, 'reasoningEffort': 'low', 'retryOn': [], 'description': '', 'contextWindowTokens': 128000}], 'roles': {'ceo': ['m'], 'execution': ['m'], 'inspection': ['m']}},
             'providers': {'openai': {'apiKey': '', 'apiBase': None, 'extraHeaders': None}},
             'web': {'host': '127.0.0.1', 'port': 1},
             'toolSecrets': {},
@@ -2735,6 +2735,7 @@ def test_models_endpoint_returns_role_iterations(tmp_path: Path, monkeypatch):
     assert payload['ok'] is True
     assert payload['role_iterations'] == {'ceo': 40, 'execution': 16, 'inspection': 16, 'memory': None}
     assert payload['role_concurrency'] == {'ceo': None, 'execution': None, 'inspection': None, 'memory': 1}
+    assert payload['items'][0]['context_window_tokens'] == 128000
 
 
 def test_model_retry_count_update_persists_and_refreshes_runtime(tmp_path: Path, monkeypatch):
@@ -3773,6 +3774,29 @@ def test_runtime_refresh_status_endpoint_returns_current_command_snapshot(monkey
     assert payload['item']['command_id'] == 'command:refresh-1'
     assert payload['item']['status'] == 'completed'
     assert payload['item']['result'] == {'changed': True}
+
+
+def test_model_role_batch_save_rejects_models_missing_context_window_tokens(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    saved['models']['catalog'][0].pop('contextWindowTokens', None)
+    (workspace / '.g3ku' / 'config.json').write_text(json.dumps(saved), encoding='utf-8')
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put(
+        '/api/models/routes/batch',
+        json={'updates': {'ceo': {'model_keys': ['m']}}},
+    )
+
+    assert response.status_code == 400
+    assert 'context_window_tokens' in str(response.json()['detail'])
 
 
 def test_china_bridge_channels_endpoint_lists_supported_channels(tmp_path: Path, monkeypatch):

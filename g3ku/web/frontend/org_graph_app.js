@@ -316,6 +316,8 @@ const U = {
     ceoContextLoadNotice: document.getElementById("ceo-context-load-notice"),
     ceoCompressionToast: document.getElementById("ceo-compression-toast"),
     ceoCompressionToastText: document.getElementById("ceo-compression-toast-text"),
+    ceoCompressionActions: document.getElementById("ceo-compression-actions"),
+    ceoCompressionPause: document.getElementById("ceo-compression-pause-btn"),
     ceoSend: document.getElementById("ceo-send-btn"),
     viewCeo: document.getElementById("view-ceo"),
     viewTasks: document.getElementById("view-tasks-list"),
@@ -511,12 +513,12 @@ function displayChinaChannelLabel(channelId) {
     return ({
         qqbot: "QQ Bot",
         dingtalk: "DingTalk",
-        wecom: "????",
-        "wecom-app": "??????",
-        "wecom-kf": "??????",
-        "wechat-mp": "?????",
-        "feishu-china": "??",
-    }[String(channelId || "").trim()] || String(channelId || "??").trim() || "??");
+        wecom: "企业微信",
+        "wecom-app": "企业微信应用",
+        "wecom-kf": "企业微信客服",
+        "wechat-mp": "微信公众号",
+        "feishu-china": "飞书",
+    }[String(channelId || "").trim()] || String(channelId || "未知").trim() || "未知");
 }
 
 function flattenChannelGroups(groups = []) {
@@ -1682,6 +1684,8 @@ function activeCeoSessionCompressionState() {
 function syncCeoCompressionToast() {
     const toastEl = U.ceoCompressionToast;
     const textEl = U.ceoCompressionToastText;
+    const actionsEl = U.ceoCompressionActions;
+    const pauseEl = U.ceoCompressionPause;
     if (!toastEl || !textEl) return;
     const compression = activeCeoSessionCompressionState();
     const visible = !!compression;
@@ -1689,6 +1693,8 @@ function syncCeoCompressionToast() {
     toastEl.hidden = !visible;
     if (toastEl.classList?.toggle) toastEl.classList.toggle("is-visible", visible);
     toastEl.setAttribute("aria-hidden", visible ? "false" : "true");
+    if (actionsEl) actionsEl.hidden = !visible;
+    if (pauseEl) pauseEl.disabled = !visible || !!S.ceoPauseBusy;
 }
 
 function appendCeoSessionSnapshotMessage(messages = [], message = null) {
@@ -2897,6 +2903,13 @@ function handleCeoError(payload = {}) {
     if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
     syncCeoSessionActions();
     syncCeoPrimaryButton();
+    if (["frontdoor_context_window_exceeded", "model_context_window_missing"].includes(String(payload?.code || "").trim())) {
+        showToast({
+            title: "上下文超限",
+            text: String(payload?.message || "上下文大小超出当前模型，请更改模型链配置后继续"),
+            kind: "error",
+        });
+    }
     finalizeCeoTurn(`运行出错：${String(payload?.message || "unknown error")}`, payload || {});
 }
 
@@ -3314,7 +3327,7 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null) {
     const summary = filterCeoInteractionFlowSummary(canonicalContext);
     if (!summary?.stages?.length) {
         resetCeoToolFlow(turn);
-        updateCeoTurnMeta(turn, "绛夊緟宸ュ叿寮€濮?..");
+        updateCeoTurnMeta(turn, "等待工具开始...");
         return 0;
     }
     if (typeof renderTraceStep !== "function"
@@ -5635,6 +5648,10 @@ function renderModelDetail() {
                         <h3>模型参数</h3>
                         <div class="model-form-grid">
                             <label class="resource-field">
+                                <span class="resource-field-label">最大上下文TOKEN *</span>
+                                <input class="resource-search" type="number" min="25001" step="1" name="contextWindowTokens" value="${esc(String(current?.context_window_tokens ?? ""))}" placeholder="必须大于 25000">
+                            </label>
+                            <label class="resource-field">
                                 <span class="resource-field-label">Max Tokens</span>
                                 <input class="resource-search" type="number" min="1" step="1" name="maxTokens" value="${esc(String(current?.max_tokens ?? ""))}" placeholder="留空则不下发">
                             </label>
@@ -5660,10 +5677,6 @@ function renderModelDetail() {
                     <section class="resource-section">
                         <h3>额外请求头</h3>
                         <textarea class="resource-editor model-textarea" name="extraHeaders" rows="6" placeholder='{"X-Trace-Id": "demo"}'>${esc(current?.extra_headers ? JSON.stringify(current.extra_headers, null, 2) : "")}</textarea>
-                    </section>
-                    <section class="resource-section">
-                        <h3>说明</h3>
-                        <textarea class="resource-editor model-textarea" name="description" rows="5" placeholder="可填写用途、限制、成本等说明">${esc(current?.description || "")}</textarea>
                     </section>
                     <div class="model-actions">
                         <button type="submit" class="toolbar-btn success">${isCreate ? "添加并保存" : "保存模型"}</button>
@@ -6228,10 +6241,10 @@ function collectModelFormData(form, current) {
     const maxTokensText = String(formData.get("maxTokens") || "").trim();
     const temperatureText = String(formData.get("temperature") || "").trim();
     const reasoningEffortText = String(formData.get("reasoningEffort") || "").trim();
+    const contextWindowTokensText = String(formData.get("contextWindowTokens") || "").trim();
     const reasoningEffort = reasoningEffortText || null;
     const retryOnRaw = String(formData.get("retryOn") || "").trim();
     const retryCountText = String(formData.get("retryCount") || "").trim();
-    const description = String(formData.get("description") || "").trim();
     const enabled = formData.get("enabled") === "on";
     const selectedScopes = new Set(MODEL_SCOPES.filter((scope) => formData.get(`scope_${scope.key}`) === "on").map((scope) => scope.key));
     const hasApiKeyEntries = String(apiKey || "").split(/[\n,]/).some((item) => String(item || "").trim());
@@ -6247,9 +6260,13 @@ function collectModelFormData(form, current) {
     const retryCount = retryCountText ? Number.parseInt(retryCountText, 10) : 0;
     const maxTokens = maxTokensText ? Number(maxTokensText) : null;
     const temperature = temperatureText ? Number(temperatureText) : null;
+    const contextWindowTokens = contextWindowTokensText ? Number.parseInt(contextWindowTokensText, 10) : NaN;
 
     if (maxTokensText && (!Number.isInteger(maxTokens) || maxTokens <= 0)) {
         throw new Error("Max Tokens 必须是正整数");
+    }
+    if (!contextWindowTokensText || !Number.isInteger(contextWindowTokens) || contextWindowTokens <= 25000) {
+        throw new Error("最大上下文TOKEN必须是大于 25000 的整数");
     }
     if (temperatureText && (!Number.isFinite(temperature) || temperature < 0 || temperature > 2)) {
         throw new Error("Temperature 必须在 0 到 2 之间");
@@ -6266,7 +6283,7 @@ function collectModelFormData(form, current) {
             apiBase,
             enabled,
             scopes: [...selectedScopes],
-            description,
+            contextWindowTokens,
         };
         if (maxTokens !== null) payload.maxTokens = maxTokens;
         if (temperature !== null) payload.temperature = temperature;
@@ -6294,7 +6311,9 @@ function collectModelFormData(form, current) {
     if (reasoningEffort !== (String(current?.reasoning_effort || "").trim() || null)) patch.reasoningEffort = reasoningEffort;
     if (retryOn !== null && JSON.stringify(retryOn) !== JSON.stringify(current?.retry_on || [])) patch.retryOn = retryOn;
     if (retryCount !== Number.parseInt(String(current?.retry_count ?? 0), 10)) patch.retryCount = retryCount;
-    if (description !== String(current?.description || "")) patch.description = description;
+    if (contextWindowTokens !== Number.parseInt(String(current?.context_window_tokens ?? 0), 10)) {
+        patch.contextWindowTokens = contextWindowTokens;
+    }
     if (extraHeaders !== null && JSON.stringify(extraHeaders) !== JSON.stringify(current?.extra_headers || null)) patch.extraHeaders = extraHeaders;
     return { isCreate, key, enabled, selectedScopes, patch };
 }
@@ -8112,6 +8131,9 @@ function bind() {
         }
     });
     U.ceoSend?.addEventListener("click", handleCeoPrimaryAction);
+    U.ceoCompressionPause?.addEventListener("click", () => {
+        requestCeoPause();
+    });
     U.ceoAttach?.addEventListener("click", () => {
         if (S.ceoUploadBusy) return;
         U.ceoFileInput?.click();

@@ -16,12 +16,7 @@ from g3ku.runtime.context.semantic_scope import semantic_catalog_rankings
 from g3ku.runtime.context.summarizer import score_query
 from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBundle
 from g3ku.runtime.core_tools import resolve_core_tool_targets
-from g3ku.runtime.semantic_context_summary import (
-    G3KU_MIN_CONTEXT_FLOOR,
-    build_global_summary_thresholds,
-    default_semantic_context_state,
-    estimate_message_tokens,
-)
+from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.stage_prompt_compaction import (
     STAGE_EXTERNALIZED_PREFIX,
     completed_stage_blocks,
@@ -52,14 +47,13 @@ DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K = 16
 
 def _context_window_from_model_parameters(model_parameters: dict[str, Any] | None) -> int:
     payload = dict(model_parameters or {})
-    for key in ("context_length", "context_window", "max_input_tokens", "max_context_tokens"):
-        value = payload.get(key)
-        try:
-            resolved = int(value or 0)
-        except (TypeError, ValueError):
-            resolved = 0
-        if resolved > 0:
-            return resolved
+    value = payload.get("context_window_tokens")
+    try:
+        resolved = int(value or 0)
+    except (TypeError, ValueError):
+        resolved = 0
+    if resolved > 0:
+        return resolved
     return 0
 
 
@@ -79,24 +73,7 @@ def _resolve_ceo_context_window_tokens(loop: Any) -> int:
                 return resolved
         except Exception:
             pass
-    try:
-        resolved = int(getattr(loop, "context_length", 0) or 0)
-    except (TypeError, ValueError):
-        resolved = 0
-    if resolved > 0:
-        return resolved
-    return G3KU_MIN_CONTEXT_FLOOR
-
-
-def _externalized_completed_blocks_for_global_summary(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
-    selected: list[dict[str, Any]] = []
-    for item in list(messages or []):
-        if not isinstance(item, dict):
-            continue
-        content = str(item.get("content") or "").strip()
-        if content.startswith(STAGE_EXTERNALIZED_PREFIX):
-            selected.append(dict(item))
-    return selected
+    return 0
 
 
 class CeoMessageBuilder:
@@ -769,27 +746,6 @@ class CeoMessageBuilder:
                 }
             )
         return items
-
-    @classmethod
-    def _global_summary_settings(cls, loop: Any) -> dict[str, Any]:
-        assembly_cfg = cls._assembly_cfg(loop)
-        return {
-            "trigger_ratio": float(getattr(assembly_cfg, "frontdoor_global_summary_trigger_ratio", 0.10) or 0.10),
-            "target_ratio": float(getattr(assembly_cfg, "frontdoor_global_summary_target_ratio", 0.20) or 0.20),
-            "min_output_tokens": int(getattr(assembly_cfg, "frontdoor_global_summary_min_output_tokens", 2000) or 2000),
-            "max_output_ratio": float(getattr(assembly_cfg, "frontdoor_global_summary_max_output_ratio", 0.05) or 0.05),
-            "max_output_tokens_ceiling": int(
-                getattr(assembly_cfg, "frontdoor_global_summary_max_output_tokens_ceiling", 12000) or 12000
-            ),
-            "pressure_warn_ratio": float(getattr(assembly_cfg, "frontdoor_global_summary_pressure_warn_ratio", 0.85) or 0.85),
-            "force_refresh_ratio": float(getattr(assembly_cfg, "frontdoor_global_summary_force_refresh_ratio", 0.95) or 0.95),
-            "min_delta_tokens": int(getattr(assembly_cfg, "frontdoor_global_summary_min_delta_tokens", 2000) or 2000),
-            "failure_cooldown_seconds": int(
-                getattr(assembly_cfg, "frontdoor_global_summary_failure_cooldown_seconds", 600)
-                or 600
-            ),
-            "model_key": str(getattr(assembly_cfg, "frontdoor_global_summary_model", "") or "").strip(),
-        }
 
     @staticmethod
     def _now_iso() -> str:
@@ -1678,35 +1634,17 @@ class CeoMessageBuilder:
             if isinstance(item, dict)
             and str(item.get("role") or "").strip().lower() != "system"
         ]
-        global_zone_source = list(raw_history_messages)
-        pre_summary_messages = list(stable_messages)
+        history_zone_source = list(raw_history_messages)
+        pre_request_messages = list(stable_messages)
         if not current_user_in_history:
-            pre_summary_messages.append({"role": "user", "content": str(context_sources["user_content"] or "")})
-        pre_summary_prompt_tokens = estimate_message_tokens(pre_summary_messages)
-        compressed_zone_tokens = estimate_message_tokens(global_zone_source)
-        global_summary_settings = self._global_summary_settings(self._loop)
-        context_window_tokens = _resolve_ceo_context_window_tokens(self._loop)
-        thresholds = build_global_summary_thresholds(
-            context_window_tokens=context_window_tokens,
-            compressed_zone_tokens=compressed_zone_tokens,
-            trigger_ratio=global_summary_settings["trigger_ratio"],
-            target_ratio=global_summary_settings["target_ratio"],
-            min_output_tokens=global_summary_settings["min_output_tokens"],
-            max_output_ratio=global_summary_settings["max_output_ratio"],
-            max_output_tokens_ceiling=global_summary_settings["max_output_tokens_ceiling"],
-            pressure_warn_ratio=global_summary_settings["pressure_warn_ratio"],
-            force_refresh_ratio=global_summary_settings["force_refresh_ratio"],
-        )
-        semantic_state = {
-            **default_semantic_context_state(),
-            **dict(semantic_context_state or {}),
-        }
-        global_summary_text = str(semantic_state.get("summary_text") or "").strip()
+            pre_request_messages.append({"role": "user", "content": str(context_sources["user_content"] or "")})
+        pre_request_prompt_tokens = estimate_message_tokens(pre_request_messages)
+        history_zone_tokens = estimate_message_tokens(history_zone_source)
         compression_state_payload = {
-            "status": "ready" if global_summary_text else "",
-            "text": "鍏ㄥ眬涓婁笅鏂囧凡鍘嬬缉" if global_summary_text else "",
-            "source": "semantic" if global_summary_text else "",
-            "needs_recheck": bool(semantic_state.get("needs_refresh")),
+            "status": "",
+            "text": "",
+            "source": "",
+            "needs_recheck": False,
         }
         effective_prompt_tokens = estimate_message_tokens(model_messages)
         inject_elapsed_ms = self._elapsed_ms(inject_started_at)
@@ -1744,19 +1682,10 @@ class CeoMessageBuilder:
             'transcript_message_count': len(self._transcript_history(persisted_session)),
             'raw_history_message_count': len(raw_history_messages),
             'stage_workset_history_message_count': 0,
-            'global_zone_message_count': len(global_zone_source),
-            'global_zone_tokens': compressed_zone_tokens,
-            'pre_summary_prompt_tokens': pre_summary_prompt_tokens,
+            'history_zone_message_count': len(history_zone_source),
+            'history_zone_tokens': history_zone_tokens,
+            'pre_request_prompt_tokens': pre_request_prompt_tokens,
             'effective_prompt_tokens': effective_prompt_tokens,
-            'global_summary_trigger_tokens': int(thresholds["trigger_tokens"]),
-            'global_summary_pressure_warn_tokens': int(thresholds["pressure_warn_tokens"]),
-            'global_summary_force_refresh_tokens': int(thresholds["force_refresh_tokens"]),
-            'global_summary_max_output_tokens': int(thresholds["max_output_tokens"]),
-            'global_summary_present': False,
-            'global_summary_trigger_reached': False,
-            'global_summary_warn_reached': False,
-            'global_summary_force_reached': False,
-            'semantic_context_state': dict(semantic_state),
             'compression_state_payload': dict(compression_state_payload),
             'frontdoor_history_shrink_reason': '',
             'current_user_in_checkpoint': bool(current_user_in_history),
@@ -1892,44 +1821,23 @@ class CeoMessageBuilder:
             skip_stage_ids=retained_completed_stage_ids,
         )
         stage_workset_history = [*list(completed_blocks), *list(retained_raw_stage_blocks)]
-        compression_blocks_for_summary = _externalized_completed_blocks_for_global_summary(completed_blocks)
-        global_zone_source = [
-            *list(compression_blocks_for_summary),
+        history_zone_source = [
             *list(raw_history_messages),
+            *list(stage_workset_history),
             *self._hidden_internal_summary_messages(
                 persisted_session=persisted_session,
                 checkpoint_messages=checkpoint_messages,
             ),
         ]
-        global_summary_settings = self._global_summary_settings(self._loop)
-        context_window_tokens = _resolve_ceo_context_window_tokens(self._loop)
-        pre_summary_messages = [
+        pre_request_messages = [
             {"role": "system", "content": str(context_sources["system_prompt"] or "")},
             *raw_history_messages,
             *stage_workset_history,
         ]
         if not current_user_in_history:
-            pre_summary_messages.append({"role": "user", "content": str(context_sources["user_content"] or "")})
-        pre_summary_prompt_tokens = estimate_message_tokens(pre_summary_messages)
-        compressed_zone_tokens = estimate_message_tokens(global_zone_source)
-        thresholds = build_global_summary_thresholds(
-            context_window_tokens=context_window_tokens,
-            compressed_zone_tokens=compressed_zone_tokens,
-            trigger_ratio=global_summary_settings["trigger_ratio"],
-            target_ratio=global_summary_settings["target_ratio"],
-            min_output_tokens=global_summary_settings["min_output_tokens"],
-            max_output_ratio=global_summary_settings["max_output_ratio"],
-            max_output_tokens_ceiling=global_summary_settings["max_output_tokens_ceiling"],
-            pressure_warn_ratio=global_summary_settings["pressure_warn_ratio"],
-            force_refresh_ratio=global_summary_settings["force_refresh_ratio"],
-        )
-        semantic_state = {
-            **default_semantic_context_state(),
-            **dict(semantic_context_state or {}),
-        }
-        trigger_reached = pre_summary_prompt_tokens >= int(thresholds["trigger_tokens"])
-        warn_reached = pre_summary_prompt_tokens >= int(thresholds["pressure_warn_tokens"])
-        force_reached = pre_summary_prompt_tokens >= int(thresholds["force_refresh_tokens"])
+            pre_request_messages.append({"role": "user", "content": str(context_sources["user_content"] or "")})
+        pre_request_prompt_tokens = estimate_message_tokens(pre_request_messages)
+        history_zone_tokens = estimate_message_tokens(history_zone_source)
         compression_state_payload = {
             "status": "",
             "text": "",
@@ -2052,19 +1960,10 @@ class CeoMessageBuilder:
             'transcript_message_count': len(history_state['transcript_history']),
             'raw_history_message_count': len(raw_history_messages),
             'stage_workset_history_message_count': len(stage_workset_history),
-            'global_zone_message_count': len(global_zone_source),
-            'global_zone_tokens': compressed_zone_tokens,
-            'pre_summary_prompt_tokens': pre_summary_prompt_tokens,
+            'history_zone_message_count': len(history_zone_source),
+            'history_zone_tokens': history_zone_tokens,
+            'pre_request_prompt_tokens': pre_request_prompt_tokens,
             'effective_prompt_tokens': effective_prompt_tokens,
-            'global_summary_trigger_tokens': int(thresholds["trigger_tokens"]),
-            'global_summary_pressure_warn_tokens': int(thresholds["pressure_warn_tokens"]),
-            'global_summary_force_refresh_tokens': int(thresholds["force_refresh_tokens"]),
-            'global_summary_max_output_tokens': int(thresholds["max_output_tokens"]),
-            'global_summary_present': False,
-            'global_summary_trigger_reached': bool(trigger_reached),
-            'global_summary_warn_reached': bool(warn_reached),
-            'global_summary_force_reached': bool(force_reached),
-            'semantic_context_state': dict(semantic_state),
             'compression_state_payload': dict(compression_state_payload),
             'frontdoor_history_shrink_reason': frontdoor_history_shrink_reason,
             'current_user_in_checkpoint': bool(history_state['current_user_in_checkpoint']),

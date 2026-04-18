@@ -15,17 +15,19 @@ from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
 from g3ku.agent.tools.base import Tool
+from g3ku.config.live_runtime import get_runtime_config
 from g3ku.json_schema_utils import (
     attach_raw_parameters_schema,
     build_args_schema_model,
     normalize_runtime_tool_arguments_dict,
+    sanitize_provider_parameters_schema,
 )
+from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.project_environment import current_project_environment
-from g3ku.runtime.semantic_context_summary import default_semantic_context_state
-from g3ku.runtime.semantic_context_summary import estimate_message_tokens
+from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
     FRONTDOOR_COMPACTED_HISTORY_MAX_TOKENS,
@@ -99,6 +101,14 @@ class FrontdoorExecutionBundle:
     visible_tools: dict[str, Tool]
     runtime_context: dict[str, Any]
     on_progress: Any
+
+
+class FrontdoorCompressionRuntimeError(RuntimeError):
+    def __init__(self, *, code: str, message: str, recoverable: bool = True) -> None:
+        super().__init__(str(message or "").strip())
+        self.code = str(code or "").strip() or "runtime_error"
+        self.message = str(message or "").strip()
+        self.recoverable = bool(recoverable)
 
 
 class _CeoStructuredTool(StructuredTool):
@@ -234,7 +244,7 @@ def _strip_schema_descriptions(value: Any) -> Any:
 def _provider_visible_tool_contract(tool: Tool) -> tuple[str, dict[str, Any] | None]:
     _model_description, model_parameters = _model_visible_tool_contract(tool)
     compatible_parameters = _ceo_model_compatible_parameters_schema(tool.name, model_parameters)
-    stripped_parameters = _strip_schema_descriptions(compatible_parameters)
+    stripped_parameters = sanitize_provider_parameters_schema(compatible_parameters)
     return "", stripped_parameters if isinstance(stripped_parameters, dict) else compatible_parameters
 
 
@@ -331,6 +341,7 @@ def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any
 
 class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     _ALLOWED_FRONTDOOR_SHRINK_REASONS = frozenset({"", "token_compression", "stage_compaction"})
+    _TOKEN_COMPRESSION_TRIGGER_RATIO = 0.80
 
     @staticmethod
     def _is_frontdoor_tool_contract_record(record: dict[str, Any] | None) -> bool:
@@ -489,6 +500,274 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             history_shrink_reason="token_compression",
             diagnostics=diagnostics,
         )
+
+    def _resolve_frontdoor_send_model_context_window(
+        self,
+        *,
+        model_refs: list[str] | None,
+    ) -> dict[str, Any]:
+        model_key = str((list(model_refs or []) or [""])[0] or "").strip()
+        if not model_key:
+            return {"model_key": "", "provider_model": "", "context_window_tokens": 0}
+        config = getattr(self._loop, "app_config", None)
+        if config is None:
+            try:
+                config, _revision, _changed = get_runtime_config(force=False)
+            except Exception:
+                config = None
+        provider_model = model_key
+        context_window_tokens = 0
+        if config is not None:
+            try:
+                managed = config.get_managed_model(model_key)
+            except Exception:
+                managed = None
+            if managed is not None:
+                provider_model = str(getattr(managed, "provider_model", "") or model_key).strip() or model_key
+                raw_context_window_tokens = getattr(managed, "context_window_tokens", None)
+                try:
+                    context_window_tokens = int(raw_context_window_tokens or 0)
+                except (TypeError, ValueError):
+                    context_window_tokens = 0
+            try:
+                target = resolve_chat_target(config, model_key)
+            except Exception:
+                target = None
+            if target is not None:
+                resolved_provider_model = str(
+                    getattr(target, "resolved_model", None)
+                    or provider_model
+                    or model_key
+                ).strip()
+                provider_id = str(getattr(target, "provider_id", "") or "").strip()
+                if provider_id and ":" not in resolved_provider_model:
+                    provider_model = f"{provider_id}:{resolved_provider_model}"
+                else:
+                    provider_model = resolved_provider_model or provider_model or model_key
+                try:
+                    target_context_window_tokens = int(
+                        dict(getattr(target, "model_parameters", None) or {}).get("context_window_tokens") or 0
+                    )
+                except (TypeError, ValueError):
+                    target_context_window_tokens = 0
+                if target_context_window_tokens > 0:
+                    context_window_tokens = target_context_window_tokens
+        return {
+            "model_key": model_key,
+            "provider_model": provider_model or model_key,
+            "context_window_tokens": context_window_tokens,
+        }
+
+    @staticmethod
+    def _frontdoor_model_display_name(model_info: dict[str, Any] | None) -> str:
+        payload = dict(model_info or {})
+        return str(payload.get("provider_model") or payload.get("model_key") or "当前模型").strip() or "当前模型"
+
+    def _frontdoor_missing_context_window_error(self, *, model_info: dict[str, Any] | None) -> FrontdoorCompressionRuntimeError:
+        display_name = self._frontdoor_model_display_name(model_info)
+        return FrontdoorCompressionRuntimeError(
+            code="model_context_window_missing",
+            message=f"当前模型{display_name}未配置最大上下文TOKEN，请更改模型链配置后继续",
+            recoverable=True,
+        )
+
+    def _frontdoor_context_window_exceeded_error(self, *, model_info: dict[str, Any] | None) -> FrontdoorCompressionRuntimeError:
+        display_name = self._frontdoor_model_display_name(model_info)
+        return FrontdoorCompressionRuntimeError(
+            code="frontdoor_context_window_exceeded",
+            message=f"上下文大小超出当前模型{display_name}，请更改模型链配置后继续",
+            recoverable=True,
+        )
+
+    @staticmethod
+    def _estimate_frontdoor_send_total_tokens(
+        *,
+        provider_request_body: dict[str, Any] | None,
+        request_messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]],
+    ) -> int:
+        return estimate_frontdoor_provider_request_tokens(
+            provider_request_body=provider_request_body,
+            request_messages=request_messages,
+            tool_schemas=tool_schemas,
+        )
+
+    async def _emit_frontdoor_runtime_snapshot(
+        self,
+        *,
+        runtime: Runtime[CeoRuntimeContext],
+        state: dict[str, Any],
+    ) -> None:
+        session = getattr(getattr(runtime, "context", None), "session", None)
+        if session is None:
+            return
+        self._sync_runtime_session_frontdoor_state(state=state, runtime=runtime)
+        emit_snapshot = getattr(session, "_emit_state_snapshot", None)
+        if callable(emit_snapshot):
+            result = emit_snapshot()
+            if hasattr(result, "__await__"):
+                await result
+
+    async def _run_frontdoor_llm_token_compression(
+        self,
+        *,
+        state: CeoGraphState,
+        runtime: Runtime[CeoRuntimeContext],
+        request_messages: list[dict[str, Any]],
+        model_refs: list[str],
+        tool_schemas: list[dict[str, Any]],
+    ) -> FrontdoorTokenPreflightResult:
+        body_messages, contract_messages = self._split_request_body_and_tool_contract_messages(request_messages)
+        normalized_body = [dict(item) for item in body_messages if isinstance(item, dict)]
+        system_prefix: list[dict[str, Any]] = []
+        if normalized_body and str(normalized_body[0].get("role") or "").strip().lower() == "system":
+            system_prefix = [dict(normalized_body[0])]
+            normalized_body = normalized_body[1:]
+        recent_tail_count = min(len(normalized_body), 4)
+        if recent_tail_count <= 0 or len(normalized_body) <= recent_tail_count:
+            return FrontdoorTokenPreflightResult(
+                request_messages=list(request_messages),
+                final_request_tokens=self._estimate_frontdoor_send_total_tokens(
+                    provider_request_body=None,
+                    request_messages=request_messages,
+                    tool_schemas=tool_schemas,
+                ),
+                history_shrink_reason="",
+                diagnostics={"applied": False, "reason": "no_compressible_history"},
+            )
+        older_history_messages = [dict(item) for item in normalized_body[:-recent_tail_count]]
+        recent_tail = [dict(item) for item in normalized_body[-recent_tail_count:]]
+        model_info = self._resolve_frontdoor_send_model_context_window(model_refs=model_refs)
+        session = getattr(getattr(runtime, "context", None), "session", None)
+        generation_id: int | None = None
+        begin_generation = getattr(session, "_begin_frontdoor_compression_generation", None)
+        finish_generation = getattr(session, "_finish_frontdoor_compression_generation", None)
+        is_generation_cancelled = getattr(session, "_is_frontdoor_compression_generation_cancelled", None)
+        cancel_token = getattr(session, "_active_cancel_token", None)
+        if callable(begin_generation):
+            try:
+                generation_id = int(begin_generation() or 0)
+            except Exception:
+                generation_id = None
+
+        def _compression_cancelled() -> bool:
+            if cancel_token is not None and callable(getattr(cancel_token, "is_cancelled", None)):
+                try:
+                    if bool(cancel_token.is_cancelled()):
+                        return True
+                except Exception:
+                    pass
+            if generation_id is not None and callable(is_generation_cancelled):
+                try:
+                    if bool(is_generation_cancelled(generation_id)):
+                        return True
+                except Exception:
+                    return False
+            return False
+
+        compression_prompt_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你正在压缩一段较早的对话历史，以便同一模型继续后续推理。\n"
+                    "保留事实、用户要求、时间约束、已确认结论、已完成工作、待办事项、关键引用和重要失败信息。\n"
+                    "不要写寒暄，不要写解释，不要输出 JSON，只输出可直接放入上下文的中文压缩摘要正文。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "kind": "frontdoor_token_compression",
+                        "model": self._frontdoor_model_display_name(model_info),
+                        "older_history_messages": older_history_messages,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+        compression_state = {
+            "status": "running",
+            "text": "上下文压缩中",
+            "source": "token_compression",
+            "needs_recheck": False,
+        }
+        await self._emit_frontdoor_runtime_snapshot(
+            runtime=runtime,
+            state={**dict(state or {}), "compression_state": compression_state},
+        )
+        try:
+            compressed_message = await self._call_model_with_tools(
+                messages=compression_prompt_messages,
+                langchain_tools=[],
+                model_refs=list(model_refs or []),
+                parallel_tool_calls=None,
+                prompt_cache_key="",
+            )
+            if _compression_cancelled():
+                raise asyncio.CancelledError()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if not _compression_cancelled():
+                await self._emit_frontdoor_runtime_snapshot(
+                    runtime=runtime,
+                    state={**dict(state or {}), "compression_state": self._default_compression_state()},
+                )
+            raise
+        try:
+            response_view = self._model_response_view(compressed_message)
+            compressed_text = self._content_text(response_view.content).strip()
+            if _compression_cancelled():
+                raise asyncio.CancelledError()
+            if not compressed_text:
+                await self._emit_frontdoor_runtime_snapshot(
+                    runtime=runtime,
+                    state={**dict(state or {}), "compression_state": self._default_compression_state()},
+                )
+                raise self._frontdoor_context_window_exceeded_error(model_info=model_info)
+            compacted_payload = {
+                "kind": "frontdoor_token_compaction_llm",
+                "history_message_count": len(older_history_messages),
+            }
+            compacted_block = {
+                "role": "assistant",
+                "content": (
+                    "[G3KU_TOKEN_COMPACT_V2]\n"
+                    f"{json.dumps(compacted_payload, ensure_ascii=False, sort_keys=True)}\n\n"
+                    f"{compressed_text}"
+                ).strip(),
+            }
+            rewritten_messages = [*system_prefix, compacted_block, *recent_tail, *contract_messages]
+            rewritten_tokens = self._estimate_frontdoor_send_total_tokens(
+                provider_request_body=None,
+                request_messages=rewritten_messages,
+                tool_schemas=tool_schemas,
+            )
+            if _compression_cancelled():
+                raise asyncio.CancelledError()
+            await self._emit_frontdoor_runtime_snapshot(
+                runtime=runtime,
+                state={**dict(state or {}), "compression_state": self._default_compression_state()},
+            )
+            return FrontdoorTokenPreflightResult(
+                request_messages=rewritten_messages,
+                final_request_tokens=rewritten_tokens,
+                history_shrink_reason="token_compression",
+                diagnostics={
+                    "applied": True,
+                    "mode": "llm",
+                    "retained_recent_tail_count": recent_tail_count,
+                    "compressed_history_message_count": len(older_history_messages),
+                    "final_request_tokens": rewritten_tokens,
+                },
+            )
+        finally:
+            if generation_id is not None and callable(finish_generation):
+                try:
+                    finish_generation(generation_id)
+                except Exception:
+                    pass
 
     def _refresh_runtime_config_for_retry_invalidation(self) -> bool:
         try:
@@ -701,8 +980,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 values["frontdoor_canonical_context"] = dict(interrupt_state.get("frontdoor_canonical_context") or {})
             if isinstance(interrupt_state.get("compression_state"), dict):
                 values["compression_state"] = dict(interrupt_state.get("compression_state") or {})
-            if isinstance(interrupt_state.get("semantic_context_state"), dict):
-                values["semantic_context_state"] = dict(interrupt_state.get("semantic_context_state") or {})
             hydrated_tool_names = interrupt_state.get("hydrated_tool_names")
             if isinstance(hydrated_tool_names, list):
                 values["hydrated_tool_names"] = [
@@ -916,7 +1193,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     @staticmethod
     def _default_semantic_context_state() -> dict[str, Any]:
-        return default_semantic_context_state()
+        return {}
 
     @staticmethod
     def _normalized_hydrated_tool_names(raw: Any) -> list[str]:
@@ -1012,11 +1289,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(state, dict)
             else cls._default_compression_state()
         )
-        semantic_context_state = (
-            dict(state.get("semantic_context_state") or cls._default_semantic_context_state())
-            if isinstance(state, dict)
-            else cls._default_semantic_context_state()
-        )
         hydrated_tool_names = (
             cls._normalized_hydrated_tool_names(state.get("hydrated_tool_names"))
             if isinstance(state, dict)
@@ -1026,7 +1298,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             frontdoor_stage_state,
             frontdoor_canonical_context,
             compression_state,
-            semantic_context_state,
+            {},
             hydrated_tool_names,
         )
 
@@ -1058,30 +1330,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     @staticmethod
     def _semantic_context_state_has_material_content(value: Any) -> bool:
-        if not isinstance(value, dict):
-            return False
-        if str(value.get("summary_text") or "").strip():
-            return True
-        if bool(value.get("needs_refresh")):
-            return True
-        if str(value.get("updated_at") or "").strip():
-            return True
-        if str(value.get("coverage_history_source") or "").strip():
-            return True
-        try:
-            coverage_message_index = int(value.get("coverage_message_index", -1) or -1)
-        except (TypeError, ValueError):
-            coverage_message_index = -1
-        if coverage_message_index >= 0:
-            return True
-        try:
-            coverage_stage_index = int(value.get("coverage_stage_index", 0) or 0)
-        except (TypeError, ValueError):
-            coverage_stage_index = 0
-        if coverage_stage_index > 0:
-            return True
-        if str(value.get("failure_cooldown_until") or "").strip():
-            return True
         return False
 
     @classmethod
@@ -1131,7 +1379,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             frontdoor_stage_state,
             frontdoor_canonical_context,
             compression_state,
-            semantic_context_state,
+            _semantic_context_state,
             hydrated_tool_names,
         ) = self._runtime_session_frontdoor_state(
             state,
@@ -1140,7 +1388,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         setattr(target_session, "_frontdoor_stage_state", frontdoor_stage_state)
         setattr(target_session, "_frontdoor_canonical_context", frontdoor_canonical_context)
         setattr(target_session, "_compression_state", compression_state)
-        setattr(target_session, "_semantic_context_state", semantic_context_state)
+        setattr(target_session, "_semantic_context_state", {})
         setattr(target_session, "_frontdoor_hydrated_tool_names", list(hydrated_tool_names))
         if isinstance(state, dict):
             setattr(
@@ -2548,28 +2796,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
             if self._compression_state_has_material_content(paused_compression_state):
                 current_compression_state = paused_compression_state
-        current_semantic_context_state = (
-            dict(state.get("semantic_context_state") or {})
-            if isinstance(state, dict)
-            else {}
-        )
-        if not self._semantic_context_state_has_material_content(current_semantic_context_state):
-            current_semantic_context_state = dict(getattr(session, "_semantic_context_state", {}) or {})
-        if not self._semantic_context_state_has_material_content(current_semantic_context_state):
-            paused_semantic_context_state = (
-                dict(paused_manual_snapshot.get("semantic_context_state") or {})
-                if paused_manual_snapshot
-                else {}
-            )
-            session_semantic_context_state = dict(getattr(session, "_semantic_context_state", None) or {})
-            if self._semantic_context_state_has_material_content(paused_semantic_context_state):
-                current_semantic_context_state = paused_semantic_context_state
-            elif self._semantic_context_state_has_material_content(session_semantic_context_state):
-                current_semantic_context_state = session_semantic_context_state
-        current_semantic_context_state = {
-            **self._default_semantic_context_state(),
-            **dict(current_semantic_context_state or {}),
-        }
         checkpoint_messages = list(state.get("messages") or [])
         request_body_seed_messages: list[dict[str, Any]] = []
         if session_request_body_messages:
@@ -2606,7 +2832,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             user_metadata=builder_user_metadata,
             frontdoor_stage_state=current_frontdoor_stage_state,
             frontdoor_canonical_context=current_frontdoor_canonical_context,
-            semantic_context_state=dict(current_semantic_context_state or {}),
+            semantic_context_state={},
             hydrated_tool_names=list(hydrated_tool_names),
         )
         selected_skill_ids = [
@@ -2844,11 +3070,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 or current_compression_state
                 or self._default_compression_state()
             ),
-            "semantic_context_state": dict(
-                getattr(assembly, "trace", {}).get("semantic_context_state")
-                or current_semantic_context_state
-                or {}
-            ),
             "turn_overlay_text": turn_overlay_text or None,
             "frontdoor_selection_debug": frontdoor_selection_debug,
             "tool_names": list(tool_names),
@@ -2943,21 +3164,45 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "tools": list(actual_tool_schemas or []),
                 "parallel_tool_calls": (bool(state_for_request.get("parallel_enabled")) if langchain_tools else None),
             }
-            preflight = self._run_frontdoor_token_preflight_compaction(
-                state=state_for_request,
+            model_info = self._resolve_frontdoor_send_model_context_window(
+                model_refs=list(state_for_request.get("model_refs") or []),
+            )
+            context_window_tokens = int(model_info.get("context_window_tokens") or 0)
+            if context_window_tokens <= 25_000:
+                raise self._frontdoor_missing_context_window_error(model_info=model_info)
+            estimated_total_tokens = self._estimate_frontdoor_send_total_tokens(
+                provider_request_body=provider_request_body,
                 request_messages=request_messages,
                 tool_schemas=actual_tool_schemas,
-                provider_request_body=provider_request_body,
             )
-            if isinstance(preflight, dict):
-                preflight_request_messages = list(preflight.get("request_messages") or request_messages)
-                preflight_diagnostics = dict(preflight.get("frontdoor_token_preflight_diagnostics") or {})
-                preflight_shrink_reason = str(preflight.get("frontdoor_history_shrink_reason") or "").strip()
-            else:
-                preflight_request_messages = list(preflight.request_messages)
-                preflight_diagnostics = dict(preflight.diagnostics)
+            trigger_tokens = int(context_window_tokens * self._TOKEN_COMPRESSION_TRIGGER_RATIO)
+            preflight_diagnostics = {
+                "applied": False,
+                "mode": "llm",
+                "final_request_tokens": estimated_total_tokens,
+                "trigger_tokens": trigger_tokens,
+                "max_context_tokens": context_window_tokens,
+                "provider_model": self._frontdoor_model_display_name(model_info),
+            }
+            preflight_shrink_reason = ""
+            if estimated_total_tokens > context_window_tokens:
+                raise self._frontdoor_context_window_exceeded_error(model_info=model_info)
+            if estimated_total_tokens > trigger_tokens:
+                preflight = await self._run_frontdoor_llm_token_compression(
+                    state=state_for_request,
+                    runtime=runtime,
+                    request_messages=request_messages,
+                    model_refs=list(state_for_request.get("model_refs") or []),
+                    tool_schemas=actual_tool_schemas,
+                )
+                request_messages = list(preflight.request_messages)
+                preflight_diagnostics = {
+                    **preflight_diagnostics,
+                    **dict(preflight.diagnostics or {}),
+                }
                 preflight_shrink_reason = str(preflight.history_shrink_reason or "").strip()
-            request_messages = preflight_request_messages
+                if int(preflight.final_request_tokens or 0) > context_window_tokens:
+                    raise self._frontdoor_context_window_exceeded_error(model_info=model_info)
             state_for_request = {
                 **dict(state_for_request or {}),
                 "frontdoor_live_request_messages": list(request_messages),
@@ -3046,6 +3291,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "frontdoor_token_preflight_diagnostics": dict(
                 state_for_request.get("frontdoor_token_preflight_diagnostics") or {}
             ),
+            "frontdoor_history_shrink_reason": str(
+                state_for_request.get("frontdoor_history_shrink_reason") or ""
+            ).strip(),
             **actual_request_trace,
             "response_payload": self._checkpoint_safe_model_response_payload(message),
             "empty_response_retry_count": empty_response_retry_count,
@@ -3234,7 +3482,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             preview_frontdoor_stage_state,
             preview_frontdoor_canonical_context,
             preview_compression_state,
-            preview_semantic_context_state,
+            _preview_semantic_context_state,
             _preview_hydrated_tool_names,
         ) = self._runtime_session_frontdoor_state(
             preview_state,
@@ -3245,7 +3493,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "frontdoor_stage_state": preview_frontdoor_stage_state,
             "frontdoor_canonical_context": preview_frontdoor_canonical_context,
             "compression_state": preview_compression_state,
-            "semantic_context_state": preview_semantic_context_state,
             "hydrated_tool_names": [
                 str(item or "").strip()
                 for item in list(state.get("hydrated_tool_names") or [])

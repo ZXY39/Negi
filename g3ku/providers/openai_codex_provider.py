@@ -14,6 +14,7 @@ import httpx
 from loguru import logger
 from oauth_cli_kit import get_token as get_codex_token
 
+from g3ku.json_schema_utils import sanitize_provider_parameters_schema
 from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, normalize_usage_payload
 from g3ku.providers.streaming_timeouts import (
     StreamingChunkTimeoutError,
@@ -279,7 +280,7 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "type": "function",
             "name": name,
             "description": fn.get("description") or "",
-            "parameters": params if isinstance(params, dict) else {},
+            "parameters": sanitize_provider_parameters_schema(params if isinstance(params, dict) else {}),
         })
     return converted
 

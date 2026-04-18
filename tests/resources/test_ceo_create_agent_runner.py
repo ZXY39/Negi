@@ -291,7 +291,7 @@ class _BrokenValidationTool(Tool):
         raise TypeError("unhashable type: 'list'")
 
 
-def test_memory_assembly_config_uses_frontdoor_global_summary_defaults() -> None:
+def test_memory_assembly_config_no_longer_exposes_frontdoor_global_summary_settings() -> None:
     cfg = MemoryAssemblyConfig()
 
     assert not hasattr(cfg, "frontdoor_recent_message_count")
@@ -300,15 +300,15 @@ def test_memory_assembly_config_uses_frontdoor_global_summary_defaults() -> None
     assert not hasattr(cfg, "frontdoor_summarizer_keep_message_count")
     assert cfg.frontdoor_interrupt_approval_enabled is False
     assert cfg.frontdoor_interrupt_tool_names == ["message", "create_async_task"]
-    assert cfg.frontdoor_global_summary_trigger_ratio == 0.10
-    assert cfg.frontdoor_global_summary_target_ratio == 0.20
-    assert cfg.frontdoor_global_summary_min_output_tokens == 2000
-    assert cfg.frontdoor_global_summary_max_output_ratio == 0.05
-    assert cfg.frontdoor_global_summary_max_output_tokens_ceiling == 12000
-    assert cfg.frontdoor_global_summary_pressure_warn_ratio == 0.85
-    assert cfg.frontdoor_global_summary_force_refresh_ratio == 0.95
-    assert cfg.frontdoor_global_summary_min_delta_tokens == 2000
-    assert cfg.frontdoor_global_summary_failure_cooldown_seconds == 600
+    assert not hasattr(cfg, "frontdoor_global_summary_trigger_ratio")
+    assert not hasattr(cfg, "frontdoor_global_summary_target_ratio")
+    assert not hasattr(cfg, "frontdoor_global_summary_min_output_tokens")
+    assert not hasattr(cfg, "frontdoor_global_summary_max_output_ratio")
+    assert not hasattr(cfg, "frontdoor_global_summary_max_output_tokens_ceiling")
+    assert not hasattr(cfg, "frontdoor_global_summary_pressure_warn_ratio")
+    assert not hasattr(cfg, "frontdoor_global_summary_force_refresh_ratio")
+    assert not hasattr(cfg, "frontdoor_global_summary_min_delta_tokens")
+    assert not hasattr(cfg, "frontdoor_global_summary_failure_cooldown_seconds")
 
 
 def test_initial_persistent_state_tracks_stage_state_and_runtime_marker() -> None:
@@ -1297,16 +1297,7 @@ async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compressio
                     "transition_required": False,
                     "stages": [{"stage_id": "frontdoor-stage-1", "rounds": []}],
                 },
-                "compression_state": {"status": "ready", "text": "全局上下文已压缩", "source": "semantic"},
-                "semantic_context_state": {
-                    "summary_text": "## 长期目标\n继续当前任务",
-                    "coverage_history_source": "checkpoint",
-                    "coverage_message_index": 3,
-                    "coverage_stage_index": 1,
-                    "needs_refresh": False,
-                    "failure_cooldown_until": "",
-                    "updated_at": "2026-04-13T18:00:00",
-                },
+                "compression_state": {"status": "", "text": "", "source": ""},
             }
 
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
@@ -1325,8 +1316,8 @@ async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compressio
     assert session._last_verified_task_ids == ["task:demo-123"]
     assert session._frontdoor_hydrated_tool_names == ["filesystem_write"]
     assert session._frontdoor_stage_state["active_stage_id"] == "frontdoor-stage-1"
-    assert session._compression_state == {"status": "ready", "text": "全局上下文已压缩", "source": "semantic"}
-    assert session._semantic_context_state["summary_text"] == "## 长期目标\n继续当前任务"
+    assert session._compression_state == {"status": "", "text": "", "source": ""}
+    assert session._semantic_context_state == {}
 
 
 @pytest.mark.asyncio
@@ -1953,14 +1944,10 @@ async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_con
                 ],
             },
             "compression": {
-                "status": "ready",
-                "text": "Global context already summarized",
-                "source": "semantic",
+                "status": "running",
+                "text": "??????",
+                "source": "token_compression",
                 "needs_recheck": False,
-            },
-            "semantic_context_state": {
-                "summary_text": "## Long Context\nKeep the paused findings",
-                "needs_refresh": False,
             },
             "hydrated_tool_names": ["filesystem_write"],
         }
@@ -2044,11 +2031,11 @@ async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_con
 
     assert captured_builder_kwargs["frontdoor_stage_state"]["active_stage_id"] == "frontdoor-stage-1"
     assert captured_builder_kwargs["frontdoor_canonical_context"]["stages"][0]["stage_id"] == "frontdoor-stage-0"
-    assert captured_builder_kwargs["semantic_context_state"]["summary_text"] == "## Long Context\nKeep the paused findings"
+    assert captured_builder_kwargs["semantic_context_state"] == {}
     assert captured_builder_kwargs["hydrated_tool_names"] == ["filesystem_write"]
     assert prepared["frontdoor_stage_state"]["active_stage_id"] == "frontdoor-stage-1"
-    assert prepared["compression_state"]["status"] == "ready"
-    assert prepared["semantic_context_state"]["summary_text"] == "## Long Context\nKeep the paused findings"
+    assert prepared["compression_state"]["status"] == "running"
+    assert "semantic_context_state" not in prepared
     assert prepared["hydrated_tool_names"] == ["filesystem_write"]
     contract_messages = [
         dict(item)
@@ -2126,15 +2113,12 @@ def test_runtime_agent_session_paused_snapshot_keeps_frontdoor_runtime_context()
         ],
     }
     session._compression_state = {
-        "status": "ready",
-        "text": "Global context already summarized",
-        "source": "semantic",
+        "status": "running",
+        "text": "??????",
+        "source": "token_compression",
         "needs_recheck": False,
     }
-    session._semantic_context_state = {
-        "summary_text": "## Long Context\nKeep the paused findings",
-        "needs_refresh": False,
-    }
+    session._semantic_context_state = {}
     session._frontdoor_hydrated_tool_names = ["filesystem_write"]
 
     snapshot = session._build_execution_context_snapshot(
@@ -2145,7 +2129,8 @@ def test_runtime_agent_session_paused_snapshot_keeps_frontdoor_runtime_context()
     assert isinstance(snapshot, dict)
     assert snapshot["canonical_context"]["active_stage_id"] == "frontdoor-stage-1"
     assert snapshot["frontdoor_canonical_context"]["stages"][0]["stage_id"] == "frontdoor-stage-0"
-    assert snapshot["semantic_context_state"]["summary_text"] == "## Long Context\nKeep the paused findings"
+    assert snapshot["compression"]["source"] == "token_compression"
+    assert "semantic_context_state" not in snapshot
     assert snapshot["hydrated_tool_names"] == ["filesystem_write"]
 
 
@@ -3069,6 +3054,15 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
     monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_model": "openai_codex:gpt-test",
+            "context_window_tokens": 128000,
+        },
+    )
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
     monkeypatch.setattr(
         runner,
@@ -3246,6 +3240,16 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
     monkeypatch.setattr(
         runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_model": "openai_codex:gpt-test",
+            "context_window_tokens": 128000,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner,
         "_selected_tool_schemas",
         lambda tool_names: [
             {
@@ -3264,22 +3268,15 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
     )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
-    setattr(runner, "_run_frontdoor_token_preflight_compaction", lambda **_: None)
     monkeypatch.setattr(
         runner,
-        "_run_frontdoor_token_preflight_compaction",
+        "_estimate_frontdoor_send_total_tokens",
         lambda **kwargs: observed.update(
             {
                 "request_messages": list(kwargs["request_messages"]),
                 "tool_schemas": list(kwargs["tool_schemas"]),
             }
-        )
-        or {
-            "request_messages": list(kwargs["request_messages"]),
-            "tool_schemas": list(kwargs["tool_schemas"]),
-            "frontdoor_history_shrink_reason": "",
-            "frontdoor_token_preflight_diagnostics": {"applied": False, "final_request_tokens": 12345},
-        },
+        ) or 12345,
         raising=False,
     )
 
@@ -3445,6 +3442,16 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_model": "openai_codex:gpt-test",
+            "context_window_tokens": 128000,
+        },
+        raising=False,
+    )
     monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
     monkeypatch.setattr(
@@ -5417,6 +5424,15 @@ async def test_graph_call_model_restarts_with_refreshed_model_refs_after_runtime
         runner,
         "_resolve_ceo_model_refs",
         lambda: ["new-model"] if int(getattr(loop, "_runtime_model_revision", 0) or 0) >= 2 else ["old-model"],
+    )
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **kwargs: {
+            "model_key": str((kwargs.get("model_refs") or [""])[0] or ""),
+            "provider_model": str((kwargs.get("model_refs") or [""])[0] or ""),
+            "context_window_tokens": 128000,
+        },
     )
 
     def _refresh_runtime_config(_loop, *, force: bool = False, reason: str = "runtime") -> bool:

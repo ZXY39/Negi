@@ -541,3 +541,17 @@ Steady-state validation target for this repair:
 
 - warm-up rounds may miss after a legitimate schema change;
 - after schema stabilizes, the later consecutive node rounds should recover to roughly 90% cache-hit ratio or better.
+
+## Current Compression Rules
+
+The current CEO/frontdoor shrink rules are simpler than the older notes above:
+
+- Only `token_compression` and `stage_compaction` are valid shrink reasons.
+- `token_compression` is an inline LLM rewrite that runs only when the estimated provider-bound request is above `80%` of the selected model's `context_window_tokens` and still within that window.
+- If the estimate is already above the selected model window, frontdoor must fail before send instead of attempting any semantic/global-summary fallback.
+- If inline compression runs and the recomputed request is still above the selected model window, frontdoor fails with the same context-window error.
+- Manual pause during compression discards any late compression result; the next visible turn re-runs prepare -> estimate -> optional compression -> send from the current authoritative baseline.
+
+### Obsolete Notes To Ignore
+
+Older references in historical troubleshooting notes to `semantic_context_state`, `global summary`, or `frontdoor_global_summary_*` should now be treated as obsolete. The current debugging authority is the actual provider request JSON plus the runtime-selected model's `context_window_tokens`.

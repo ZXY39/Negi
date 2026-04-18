@@ -4,7 +4,6 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from g3ku.runtime.semantic_context_summary import LONG_CONTEXT_SUMMARY_PREFIX
 from g3ku.runtime.frontdoor.tool_contract import FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND
 from main.runtime.chat_backend import (
     build_prompt_cache_diagnostics,
@@ -13,6 +12,7 @@ from main.runtime.chat_backend import (
 )
 
 DEFAULT_CACHE_FAMILY_REVISION = "ceo_frontdoor:stable-prefix:v1"
+LEGACY_LONG_CONTEXT_SUMMARY_PREFIX = "[G3KU_LONG_CONTEXT_SUMMARY_V1]"
 
 
 def _is_frontdoor_runtime_tool_contract_record(record: dict[str, Any]) -> bool:
@@ -185,7 +185,7 @@ def _contains_long_context_summary(records: list[dict[str, Any]]) -> bool:
     for record in items:
         role = str(record.get("role") or "").strip().lower()
         content = str(record.get("content") or "").strip()
-        if role == "assistant" and content.startswith(LONG_CONTEXT_SUMMARY_PREFIX):
+        if role == "assistant" and content.startswith(LEGACY_LONG_CONTEXT_SUMMARY_PREFIX):
             return True
     return False
 

@@ -908,8 +908,8 @@ async function performTaskBatchAction(action, eligible) {
             return;
         }
         const successText = action === "delete"
-            ? `??? ${succeeded.length} ???`
-            : `${succeeded.length} ??????`;
+            ? `已删除 ${succeeded.length} 个任务`
+            : `${succeeded.length} 个任务已${taskActionText(action)}`;
         showToast({
             title: taskActionSuccessTitle(action),
             text: successText,

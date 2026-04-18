@@ -234,7 +234,7 @@ Maintenance note for hydration LRU:
 - `submit_next_stage` 的阶段预算现在在 execution / acceptance / CEO-frontdoor 三条路径上统一为 `1-10`；运行时仍允许在预算未耗尽前提前切到下一阶段，因此预算应理解为“本阶段声明的上限窗口”，而不是“必须烧满的最小轮数”。
 - 这不影响 candidate 语义。`candidate_tool_names` / `candidate_skill_ids` 仍继续表达“RBAC 可见 ∩ 语义召回命中”的候选集合，只是这些候选在无有效阶段时不会同时出现在 agent-facing callable contract 里。
 - 维护时要区分两份前门工具集合：`tool_names` 继续保存阶段内可恢复的完整 callable pool，而“这一刻 agent-facing 合同里暴露给模型的 callable tools”要通过前门 callable-tool helper 结合 `frontdoor_stage_state` 再算一次。不要把前者直接当作当前轮的模型可见函数列表，也不要把 agent-facing callable 收紧误解成 provider body 里的 `tools` 已同步收紧。
-- approval interrupt 在暂停前会把 `frontdoor_stage_state`、`compression_state`、`semantic_context_state`、`hydrated_tool_names`、`tool_call_payloads` 与 `frontdoor_selection_debug` 一并写进 interrupt payload；恢复后如果这些字段丢失，应按“frontdoor canonical runtime contract / runtime state 损坏”排查。
+- approval interrupt 在暂停前会把 `frontdoor_stage_state`、`compression_state`、`hydrated_tool_names`、`tool_call_payloads` 与 `frontdoor_selection_debug` 一并写进 interrupt payload；恢复后如果这些字段丢失，应按“frontdoor canonical runtime contract / runtime state 损坏”排查。
 
 维护上还要再记住一个和阶段预算相关的边界：
 
@@ -292,7 +292,7 @@ Maintenance note for hydration LRU:
 - 排查“某个工具为什么没进前门候选集”时，优先看 `frontdoor_selection_debug.semantic_frontdoor` 与 `frontdoor_selection_debug.tool_selection`：
   - `semantic_frontdoor` 负责回答 rewrite 后 query 是什么、dense/rerank 命中了哪些 tool/skill
   - `tool_selection` 负责回答这些命中项为什么最终没有进入 `candidate_tool_names`
-- 对 CEO/frontdoor，`frontdoor_stage_state`、`compression_state`、`semantic_context_state` 是受保护运行时状态；工具合同刷新不能覆盖、清空或重置这三份状态。
+- 对 CEO/frontdoor，`frontdoor_stage_state`、`compression_state` 与 `hydrated_tool_names` 是受保护运行时状态；工具合同刷新不能覆盖、清空或重置这些字段。
 
 对 CEO frontdoor 还要额外记住一个优先级边界：
 
@@ -500,4 +500,18 @@ The provider-facing bundle is also intentionally minimal:
 
 - Rich tool and skill descriptions stay in the tail runtime contract.
 - Provider `tools[]` should keep only the smallest callable schema required for function calling.
+- Provider-facing schemas are now sanitized before transport: descriptive text and unsupported JSON Schema combinators such as `anyOf`, `oneOf`, and `allOf` are stripped or flattened into a simpler supported shape.
+- Runtime-side tool validation remains the authority for argument correctness. Do not assume a provider-facing schema still preserves every branch of the richer internal contract.
 - If cache misses correlate with a large `actual_tool_schema_hash` delta, first check whether provider schemas accidentally regressed from this minimal/stable form.
+
+## Frontdoor Interrupt Payload Update
+
+Approval-interrupt and pause/recovery payloads should now be understood as carrying these runtime-owned frontdoor fields:
+
+- `frontdoor_stage_state`
+- `compression_state`
+- `hydrated_tool_names`
+- `tool_call_payloads`
+- `frontdoor_selection_debug`
+
+`semantic_context_state` is no longer part of the active frontdoor runtime contract. If a maintainer still sees it in an old paused snapshot or legacy test fixture, treat it as stale compatibility data rather than as a live contract field.

@@ -214,7 +214,7 @@ The current rule is:
 
 - UI may show heartbeat / cron stage openings, tool calls, execution trace, and compression state directly.
 - The next real user turn still filters internal-only history from its local raw history injection.
-- To avoid forgetting that work, heartbeat / cron agent-side raw execution context is expected to flow into the global semantic summary path, so later user turns can recover the important meaning without replaying the entire internal turn transcript.
+- To avoid forgetting that work, later user turns now rely on the authoritative continuity baseline, visible history, and explicit stage/archive state rather than any semantic-summary lane.
 
 ## Actual Request Debugging Contract
 
@@ -245,6 +245,7 @@ CEO/frontdoor now follows a parallel debugging pattern, but with session-scoped 
   - `request_messages` / `tool_schemas`: the runtime-side request projection before the provider adapter rewrites it
   - `provider_request_meta` / `provider_request_body`: the adapter-final HTTP body that was actually prepared for transport
 - If cache accounting disagrees with the runtime projection, debug against `provider_request_body` first.
+- If a `/responses` gateway fails only when tools are present, inspect `provider_request_body.tools` before blaming the model route. The transport-facing schema bundle is intentionally sanitized to avoid unsupported combinators such as `anyOf`, `oneOf`, and `allOf`.
 - For stage-transition rounds specifically, it is now expected that the tail runtime contract may show `callable_tool_names=["submit_next_stage"]` while `provider_request_body.tools` still carries the stable runtime-visible tool bundle. That mismatch is intentional and no longer indicates a frontdoor contract leak.
 - For reopened completed sessions, the first fresh visible turn may bridge the previous `provider_tool_schema_names` and cache-family anchor only when the current `visible_tool_ids` plus `visible_skill_ids` exactly match the completed continuity snapshot. If the visible set changed, context should still restore but cache miss is allowed.
 
@@ -254,6 +255,22 @@ Use these focused checks when validating i18n shell behavior:
 
 - `python -m pytest tests/web/test_frontend_i18n.py -v`
 - `python -m pytest tests/resources/test_bootstrap_runtime_status.py -v`
+
+## CEO Compression UI Contract
+
+The CEO composer now has a dedicated frontdoor-compression UI path that is separate from ordinary tool progress.
+
+- `compression_state` only means inline frontdoor `token_compression` progress. The frontend should treat `status === "running"` as "the runtime is compressing context right now" and should not infer any durable semantic-summary state from it.
+- While `compression_state.status === "running"`, the browser shows the `上下文压缩中` toast near the composer and a separate pause button below the input row.
+- That dedicated compression pause button still sends the ordinary `client.pause_turn` request; the backend is responsible for cancelling compression and discarding any late compression result.
+- When compression finishes, errors, is discarded by pause, or the turn ends, both the toast and the dedicated pause button must disappear.
+- Tool-wait reminder labels from the reminder sidecar are live-only event data and should remain hidden from the visible CEO feed. They must not render as transcript lines, assistant bubbles, or persistent notices.
+
+### Context Window Error UX
+
+- If the estimated provider-bound request is already larger than the selected model's `context_window_tokens`, the frontend now shows an error toast instead of attempting a semantic/global-summary fallback.
+- The canonical message is `上下文大小超出当前模型<展示名>，请更改模型链配置后继续`.
+- `<展示名>` is expected to come from the runtime-selected model's `provider_model`, with model `key` only as fallback.
 
 ## Tool Admin RBAC Contract
 
@@ -296,14 +313,6 @@ If an operator reports "save succeeded but reopen restored the roles", first ins
 3. the post-reload `GET /api/resources/tools/{tool_id}` response.
 
 Do not start with frontdoor prompt debugging unless those three layers already agree.
-
-## CEO Compression UI Contract
-
-The browser shell still receives `compression` snapshot data, but it now refers only to semantic-summary refresh state.
-
-- The UI should not assume there is any older message-count compaction stage behind this field.
-- `compression.status` now reflects semantic-summary lifecycle only.
-- The frontend may still display heartbeat / cron live execution and compression activity from snapshots, but later real user turns depend on the semantic summary path rather than any hidden legacy history compactor.
 
 ## CEO Canonical Context UI Contract
 

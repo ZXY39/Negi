@@ -947,7 +947,6 @@ def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | 
         "frontdoor_stage_state": dict(payload.get("frontdoor_stage_state") or {}),
         "frontdoor_canonical_context": dict(payload.get("frontdoor_canonical_context") or {}),
         "compression_state": dict(payload.get("compression_state") or {}),
-        "semantic_context_state": dict(payload.get("semantic_context_state") or {}),
         "hydrated_tool_names": _normalized_name_list(payload.get("hydrated_tool_names")),
         "capability_snapshot_exposure_revision": str(payload.get("capability_snapshot_exposure_revision") or "").strip(),
         "visible_tool_ids": _normalized_name_list(payload.get("visible_tool_ids")),

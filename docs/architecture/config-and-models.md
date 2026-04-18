@@ -241,19 +241,29 @@ loader 会显式拒绝 legacy `channels.*` 配置，这一点在迁移和排障�
 - `g3ku/llm_config/facade.py`
   涉及 secret、record、binding、memory target，多条模型链路都会经过这里。
 
-## Frontdoor Compression Config Cleanup
+## Frontdoor Context Window Contract
 
-The frontdoor compression config surface is now token-based only for long-context summarization.
+Frontdoor request-size control now comes from the selected chat model's `context_window_tokens`, not from a separate frontdoor summary tuning surface.
 
-- `frontdoor_global_summary_*` fields remain the supported runtime entrypoints.
-- The older `frontdoor_*message_count` settings were removed from `MemoryAssemblyConfig` rather than kept as compatibility no-ops.
+- Every managed chat model and every `llm-config` chat binding must carry `context_window_tokens`.
+- The value is runtime-authoritative: CEO/frontdoor resolves the currently selected model, reads its `context_window_tokens`, and uses that number for pre-send checks.
+- There is no fallback to `loop.context_length`, no default floor, and no legacy global-summary threshold override.
+- Inline legacy model payload migration must preserve `contextWindowTokens`; otherwise later `/api/models` reads and role-chain validation will misreport the model as missing a context window.
 
-This matters for maintenance because a stale config file using the removed message-count keys should now be treated as outdated configuration, not as silently ignored tuning.
+### Save-Time And Run-Time Validation
 
-If a user reports that frontdoor compaction settings stopped working after upgrade, check:
+- Model create/update now requires `context_window_tokens > 25000`.
+- Role-chain batch save fails if any referenced model is missing a valid `context_window_tokens`.
+- Old stored models may still exist without that field, but if one is actually selected at runtime the turn now fails fast instead of sending with an implicit unlimited window.
 
-- whether they are still trying to set the removed message-count fields
-- whether they migrated to the `frontdoor_global_summary_*` token/ratio settings instead
+### What To Check When It Breaks
+
+If an operator reports frontdoor send failures after a model or chain change, check in this order:
+
+1. The selected model binding in `/api/models` really exposes `context_window_tokens`.
+2. The saved `llm-config` record under `.g3ku/llm-config/records/*.json` kept the field during migration.
+3. The role chain only references models that have a valid window configured.
+4. The actual provider request estimate crossed the model's window, in which case frontdoor now stops before send instead of trying a legacy semantic-summary path.
 
 ## Memory Runtime Settings Anchor
 

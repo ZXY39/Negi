@@ -28,7 +28,7 @@ The CEO inline tool reminder lane is not a heartbeat turn.
 - It does not enqueue a heartbeat event.
 - It does not call `RuntimeAgentSession.prompt(...)`.
 - It does not acquire the normal turn lock or enter the heartbeat running gate.
-- It does not write transcript history, canonical context, semantic summary, or persistent session state.
+- It does not write transcript history, canonical context, or persistent session state.
 
 This distinction matters when debugging long-running CEO direct tools: a reminder event is not evidence that a new internal turn happened.
 
@@ -40,7 +40,7 @@ CEO frontdoor direct long-running tools now use a live-only sidecar reminder lan
 - Reminder windows are fixed at `30 / 60 / 120 / 240 / 600` seconds, and after the 600-second window they repeat every 600 seconds.
 - When the main turn already has an authoritative CEO actual-request JSON, `CeoToolReminderService` reuses that saved `request_messages` / `tool_schemas` / `prompt_cache_key` / `parallel_tool_calls` scaffold as the provider-facing cache prefix and appends only live reminder-tail messages. It falls back to a read-only `CeoMessageBuilder.build_for_ceo(..., ephemeral_tail_messages=...)` rebuild only when no actual-request scaffold exists yet.
 - The sidecar still reuses the CEO main model binding, but its decision channel is now text-only (`STOP` / `CONTINUE`). Even when it reuses the main turn's full provider-visible tool bundle for cache-prefix stability, it must not execute arbitrary returned tool calls.
-- Reminder labels remain live-only event data and must not be persisted into transcript, canonical context, semantic summary, or history injection.
+- Reminder labels remain live-only event data and must not be persisted into transcript, canonical context, or history injection.
 
 ## Reminder Failure Semantics
 
@@ -69,3 +69,11 @@ If the tool finishes successfully before the stop lands, the runtime clears the 
 - They do not become `snapshot.ceo` messages and are not restored on refresh or reconnect.
 
 When debugging a “reminder appeared but the transcript stayed clean” report, that is the intended contract.
+
+## Reminder Sidecar Update
+
+The CEO inline reminder sidecar is still live-only, but the downstream long-context handoff model changed:
+
+- Reminder labels must not be rendered into transcript history or durable CEO bubbles.
+- Reminder snapshots may still carry the current visible stage view, compression progress, hydrated tools, selection debug, and actual-request pointer for cache forensics.
+- There is no longer a semantic/global-summary persistence lane associated with reminder handling. Any older note that says heartbeat or reminder work is recovered through semantic summary should be treated as obsolete.

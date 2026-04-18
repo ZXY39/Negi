@@ -2553,16 +2553,15 @@ async def test_message_builder_does_not_inject_global_summary_block_during_histo
     stable_contents = [str(item.get("content") or "") for item in result.stable_messages]
     assert not any(content.startswith("[G3KU_LONG_CONTEXT_SUMMARY_V1]") for content in stable_contents)
     assert summary_calls == 0
-    assert result.trace["global_summary_present"] is False
-    semantic_state = dict(result.trace.get("semantic_context_state") or {})
+    assert "global_summary_present" not in result.trace
+    assert "semantic_context_state" not in result.trace
     compression_state = dict(result.trace.get("compression_state_payload") or {})
-    assert semantic_state.get("summary_text") == ""
     assert compression_state.get("status") == ""
     assert compression_state.get("source") == ""
 
 
 @pytest.mark.asyncio
-async def test_message_builder_trace_reports_pre_summary_and_effective_prompt_tokens(
+async def test_message_builder_trace_reports_pre_request_and_effective_prompt_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prompt_builder = _SplitPromptBuilder()
@@ -2605,7 +2604,7 @@ async def test_message_builder_trace_reports_pre_summary_and_effective_prompt_to
     )
 
     assert "prompt_estimate_tokens" not in result.trace
-    assert result.trace["pre_summary_prompt_tokens"] == 300
+    assert result.trace["pre_request_prompt_tokens"] == 300
     assert result.trace["effective_prompt_tokens"] >= 300
 
 
@@ -2662,8 +2661,8 @@ async def test_message_builder_does_not_recompute_or_reuse_global_summary_blocks
     )
 
     assert summary_calls == 0
-    assert result.trace["global_summary_present"] is False
-    assert result.trace["semantic_context_state"]["summary_text"] == "## Goals\nExisting summary"
+    assert "global_summary_present" not in result.trace
+    assert "semantic_context_state" not in result.trace
 
 
 @pytest.mark.asyncio
@@ -2784,13 +2783,12 @@ async def test_message_builder_ignores_global_summary_failure_cooldown_during_hi
     )
 
     assert summary_calls == 0
-    assert result.trace["global_summary_present"] is False
-    assert result.trace["semantic_context_state"]["summary_text"] == "## Goals\nExisting summary"
-    assert result.trace["semantic_context_state"]["failure_cooldown_until"] == "2999-01-01T00:00:00"
+    assert "global_summary_present" not in result.trace
+    assert "semantic_context_state" not in result.trace
 
 
 @pytest.mark.asyncio
-async def test_message_builder_uses_resolved_ceo_context_window_instead_of_loop_context_length(
+async def test_message_builder_no_longer_emits_global_summary_threshold_trace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prompt_builder = _SplitPromptBuilder()
@@ -2831,9 +2829,9 @@ async def test_message_builder_uses_resolved_ceo_context_window_instead_of_loop_
         user_content="continue",
     )
 
-    assert result.trace["global_summary_trigger_tokens"] == 20_000
-    assert result.trace["global_summary_pressure_warn_tokens"] == 54_400
-    assert result.trace["global_summary_force_refresh_tokens"] == 60_800
+    assert "global_summary_trigger_tokens" not in result.trace
+    assert "global_summary_pressure_warn_tokens" not in result.trace
+    assert "global_summary_force_refresh_tokens" not in result.trace
 
 
 @pytest.mark.asyncio
@@ -3036,16 +3034,6 @@ async def test_ceo_context_assembly_injects_memory_snapshot_without_legacy_memor
                 skill_inventory_top_k=16,
                 extension_tool_top_k=16,
                 core_tools=["memory_write", "memory_delete", "memory_note"],
-                frontdoor_global_summary_trigger_ratio=0.5,
-                frontdoor_global_summary_target_ratio=0.2,
-                frontdoor_global_summary_min_output_tokens=2000,
-                frontdoor_global_summary_max_output_ratio=0.05,
-                frontdoor_global_summary_max_output_tokens_ceiling=12000,
-                frontdoor_global_summary_pressure_warn_ratio=0.85,
-                frontdoor_global_summary_force_refresh_ratio=0.95,
-                frontdoor_global_summary_min_delta_tokens=2000,
-                frontdoor_global_summary_failure_cooldown_seconds=600,
-                frontdoor_global_summary_model="",
             )
         ),
     )
@@ -3095,16 +3083,6 @@ async def test_frontdoor_uses_frozen_memory_snapshot_only_once_per_turn() -> Non
                 skill_inventory_top_k=16,
                 extension_tool_top_k=16,
                 core_tools=["memory_write", "memory_delete", "memory_note"],
-                frontdoor_global_summary_trigger_ratio=0.5,
-                frontdoor_global_summary_target_ratio=0.2,
-                frontdoor_global_summary_min_output_tokens=2000,
-                frontdoor_global_summary_max_output_ratio=0.05,
-                frontdoor_global_summary_max_output_tokens_ceiling=12000,
-                frontdoor_global_summary_pressure_warn_ratio=0.85,
-                frontdoor_global_summary_force_refresh_ratio=0.95,
-                frontdoor_global_summary_min_delta_tokens=2000,
-                frontdoor_global_summary_failure_cooldown_seconds=600,
-                frontdoor_global_summary_model="",
             )
         ),
     )
@@ -3143,16 +3121,6 @@ async def test_ceo_context_assembly_keeps_memory_snapshot_out_of_turn_overlay_an
                 skill_inventory_top_k=16,
                 extension_tool_top_k=16,
                 core_tools=["memory_write", "memory_delete", "memory_note"],
-                frontdoor_global_summary_trigger_ratio=0.5,
-                frontdoor_global_summary_target_ratio=0.2,
-                frontdoor_global_summary_min_output_tokens=2000,
-                frontdoor_global_summary_max_output_ratio=0.05,
-                frontdoor_global_summary_max_output_tokens_ceiling=12000,
-                frontdoor_global_summary_pressure_warn_ratio=0.85,
-                frontdoor_global_summary_force_refresh_ratio=0.95,
-                frontdoor_global_summary_min_delta_tokens=2000,
-                frontdoor_global_summary_failure_cooldown_seconds=600,
-                frontdoor_global_summary_model="",
             )
         ),
     )

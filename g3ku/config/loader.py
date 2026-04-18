@@ -342,6 +342,11 @@ def _normalize_inline_model_bindings(cfg: Config) -> bool:
                     if item.reasoning_effort is not None and str(item.reasoning_effort).strip()
                     else {}
                 ),
+                **(
+                    {"context_window_tokens": int(item.context_window_tokens)}
+                    if getattr(item, "context_window_tokens", None) is not None
+                    else {}
+                ),
             },
             extra_headers=dict(
                 item.extra_headers
@@ -377,6 +382,8 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
             "retryCount": int(getattr(item, "retry_count", 0) or 0),
             "description": item.description,
         }
+        if getattr(item, "context_window_tokens", None) is not None:
+            payload["contextWindowTokens"] = int(getattr(item, "context_window_tokens", 0) or 0)
         if getattr(item, "single_api_key_max_concurrency", None) is not None:
             payload["singleApiKeyMaxConcurrency"] = item.single_api_key_max_concurrency
         catalog.append(payload)

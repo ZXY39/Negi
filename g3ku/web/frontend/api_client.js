@@ -544,6 +544,7 @@ class ApiClient {
             ["reasoning_effort", "reasoningEffort"],
             ["retry_on", "retryOn"],
             ["retry_count", "retryCount"],
+            ["context_window_tokens", "contextWindowTokens"],
         ];
         mappedFields.forEach(([snakeKey, camelKey]) => {
             const value = pick(snakeKey, camelKey);

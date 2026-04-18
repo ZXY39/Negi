@@ -270,6 +270,16 @@ test("ceo stage trace with no rounds still signals caller to keep stage view", (
     assert.match(turn.listEl.innerHTML, /inspect repository/);
 });
 
+test("ceo stage trace with no stages keeps a readable waiting meta", () => {
+    const { renderCeoStageTraceIntoTurn } = loadApp();
+    const turn = makeTurn({ text: "" });
+
+    const rendered = renderCeoStageTraceIntoTurn(turn, { stages: [] });
+
+    assert.equal(rendered, 0);
+    assert.equal(turn.metaEl.textContent, "等待工具开始...");
+});
+
 test("ceo stage trace renders real stage goal and budget from true frontdoor stage data", () => {
     const { renderCeoStageTraceIntoTurn } = loadApp();
     const turn = makeTurn({ text: "" });

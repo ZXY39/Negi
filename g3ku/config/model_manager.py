@@ -38,6 +38,7 @@ def _optional_chat_parameters(
     max_tokens: Any = _UNSET,
     temperature: Any = _UNSET,
     reasoning_effort: Any = _UNSET,
+    context_window_tokens: Any = _UNSET,
 ) -> dict[str, Any]:
     parameters: dict[str, Any] = {}
     if max_tokens is not _UNSET and max_tokens not in (None, ""):
@@ -46,6 +47,8 @@ def _optional_chat_parameters(
         parameters["temperature"] = float(temperature)
     if reasoning_effort is not _UNSET and str(reasoning_effort or "").strip():
         parameters["reasoning_effort"] = str(reasoning_effort).strip()
+    if context_window_tokens is not _UNSET and context_window_tokens not in (None, ""):
+        parameters["context_window_tokens"] = int(context_window_tokens)
     return parameters
 
 
@@ -58,6 +61,7 @@ def _chat_binding_draft(
     max_tokens: int | None,
     temperature: float | None,
     reasoning_effort: str | None,
+    context_window_tokens: int | None,
 ) -> dict[str, Any]:
     provider_id, model_id = Config.parse_provider_model(provider_model)
     return {
@@ -71,6 +75,7 @@ def _chat_binding_draft(
             max_tokens=max_tokens,
             temperature=temperature,
             reasoning_effort=reasoning_effort,
+            context_window_tokens=context_window_tokens,
         ),
         "extra_headers": extra_headers or {},
         "extra_options": {},
@@ -132,6 +137,7 @@ class ModelManager:
         retry_count: int | None = None,
         single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None,
         description: str = "",
+        context_window_tokens: int,
     ) -> dict[str, Any]:
         clean_key = str(key or "").strip()
         if not clean_key:
@@ -148,6 +154,7 @@ class ModelManager:
                 max_tokens=max_tokens,
                 temperature=temperature,
                 reasoning_effort=reasoning_effort,
+                context_window_tokens=context_window_tokens,
             ),
             binding_payload={
                 "key": clean_key,
@@ -180,6 +187,7 @@ class ModelManager:
         retry_count: int | None | object = _UNSET,
         single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency | object = _UNSET,
         description: str | None | object = _UNSET,
+        context_window_tokens: int | None | object = _UNSET,
     ) -> dict[str, Any]:
         item = self._require_model(key)
         patch: dict[str, Any] = {}
@@ -191,7 +199,9 @@ class ModelManager:
             patch["api_key"] = str(api_key).strip()
         if api_base is not _UNSET:
             patch["base_url"] = str(api_base).strip()
-        parameters_present = any(value is not _UNSET for value in (max_tokens, temperature, reasoning_effort))
+        parameters_present = any(
+            value is not _UNSET for value in (max_tokens, temperature, reasoning_effort, context_window_tokens)
+        )
         parameters: dict[str, Any] = {}
         if max_tokens is not _UNSET:
             parameters["max_tokens"] = None if max_tokens in (None, "") else int(max_tokens)
@@ -199,6 +209,10 @@ class ModelManager:
             parameters["temperature"] = None if temperature in (None, "") else float(temperature)
         if reasoning_effort is not _UNSET:
             parameters["reasoning_effort"] = str(reasoning_effort).strip() or None
+        if context_window_tokens is not _UNSET:
+            parameters["context_window_tokens"] = (
+                None if context_window_tokens in (None, "") else int(context_window_tokens)
+            )
         if parameters_present:
             patch["parameters"] = parameters
         if extra_headers is not _UNSET:
@@ -267,6 +281,11 @@ class ModelManager:
                 model = self._require_model(key)
                 if not model.enabled:
                     raise ValueError(f"Disabled model cannot be assigned to roles: {key}")
+                context_window_tokens = getattr(model, "context_window_tokens", None)
+                if not isinstance(context_window_tokens, int) or context_window_tokens <= 25_000:
+                    raise ValueError(
+                        f"Model {key} in scope {normalized_scope} must configure context_window_tokens > 25000"
+                    )
                 if normalized_scope == "memory":
                     capability = self.facade.get_binding_capability(self.config, key)
                     if capability != "chat":

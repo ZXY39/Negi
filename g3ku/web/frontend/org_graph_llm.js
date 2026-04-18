@@ -31,7 +31,7 @@
       retryOn: [...DEFAULT_RETRY_ON],
       retryCount: 0,
       singleApiKeyMaxConcurrency: "",
-      description: "",
+      contextWindowTokens: "",
       validation: null,
       probe: null,
       memory: {
@@ -644,7 +644,7 @@
       initialJsonText: JSON.stringify(draft, null, 2),
       retryOn: [...DEFAULT_RETRY_ON],
       retryCount: 0,
-      description: "",
+      contextWindowTokens: "",
     };
     renderAll();
   }
@@ -671,7 +671,7 @@
         binding.single_api_key_max_concurrency ?? binding.singleApiKeyMaxConcurrency ?? "",
         draft.api_key || ""
       ),
-      description: trim(binding.description),
+      contextWindowTokens: trim(binding.context_window_tokens),
     };
     renderAll();
   }
@@ -783,7 +783,7 @@
     const retryOnInput = document.getElementById("llm-binding-retry-on");
     const retryCountInput = document.getElementById("llm-binding-retry-count");
     const singleApiKeyMaxConcurrencyInput = document.getElementById("llm-binding-single-api-key-max-concurrency");
-    const descriptionInput = document.getElementById("llm-binding-description");
+    const contextWindowTokensInput = document.getElementById("llm-binding-context-window-tokens");
     if (modelKeyInput) editor.modelKey = trim(modelKeyInput.value || editor.modelKey);
     if (retryOnInput) editor.retryOn = parseBindingRetryOn(retryOnInput.value || "");
     if (retryCountInput) {
@@ -793,7 +793,7 @@
     if (singleApiKeyMaxConcurrencyInput) {
       editor.singleApiKeyMaxConcurrency = trim(singleApiKeyMaxConcurrencyInput.value || "");
     }
-    if (descriptionInput) editor.description = trim(descriptionInput.value || "");
+    if (contextWindowTokensInput) editor.contextWindowTokens = trim(contextWindowTokensInput.value || "");
     return editor;
   }
 
@@ -807,20 +807,26 @@
       String(editor?.singleApiKeyMaxConcurrency ?? ""),
       draft.api_key || ""
     );
-    const description = trim(editor?.description);
+    const contextWindowTokens = Number.parseInt(String(editor?.contextWindowTokens ?? "").trim(), 10);
     if (requireModelKey && !modelKey) throw new Error("模型 Key 不能为空");
     if (!Number.isInteger(retryCount) || retryCount < 0) {
       throw new Error("重试次数必须是不小于 0 的整数");
     }
+    if (!Number.isInteger(contextWindowTokens) || contextWindowTokens <= 25000) {
+      throw new Error("最大上下文TOKEN必须是大于 25000 的整数");
+    }
     if (singleApiKeyMaxConcurrency !== null && (!Number.isInteger(singleApiKeyMaxConcurrency) || singleApiKeyMaxConcurrency < 1)) {
       throw new Error("single_api_key_max_concurrency must be >= 1");
     }
+    draft.parameters = draft.parameters && typeof draft.parameters === "object" && !Array.isArray(draft.parameters) ? draft.parameters : {};
+    draft.parameters.context_window_tokens = contextWindowTokens;
     return {
       modelKey,
       retryOn: retryOn.length ? retryOn : [...DEFAULT_RETRY_ON],
       retryCount,
       singleApiKeyMaxConcurrency,
-      description,
+      contextWindowTokens,
+      draft,
     };
   }
 
@@ -841,10 +847,9 @@
           <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="number" min="1" step="1" inputmode="numeric" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制">
         </label>
       </div>
-      <p class="llm-muted">多个 API Key 时，"retry_count" 表示完整轮过所有 key 的次数，不是单次请求重试次数。</p>
       <label class="resource-field">
-        <span class="resource-field-label">说明</span>
-        <textarea id="llm-binding-description" class="resource-editor model-textarea" rows="4" placeholder="用于备注当前模型的用途、成本或降级策略。">${escv(editor.description || "")}</textarea>
+        <span class="resource-field-label">最大上下文TOKEN *</span>
+        <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
       </label>`;
   }
 
@@ -862,17 +867,23 @@
       String(editor?.singleApiKeyMaxConcurrency ?? ""),
       draft.api_key || ""
     );
-    const description = trim(editor?.description);
-    if (requireModelKey && !modelKey) throw new Error("妯″瀷 Key 涓嶈兘涓虹┖");
+    const contextWindowTokens = Number.parseInt(String(editor?.contextWindowTokens ?? "").trim(), 10);
+    if (requireModelKey && !modelKey) throw new Error("模型 Key 不能为空");
     if (!Number.isInteger(retryCount) || retryCount < 0) {
       throw new Error("重试次数必须是不小于 0 的整数");
     }
+    if (!Number.isInteger(contextWindowTokens) || contextWindowTokens <= 25000) {
+      throw new Error("最大上下文TOKEN必须是大于 25000 的整数");
+    }
+    draft.parameters = draft.parameters && typeof draft.parameters === "object" && !Array.isArray(draft.parameters) ? draft.parameters : {};
+    draft.parameters.context_window_tokens = contextWindowTokens;
     return {
       modelKey,
       retryOn: retryOn.length ? retryOn : [...DEFAULT_RETRY_ON],
       retryCount,
       singleApiKeyMaxConcurrency,
-      description,
+      contextWindowTokens,
+      draft,
     };
   }
 
@@ -897,8 +908,8 @@
         </label>
       </div>
       <label class="resource-field">
-        <span class="resource-field-label">说明</span>
-        <textarea id="llm-binding-description" class="resource-editor model-textarea" rows="4" placeholder="用于备注当前模型的用途、成本或降级策略。">${escv(editor.description || "")}</textarea>
+        <span class="resource-field-label">最大上下文TOKEN *</span>
+        <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
       </label>`;
   }
 
@@ -1408,7 +1419,7 @@
     state.editor.modelKey = modelKey;
     state.editor.providerId = providerId;
     state.editor.jsonText = jsonText;
-    const draft = parseDraftJson(jsonText, providerId);
+    const draft = bindingDraft.draft;
     state.saving = true;
     renderAll();
     try {
@@ -1433,17 +1444,16 @@
         kind: "success",
         persistent: true,
       });
-      const saveResult = await ApiClient.createLlmBinding({
-        binding: {
-          key: modelKey,
-          config_id: "",
-          enabled: true,
-          description: bindingDraft.description,
-          retry_on: [...bindingDraft.retryOn],
-          retry_count: bindingDraft.retryCount,
-          single_api_key_max_concurrency: bindingDraft.singleApiKeyMaxConcurrency,
-        },
-        draft,
+        const saveResult = await ApiClient.createLlmBinding({
+          binding: {
+            key: modelKey,
+            config_id: "",
+            enabled: true,
+            retry_on: [...bindingDraft.retryOn],
+            retry_count: bindingDraft.retryCount,
+            single_api_key_max_concurrency: bindingDraft.singleApiKeyMaxConcurrency,
+          },
+          draft,
       });
       await waitForRuntimeRefreshAndUpdateToast(saveResult?.runtimeRefresh);
       closeEditor();
@@ -1493,7 +1503,7 @@
     const bindingDraft = bindingDraftPayload();
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
     state.editor.jsonText = jsonText;
-    const draft = parseDraftJson(jsonText, state.editor.providerId);
+    const draft = bindingDraft.draft;
     const configChanged = trim(jsonText) !== trim(state.editor.initialJsonText || "");
     const bindingPatch = {};
     if (JSON.stringify(bindingDraft.retryOn) !== JSON.stringify(binding.retry_on || [])) bindingPatch.retry_on = bindingDraft.retryOn;
@@ -1501,7 +1511,6 @@
     if (!singleApiKeyMaxConcurrencyEquals(bindingDraft.singleApiKeyMaxConcurrency, binding.single_api_key_max_concurrency ?? binding.singleApiKeyMaxConcurrency ?? null)) {
       bindingPatch.single_api_key_max_concurrency = bindingDraft.singleApiKeyMaxConcurrency;
     }
-    if (bindingDraft.description !== trim(binding.description)) bindingPatch.description = bindingDraft.description;
     state.saving = true;
     renderAll();
     try {

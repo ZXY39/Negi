@@ -25,7 +25,6 @@ from g3ku.runtime.frontdoor.canonical_context import (
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
 from g3ku.runtime.cancellation import ToolCancellationToken
-from g3ku.runtime.semantic_context_summary import default_semantic_context_state
 
 _CONTROL_TOOL_NAMES = {"stop_tool_execution"}
 _LEGACY_CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
@@ -76,12 +75,15 @@ class RuntimeAgentSession:
         self._frontdoor_stage_state: dict[str, Any] = {}
         self._frontdoor_canonical_context: dict[str, Any] = default_frontdoor_canonical_context()
         self._compression_state: dict[str, Any] = {}
-        self._semantic_context_state: dict[str, Any] = default_semantic_context_state()
+        self._semantic_context_state: dict[str, Any] = {}
         self._frontdoor_hydrated_tool_names: list[str] = []
         self._frontdoor_selection_debug: dict[str, Any] = {}
         self._frontdoor_request_body_messages: list[dict[str, Any]] = []
         self._frontdoor_history_shrink_reason: str = ""
         self._frontdoor_token_preflight_diagnostics: dict[str, Any] = {}
+        self._frontdoor_compression_generation_seq: int = 0
+        self._active_frontdoor_compression_generation: int | None = None
+        self._cancelled_frontdoor_compression_generations: set[int] = set()
         self._frontdoor_actual_request_path: str = ""
         self._frontdoor_actual_request_history: list[dict[str, Any]] = []
         self._frontdoor_previous_actual_request_path: str = ""
@@ -180,7 +182,7 @@ class RuntimeAgentSession:
         self._frontdoor_stage_state = dict(snapshot.get("frontdoor_stage_state") or {})
         self._frontdoor_canonical_context = dict(snapshot.get("frontdoor_canonical_context") or {})
         self._compression_state = dict(snapshot.get("compression_state") or {})
-        self._semantic_context_state = dict(snapshot.get("semantic_context_state") or {})
+        self._semantic_context_state = {}
         self._frontdoor_hydrated_tool_names = self._normalized_name_list(
             snapshot.get("hydrated_tool_names")
         )
@@ -272,9 +274,6 @@ class RuntimeAgentSession:
                         getattr(self, "_frontdoor_canonical_context", None) or {}
                     ),
                     "compression_state": copy.deepcopy(getattr(self, "_compression_state", None) or {}),
-                    "semantic_context_state": copy.deepcopy(
-                        getattr(self, "_semantic_context_state", None) or {}
-                    ),
                     "hydrated_tool_names": list(
                         self._normalized_name_list(getattr(self, "_frontdoor_hydrated_tool_names", []))
                     ),
@@ -1003,42 +1002,38 @@ class RuntimeAgentSession:
             return {}
         return snapshot
 
-    @staticmethod
-    def _semantic_context_state_has_material_content(value: Any) -> bool:
-        if not isinstance(value, dict):
-            return False
-        if str(value.get("summary_text") or "").strip():
-            return True
-        if bool(value.get("needs_refresh")):
-            return True
-        if str(value.get("updated_at") or "").strip():
-            return True
-        if str(value.get("coverage_history_source") or "").strip():
-            return True
-        try:
-            coverage_message_index = int(value.get("coverage_message_index", -1) or -1)
-        except (TypeError, ValueError):
-            coverage_message_index = -1
-        if coverage_message_index >= 0:
-            return True
-        try:
-            coverage_stage_index = int(value.get("coverage_stage_index", 0) or 0)
-        except (TypeError, ValueError):
-            coverage_stage_index = 0
-        if coverage_stage_index > 0:
-            return True
-        if str(value.get("failure_cooldown_until") or "").strip():
-            return True
-        return False
+    def _begin_frontdoor_compression_generation(self) -> int:
+        self._frontdoor_compression_generation_seq = int(self._frontdoor_compression_generation_seq or 0) + 1
+        generation_id = self._frontdoor_compression_generation_seq
+        self._active_frontdoor_compression_generation = generation_id
+        self._cancelled_frontdoor_compression_generations.discard(generation_id)
+        return generation_id
 
-    def _semantic_context_state_snapshot(self) -> dict[str, Any]:
-        raw = getattr(self, "_semantic_context_state", None)
-        if not isinstance(raw, dict):
-            return {}
-        snapshot = copy.deepcopy(raw)
-        if not self._semantic_context_state_has_material_content(snapshot):
-            return {}
-        return snapshot
+    def _finish_frontdoor_compression_generation(self, generation_id: int) -> None:
+        try:
+            normalized_generation_id = int(generation_id or 0)
+        except (TypeError, ValueError):
+            normalized_generation_id = 0
+        if normalized_generation_id <= 0:
+            return
+        if self._active_frontdoor_compression_generation == normalized_generation_id:
+            self._active_frontdoor_compression_generation = None
+        self._cancelled_frontdoor_compression_generations.discard(normalized_generation_id)
+
+    def _cancel_active_frontdoor_compression_generation(self) -> None:
+        generation_id = self._active_frontdoor_compression_generation
+        if generation_id is None:
+            return
+        self._cancelled_frontdoor_compression_generations.add(generation_id)
+
+    def _is_frontdoor_compression_generation_cancelled(self, generation_id: int) -> bool:
+        try:
+            normalized_generation_id = int(generation_id or 0)
+        except (TypeError, ValueError):
+            return False
+        if normalized_generation_id <= 0:
+            return False
+        return normalized_generation_id in self._cancelled_frontdoor_compression_generations
 
     def reminder_context_snapshot(self) -> dict[str, Any] | None:
         status = str(self._state.status or "").strip().lower()
@@ -1059,7 +1054,6 @@ class RuntimeAgentSession:
             "visible_canonical_context": visible_canonical_context,
             "frontdoor_canonical_context": durable_canonical_context,
             "compression": compression,
-            "semantic_context_state": copy.deepcopy(getattr(self, "_semantic_context_state", None) or {}),
             "hydrated_tool_names": [
                 str(item or "").strip()
                 for item in list(getattr(self, "_frontdoor_hydrated_tool_names", []) or [])
@@ -1139,7 +1133,6 @@ class RuntimeAgentSession:
         canonical_context = self._frontdoor_visible_canonical_context_snapshot()
         frontdoor_canonical_context = self._frontdoor_canonical_context_snapshot()
         compression = self._compression_snapshot()
-        semantic_context_state = self._semantic_context_state_snapshot()
         frontdoor_stage_state = (
             copy.deepcopy(getattr(self, "_frontdoor_stage_state", None) or {})
             if self._has_renderable_frontdoor_stage_state()
@@ -1156,8 +1149,6 @@ class RuntimeAgentSession:
             snapshot["frontdoor_stage_state"] = frontdoor_stage_state
         if frontdoor_canonical_context:
             snapshot["frontdoor_canonical_context"] = frontdoor_canonical_context
-        if semantic_context_state:
-            snapshot["semantic_context_state"] = semantic_context_state
         turn_id = self._current_turn_id()
         if turn_id:
             snapshot["turn_id"] = turn_id
@@ -1227,7 +1218,6 @@ class RuntimeAgentSession:
             and "last_error" not in snapshot
             and "frontdoor_stage_state" not in snapshot
             and "frontdoor_canonical_context" not in snapshot
-            and "semantic_context_state" not in snapshot
             and "hydrated_tool_names" not in snapshot
             and "frontdoor_request_body_messages" not in snapshot
             and "frontdoor_history_shrink_reason" not in snapshot
@@ -1709,13 +1699,11 @@ class RuntimeAgentSession:
         frontdoor_stage_state = interrupt_values.get("frontdoor_stage_state")
         frontdoor_canonical_context = interrupt_values.get("frontdoor_canonical_context")
         compression_state = interrupt_values.get("compression_state")
-        semantic_context_state = interrupt_values.get("semantic_context_state")
         hydrated_tool_names = interrupt_values.get("hydrated_tool_names")
         frontdoor_selection_debug = interrupt_values.get("frontdoor_selection_debug")
         preserved_frontdoor_stage_state = getattr(self, "_frontdoor_stage_state", None)
         preserved_frontdoor_canonical_context = getattr(self, "_frontdoor_canonical_context", None)
         preserved_compression_state = getattr(self, "_compression_state", None)
-        preserved_semantic_context_state = getattr(self, "_semantic_context_state", None)
         preserved_hydrated_tool_names = getattr(self, "_frontdoor_hydrated_tool_names", None)
         preserved_frontdoor_selection_debug = getattr(self, "_frontdoor_selection_debug", None)
         self._frontdoor_stage_state = (
@@ -1739,13 +1727,7 @@ class RuntimeAgentSession:
             if isinstance(preserved_compression_state, dict)
             else {}
         )
-        self._semantic_context_state = (
-            dict(semantic_context_state)
-            if isinstance(semantic_context_state, dict)
-            else dict(preserved_semantic_context_state)
-            if isinstance(preserved_semantic_context_state, dict)
-            else default_semantic_context_state()
-        )
+        self._semantic_context_state = {}
         self._frontdoor_hydrated_tool_names = [
             str(item or "").strip()
             for item in list(hydrated_tool_names or preserved_hydrated_tool_names or [])
@@ -1852,6 +1834,13 @@ class RuntimeAgentSession:
 
             output = await self._run_message(user_input)
         except asyncio.CancelledError:
+            terminal_stop_already_applied = (
+                self._last_stop_reason == "user_pause"
+                or str(self._state.status or "").strip().lower() in {"completed", "idle"}
+            )
+            if terminal_stop_already_applied:
+                self._state.is_running = False
+                raise
             already_paused = bool(self._state.paused) or str(self._state.status or "").strip().lower() == "paused"
             self._state.is_running = False
             self._state.paused = True
@@ -1939,7 +1928,20 @@ class RuntimeAgentSession:
             )
             self._state.is_running = False
             self._state.status = "error"
-            error = StructuredError(code="legacy_session_error", message=str(exc), recoverable=True)
+            if isinstance(exc, StructuredError):
+                error = exc
+            elif all(hasattr(exc, key) for key in ("code", "message", "recoverable")):
+                error = StructuredError(
+                    code=str(getattr(exc, "code", "") or "legacy_session_error"),
+                    message=str(getattr(exc, "message", "") or str(exc)),
+                    recoverable=bool(getattr(exc, "recoverable", True)),
+                )
+            else:
+                error = StructuredError(
+                    code="legacy_session_error",
+                    message=str(exc),
+                    recoverable=True,
+                )
             self._state.last_error = error
             error_reply = f"运行出错：{error.message}"
             self._state.latest_message = error_reply
@@ -2144,6 +2146,7 @@ class RuntimeAgentSession:
         if manual:
             self._set_paused_execution_context(paused_snapshot)
         await self._emit_safe_stop_notice("pause")
+        self._cancel_active_frontdoor_compression_generation()
         if self._active_cancel_token is not None:
             self._active_cancel_token.cancel(reason="用户已请求暂停，正在安全停止...")
         await self._loop.cancel_session_tasks(self._state.session_key)
@@ -2241,6 +2244,7 @@ class RuntimeAgentSession:
 
     async def cancel(self, *, reason: str = "user_cancelled") -> None:
         await self._emit_safe_stop_notice("cancel")
+        self._cancel_active_frontdoor_compression_generation()
         if self._active_cancel_token is not None:
             self._active_cancel_token.cancel(reason=reason or "用户已请求停止，正在安全停止...")
         await self._loop.cancel_session_tasks(self._state.session_key)

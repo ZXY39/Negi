@@ -326,3 +326,90 @@ def test_llm_frontend_uses_binding_name_wording_in_create_form() -> None:
     assert result["label"] == "配置名 / 绑定名"
     assert result["normalized"] == "配置名 / 绑定名 * / 配置名 / 绑定名 * / 配置名 / 绑定名 *"
     assert "配置名 / 绑定名 / Provider / 模型" in html
+
+
+def test_binding_draft_payload_requires_model_key_with_readable_message() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.window.addEventListener = () => {};
+        global.document = { getElementById: () => null, querySelector: () => null, addEventListener: () => {} };
+        global.S = {
+          modelCatalog: {},
+          llmCenter: {
+            loading: false,
+            saving: false,
+            error: "",
+            templates: [],
+            templateMap: {},
+            templateDetailMap: {},
+            bindings: [],
+            bindingMap: {},
+            routes: {},
+            roleIterations: {},
+            roleConcurrency: {},
+            editor: {
+              open: true,
+              mode: "create",
+              bindingKey: "",
+              configId: "",
+              modelKey: "",
+              providerId: "demo",
+              jsonText: "{}",
+              initialJsonText: "{}",
+              retryOn: ["network"],
+              retryCount: 0,
+              singleApiKeyMaxConcurrency: "",
+              contextWindowTokens: "30001",
+              validation: null,
+              probe: null,
+              memory: {
+                loading: false,
+                error: "",
+                embedding: {},
+                rerank: {},
+              },
+            },
+            eventsBound: false,
+          },
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.EMPTY_MODEL_ROLES = () => ({ ceo: [], execution: [], inspection: [] });
+        global.DEFAULT_ROLE_ITERATIONS = () => ({ ceo: null, execution: null, inspection: null });
+        global.DEFAULT_ROLE_CONCURRENCY = () => ({ ceo: null, execution: null, inspection: null });
+        global.DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "" });
+        global.normalizeAllModelRoles = (value) => value;
+        global.normalizeRoleIterations = (value) => value;
+        global.normalizeRoleConcurrency = (value) => value;
+        global.cloneModelRoles = (value) => value;
+        global.cloneRoleIterations = (value) => value;
+        global.cloneRoleConcurrency = (value) => value;
+        global.syncModelRoleDraftState = () => {};
+        global.hint = () => {};
+        global.setDrawerOpen = () => {};
+        global.icons = () => {};
+        global.enhanceResourceSelects = () => {};
+        let code = fs.readFileSync("g3ku/web/frontend/org_graph_llm.js", "utf8");
+        code = code.replace(
+          "window.__llmTestHooks = {",
+          "window.__llmTestHooks = {\\n    bindingDraftPayload,"
+        );
+        vm.runInThisContext(code);
+
+        let message = "";
+        try {
+          window.__llmTestHooks.bindingDraftPayload({ requireModelKey: true });
+        } catch (error) {
+          message = error.message || String(error);
+        }
+
+        console.log(JSON.stringify({ message }));
+        """
+    )
+
+    assert result["message"] == "模型 Key 不能为空"

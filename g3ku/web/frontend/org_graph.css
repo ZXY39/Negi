@@ -3792,6 +3792,13 @@ textarea {
     white-space: nowrap;
 }
 
+.ceo-compression-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    margin-top: 6px;
+}
+
 @keyframes ceo-compression-pulse {
     0%, 100% {
         box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand-primary) 34%, transparent);
