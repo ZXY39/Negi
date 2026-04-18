@@ -518,3 +518,15 @@ async def test_completed_spawn_round_children_are_not_distribution_targets(tmp_p
         assert service.node_runner.node_is_in_live_distribution_tree(task_id=record.task_id, node_id=child.node_id) is False
     finally:
         await service.close()
+
+
+def test_submit_message_distribution_tool_schema_uses_explicit_child_targets() -> None:
+    from main.runtime.internal_tools import SubmitMessageDistributionTool
+
+    tool = SubmitMessageDistributionTool(lambda payload: payload)
+    schema = tool.parameters
+    item = schema["properties"]["children"]["items"]
+
+    assert "target_node_id" in item["properties"]
+    assert "message" in item["properties"]
+    assert "reason" in item["properties"]
