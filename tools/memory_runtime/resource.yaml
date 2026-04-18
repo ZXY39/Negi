@@ -26,8 +26,6 @@ permissions:
   filesystem: []
 settings:
   enabled: true
-  mode: dual
-  backend: rag
   arch_version: v2
   document:
     summary_max_chars: 100
@@ -76,8 +74,6 @@ settings:
   guard:
     mode: tiered
     auto_fact_confidence: 0.8
-  compat:
-    dual_write_legacy_files: true
   commit:
     turn_trigger: 20
     idle_minutes_trigger: 360
@@ -104,7 +100,6 @@ settings:
     - skill_access
   catalog_summary:
     model_key: ceo_primary
-  bootstrap_mode: new_only
   retention_days: null
 parameters:
   type: object

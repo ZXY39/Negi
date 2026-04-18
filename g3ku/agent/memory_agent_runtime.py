@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import shutil
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -29,6 +30,17 @@ from g3ku.providers.chatmodels import build_chat_model
 
 _NOTE_REF_RE = re.compile(r"\bref:(?P<ref>[a-z0-9_]+)\b")
 _STAGED_DOCUMENT_UNSET = object()
+_LEGACY_CLEANUP_RELATIVE_PATHS: tuple[str, ...] = (
+    "memory/HISTORY.md",
+    "memory/structured_current.jsonl",
+    "memory/structured_history.jsonl",
+    "memory/structured_state.json",
+    "memory/sync_journal.jsonl",
+    "memory/sync_state.json",
+    "memory/audit.jsonl",
+    "memory/pending_facts.jsonl",
+    "memory/context_store",
+)
 
 
 @dataclass(slots=True)
@@ -719,6 +731,65 @@ class MemoryManager:
         )
         self._commit_validated_write(validated)
         report["note_refs_written"] = list(validated.note_refs_written)
+        return report
+
+    def legacy_cleanup_report(self, *, apply: bool = False) -> dict[str, Any]:
+        existing_paths: list[str] = []
+        data_bearing_paths: list[str] = []
+        resolved_paths: list[Path] = []
+
+        for relative_path in _LEGACY_CLEANUP_RELATIVE_PATHS:
+            path = self.workspace / relative_path
+            if not path.exists():
+                continue
+            existing_paths.append(relative_path)
+            resolved_paths.append(path)
+            if path.is_dir():
+                try:
+                    has_children = any(path.iterdir())
+                except OSError:
+                    has_children = True
+                if has_children:
+                    data_bearing_paths.append(relative_path)
+                continue
+            try:
+                if path.read_text(encoding="utf-8").strip():
+                    data_bearing_paths.append(relative_path)
+            except OSError:
+                data_bearing_paths.append(relative_path)
+
+        report = {
+            "ok": True,
+            "status": "dry_run" if not apply else "applied",
+            "apply": bool(apply),
+            "existing_paths": existing_paths,
+            "data_bearing_paths": data_bearing_paths,
+            "deleted_paths": [],
+            "queue_depth": len(self._read_queue_requests()),
+            "memory_document_empty": not bool(self.snapshot_text().strip()),
+        }
+        if not apply:
+            return report
+
+        if self._read_queue_requests():
+            raise ValueError("memory queue is not empty; flush or reconcile the queue before cleanup-legacy --apply")
+        if not self.snapshot_text().strip() and data_bearing_paths:
+            raise ValueError(
+                "legacy memory artifacts still contain data while memory/MEMORY.md is empty; "
+                "run import-legacy first or delete them only after manual review"
+            )
+
+        deleted_paths: list[str] = []
+        for relative_path, path in zip(existing_paths, resolved_paths):
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            except FileNotFoundError:
+                continue
+            deleted_paths.append(relative_path)
+        report["deleted_paths"] = deleted_paths
         return report
 
     async def collect_due_batch(self, *, now_iso: str) -> MemoryBatch | None:

@@ -262,7 +262,8 @@ If a user reports that frontdoor compaction settings stopped working after upgra
 - `document.*` now controls the Markdown notebook layout, including `memory/MEMORY.md`, `memory/notes/`, the summary character limit, and the full document character ceiling.
 - `queue.*` now controls the single durable queue, including `memory/queue.jsonl`, `memory/ops.jsonl`, batch size, and max wait time.
 - `agent.*` now controls the dedicated memory-maintenance worker behavior.
-- Older `store.*`, `retrieval.*`, and `embedding.*` sections still matter for the catalog bridge because tool/skill semantic narrowing still relies on that projection.
+- Older `store.*`, `retrieval.*`, and `embedding.*` sections still matter for the catalog bridge because tool/skill semantic narrowing still relies on that catalog-only projection, even though long-term memory正文 no longer depends on the old `rag_memory` runtime.
+- The earlier transition fields such as `mode`, `backend`, `bootstrap_mode`, and `compat.dual_write_legacy_files` are no longer part of the active memory runtime settings surface.
 
 There is now also a project-config side contract that maintainers must keep straight:
 

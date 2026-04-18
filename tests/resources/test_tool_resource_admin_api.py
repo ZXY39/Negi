@@ -306,7 +306,7 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_repo_tools(workspace, 'memory_search', 'memory_write', 'memory_runtime')
+    _copy_repo_tools(workspace, 'memory_note', 'memory_write', 'memory_runtime')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
@@ -335,19 +335,10 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
         assert toolskill['repair_required'] is True
         assert 'tool_handler_unavailable' in toolskill['errors']
         assert '# memory_write' in toolskill['content']
-        assert '# memory_search' not in toolskill['content']
-        assert toolskill['required_parameters'] == ['facts']
-        assert toolskill['parameters_schema']['properties']['facts']['items']['required'] == [
-            'category',
-            'entity',
-            'attribute',
-            'value',
-            'observed_at',
-            'time_semantics',
-            'source_excerpt',
-        ]
-        assert 'facts[*].category' in str(toolskill['parameter_contract_markdown'])
-        assert dict(toolskill['example_arguments']).get('facts')
+        assert toolskill['required_parameters'] == ['content']
+        assert toolskill['parameters_schema']['properties']['content']['type'] == 'string'
+        assert 'content' in str(toolskill['parameter_contract_markdown'])
+        assert dict(toolskill['example_arguments']).get('content')
 
         seeded = service.update_tool_policy(
             'memory',
@@ -371,18 +362,10 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
             session_id='web:shared',
             tool_id='memory_write',
         )
-        assert payload_v2['required_parameters'] == ['facts']
-        assert payload_v2['parameters_schema']['properties']['facts']['items']['required'] == [
-            'category',
-            'entity',
-            'attribute',
-            'value',
-            'observed_at',
-            'time_semantics',
-            'source_excerpt',
-        ]
-        assert 'facts[*].category' in str(payload_v2['parameter_contract_markdown'])
-        assert dict(payload_v2['example_arguments']).get('facts')
+        assert payload_v2['required_parameters'] == ['content']
+        assert payload_v2['parameters_schema']['properties']['content']['type'] == 'string'
+        assert 'content' in str(payload_v2['parameter_contract_markdown'])
+        assert dict(payload_v2['example_arguments']).get('content')
     finally:
         await service.close()
         manager.close()
@@ -4536,7 +4519,7 @@ def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, 
     ensure_startup_config_ready()
     _write_skill(workspace, name='demo_skill')
     _write_external_tool(workspace, name='external_browser')
-    _copy_repo_tools(workspace, 'memory_search', 'memory_write', 'memory_runtime')
+    _copy_repo_tools(workspace, 'memory_note', 'memory_write', 'memory_runtime')
 
     app = FastAPI()
     app.include_router(admin_rest.router, prefix='/api')
@@ -4573,7 +4556,6 @@ def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, 
     assert memory_payload['toolskill_source_name'] == 'memory_write'
     assert memory_payload['available'] is False
     assert '# memory_write' in str(memory_payload.get('content') or '')
-    assert '# memory_search' not in str(memory_payload.get('content') or '')
 
 
 def test_resource_write_endpoints_work_without_configured_models(tmp_path: Path, monkeypatch):
@@ -4978,7 +4960,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
     _copy_repo_tools(
         workspace,
         'content',
-        'memory_search',
+        'memory_note',
         'memory_write',
         'memory_runtime',
         'message',

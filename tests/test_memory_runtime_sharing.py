@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from g3ku.agent.rag_memory import (
+from g3ku.agent.catalog_store import (
     ContextRecordV2,
     DashScopeMultimodalEmbeddings,
     DashScopeTextReranker,
@@ -232,7 +232,7 @@ def test_g3ku_hybrid_store_reuses_qdrant_backend_per_process(tmp_path, monkeypat
         ),
     )
     monkeypatch.setattr(
-        "g3ku.agent.rag_memory.DashScopeMultimodalEmbeddings",
+        "g3ku.agent.catalog_store.DashScopeMultimodalEmbeddings",
         lambda **kwargs: object(),
     )
 
@@ -327,7 +327,7 @@ def test_g3ku_hybrid_store_uses_dashscope_embedding_adapter_for_configured_proto
         ),
     )
     monkeypatch.setattr(
-        "g3ku.agent.rag_memory.DashScopeMultimodalEmbeddings",
+        "g3ku.agent.catalog_store.DashScopeMultimodalEmbeddings",
         _fake_dashscope_embeddings,
     )
 
@@ -383,10 +383,10 @@ def test_g3ku_hybrid_store_skips_dense_backend_when_owner_lock_is_busy(tmp_path,
         ),
     )
     monkeypatch.setattr(
-        "g3ku.agent.rag_memory.DashScopeMultimodalEmbeddings",
+        "g3ku.agent.catalog_store.DashScopeMultimodalEmbeddings",
         lambda **kwargs: object(),
     )
-    monkeypatch.setattr("g3ku.agent.rag_memory._try_acquire_file_lock", lambda *args, **kwargs: None)
+    monkeypatch.setattr("g3ku.agent.catalog_store._try_acquire_file_lock", lambda *args, **kwargs: None)
 
     G3kuHybridStore._dense_backend_registry.clear()
     store = G3kuHybridStore(
@@ -491,12 +491,12 @@ def test_g3ku_hybrid_store_releases_owner_lock_after_last_reference(tmp_path, mo
         ),
     )
     monkeypatch.setattr(
-        "g3ku.agent.rag_memory.DashScopeMultimodalEmbeddings",
+        "g3ku.agent.catalog_store.DashScopeMultimodalEmbeddings",
         lambda **kwargs: object(),
     )
-    monkeypatch.setattr("g3ku.agent.rag_memory._try_acquire_file_lock", lambda *args, **kwargs: owner_lock)
+    monkeypatch.setattr("g3ku.agent.catalog_store._try_acquire_file_lock", lambda *args, **kwargs: owner_lock)
     monkeypatch.setattr(
-        "g3ku.agent.rag_memory._release_file_lock",
+        "g3ku.agent.catalog_store._release_file_lock",
         lambda handle: calls.__setitem__("released", calls["released"] + int(handle is owner_lock)),
     )
 
@@ -565,7 +565,7 @@ def test_reset_memory_runtime_purges_stale_dense_backends_for_same_qdrant_group(
     )
 
     monkeypatch.setattr(
-        "g3ku.agent.rag_memory._release_file_lock",
+        "g3ku.agent.catalog_store._release_file_lock",
         lambda handle: calls.__setitem__("released", calls["released"] + int(handle is owner_lock)),
     )
 
@@ -637,7 +637,7 @@ def test_context_v2_dense_backfill_reports_post_rebuild_stats(tmp_path, monkeypa
         ),
     )
     monkeypatch.setattr(
-        "g3ku.agent.rag_memory.DashScopeMultimodalEmbeddings",
+        "g3ku.agent.catalog_store.DashScopeMultimodalEmbeddings",
         lambda **kwargs: object(),
     )
 
@@ -762,7 +762,7 @@ def test_dashscope_embeddings_rotate_api_keys_on_retryable_status(monkeypatch) -
             {"output": {"embeddings": [{"embedding": [0.1, 0.2], "text_index": 0}]}},
         )
 
-    monkeypatch.setattr("g3ku.agent.rag_memory.requests.post", _post)
+    monkeypatch.setattr("g3ku.agent.catalog_store.requests.post", _post)
 
     embeddings = DashScopeMultimodalEmbeddings(api_key="key-1,key-2")
     vectors = embeddings.embed_documents(["hello"])
@@ -784,7 +784,7 @@ def test_dashscope_reranker_rotates_api_keys_on_auth_failure(monkeypatch) -> Non
             {"output": {"results": [{"index": 0, "score": 0.9}]}},
         )
 
-    monkeypatch.setattr("g3ku.agent.rag_memory.requests.post", _post)
+    monkeypatch.setattr("g3ku.agent.catalog_store.requests.post", _post)
 
     reranker = DashScopeTextReranker(api_key="key-1,key-2")
     ranked = reranker.rerank(query="hello", documents=["hello"])
@@ -826,12 +826,7 @@ def test_sync_internal_tool_runtimes_reads_memory_runtime_manifest(tmp_path):
         def close(self):
             self.closed += 1
 
-    class _Loop(SimpleNamespace):
-        def _use_rag_memory(self) -> bool:
-            cfg = getattr(self, '_memory_runtime_settings', None)
-            return bool(cfg and cfg.enabled)
-
-    loop = _Loop(
+    loop = SimpleNamespace(
         workspace=workspace,
         resource_manager=manager,
         _internal_tool_settings_fingerprints={},
@@ -894,12 +889,7 @@ def test_sync_internal_tool_runtimes_keeps_memory_manager_when_runtime_has_no_ra
         def close(self):
             return None
 
-    class _Loop(SimpleNamespace):
-        def _use_rag_memory(self) -> bool:
-            cfg = getattr(self, '_memory_runtime_settings', None)
-            return bool(cfg and cfg.enabled)
-
-    loop = _Loop(
+    loop = SimpleNamespace(
         workspace=workspace,
         resource_manager=manager,
         _internal_tool_settings_fingerprints={},
@@ -945,12 +935,7 @@ def test_sync_internal_tool_runtimes_bootstraps_catalog_when_memory_store_is_ava
         def close(self):
             return None
 
-    class _Loop(SimpleNamespace):
-        def _use_rag_memory(self) -> bool:
-            cfg = getattr(self, '_memory_runtime_settings', None)
-            return bool(cfg and cfg.enabled)
-
-    loop = _Loop(
+    loop = SimpleNamespace(
         workspace=workspace,
         resource_manager=None,
         _internal_tool_settings_fingerprints={},

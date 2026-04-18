@@ -820,7 +820,7 @@ def test_execution_stage_progress_ignores_non_budget_rounds_in_frontend_formatti
           tool_rounds_used: 1,
           rounds: [
             { round_id: "round-loader", budget_counted: false, tools: [{ tool_name: "load_skill_context" }] },
-            { round_id: "round-budgeted", budget_counted: true, tools: [{ tool_name: "memory_search" }] },
+            { round_id: "round-budgeted", budget_counted: true, tools: [{ tool_name: "memory_note" }] },
           ],
         });
 

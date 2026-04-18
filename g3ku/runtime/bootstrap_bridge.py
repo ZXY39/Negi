@@ -278,7 +278,7 @@ class RuntimeBootstrapBridge:
         if store_cfg is None:
             return
         try:
-            from g3ku.agent.rag_memory import G3kuHybridStore
+            from g3ku.agent.catalog_store import G3kuHybridStore
 
             qdrant_path = resolve_path_in_workspace(
                 getattr(store_cfg, 'qdrant_path', 'memory/qdrant'),

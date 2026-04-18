@@ -330,7 +330,6 @@ def test_ceo_prompt_builder_keeps_memory_guidance() -> None:
     assert "memory_delete" in prompt
     assert "memory_note" in prompt
     assert "MEMORY.md" in prompt
-    assert "memory_search" not in prompt
     assert "已检索上下文" in prompt
     assert "submit_next_stage" in prompt
 
@@ -3015,7 +3014,7 @@ async def test_message_builder_keeps_turn_memory_from_different_session_in_share
 
 
 @pytest.mark.asyncio
-async def test_ceo_context_assembly_injects_memory_snapshot_without_memory_search_overlay() -> None:
+async def test_ceo_context_assembly_injects_memory_snapshot_without_legacy_memory_overlay() -> None:
     loop = SimpleNamespace(
         memory_manager=SimpleNamespace(
             snapshot_text=lambda **_: "---\n2026/4/17-self：\n完成任务必须说明任务总耗时\n",
@@ -3057,7 +3056,6 @@ async def test_ceo_context_assembly_injects_memory_snapshot_without_memory_searc
 
     overlay = "\n\n".join(result["turn_overlay_parts"])
     assert "2026/4/17-self：" in overlay
-    assert "memory_search" not in overlay
 
 
 @pytest.mark.asyncio

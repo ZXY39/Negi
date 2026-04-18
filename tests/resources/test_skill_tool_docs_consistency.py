@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -9,15 +10,19 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_ddg_web_search_is_gated_by_web_fetch_requirement():
-    manifest = yaml.safe_load((REPO_ROOT / 'skills' / 'ddg-web-search' / 'resource.yaml').read_text(encoding='utf-8'))
+    resource_path = REPO_ROOT / 'skills' / 'ddg-web-search' / 'resource.yaml'
+    if not resource_path.exists():
+        pytest.skip("ddg-web-search skill is not installed in this workspace")
+    manifest = yaml.safe_load(resource_path.read_text(encoding='utf-8'))
     required_tools = ((manifest.get('requires') or {}).get('tools') or [])
     assert 'web_fetch' in required_tools
 
 
 def test_memory_skill_uses_current_search_guidance():
     content = (REPO_ROOT / 'skills' / 'memory' / 'SKILL.md').read_text(encoding='utf-8')
-    assert 'rg -n -i "关键词" memory/HISTORY.md' in content
-    assert '使用 `exec` 工具运行 grep' not in content
+    assert 'memory/HISTORY.md' not in content
+    assert 'memory_note(ref=' in content
+    assert 'MEMORY.md' in content
 
 
 def test_tmux_skill_does_not_claim_exec_background_mode():

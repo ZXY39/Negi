@@ -3694,8 +3694,8 @@ async def test_create_agent_middleware_syncs_real_stage_state_before_running_too
     normalized_calls = [
         {
             "id": "call-memory-1",
-            "name": "memory_search",
-            "arguments": {"query": "repository structure"},
+            "name": "memory_note",
+            "arguments": {"ref": "note_repo"},
         }
     ]
 
@@ -3726,8 +3726,8 @@ async def test_create_agent_middleware_syncs_real_stage_state_before_running_too
                     tool_calls=[
                         {
                             "id": "call-memory-1",
-                            "name": "memory_search",
-                            "args": {"query": "repository structure"},
+                            "name": "memory_note",
+                            "args": {"ref": "note_repo"},
                         }
                     ],
                 )
@@ -3736,9 +3736,9 @@ async def test_create_agent_middleware_syncs_real_stage_state_before_running_too
         runtime,
     )
     await session._handle_progress(
-        "memory_search started",
+        "memory_note started",
         event_kind="tool_start",
-        event_data={"tool_name": "memory_search", "tool_call_id": "call-memory-1"},
+        event_data={"tool_name": "memory_note", "tool_call_id": "call-memory-1"},
     )
 
     running_tool_snapshot = session.inflight_turn_snapshot()
@@ -3748,7 +3748,7 @@ async def test_create_agent_middleware_syncs_real_stage_state_before_running_too
     stage = running_tool_snapshot["canonical_context"]["stages"][0]
     assert stage["stage_goal"] == "Inspect the repository structure"
     assert stage["tool_round_budget"] == 5
-    assert [round_item["tool_names"] for round_item in stage["rounds"]] == [["memory_search"]]
+    assert [round_item["tool_names"] for round_item in stage["rounds"]] == [["memory_note"]]
     assert [round_item["tool_call_ids"] for round_item in stage["rounds"]] == [["call-memory-1"]]
     assert stage["rounds"][0]["tools"] == []
 

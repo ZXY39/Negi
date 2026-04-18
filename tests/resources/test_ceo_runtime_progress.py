@@ -2430,7 +2430,7 @@ def test_inflight_turn_snapshot_prefers_stage_trace_summary_over_flat_tool_event
     assert "tool_events" not in snapshot
 
 
-def test_inflight_snapshot_without_real_stage_state_keeps_legacy_tool_flow_instead_of_synthetic_stage() -> None:
+def test_inflight_snapshot_without_real_stage_state_omits_tool_flow_snapshot() -> None:
     session = RuntimeAgentSession(
         SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
         session_key="web:shared",
@@ -2464,24 +2464,19 @@ def test_inflight_snapshot_without_real_stage_state_keeps_legacy_tool_flow_inste
             "type": "tool_execution_start",
             "timestamp": "2026-04-08T08:00:03Z",
             "payload": {
-                "tool_name": "memory_search",
-                "text": "memory_search started",
-                "tool_call_id": "memory_search:2",
+                "tool_name": "memory_note",
+                "text": "memory_note started",
+                "tool_call_id": "memory_note:2",
             },
         },
     ]
 
     snapshot = session.inflight_turn_snapshot()
 
-    assert snapshot is not None
-    summary = snapshot.get("execution_trace_summary") if isinstance(snapshot, dict) else None
-    stages = summary.get("stages") if isinstance(summary, dict) else None
-    assert not stages
-    assert [item["tool_name"] for item in snapshot["tool_events"]] == ["load_tool_context", "memory_search"]
-    assert [item["status"] for item in snapshot["tool_events"]] == ["success", "running"]
+    assert snapshot is None
 
 
-def test_inflight_snapshot_with_empty_stage_list_keeps_legacy_tool_flow() -> None:
+def test_inflight_snapshot_with_empty_stage_list_omits_tool_flow_snapshot() -> None:
     session = RuntimeAgentSession(
         SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
         session_key="web:shared",
@@ -2515,19 +2510,16 @@ def test_inflight_snapshot_with_empty_stage_list_keeps_legacy_tool_flow() -> Non
             "type": "tool_execution_start",
             "timestamp": "2026-04-08T08:10:03Z",
             "payload": {
-                "tool_name": "memory_search",
-                "text": "memory_search started",
-                "tool_call_id": "memory_search:2",
+                "tool_name": "memory_note",
+                "text": "memory_note started",
+                "tool_call_id": "memory_note:2",
             },
         },
     ]
 
     snapshot = session.inflight_turn_snapshot()
 
-    assert snapshot is not None
-    assert snapshot.get("execution_trace_summary") == {}
-    assert [item["tool_name"] for item in snapshot["tool_events"]] == ["load_tool_context", "memory_search"]
-    assert [item["status"] for item in snapshot["tool_events"]] == ["success", "running"]
+    assert snapshot is None
 
 
 def test_inflight_snapshot_with_real_stage_state_preserves_goal_budget_and_round_boundaries() -> None:
@@ -2560,8 +2552,8 @@ def test_inflight_snapshot_with_real_stage_state_preserves_goal_budget_and_round
                         },
                         {
                             "round_index": 2,
-                            "tool_call_ids": ["memory_search:2"],
-                            "tool_names": ["memory_search"],
+                            "tool_call_ids": ["memory_note:2"],
+                            "tool_names": ["memory_note"],
                         },
                     ],
                 }
@@ -2591,9 +2583,9 @@ def test_inflight_snapshot_with_real_stage_state_preserves_goal_budget_and_round
             "type": "tool_execution_start",
             "timestamp": "2026-04-08T08:01:10Z",
             "payload": {
-                "tool_name": "memory_search",
+                "tool_name": "memory_note",
                 "text": "round 2 started",
-                "tool_call_id": "memory_search:2",
+                "tool_call_id": "memory_note:2",
             },
         },
     ]
@@ -2608,11 +2600,12 @@ def test_inflight_snapshot_with_real_stage_state_preserves_goal_budget_and_round
     assert stage["stage_id"] == "frontdoor-stage-1"
     assert stage["stage_goal"] == "查看当前可检索的长期记忆，并向用户按类别清晰汇总我已记住的内容。"
     assert stage["tool_round_budget"] == 3
-    assert [len(round_item["tools"]) for round_item in stage["rounds"]] == [1, 1]
-    assert [item["tool_name"] for item in stage["rounds"][0]["tools"]] == ["load_tool_context"]
-    assert [item["tool_name"] for item in stage["rounds"][1]["tools"]] == ["memory_search"]
-    assert stage["rounds"][0]["tools"][0]["tool_call_id"] == "load_tool_context:1"
-    assert stage["rounds"][1]["tools"][0]["tool_call_id"] == "memory_search:2"
+    assert [len(round_item["tools"]) for round_item in stage["rounds"]] == [0, 0]
+    assert [round_item["tool_names"] for round_item in stage["rounds"]] == [["load_tool_context"], ["memory_note"]]
+    assert [round_item["tool_call_ids"] for round_item in stage["rounds"]] == [
+        ["load_tool_context:1"],
+        ["memory_note:2"],
+    ]
 
 
 def test_snapshot_includes_compression_state_when_frontdoor_archive_is_running() -> None:

@@ -53,7 +53,7 @@ class ContextCatalogIndexer:
         skill_ids: set[str] | None = None,
         tool_ids: set[str] | None = None,
     ) -> dict[str, int]:
-        from g3ku.agent.rag_memory import ContextRecordV2
+        from g3ku.agent.catalog_store import ContextRecordV2
 
         existing = await self._list_existing()
         seen: set[str] = set()

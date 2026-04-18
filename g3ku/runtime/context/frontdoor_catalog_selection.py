@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from g3ku.agent.rag_memory import DashScopeTextReranker
+from g3ku.agent.catalog_store import DashScopeTextReranker
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.llm_config.runtime_resolver import resolve_memory_rerank_target
 from g3ku.providers.chatmodels import build_chat_model

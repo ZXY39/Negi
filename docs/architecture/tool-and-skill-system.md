@@ -142,6 +142,7 @@ Maintenance note for the memory tool family:
 - CEO/frontdoor now receives committed long-term memory through the injected `MEMORY.md` snapshot, not through a retrieval tool call.
 - `memory_note(ref)` is the only on-demand detailed-memory loader.
 - Node execution and acceptance paths no longer inject extra memory retrieval blocks; they only use the catalog bridge for tool/skill narrowing.
+- That catalog bridge is now catalog-only: it owns context-record storage and dense/sparse tool-skill narrowing data, but it no longer delegates through the old `rag_memory` long-term memory runtime.
 - `memory_write` and `memory_delete` are queue-submit tools. They ask the memory runtime to process a later batch; they do not synchronously rewrite committed memory during the current turn.
 - The actual rewrite/delete decision is now delegated to a dedicated internal memory agent with a restricted tool surface. That internal agent is not part of the normal agent-facing tool catalog and should not be debugged as if it were a surfaced Tool Admin family.
 
