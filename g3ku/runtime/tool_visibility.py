@@ -14,8 +14,9 @@ CEO_FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "content_open",
     "content_search",
     "exec",
-    "memory_search",
     "memory_write",
+    "memory_delete",
+    "memory_note",
 )
 
 NODE_FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = (

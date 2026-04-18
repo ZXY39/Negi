@@ -1,14 +1,14 @@
-﻿schema_version: 1
+schema_version: 1
 kind: tool
 name: memory_write
-description: Write explicit permanent memory items and make them searchable for future retrieval.
+description: Queue explicit durable memory write requests for the memory agent.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: Repository-managed structured memory write tool for explicit CEO long-term memory saves.
+  summary: Repository-managed queued memory write tool for explicit CEO long-term memory saves.
   compare_rule: Treat changes in main implementation, parameters, permissions, settings, or return payload shape as version changes.
   source_of_truth: This resource.yaml and the main implementation are authoritative; toolskills supplement usage guidance when present.
 protocol: mcp
@@ -24,136 +24,13 @@ permissions:
 parameters:
   type: object
   properties:
-    facts:
-      type: array
-      description: One to five structured memory facts to upsert immediately.
-      items:
-        type: object
-        properties:
-          category:
-            type: string
-            enum:
-              - constraint
-              - default_setting
-              - historical_fact
-              - identity
-              - preference
-              - relationship
-              - stateful_fact
-              - workflow_rule
-            description: Structured fact category.
-          entity:
-            type: string
-            description: Entity the fact is about (e.g. user, project:g3ku).
-          attribute:
-            type: string
-            description: Attribute name for the entity (stable key within the entity).
-          value:
-            type:
-              - string
-              - number
-              - boolean
-              - object
-              - array
-              - 'null'
-            description: Canonical value for the fact (string/number/bool/object/array).
-          observed_at:
-            type: string
-            description: ISO8601 timestamp when the fact was observed (or recorded).
-          time_semantics:
-            type: string
-            enum:
-              - current_state
-              - durable_until_replaced
-              - historical_observation
-            description: How the fact should be interpreted over time.
-          source_excerpt:
-            type: string
-            description: Short excerpt from the current user turn supporting this fact.
-          qualifier:
-            type: object
-            description: Optional qualifier metadata (e.g. project context, constraints).
-          merge_mode:
-            type: string
-            enum:
-              - merge
-            description: Optional preference-only merge behavior.
-          expires_at:
-            type:
-              - string
-              - 'null'
-            description: Optional ISO8601 expiry timestamp (null for no expiry).
-        required:
-          - category
-          - entity
-          - attribute
-          - value
-          - observed_at
-          - time_semantics
-          - source_excerpt
+    content:
+      type: string
+      description: Raw memory candidate text to queue for the memory agent.
   required:
-    - facts
-model_description: Write durable memory facts. Use string values in the callable schema.
-model_parameters:
-  type: object
-  properties:
-    facts:
-      type: array
-      description: One to five memory facts to write.
-      items:
-        type: object
-        properties:
-          category:
-            type: string
-            enum:
-              - constraint
-              - default_setting
-              - historical_fact
-              - identity
-              - preference
-              - relationship
-              - stateful_fact
-              - workflow_rule
-          entity:
-            type: string
-          attribute:
-            type: string
-          value:
-            type: string
-            description: Canonical fact value. Serialize object/array values as a JSON-serialized string.
-          observed_at:
-            type: string
-          time_semantics:
-            type: string
-            enum:
-              - current_state
-              - durable_until_replaced
-              - historical_observation
-          source_excerpt:
-            type: string
-          qualifier:
-            type: object
-          merge_mode:
-            type: string
-            enum:
-              - merge
-          expires_at:
-            type:
-              - string
-              - 'null'
-        required:
-          - category
-          - entity
-          - attribute
-          - value
-          - observed_at
-          - time_semantics
-          - source_excerpt
-  required:
-    - facts
+    - content
 exposure:
   agent: true
   main_runtime: true
 toolskill:
   enabled: true
-

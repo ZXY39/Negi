@@ -18,6 +18,7 @@ ROLE_SCOPE_ALIASES = {
     "ceo": "ceo",
     "execution": "execution",
     "inspection": "inspection",
+    "memory": "memory",
     "checker": "inspection",
 }
 
@@ -26,11 +27,13 @@ DEFAULT_ROLE_MAX_ITERATIONS = {
     "ceo": None,
     "execution": None,
     "inspection": None,
+    "memory": None,
 }
 DEFAULT_ROLE_MAX_CONCURRENCY = {
     "ceo": None,
     "execution": None,
     "inspection": None,
+    "memory": 1,
 }
 DEFAULT_NODE_DISPATCH_CONCURRENCY = {
     "execution": 8,
@@ -184,13 +187,14 @@ class AgentDefaults(Base):
 
 
 class RoleIterationConfig(Base):
-    """Per-role loop limits for CEO, execution, and inspection runtimes."""
+    """Per-role loop limits for CEO, execution, inspection, and memory runtimes."""
 
     ceo: int | None = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["ceo"], ge=0)
     execution: int | None = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["execution"], ge=0)
     inspection: int | None = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["inspection"], ge=0)
+    memory: int | None = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["memory"], ge=0)
 
-    @field_validator("ceo", "execution", "inspection", mode="before")
+    @field_validator("ceo", "execution", "inspection", "memory", mode="before")
     @classmethod
     def _normalize_iterations(cls, value: Any, info: ValidationInfo) -> int | None:
         if value is None:
@@ -201,11 +205,12 @@ class RoleIterationConfig(Base):
 
 
 class RoleConcurrencyConfig(Base):
-    """Per-role parallel work caps for CEO, execution, and inspection runtimes."""
+    """Per-role parallel work caps for CEO, execution, inspection, and memory runtimes."""
 
     ceo: int | None = Field(default=DEFAULT_ROLE_MAX_CONCURRENCY["ceo"], ge=0)
     execution: int | None = Field(default=DEFAULT_ROLE_MAX_CONCURRENCY["execution"], ge=0)
     inspection: int | None = Field(default=DEFAULT_ROLE_MAX_CONCURRENCY["inspection"], ge=0)
+    memory: int = Field(default=DEFAULT_ROLE_MAX_CONCURRENCY["memory"], ge=1, le=1)
 
     @field_validator("ceo", "execution", "inspection", mode="before")
     @classmethod
@@ -215,6 +220,18 @@ class RoleConcurrencyConfig(Base):
         if isinstance(value, str) and not value.strip():
             return DEFAULT_ROLE_MAX_CONCURRENCY[info.field_name]
         return int(value)
+
+    @field_validator("memory", mode="before")
+    @classmethod
+    def _normalize_memory_concurrency(cls, value: Any) -> int:
+        if value is None:
+            return 1
+        if isinstance(value, str) and not value.strip():
+            return 1
+        normalized = int(value)
+        if normalized != 1:
+            raise ValueError("agents.roleConcurrency.memory is fixed at 1")
+        return 1
 
 
 class ModelFallbackTarget(Base):
@@ -368,8 +385,9 @@ class RoleModelRoutingConfig(Base):
     ceo: list[str] = Field(default_factory=list)
     execution: list[str] = Field(default_factory=list)
     inspection: list[str] = Field(default_factory=list)
+    memory: list[str] = Field(default_factory=list)
 
-    @field_validator("ceo", "execution", "inspection", mode="before")
+    @field_validator("ceo", "execution", "inspection", "memory", mode="before")
     @classmethod
     def _normalize_chain(cls, value: Any) -> list[str]:
         items = value if isinstance(value, list) else []
@@ -647,6 +665,32 @@ class MemoryCostConfig(Base):
     max_increase_pct: int = 15
 
 
+class MemoryDocumentConfig(Base):
+    """Markdown memory document limits and paths."""
+
+    summary_max_chars: int = Field(default=100, ge=1)
+    document_max_chars: int = Field(default=10000, ge=1)
+    memory_file: str = "memory/MEMORY.md"
+    notes_dir: str = "memory/notes"
+
+
+class MemoryQueueConfig(Base):
+    """Queued memory worker controls."""
+
+    queue_file: str = "memory/queue.jsonl"
+    ops_file: str = "memory/ops.jsonl"
+    batch_max_chars: int = Field(default=50000, ge=1)
+    max_wait_seconds: int = Field(default=3, ge=0)
+    review_interval_turns: int = Field(default=10, ge=1)
+
+
+class MemoryAgentConfig(Base):
+    """Dedicated memory agent execution controls."""
+
+    model_key: str = ""
+    repair_attempt_limit: int = Field(default=1, ge=0)
+
+
 class MemoryAssemblyConfig(Base):
     """Frontdoor dynamic tool and skill selection controls."""
 
@@ -674,8 +718,9 @@ class MemoryAssemblyConfig(Base):
             'task_summary',
             'task_list',
             'task_progress',
-            'memory_search',
             'memory_write',
+            'memory_delete',
+            'memory_note',
             'message',
             'task_runtime',
             'skill_access',
@@ -710,6 +755,9 @@ class MemoryToolsConfig(Base):
     catalog_summary: MemoryCatalogSummaryConfig = Field(default_factory=MemoryCatalogSummaryConfig)
     bootstrap_mode: Literal["new_only", "full", "none"] = "new_only"
     retention_days: int | None = None
+    document: MemoryDocumentConfig = Field(default_factory=MemoryDocumentConfig)
+    queue: MemoryQueueConfig = Field(default_factory=MemoryQueueConfig)
+    agent: MemoryAgentConfig = Field(default_factory=MemoryAgentConfig)
 
 
 

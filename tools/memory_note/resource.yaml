@@ -1,0 +1,36 @@
+schema_version: 1
+kind: tool
+name: memory_note
+description: Load a detailed memory note by short ref.
+tool_result_delivery_contract: runtime_managed
+source:
+  type: ''
+  url: ''
+  ref: ''
+current_version:
+  summary: Repository-managed note loader for detailed long-term memory note bodies.
+  compare_rule: Treat changes in main implementation, parameters, permissions, settings, or return payload shape as version changes.
+  source_of_truth: This resource.yaml and the main implementation are authoritative; toolskills supplement usage guidance when present.
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    ref:
+      type: string
+      description: Short note ref such as note_a1b2.
+  required:
+    - ref
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

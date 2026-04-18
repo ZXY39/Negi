@@ -327,10 +327,10 @@ def test_ceo_prompt_builder_keeps_memory_guidance() -> None:
     builder = CeoPromptBuilder(loop=SimpleNamespace(workspace=Path.cwd()))
     prompt = builder.build(skills=[])
     assert "memory_write" in prompt
-    assert "stateful_fact" in prompt
-    assert "observed_at" in prompt
     assert "memory_delete" in prompt
-    assert "memory_search" in prompt
+    assert "memory_note" in prompt
+    assert "MEMORY.md" in prompt
+    assert "memory_search" not in prompt
     assert "已检索上下文" in prompt
     assert "submit_next_stage" in prompt
 
@@ -867,7 +867,7 @@ async def test_message_builder_renders_external_tool_context_for_unavailable_cal
 
 
 @pytest.mark.asyncio
-async def test_message_builder_uses_memory_only_retrieval_for_memory_intent() -> None:
+async def test_message_builder_uses_memory_write_hint_without_memory_retrieval_overlay() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _SemanticMemoryManager(
         response="remembered browser workflow",
@@ -887,8 +887,7 @@ async def test_message_builder_uses_memory_only_retrieval_for_memory_intent() ->
         persisted_session=None,
     )
 
-    assert memory_manager.calls[0]["search_context_types"] == ["memory"]
-    assert memory_manager.calls[0]["allowed_context_types"] == ["memory"]
+    assert memory_manager.calls == []
     assert result.trace["memory_write_hint"]["triggered"] is True
 
 
@@ -2971,10 +2970,10 @@ async def test_message_builder_ignores_same_session_turn_memory_records_for_ceo_
         user_content="follow up question",
     )
 
-    assert memory_manager.calls[0]["exclude_same_session_turn_memory"] is True
     overlay = str(result.turn_overlay_text or "")
     assert "turn memory snippet" not in overlay
-    assert result.trace["same_session_turn_memory_filtered_count"] == 1
+    assert memory_manager.calls == []
+    assert result.trace["same_session_turn_memory_filtered_count"] == 0
     assert result.trace["retrieved_record_count"] == 0
 
 
@@ -3014,6 +3013,112 @@ async def test_message_builder_keeps_turn_memory_from_different_session_in_share
     )
 
     overlay = str(result.turn_overlay_text or "")
-    assert "other session snippet" in overlay
+    assert "other session snippet" not in overlay
+    assert memory_manager.calls == []
     assert result.trace["same_session_turn_memory_filtered_count"] == 0
-    assert result.trace["retrieved_record_count"] == 1
+    assert result.trace["retrieved_record_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_ceo_context_assembly_injects_memory_snapshot_without_memory_search_overlay() -> None:
+    loop = SimpleNamespace(
+        memory_manager=SimpleNamespace(
+            snapshot_text=lambda **_: "---\n2026/4/17-self：\n完成任务必须说明任务总耗时\n",
+            sync_catalog=None,
+        ),
+        main_task_service=None,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                skill_inventory_top_k=16,
+                extension_tool_top_k=16,
+                core_tools=["memory_write", "memory_delete", "memory_note"],
+                frontdoor_global_summary_trigger_ratio=0.5,
+                frontdoor_global_summary_target_ratio=0.2,
+                frontdoor_global_summary_min_output_tokens=2000,
+                frontdoor_global_summary_max_output_ratio=0.05,
+                frontdoor_global_summary_max_output_tokens_ceiling=12000,
+                frontdoor_global_summary_pressure_warn_ratio=0.85,
+                frontdoor_global_summary_force_refresh_ratio=0.95,
+                frontdoor_global_summary_min_delta_tokens=2000,
+                frontdoor_global_summary_failure_cooldown_seconds=600,
+                frontdoor_global_summary_model="",
+            )
+        ),
+    )
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=_PromptBuilder())
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+    )
+
+    result = await builder._collect_turn_context_sources(
+        session=session,
+        query_text="记住这个规则",
+        exposure={"tool_names": ["memory_write", "memory_delete", "memory_note"], "tool_families": [], "skills": []},
+        user_content="记住这个规则",
+        hydrated_tool_names=[],
+    )
+
+    overlay = "\n\n".join(result["turn_overlay_parts"])
+    assert "2026/4/17-self：" in overlay
+    assert "memory_search" not in overlay
+
+
+@pytest.mark.asyncio
+async def test_frontdoor_uses_frozen_memory_snapshot_only_once_per_turn() -> None:
+    snapshot_calls: list[dict[str, object]] = []
+    snapshot_values = iter(
+        [
+            "---\n2026/4/17-self：\nUse the first frozen snapshot\n",
+            "---\n2026/4/17-self：\nDo not hot-reload within the same turn\n",
+        ]
+    )
+
+    def _snapshot_text(**kwargs):
+        snapshot_calls.append(dict(kwargs))
+        return next(snapshot_values)
+
+    loop = SimpleNamespace(
+        memory_manager=SimpleNamespace(
+            snapshot_text=_snapshot_text,
+            sync_catalog=None,
+        ),
+        main_task_service=None,
+        _memory_runtime_settings=SimpleNamespace(
+            assembly=SimpleNamespace(
+                skill_inventory_top_k=16,
+                extension_tool_top_k=16,
+                core_tools=["memory_write", "memory_delete", "memory_note"],
+                frontdoor_global_summary_trigger_ratio=0.5,
+                frontdoor_global_summary_target_ratio=0.2,
+                frontdoor_global_summary_min_output_tokens=2000,
+                frontdoor_global_summary_max_output_ratio=0.05,
+                frontdoor_global_summary_max_output_tokens_ceiling=12000,
+                frontdoor_global_summary_pressure_warn_ratio=0.85,
+                frontdoor_global_summary_force_refresh_ratio=0.95,
+                frontdoor_global_summary_min_delta_tokens=2000,
+                frontdoor_global_summary_failure_cooldown_seconds=600,
+                frontdoor_global_summary_model="",
+            )
+        ),
+    )
+    builder = CeoMessageBuilder(loop=loop, prompt_builder=_PromptBuilder())
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+    )
+
+    result = await builder._collect_turn_context_sources(
+        session=session,
+        query_text="remember this rule",
+        exposure={"tool_names": ["memory_write", "memory_delete", "memory_note"], "tool_families": [], "skills": []},
+        user_content="remember this rule",
+        hydrated_tool_names=[],
+    )
+
+    overlay = "\n\n".join(result["turn_overlay_parts"])
+    assert len(snapshot_calls) == 1
+    assert "Use the first frozen snapshot" in overlay
+    assert "Do not hot-reload within the same turn" not in overlay

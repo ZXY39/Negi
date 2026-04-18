@@ -181,6 +181,10 @@ class LLMConfigFacade:
         record = self._hydrate_record_secrets(self.repository.get(binding.llm_config_id))
         return self._binding_payload(binding, record)
 
+    def get_binding_capability(self, config: Any, model_key: str) -> str:
+        payload = self.get_binding(config, model_key)
+        return str(payload.get("capability") or "").strip().lower()
+
     def create_binding(self, config: Any, *, draft_payload: dict[str, Any], binding_payload: dict[str, Any]) -> dict[str, Any]:
         binding = ModelBindingDraft.model_validate(binding_payload)
         from g3ku.config.schema import ManagedModelConfig
@@ -283,6 +287,7 @@ class LLMConfigFacade:
             "ceo": list(config.models.roles.ceo),
             "execution": list(config.models.roles.execution),
             "inspection": list(config.models.roles.inspection),
+            "memory": list(getattr(config.models.roles, "memory", []) or []),
         }
 
     def set_route(self, config: Any, scope: str, model_keys: list[str]) -> dict[str, list[str]]:

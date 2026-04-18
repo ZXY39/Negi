@@ -1,19 +1,17 @@
 # memory_delete
 
-## When To Use
+Queue a durable long-term memory delete request using memory text visible in the current `MEMORY.md` snapshot.
 
-Use `memory_delete` only when you are deleting a specific structured fact and you have an exact identifier:
-- `fact_id` from memory runtime outputs
-- `canonical_key` from structured fact payloads
+## Must Use
 
-Do not use this tool for bulk deletion, fuzzy matching, or guessing. Prefer `memory_search` first to locate the exact target.
+- The user explicitly asks to forget a remembered rule, preference, or fact that is already visible in the current memory snapshot.
 
-## Parameters
+## Input
 
-- `fact_ids`: list of fact ids to delete (exact match).
-- `canonical_keys`: list of canonical keys to delete (exact match).
+- Pass the visible memory text as `target_text`.
 
-## Returns
+## Do Not Use
 
-Returns JSON including `ok` and `deleted` counts.
-
+- Guessing at memories that are not currently visible.
+- Bulk deletion.
+- Removing memory when correction or replacement would be better.

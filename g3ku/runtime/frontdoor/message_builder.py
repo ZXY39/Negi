@@ -12,7 +12,7 @@ from loguru import logger
 
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
-from g3ku.runtime.context.semantic_scope import plan_retrieval_scope, semantic_catalog_rankings
+from g3ku.runtime.context.semantic_scope import semantic_catalog_rankings
 from g3ku.runtime.context.summarizer import score_query
 from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBundle
 from g3ku.runtime.core_tools import resolve_core_tool_targets
@@ -1290,6 +1290,23 @@ class CeoMessageBuilder:
             if str(name or '').strip()
         }
         turn_overlay_parts: list[str] = []
+        memory_snapshot_text = ""
+        if memory_manager is not None:
+            snapshot_reader = getattr(memory_manager, "snapshot_text", None)
+            if callable(snapshot_reader):
+                try:
+                    memory_snapshot_text = str(
+                        snapshot_reader(
+                            session_key=str(getattr(getattr(session, "state", None), "session_key", "") or ""),
+                            channel=str(getattr(session, "_memory_channel", getattr(session, "_channel", "cli")) or "cli"),
+                            chat_id=str(getattr(session, "_memory_chat_id", getattr(session, "_chat_id", session.state.session_key)) or session.state.session_key),
+                        )
+                        or ""
+                    ).strip()
+                except Exception:
+                    memory_snapshot_text = ""
+        if memory_snapshot_text:
+            turn_overlay_parts.append(f"## 长期记忆\n{memory_snapshot_text}".strip())
         if memory_write_terms and memory_write_visible:
             turn_overlay_parts.append(self._memory_write_hint_block(memory_write_terms))
 
@@ -1349,71 +1366,17 @@ class CeoMessageBuilder:
             selected_tool_names=list(candidate_tool_names),
             visible_families=visible_families,
         )
-        retrieval_scope = plan_retrieval_scope(
-            visible_skills=visible_skills,
-            visible_families=visible_families,
-            semantic_frontdoor=semantic_frontdoor,
-        )
-        if visible_only_mode:
-            targeted_skill_ids = self._visible_skill_ids(visible_skills)
-            targeted_tool_ids = self._visible_tool_ids(visible_families)
-            search_context_types = ['memory']
-            if targeted_skill_ids:
-                search_context_types.append('skill')
-            if targeted_tool_ids:
-                search_context_types.append('resource')
-            retrieval_scope = {
-                'mode': 'visible_only',
-                'search_context_types': search_context_types,
-                'allowed_context_types': list(search_context_types),
-                'allowed_resource_record_ids': [f'tool:{item}' for item in targeted_tool_ids],
-                'allowed_skill_record_ids': [f'skill:{item}' for item in targeted_skill_ids],
-            }
-        if memory_write_terms:
-            retrieval_scope = {
-                **retrieval_scope,
-                'search_context_types': ['memory'],
-                'allowed_context_types': ['memory'],
-                'allowed_resource_record_ids': [],
-                'allowed_skill_record_ids': [],
-            }
-
-        session_key = str(session.state.session_key or '')
-        channel = str(getattr(session, '_memory_channel', getattr(session, '_channel', 'cli')) or 'cli')
-        chat_id = str(getattr(session, '_memory_chat_id', getattr(session, '_chat_id', session_key)) or session_key)
         retrieved_bundle = RetrievedContextBundle(query=query_text)
-        if memory_manager is not None and query_text:
-            retrieval_started_at = time.perf_counter()
-            try:
-                retrieved_bundle = await memory_manager.retrieve_context_bundle(
-                    query=query_text,
-                    session_key=session_key,
-                    channel=channel,
-                    chat_id=chat_id,
-                    search_context_types=retrieval_scope['search_context_types'],
-                    allowed_context_types=retrieval_scope['allowed_context_types'],
-                    allowed_resource_record_ids=retrieval_scope['allowed_resource_record_ids'],
-                    allowed_skill_record_ids=retrieval_scope['allowed_skill_record_ids'],
-                    exclude_same_session_turn_memory=True,
-                )
-            except Exception:
-                retrieved_bundle = RetrievedContextBundle(query=query_text)
-            retrieval_elapsed_ms = self._elapsed_ms(retrieval_started_at)
-
-        retrieved_bundle, same_session_turn_memory_filtered_count = self._filter_same_session_turn_memory_records(
-            retrieved_bundle,
-            session_key=session_key,
-            channel=channel,
-            chat_id=chat_id,
-        )
-        retrieved_markdown = self._render_retrieved_context(retrieved_bundle)
-        if memory_write_terms and retrieved_markdown:
-            if split_prompt_builder:
-                turn_overlay_parts.append(self._retrieved_memory_resolution_hint_block())
-            else:
-                retrieved_markdown = f"{self._retrieved_memory_resolution_hint_block()}\n\n{retrieved_markdown}"
-        if retrieved_markdown:
-            turn_overlay_parts.append(retrieved_markdown)
+        retrieval_scope = {
+            'mode': 'disabled',
+            'search_context_types': [],
+            'allowed_context_types': [],
+            'allowed_resource_record_ids': [],
+            'allowed_skill_record_ids': [],
+        }
+        retrieved_markdown = ""
+        same_session_turn_memory_filtered_count = 0
+        retrieval_elapsed_ms = 0.0
 
         return {
             'capability_snapshot': capability_snapshot,
@@ -1970,6 +1933,17 @@ class CeoMessageBuilder:
         summary_generated = False
         refresh_attempted = False
         if bool(refresh_decision["should_refresh"]):
+            memory_manager = getattr(self._loop, "memory_manager", None)
+            if memory_manager is not None and global_zone_source:
+                try:
+                    await memory_manager.enqueue_pre_compression_flush(
+                        session_key=str(getattr(getattr(session, "state", None), "session_key", "") or ""),
+                        channel=str(getattr(session, "_memory_channel", getattr(session, "_channel", "cli")) or "cli"),
+                        chat_id=str(getattr(session, "_memory_chat_id", getattr(session, "_chat_id", getattr(getattr(session, "state", None), "session_key", ""))) or getattr(getattr(session, "state", None), "session_key", "")),
+                        context_messages=list(global_zone_source),
+                    )
+                except Exception:
+                    pass
             refresh_attempted = True
             refresh_result = normalize_summary_result(
                 await summarize_global_context_model_first(

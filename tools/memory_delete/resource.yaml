@@ -1,14 +1,14 @@
-﻿schema_version: 1
+schema_version: 1
 kind: tool
 name: memory_delete
-description: Delete structured memory facts precisely by fact_id and/or canonical_key.
+description: Queue durable long-term memory deletions using visible memory text.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: Repository-managed structured memory delete tool for precise fact removals.
+  summary: Repository-managed queued memory delete tool for visible text removals.
   compare_rule: Treat changes in main implementation, parameters, permissions, settings, or return payload shape as version changes.
   source_of_truth: This resource.yaml and the main implementation are authoritative; toolskills supplement usage guidance when present.
 protocol: mcp
@@ -24,21 +24,13 @@ permissions:
 parameters:
   type: object
   properties:
-    fact_ids:
-      type: array
-      description: Structured fact ids to delete (exact match).
-      items:
-        type: string
-    canonical_keys:
-      type: array
-      description: Structured canonical keys to delete (exact match).
-      items:
-        type: string
-  required: []
+    target_text:
+      type: string
+      description: Memory text visible in the current MEMORY snapshot that should be removed.
+  required:
+    - target_text
 exposure:
   agent: true
   main_runtime: true
 toolskill:
   enabled: true
-
-

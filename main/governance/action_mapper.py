@@ -64,20 +64,6 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
         'description': 'Manage model catalog and role routing.',
         'actions': [{'id': 'manage', 'label': 'Manage Models', 'risk_level': 'high', 'destructive': True, 'allowed_roles': ['ceo']}],
     },
-    'memory_search': {
-        'tool_id': 'memory',
-        'display_name': 'Memory',
-        'description': 'Search long-term memory and expose memory runtime internals.',
-        'actions': [
-            {
-                'id': 'search',
-                'label': 'Search Memory',
-                'risk_level': 'low',
-                'destructive': False,
-                'allowed_roles': DEFAULT_ALLOWED_ROLES,
-            }
-        ],
-    },
     'memory_write': {
         'tool_id': 'memory',
         'display_name': 'Memory',
@@ -95,7 +81,7 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
     'memory_delete': {
         'tool_id': 'memory',
         'display_name': 'Memory',
-        'description': 'Delete structured memory facts precisely by fact_id or canonical_key.',
+        'description': 'Delete visible text from the committed MEMORY.md snapshot.',
         'actions': [
             {
                 'id': 'delete',
@@ -106,10 +92,24 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
             }
         ],
     },
+    'memory_note': {
+        'tool_id': 'memory',
+        'display_name': 'Memory',
+        'description': 'Load a detailed memory note by short ref.',
+        'actions': [
+            {
+                'id': 'note',
+                'label': 'Load Memory Note',
+                'risk_level': 'low',
+                'destructive': False,
+                'allowed_roles': ['ceo'],
+            }
+        ],
+    },
     'memory_runtime': {
         'tool_id': 'memory',
         'display_name': 'Memory',
-        'description': 'Search long-term memory and expose memory runtime internals.',
+        'description': 'Expose queued markdown memory runtime internals.',
         'actions': [
             {
                 'id': 'runtime',

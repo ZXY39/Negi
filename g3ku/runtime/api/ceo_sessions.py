@@ -552,6 +552,17 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
             deleted_task_count = await service.delete_task_records_for_session(session_key)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    memory_manager = getattr(agent, 'memory_manager', None) if agent is not None else None
+    if memory_manager is not None:
+        try:
+            await memory_manager.enqueue_session_boundary_flush(
+                session_key=session_key,
+                channel=('china' if is_channel_session else 'web'),
+                chat_id=str(session_id or '').strip(),
+                trigger_source=('session_cleared' if is_channel_session else 'session_deleted'),
+            )
+        except Exception:
+            pass
     if is_channel_session:
         delete_web_ceo_session_artifacts(
             session_manager=session_manager,

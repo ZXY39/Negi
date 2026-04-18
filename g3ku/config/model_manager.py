@@ -9,7 +9,7 @@ from g3ku.llm_config.enums import AuthMode, Capability
 from g3ku.llm_config.facade import LLMConfigFacade
 from g3ku.utils.api_keys import SingleAPIKeyMaxConcurrency, normalize_single_api_key_max_concurrency
 
-VALID_SCOPES = ("ceo", "execution", "inspection")
+VALID_SCOPES = ("ceo", "execution", "inspection", "memory")
 _UNSET = object()
 
 
@@ -19,6 +19,7 @@ def _normalize_scope(value: str) -> str:
         "ceo": "ceo",
         "execution": "execution",
         "inspection": "inspection",
+        "memory": "memory",
         "checker": "inspection",
     }
     if raw not in mapping:
@@ -266,15 +267,25 @@ class ModelManager:
                 model = self._require_model(key)
                 if not model.enabled:
                     raise ValueError(f"Disabled model cannot be assigned to roles: {key}")
+                if normalized_scope == "memory":
+                    capability = self.facade.get_binding_capability(self.config, key)
+                    if capability != "chat":
+                        raise ValueError(f"memory role only accepts chat-capable models: {key}")
                 seen.add(key)
                 cleaned.append(key)
-            if not cleaned:
+            if not cleaned and normalized_scope != "memory":
                 raise ValueError("model_keys must not be empty")
             prepared["model_keys"] = cleaned
         if max_iterations is not _UNSET:
             prepared["max_iterations"] = self._normalize_optional_limit(max_iterations, field_name="max_iterations")
         if max_concurrency is not _UNSET:
-            prepared["max_concurrency"] = self._normalize_optional_limit(max_concurrency, field_name="max_concurrency")
+            if normalized_scope == "memory":
+                fixed = self._normalize_optional_limit(max_concurrency, field_name="max_concurrency")
+                if fixed not in (None, 1):
+                    raise ValueError("memory role concurrency is fixed at 1")
+                prepared["max_concurrency"] = 1
+            else:
+                prepared["max_concurrency"] = self._normalize_optional_limit(max_concurrency, field_name="max_concurrency")
         if not prepared:
             raise ValueError("model_keys, max_iterations, or max_concurrency must be provided")
         return normalized_scope, prepared

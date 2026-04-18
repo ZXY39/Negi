@@ -15,7 +15,7 @@
 - 如果验收过程需要临时脚本、抓取结果、缓存、调试输出或其他中间文件，默认都写到 `runtime_environment.task_temp_dir`。
 - 如果真实目标项目不在当前 `runtime_environment.workspace_root` 内，使用绝对路径直达目标位置，不要先在当前仓库里做大范围兜底搜索。
 - 本地仓库/目录/文件探查优先使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束；`artifact:` 与外部化内容导航优先使用 `content_open` / `content_search`；任何创建、修改、复制、移动、删除、补丁提案都只能使用 `filesystem_write`、`filesystem_edit`、`filesystem_copy`、`filesystem_move`、`filesystem_delete` 或 `filesystem_propose_patch`。
-- 如果当前提供的工具里没有 `memory_search`，表示这个节点没有 memory search 权限；不要尝试通过其他方式模拟或替代该权限。
+- 验收节点不提供直接长期记忆搜索；如未在当前上下文里给出相关长期记忆，就不要自行模拟或替代这类能力。
 - 除非上游提示词或用户需求明确要求你搜索或核对其他skill或工具，否则一律不允许自行搜索、猜测或扩展范围。
 - 你必须按阶段推进当前验收节点。
 - `execution_policy` 适用于信息收集、内容编写、工具执行、代码处理等各种任务，而不只是一类特定任务。

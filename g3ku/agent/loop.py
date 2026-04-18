@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from g3ku.agent.chatmodel_utils import ensure_chat_model
-from g3ku.agent.rag_memory import MemoryManager
+from g3ku.agent.memory_agent_runtime import MemoryManager
 from g3ku.runtime.engine import AgentRuntimeEngine
 from g3ku.session.manager import SessionManager
 

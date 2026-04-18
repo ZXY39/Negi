@@ -853,6 +853,10 @@ def test_sync_internal_tool_runtimes_reads_memory_runtime_manifest(tmp_path):
         assert changed is True
         assert loop._memory_runtime_settings is not None
         assert loop._memory_runtime_settings.enabled is True
+        assert loop._memory_runtime_settings.document.summary_max_chars == 100
+        assert loop._memory_runtime_settings.document.document_max_chars == 10000
+        assert loop._memory_runtime_settings.queue.batch_max_chars == 50000
+        assert loop._memory_runtime_settings.queue.max_wait_seconds == 3
         assert loop.memory_manager is not None
         assert loop._store_enabled is True
     finally:
