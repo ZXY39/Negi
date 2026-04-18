@@ -81,6 +81,7 @@ class RuntimeAgentSession:
         self._frontdoor_selection_debug: dict[str, Any] = {}
         self._frontdoor_request_body_messages: list[dict[str, Any]] = []
         self._frontdoor_history_shrink_reason: str = ""
+        self._frontdoor_token_preflight_diagnostics: dict[str, Any] = {}
         self._frontdoor_actual_request_path: str = ""
         self._frontdoor_actual_request_history: list[dict[str, Any]] = []
         self._frontdoor_previous_actual_request_path: str = ""
@@ -165,6 +166,9 @@ class RuntimeAgentSession:
         self._frontdoor_history_shrink_reason = str(
             snapshot.get("frontdoor_history_shrink_reason") or ""
         ).strip()
+        self._frontdoor_token_preflight_diagnostics = dict(
+            snapshot.get("frontdoor_token_preflight_diagnostics") or {}
+        )
         self._frontdoor_actual_request_path = str(
             snapshot.get("frontdoor_actual_request_path") or ""
         ).strip()
@@ -250,6 +254,9 @@ class RuntimeAgentSession:
                     "frontdoor_history_shrink_reason": str(
                         getattr(self, "_frontdoor_history_shrink_reason", "") or ""
                     ).strip(),
+                    "frontdoor_token_preflight_diagnostics": copy.deepcopy(
+                        getattr(self, "_frontdoor_token_preflight_diagnostics", None) or {}
+                    ),
                     "frontdoor_actual_request_path": str(
                         getattr(self, "_frontdoor_actual_request_path", "") or ""
                     ).strip(),
@@ -1183,6 +1190,11 @@ class RuntimeAgentSession:
         ).strip()
         if frontdoor_history_shrink_reason:
             snapshot["frontdoor_history_shrink_reason"] = frontdoor_history_shrink_reason
+        frontdoor_token_preflight_diagnostics = copy.deepcopy(
+            getattr(self, "_frontdoor_token_preflight_diagnostics", None) or {}
+        )
+        if frontdoor_token_preflight_diagnostics:
+            snapshot["frontdoor_token_preflight_diagnostics"] = frontdoor_token_preflight_diagnostics
         frontdoor_selection_debug = getattr(self, "_frontdoor_selection_debug", None)
         if isinstance(frontdoor_selection_debug, dict) and frontdoor_selection_debug:
             snapshot["frontdoor_selection_debug"] = copy.deepcopy(frontdoor_selection_debug)
@@ -1218,6 +1230,7 @@ class RuntimeAgentSession:
             and "hydrated_tool_names" not in snapshot
             and "frontdoor_request_body_messages" not in snapshot
             and "frontdoor_history_shrink_reason" not in snapshot
+            and "frontdoor_token_preflight_diagnostics" not in snapshot
             and "frontdoor_selection_debug" not in snapshot
             and "actual_request_path" not in snapshot
             and "prompt_cache_key_hash" not in snapshot

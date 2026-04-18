@@ -355,6 +355,31 @@ heartbeat 使用的是专门的内部 prompt lane，它的稳定前缀和 reques
 - 按 runtime bug 处理
 - 不要把它解释成“正常上下文整理”
 
+## 4.5 token preflight 之后要看哪份诊断
+
+当前 CEO/frontdoor 在真正发 provider 请求前还有最后一层 token preflight。
+
+排查顺序应是：
+
+- 先看 actual request artifact，确认最终 `request_messages` / `provider_request_body`
+- 再看 `frontdoor_token_preflight_diagnostics`
+- 最后再回头看 builder 里的 `pre_summary_prompt_tokens`
+
+原因：
+
+- builder 里的 token 估算仍然只说明“组装阶段看到的上下文压力”
+- 真正决定本轮是否在发送前压缩的，是 provider-send 前的最终 preflight
+
+如果 `frontdoor_token_preflight_diagnostics.applied=true`：
+
+- 预期 `frontdoor_history_shrink_reason` 为 `token_compression`
+- 如果 diagnostics 显示已触发 preflight，但 shrink reason 不是 `token_compression`，优先按 runtime bug 排查
+
+如果 diagnostics 显示未触发 preflight，但请求仍明显缩短：
+
+- 优先回到 `stage_compaction` / continuity baseline handoff 链路
+- 不要把所有缩短都归因到 token preflight
+
 ## 5. 修改节点上下文策略时必须重点验证的地方
 
 下面这些检查点不只适用于 CEO/frontdoor，后续改 node context strategy 时也必须逐条过。

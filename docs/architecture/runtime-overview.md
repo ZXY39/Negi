@@ -574,6 +574,9 @@ The prompt token trace also changed:
 
 - `pre_summary_prompt_tokens` is the trigger-side estimate before long-context summary injection, and it must include the stage workset.
 - `effective_prompt_tokens` is the estimate for the final model request actually sent after prompt assembly.
+- CEO/frontdoor now also runs a final token preflight immediately before provider send. This happens after fresh-turn request seeding, completed-continuity bridge decisions, provider tool-schema seeding, and frozen `MEMORY.md` injection have already produced the authoritative request projection.
+- That preflight is the final gate for provider-bound request size. If it compacts the request, `frontdoor_history_shrink_reason` must be `token_compression`; the runtime must not invent a second competing shrink-reason field.
+- The preflight emits additive diagnostics as `frontdoor_token_preflight_diagnostics` on graph state, inflight/paused snapshots, and completed continuity sidecars. Maintainers should treat that payload as observability for the final gate, not as a replacement for the request-body baseline contract.
 
 ## CEO Inline Tool Reminder Sidecar
 

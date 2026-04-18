@@ -27,6 +27,14 @@ from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.semantic_context_summary import default_semantic_context_state
 from g3ku.runtime.semantic_context_summary import estimate_message_tokens
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
+from g3ku.runtime.frontdoor.token_preflight_compaction import (
+    FRONTDOOR_COMPACTED_HISTORY_MAX_TOKENS,
+    FrontdoorTokenPreflightResult,
+    build_frontdoor_token_preflight_policy,
+    compact_frontdoor_history_zone,
+    estimate_frontdoor_provider_request_tokens,
+    should_run_frontdoor_token_preflight,
+)
 from main.models import normalize_execution_policy_metadata
 from main.protocol import now_iso
 from main.runtime.chat_backend import build_actual_request_diagnostics
@@ -372,6 +380,105 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> list[dict[str, Any]]:
         body_messages, _contract_messages = cls._split_request_body_and_tool_contract_messages(request_messages)
         return [dict(item) for item in list(body_messages or []) if isinstance(item, dict)]
+
+    @classmethod
+    def _rewrite_frontdoor_request_messages_with_compacted_history(
+        cls,
+        *,
+        request_messages: list[dict[str, Any]],
+        compacted_history: Any,
+    ) -> list[dict[str, Any]]:
+        body_messages, contract_messages = cls._split_request_body_and_tool_contract_messages(request_messages)
+        if not body_messages:
+            return [dict(item) for item in list(request_messages or []) if isinstance(item, dict)]
+
+        normalized_body = [dict(item) for item in body_messages if isinstance(item, dict)]
+        system_prefix: list[dict[str, Any]] = []
+        if normalized_body and str(normalized_body[0].get("role") or "").strip().lower() == "system":
+            system_prefix = [dict(normalized_body[0])]
+            normalized_body = normalized_body[1:]
+
+        recent_tail_count = min(len(normalized_body), 4)
+        if recent_tail_count <= 0 or len(normalized_body) <= recent_tail_count:
+            return [*system_prefix, *normalized_body, *contract_messages]
+
+        recent_tail = [dict(item) for item in normalized_body[-recent_tail_count:]]
+        return [
+            *system_prefix,
+            dict(getattr(compacted_history, "compacted_block", {}) or {}),
+            *recent_tail,
+            *contract_messages,
+        ]
+
+    def _run_frontdoor_token_preflight_compaction(
+        self,
+        *,
+        state: CeoGraphState,
+        request_messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]],
+        provider_request_body: dict[str, Any] | None,
+    ) -> FrontdoorTokenPreflightResult:
+        assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
+        policy = build_frontdoor_token_preflight_policy(
+            max_context_tokens=int(
+                getattr(assembly_cfg, "frontdoor_compaction_max_context_tokens", 200000) or 200000
+            ),
+            trigger_ratio=float(
+                getattr(assembly_cfg, "frontdoor_compaction_trigger_ratio", 0.10) or 0.10
+            ),
+        )
+        final_request_tokens = estimate_frontdoor_provider_request_tokens(
+            provider_request_body=provider_request_body,
+            request_messages=request_messages,
+            tool_schemas=tool_schemas,
+        )
+        diagnostics: dict[str, Any] = {
+            "applied": False,
+            "final_request_tokens": final_request_tokens,
+            "trigger_tokens": int(policy.trigger_tokens),
+            "max_context_tokens": int(policy.max_context_tokens),
+        }
+        if not should_run_frontdoor_token_preflight(
+            final_request_tokens=final_request_tokens,
+            policy=policy,
+        ):
+            return FrontdoorTokenPreflightResult(
+                request_messages=list(request_messages),
+                final_request_tokens=final_request_tokens,
+                history_shrink_reason="",
+                diagnostics=diagnostics,
+            )
+
+        compacted_history = compact_frontdoor_history_zone(
+            raw_history_messages=self._request_body_messages_without_tool_contracts(request_messages),
+            frontdoor_stage_state=dict(state.get("frontdoor_stage_state") or {}),
+            max_compacted_tokens=FRONTDOOR_COMPACTED_HISTORY_MAX_TOKENS,
+        )
+        rewritten_messages = self._rewrite_frontdoor_request_messages_with_compacted_history(
+            request_messages=request_messages,
+            compacted_history=compacted_history,
+        )
+        rewritten_tokens = estimate_frontdoor_provider_request_tokens(
+            provider_request_body=None,
+            request_messages=rewritten_messages,
+            tool_schemas=tool_schemas,
+        )
+        diagnostics.update(
+            {
+                "applied": True,
+                "compacted_block_tokens": int(getattr(compacted_history, "compacted_block_tokens", 0) or 0),
+                "retained_completed_stage_ids": list(
+                    getattr(compacted_history, "retained_completed_stage_ids", []) or []
+                ),
+                "final_request_tokens": rewritten_tokens,
+            }
+        )
+        return FrontdoorTokenPreflightResult(
+            request_messages=rewritten_messages,
+            final_request_tokens=rewritten_tokens,
+            history_shrink_reason="token_compression",
+            diagnostics=diagnostics,
+        )
 
     def _refresh_runtime_config_for_retry_invalidation(self) -> bool:
         try:
@@ -1058,6 +1165,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             self._frontdoor_selection_debug_snapshot(state),
         )
         if isinstance(state, dict):
+            if "frontdoor_token_preflight_diagnostics" in state:
+                setattr(
+                    target_session,
+                    "_frontdoor_token_preflight_diagnostics",
+                    copy.deepcopy(dict(state.get("frontdoor_token_preflight_diagnostics") or {})),
+                )
             diagnostics = dict(state.get("prompt_cache_diagnostics") or {})
             actual_request_path = str(state.get("frontdoor_actual_request_path") or "").strip()
             actual_request_history = [
@@ -2815,6 +2928,36 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 request_messages,
                 overlay_text=str(state_for_request.get("repair_overlay_text") or "").strip(),
             )
+            provider_request_body = {
+                "input": list(request_messages),
+                "tools": list(actual_tool_schemas or []),
+                "parallel_tool_calls": (bool(state_for_request.get("parallel_enabled")) if langchain_tools else None),
+            }
+            preflight = self._run_frontdoor_token_preflight_compaction(
+                state=state_for_request,
+                request_messages=request_messages,
+                tool_schemas=actual_tool_schemas,
+                provider_request_body=provider_request_body,
+            )
+            if isinstance(preflight, dict):
+                preflight_request_messages = list(preflight.get("request_messages") or request_messages)
+                preflight_diagnostics = dict(preflight.get("frontdoor_token_preflight_diagnostics") or {})
+                preflight_shrink_reason = str(preflight.get("frontdoor_history_shrink_reason") or "").strip()
+            else:
+                preflight_request_messages = list(preflight.request_messages)
+                preflight_diagnostics = dict(preflight.diagnostics)
+                preflight_shrink_reason = str(preflight.history_shrink_reason or "").strip()
+            request_messages = preflight_request_messages
+            state_for_request = {
+                **dict(state_for_request or {}),
+                "frontdoor_live_request_messages": list(request_messages),
+                "frontdoor_token_preflight_diagnostics": preflight_diagnostics,
+                "frontdoor_history_shrink_reason": str(
+                    preflight_shrink_reason
+                    or state_for_request.get("frontdoor_history_shrink_reason")
+                    or ""
+                ).strip(),
+            }
             prompt_cache_diagnostics = {
                 **prompt_cache_diagnostics,
                 **build_actual_request_diagnostics(
@@ -2890,6 +3033,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "model_refs": list(state_for_request.get("model_refs") or []),
             "prompt_cache_key": prompt_cache_key,
             "prompt_cache_diagnostics": prompt_cache_diagnostics,
+            "frontdoor_token_preflight_diagnostics": dict(
+                state_for_request.get("frontdoor_token_preflight_diagnostics") or {}
+            ),
             **actual_request_trace,
             "response_payload": self._checkpoint_safe_model_response_payload(message),
             "empty_response_retry_count": empty_response_retry_count,

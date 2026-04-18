@@ -941,6 +941,7 @@ def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | 
     normalized = {
         "frontdoor_request_body_messages": _normalized_message_records(payload.get("frontdoor_request_body_messages")),
         "frontdoor_history_shrink_reason": shrink_reason,
+        "frontdoor_token_preflight_diagnostics": dict(payload.get("frontdoor_token_preflight_diagnostics") or {}),
         "frontdoor_actual_request_path": str(payload.get("frontdoor_actual_request_path") or "").strip(),
         "frontdoor_actual_request_history": _normalized_message_records(payload.get("frontdoor_actual_request_history")),
         "frontdoor_stage_state": dict(payload.get("frontdoor_stage_state") or {}),

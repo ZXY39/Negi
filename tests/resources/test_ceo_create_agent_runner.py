@@ -3244,6 +3244,17 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(
+        runner,
+        "_selected_tool_schemas",
+        lambda tool_names: [
+            {
+                "type": "function",
+                "function": {"name": str(name), "description": "", "parameters": {"type": "object"}},
+            }
+            for name in list(tool_names or [])
+        ],
+    )
     monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
     monkeypatch.setattr(
@@ -3253,6 +3264,7 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
     )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
+    setattr(runner, "_run_frontdoor_token_preflight_compaction", lambda **_: None)
     monkeypatch.setattr(
         runner,
         "_run_frontdoor_token_preflight_compaction",
