@@ -323,8 +323,6 @@ const U = {
     ceoComposerOutlineProgress: document.getElementById("ceo-composer-outline-progress"),
     ceoCompressionToast: document.getElementById("ceo-compression-toast"),
     ceoCompressionToastText: document.getElementById("ceo-compression-toast-text"),
-    ceoCompressionActions: document.getElementById("ceo-compression-actions"),
-    ceoCompressionPause: document.getElementById("ceo-compression-pause-btn"),
     ceoSend: document.getElementById("ceo-send-btn"),
     viewCeo: document.getElementById("view-ceo"),
     viewTasks: document.getElementById("view-tasks-list"),
@@ -1376,6 +1374,14 @@ async function refreshCeoComposerUsageEstimate() {
     }
     const entries = buildCeoComposerPreflightEntries(sessionId);
     if (!entries.length) {
+        const currentEstimate = (
+            S.ceoComposerUsageEstimate
+            && String(S.ceoComposerUsageEstimate.session_id || "").trim() === sessionId
+        ) ? S.ceoComposerUsageEstimate : null;
+        if (S.ceoTurnActive && currentEstimate) {
+            syncCeoComposerUsageOutline();
+            return currentEstimate;
+        }
         clearCeoComposerUsageEstimate();
         return null;
     }
@@ -1868,8 +1874,6 @@ function activeCeoSessionCompressionState() {
 function syncCeoCompressionToast() {
     const toastEl = U.ceoCompressionToast;
     const textEl = U.ceoCompressionToastText;
-    const actionsEl = U.ceoCompressionActions;
-    const pauseEl = U.ceoCompressionPause;
     if (!toastEl || !textEl) return;
     const compression = activeCeoSessionCompressionState();
     const visible = !!compression;
@@ -1877,8 +1881,6 @@ function syncCeoCompressionToast() {
     toastEl.hidden = !visible;
     if (toastEl.classList?.toggle) toastEl.classList.toggle("is-visible", visible);
     toastEl.setAttribute("aria-hidden", visible ? "false" : "true");
-    if (actionsEl) actionsEl.hidden = !visible;
-    if (pauseEl) pauseEl.disabled = !visible || !!S.ceoPauseBusy;
 }
 
 function appendCeoSessionSnapshotMessage(messages = [], message = null) {
@@ -4072,6 +4074,13 @@ function highestNoticeRiskLevel(levels = []) {
     return highest;
 }
 
+function ceoContextLoadNoticeIconName(kind = "") {
+    const normalizedKind = String(kind || "").trim().toLowerCase();
+    if (normalizedKind === "tool") return "wrench";
+    if (normalizedKind === "skill") return "sparkles";
+    return "";
+}
+
 function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOTICE_DURATION_MS, kind = "", riskLevel = "medium" } = {}) {
     const normalizedText = String(text || "").trim();
     if (!normalizedText) {
@@ -4097,12 +4106,24 @@ function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOT
     textEl.className = "ceo-context-load-notice-text";
     textEl.textContent = normalizedText;
     item.appendChild(textEl);
+    const metaEl = document.createElement("span");
+    metaEl.className = "ceo-context-load-notice-meta";
     const riskDotEl = document.createElement("span");
     riskDotEl.className = `ceo-context-load-notice-risk-dot risk-${normalizedRiskLevel}`;
     riskDotEl.setAttribute("aria-hidden", "true");
-    item.appendChild(riskDotEl);
+    metaEl.appendChild(riskDotEl);
+    const iconName = ceoContextLoadNoticeIconName(normalizedKind);
+    if (iconName) {
+        const kindIconEl = document.createElement("span");
+        kindIconEl.className = "ceo-context-load-notice-kind-icon";
+        kindIconEl.setAttribute("aria-hidden", "true");
+        kindIconEl.innerHTML = `<i data-lucide="${iconName}"></i>`;
+        metaEl.appendChild(kindIconEl);
+    }
+    item.appendChild(metaEl);
     noticeEl.appendChild(item);
     syncCeoContextLoadNoticeVisibility();
+    icons();
     if (Number.isFinite(durationMs) && durationMs > 0) {
         const timeoutId = window.setTimeout(() => {
             removeCeoContextLoadNoticeItem(noticeId);
@@ -8317,9 +8338,6 @@ function bind() {
         }
     });
     U.ceoSend?.addEventListener("click", handleCeoPrimaryAction);
-    U.ceoCompressionPause?.addEventListener("click", () => {
-        requestCeoPause();
-    });
     U.ceoAttach?.addEventListener("click", () => {
         if (S.ceoUploadBusy) return;
         U.ceoFileInput?.click();

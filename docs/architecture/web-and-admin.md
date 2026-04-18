@@ -102,8 +102,12 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 
 - Successful CEO/frontdoor `load_tool_context` and `load_skill_context` calls are no longer shown as ordinary `Interaction Flow` steps under the assistant bubble.
 - Instead, the browser shows a short-lived composer notice above the input row, using the loaded `tool_id` or `skill_id` when the runtime payload exposes it.
-- These notices are intentionally stackable rather than single-slot: multiple successful loader calls may coexist in a small floating notice stack above the composer.
-- The intended motion contract is "launch from the composer, settle into the notice stack, then fade out"; the full lifecycle is currently about 5 seconds per notice.
+- These notices are intentionally stackable rather than single-slot: multiple successful loader calls may coexist in one right-aligned floating column that lines up with the send-button edge.
+- The type-specific styling now comes from a right-edge icon instead of the older leading green dot:
+  - tool notices use the same `wrench` icon family as the sidebar Tool page
+  - skill notices use the same `sparkles` icon family as the sidebar Skill page
+- The risk-colored dot remains present so operators can still distinguish low / medium / high loader risk at a glance.
+- The intended motion contract is still "launch from the composer, settle into the notice stack, then fade out"; the full lifecycle is currently about 5 seconds per notice.
 - That notice is intentionally live-only UI state. It should fade away after a short timeout and must not be appended into the persisted CEO session `messages` list.
 
 ### Manual Pause Resume Rule
@@ -261,9 +265,11 @@ Use these focused checks when validating i18n shell behavior:
 The CEO composer now has a dedicated frontdoor-compression UI path that is separate from ordinary tool progress.
 
 - `compression_state` only means inline frontdoor `token_compression` progress. The frontend should treat `status === "running"` as "the runtime is compressing context right now" and should not infer any durable semantic-summary state from it.
-- While `compression_state.status === "running"`, the browser shows the `上下文压缩中` toast near the composer and a separate pause button below the input row.
-- That dedicated compression pause button still sends the ordinary `client.pause_turn` request; the backend is responsible for cancelling compression and discarding any late compression result.
-- When compression finishes, errors, is discarded by pause, or the turn ends, both the toast and the dedicated pause button must disappear.
+- While `compression_state.status === "running"`, the browser shows the `上下文压缩中` toast near the composer, but pause still goes through the existing primary send/pause button at the right side of the input row.
+- The compression toast is intentionally left-aligned within the composer flow instead of floating over the right-side loader lane.
+- When queued follow-up messages are present, the compression toast must render above that queued-message list rather than overlapping it.
+- Clicking the ordinary primary `暂停` button during compression still sends the usual `client.pause_turn` request; the backend is responsible for cancelling compression and discarding any late compression result.
+- When compression finishes, errors, is discarded by pause, or the turn ends, the compression toast must disappear.
 - Tool-wait reminder labels from the reminder sidecar are live-only event data and should remain hidden from the visible CEO feed. They must not render as transcript lines, assistant bubbles, or persistent notices.
 
 ### Context Window Error UX

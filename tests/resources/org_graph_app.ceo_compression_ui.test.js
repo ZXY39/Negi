@@ -88,25 +88,30 @@ function loadApp() {
     vm.createContext(context);
     vm.runInContext(
         `${APP_CODE}
-        this.__testExports = { S, U, syncCeoCompressionToast, handleCeoError };`,
+        this.__testExports = { S, U, syncCeoCompressionToast, handleCeoError, syncCeoPrimaryButton };`,
         context
     );
     context.__testExports.U.ceoCompressionToast = new StubHTMLElement();
     context.__testExports.U.ceoCompressionToastText = new StubHTMLElement();
     context.__testExports.U.ceoCompressionActions = new StubHTMLElement();
     context.__testExports.U.ceoCompressionPause = new StubHTMLButtonElement();
+    context.__testExports.U.ceoInput = new StubHTMLTextAreaElement();
+    context.__testExports.U.ceoSend = new StubHTMLButtonElement();
+    context.__testExports.S.ceoUploads = [];
     context.__testExports.__toasts = [];
     context.showToast = (payload) => context.__testExports.__toasts.push(payload);
     context.patchCeoSessionRuntimeState = () => false;
     context.renderCeoSessions = () => {};
     context.syncCeoSessionActions = () => {};
-    context.syncCeoPrimaryButton = () => {};
     context.finalizeCeoTurn = () => {};
+    context.syncCeoAttachButton = () => {};
+    context.icons = () => {};
+    context.activeSessionIsReadonly = () => false;
     context.__testExports.S.activeSessionId = "web:test";
     return context.__testExports;
 }
 
-test("compression toast also shows dedicated pause controls while compression is running", () => {
+test("compression toast keeps dedicated compression pause controls hidden while compression is running", () => {
     const { syncCeoCompressionToast, S, U } = loadApp();
     S.ceoSnapshotCache = {
         "web:test": {
@@ -117,12 +122,25 @@ test("compression toast also shows dedicated pause controls while compression is
             },
         },
     };
+    U.ceoCompressionActions.hidden = true;
+    U.ceoCompressionPause.disabled = true;
 
     syncCeoCompressionToast();
 
     assert.equal(U.ceoCompressionToast.hidden, false);
-    assert.equal(U.ceoCompressionActions.hidden, false);
-    assert.equal(U.ceoCompressionPause.disabled, false);
+    assert.equal(U.ceoCompressionActions.hidden, true);
+    assert.equal(U.ceoCompressionPause.disabled, true);
+});
+
+test("primary button stays in pause state while compression is running", () => {
+    const { syncCeoPrimaryButton, S, U } = loadApp();
+    S.ceoTurnActive = true;
+    U.ceoInput.value = "";
+
+    syncCeoPrimaryButton();
+
+    assert.equal(U.ceoSend.disabled, false);
+    assert.match(U.ceoSend.innerHTML, /暂停/);
 });
 
 test("context window overflow errors show a toast", () => {

@@ -121,11 +121,13 @@ function loadApp() {
         this.__testExports = {
             S,
             U,
+            refreshCeoComposerUsageEstimate,
             buildCeoComposerPreflightEntries,
             syncCeoComposerUsageOutline,
         };`,
         context
     );
+    context.__testExports.__context = context;
     return context.__testExports;
 }
 
@@ -169,4 +171,25 @@ test("composer usage outline maps ratio into clockwise stroke progress", () => {
 
     assert.equal(U.ceoComposerOutlineShell.classList.contains("is-active"), true);
     assert.equal(U.ceoComposerOutlineProgress.style.strokeDasharray, "100 400");
+});
+
+test("active turn keeps last composer usage outline after draft is cleared", async () => {
+    const { refreshCeoComposerUsageEstimate, S, U } = loadApp();
+    S.activeSessionId = "web:test";
+    S.ceoTurnActive = true;
+    S.ceoComposerUsageEstimate = {
+        session_id: "web:test",
+        ratio: 0.52,
+        estimated_total_tokens: 16640,
+        context_window_tokens: 32000,
+        provider_model: "openai:gpt-5.2",
+    };
+    S.ceoUploads = [];
+    U.ceoInput = new StubHTMLTextAreaElement();
+    U.ceoInput.value = "";
+
+    const result = await refreshCeoComposerUsageEstimate();
+
+    assert.equal(result.estimated_total_tokens, 16640);
+    assert.equal(S.ceoComposerUsageEstimate.estimated_total_tokens, 16640);
 });

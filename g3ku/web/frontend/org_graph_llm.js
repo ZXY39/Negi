@@ -32,6 +32,7 @@
       retryCount: 0,
       singleApiKeyMaxConcurrency: "",
       contextWindowTokens: "",
+      initialContextWindowTokens: "",
       validation: null,
       probe: null,
       memory: {
@@ -645,6 +646,7 @@
       retryOn: [...DEFAULT_RETRY_ON],
       retryCount: 0,
       contextWindowTokens: "",
+      initialContextWindowTokens: "",
     };
     renderAll();
   }
@@ -672,6 +674,7 @@
         draft.api_key || ""
       ),
       contextWindowTokens: trim(binding.context_window_tokens),
+      initialContextWindowTokens: trim(binding.context_window_tokens),
     };
     renderAll();
   }
@@ -801,8 +804,119 @@
     return editor;
   }
 
-  function bindingDraftPayload({ requireModelKey = false } = {}) {
+  function parseContextWindowTokensValue(raw) {
+    const parsed = Number.parseInt(String(raw ?? "").trim(), 10);
+    return Number.isInteger(parsed) ? parsed : null;
+  }
+
+  function validContextWindowTokensValue(raw) {
+    const parsed = parseContextWindowTokensValue(raw);
+    return Number.isInteger(parsed) && parsed > 25000 ? parsed : null;
+  }
+
+  function contextWindowTokensFromDraftText(raw, providerId) {
+    try {
+      const draft = parseDraftJson(raw, providerId);
+      return validContextWindowTokensValue(draft?.parameters?.context_window_tokens);
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function setBindingJsonEditorValue(nextText) {
+    const editor = llmState().editor;
+    if (!editor || editor.mode === "memory") return false;
+    const normalized = String(nextText || "");
+    editor.jsonText = normalized;
+    const jsonEditor = document.getElementById("llm-json-editor");
+    if (jsonEditor && String(jsonEditor.value || "") !== normalized) jsonEditor.value = normalized;
+    return true;
+  }
+
+  function syncContextWindowTokensIntoJsonEditor(tokens) {
+    const editor = llmState().editor;
+    if (!editor || editor.mode === "memory") return false;
+    const resolved = validContextWindowTokensValue(tokens);
+    if (!Number.isInteger(resolved)) return false;
+    const providerId = trim(document.getElementById("llm-provider-select")?.value || editor.providerId);
+    const currentText = String(document.getElementById("llm-json-editor")?.value || editor.jsonText || "");
+    let draft;
+    try {
+      draft = parseDraftJson(currentText, providerId);
+    } catch (_error) {
+      return false;
+    }
+    draft.parameters = draft.parameters && typeof draft.parameters === "object" && !Array.isArray(draft.parameters) ? draft.parameters : {};
+    if (validContextWindowTokensValue(draft.parameters.context_window_tokens) === resolved) return false;
+    draft.parameters.context_window_tokens = resolved;
+    setBindingJsonEditorValue(JSON.stringify(draft, null, 2));
+    return true;
+  }
+
+  function syncContextWindowTokensInputValue(tokens) {
+    const editor = llmState().editor;
+    if (!editor || editor.mode === "memory") return false;
+    const normalized = Number.isInteger(validContextWindowTokensValue(tokens)) ? String(validContextWindowTokensValue(tokens)) : "";
+    editor.contextWindowTokens = normalized;
+    const input = document.getElementById("llm-binding-context-window-tokens");
+    if (input && String(input.value || "") !== normalized) input.value = normalized;
+    return true;
+  }
+
+  function handleBindingContextWindowInput() {
+    const editor = llmState().editor;
+    if (!editor || editor.mode === "memory") return;
+    const input = document.getElementById("llm-binding-context-window-tokens");
+    editor.contextWindowTokens = trim(input?.value || editor.contextWindowTokens);
+    const resolved = validContextWindowTokensValue(editor.contextWindowTokens);
+    if (Number.isInteger(resolved)) syncContextWindowTokensIntoJsonEditor(resolved);
+  }
+
+  function handleBindingJsonEditorInput() {
+    const editor = llmState().editor;
+    if (!editor || editor.mode === "memory") return;
+    const jsonEditor = document.getElementById("llm-json-editor");
+    editor.jsonText = String(jsonEditor?.value || editor.jsonText || "");
+    const resolved = contextWindowTokensFromDraftText(editor.jsonText, editor.providerId || "");
+    if (Number.isInteger(resolved)) syncContextWindowTokensInputValue(resolved);
+  }
+
+  function reconcileBindingContextWindowTokens() {
     const editor = syncBindingInputs();
+    if (!editor || editor.mode === "memory") return editor;
+    const providerId = trim(editor.providerId || "");
+    const jsonText = String(editor.jsonText || "");
+    const inputTokens = validContextWindowTokensValue(editor.contextWindowTokens);
+    const jsonTokens = contextWindowTokensFromDraftText(jsonText, providerId);
+    const initialJsonTokens = contextWindowTokensFromDraftText(editor.initialJsonText || "", providerId);
+    const initialInputTokens = validContextWindowTokensValue(
+      editor.initialContextWindowTokens != null && String(editor.initialContextWindowTokens).trim() !== ""
+        ? editor.initialContextWindowTokens
+        : initialJsonTokens
+    );
+    let resolved = null;
+    if (jsonTokens !== null && inputTokens !== null && jsonTokens === inputTokens) {
+      resolved = jsonTokens;
+    } else if (jsonTokens !== null && inputTokens === null) {
+      resolved = jsonTokens;
+    } else if (jsonTokens === null && inputTokens !== null) {
+      resolved = inputTokens;
+    } else if (jsonTokens !== null && inputTokens !== null) {
+      const jsonChanged = jsonTokens !== initialJsonTokens;
+      const inputChanged = inputTokens !== initialInputTokens;
+      if (jsonChanged && !inputChanged) resolved = jsonTokens;
+      else if (inputChanged && !jsonChanged) resolved = inputTokens;
+      else resolved = inputTokens;
+    }
+    if (Number.isInteger(resolved)) {
+      syncContextWindowTokensInputValue(resolved);
+      syncContextWindowTokensIntoJsonEditor(resolved);
+    }
+    return editor;
+  }
+
+  function bindingDraftPayload({ requireModelKey = false } = {}) {
+    const editor = reconcileBindingContextWindowTokens();
     const modelKey = trim(editor?.modelKey);
     const retryOn = Array.isArray(editor?.retryOn) ? editor.retryOn.map((item) => trim(item)).filter(Boolean) : [];
     const retryCount = Number.parseInt(String(editor?.retryCount ?? 0), 10);
@@ -1280,7 +1394,7 @@
 
   async function handleProviderChange() {
     const state = llmState();
-    syncBindingInputs();
+    reconcileBindingContextWindowTokens();
     const select = document.getElementById("llm-provider-select");
     const providerId = trim(select?.value);
     if (!providerId) return;
@@ -1294,7 +1408,7 @@
 
     async function handleTest() {
     const state = llmState();
-    syncBindingInputs();
+    reconcileBindingContextWindowTokens();
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
     const providerId = trim(document.getElementById("llm-provider-select")?.value || state.editor.providerId);
     state.editor.jsonText = jsonText;
@@ -1415,6 +1529,7 @@
 
     async function handleCreateSave() {
     const state = llmState();
+    reconcileBindingContextWindowTokens();
     const bindingDraft = bindingDraftPayload({ requireModelKey: true });
     const modelKey = bindingDraft.modelKey;
     const providerId = trim(document.getElementById("llm-provider-select")?.value || state.editor.providerId);
@@ -1470,6 +1585,7 @@
 
   async function handleDetailSave() {
     const state = llmState();
+    reconcileBindingContextWindowTokens();
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
     state.editor.jsonText = jsonText;
     const draft = parseDraftJson(jsonText, state.editor.providerId);
@@ -1504,6 +1620,7 @@
     const state = llmState();
     const binding = currentBinding();
     if (!binding) throw new Error("当前模型绑定不存在");
+    reconcileBindingContextWindowTokens();
     const bindingDraft = bindingDraftPayload();
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
     state.editor.jsonText = jsonText;
@@ -1937,6 +2054,13 @@
       if (memoryTemplateSection) void handleMemoryTemplateChange(memoryTemplateSection);
     });
     U.llmEditorShell?.addEventListener("input", (event) => {
+      if (event.target?.id === "llm-binding-context-window-tokens") {
+        handleBindingContextWindowInput();
+        return;
+      }
+      if (event.target?.id === "llm-json-editor") {
+        handleBindingJsonEditorInput();
+      }
       const sectionKey = memorySectionKeyFromTextareaId(event.target?.id);
       if (!sectionKey) return;
       handleMemorySectionInput(sectionKey);
@@ -1971,6 +2095,13 @@
       if (memoryTemplateSection) void handleMemoryTemplateChange(memoryTemplateSection);
     });
     U.llmEditorShell?.addEventListener("input", (event) => {
+      if (event.target?.id === "llm-binding-context-window-tokens") {
+        handleBindingContextWindowInput();
+        return;
+      }
+      if (event.target?.id === "llm-json-editor") {
+        handleBindingJsonEditorInput();
+      }
       const sectionKey = memorySectionKeyFromTextareaId(event.target?.id);
       if (!sectionKey) return;
       handleMemorySectionInput(sectionKey);
