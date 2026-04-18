@@ -229,18 +229,6 @@ def _ceo_model_compatible_parameters_schema(tool_name: str, schema: dict[str, An
     return normalized
 
 
-def _strip_schema_descriptions(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            str(key): _strip_schema_descriptions(item)
-            for key, item in value.items()
-            if str(key) != "description"
-        }
-    if isinstance(value, list):
-        return [_strip_schema_descriptions(item) for item in value]
-    return value
-
-
 def _provider_visible_tool_contract(tool: Tool) -> tuple[str, dict[str, Any] | None]:
     _model_description, model_parameters = _model_visible_tool_contract(tool)
     compatible_parameters = _ceo_model_compatible_parameters_schema(tool.name, model_parameters)

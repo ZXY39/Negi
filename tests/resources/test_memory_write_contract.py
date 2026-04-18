@@ -27,10 +27,10 @@ def test_memory_delete_provider_visible_schema_strips_schema_combinators() -> No
     _description, schema = _provider_visible_tool_contract(tool)
 
     assert isinstance(schema, dict)
-    assert set((schema.get("properties") or {}).keys()) == {"id", "ids"}
     assert "anyOf" not in schema
     assert "oneOf" not in schema
     assert "allOf" not in schema
+    assert set((schema.get("properties") or {}).keys()) == {"id", "ids"}
 
 
 def test_frontdoor_selected_tool_schemas_strip_provider_unsupported_combinators() -> None:
