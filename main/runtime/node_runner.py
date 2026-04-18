@@ -13,7 +13,7 @@ from g3ku.agent.tools.base import Tool
 from g3ku.runtime.memory_scope import normalize_memory_scope
 from g3ku.runtime.project_environment import current_project_environment
 from main.errors import TaskPausedError, describe_exception
-from main.ids import new_node_id
+from main.ids import new_command_id, new_node_id
 from main.models import (
     NodeFinalResult,
     NodeRecord,
@@ -27,7 +27,12 @@ from main.models import (
     normalize_result_payload,
 )
 from main.prompts import load_prompt
-from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool, SubmitNextStageTool
+from main.runtime.internal_tools import (
+    SpawnChildNodesTool,
+    SubmitFinalResultTool,
+    SubmitMessageDistributionTool,
+    SubmitNextStageTool,
+)
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
@@ -92,6 +97,7 @@ class NodeRunner:
         self.governance_child_created_observer = None
         self.governance_spawn_refusal_supplier = None
         self._spawn_operation_locks: dict[str, asyncio.Lock] = {}
+        self.distribution_delivery_callback = None
 
     @staticmethod
     def _normalized_status(value: Any) -> str:
@@ -268,6 +274,8 @@ class NodeRunner:
             raise ValueError(f'missing task or node: {task_id} / {node_id}')
         if node.status in {STATUS_SUCCESS, STATUS_FAILED}:
             return self._result_from_record(node)
+        if self._distribution_mode_active(task_id=task_id, node_id=node.node_id):
+            return await self._run_distribution_node(task=task, node=node)
         if self._pause_requested(task_id):
             self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
             raise TaskPausedError(task_id)
@@ -376,6 +384,269 @@ class NodeRunner:
         return {
             'messages': await self._build_messages(task=task, node=node),
         }
+
+    def _distribution_runtime_state(self, task_id: str) -> dict[str, Any]:
+        runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
+        return dict(runtime_meta.get('distribution') or {})
+
+    def _distribution_mode_active(self, *, task_id: str, node_id: str) -> bool:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return False
+        distribution = self._distribution_runtime_state(task_id)
+        state = str(distribution.get('state') or '').strip()
+        if state not in {'paused', 'distributing'}:
+            return False
+        frontier_node_ids = [
+            str(item or '').strip()
+            for item in list(distribution.get('frontier_node_ids') or [])
+            if str(item or '').strip()
+        ]
+        if state == 'paused' and not frontier_node_ids:
+            frontier_node_ids = [str(task.root_node_id or '').strip()]
+        return str(node_id or '').strip() in frontier_node_ids
+
+    def _active_distribution_epoch(self, task_id: str) -> tuple[str, dict[str, Any], Any] | None:
+        distribution = self._distribution_runtime_state(task_id)
+        epoch_id = str(distribution.get('active_epoch_id') or '').strip()
+        if not epoch_id:
+            return None
+        epoch = self._store.get_task_message_distribution_epoch(task_id, epoch_id)
+        if epoch is None:
+            return None
+        return epoch_id, distribution, epoch
+
+    def _distribution_provider_tools(self, tool: SubmitMessageDistributionTool) -> list[dict[str, Any]]:
+        return [
+            {
+                'type': 'function',
+                'function': {
+                    'name': tool.name,
+                    'description': tool.description,
+                    'parameters': tool.parameters,
+                },
+            }
+        ]
+
+    @staticmethod
+    def _distribution_response_arguments(response: Any) -> dict[str, Any]:
+        tool_calls = getattr(response, 'tool_calls', None)
+        if isinstance(response, dict):
+            tool_calls = response.get('tool_calls')
+        for item in list(tool_calls or []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name') or '').strip()
+            function = item.get('function') if isinstance(item.get('function'), dict) else {}
+            if not name:
+                name = str(function.get('name') or '').strip()
+            if name != 'submit_message_distribution':
+                continue
+            arguments = function.get('arguments') if isinstance(function, dict) else None
+            if arguments is None:
+                arguments = item.get('arguments')
+            if isinstance(arguments, str):
+                try:
+                    parsed = json.loads(arguments)
+                except Exception:
+                    parsed = {}
+                return dict(parsed or {}) if isinstance(parsed, dict) else {}
+            return dict(arguments or {}) if isinstance(arguments, dict) else {}
+        return {}
+
+    def _distribution_root_message(self, *, epoch) -> str:
+        payload = dict(epoch.payload or {})
+        queued_root_messages = [
+            str(item or '').strip()
+            for item in list(payload.get('queued_root_messages') or [])
+            if str(item or '').strip()
+        ]
+        if not queued_root_messages:
+            queued_root_messages = [str(epoch.root_message or '').strip()]
+        return '\n\n'.join(item for item in queued_root_messages if item)
+
+    def _distribution_node_message(self, *, task_id: str, node: NodeRecord, epoch) -> str:
+        if str(node.node_id or '').strip() == str(epoch.root_node_id or '').strip():
+            return self._distribution_root_message(epoch=epoch)
+        messages = [
+            str(item.message or '').strip()
+            for item in list(self._store.list_task_node_notifications(task_id, node.node_id) or [])
+            if str(item.epoch_id or '').strip() == str(epoch.epoch_id or '').strip()
+            and str(item.status or '').strip() == 'delivered'
+            and str(item.message or '').strip()
+        ]
+        return '\n\n'.join(messages)
+
+    def _distribution_child_payloads(self, *, task_id: str, child_node_ids: list[str]) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        for child_node_id in list(child_node_ids or []):
+            child = self._store.get_node(child_node_id)
+            if child is None or str(child.task_id or '').strip() != str(task_id or '').strip():
+                continue
+            payloads.append(
+                {
+                    'node_id': child.node_id,
+                    'goal': str(child.goal or ''),
+                    'prompt_summary': ' '.join(str(child.prompt or '').split())[:240],
+                    'status': str(child.status or ''),
+                }
+            )
+        return payloads
+
+    def _persist_distribution_delivery(
+        self,
+        *,
+        task_id: str,
+        epoch_id: str,
+        source_node_id: str,
+        target_node_id: str,
+        message: str,
+    ) -> None:
+        callback = self.distribution_delivery_callback
+        if callable(callback):
+            callback(
+                task_id=task_id,
+                epoch_id=epoch_id,
+                source_node_id=source_node_id,
+                target_node_id=target_node_id,
+                message=message,
+            )
+            return
+        self._store.upsert_task_node_notification(
+            {
+                'notification_id': new_command_id().replace('command:', 'notif:', 1),
+                'task_id': task_id,
+                'node_id': target_node_id,
+                'epoch_id': epoch_id,
+                'source_node_id': source_node_id,
+                'message': str(message or '').strip(),
+                'status': 'delivered',
+                'created_at': _now(),
+                'delivered_at': _now(),
+                'consumed_at': '',
+                'payload': {},
+            }
+        )
+
+    async def _run_distribution_node(self, *, task, node: NodeRecord) -> NodeFinalResult:
+        active_epoch = self._active_distribution_epoch(task.task_id)
+        if active_epoch is None:
+            return NodeFinalResult(status='success', summary='distribution epoch missing')
+        epoch_id, distribution, epoch = active_epoch
+        incoming_message = self._distribution_node_message(task_id=task.task_id, node=node, epoch=epoch)
+        live_child_node_ids = self.live_distribution_child_node_ids(task_id=task.task_id, parent_node_id=node.node_id)
+        child_payloads = self._distribution_child_payloads(task_id=task.task_id, child_node_ids=live_child_node_ids)
+        prompt_messages = [
+            {'role': 'system', 'content': load_prompt('node_message_distribution.md').strip()},
+            {
+                'role': 'user',
+                'content': json.dumps(
+                    {
+                        'task_id': task.task_id,
+                        'node_id': node.node_id,
+                        'goal': str(node.goal or ''),
+                        'prompt_summary': ' '.join(str(node.prompt or '').split())[:400],
+                        'incoming_message': incoming_message,
+                        'live_children': child_payloads,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            },
+        ]
+        decision_tool = SubmitMessageDistributionTool(lambda payload: payload)
+        response = await self._react_loop._chat_with_optional_extensions(
+            messages=prompt_messages,
+            tools=self._distribution_provider_tools(decision_tool),
+            model_refs=self._model_refs_for(node),
+            tool_choice={'type': 'function', 'function': {'name': decision_tool.name}},
+            parallel_tool_calls=False,
+        )
+        arguments = self._distribution_response_arguments(response)
+        submitted = await decision_tool.execute(
+            children=list(arguments.get('children') or []),
+            notes=str(arguments.get('notes') or ''),
+        )
+        valid_child_ids = set(live_child_node_ids)
+        delivered_child_ids: list[str] = []
+        for item in list(submitted.get('children') or []):
+            if not isinstance(item, dict):
+                continue
+            target_node_id = str(item.get('target_node_id') or '').strip()
+            child_message = str(item.get('message') or '').strip()
+            if not target_node_id or not child_message or target_node_id not in valid_child_ids:
+                continue
+            self._persist_distribution_delivery(
+                task_id=task.task_id,
+                epoch_id=epoch_id,
+                source_node_id=node.node_id,
+                target_node_id=target_node_id,
+                message=child_message,
+            )
+            if target_node_id not in delivered_child_ids:
+                delivered_child_ids.append(target_node_id)
+        self._log_service.update_frame(
+            task.task_id,
+            node.node_id,
+            lambda frame: {
+                **dict(frame or {}),
+                'node_id': node.node_id,
+                'depth': int(node.depth or 0),
+                'node_kind': node.node_kind,
+                'phase': 'message_distribution',
+            },
+            publish_snapshot=True,
+        )
+        epoch_payload = dict(epoch.payload or {})
+        distributed_node_ids = [
+            str(item or '').strip()
+            for item in list(epoch_payload.get('distributed_node_ids') or [])
+            if str(item or '').strip()
+        ]
+        if node.node_id not in distributed_node_ids:
+            distributed_node_ids.append(node.node_id)
+        next_frontier_node_ids = [
+            str(item or '').strip()
+            for item in list(epoch_payload.get('next_frontier_node_ids') or [])
+            if str(item or '').strip()
+        ]
+        for child_node_id in delivered_child_ids:
+            if child_node_id not in next_frontier_node_ids:
+                next_frontier_node_ids.append(child_node_id)
+        self._store.upsert_task_message_distribution_epoch(
+            epoch.model_copy(
+                update={
+                    'state': 'distributing',
+                    'payload': {
+                        **epoch_payload,
+                        'distributed_node_ids': distributed_node_ids,
+                        'next_frontier_node_ids': next_frontier_node_ids,
+                    },
+                }
+            )
+        )
+        self._log_service.update_task_runtime_meta(
+            task.task_id,
+            distribution={
+                'active_epoch_id': epoch_id,
+                'state': str(distribution.get('state') or 'distributing') or 'distributing',
+                'frontier_node_ids': [
+                    str(item or '').strip()
+                    for item in list(distribution.get('frontier_node_ids') or [])
+                    if str(item or '').strip()
+                ],
+                'queued_epoch_count': int(distribution.get('queued_epoch_count') or 0),
+                'pending_mailbox_count': int(distribution.get('pending_mailbox_count') or 0) + len(delivered_child_ids),
+            },
+        )
+        return NodeFinalResult(
+            status='success',
+            summary=f'distribution turn completed for {node.node_id}',
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason='',
+        )
 
     def _flush_latest_valid_result_if_paused(self, *, task_id: str, node_id: str) -> NodeFinalResult | None:
         latest = self._store.get_node(node_id)

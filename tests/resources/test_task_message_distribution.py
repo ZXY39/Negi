@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 import pytest
 
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
@@ -128,8 +129,12 @@ async def _noop_async(*args, **kwargs):
 
 
 def _build_service(tmp_path: Path) -> MainRuntimeService:
+    return _build_service_with_backend(tmp_path, chat_backend=_DummyChatBackend())
+
+
+def _build_service_with_backend(tmp_path: Path, *, chat_backend) -> MainRuntimeService:
     service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
+        chat_backend=chat_backend,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -362,6 +367,58 @@ def _set_spawn_operations(service: MainRuntimeService, *, root_node_id: str, pay
     service.log_service.update_node_metadata(root_node_id, _mutate)
 
 
+class _QueuedChatBackend:
+    def __init__(self, responses: list[object]) -> None:
+        self._responses = list(responses)
+        self.calls: list[dict[str, object]] = []
+
+    async def chat(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        if not self._responses:
+            raise AssertionError(f"unexpected chat call: {kwargs!r}")
+        return self._responses.pop(0)
+
+
+async def _seed_distributing_epoch(
+    service: MainRuntimeService,
+    *,
+    task_id: str,
+    message: str,
+    frontier_node_ids: list[str],
+) -> TaskMessageDistributionEpoch:
+    task = service.get_task(task_id)
+    assert task is not None
+    await service.task_append_notice(
+        task_ids=[task_id],
+        node_ids=[],
+        message=message,
+        session_id=task.session_id,
+    )
+    epoch = service.store.list_active_task_message_distribution_epochs(task_id)[0]
+    updated = epoch.model_copy(
+        update={
+            "state": "distributing",
+            "payload": {
+                **dict(epoch.payload or {}),
+                "frontier_node_ids": list(frontier_node_ids),
+                "distributed_node_ids": [],
+            },
+        }
+    )
+    service.store.upsert_task_message_distribution_epoch(updated)
+    service.log_service.update_task_runtime_meta(
+        task_id,
+        distribution={
+            "active_epoch_id": updated.epoch_id,
+            "state": "distributing",
+            "frontier_node_ids": list(frontier_node_ids),
+            "queued_epoch_count": 0,
+            "pending_mailbox_count": 0,
+        },
+    )
+    return updated
+
+
 @pytest.mark.asyncio
 async def test_spawned_child_nodes_record_owner_round_metadata(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
@@ -530,3 +587,209 @@ def test_submit_message_distribution_tool_schema_uses_explicit_child_targets() -
     assert "target_node_id" in item["properties"]
     assert "message" in item["properties"]
     assert "reason" in item["properties"]
+
+
+@pytest.mark.asyncio
+async def test_distribution_turn_runs_through_task_dispatcher_and_persists_child_deliveries(tmp_path: Path) -> None:
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_message_distribution",
+                        "arguments": {
+                            "children": [
+                                {"target_node_id": "CHILD_ONE", "message": "first child update", "reason": "focus"},
+                                {"target_node_id": "CHILD_TWO", "message": "second child update", "reason": "coverage"},
+                            ],
+                            "notes": "forward to both active children",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        first_spec = SpawnChildSpec(goal="first child", prompt="first prompt", execution_policy={"mode": "focus"})
+        second_spec = SpawnChildSpec(goal="second child", prompt="second prompt", execution_policy={"mode": "focus"})
+        first_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=first_spec,
+            owner_round_id="round-1",
+            owner_entry_index=0,
+        )
+        second_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=second_spec,
+            owner_round_id="round-1",
+            owner_entry_index=1,
+        )
+        _set_spawn_operations(
+            service,
+            root_node_id=root.node_id,
+            payload={
+                "round-1": {
+                    "specs": [first_spec.model_dump(mode="json"), second_spec.model_dump(mode="json")],
+                    "entries": [
+                        {"index": 0, "goal": "first child", "child_node_id": first_child.node_id},
+                        {"index": 1, "goal": "second child", "child_node_id": second_child.node_id},
+                    ],
+                    "completed": False,
+                },
+            },
+        )
+        epoch = await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="新增董事会验收格式",
+            frontier_node_ids=[root.node_id],
+        )
+        backend._responses[0].tool_calls[0]["arguments"]["children"][0]["target_node_id"] = first_child.node_id
+        backend._responses[0].tool_calls[0]["arguments"]["children"][1]["target_node_id"] = second_child.node_id
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        first_notifications = service.store.list_task_node_notifications(record.task_id, first_child.node_id)
+        second_notifications = service.store.list_task_node_notifications(record.task_id, second_child.node_id)
+        runtime_meta = service.log_service.read_task_runtime_meta(record.task_id) or {}
+        distribution = dict(runtime_meta.get("distribution") or {})
+        frame = service.log_service.read_runtime_frame(record.task_id, root.node_id) or {}
+
+        assert len(backend.calls) == 1
+        assert frame.get("phase") == "message_distribution"
+        assert len(first_notifications) == 1
+        assert first_notifications[0].epoch_id == epoch.epoch_id
+        assert first_notifications[0].message == "first child update"
+        assert len(second_notifications) == 1
+        assert second_notifications[0].message == "second child update"
+        assert distribution["frontier_node_ids"] == [first_child.node_id, second_child.node_id]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_leaf_node_does_not_spawn_further_distribution_turns(tmp_path: Path) -> None:
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_message_distribution",
+                        "arguments": {
+                            "children": [],
+                            "notes": "leaf node has no current live execution children",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        epoch = await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="新增董事会验收格式",
+            frontier_node_ids=[record.root_node_id],
+        )
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        runtime_meta = service.log_service.read_task_runtime_meta(record.task_id) or {}
+        distribution = dict(runtime_meta.get("distribution") or {})
+        refreshed_epoch = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
+
+        assert len(backend.calls) == 1
+        assert distribution["frontier_node_ids"] == []
+        assert refreshed_epoch is not None
+        assert refreshed_epoch.payload.get("distributed_node_ids") == [record.root_node_id]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_turn_omits_non_targeted_children(tmp_path: Path) -> None:
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_message_distribution",
+                        "arguments": {
+                            "children": [
+                                {"target_node_id": "CHILD_TWO", "message": "second child update", "reason": "only this child needs the new constraint"},
+                            ],
+                            "notes": "leave the other child unchanged",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        first_spec = SpawnChildSpec(goal="first child", prompt="first prompt", execution_policy={"mode": "focus"})
+        second_spec = SpawnChildSpec(goal="second child", prompt="second prompt", execution_policy={"mode": "focus"})
+        first_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=first_spec,
+            owner_round_id="round-1",
+            owner_entry_index=0,
+        )
+        second_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=second_spec,
+            owner_round_id="round-1",
+            owner_entry_index=1,
+        )
+        _set_spawn_operations(
+            service,
+            root_node_id=root.node_id,
+            payload={
+                "round-1": {
+                    "specs": [first_spec.model_dump(mode="json"), second_spec.model_dump(mode="json")],
+                    "entries": [
+                        {"index": 0, "goal": "first child", "child_node_id": first_child.node_id},
+                        {"index": 1, "goal": "second child", "child_node_id": second_child.node_id},
+                    ],
+                    "completed": False,
+                },
+            },
+        )
+        await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="新增董事会验收格式",
+            frontier_node_ids=[root.node_id],
+        )
+        backend._responses[0].tool_calls[0]["arguments"]["children"][0]["target_node_id"] = second_child.node_id
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        assert service.store.list_task_node_notifications(record.task_id, first_child.node_id) == []
+        second_notifications = service.store.list_task_node_notifications(record.task_id, second_child.node_id)
+        assert len(second_notifications) == 1
+        assert second_notifications[0].message == "second child update"
+    finally:
+        await service.close()

@@ -369,6 +369,11 @@ class TaskActorService:
                     blocking_reason='missing root node',
                 )
             else:
+                distribution = self._distribution_runtime_state(task_id)
+                if str(distribution.get('state') or '').strip() in {'paused', 'distributing'}:
+                    distribution_result = await self._run_distribution_epoch(task_id)
+                    if distribution_result is not None:
+                        return
                 result = await dispatcher.execute_node(task_id, root_node.node_id)
                 if result.status == 'success':
                     result = await self._run_final_acceptance_if_needed(task_id)
@@ -462,6 +467,69 @@ class TaskActorService:
             execution_limit=self._node_dispatch_limits['execution'],
             inspection_limit=self._node_dispatch_limits['inspection'],
         )
+
+    def _distribution_runtime_state(self, task_id: str) -> dict[str, object]:
+        runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
+        return dict(runtime_meta.get('distribution') or {})
+
+    async def _run_distribution_epoch(self, task_id: str) -> bool | None:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return None
+        distribution = self._distribution_runtime_state(task_id)
+        epoch_id = str(distribution.get('active_epoch_id') or '').strip()
+        if not epoch_id:
+            return None
+        epoch = self._store.get_task_message_distribution_epoch(task_id, epoch_id)
+        if epoch is None:
+            return None
+        state = str(distribution.get('state') or '').strip()
+        frontier = [
+            str(item or '').strip()
+            for item in list(distribution.get('frontier_node_ids') or [])
+            if str(item or '').strip()
+        ]
+        if state == 'paused':
+            frontier = frontier or [str(task.root_node_id or '').strip()]
+            payload = dict(epoch.payload or {})
+            payload['frontier_node_ids'] = list(frontier)
+            payload.setdefault('distributed_node_ids', [])
+            payload['next_frontier_node_ids'] = []
+            epoch = self._store.upsert_task_message_distribution_epoch(
+                epoch.model_copy(update={'state': 'distributing', 'payload': payload})
+            )
+            distribution['state'] = 'distributing'
+            distribution['frontier_node_ids'] = list(frontier)
+            self._log_service.update_task_runtime_meta(task_id, distribution=distribution)
+        if not frontier:
+            return True
+        for node_id in frontier:
+            await self._execute_node(task_id, node_id)
+        refreshed_epoch = self._store.get_task_message_distribution_epoch(task_id, epoch_id)
+        if refreshed_epoch is None:
+            return True
+        payload = dict(refreshed_epoch.payload or {})
+        next_frontier = [
+            str(item or '').strip()
+            for item in list(payload.pop('next_frontier_node_ids') or [])
+            if str(item or '').strip()
+        ]
+        updated_state = 'distributing' if next_frontier else 'resuming'
+        payload['frontier_node_ids'] = list(next_frontier)
+        self._store.upsert_task_message_distribution_epoch(
+            refreshed_epoch.model_copy(update={'state': updated_state, 'payload': payload})
+        )
+        self._log_service.update_task_runtime_meta(
+            task_id,
+            distribution={
+                'active_epoch_id': epoch_id,
+                'state': updated_state,
+                'frontier_node_ids': list(next_frontier),
+                'queued_epoch_count': int(distribution.get('queued_epoch_count') or 0),
+                'pending_mailbox_count': int(distribution.get('pending_mailbox_count') or 0),
+            },
+        )
+        return True
 
     async def _run_final_acceptance_if_needed(self, task_id: str) -> NodeFinalResult:
         task = self._store.get_task(task_id)

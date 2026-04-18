@@ -531,7 +531,7 @@ class TaskLogService:
                 str(item.get('node_id') or '')
                 for item in frames
                 if (
-                    str(item.get('phase') or '') in {'before_model', 'waiting_tool_results', 'after_model'}
+                    str(item.get('phase') or '') in {'before_model', 'waiting_tool_results', 'after_model', 'message_distribution'}
                     or cls._frame_has_active_tools(item)
                 )
                 and str(item.get('node_id') or '').strip()
@@ -3370,7 +3370,7 @@ class TaskLogService:
             **payload,
         }
         runnable = bool(
-            str(next_frame.get('phase') or '') in {'before_model', 'waiting_tool_results', 'after_model'}
+            str(next_frame.get('phase') or '') in {'before_model', 'waiting_tool_results', 'after_model', 'message_distribution'}
             or self._frame_has_active_tools(next_frame)
         )
         waiting = bool(
