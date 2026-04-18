@@ -1066,6 +1066,7 @@ class RuntimeAgentSession:
                 if str(item or "").strip()
             ],
             "frontdoor_selection_debug": copy.deepcopy(getattr(self, "_frontdoor_selection_debug", None) or {}),
+            "frontdoor_actual_request_path": str(getattr(self, "_frontdoor_actual_request_path", "") or "").strip(),
         }
         return snapshot
 

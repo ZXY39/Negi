@@ -10,6 +10,7 @@ test("ceo context load notice uses minimal tag styling instead of cloud decorati
         CSS,
         /\.ceo-context-load-notice\s*\{[\s\S]*display:\s*grid;[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/,
     );
+    assert.match(CSS, /\.ceo-context-load-notice\s*\{[\s\S]*grid-auto-flow:\s*row dense/);
     assert.match(
         CSS,
         /\.ceo-context-load-notice-item\s*\{[\s\S]*background:\s*color-mix\(in srgb,\s*var\(--bg-panel\)/,

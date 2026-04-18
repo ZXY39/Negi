@@ -142,7 +142,7 @@ function loadApp() {
     return context.__testExports;
 }
 
-test("handleCeoToolReminder renders and updates a live-only reminder at the bottom of the active turn", () => {
+test("handleCeoToolReminder keeps reminder text hidden for active turns", () => {
     const { createPendingCeoTurn, handleCeoToolReminder, S } = loadApp();
 
     const turn = createPendingCeoTurn("user");
@@ -160,8 +160,8 @@ test("handleCeoToolReminder renders and updates a live-only reminder at the bott
         label: "上方的 exec 工具已运行 60 秒，之前已提醒 1 次，选择继续等待。",
     });
 
-    assert.equal(turn.reminderEl.hidden, false);
-    assert.match(String(turn.reminderEl.textContent || ""), /exec 工具已运行 60 秒/);
+    assert.equal(turn.reminderEl.hidden, true);
+    assert.equal(String(turn.reminderEl.textContent || ""), "");
 
     handleCeoToolReminder({
         source: "reminder",
@@ -174,9 +174,8 @@ test("handleCeoToolReminder renders and updates a live-only reminder at the bott
         label: "上方的 exec 工具已运行 120 秒，之前已提醒 2 次，本次决定停止工具调用。",
     });
 
-    assert.equal(turn.reminderEl.hidden, false);
-    assert.match(String(turn.reminderEl.textContent || ""), /120 秒/);
-    assert.match(String(turn.reminderEl.textContent || ""), /本次决定停止工具调用/);
+    assert.equal(turn.reminderEl.hidden, true);
+    assert.equal(String(turn.reminderEl.textContent || ""), "");
 
     handleCeoToolReminder({
         source: "reminder",

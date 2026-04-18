@@ -206,7 +206,7 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - `load_tool_context` / `load_skill_context` 会照常进入 round 记录与执行轨迹，但它们现在不再增加 `tool_rounds_used`。
 - 这条规则同时适用于 execution/acceptance 节点和 CEO/frontdoor；如果维护者看到很多 loader 调用，不要据此直接推断阶段预算已经被吃掉。
 - 排查预算问题时，应优先检查 `rounds[*].budget_counted`、阶段快照和 runtime messages artifact，而不是按工具名手算。
-- execution、acceptance 与 CEO/frontdoor 现在共用同一条阶段预算合同：`submit_next_stage.tool_round_budget` 必须落在 `5-15` 之间；这表示单阶段允许声明的上限窗口，而不是要求模型必须把预算耗尽后才能提前切到下一阶段。
+- execution、acceptance 与 CEO/frontdoor 现在共用同一条阶段预算合同：`submit_next_stage.tool_round_budget` 必须落在 `1-10` 之间；这表示单阶段允许声明的上限窗口，而不是要求模型必须把预算耗尽后才能提前切到下一阶段。
 
 ### Canonical Tool Contract Notes
 
@@ -577,6 +577,7 @@ The prompt token trace also changed:
 - CEO/frontdoor now also runs a final token preflight immediately before provider send. This happens after fresh-turn request seeding, completed-continuity bridge decisions, provider tool-schema seeding, and frozen `MEMORY.md` injection have already produced the authoritative request projection.
 - That preflight is the final gate for provider-bound request size. If it compacts the request, `frontdoor_history_shrink_reason` must be `token_compression`; the runtime must not invent a second competing shrink-reason field.
 - The preflight emits additive diagnostics as `frontdoor_token_preflight_diagnostics` on graph state, inflight/paused snapshots, and completed continuity sidecars. Maintainers should treat that payload as observability for the final gate, not as a replacement for the request-body baseline contract.
+- That preflight estimate must be derived from the raw provider-bound payload, not from summary-oriented serializers that truncate long fields for readability. If a huge `provider_request_body` still produces a tiny, suspiciously stable `final_request_tokens`, treat the estimator as broken before questioning the compression threshold.
 
 ## CEO Inline Tool Reminder Sidecar
 
@@ -591,8 +592,9 @@ The reminder lane itself is deliberately read-only with respect to session persi
 
 - `CeoToolReminderService` does not call `session.prompt(...)`.
 - It does not take the normal turn lock or create a heartbeat/internal turn.
-- It rebuilds CEO context with `CeoMessageBuilder.build_for_ceo(..., ephemeral_tail_messages=...)` using a read-only reminder snapshot from `RuntimeAgentSession.reminder_context_snapshot()`.
-- That snapshot includes the current visible stage/canonical view, durable `frontdoor_canonical_context`, compression state, semantic summary state, hydrated tools, selection debug, and current visible user/assistant text.
+- Its first choice is to reuse the latest persisted CEO actual-request artifact as the provider-facing scaffold so the sidecar request shares the same cacheable prefix as the main turn; only if that scaffold is missing does it fall back to `CeoMessageBuilder.build_for_ceo(..., ephemeral_tail_messages=...)`.
+- The reminder snapshot from `RuntimeAgentSession.reminder_context_snapshot()` therefore now needs to carry the latest actual-request pointer in addition to the current visible stage/canonical view, durable `frontdoor_canonical_context`, compression state, semantic summary state, hydrated tools, selection debug, and current visible user/assistant text.
+- Sidecar stop/continue decisions are now parsed from a text-only reminder reply (`STOP` / `CONTINUE`). Reusing the main turn's provider-visible tool bundle is a cache-stability tactic, not permission to execute arbitrary returned tool calls in the sidecar lane.
 - The reminder text itself is live-only. It must not be written into transcript history, canonical context, semantic summary, or future prompt-history injection.
 
 ### Timeout Stop Error Contract

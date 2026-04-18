@@ -54,7 +54,7 @@ settings:
   store:
     backend: hybrid
     qdrant_path: memory/qdrant
-    qdrant_collection: nanobot_memory_v1
+    qdrant_collection: g3ku_memory
     sqlite_path: memory/memory.db
   retrieval:
     dense_top_k: 24
