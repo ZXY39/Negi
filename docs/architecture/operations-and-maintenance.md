@@ -123,6 +123,19 @@
 - `main/service/runtime_service.py`
 - `main/runtime/node_runner.py`
 
+Maintenance note for `task_append_notice` / task message distribution:
+
+- If a task appears stuck in `pause_requested`, `distributing`, or `resuming`, inspect these together before blaming the model:
+  - `task_message_distribution_epochs` rows for the task
+  - `task_node_notifications` rows for the task
+  - `task_runtime_meta.distribution`
+  - the current runtime frames for the frontier nodes
+- `pause_requested` means the append-notice transaction has requested the existing pause barrier but ordinary execution has not yet consumed the next distribution step.
+- `distributing` means the active frontier is currently being processed through the ordinary task/node dispatcher. This is still queue-controlled node work, not a sidecar lane.
+- `resuming` means the compact distribution turns have finished and the runtime is waiting to hand ordinary execution back the delivered mailbox messages at the next safe boundary.
+- If a child execution node was previously terminal and now appears active again after append-notice, check whether its old acceptance node was logically invalidated rather than deleted. The acceptance record should still exist for audit, but it should no longer be authoritative for the current spawn entry.
+- If force delete is requested during message distribution, deletion should win immediately. Do not wait for the epoch to finish naturally; confirm instead that epochs/mailboxes were cancelled or purged before the task row disappeared.
+
 如果任务已经创建，但表现为“响应明显变慢”“长时间停在 `model.chat.await_response`”或“前端只看到 task-event 在刷”，优先同时对照：
 
 - `.g3ku/main-runtime/manual-web-run.log`

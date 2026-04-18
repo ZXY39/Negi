@@ -254,12 +254,11 @@ async def test_task_append_notice_queues_next_epoch_while_distribution_is_active
         epochs = service.store.list_active_task_message_distribution_epochs(record.task_id)
         runtime_meta = service.log_service.read_task_runtime_meta(record.task_id) or {}
         distribution = dict(runtime_meta.get("distribution") or {})
+        epochs_by_state = {item.state: item for item in epochs}
 
         assert len(epochs) == 2
-        assert epochs[0].epoch_id == active_epoch.epoch_id
-        assert epochs[0].state == "distributing"
-        assert epochs[1].state == "queued"
-        assert epochs[1].root_message == "必须补充风险分层"
+        assert epochs_by_state["distributing"].epoch_id == active_epoch.epoch_id
+        assert epochs_by_state["queued"].root_message == "必须补充风险分层"
         assert distribution["active_epoch_id"] == active_epoch.epoch_id
         assert distribution["state"] == "distributing"
         assert distribution["queued_epoch_count"] == 1
@@ -1139,5 +1138,33 @@ async def test_distribution_epoch_completes_and_task_resumes_ordinary_execution(
         assert updated_epoch.state == "completed"
         assert distribution["state"] == ""
         assert distribution["frontier_node_ids"] == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_task_progress_exposes_distribution_runtime_state(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        service.log_service.update_task_runtime_meta(
+            record.task_id,
+            distribution={
+                "active_epoch_id": "epoch:summary",
+                "state": "distributing",
+                "frontier_node_ids": ["node:root", "node:child"],
+                "queued_epoch_count": 1,
+                "pending_mailbox_count": 2,
+            },
+        )
+
+        progress = service.query_service.view_progress(record.task_id, mark_read=False)
+
+        assert progress is not None
+        assert progress.live_state is not None
+        assert progress.live_state.distribution.active_epoch_id == "epoch:summary"
+        assert progress.live_state.distribution.state == "distributing"
+        assert progress.live_state.distribution.frontier_node_ids == ["node:root", "node:child"]
+        assert progress.live_state.distribution.pending_mailbox_count == 2
     finally:
         await service.close()
