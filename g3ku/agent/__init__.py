@@ -7,21 +7,17 @@ from typing import Any
 
 __all__ = [
     "AgentLoop",
-    "MemoryStore",
     "SkillsLoader",
 ]
 
 _EXPORT_MAP = {
     "AgentLoop": ("g3ku.agent.loop", "AgentLoop"),
-    "MemoryStore": ("g3ku.agent.memory", "MemoryStore"),
     "SkillsLoader": ("g3ku.agent.skills", "SkillsLoader"),
 }
 _SUBMODULES = {
     "loop",
-    "memory",
     "skills",
     "middleware",
-    "rag_memory",
     "session_commit",
 }
 

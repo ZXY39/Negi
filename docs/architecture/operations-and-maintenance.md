@@ -50,6 +50,11 @@
 5. 确认 Web API、任务面板、模型配置页能正常返回
 6. 如项目启用中国渠道，再跑 `g3ku china-bridge doctor`
 
+当前 `g3ku status` 的记忆区块应按 queued Markdown runtime 理解：
+
+- 它会显示 `Memory Notebook`、`Memory Notes Dir`、`Memory Queue`、`Memory Ops Log`、`Memory Checkpointer`
+- 它不再把 `Memory Mode`、`Memory Store(SQLite)`、`Memory Store(Qdrant)`、`pending_facts.jsonl`、`audit.jsonl` 当作当前长期记忆健康指标
+
 ## 3. 关键状态文件与目录
 
 日常排障时，先熟悉这些目录：
@@ -343,7 +348,19 @@ Operator debugging order for a stuck queue head:
 
 ### Memory Maintenance CLI
 
-The memory CLI now has three operator-oriented maintenance commands in addition to `current`, `queue`, and `flush`:
+The memory CLI now keeps only the queued Markdown runtime operator surface:
+
+- `g3ku memory current`
+- `g3ku memory queue`
+- `g3ku memory flush`
+- `g3ku memory doctor`
+- `g3ku memory reconcile-notes`
+- `g3ku memory import-legacy <path>`
+- `g3ku memory cleanup-legacy`
+
+The old legacy-only commands such as runtime stats/trace/explain, `migrate-v2`, `reset-runtime`, decay, and pending-fact review are no longer part of the active operator contract.
+
+The operator-oriented maintenance commands beyond `current`, `queue`, and `flush` are:
 
 - `g3ku memory doctor`
   Read-only health check for the queued Markdown memory layout.
@@ -367,12 +384,15 @@ Use them with these boundaries in mind:
 - `import-legacy` is dry-run by default. The operator must pass `--apply` before it writes `MEMORY.md` or any note files.
 - The default dry-run path for `import-legacy` is inspection-only as well: it parses the legacy payload and prints a summary without creating `memory/`, `MEMORY.md`, `queue.jsonl`, `ops.jsonl`, or note files.
 - `import-legacy --apply` is intentionally conservative. The target memory notebook should already be empty, and the operator should not use it as a merge tool for a live non-empty queue.
+- `cleanup-legacy` is also dry-run by default. It lists removable legacy artifacts such as `HISTORY.md`, structured projections, sync journals, pending/audit files, and `context_store/`.
+- `cleanup-legacy --apply` refuses to delete data-bearing legacy artifacts while `MEMORY.md` is still empty. The intended order is to import or explicitly review old data first, then delete the leftovers once the new notebook already contains the migrated memory.
 
 Recommended operator order:
 
 1. Run `g3ku memory doctor` first.
 2. If the only issues are missing note files or orphan notes, use `g3ku memory reconcile-notes`.
 3. If the notebook is empty and you are doing a controlled migration, run `g3ku memory import-legacy <path>` once without `--apply`, inspect the summary, then rerun with `--apply`.
+4. After migration is complete and `MEMORY.md` is already authoritative, run `g3ku memory cleanup-legacy` once in dry-run mode, review the paths, then rerun with `--apply` to remove leftovers.
 
 Two queue-head recovery caveats matter during operations:
 

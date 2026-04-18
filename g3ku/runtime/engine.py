@@ -161,14 +161,6 @@ class AgentRuntimeEngine:
             return text
         return f"{text[:max_chars]}...(truncated {len(text) - max_chars} chars)"
 
-    def _use_rag_memory(self) -> bool:
-        cfg = getattr(self, '_memory_runtime_settings', None)
-        return bool(cfg and getattr(cfg, 'enabled', False) and str(getattr(cfg, 'mode', 'legacy')).lower() in {'rag', 'dual'})
-
-    def _use_legacy_memory(self) -> bool:
-        cfg = getattr(self, '_memory_runtime_settings', None)
-        return bool(cfg and getattr(cfg, 'enabled', False) and str(getattr(cfg, 'mode', 'legacy')).lower() in {'legacy', 'dual'})
-
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         for name in ('message', 'cron'):
             tool = self.tools.get(name)

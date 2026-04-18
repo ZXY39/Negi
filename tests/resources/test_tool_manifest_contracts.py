@@ -87,7 +87,7 @@ def test_tool_manifests_match_explicit_parameter_contracts():
         'filesystem_write',
         'load_skill_context',
         'load_tool_context',
-        'memory_search',
+        'memory_note',
         'memory_write',
         'message',
         'model_config',

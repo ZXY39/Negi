@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from g3ku.agent.rag_memory import ContextRecordV2, MemoryManager
+from g3ku.agent.catalog_store import ContextRecordV2
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.main_runtime import LoadSkillContextTool, LoadToolContextTool
 from g3ku.content import ContentNavigationService, parse_content_envelope
@@ -1690,12 +1690,12 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
     service.list_visible_tool_families = lambda *, actor_role, session_id: [
         SimpleNamespace(tool_id='filesystem', actions=[SimpleNamespace(executor_names=['filesystem_write'])]),
         SimpleNamespace(tool_id='content_navigation', actions=[SimpleNamespace(executor_names=['content_open'])]),
-        SimpleNamespace(tool_id='memory', actions=[SimpleNamespace(executor_names=['memory_search'])]),
+        SimpleNamespace(tool_id='agent_browser', actions=[SimpleNamespace(executor_names=['agent_browser'])]),
         SimpleNamespace(tool_id='web_fetch', actions=[SimpleNamespace(executor_names=['web_fetch'])]),
     ]
     log_service.upsert_frame('task-hydration-lru', {'node_id': 'node-hydration-lru'})
 
-    for tool_id in ['filesystem_write', 'content_open', 'memory_search', 'web_fetch']:
+    for tool_id in ['filesystem_write', 'content_open', 'agent_browser', 'web_fetch']:
         service._promote_tool_context_hydration(
             task_id='task-hydration-lru',
             node_id='node-hydration-lru',
@@ -1707,12 +1707,12 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
     promoted_frame = log_service.read_runtime_frame('task-hydration-lru', 'node-hydration-lru')
     assert promoted_frame['hydrated_executor_names'] == [
         'filesystem_write',
-        'memory_search',
+        'agent_browser',
         'web_fetch',
     ]
     assert promoted_frame['hydrated_executor_state'] == [
         'filesystem_write',
-        'memory_search',
+        'agent_browser',
         'web_fetch',
     ]
 
@@ -1727,12 +1727,12 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
     promoted_frame = log_service.read_runtime_frame('task-hydration-lru', 'node-hydration-lru')
     assert promoted_frame['hydrated_executor_names'] == [
         'filesystem_write',
-        'memory_search',
+        'agent_browser',
         'web_fetch',
     ]
     assert promoted_frame['hydrated_executor_state'] == [
         'filesystem_write',
-        'memory_search',
+        'agent_browser',
         'web_fetch',
     ]
 
@@ -2212,11 +2212,6 @@ def test_execution_selector_web_research_query_does_not_directly_promote_candida
             authoritative_description='web_fetch authoritative schema',
             model_description='web_fetch compact model schema',
         ),
-        'memory_search': _ModelSchemaRecordingTool(
-            name='memory_search',
-            authoritative_description='memory_search authoritative schema',
-            model_description='memory_search compact model schema',
-        ),
         'agent_browser': _ModelSchemaRecordingTool(
             name='agent_browser',
             authoritative_description='agent_browser authoritative schema',
@@ -2243,14 +2238,6 @@ def test_execution_selector_web_research_query_does_not_directly_promote_candida
         ),
     )
     service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
-        {
-            'tool_id': 'memory',
-            'display_name': 'Memory',
-            'description': 'Search prior memory',
-            'l0': 'Search prior memory',
-            'l1': 'Search prior memory',
-            'actions': [{'action_id': 'search', 'executor_names': ['memory_search']}],
-        },
         {
             'tool_id': 'web_fetch',
             'display_name': 'Web Fetch',
@@ -4115,30 +4102,6 @@ async def test_enrich_node_messages_still_applies_selector_when_unified_context_
         }
     ]
     assert retrieve_block_calls == []
-
-
-def test_filter_retrieved_records_preserves_memory_and_filters_catalog_context() -> None:
-    records = [
-        ContextRecordV2(record_id="memory-1", context_type="memory", uri="g3ku://memory/web/shared/memory-1"),
-        ContextRecordV2(record_id="tool:filesystem", context_type="resource", uri="g3ku://resource/tool/filesystem"),
-        ContextRecordV2(record_id="tool:exec", context_type="resource", uri="g3ku://resource/tool/exec"),
-        ContextRecordV2(record_id="skill:skill-creator", context_type="skill", uri="g3ku://skill/skill-creator"),
-        ContextRecordV2(record_id="skill:tmux", context_type="skill", uri="g3ku://skill/tmux"),
-    ]
-
-    filtered = MemoryManager._filter_retrieved_records(
-        records,
-        allowed_context_types=["memory", "resource", "skill"],
-        allowed_resource_record_ids=["tool:filesystem"],
-        allowed_skill_record_ids=["skill:skill-creator"],
-    )
-
-    assert [record.record_id for record in filtered] == [
-        "memory-1",
-        "tool:filesystem",
-        "skill:skill-creator",
-    ]
-
 
 @pytest.mark.asyncio
 async def test_execute_tool_blocks_repeated_overflowed_search() -> None:

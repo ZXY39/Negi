@@ -185,9 +185,6 @@ def test_runtime_agent_session_serializes_prompt_and_keeps_live_targets(monkeypa
         def release_session_cancellation_token(self, _session_key: str, _token) -> None:
             return None
 
-        def _use_rag_memory(self) -> bool:
-            return False
-
     async def _run() -> None:
         loop = _LoopStub()
         session = RuntimeAgentSession(loop, session_key="china:qqbot:default:dm", channel="qqbot", chat_id="default:dm:user-a")

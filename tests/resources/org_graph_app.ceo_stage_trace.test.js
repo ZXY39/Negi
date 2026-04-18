@@ -289,7 +289,7 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
                         round_index: 1,
                         tools: [
                             { tool_name: "load_tool_context", status: "success", output_text: "ok" },
-                            { tool_name: "memory_search", status: "success", output_text: "ok" },
+                            { tool_name: "memory_note", status: "success", output_text: "ok" },
                             { tool_name: "submit_next_stage", status: "success", output_text: "stage advanced" },
                         ],
                     },
@@ -312,7 +312,7 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
                         round_id: "round-2",
                         round_index: 2,
                         budget_counted: true,
-                        tools: [{ tool_name: "memory_search", status: "running", output_text: "" }],
+                        tools: [{ tool_name: "memory_note", status: "running", output_text: "" }],
                     },
                 ],
             },
@@ -323,7 +323,7 @@ test("ceo stage trace renders real stage goal and budget from true frontdoor sta
     assert.match(turn.listEl.innerHTML, /1\/7/);
     assert.doesNotMatch(turn.listEl.innerHTML, /\u6700\u5927\u8f6e\u6570/);
     assert.doesNotMatch(turn.listEl.innerHTML, /loaded context/);
-    assert.match(turn.listEl.innerHTML, /memory_search/);
+    assert.match(turn.listEl.innerHTML, /memory_note/);
     assert.equal(renderedSteps, 1);
     assert.match(turn.metaEl.textContent, /1/);
     assert.doesNotMatch(turn.listEl.innerHTML, /ceo:stage:inflight-stage-1/);
@@ -476,7 +476,7 @@ test("ceo stage trace hides successful loader tools from interaction flow render
                                 output_text: '{"tool_id":"filesystem_write"}',
                             },
                             {
-                                tool_name: "memory_search",
+                                tool_name: "memory_note",
                                 status: "success",
                                 output_text: "ok",
                             },
@@ -489,7 +489,7 @@ test("ceo stage trace hides successful loader tools from interaction flow render
 
     assert.equal(renderedSteps, 1);
     assert.doesNotMatch(turn.listEl.innerHTML, /load_tool_context/);
-    assert.match(turn.listEl.innerHTML, /memory_search/);
+    assert.match(turn.listEl.innerHTML, /memory_note/);
     assert.equal(U.ceoContextLoadNotice.children.length, 1);
     assert.equal(noticeRiskClass(U.ceoContextLoadNotice.children[0]), "risk-medium");
     assert.match(noticeText(U.ceoContextLoadNotice.children[0]), /filesystem_write/);

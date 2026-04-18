@@ -279,7 +279,7 @@ def _load_memory_runtime_settings(config: Config) -> MemoryRuntimeSettings | Non
 
 
 def _memory_startup_self_check(config: Config) -> None:
-    """Print startup diagnostics for memory mode and embedding credentials."""
+    """Print startup diagnostics for memory runtime and catalog projection credentials."""
     mem_cfg = _load_memory_runtime_settings(config)
     if mem_cfg is None:
         console.print("[yellow]Memory self-check:[/yellow] tools/memory_runtime/resource.yaml is missing or invalid.")
@@ -288,8 +288,7 @@ def _memory_startup_self_check(config: Config) -> None:
         console.print("[yellow]Memory self-check:[/yellow] tools/memory_runtime settings.enabled=false (disabled).")
         return
 
-    mode = str(mem_cfg.mode or "legacy").lower()
-    console.print(f"[green]Memory self-check:[/green] mode={mode}")
+    console.print("[green]Memory self-check:[/green] queued markdown runtime enabled")
 
     def _provider_from_model(value: str) -> str | None:
         model = str(value or "").strip()
@@ -328,13 +327,13 @@ def _memory_startup_self_check(config: Config) -> None:
         "dashscope": ["DASHSCOPE_API_KEY"],
         "zhipu": ["ZHIPU_API_KEY"],
     }
-    if mode in {"rag", "dual"} and not _provider_has_key(provider_id):
+    if not _provider_has_key(provider_id):
         console.print(
             "[yellow]Memory self-check warning:[/yellow] embedding provider "
             f"'{provider_id}' has no API key configured. Dense retrieval may fallback to sparse-only."
         )
     rerank_provider = _provider_from_model(str(getattr(memory_binding, "rerank_provider_model", "") or ""))
-    if mode in {"rag", "dual"} and rerank_provider and not _provider_has_key(rerank_provider):
+    if rerank_provider and not _provider_has_key(rerank_provider):
         console.print(
             "[yellow]Memory self-check warning:[/yellow] rerank provider "
             f"'{rerank_provider}' has no API key configured. Rerank stage will be skipped."
@@ -893,17 +892,17 @@ def status():
         if mem_cfg is None:
             console.print("Memory Runtime: [yellow]missing tools/memory_runtime/resource.yaml[/yellow]")
         else:
-            console.print(f"Memory Mode: {mem_cfg.mode} ({'enabled' if mem_cfg.enabled else 'disabled'})")
             cp_path = resolve_path_in_workspace(mem_cfg.checkpointer.path, config.workspace_path)
-            store_db = resolve_path_in_workspace(mem_cfg.store.sqlite_path, config.workspace_path)
-            qdrant_dir = resolve_path_in_workspace(mem_cfg.store.qdrant_path, config.workspace_path)
+            memory_file = resolve_path_in_workspace(mem_cfg.document.memory_file, config.workspace_path)
+            notes_dir = resolve_path_in_workspace(mem_cfg.document.notes_dir, config.workspace_path)
+            queue_file = resolve_path_in_workspace(mem_cfg.queue.queue_file, config.workspace_path)
+            ops_file = resolve_path_in_workspace(mem_cfg.queue.ops_file, config.workspace_path)
+            console.print(f"Memory Runtime: {'enabled' if mem_cfg.enabled else 'disabled'}")
+            console.print(f"Memory Notebook: {memory_file} {_status_mark(memory_file.exists())}")
+            console.print(f"Memory Notes Dir: {notes_dir} {_status_mark(notes_dir.exists())}")
+            console.print(f"Memory Queue: {queue_file} {_status_mark(queue_file.exists())}")
+            console.print(f"Memory Ops Log: {ops_file} {_status_mark(ops_file.exists())}")
             console.print(f"Memory Checkpointer: {mem_cfg.checkpointer.backend} {cp_path}")
-            console.print(f"Memory Store(SQLite): {store_db} {_status_mark(store_db.exists())}")
-            console.print(f"Memory Store(Qdrant): {qdrant_dir} {_status_mark(qdrant_dir.exists())}")
-            pending_file = config.workspace_path / "memory" / "pending_facts.jsonl"
-            audit_file = config.workspace_path / "memory" / "audit.jsonl"
-            console.print(f"Memory Pending File: {pending_file} {_status_mark(pending_file.exists())}")
-            console.print(f"Memory Audit File: {audit_file} {_status_mark(audit_file.exists())}")
 
         # Check API keys from registry
         for spec in PROVIDERS:

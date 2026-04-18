@@ -66,7 +66,7 @@ async def test_node_selector_dense_unavailable_returns_full_rbac_visible_sets() 
 
 
 @pytest.mark.asyncio
-async def test_node_selector_without_memory_search_permission_still_uses_dense_skill_and_tool_selection(
+async def test_node_selector_without_legacy_memory_tool_still_uses_dense_skill_and_tool_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _node_context_selection_module()

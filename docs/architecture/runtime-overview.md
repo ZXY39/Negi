@@ -473,7 +473,7 @@ Maintainers should treat transient execution state as explicitly out of bounds f
 
 Those belong in transcript, session, task, or stage runtime state, not in `MEMORY.md`.
 
-Because tool/skill catalog narrowing still shares the legacy catalog bridge, a destructive reset of `memory/` may still remove catalog retrieval data together with user memory content. Catalog sync must be rebuilt after startup.
+Tool/skill catalog narrowing now goes through a catalog-only bridge and no longer delegates to the old `rag_memory` runtime. However, the catalog projection still lives under the same `memory/` tree, so a destructive reset of `memory/` may still remove catalog retrieval data together with user memory content. Catalog sync must be rebuilt after startup.
 
 ## CEO Frontdoor Legacy Compression Removal
 

@@ -62,7 +62,7 @@ def test_selector_does_not_promote_non_builtin_candidates_without_hydration() ->
         core_requirement="write files and inspect memory",
         visible_tool_families=[
             _tool_family_record("filesystem", executors=["filesystem_write", "filesystem_edit"]),
-            _tool_family_record("memory", executors=["memory_search"]),
+            _tool_family_record("memory", executors=["memory_note"]),
             _tool_family_record("web_fetch", executors=["web_fetch"]),
         ],
         visible_tool_names=[
@@ -71,7 +71,7 @@ def test_selector_does_not_promote_non_builtin_candidates_without_hydration() ->
             "spawn_child_nodes",
             "filesystem_write",
             "filesystem_edit",
-            "memory_search",
+            "memory_note",
             "web_fetch",
         ],
         always_callable_tool_names=[
@@ -90,7 +90,7 @@ def test_selector_does_not_promote_non_builtin_candidates_without_hydration() ->
     assert result.candidate_tool_names == [
         "filesystem_write",
         "filesystem_edit",
-        "memory_search",
+        "memory_note",
         "web_fetch",
     ]
     assert result.trace["selected_executor_scores"] == []
@@ -104,7 +104,7 @@ def test_selector_promoted_tools_remain_concrete_and_do_not_consume_top_k_budget
         visible_tool_families=[
             _tool_family_record("filesystem", executors=["filesystem_propose_patch"]),
             _tool_family_record("content_navigation", executors=["content_open"]),
-            _tool_family_record("memory", executors=["memory_search"]),
+            _tool_family_record("memory", executors=["memory_note"]),
         ],
         visible_tool_names=[
             "submit_next_stage",
@@ -112,7 +112,7 @@ def test_selector_promoted_tools_remain_concrete_and_do_not_consume_top_k_budget
             "spawn_child_nodes",
             "filesystem_propose_patch",
             "content_open",
-            "memory_search",
+            "memory_note",
         ],
         always_callable_tool_names=[
             "submit_next_stage",
@@ -130,7 +130,7 @@ def test_selector_promoted_tools_remain_concrete_and_do_not_consume_top_k_budget
         "filesystem_propose_patch",
         "content_open",
     ]
-    assert result.candidate_tool_names == ["memory_search"]
+    assert result.candidate_tool_names == ["memory_note"]
     assert result.trace["selected_promoted_tool_names"] == [
         "filesystem_propose_patch",
         "content_open",

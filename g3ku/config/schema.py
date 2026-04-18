@@ -635,12 +635,6 @@ class MemoryGuardConfig(Base):
     auto_fact_confidence: float = 0.8
 
 
-class MemoryCompatConfig(Base):
-    """Compatibility toggles for legacy files."""
-
-    dual_write_legacy_files: bool = True
-
-
 class MemoryFeaturesConfig(Base):
     """Feature switches for memory architecture v2."""
 
@@ -735,11 +729,9 @@ class MemoryCatalogSummaryConfig(Base):
 
 
 class MemoryToolsConfig(Base):
-    """RAG memory runtime configuration."""
+    """Queued Markdown memory runtime configuration."""
 
     enabled: bool = True
-    mode: Literal["legacy", "rag", "dual"] = "dual"
-    backend: Literal["rag"] = "rag"
     arch_version: Literal["v1", "v2"] = "v2"
     features: MemoryFeaturesConfig = Field(default_factory=MemoryFeaturesConfig)
     checkpointer: MemoryCheckpointerConfig = Field(default_factory=MemoryCheckpointerConfig)
@@ -748,12 +740,10 @@ class MemoryToolsConfig(Base):
     embedding: MemoryEmbeddingConfig = Field(default_factory=MemoryEmbeddingConfig)
     isolation: MemoryIsolationConfig = Field(default_factory=MemoryIsolationConfig)
     guard: MemoryGuardConfig = Field(default_factory=MemoryGuardConfig)
-    compat: MemoryCompatConfig = Field(default_factory=MemoryCompatConfig)
     commit: MemoryCommitConfig = Field(default_factory=MemoryCommitConfig)
     cost: MemoryCostConfig = Field(default_factory=MemoryCostConfig)
     assembly: MemoryAssemblyConfig = Field(default_factory=MemoryAssemblyConfig)
     catalog_summary: MemoryCatalogSummaryConfig = Field(default_factory=MemoryCatalogSummaryConfig)
-    bootstrap_mode: Literal["new_only", "full", "none"] = "new_only"
     retention_days: int | None = None
     document: MemoryDocumentConfig = Field(default_factory=MemoryDocumentConfig)
     queue: MemoryQueueConfig = Field(default_factory=MemoryQueueConfig)

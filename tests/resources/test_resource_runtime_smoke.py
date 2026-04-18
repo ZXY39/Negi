@@ -2092,7 +2092,7 @@ def test_direct_load_tools_remain_inline_without_manifest_flag(tmp_path: Path, s
 @pytest.mark.parametrize(
     'source_kind',
     [
-        'tool_result:memory_search',
+        'tool_result:memory_note',
         'tool_result:create_async_task_cn',
         'tool_result:task_failed_nodes_cn',
         'tool_result:task_fetch_cn',
@@ -2599,42 +2599,6 @@ def test_content_rest_routes_use_runtime_service_methods_and_preserve_legacy_art
     assert service.search_calls == [{"query": "needle", "ref": "artifact:artifact:wrapper", "path": None, "view": "canonical", "limit": 10, "before": 2, "after": 2}]
     assert service.open_calls[1]["view"] == "canonical"
     assert service.read_calls == [{"ref": "artifact:artifact:wrapper", "path": None, "view": "canonical"}]
-
-
-@pytest.mark.asyncio
-async def test_memory_search_reads_manifest_settings(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'memory_search', workspace / 'tools' / 'memory_search')
-
-    manifest = workspace / 'tools' / 'memory_search' / 'resource.yaml'
-    manifest.write_text(
-        manifest.read_text(encoding='utf-8').replace('default_limit: 8', 'default_limit: 11'),
-        encoding='utf-8',
-    )
-
-    class _FakeMemoryManager:
-        def __init__(self):
-            self.last_call = None
-
-        async def search_tool_view(self, **kwargs):
-            self.last_call = kwargs
-            return {'ok': True, 'limit': kwargs['limit']}
-
-    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
-    descriptor = registry.discover().tools['memory_search']
-    manager = _FakeMemoryManager()
-    tool = ResourceLoader(workspace).load_tool(
-        descriptor,
-        services={'loop': SimpleNamespace(_store_enabled=True), 'memory_manager': manager},
-    )
-
-    payload = json.loads(await tool.execute(query='remember this', __g3ku_runtime={'session_key': 'cli:demo'}))
-    assert payload == {'ok': True, 'limit': 11}
-    assert manager.last_call['limit'] == 11
-
-
 @pytest.mark.xfail(reason="memory_write contract is being replaced by queued markdown memory requests")
 @pytest.mark.asyncio
 async def test_memory_write_uses_structured_fact_contract(tmp_path: Path):

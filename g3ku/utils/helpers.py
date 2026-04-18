@@ -63,9 +63,7 @@ _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
 _ACTIVE_WORKSPACE_TEMPLATE_FILES: tuple[tuple[str, str], ...] = (
     ("memory/MEMORY.md", "memory/MEMORY.md"),
 )
-_ACTIVE_WORKSPACE_PLACEHOLDERS: tuple[str, ...] = (
-    "memory/HISTORY.md",
-)
+_ACTIVE_WORKSPACE_PLACEHOLDERS: tuple[str, ...] = ()
 
 
 def safe_filename(name: str) -> str:
