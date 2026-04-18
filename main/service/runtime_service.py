@@ -2003,6 +2003,243 @@ class MainRuntimeService:
             if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress'
         ]
 
+    @staticmethod
+    def _normalize_async_task_target_text(value: Any) -> str:
+        text = str(value or '').strip().casefold()
+        if not text:
+            return ''
+        text = re.sub(r'\s+', ' ', text)
+        return (
+            text.replace('，', ',')
+            .replace('。', '.')
+            .replace('：', ':')
+            .replace('（', '(')
+            .replace('）', ')')
+        )
+
+    def _async_task_keyword_fingerprint(self, value: Any) -> tuple[str, ...]:
+        normalized = self._normalize_async_task_target_text(value)
+        if not normalized:
+            return ()
+        tokens = re.findall(r"[a-z0-9_:/.-]+|[\u4e00-\u9fff]+", normalized)
+        unique_tokens: list[str] = []
+        for raw_token in tokens:
+            token = str(raw_token or '').strip()
+            if len(token) <= 1 or token in unique_tokens:
+                continue
+            unique_tokens.append(token)
+        return tuple(unique_tokens)
+
+    def _async_task_precheck_pool(self, session_id: str) -> list[dict[str, Any]]:
+        pool: list[dict[str, Any]] = []
+        for task in self.list_unfinished_tasks_for_session(session_id):
+            metadata = task.metadata if isinstance(task.metadata, dict) else {}
+            task_text = str(getattr(task, 'user_request', '') or '').strip()
+            core_requirement = str(metadata.get('core_requirement') or '').strip()
+            target_text = core_requirement or task_text
+            pool.append(
+                {
+                    'task_id': str(getattr(task, 'task_id', '') or '').strip(),
+                    'task_text': task_text,
+                    'core_requirement': core_requirement,
+                    'execution_policy': dict(metadata.get('execution_policy') or {}),
+                    'status': str(getattr(task, 'status', '') or '').strip(),
+                    'is_paused': bool(getattr(task, 'is_paused', False)),
+                    'target_text': self._normalize_async_task_target_text(target_text),
+                    'keyword_fingerprint': self._async_task_keyword_fingerprint(target_text),
+                }
+            )
+        return pool
+
+    def _rule_precheck_async_task_creation(
+        self,
+        *,
+        session_id: str,
+        task_text: str,
+        core_requirement: str,
+        execution_policy: dict[str, Any] | None,
+        requires_final_acceptance: bool,
+        final_acceptance_prompt: str,
+    ) -> dict[str, Any]:
+        _ = execution_policy, requires_final_acceptance, final_acceptance_prompt
+        candidate_target = self._normalize_async_task_target_text(core_requirement or task_text)
+        candidate_keywords = self._async_task_keyword_fingerprint(core_requirement or task_text)
+        for item in self._async_task_precheck_pool(session_id):
+            if candidate_target and candidate_target == str(item.get('target_text') or '').strip():
+                return {
+                    'decision': 'reject_duplicate',
+                    'matched_task_id': str(item.get('task_id') or '').strip(),
+                    'reason': 'core_requirement exact match',
+                    'decision_source': 'rule',
+                }
+            if candidate_keywords and candidate_keywords == tuple(item.get('keyword_fingerprint') or ()):
+                return {
+                    'decision': 'reject_duplicate',
+                    'matched_task_id': str(item.get('task_id') or '').strip(),
+                    'reason': 'keyword fingerprint exact match',
+                    'decision_source': 'rule',
+                }
+        return {
+            'decision': 'approve_new',
+            'matched_task_id': '',
+            'reason': 'rule precheck found no exact duplicate',
+            'decision_source': 'rule',
+        }
+
+    def _unfinished_async_task_review_payload(self, session_id: str) -> list[dict[str, Any]]:
+        payload: list[dict[str, Any]] = []
+        for item in self._async_task_precheck_pool(session_id):
+            payload.append(
+                {
+                    'task_id': str(item.get('task_id') or '').strip(),
+                    'task_text': str(item.get('task_text') or '').strip(),
+                    'core_requirement': str(item.get('core_requirement') or '').strip(),
+                    'execution_policy': dict(item.get('execution_policy') or {}),
+                    'status': str(item.get('status') or '').strip(),
+                    'is_paused': bool(item.get('is_paused', False)),
+                }
+            )
+        return payload
+
+    @staticmethod
+    def _parse_async_task_duplicate_precheck_response(response: Any) -> dict[str, Any] | None:
+        tool_calls = list(getattr(response, 'tool_calls', []) or [])
+        for call in tool_calls:
+            if isinstance(call, dict):
+                name = str(call.get('name') or '').strip()
+                arguments: Any = call.get('arguments')
+            else:
+                name = str(getattr(call, 'name', '') or '').strip()
+                arguments = getattr(call, 'arguments', None)
+            if name != 'review_async_task_duplicate_precheck':
+                continue
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except Exception:
+                    return None
+            if not isinstance(arguments, dict):
+                return None
+            decision = str(arguments.get('decision') or '').strip()
+            if decision not in {'approve_new', 'reject_duplicate', 'reject_use_append_notice'}:
+                return None
+            matched_task_id = str(arguments.get('matched_task_id') or '').strip()
+            if decision != 'approve_new' and not matched_task_id.startswith('task:'):
+                return None
+            return {
+                'decision': decision,
+                'matched_task_id': matched_task_id,
+                'reason': str(arguments.get('reason') or '').strip(),
+                'decision_source': 'llm',
+            }
+        return None
+
+    async def _execute_async_task_duplicate_precheck_review(
+        self,
+        *,
+        session_id: str,
+        task_text: str,
+        core_requirement: str,
+        execution_policy: dict[str, Any] | None,
+        requires_final_acceptance: bool,
+        final_acceptance_prompt: str,
+    ) -> dict[str, Any] | None:
+        model_refs = list(self.node_runner._acceptance_model_refs or self.node_runner._execution_model_refs)
+        if not model_refs:
+            return None
+        backend = self._chat_backend
+        if backend is None or not callable(getattr(backend, 'chat', None)):
+            return None
+        response = await backend.chat(
+            messages=[
+                {'role': 'system', 'content': load_prompt('async_task_duplicate_precheck.md').strip()},
+                {
+                    'role': 'user',
+                    'content': json.dumps(
+                        {
+                            'candidate_task': {
+                                'task_text': str(task_text or '').strip(),
+                                'core_requirement': str(core_requirement or '').strip(),
+                                'execution_policy': dict(execution_policy or {}),
+                                'requires_final_acceptance': bool(requires_final_acceptance),
+                                'final_acceptance_prompt': str(final_acceptance_prompt or '').strip(),
+                            },
+                            'unfinished_session_tasks': self._unfinished_async_task_review_payload(session_id),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                },
+            ],
+            tools=[
+                {
+                    'type': 'function',
+                    'function': {
+                        'name': 'review_async_task_duplicate_precheck',
+                        'description': 'Decide whether a new async task should be created or blocked.',
+                        'parameters': {
+                            'type': 'object',
+                            'properties': {
+                                'decision': {
+                                    'type': 'string',
+                                    'enum': ['approve_new', 'reject_duplicate', 'reject_use_append_notice'],
+                                },
+                                'matched_task_id': {'type': 'string'},
+                                'reason': {'type': 'string'},
+                            },
+                            'required': ['decision', 'reason'],
+                            'additionalProperties': False,
+                        },
+                    },
+                }
+            ],
+            model_refs=model_refs,
+        )
+        return self._parse_async_task_duplicate_precheck_response(response)
+
+    async def precheck_async_task_creation(
+        self,
+        *,
+        session_id: str,
+        task_text: str,
+        core_requirement: str,
+        execution_policy: dict[str, Any] | None,
+        requires_final_acceptance: bool,
+        final_acceptance_prompt: str,
+    ) -> dict[str, Any]:
+        normalized_session_id = self._normalize_session_key(session_id)
+        rule_decision = self._rule_precheck_async_task_creation(
+            session_id=normalized_session_id,
+            task_text=task_text,
+            core_requirement=core_requirement,
+            execution_policy=dict(execution_policy or {}),
+            requires_final_acceptance=bool(requires_final_acceptance),
+            final_acceptance_prompt=str(final_acceptance_prompt or '').strip(),
+        )
+        if str(rule_decision.get('decision') or '').strip() != 'approve_new':
+            return rule_decision
+        if not self._async_task_precheck_pool(normalized_session_id):
+            return rule_decision
+        try:
+            llm_decision = await self._execute_async_task_duplicate_precheck_review(
+                session_id=normalized_session_id,
+                task_text=task_text,
+                core_requirement=core_requirement,
+                execution_policy=dict(execution_policy or {}),
+                requires_final_acceptance=bool(requires_final_acceptance),
+                final_acceptance_prompt=str(final_acceptance_prompt or '').strip(),
+            )
+        except Exception:
+            llm_decision = None
+        if llm_decision is None:
+            return {
+                'decision': 'approve_new',
+                'matched_task_id': '',
+                'reason': 'llm review unavailable; allow new task',
+                'decision_source': 'fallback',
+            }
+        return llm_decision
+
     def list_active_task_snapshots_for_session(self, session_id: str, *, limit: int = 3) -> list[dict[str, str]]:
         unfinished = list(self.list_unfinished_tasks_for_session(session_id))
         unfinished.sort(
@@ -7132,6 +7369,21 @@ class CreateAsyncTaskTool(Tool):
         final_acceptance_prompt = str(kwargs.get('final_acceptance_prompt') or '').strip()
         raw_requires_final_acceptance = kwargs.get('requires_final_acceptance')
         requires_final_acceptance = bool(raw_requires_final_acceptance) or (raw_requires_final_acceptance in (None, '') and bool(final_acceptance_prompt))
+        precheck = await self._service.precheck_async_task_creation(
+            session_id=session_id,
+            task_text=str(task or '').strip(),
+            core_requirement=normalized_core_requirement,
+            execution_policy=normalized_execution_policy.model_dump(mode='json'),
+            requires_final_acceptance=requires_final_acceptance,
+            final_acceptance_prompt=final_acceptance_prompt,
+        )
+        decision = str(precheck.get('decision') or '').strip()
+        matched_task_id = str(precheck.get('matched_task_id') or '').strip()
+        reason = str(precheck.get('reason') or '').strip()
+        if decision == 'reject_duplicate':
+            return f'任务未创建：与进行中任务 {matched_task_id} 高度重复。原因：{reason}'
+        if decision == 'reject_use_append_notice':
+            return f'任务未创建：现有任务 {matched_task_id} 需要追加通知而不是新建。原因：{reason}'
         record = await self._service.create_task(
             str(task or ''),
             session_id=session_id,

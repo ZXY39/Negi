@@ -145,6 +145,16 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - 判断当前这轮能直接回答，还是需要走任务运行时
 - 在必要时触发任务工具，如 `create_async_task`
 
+Maintenance note for `create_async_task` duplicate precheck:
+
+- CEO/frontdoor may still call `create_async_task` more than once in the same visible turn; the runtime no longer enforces a hidden "one turn, one async task" rule.
+- Whether a detached task is actually created is now decided by `MainRuntimeService`, not by prompt wording alone.
+- Before creating a new task, the service compares the candidate request against the current session's unfinished task pool.
+- The deterministic rule layer only blocks exact duplicates, using normalized target text and exact keyword fingerprint matching.
+- If the exact-rule layer allows the request and unfinished tasks exist, an inspection-model review may still return `approve_new`, `reject_duplicate`, or `reject_use_append_notice`.
+- `reject_use_append_notice` means the new request is really an update to an existing unfinished task rather than a new detached work item. In the current version this blocks creation and points the caller toward a later append-notice path.
+- Frontdoor dispatch bookkeeping must therefore distinguish "tool call happened" from "new task was actually created". A rejection message may still mention an old `task:...` id, but that does not count as a fresh dispatch.
+
 对于异步任务的回传，还要补一个当前维护边界：
 
 - 任务本身在 `main/` 中结束后，会通过 task terminal callback / heartbeat 回到原 CEO 会话。

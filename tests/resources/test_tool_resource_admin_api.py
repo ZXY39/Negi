@@ -956,6 +956,15 @@ async def test_create_async_task_tool_uses_runtime_task_default_max_depth():
     captured: dict[str, object] = {}
 
     class _StubService:
+        async def precheck_async_task_creation(self, **kwargs):
+            captured['precheck'] = dict(kwargs)
+            return {
+                'decision': 'approve_new',
+                'matched_task_id': '',
+                'reason': 'no duplicate found',
+                'decision_source': 'rule',
+            }
+
         async def create_task(self, task: str, *, session_id: str = 'web:shared', max_depth: int | None = None, **kwargs):
             captured['task'] = task
             captured['session_id'] = session_id
@@ -1004,6 +1013,67 @@ async def test_create_async_task_tool_rejects_continuation_of_task_id():
             continuation_of_task_id='task:old-1',
             __g3ku_runtime={'session_key': 'web:ceo-demo'},
         )
+
+
+@pytest.mark.asyncio
+async def test_create_async_task_tool_returns_duplicate_rejection_text():
+    captured: dict[str, object] = {}
+
+    class _StubService:
+        async def precheck_async_task_creation(self, **kwargs):
+            captured['precheck'] = dict(kwargs)
+            return {
+                'decision': 'reject_duplicate',
+                'matched_task_id': 'task:existing-1',
+                'reason': 'core_requirement exact match',
+                'decision_source': 'rule',
+            }
+
+        async def create_task(self, *args, **kwargs):
+            raise AssertionError('create_task should not run for duplicate rejection')
+
+    tool = CreateAsyncTaskTool(_StubService())
+    result = await tool.execute(
+        '整理重点客户流失信号',
+        core_requirement='整理重点客户流失信号',
+        execution_policy={'mode': 'focus'},
+        __g3ku_runtime={'session_key': 'web:ceo-demo'},
+    )
+
+    assert '任务未创建' in result
+    assert 'task:existing-1' in result
+    assert '高度重复' in result
+    assert captured['precheck']['session_id'] == 'web:ceo-demo'
+
+
+@pytest.mark.asyncio
+async def test_create_async_task_tool_returns_append_notice_guidance():
+    class _StubService:
+        async def precheck_async_task_creation(self, **kwargs):
+            _ = kwargs
+            return {
+                'decision': 'reject_use_append_notice',
+                'matched_task_id': 'task:existing-2',
+                'reason': 'existing task only needs the new acceptance constraint',
+                'decision_source': 'llm',
+            }
+
+        async def create_task(self, *args, **kwargs):
+            raise AssertionError('create_task should not run for append-notice rejection')
+
+    tool = CreateAsyncTaskTool(_StubService())
+    result = await tool.execute(
+        '整理重点客户流失信号并新增董事会验收格式',
+        core_requirement='整理重点客户流失信号并新增董事会验收格式',
+        execution_policy={'mode': 'focus'},
+        requires_final_acceptance=True,
+        final_acceptance_prompt='必须按董事会模板输出',
+        __g3ku_runtime={'session_key': 'web:ceo-demo'},
+    )
+
+    assert '任务未创建' in result
+    assert 'task:existing-2' in result
+    assert '追加通知' in result
 
 
 def test_create_async_task_contract_no_longer_accepts_continuation_fields() -> None:
