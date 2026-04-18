@@ -4,7 +4,9 @@ import asyncio
 import hashlib
 import json
 import re
+import secrets
 import shutil
+import string
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -27,6 +29,7 @@ from g3ku.agent.memory_catalog_bridge import MemoryCatalogBridge
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.chatmodels import build_chat_model
+from main.prompts import load_prompt
 
 _NOTE_REF_RE = re.compile(r"\bref:(?P<ref>[a-z0-9_]+)\b")
 _STAGED_DOCUMENT_UNSET = object()
@@ -400,6 +403,8 @@ class _MemoryToolSession:
     notes_dir: Path
     staged_document: object = _STAGED_DOCUMENT_UNSET
     staged_notes: dict[str, str] = field(default_factory=dict)
+    applied_batch: dict[str, Any] | None = None
+    apply_batch_count: int = 0
 
     def read_document(self) -> str:
         if self.staged_document is _STAGED_DOCUMENT_UNSET:
@@ -426,6 +431,104 @@ class _MemoryToolSession:
         note_file_name(normalized)
         self.staged_notes[normalized] = str(content or "")
         return f"note staged: {normalized}"
+
+    def apply_batch(
+        self,
+        *,
+        adds: list[dict[str, Any]] | None = None,
+        rewrites: list[dict[str, Any]] | None = None,
+        deletes: list[str] | None = None,
+        note_upserts: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        errors: dict[str, str] = {}
+        normalized_adds: list[dict[str, str]] = []
+        normalized_rewrites: list[dict[str, str]] = []
+        normalized_deletes: list[str] = []
+        normalized_note_upserts: dict[str, str] = {}
+
+        raw_adds = list(adds or [])
+        if not isinstance(raw_adds, list):
+            errors["adds"] = "adds must be a list"
+        else:
+            for index, item in enumerate(raw_adds):
+                if not isinstance(item, dict):
+                    errors[f"adds[{index}]"] = "add item must be an object"
+                    continue
+                content = str(item.get("content") or "").strip()
+                decision_source = str(item.get("decision_source") or "").strip().lower()
+                if not content:
+                    errors[f"adds[{index}].content"] = "content must not be empty"
+                if decision_source not in {"user", "self"}:
+                    errors[f"adds[{index}].decision_source"] = "decision_source must be user or self"
+                if content and decision_source in {"user", "self"}:
+                    normalized_adds.append(
+                        {
+                            "content": content,
+                            "decision_source": decision_source,
+                        }
+                    )
+
+        raw_rewrites = list(rewrites or [])
+        if not isinstance(raw_rewrites, list):
+            errors["rewrites"] = "rewrites must be a list"
+        else:
+            for index, item in enumerate(raw_rewrites):
+                if not isinstance(item, dict):
+                    errors[f"rewrites[{index}]"] = "rewrite item must be an object"
+                    continue
+                memory_id = str(item.get("id") or "").strip()
+                content = str(item.get("content") or "").strip()
+                if not memory_id:
+                    errors[f"rewrites[{index}].id"] = "id must not be empty"
+                if not content:
+                    errors[f"rewrites[{index}].content"] = "content must not be empty"
+                if memory_id and content:
+                    normalized_rewrites.append(
+                        {
+                            "id": memory_id,
+                            "content": content,
+                        }
+                    )
+
+        raw_deletes = list(deletes or [])
+        if not isinstance(raw_deletes, list):
+            errors["deletes"] = "deletes must be a list"
+        else:
+            for index, item in enumerate(raw_deletes):
+                memory_id = str(item or "").strip()
+                if not memory_id:
+                    errors[f"deletes[{index}]"] = "delete id must not be empty"
+                    continue
+                normalized_deletes.append(memory_id)
+
+        raw_note_upserts = dict(note_upserts or {})
+        if not isinstance(raw_note_upserts, dict):
+            errors["note_upserts"] = "note_upserts must be an object"
+        else:
+            for raw_ref, raw_body in raw_note_upserts.items():
+                ref = str(raw_ref or "").strip()
+                body = str(raw_body or "")
+                try:
+                    note_file_name(ref)
+                except Exception as exc:
+                    errors[f"note_upserts.{ref or '<empty>'}"] = str(exc or "invalid note ref").strip()
+                    continue
+                normalized_note_upserts[ref] = body
+
+        if not normalized_adds and not normalized_rewrites and not normalized_deletes and not normalized_note_upserts:
+            errors["batch"] = "at least one add, rewrite, delete, or note_upsert is required"
+
+        if errors:
+            return {"ok": False, "errors": errors}
+
+        self.apply_batch_count += 1
+        self.applied_batch = {
+            "adds": normalized_adds,
+            "rewrites": normalized_rewrites,
+            "deletes": normalized_deletes,
+            "note_upserts": normalized_note_upserts,
+        }
+        return {"ok": True, "status": "batch_staged"}
 
 
 @dataclass(slots=True)
@@ -462,6 +565,7 @@ class MemoryManager:
         self.notes_dir = self.workspace / str(config.document.notes_dir)
         self.queue_file = self.workspace / str(config.queue.queue_file)
         self.ops_file = self.workspace / str(config.queue.ops_file)
+        self.review_state_file = self.mem_dir / "review_state.json"
         self._io_lock = threading.RLock()
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -493,6 +597,8 @@ class MemoryManager:
             self.queue_file.write_text("", encoding="utf-8")
         if not self.ops_file.exists():
             self.ops_file.write_text("", encoding="utf-8")
+        if not self.review_state_file.exists():
+            self.review_state_file.write_text('{"sessions": {}}\n', encoding="utf-8")
 
     def _read_note_bodies(self) -> dict[str, str]:
         if not self.notes_dir.exists():
@@ -1276,6 +1382,7 @@ class MemoryManager:
     def _build_legacy_import_payload(self, rows: list[dict[str, Any]]) -> tuple[str, dict[str, str]]:
         entries: list[MemoryEntry] = []
         note_writes: dict[str, str] = {}
+        allocated_ids: set[str] = set()
         for index, row in enumerate(rows, start=1):
             date_text = str(row.get("date_text") or "").strip()
             source = str(row.get("source") or "").strip().lower()
@@ -1288,7 +1395,17 @@ class MemoryManager:
                 raise ValueError(f"legacy import row {index} has unsupported source: {source}")
             if note_ref and f"ref:{note_ref}" not in summary:
                 summary = f"{summary} ref:{note_ref}"
-            entries.append(MemoryEntry(date_text=date_text, source=source, summary=summary, note_ref=note_ref))
+            memory_id = self._generate_memory_id(allocated_ids)
+            allocated_ids.add(memory_id)
+            entries.append(
+                MemoryEntry(
+                    memory_id=memory_id,
+                    date_text=date_text,
+                    source=source,
+                    summary=summary,
+                    note_ref=note_ref,
+                )
+            )
             if note_ref:
                 if not note_text and not (self.notes_dir / note_file_name(note_ref)).exists():
                     raise ValueError(f"legacy import row {index} references {note_ref} without note_text")
@@ -1457,48 +1574,32 @@ class MemoryManager:
         return _MemoryAttemptResult(session=session, usage=usage_total, final_text=final_text)
 
     def _memory_agent_tools(self, session: _MemoryToolSession):
-        @tool("memory_read_document")
-        def memory_read_document() -> str:
-            """Read the current staged MEMORY.md content or the frozen snapshot."""
-
-            return session.read_document()
-
         @tool("memory_read_note")
         def memory_read_note(ref: str) -> str:
             """Read one existing note by ref without the .md suffix."""
 
             return session.read_note(ref)
 
-        @tool("memory_write_document")
-        def memory_write_document(content: str) -> str:
-            """Stage the complete next MEMORY.md body."""
+        @tool("memory_apply_batch")
+        def memory_apply_batch(
+            adds: list[dict[str, Any]] | None = None,
+            rewrites: list[dict[str, Any]] | None = None,
+            deletes: list[str] | None = None,
+            note_upserts: dict[str, str] | None = None,
+        ) -> dict[str, Any]:
+            """Stage one complete memory mutation batch."""
 
-            return session.write_document(content)
+            return session.apply_batch(
+                adds=adds,
+                rewrites=rewrites,
+                deletes=deletes,
+                note_upserts=note_upserts,
+            )
 
-        @tool("memory_write_note")
-        def memory_write_note(ref: str, content: str) -> str:
-            """Stage a note file body under memory/notes/<ref>.md."""
-
-            return session.write_note(ref, content)
-
-        return [memory_read_document, memory_read_note, memory_write_document, memory_write_note]
+        return [memory_read_note, memory_apply_batch]
 
     def _memory_agent_system_prompt(self) -> str:
-        return (
-            "You are G3KU's dedicated long-term memory maintenance agent.\n"
-            "You only manage MEMORY.md and note files.\n"
-            "Allowed tools: memory_read_document, memory_read_note, memory_write_document, memory_write_note.\n"
-            "You must not invent unrelated memories, runtime state, task-in-progress state, pause state, or control metadata.\n"
-            "Use the provided memory strategy v2 snapshot as the authoritative policy boundary.\n"
-            "MEMORY.md rules:\n"
-            "- Each block is exactly: --- / YYYY/M/D-source： / one concise sentence.\n"
-            "- source is only user or self.\n"
-            "- Each concise sentence must be <= 100 characters.\n"
-            "- Full MEMORY.md must be <= 10000 characters.\n"
-            "- Use ref:note_xxxx only when detail must move into notes.\n"
-            "- Delete batches may only remove memories that already exist in the current snapshot.\n"
-            "Always stage the final MEMORY.md with memory_write_document before you finish."
-        )
+        return load_prompt("memory_agent.md").strip()
 
     def _memory_agent_user_prompt(
         self,
@@ -1532,6 +1633,12 @@ class MemoryManager:
             f"Memory strategy v2 snapshot:\n{json.dumps(strategy_snapshot, ensure_ascii=False, indent=2)}\n"
             f"{repair_block}"
         )
+
+    def _memory_agent_system_prompt(self) -> str:
+        return load_prompt("memory_agent.md").strip()
+
+    def _memory_assessor_system_prompt(self) -> str:
+        return load_prompt("memory_assessor.md").strip()
 
     @staticmethod
     def _response_text(response: Any) -> str:
@@ -1618,41 +1725,10 @@ class MemoryManager:
         before_text: str,
         session: _MemoryToolSession,
     ) -> _MemoryValidatedWrite:
-        if session.staged_document is _STAGED_DOCUMENT_UNSET:
-            raise _MemoryAgentValidationError("memory agent must call memory_write_document")
-        document_text = self._normalize_document_text(str(session.staged_document or ""))
-        validate_memory_document(
-            document_text,
-            summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 100) or 100),
-            document_max_chars=int(getattr(self.config.document, "document_max_chars", 10000) or 10000),
-        )
-        before_entries = parse_memory_document(before_text)
-        after_entries = parse_memory_document(document_text)
-        if batch.op == "delete":
-            before_blocks = {format_memory_entry(entry).strip() for entry in before_entries}
-            for entry in after_entries:
-                if format_memory_entry(entry).strip() not in before_blocks:
-                    raise _MemoryAgentValidationError("delete batch may only keep blocks from the current snapshot")
-        note_refs = {
-            str(entry.note_ref or "").strip()
-            for entry in after_entries
-            if str(entry.note_ref or "").strip()
-        }
-        existing_refs = {path.stem for path in self.notes_dir.glob("*.md")}
-        missing_refs = sorted(ref for ref in note_refs if ref not in existing_refs and ref not in session.staged_notes)
-        if missing_refs:
-            raise _MemoryAgentValidationError(f"missing note refs: {', '.join(missing_refs)}")
-        note_writes = {
-            ref: self._normalize_note_text(content)
-            for ref, content in dict(session.staged_notes or {}).items()
-            if str(ref or "").strip()
-        }
-        return _MemoryValidatedWrite(
-            document_text=document_text,
-            note_writes=note_writes,
-            note_refs_written=sorted(note_writes.keys()),
-            memory_chars_after=len(document_text),
-            document_preview=self._document_preview(document_text),
+        return self._build_validated_write_from_apply_batch(
+            before_text=before_text,
+            session=session,
+            batch=batch,
         )
 
     @staticmethod
@@ -1693,3 +1769,722 @@ class MemoryManager:
     @staticmethod
     def _collect_note_refs(document_text: str) -> list[str]:
         return sorted({match.group("ref") for match in _NOTE_REF_RE.finditer(str(document_text or ""))})
+
+    def _read_review_state(self) -> dict[str, Any]:
+        default_state = {"sessions": {}}
+        if not self.review_state_file.exists():
+            return default_state
+        with self._io_lock:
+            try:
+                payload = json.loads(self.review_state_file.read_text(encoding="utf-8") or "{}")
+            except Exception:
+                return default_state
+        if not isinstance(payload, dict):
+            return default_state
+        sessions = payload.get("sessions")
+        if not isinstance(sessions, dict):
+            return default_state
+        normalized_sessions: dict[str, Any] = {}
+        for raw_session_key, raw_state in sessions.items():
+            session_key = str(raw_session_key or "").strip()
+            if not session_key or not isinstance(raw_state, dict):
+                continue
+            pending_turns = [
+                dict(item)
+                for item in list(raw_state.get("pending_turns") or [])
+                if isinstance(item, dict)
+            ]
+            normalized_sessions[session_key] = {"pending_turns": pending_turns}
+        return {"sessions": normalized_sessions}
+
+    def _write_review_state(self, payload: dict[str, Any]) -> None:
+        normalized = dict(payload or {})
+        sessions = normalized.get("sessions")
+        if not isinstance(sessions, dict):
+            normalized["sessions"] = {}
+        with self._io_lock:
+            self.review_state_file.write_text(
+                json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+    def _review_window_turns(self) -> int:
+        return max(int(getattr(self.config.queue, "review_interval_turns", 5) or 5), 1)
+
+    @staticmethod
+    def _memory_date_text(now_iso: str | None = None) -> str:
+        value = datetime.fromisoformat(str(now_iso or MemoryManager._now_iso()).strip())
+        return f"{value.year}/{value.month}/{value.day}"
+
+    def _generate_memory_id(self, existing_ids: set[str]) -> str:
+        alphabet = string.ascii_letters + string.digits
+        for _ in range(2048):
+            candidate = "".join(secrets.choice(alphabet) for _ in range(6))
+            if candidate not in existing_ids:
+                return candidate
+        raise RuntimeError("unable to allocate unique memory id")
+
+    @staticmethod
+    def _normalize_memory_content_text(text: str) -> str:
+        normalized = str(text or "").strip()
+        if not normalized:
+            raise _MemoryAgentValidationError("memory content must not be empty")
+        if "\n" in normalized or "\r" in normalized:
+            raise _MemoryAgentValidationError("memory content must be one line")
+        return normalized
+
+    @staticmethod
+    def _review_turn_payload(
+        *,
+        turn_id: str,
+        user_messages: list[str],
+        assistant_text: str,
+        compression_summary: dict[str, Any] | None,
+        canonical_summary: dict[str, Any] | None,
+    ) -> str:
+        parts = [f"[turn_id] {str(turn_id or '').strip() or '(unknown)'}"]
+        normalized_user_messages = [str(item or "").strip() for item in list(user_messages or []) if str(item or "").strip()]
+        if normalized_user_messages:
+            parts.append("用户消息：")
+            parts.extend(f"- {item}" for item in normalized_user_messages)
+        assistant = str(assistant_text or "").strip()
+        if assistant:
+            parts.append("助手回复：")
+            parts.append(assistant)
+        if isinstance(compression_summary, dict) and compression_summary:
+            parts.append("压缩摘要：")
+            parts.append(json.dumps(compression_summary, ensure_ascii=False, sort_keys=True))
+        if isinstance(canonical_summary, dict) and canonical_summary:
+            parts.append("阶段摘要：")
+            parts.append(json.dumps(canonical_summary, ensure_ascii=False, sort_keys=True))
+        return "\n".join(str(item) for item in parts if str(item).strip()).strip()
+
+    @staticmethod
+    def _review_window_payload(*, session_key: str, pending_turns: list[dict[str, Any]]) -> str:
+        sections = [f"[session_key] {str(session_key or '').strip()}"]
+        for index, item in enumerate(list(pending_turns or []), start=1):
+            payload_text = str(item.get("payload_text") or "").strip()
+            if not payload_text:
+                continue
+            sections.append(f"## 窗口回合 {index}")
+            sections.append(payload_text)
+        return "\n\n".join(sections).strip()
+
+    async def record_turn_for_review(
+        self,
+        *,
+        session_key: str,
+        turn_id: str,
+        user_messages: list[str],
+        assistant_text: str,
+        compression_summary: dict[str, Any] | None,
+        canonical_summary: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        normalized_session = str(session_key or "").strip()
+        if not normalized_session:
+            return {"ok": True, "status": "ignored", "reason": "missing_session_key"}
+        payload_text = self._review_turn_payload(
+            turn_id=turn_id,
+            user_messages=user_messages,
+            assistant_text=assistant_text,
+            compression_summary=compression_summary,
+            canonical_summary=canonical_summary,
+        )
+        if not payload_text:
+            return {"ok": True, "status": "ignored", "reason": "empty_turn"}
+        state = self._read_review_state()
+        sessions = dict(state.get("sessions") or {})
+        session_state = dict(sessions.get(normalized_session) or {})
+        pending_turns = [
+            dict(item)
+            for item in list(session_state.get("pending_turns") or [])
+            if isinstance(item, dict)
+        ]
+        pending_turns.append(
+            {
+                "turn_id": str(turn_id or "").strip(),
+                "payload_text": payload_text,
+                "created_at": self._now_iso(),
+            }
+        )
+        if len(pending_turns) < self._review_window_turns():
+            sessions[normalized_session] = {"pending_turns": pending_turns}
+            self._write_review_state({"sessions": sessions})
+            return {
+                "ok": True,
+                "status": "buffered",
+                "pending_turn_count": len(pending_turns),
+            }
+        payload = self._review_window_payload(session_key=normalized_session, pending_turns=pending_turns)
+        request = MemoryQueueRequest(
+            op="assess",
+            decision_source="self",
+            payload_text=payload,
+            created_at=self._now_iso(),
+            request_id=self._request_id("assess"),
+            session_key=normalized_session,
+            trigger_source="ordinary_turn_window",
+        )
+        sessions[normalized_session] = {"pending_turns": []}
+        self._write_review_state({"sessions": sessions})
+        await self._append_queue_request(request)
+        return {
+            "ok": True,
+            "status": "queued",
+            "request_id": request.request_id,
+            "pending_turn_count": 0,
+        }
+
+    async def flush_review_window(
+        self,
+        *,
+        session_key: str,
+        trigger_source: str,
+    ) -> dict[str, Any]:
+        normalized_session = str(session_key or "").strip()
+        if not normalized_session:
+            return {"ok": True, "status": "ignored", "reason": "missing_session_key"}
+        state = self._read_review_state()
+        sessions = dict(state.get("sessions") or {})
+        session_state = dict(sessions.get(normalized_session) or {})
+        pending_turns = [
+            dict(item)
+            for item in list(session_state.get("pending_turns") or [])
+            if isinstance(item, dict)
+        ]
+        if not pending_turns:
+            return {"ok": True, "status": "idle", "reason": "no_pending_turns"}
+        payload = self._review_window_payload(session_key=normalized_session, pending_turns=pending_turns)
+        request = MemoryQueueRequest(
+            op="assess",
+            decision_source="self",
+            payload_text=payload,
+            created_at=self._now_iso(),
+            request_id=self._request_id("assess"),
+            session_key=normalized_session,
+            trigger_source=str(trigger_source or "").strip() or "token_compression",
+        )
+        sessions[normalized_session] = {"pending_turns": []}
+        self._write_review_state({"sessions": sessions})
+        await self._append_queue_request(request)
+        return {
+            "ok": True,
+            "status": "queued",
+            "request_id": request.request_id,
+            "pending_turn_count": 0,
+        }
+
+    def clear_review_window(self, *, session_key: str) -> None:
+        normalized_session = str(session_key or "").strip()
+        if not normalized_session:
+            return
+        state = self._read_review_state()
+        sessions = dict(state.get("sessions") or {})
+        if normalized_session not in sessions:
+            return
+        sessions.pop(normalized_session, None)
+        self._write_review_state({"sessions": sessions})
+
+    async def enqueue_write_request(
+        self,
+        *,
+        session_key: str,
+        decision_source: str,
+        payload_text: str,
+        trigger_source: str,
+    ) -> dict[str, Any]:
+        normalized_payload = str(payload_text or "").strip()
+        if not normalized_payload:
+            return {"ok": True, "status": "ignored", "reason": "empty_payload"}
+        request = MemoryQueueRequest(
+            op="write",
+            decision_source=self._normalize_decision_source(decision_source),
+            payload_text=normalized_payload,
+            created_at=self._now_iso(),
+            session_key=str(session_key or "").strip(),
+            trigger_source=str(trigger_source or "").strip(),
+            request_id=self._request_id("write"),
+        )
+        await self._append_queue_request(request)
+        return {"ok": True, "request_id": request.request_id, "status": "queued"}
+
+    async def enqueue_delete_request(
+        self,
+        *,
+        session_key: str,
+        decision_source: str,
+        payload_text: str,
+        trigger_source: str,
+    ) -> dict[str, Any]:
+        normalized_payload = str(payload_text or "").strip()
+        if not normalized_payload:
+            return {"ok": True, "status": "ignored", "reason": "empty_payload"}
+        request = MemoryQueueRequest(
+            op="delete",
+            decision_source=self._normalize_decision_source(decision_source),
+            payload_text=normalized_payload,
+            created_at=self._now_iso(),
+            session_key=str(session_key or "").strip(),
+            trigger_source=str(trigger_source or "").strip(),
+            request_id=self._request_id("delete"),
+        )
+        await self._append_queue_request(request)
+        return {"ok": True, "request_id": request.request_id, "status": "queued"}
+
+    async def enqueue_autonomous_review(
+        self,
+        *,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+        user_messages: list[str],
+        assistant_text: str,
+        turn_id: str,
+        compression_summary: dict[str, Any] | None = None,
+        canonical_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        _ = channel, chat_id
+        return await self.record_turn_for_review(
+            session_key=session_key,
+            turn_id=turn_id,
+            user_messages=user_messages,
+            assistant_text=assistant_text,
+            compression_summary=compression_summary,
+            canonical_summary=canonical_summary,
+        )
+
+    async def enqueue_pre_compression_flush(
+        self,
+        *,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+        context_messages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        _ = channel, chat_id, context_messages
+        return await self.flush_review_window(
+            session_key=session_key,
+            trigger_source="pre_compression_flush",
+        )
+
+    async def enqueue_session_boundary_flush(
+        self,
+        *,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+        trigger_source: str,
+    ) -> dict[str, Any]:
+        _ = channel, chat_id, trigger_source
+        self.clear_review_window(session_key=session_key)
+        return {"ok": True, "status": "ignored", "reason": "session_boundary_flush_disabled"}
+
+    def _memory_agent_tools(self, session: _MemoryToolSession):
+        @tool("memory_read_note")
+        def memory_read_note(ref: str) -> str:
+            """Read one existing note by ref without the .md suffix."""
+
+            return session.read_note(ref)
+
+        @tool("memory_apply_batch")
+        def memory_apply_batch(
+            adds: list[dict[str, Any]] | None = None,
+            rewrites: list[dict[str, Any]] | None = None,
+            deletes: list[str] | None = None,
+            note_upserts: dict[str, str] | None = None,
+        ) -> dict[str, Any]:
+            """Stage one complete memory mutation batch."""
+
+            return session.apply_batch(
+                adds=adds,
+                rewrites=rewrites,
+                deletes=deletes,
+                note_upserts=note_upserts,
+            )
+
+        return [memory_read_note, memory_apply_batch]
+
+    def _memory_agent_user_prompt(
+        self,
+        *,
+        batch: MemoryBatch,
+        snapshot_text: str,
+        repair_reason: str,
+    ) -> str:
+        note_index = sorted(path.stem for path in self.notes_dir.glob("*.md"))
+        requests = [
+            {
+                "request_id": item.request_id,
+                "op": item.op,
+                "decision_source": item.decision_source,
+                "payload_text": item.payload_text,
+                "created_at": item.created_at,
+                "trigger_source": item.trigger_source,
+                "session_key": item.session_key,
+            }
+            for item in batch.items
+        ]
+        repair_block = f"\n上一轮输出无效：{repair_reason}\n请修复后重试。\n" if repair_reason else ""
+        return (
+            f"当前记忆正文：\n{snapshot_text or '(empty)'}\n\n"
+            f"现有 note refs：{json.dumps(note_index, ensure_ascii=False)}\n"
+            f"当前批次类型：{batch.op}\n"
+            f"待处理请求：\n{json.dumps(requests, ensure_ascii=False, indent=2)}\n"
+            "提交要求：\n"
+            "- 只允许使用一次 memory_apply_batch 完成所有修改。\n"
+            "- 新增记忆必须通过 adds 提交，并显式给出 decision_source。\n"
+            "- rewrite 只传 id 和 content；系统会保留原 source 并刷新日期。\n"
+            "- delete 传记忆 id 列表。\n"
+            "- note_upserts 只写需要新增或改写的 note。\n"
+            f"{repair_block}"
+        )
+
+    def _memory_assessor_user_prompt(self, *, batch: MemoryBatch) -> str:
+        windows = [str(item.payload_text or "").strip() for item in batch.items if str(item.payload_text or "").strip()]
+        return (
+            "以下是待评估的对话窗口内容。\n"
+            "请只判断是否存在值得进入长期记忆的高价值内容。\n\n"
+            f"{chr(10).join(windows) or '(empty)'}\n"
+        )
+
+    @staticmethod
+    async def _execute_memory_tool(tools: list[Any], tool_call: dict[str, Any]) -> dict[str, Any]:
+        name = str(tool_call.get("name") or "").strip()
+        args = dict(tool_call.get("args") or {})
+        tool_map = {str(getattr(item, "name", "") or ""): item for item in list(tools or [])}
+        target = tool_map.get(name)
+        if target is None:
+            return {"ok": False, "tool": name, "error": f"unknown memory tool: {name}"}
+        try:
+            result = target.invoke(args)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return {"ok": True, "tool": name, "result": result}
+        except Exception as exc:
+            return {"ok": False, "tool": name, "error": str(exc or "memory tool failed").strip()}
+
+    async def _run_memory_assessor_batch(
+        self,
+        *,
+        batch: MemoryBatch,
+        runtime_config: Any,
+    ) -> dict[str, Any]:
+        result_holder = {"content": None}
+
+        @tool("memory_assessment_result")
+        def memory_assessment_result(content: str) -> str:
+            """Record the assessor decision as either null or one refined memory text block."""
+
+            normalized = str(content or "").strip()
+            if not normalized:
+                raise ValueError("content must not be empty")
+            result_holder["content"] = normalized
+            return "assessment recorded"
+
+        model = build_chat_model(runtime_config, role="memory").bind_tools([memory_assessment_result])
+        messages: list[Any] = [
+            SystemMessage(content=self._memory_assessor_system_prompt()),
+            HumanMessage(content=self._memory_assessor_user_prompt(batch=batch)),
+        ]
+        usage_total = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
+        round_limit = int(runtime_config.get_role_max_iterations("memory") or 6)
+        round_limit = max(round_limit, 1)
+        for _ in range(round_limit):
+            response = await model.ainvoke(messages)
+            self._merge_usage(usage_total, self._extract_usage(response))
+            final_text = self._response_text(response)
+            tool_calls = self._normalize_tool_calls(response)
+            if not tool_calls:
+                break
+            messages.append(AIMessage(content=final_text, tool_calls=tool_calls))
+            for tool_call in tool_calls:
+                result = await self._execute_memory_tool([memory_assessment_result], tool_call)
+                messages.append(
+                    ToolMessage(
+                        content=json.dumps(result, ensure_ascii=False),
+                        tool_call_id=str(tool_call.get("id") or ""),
+                        name=str(tool_call.get("name") or ""),
+                    )
+                )
+            if result_holder["content"] is not None:
+                break
+        if result_holder["content"] is None:
+            raise _MemoryAgentRuntimeError("memory assessor must call memory_assessment_result")
+        assessed_text = str(result_holder["content"] or "").strip()
+        return {
+            "assessed_text": None if assessed_text.lower() == "null" else assessed_text,
+            "usage": usage_total,
+        }
+
+    def _build_validated_write_from_apply_batch(
+        self,
+        *,
+        before_text: str,
+        session: _MemoryToolSession,
+        batch: MemoryBatch,
+    ) -> _MemoryValidatedWrite:
+        if session.apply_batch_count != 1 or not isinstance(session.applied_batch, dict):
+            raise _MemoryAgentValidationError("memory agent must call memory_apply_batch exactly once")
+        payload = dict(session.applied_batch or {})
+        adds = list(payload.get("adds") or [])
+        rewrites = list(payload.get("rewrites") or [])
+        deletes = list(payload.get("deletes") or [])
+        note_upserts = dict(payload.get("note_upserts") or {})
+
+        if batch.op == "delete" and (adds or rewrites):
+            raise _MemoryAgentValidationError("delete batch may not add or rewrite memories")
+
+        before_entries = parse_memory_document(before_text)
+        existing_by_id = {entry.memory_id: entry for entry in before_entries}
+        if len(existing_by_id) != len(before_entries):
+            raise _MemoryAgentValidationError("current memory snapshot contains duplicate ids")
+
+        delete_ids = {str(item or "").strip() for item in deletes if str(item or "").strip()}
+        missing_delete_ids = sorted(memory_id for memory_id in delete_ids if memory_id not in existing_by_id)
+        if missing_delete_ids:
+            raise _MemoryAgentValidationError(f"delete ids not found: {', '.join(missing_delete_ids)}")
+
+        rewrite_by_id: dict[str, str] = {}
+        for item in rewrites:
+            if not isinstance(item, dict):
+                raise _MemoryAgentValidationError("rewrite item must be an object")
+            memory_id = str(item.get("id") or "").strip()
+            content = self._normalize_memory_content_text(str(item.get("content") or ""))
+            if memory_id not in existing_by_id:
+                raise _MemoryAgentValidationError(f"rewrite id not found: {memory_id}")
+            rewrite_by_id[memory_id] = content
+
+        existing_ids = set(existing_by_id)
+        date_text = self._memory_date_text()
+        after_entries: list[MemoryEntry] = []
+        seen_summary_keys: set[tuple[str, str]] = set()
+        for entry in before_entries:
+            if entry.memory_id in delete_ids:
+                continue
+            if entry.memory_id in rewrite_by_id:
+                updated_summary = rewrite_by_id[entry.memory_id]
+                updated = MemoryEntry(
+                    memory_id=entry.memory_id,
+                    date_text=date_text,
+                    source=entry.source,
+                    summary=updated_summary,
+                    note_ref=(self._extract_note_ref(updated_summary)),
+                )
+                summary_key = (updated.source, updated.summary)
+                if summary_key in seen_summary_keys:
+                    continue
+                seen_summary_keys.add(summary_key)
+                after_entries.append(updated)
+                continue
+            summary_key = (entry.source, entry.summary)
+            if summary_key in seen_summary_keys:
+                continue
+            seen_summary_keys.add(summary_key)
+            after_entries.append(entry)
+
+        for item in adds:
+            if not isinstance(item, dict):
+                raise _MemoryAgentValidationError("add item must be an object")
+            content = self._normalize_memory_content_text(str(item.get("content") or ""))
+            decision_source = str(item.get("decision_source") or "").strip().lower()
+            if decision_source not in {"user", "self"}:
+                raise _MemoryAgentValidationError("add decision_source must be user or self")
+            summary_key = (decision_source, content)
+            if summary_key in seen_summary_keys:
+                continue
+            seen_summary_keys.add(summary_key)
+            memory_id = self._generate_memory_id(existing_ids)
+            existing_ids.add(memory_id)
+            after_entries.append(
+                MemoryEntry(
+                    memory_id=memory_id,
+                    date_text=date_text,
+                    source=decision_source,
+                    summary=content,
+                    note_ref=(self._extract_note_ref(content)),
+                )
+            )
+
+        document_text = "".join(format_memory_entry(entry) for entry in after_entries)
+        validate_memory_document(
+            document_text,
+            summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 100) or 100),
+            document_max_chars=int(getattr(self.config.document, "document_max_chars", 10000) or 10000),
+        )
+        existing_refs = {path.stem for path in self.notes_dir.glob("*.md")}
+        note_writes = {
+            str(ref): self._normalize_note_text(content)
+            for ref, content in note_upserts.items()
+            if str(ref or "").strip()
+        }
+        note_refs = {
+            str(entry.note_ref or "").strip()
+            for entry in after_entries
+            if str(entry.note_ref or "").strip()
+        }
+        missing_refs = sorted(ref for ref in note_refs if ref not in existing_refs and ref not in note_writes)
+        if missing_refs:
+            raise _MemoryAgentValidationError(f"missing note refs: {', '.join(missing_refs)}")
+        return _MemoryValidatedWrite(
+            document_text=self._normalize_document_text(document_text),
+            note_writes=note_writes,
+            note_refs_written=sorted(note_writes.keys()),
+            memory_chars_after=len(self._normalize_document_text(document_text)),
+            document_preview=self._document_preview(document_text),
+        )
+
+    @staticmethod
+    def _extract_note_ref(text: str) -> str:
+        match = _NOTE_REF_RE.search(str(text or "").strip())
+        return str(match.group("ref") or "").strip() if match else ""
+
+    def _validate_candidate_state(
+        self,
+        *,
+        batch: MemoryBatch,
+        before_text: str,
+        session: _MemoryToolSession,
+    ) -> _MemoryValidatedWrite:
+        return self._build_validated_write_from_apply_batch(
+            before_text=before_text,
+            session=session,
+            batch=batch,
+        )
+
+    async def _run_memory_agent_batch(
+        self,
+        *,
+        batch: MemoryBatch,
+        runtime_config: Any,
+        model_chain: list[str],
+    ) -> dict[str, Any]:
+        before_text = self.snapshot_text()
+        total_usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
+
+        processing_batch = batch
+        if batch.op == "assess":
+            assess_result = await self._run_memory_assessor_batch(batch=batch, runtime_config=runtime_config)
+            self._merge_usage(total_usage, assess_result["usage"])
+            assessed_text = assess_result.get("assessed_text")
+            if assessed_text is None:
+                return {
+                    "validated": None,
+                    "usage": total_usage,
+                    "attempt_count": 1,
+                    "assessed_text": None,
+                }
+            processing_batch = MemoryBatch(
+                op="write",
+                items=[
+                    MemoryQueueRequest(
+                        op="write",
+                        decision_source="self",
+                        payload_text=str(assessed_text or "").strip(),
+                        created_at=self._now_iso(),
+                        request_id=self._request_id("assessed"),
+                        trigger_source=f"assess:{batch.items[0].request_id if batch.items else 'window'}",
+                        session_key=str(batch.items[0].session_key or "").strip() if batch.items else "",
+                    )
+                ],
+            )
+
+        total_attempts = 3
+        last_error = "memory agent did not stage a batch"
+        for attempt_index in range(total_attempts):
+            repair_reason = last_error if attempt_index > 0 else ""
+            attempt = await self._run_memory_agent_attempt(
+                batch=processing_batch,
+                runtime_config=runtime_config,
+                before_text=before_text,
+                repair_reason=repair_reason,
+            )
+            self._merge_usage(total_usage, attempt.usage)
+            try:
+                validated = self._validate_candidate_state(
+                    batch=processing_batch,
+                    before_text=before_text,
+                    session=attempt.session,
+                )
+                return {
+                    "validated": validated,
+                    "usage": total_usage,
+                    "attempt_count": attempt_index + 1,
+                    "assessed_text": None if batch.op != "assess" else processing_batch.items[0].payload_text,
+                }
+            except _MemoryAgentValidationError as exc:
+                last_error = str(exc or "memory agent output invalid").strip()
+                continue
+        raise _MemoryAgentRuntimeError(last_error)
+
+    async def run_due_batch_once(self, *, now_iso: str | None = None) -> dict[str, Any]:
+        effective_now = str(now_iso or self._now_iso()).strip()
+        batch = await self.collect_due_batch(now_iso=effective_now)
+        if batch is None or not batch.items:
+            return {"ok": True, "status": "idle", "processed": 0}
+        if str(batch.items[0].status or "pending").strip() != "processing":
+            self._mark_batch_processing(batch.items, effective_now)
+
+        try:
+            runtime_config, _revision, _changed = get_runtime_config()
+        except Exception as exc:
+            return self._mark_batch_error(batch, effective_now, str(exc or "memory runtime config unavailable"))
+
+        model_chain = self._memory_model_chain(runtime_config)
+        if not model_chain:
+            return self._mark_batch_blocked(batch, effective_now, "memory role not configured")
+
+        try:
+            result = await self._run_memory_agent_batch(
+                batch=batch,
+                runtime_config=runtime_config,
+                model_chain=model_chain,
+            )
+        except Exception as exc:
+            logger.warning("memory batch failed: {}", exc)
+            return self._mark_batch_error(batch, effective_now, str(exc or "memory batch failed"))
+
+        self._drop_request_ids({item.request_id for item in batch.items})
+        if result.get("validated") is None:
+            return {
+                "ok": True,
+                "status": "assessed_null",
+                "op": batch.op,
+                "processed": len(batch.items),
+                "request_ids": [item.request_id for item in batch.items],
+                "model_chain": list(model_chain),
+            }
+
+        self._commit_validated_write(result["validated"])
+        processed_at = self._now_iso()
+        processed_payload = {
+            "batch_id": self._request_id(batch.op),
+            "op": "write" if batch.op == "assess" else batch.op,
+            "source_op": batch.op,
+            "processed_at": processed_at,
+            "request_ids": [item.request_id for item in batch.items],
+            "request_count": len(batch.items),
+            "decision_sources": [item.decision_source for item in batch.items],
+            "payload_texts": [item.payload_text for item in batch.items],
+            "usage": {
+                "input_tokens": int(result["usage"]["input_tokens"]),
+                "output_tokens": int(result["usage"]["output_tokens"]),
+                "cache_read_tokens": int(result["usage"]["cache_read_tokens"]),
+            },
+            "model_chain": list(model_chain),
+            "attempt_count": int(result["attempt_count"]),
+            "memory_chars_after": int(result["validated"].memory_chars_after),
+            "note_refs_written": list(result["validated"].note_refs_written),
+            "document_preview": result["validated"].document_preview,
+        }
+        self._append_ops_payload(processed_payload)
+        return {
+            "ok": True,
+            "status": "applied",
+            "op": batch.op,
+            "processed": len(batch.items),
+            "request_ids": [item.request_id for item in batch.items],
+            "attempt_count": int(result["attempt_count"]),
+            "usage": dict(processed_payload["usage"]),
+            "model_chain": list(model_chain),
+            "processed_at": processed_at,
+        }

@@ -43,7 +43,7 @@ def _memory_cfg():
         "ops_file": "memory/ops.jsonl",
         "batch_max_chars": 50,
         "max_wait_seconds": 3,
-        "review_interval_turns": 10,
+        "review_interval_turns": 5,
     }
     return MemoryToolsConfig.model_validate(payload)
 

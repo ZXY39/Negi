@@ -356,6 +356,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return False
         return str(payload.get("message_type") or "").strip() == FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND
 
+    @staticmethod
+    def _is_frontdoor_memory_snapshot_record(record: dict[str, Any] | None) -> bool:
+        if not isinstance(record, dict):
+            return False
+        if str(record.get("role") or "").strip().lower() != "assistant":
+            return False
+        return str(record.get("content") or "").strip().startswith("## 长期记忆\n")
+
     @classmethod
     def _split_request_body_and_tool_contract_messages(
         cls,
@@ -367,6 +375,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if not isinstance(item, dict):
                 continue
             record = dict(item)
+            if cls._is_frontdoor_memory_snapshot_record(record):
+                continue
             if cls._is_frontdoor_tool_contract_record(record):
                 contract_messages.append(record)
                 continue

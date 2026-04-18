@@ -37,7 +37,7 @@ settings:
     ops_file: memory/ops.jsonl
     batch_max_chars: 50000
     max_wait_seconds: 3
-    review_interval_turns: 10
+    review_interval_turns: 5
   agent:
     model_key: ""
     repair_attempt_limit: 1

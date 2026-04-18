@@ -244,6 +244,24 @@ class CeoMessageBuilder:
         )
 
     @staticmethod
+    def _memory_snapshot_stable_message(memory_snapshot_text: str) -> dict[str, Any] | None:
+        snapshot_text = str(memory_snapshot_text or '').strip()
+        if not snapshot_text:
+            return None
+        return {
+            "role": "assistant",
+            "content": f"## 长期记忆\n{snapshot_text}".strip(),
+        }
+
+    @staticmethod
+    def _is_memory_snapshot_message(record: dict[str, Any] | None) -> bool:
+        if not isinstance(record, dict):
+            return False
+        if str(record.get("role") or "").strip().lower() != "assistant":
+            return False
+        return str(record.get("content") or "").strip().startswith("## 长期记忆\n")
+
+    @staticmethod
     def _retrieved_memory_resolution_hint_block() -> str:
         return '\n'.join(
             [
@@ -1299,8 +1317,6 @@ class CeoMessageBuilder:
                     ).strip()
                 except Exception:
                     memory_snapshot_text = ""
-        if memory_snapshot_text:
-            turn_overlay_parts.append(f"## 长期记忆\n{memory_snapshot_text}".strip())
         if memory_write_terms and memory_write_visible:
             turn_overlay_parts.append(self._memory_write_hint_block(memory_write_terms))
 
@@ -1376,6 +1392,7 @@ class CeoMessageBuilder:
             'capability_snapshot': capability_snapshot,
             'memory_write_terms': memory_write_terms,
             'memory_write_visible': memory_write_visible,
+            'memory_snapshot_text': memory_snapshot_text,
             'selected_skills': selected_skills,
             'skill_trace': skill_trace,
             'semantic_trace': semantic_trace,
@@ -1502,10 +1519,14 @@ class CeoMessageBuilder:
         user_content: Any,
         split_prompt_builder: bool,
         turn_overlay_parts: list[str],
+        memory_snapshot_text: str,
         current_user_in_history: bool,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
         turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts)
         stable_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        memory_snapshot_message = self._memory_snapshot_stable_message(memory_snapshot_text)
+        if memory_snapshot_message is not None:
+            stable_messages.append(memory_snapshot_message)
         stable_messages.extend(history_messages)
         if not current_user_in_history:
             stable_messages.append({"role": "user", "content": user_content})
@@ -1532,11 +1553,24 @@ class CeoMessageBuilder:
         request_body_seed_messages: list[dict[str, Any]],
         user_content: Any,
         turn_overlay_parts: list[str],
+        memory_snapshot_text: str,
         query_text: str,
         user_metadata: dict[str, Any] | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str, bool]:
         turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts)
-        stable_messages = self._request_body_seed_records(request_body_seed_messages)
+        stable_messages = [
+            dict(item)
+            for item in self._request_body_seed_records(request_body_seed_messages)
+            if not self._is_memory_snapshot_message(item)
+        ]
+        memory_snapshot_message = self._memory_snapshot_stable_message(memory_snapshot_text)
+        if memory_snapshot_message is not None:
+            insert_at = 1 if stable_messages and str(stable_messages[0].get("role") or "").strip().lower() == "system" else 0
+            stable_messages = [
+                *list(stable_messages[:insert_at]),
+                memory_snapshot_message,
+                *list(stable_messages[insert_at:]),
+            ]
         current_user_in_history = self._history_has_current_user(
             history_messages=stable_messages,
             query_text=query_text,
@@ -1586,6 +1620,7 @@ class CeoMessageBuilder:
             request_body_seed_messages=request_body_seed_messages,
             user_content=context_sources['user_content'],
             turn_overlay_parts=turn_overlay_parts,
+            memory_snapshot_text=str(context_sources.get('memory_snapshot_text') or ''),
             query_text=query_text,
             user_metadata=user_metadata,
         )
@@ -1926,6 +1961,7 @@ class CeoMessageBuilder:
             user_content=context_sources['user_content'],
             split_prompt_builder=bool(context_sources['split_prompt_builder']),
             turn_overlay_parts=turn_overlay_parts,
+            memory_snapshot_text=str(context_sources.get('memory_snapshot_text') or ''),
             current_user_in_history=bool(history_state['current_user_in_history']),
         )
         frontdoor_tool_contract = build_frontdoor_tool_contract(
