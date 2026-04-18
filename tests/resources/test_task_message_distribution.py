@@ -793,3 +793,190 @@ async def test_distribution_turn_omits_non_targeted_children(tmp_path: Path) -> 
         assert second_notifications[0].message == "second child update"
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_success_execution_node_with_acceptance_is_reactivated_and_acceptance_invalidated_on_delivery(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy={"mode": "focus"})
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=spec,
+            owner_round_id="round-1",
+            owner_entry_index=0,
+        )
+        acceptance = service.node_runner.create_acceptance_node(
+            task=task,
+            accepted_node=child,
+            goal="accept:child goal",
+            acceptance_prompt="check child",
+            parent_node_id=child.node_id,
+            owner_parent_node_id=root.node_id,
+            owner_round_id="round-1",
+            owner_entry_index=0,
+        )
+        _set_spawn_operations(
+            service,
+            root_node_id=root.node_id,
+            payload={
+                "round-1": {
+                    "specs": [spec.model_dump(mode="json")],
+                    "entries": [
+                        {
+                            "index": 0,
+                            "goal": "child goal",
+                            "child_node_id": child.node_id,
+                            "acceptance_node_id": acceptance.node_id,
+                            "check_status": "passed",
+                        }
+                    ],
+                    "completed": False,
+                },
+            },
+        )
+        service.store.update_node(
+            child.node_id,
+            lambda record: record.model_copy(
+                update={
+                    "status": "success",
+                    "updated_at": now_iso(),
+                    "final_output": "child succeeded",
+                    "check_result": "acceptance passed",
+                }
+            ),
+        )
+        service.store.update_node(
+            acceptance.node_id,
+            lambda record: record.model_copy(
+                update={
+                    "status": "success",
+                    "updated_at": now_iso(),
+                    "final_output": "acceptance passed",
+                }
+            ),
+        )
+
+        service._deliver_distribution_message(
+            task_id=record.task_id,
+            epoch_id="epoch:reactivate-success",
+            source_node_id=root.node_id,
+            target_node_id=child.node_id,
+            message="新增董事会验收格式",
+        )
+
+        updated_child = service.store.get_node(child.node_id)
+        updated_acceptance = service.store.get_node(acceptance.node_id)
+        updated_root = service.store.get_node(root.node_id)
+        notifications = service.store.list_task_node_notifications(record.task_id, child.node_id)
+        entry = dict((((updated_root.metadata or {}).get("spawn_operations") or {}).get("round-1") or {}).get("entries")[0])
+
+        assert updated_child is not None
+        assert updated_child.status == "in_progress"
+        assert updated_child.final_output == ""
+        assert updated_child.failure_reason == ""
+        assert updated_acceptance is not None
+        assert updated_acceptance.metadata["invalidated"] is True
+        assert updated_acceptance.metadata["invalidated_by_epoch_id"] == "epoch:reactivate-success"
+        assert entry["check_status"] not in {"passed", "failed"}
+        assert len(notifications) == 1
+        assert notifications[0].status == "delivered"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_execution_node_is_reactivated_on_delivery(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy={"mode": "focus"})
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=spec,
+            owner_round_id="round-1",
+            owner_entry_index=0,
+        )
+        service.store.update_node(
+            child.node_id,
+            lambda record: record.model_copy(
+                update={
+                    "status": "failed",
+                    "updated_at": now_iso(),
+                    "failure_reason": "child failed",
+                }
+            ),
+        )
+
+        service._deliver_distribution_message(
+            task_id=record.task_id,
+            epoch_id="epoch:reactivate-failed",
+            source_node_id=root.node_id,
+            target_node_id=child.node_id,
+            message="必须补充风险分层",
+        )
+
+        updated_child = service.store.get_node(child.node_id)
+        notifications = service.store.list_task_node_notifications(record.task_id, child.node_id)
+
+        assert updated_child is not None
+        assert updated_child.status == "in_progress"
+        assert updated_child.failure_reason == ""
+        assert len(notifications) == 1
+        assert notifications[0].message == "必须补充风险分层"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_acceptance_nodes_are_never_direct_distribution_targets(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy={"mode": "focus"})
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=spec,
+            owner_round_id="round-1",
+            owner_entry_index=0,
+        )
+        acceptance = service.node_runner.create_acceptance_node(
+            task=task,
+            accepted_node=child,
+            goal="accept:child goal",
+            acceptance_prompt="check child",
+            parent_node_id=child.node_id,
+            owner_parent_node_id=root.node_id,
+            owner_round_id="round-1",
+            owner_entry_index=0,
+        )
+
+        with pytest.raises(ValueError, match="distribution_target_must_be_execution_node"):
+            service._deliver_distribution_message(
+                task_id=record.task_id,
+                epoch_id="epoch:reject-acceptance",
+                source_node_id=root.node_id,
+                target_node_id=acceptance.node_id,
+                message="新增董事会验收格式",
+            )
+    finally:
+        await service.close()

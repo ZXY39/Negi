@@ -2239,6 +2239,76 @@ class TaskLogService:
                     self._publish_task_node_patch_locked(task=task, node=updated)
             return updated
 
+    def invalidate_acceptance_node(self, task_id: str, node_id: str, *, epoch_id: str, reason: str) -> NodeRecord | None:
+        with self._task_lock(task_id):
+            task = self._store.get_task(task_id)
+            acceptance = self._store.get_node(node_id)
+            if task is None or acceptance is None or str(acceptance.task_id or '').strip() != str(task_id or '').strip():
+                return None
+            if str(acceptance.node_kind or '').strip().lower() != 'acceptance':
+                return None
+
+            invalidated_at = now_iso()
+
+            def _mutate_acceptance(record: NodeRecord) -> NodeRecord:
+                metadata = dict(record.metadata or {})
+                metadata['invalidated'] = True
+                metadata['invalidated_by_epoch_id'] = str(epoch_id or '').strip()
+                metadata['invalidated_reason'] = str(reason or '').strip()
+                metadata['invalidated_at'] = invalidated_at
+                return record.model_copy(
+                    update={
+                        'updated_at': invalidated_at,
+                        'metadata': metadata,
+                    }
+                )
+
+            updated_acceptance = self._store.update_node(node_id, _mutate_acceptance)
+            if updated_acceptance is None:
+                return None
+
+            metadata = dict(updated_acceptance.metadata or {})
+            owner_parent_node_id = str(metadata.get('spawn_owner_parent_node_id') or '').strip()
+            owner_round_id = str(metadata.get('spawn_owner_round_id') or '').strip()
+            owner_entry_index = int(metadata.get('spawn_owner_entry_index') or 0)
+            if owner_parent_node_id and owner_round_id:
+                parent = self._store.get_node(owner_parent_node_id)
+                if parent is not None and str(parent.task_id or '').strip() == str(task_id or '').strip():
+                    def _mutate_parent(parent_metadata: dict[str, Any]) -> dict[str, Any]:
+                        operations = dict(parent_metadata.get('spawn_operations') or {})
+                        payload = dict(operations.get(owner_round_id) or {})
+                        entries = list(payload.get('entries') or [])
+                        if 0 <= owner_entry_index < len(entries) and isinstance(entries[owner_entry_index], dict):
+                            entry = dict(entries[owner_entry_index] or {})
+                            if str(entry.get('acceptance_node_id') or '').strip() == str(node_id or '').strip():
+                                entry['check_status'] = 'pending'
+                                entries[owner_entry_index] = entry
+                                payload['entries'] = entries
+                                operations[owner_round_id] = payload
+                                parent_metadata['spawn_operations'] = operations
+                        return parent_metadata
+
+                    self.update_node_metadata(owner_parent_node_id, _mutate_parent)
+
+            accepted_node_id = str(metadata.get('accepted_node_id') or updated_acceptance.parent_node_id or '').strip()
+            if accepted_node_id:
+                cleared_child = self._store.update_node(
+                    accepted_node_id,
+                    lambda record: record.model_copy(
+                        update={
+                            'updated_at': invalidated_at,
+                            'check_result': '',
+                            'check_result_ref': '',
+                        }
+                    ),
+                )
+                if cleared_child is not None:
+                    self._sync_node_read_models_locked(cleared_child)
+
+            self._sync_node_read_models_locked(updated_acceptance)
+            self.refresh_task_view(task_id, mark_unread=True)
+            return updated_acceptance
+
     def ensure_node_output_externalized(self, task_id: str, node_id: str) -> NodeRecord | None:
         with self._task_lock(task_id):
             record = self._store.get_node(node_id)

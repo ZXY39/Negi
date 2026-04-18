@@ -432,6 +432,7 @@ class MainRuntimeService:
         self.node_runner._tool_snapshot_supplier = lambda task_id: self.get_task_detail_payload(task_id, mark_read=False)
         self.node_runner.governance_child_created_observer = self._on_governance_child_created
         self.node_runner.governance_spawn_refusal_supplier = self._governance_spawn_refusal_message
+        self.node_runner.distribution_delivery_callback = self._deliver_distribution_message
         self.task_actor_service = TaskActorService(
             store=self.store,
             log_service=self.log_service,
@@ -2447,6 +2448,119 @@ class MainRuntimeService:
                 'queued_epoch_count': 0,
                 'pending_mailbox_count': 0,
             },
+        )
+
+    def _deliver_distribution_message(
+        self,
+        *,
+        task_id: str,
+        epoch_id: str,
+        source_node_id: str,
+        target_node_id: str,
+        message: str,
+    ) -> dict[str, Any]:
+        target = self.store.get_node(target_node_id)
+        if target is None or str(target.task_id or '').strip() != str(task_id or '').strip():
+            raise ValueError('distribution_target_missing')
+        if str(target.node_kind or '').strip().lower() != 'execution':
+            raise ValueError('distribution_target_must_be_execution_node')
+        notification = self.store.upsert_task_node_notification(
+            TaskNodeNotification(
+                notification_id=new_command_id().replace('command:', 'notif:', 1),
+                task_id=str(task_id or '').strip(),
+                node_id=str(target_node_id or '').strip(),
+                epoch_id=str(epoch_id or '').strip(),
+                source_node_id=str(source_node_id or '').strip(),
+                message=str(message or '').strip(),
+                status='delivered',
+                created_at=now_iso(),
+                delivered_at=now_iso(),
+                consumed_at='',
+                payload={},
+            )
+        )
+        self._reactivate_execution_node_for_distribution(
+            task_id=task_id,
+            node_id=target_node_id,
+            epoch_id=epoch_id,
+        )
+        self._invalidate_acceptance_for_reactivated_execution_node(
+            task_id=task_id,
+            execution_node_id=target_node_id,
+            epoch_id=epoch_id,
+        )
+        self.log_service.update_task_runtime_meta(
+            task_id,
+            **self._distribution_runtime_meta_payload(task_id=task_id),
+        )
+        return notification.model_dump(mode='json')
+
+    def _reactivate_execution_node_for_distribution(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        epoch_id: str,
+    ) -> None:
+        _ = epoch_id
+        node = self.store.get_node(node_id)
+        if node is None or str(node.task_id or '').strip() != str(task_id or '').strip():
+            return
+        if str(node.node_kind or '').strip().lower() != 'execution':
+            return
+        if str(node.status or '').strip().lower() not in {'success', 'failed'}:
+            return
+        updated = self.store.update_node(
+            node_id,
+            lambda record: record.model_copy(
+                update={
+                    'status': 'in_progress',
+                    'updated_at': now_iso(),
+                    'final_output': '',
+                    'final_output_ref': '',
+                    'failure_reason': '',
+                    'check_result': '',
+                    'check_result_ref': '',
+                }
+            ),
+        )
+        if updated is not None:
+            self.log_service.sync_node_read_model(task_id, node_id)
+            self.log_service.refresh_task_view(task_id, mark_unread=True)
+
+    def _invalidate_acceptance_for_reactivated_execution_node(
+        self,
+        *,
+        task_id: str,
+        execution_node_id: str,
+        epoch_id: str,
+    ) -> None:
+        execution_node = self.store.get_node(execution_node_id)
+        if execution_node is None or str(execution_node.task_id or '').strip() != str(task_id or '').strip():
+            return
+        metadata = dict(execution_node.metadata or {})
+        owner_parent_node_id = str(metadata.get('spawn_owner_parent_node_id') or '').strip()
+        owner_round_id = str(metadata.get('spawn_owner_round_id') or '').strip()
+        owner_entry_index = int(metadata.get('spawn_owner_entry_index') or 0)
+        if not owner_parent_node_id or not owner_round_id:
+            return
+        parent = self.store.get_node(owner_parent_node_id)
+        if parent is None or str(parent.task_id or '').strip() != str(task_id or '').strip():
+            return
+        operations = dict((parent.metadata or {}).get('spawn_operations') or {})
+        payload = dict(operations.get(owner_round_id) or {})
+        entries = list(payload.get('entries') or [])
+        if owner_entry_index < 0 or owner_entry_index >= len(entries) or not isinstance(entries[owner_entry_index], dict):
+            return
+        entry = dict(entries[owner_entry_index] or {})
+        acceptance_node_id = str(entry.get('acceptance_node_id') or '').strip()
+        if not acceptance_node_id:
+            return
+        self.log_service.invalidate_acceptance_node(
+            task_id,
+            acceptance_node_id,
+            epoch_id=epoch_id,
+            reason='task_message_distribution',
         )
 
     def list_active_task_snapshots_for_session(self, session_id: str, *, limit: int = 3) -> list[dict[str, str]]:
