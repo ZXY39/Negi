@@ -327,6 +327,7 @@ class TaskLogService:
             'rbac_visible_skill_ids': [],
             'hydrated_executor_state': [],
             'model_visible_tool_names': [],
+            'provider_tool_names': [],
             'hydrated_executor_names': [],
             'lightweight_tool_ids': [],
             'model_visible_tool_selection_trace': {},
@@ -388,6 +389,11 @@ class TaskLogService:
                 or []
             ),
             'model_visible_tool_names': cls._normalized_name_list(snapshot.get('model_visible_tool_names') or []),
+            'provider_tool_names': cls._normalized_name_list(
+                snapshot.get('provider_tool_names')
+                or snapshot.get('model_visible_tool_names')
+                or []
+            ),
             'hydrated_executor_state': cls._normalized_name_list(
                 snapshot.get('hydrated_executor_state')
                 or snapshot.get('hydrated_executor_names')
@@ -395,6 +401,7 @@ class TaskLogService:
             ),
             'hydrated_executor_names': cls._normalized_name_list(snapshot.get('hydrated_executor_names') or []),
             'lightweight_tool_ids': cls._normalized_name_list(snapshot.get('lightweight_tool_ids') or []),
+            'provider_tool_bundle_seeded': bool(snapshot.get('provider_tool_bundle_seeded')),
             'model_visible_tool_selection_trace': dict(snapshot.get('model_visible_tool_selection_trace') or {}),
         }
 
@@ -442,6 +449,11 @@ class TaskLogService:
                     or []
                 ),
                 'model_visible_tool_names': list(frame.get('model_visible_tool_names') or []),
+                'provider_tool_names': list(
+                    frame.get('provider_tool_names')
+                    or frame.get('model_visible_tool_names')
+                    or []
+                ),
                 'hydrated_executor_state': list(
                     frame.get('hydrated_executor_state')
                     or frame.get('hydrated_executor_names')
@@ -449,6 +461,9 @@ class TaskLogService:
                 ),
                 'hydrated_executor_names': list(frame.get('hydrated_executor_names') or []),
                 'lightweight_tool_ids': list(frame.get('lightweight_tool_ids') or []),
+                'provider_tool_bundle_seeded': bool(
+                    dict(frame.get('model_visible_tool_selection_trace') or {}).get('provider_tool_bundle_seeded')
+                ),
                 'model_visible_tool_selection_trace': dict(frame.get('model_visible_tool_selection_trace') or {}),
             }
         )
@@ -459,6 +474,7 @@ class TaskLogService:
                 snapshot['callable_tool_names'],
                 snapshot['candidate_tool_names'],
                 snapshot['model_visible_tool_names'],
+                snapshot['provider_tool_names'],
                 snapshot['hydrated_executor_names'],
                 snapshot['lightweight_tool_ids'],
             ]
@@ -891,6 +907,9 @@ class TaskLogService:
         request_message_count: int | None = None,
         request_message_chars: int | None = None,
         actual_tool_schemas: list[dict[str, Any]] | None = None,
+        callable_tool_names: list[str] | None = None,
+        provider_tool_names: list[str] | None = None,
+        provider_tool_bundle_seeded: bool = False,
         provider_request_meta: dict[str, Any] | None = None,
         provider_request_body: dict[str, Any] | None = None,
     ) -> NodeRecord | None:
@@ -922,6 +941,9 @@ class TaskLogService:
                 request_message_count=request_message_count,
                 request_message_chars=request_message_chars,
                 actual_tool_schemas=actual_tool_schemas,
+                callable_tool_names=callable_tool_names,
+                provider_tool_names=provider_tool_names,
+                provider_tool_bundle_seeded=provider_tool_bundle_seeded,
                 provider_request_meta=provider_request_meta,
                 provider_request_body=provider_request_body,
             )
@@ -1030,6 +1052,9 @@ class TaskLogService:
                         request_message_count=request_message_count,
                         request_message_chars=request_message_chars,
                         actual_tool_schemas=actual_tool_schemas,
+                        callable_tool_names=callable_tool_names,
+                        provider_tool_names=provider_tool_names,
+                        provider_tool_bundle_seeded=provider_tool_bundle_seeded,
                     )
                     self._event_writer.append_task_model_call(
                         task_id=task_id,
@@ -1437,6 +1462,9 @@ class TaskLogService:
         request_message_count: int | None,
         request_message_chars: int | None,
         actual_tool_schemas: list[dict[str, Any]] | None = None,
+        callable_tool_names: list[str] | None = None,
+        provider_tool_names: list[str] | None = None,
+        provider_tool_bundle_seeded: bool = False,
         provider_request_meta: dict[str, Any] | None = None,
         provider_request_body: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
@@ -1487,6 +1515,10 @@ class TaskLogService:
         normalized_tool_schemas = cls._json_safe_value(tool_schemas)
         if not isinstance(normalized_tool_schemas, list):
             normalized_tool_schemas = []
+        normalized_callable_tool_names = cls._normalized_name_list(callable_tool_names or [])
+        normalized_provider_tool_names = cls._normalized_name_list(
+            provider_tool_names or normalized_callable_tool_names
+        )
         return {
             'task_id': task_id,
             'node_id': node_id,
@@ -1510,6 +1542,9 @@ class TaskLogService:
             'actual_request_message_count': int(actual_request_diagnostics.get('actual_request_message_count') or 0),
             'actual_tool_schema_hash': str(actual_request_diagnostics.get('actual_tool_schema_hash') or ''),
             'actual_tool_schemas': normalized_tool_schemas,
+            'callable_tool_names': normalized_callable_tool_names,
+            'provider_tool_names': normalized_provider_tool_names,
+            'provider_tool_bundle_seeded': bool(provider_tool_bundle_seeded),
             'provider_request_meta': normalized_provider_request_meta,
             'provider_request_body': normalized_provider_request_body,
         }
@@ -1550,6 +1585,9 @@ class TaskLogService:
         request_message_count: int | None,
         request_message_chars: int | None,
         actual_tool_schemas: list[dict[str, Any]] | None = None,
+        callable_tool_names: list[str] | None = None,
+        provider_tool_names: list[str] | None = None,
+        provider_tool_bundle_seeded: bool = False,
         actual_request_ref: str = '',
     ) -> dict[str, Any]:
         message_list = list(model_messages or [])
@@ -1589,6 +1627,11 @@ class TaskLogService:
             'prepared_message_hash': TaskLogService._short_hash(prepared_payload),
             'model_prefix_hash': TaskLogService._message_prefix_hash(message_list),
             'prepared_prefix_hash': TaskLogService._message_prefix_hash(request_list),
+            'callable_tool_names': TaskLogService._normalized_name_list(callable_tool_names or []),
+            'provider_tool_names': TaskLogService._normalized_name_list(
+                provider_tool_names or callable_tool_names or []
+            ),
+            'provider_tool_bundle_seeded': bool(provider_tool_bundle_seeded),
             'tool_signature_hash': str(actual_request_diagnostics.get('actual_tool_schema_hash') or ''),
             **actual_request_diagnostics,
             'delta_usage': delta_usage.model_dump(mode='json'),
@@ -3395,6 +3438,15 @@ class TaskLogService:
                     for item in list(next_frame.get('model_visible_tool_names') or [])
                     if str(item or '').strip()
                 ],
+                'provider_tool_names': [
+                    str(item or '').strip()
+                    for item in list(
+                        next_frame.get('provider_tool_names')
+                        or next_frame.get('model_visible_tool_names')
+                        or []
+                    )
+                    if str(item or '').strip()
+                ],
                 'hydrated_executor_names': [
                     str(item or '').strip()
                     for item in list(next_frame.get('hydrated_executor_names') or [])
@@ -3545,6 +3597,11 @@ class TaskLogService:
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])
+                if str(item or '').strip()
+            ],
+            'provider_tool_names': [
+                str(item or '').strip()
+                for item in list(payload.get('provider_tool_names') or payload.get('model_visible_tool_names') or [])
                 if str(item or '').strip()
             ],
             'hydrated_executor_names': [
@@ -4132,6 +4189,11 @@ class TaskLogService:
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])
+                if str(item or '').strip()
+            ],
+            'provider_tool_names': [
+                str(item or '').strip()
+                for item in list(payload.get('provider_tool_names') or payload.get('model_visible_tool_names') or [])
                 if str(item or '').strip()
             ],
             'hydrated_executor_names': [

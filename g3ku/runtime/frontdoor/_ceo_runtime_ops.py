@@ -22,6 +22,7 @@ from g3ku.json_schema_utils import (
 )
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
+from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.semantic_context_summary import default_semantic_context_state
 from g3ku.runtime.semantic_context_summary import estimate_message_tokens
@@ -371,6 +372,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> list[dict[str, Any]]:
         body_messages, _contract_messages = cls._split_request_body_and_tool_contract_messages(request_messages)
         return [dict(item) for item in list(body_messages or []) if isinstance(item, dict)]
+
+    def _refresh_runtime_config_for_retry_invalidation(self) -> bool:
+        try:
+            return bool(
+                refresh_loop_runtime_config(
+                    self._loop,
+                    force=False,
+                    reason="provider_retry_invalidation",
+                )
+            )
+        except Exception:
+            return False
 
     @staticmethod
     def _frontdoor_tool_schema_names(tool_schemas: list[dict[str, Any]] | None) -> list[str]:
@@ -2582,7 +2595,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             or session_shrink_reason
             or ""
         ).strip()
-        if session_request_body_messages:
+        if session_request_body_messages and not heartbeat_internal:
             previous_tokens = estimate_message_tokens(session_request_body_messages)
             next_tokens = estimate_message_tokens(persisted_messages)
             if next_tokens < previous_tokens and shrink_reason not in self._ALLOWED_FRONTDOOR_SHRINK_REASONS.difference({""}):
@@ -2658,81 +2671,95 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if configured_limit is not None and iteration > max(0, int(configured_limit)):
             raise RuntimeError("CEO frontdoor exceeded maximum iterations")
 
-        langchain_tools = self._build_langchain_tools_for_state(state=state, runtime=runtime)
-        request_messages = list(state.get("messages") or [])
-        prompt_cache_key = str(state.get("prompt_cache_key") or "")
-        prompt_cache_diagnostics = dict(state.get("prompt_cache_diagnostics") or {})
-        actual_tool_schemas: list[dict[str, Any]] = []
-        if hasattr(self, "_frontdoor_prompt_contract"):
-            try:
-                runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
-                    state,
-                    tool_names=list(state.get("provider_tool_names") or state.get("tool_names") or []),
-                )
-                try:
-                    tool_schemas = self._selected_tool_schemas(list(runtime_visible_tool_names))
-                except Exception:
-                    tool_schemas = []
-                actual_tool_schemas = list(tool_schemas or [])
-                request_contract = self._frontdoor_prompt_contract(
-                    state=dict(state or {}),
-                    provider_model=str((list(state.get("model_refs") or []) or [""])[0] or "").strip(),
-                    tool_schemas=tool_schemas,
-                    overlay_text=str(state.get("turn_overlay_text") or "").strip(),
-                    session_key=str(state.get("session_key") or "").strip(),
-                    overlay_section_count=len(list(state.get("dynamic_appendix_messages") or [])),
-                )
-                request_messages = list(request_contract.request_messages)
-                prompt_cache_key = str(request_contract.prompt_cache_key or prompt_cache_key)
-                prompt_cache_diagnostics = dict(request_contract.diagnostics or {})
-            except Exception:
-                if hasattr(self, "_state_message_records"):
-                    request_messages = list(getattr(self, "_state_message_records")(request_messages))
-        elif hasattr(self, "_state_message_records"):
-            request_messages = list(getattr(self, "_state_message_records")(request_messages))
-        request_messages = self._apply_turn_overlay(
-            request_messages,
-            overlay_text=str(state.get("repair_overlay_text") or "").strip(),
-        )
-        prompt_cache_diagnostics = {
-            **prompt_cache_diagnostics,
-            **build_actual_request_diagnostics(
-                request_messages=request_messages,
-                tool_schemas=actual_tool_schemas,
-            ),
-        }
-        provider_retry_count = 0
-        empty_response_retry_count = 0
+        state_for_request = dict(state or {})
+        langchain_tools = self._build_langchain_tools_for_state(state=state_for_request, runtime=runtime)
         while True:
-            try:
-                message = await self._call_model_with_tools(
-                    messages=request_messages,
-                    langchain_tools=langchain_tools,
-                    model_refs=list(state.get("model_refs") or []),
-                    parallel_tool_calls=(bool(state.get("parallel_enabled")) if langchain_tools else None),
-                    prompt_cache_key=prompt_cache_key,
-                )
-            except Exception as exc:
-                if PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):
-                    raise
-                provider_retry_count += 1
-                await asyncio.sleep(float(min(10, max(1, provider_retry_count))))
-                continue
-            response_view = self._model_response_view(message)
-            if self._is_empty_model_response(response_view):
-                empty_response_retry_count += 1
-                await asyncio.sleep(float(min(10, max(1, empty_response_retry_count))))
+            request_messages = list(state_for_request.get("messages") or [])
+            prompt_cache_key = str(state_for_request.get("prompt_cache_key") or "")
+            prompt_cache_diagnostics = dict(state_for_request.get("prompt_cache_diagnostics") or {})
+            actual_tool_schemas: list[dict[str, Any]] = []
+            if hasattr(self, "_frontdoor_prompt_contract"):
+                try:
+                    runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
+                        state_for_request,
+                        tool_names=list(state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or []),
+                    )
+                    try:
+                        tool_schemas = self._selected_tool_schemas(list(runtime_visible_tool_names))
+                    except Exception:
+                        tool_schemas = []
+                    actual_tool_schemas = list(tool_schemas or [])
+                    request_contract = self._frontdoor_prompt_contract(
+                        state=dict(state_for_request or {}),
+                        provider_model=str((list(state_for_request.get("model_refs") or []) or [""])[0] or "").strip(),
+                        tool_schemas=tool_schemas,
+                        overlay_text=str(state_for_request.get("turn_overlay_text") or "").strip(),
+                        session_key=str(state_for_request.get("session_key") or "").strip(),
+                        overlay_section_count=len(list(state_for_request.get("dynamic_appendix_messages") or [])),
+                    )
+                    request_messages = list(request_contract.request_messages)
+                    prompt_cache_key = str(request_contract.prompt_cache_key or prompt_cache_key)
+                    prompt_cache_diagnostics = dict(request_contract.diagnostics or {})
+                except Exception:
+                    if hasattr(self, "_state_message_records"):
+                        request_messages = list(getattr(self, "_state_message_records")(request_messages))
+            elif hasattr(self, "_state_message_records"):
+                request_messages = list(getattr(self, "_state_message_records")(request_messages))
+            request_messages = self._apply_turn_overlay(
+                request_messages,
+                overlay_text=str(state_for_request.get("repair_overlay_text") or "").strip(),
+            )
+            prompt_cache_diagnostics = {
+                **prompt_cache_diagnostics,
+                **build_actual_request_diagnostics(
+                    request_messages=request_messages,
+                    tool_schemas=actual_tool_schemas,
+                ),
+            }
+            provider_retry_count = 0
+            empty_response_retry_count = 0
+            restart_with_refreshed_runtime = False
+            while True:
+                try:
+                    message = await self._call_model_with_tools(
+                        messages=request_messages,
+                        langchain_tools=langchain_tools,
+                        model_refs=list(state_for_request.get("model_refs") or []),
+                        parallel_tool_calls=(bool(state_for_request.get("parallel_enabled")) if langchain_tools else None),
+                        prompt_cache_key=prompt_cache_key,
+                    )
+                except Exception as exc:
+                    if PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):
+                        raise
+                    if self._refresh_runtime_config_for_retry_invalidation():
+                        state_for_request["model_refs"] = list(self._resolve_ceo_model_refs())
+                        restart_with_refreshed_runtime = True
+                        break
+                    provider_retry_count += 1
+                    await asyncio.sleep(float(min(10, max(1, provider_retry_count))))
+                    continue
+                response_view = self._model_response_view(message)
+                if self._is_empty_model_response(response_view):
+                    if self._refresh_runtime_config_for_retry_invalidation():
+                        state_for_request["model_refs"] = list(self._resolve_ceo_model_refs())
+                        restart_with_refreshed_runtime = True
+                        break
+                    empty_response_retry_count += 1
+                    await asyncio.sleep(float(min(10, max(1, empty_response_retry_count))))
+                    continue
+                break
+            if restart_with_refreshed_runtime:
                 continue
             break
         response_view = self._model_response_view(message)
         actual_request_trace = self._persist_frontdoor_actual_request(
-            state=state,
+            state=state_for_request,
             runtime=runtime,
             request_messages=request_messages,
             tool_schemas=actual_tool_schemas,
             prompt_cache_key=prompt_cache_key,
             prompt_cache_diagnostics=prompt_cache_diagnostics,
-            parallel_tool_calls=(bool(state.get("parallel_enabled")) if langchain_tools else None),
+            parallel_tool_calls=(bool(state_for_request.get("parallel_enabled")) if langchain_tools else None),
             provider_request_meta=(
                 dict(response_view.provider_request_meta or {})
                 if isinstance(response_view.provider_request_meta, dict)
@@ -2754,6 +2781,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "repair_overlay_text": None,
             **message_state_update,
             "frontdoor_live_request_messages": [],
+            "model_refs": list(state_for_request.get("model_refs") or []),
             "prompt_cache_key": prompt_cache_key,
             "prompt_cache_diagnostics": prompt_cache_diagnostics,
             **actual_request_trace,

@@ -327,3 +327,18 @@ This is intentionally different from both ordinary tool interaction steps and he
 - `decision=unavailable` means the reminder sidecar failed or could not make a valid stop decision, so the tool keeps running.
 
 Operators should therefore read the reminder block as live guidance only. The authoritative end state still arrives through the normal CEO tool/error/final-reply events.
+
+## Node Actual Request Forensics
+
+Node actual-request artifacts now expose a clearer split between runtime contract and provider cache scaffolding.
+
+- `callable_tool_names` records the real tool contract for that round.
+- `provider_tool_names` records the schema bundle actually sent to the model provider.
+- `provider_tool_bundle_seeded=true` means the node temporarily reused the prior provider bundle to avoid avoidable cache-family churn during a schema warm-up step.
+
+For cache troubleshooting, the most important invariant is now:
+
+- stage/tool governance still follows `callable_tool_names`;
+- cache behavior must be explained using `provider_request_body.input`, `provider_tool_names`, and `actual_tool_schema_hash`.
+
+If a node shows low cache hits even after `actual_tool_schema_hash` stops changing, operators should immediately compare consecutive node actual-request artifacts and verify that the provider input stayed append-only rather than replacing an earlier `function_call` / `function_call_output` pair near the front of the request.

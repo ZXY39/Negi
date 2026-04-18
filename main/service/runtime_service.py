@@ -374,6 +374,9 @@ class MainRuntimeService:
             parallel_tool_calls_enabled=parallel_enabled,
             max_parallel_tool_calls=max_parallel_tool_calls,
         )
+        react_loop._runtime_config_refresh_for_retry_invalidation = (
+            lambda: self.ensure_runtime_config_current(force=False, reason='provider_retry_invalidation')
+        )
         self._chat_backend = chat_backend
         react_loop._tool_execution_manager = None
         self.model_key_concurrency_controller = ModelKeyConcurrencyController(
@@ -3623,6 +3626,8 @@ class MainRuntimeService:
         log_service = getattr(self, 'log_service', None)
         read_runtime_frame = getattr(log_service, 'read_runtime_frame', None)
         prior_selected_tool_names: list[str] = []
+        prior_provider_tool_names: list[str] = []
+        prior_provider_tool_bundle_seeded = False
         if callable(read_runtime_frame):
             prior_frame = read_runtime_frame(str(task_id or '').strip(), str(node_id or '').strip())
             if isinstance(prior_frame, dict):
@@ -3631,6 +3636,17 @@ class MainRuntimeService:
                     for item in list(prior_frame.get('model_visible_tool_names') or [])
                     if str(item or '').strip()
                 ]
+                prior_provider_tool_names = [
+                    str(item or '').strip()
+                    for item in list(
+                        prior_frame.get('provider_tool_names')
+                        or prior_frame.get('model_visible_tool_names')
+                        or []
+                    )
+                    if str(item or '').strip()
+                ]
+                prior_trace = dict(prior_frame.get('model_visible_tool_selection_trace') or {})
+                prior_provider_tool_bundle_seeded = bool(prior_trace.get('provider_tool_bundle_seeded'))
         selected_tool_names: list[str] = []
         for name in prior_selected_tool_names:
             if name in model_visible_callable_tool_names and name not in selected_tool_names:
@@ -3638,6 +3654,16 @@ class MainRuntimeService:
         for name in model_visible_callable_tool_names:
             if name not in selected_tool_names:
                 selected_tool_names.append(name)
+        provider_tool_names = list(full_callable_tool_names or selected_tool_names)
+        provider_tool_bundle_seeded = False
+        if (
+            prior_provider_tool_names
+            and set(prior_provider_tool_names).issubset(set(provider_tool_names))
+            and prior_provider_tool_names != provider_tool_names
+            and not prior_provider_tool_bundle_seeded
+        ):
+            provider_tool_names = list(prior_provider_tool_names)
+            provider_tool_bundle_seeded = True
         final_schema_chars = sum(
             len(json.dumps(visible_tools[name].to_model_schema(), ensure_ascii=False, sort_keys=True))
             for name in selected_tool_names
@@ -3650,6 +3676,7 @@ class MainRuntimeService:
         ]
         return {
             'tool_names': selected_tool_names,
+            'provider_tool_names': provider_tool_names,
             'candidate_tool_names': candidate_tool_names,
             'lightweight_tool_ids': list(selection.lightweight_tool_ids or []),
             'hydrated_executor_names': list(promoted_only_hydrated_executor_names),
@@ -3669,6 +3696,9 @@ class MainRuntimeService:
                 'requested_promoted_hydrated_executor_names': list(hydrated_executor_names),
                 'promoted_hydrated_executor_names': list(promoted_only_hydrated_executor_names),
                 'candidate_tool_names': list(candidate_tool_names),
+                'prior_provider_tool_names': list(prior_provider_tool_names),
+                'provider_tool_names': list(provider_tool_names),
+                'provider_tool_bundle_seeded': bool(provider_tool_bundle_seeded),
                 'base_schema_chars': int(selection.schema_chars),
                 'top_k': int((selection.trace or {}).get('top_k', 0) or 0),
                 'final_schema_chars': int(final_schema_chars),

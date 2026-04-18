@@ -7,20 +7,20 @@ import pytest
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.frontdoor.state_models import initial_persistent_state
 from g3ku.runtime.semantic_context_summary import (
-    HERMES_MIN_CONTEXT_FLOOR,
+    G3KU_MIN_CONTEXT_FLOOR,
     build_global_summary_thresholds,
     default_semantic_context_state,
     summarize_global_context_model_first,
 )
 
 
-def test_build_global_summary_thresholds_aligns_with_hermes_defaults() -> None:
+def test_build_global_summary_thresholds_aligns_with_g3ku_defaults() -> None:
     thresholds = build_global_summary_thresholds(
         context_window_tokens=200_000,
         compressed_zone_tokens=30_000,
     )
 
-    assert HERMES_MIN_CONTEXT_FLOOR == 64_000
+    assert G3KU_MIN_CONTEXT_FLOOR == 64_000
     assert thresholds["trigger_tokens"] == 100_000
     assert thresholds["pressure_warn_tokens"] == 170_000
     assert thresholds["force_refresh_tokens"] == 190_000

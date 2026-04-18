@@ -398,6 +398,10 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - The same pair also matters at turn finalization: after a real provider request has already been persisted for the current visible turn, a later `finalize` update may extend the session-owned request-body baseline with the direct assistant reply even if that finalize payload no longer repeats `frontdoor_actual_request_path/history`. Maintainers should treat that as "same-turn completion of an already authoritative baseline", not as a fresh planned-body overwrite.
 - For ordinary fresh visible turns, the first rebuilt provider request may now borrow the previous turn's persisted actual-request scaffold to preserve provider-side prefix reuse, while still keeping the durable session baseline in stripped/finalized form. This is intentionally asymmetric: the scaffold is a request-construction aid for the first fresh turn only, not a new durable history source of truth.
 - The same fresh-turn bridge may also reuse the previous turn's provider-visible tool schema set when the current visible tool set is only a superset. That keeps prompt-cache family churn down for adjacent turns without re-exposing tools that are no longer visible; maintainers should debug this as a first-turn cache-stability rule, not as a general replacement for current RBAC-visible capability resolution.
+- Runtime config refresh now also matters for in-flight retry loops. CEO/frontdoor provider retries and node execution provider retries no longer keep hammering the old model chain forever after a model-binding change has been applied to the current process.
+- The intended rule is: a request already in flight is not hot-swapped mid-attempt, but if the runtime enters provider-failure or empty-response retry sleep and the runtime model revision changes before the next retry, the old retry loop is invalidated and the current round restarts with freshly resolved model refs.
+- For CEO/frontdoor, that restart happens inside the current `call_model` round and the updated `model_refs` are written back into graph state for later rounds in the same visible turn.
+- For node execution, the same invalidation restarts the current `ReActToolLoop` model round so `model_refs_supplier()` can re-read the latest execution/inspection model chain before the next dispatch.
 
 ## 7. 新人阅读顺序建议
 
@@ -474,7 +478,7 @@ Heartbeat and cron turns now share the same strict internal-turn contract.
 
 - They still execute through `RuntimeAgentSession.prompt(...)` with their own internal source metadata.
 - Heartbeat / cron turns still clear live-only frontdoor debug surfaces such as `frontdoor_selection_debug` and per-round actual-request pointers, but they no longer blindly zero the session-owned request-body / stage / compression continuity state before prompt assembly.
-- When an internal turn starts with no graph-local request body, CEO/frontdoor may seed prompt assembly from the session-owned `frontdoor_request_body_messages` baseline plus the saved stage/compression snapshots, subject to the same shrink guards as visible user turns.
+- When an internal turn starts with no graph-local request body, CEO/frontdoor may seed prompt assembly from the session-owned `frontdoor_request_body_messages` baseline plus the saved stage/compression snapshots. However, `heartbeat_internal` using the dedicated `ceo_heartbeat` prompt lane is allowed to rebuild a much shorter internal prompt body than the visible-turn baseline; maintainers must not treat that lane-local shortening as a visible-turn context-loss regression.
 - Service-layer code must not auto-retry tasks or synthesize fallback assistant replies on behalf of the model.
 - An internal turn that ends with `HEARTBEAT_OK` may surface a live-only UI ACK event, but it does not become transcript history.
 - Maintainers should distinguish live UI state such as inflight snapshots and internal ACK bubbles from durable assistant transcript messages.
@@ -572,3 +576,26 @@ Example shape:
 `Error executing exec: stopped by sidecar timeout decision after 120.4s (2 reminders).`
 
 This is distinct from user-requested cancel/pause behavior. Only sidecar reminder stops use the timeout-stop contract. If the tool finishes successfully before the stop lands, the runtime clears the sidecar stop metadata and preserves the successful result.
+
+## Node Provider Request Scaffold
+
+Execution and acceptance nodes now keep two separate views of tool visibility:
+
+- `tool_names`: the authoritative per-round callable tool set used by runtime contract enforcement.
+- `provider_tool_names`: the provider-facing schema bundle used when constructing the actual model request.
+
+This separation exists to improve prompt-cache stability without weakening stage gates or tool hydration rules.
+
+### Same-Turn Append-Only Rule
+
+Within one node's multi-round loop, provider-facing `request_messages` should now prefer:
+
+1. the previous actual request body,
+2. plus the newly produced assistant/tool result messages from the last round,
+3. plus the newest overlay / `node_runtime_tool_contract` tail.
+
+Maintainers should treat this as a request-construction scaffold only.
+
+- It does not replace the node's durable/compacted `message_history`.
+- It does not redefine which tools are callable.
+- It exists purely so the provider sees append-only growth instead of an early-prefix rewrite whenever stage compaction trims the active window.

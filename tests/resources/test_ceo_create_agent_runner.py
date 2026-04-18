@@ -4666,6 +4666,82 @@ async def test_create_agent_prompt_middleware_emits_analysis_progress_for_model_
 
 
 @pytest.mark.asyncio
+async def test_graph_call_model_restarts_with_refreshed_model_refs_after_runtime_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = SimpleNamespace(main_task_service=None, _runtime_model_revision=1)
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=loop)
+    seen_model_refs: list[list[str]] = []
+
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_prompt_contract",
+        lambda **kwargs: SimpleNamespace(
+            request_messages=list(kwargs["state"].get("messages") or []),
+            prompt_cache_key=f"pk:{kwargs['provider_model']}",
+            diagnostics={},
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_resolve_ceo_model_refs",
+        lambda: ["new-model"] if int(getattr(loop, "_runtime_model_revision", 0) or 0) >= 2 else ["old-model"],
+    )
+
+    def _refresh_runtime_config(_loop, *, force: bool = False, reason: str = "runtime") -> bool:
+        _ = force, reason
+        if int(getattr(_loop, "_runtime_model_revision", 0) or 0) < 2:
+            _loop._runtime_model_revision = 2
+            return True
+        return False
+
+    monkeypatch.setattr(ceo_runtime_ops, "refresh_loop_runtime_config", _refresh_runtime_config)
+
+    async def _call_model_with_tools(**kwargs):
+        model_refs = list(kwargs.get("model_refs") or [])
+        seen_model_refs.append(model_refs)
+        if model_refs == ["old-model"]:
+            raise RuntimeError(ceo_runtime_ops.PUBLIC_PROVIDER_FAILURE_MESSAGE)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+    monkeypatch.setattr(
+        runner,
+        "_model_response_view",
+        lambda _message: SimpleNamespace(
+            content="ok",
+            tool_calls=[],
+            provider_request_meta={},
+            provider_request_body={},
+        ),
+    )
+    monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
+    monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
+
+    state = _canonical_frontdoor_state(
+        messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "hello"},
+        ],
+        model_refs=["old-model"],
+        prompt_cache_key="",
+        prompt_cache_diagnostics={},
+        session_key="web:shared",
+        parallel_enabled=False,
+    )
+
+    result = await runner._graph_call_model(
+        state,
+        runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared", session=SimpleNamespace())),
+    )
+
+    assert seen_model_refs == [["old-model"], ["new-model"]]
+    assert result["model_refs"] == ["new-model"]
+    assert result["prompt_cache_key"] == "pk:new-model"
+
+
+@pytest.mark.asyncio
 async def test_create_agent_prompt_middleware_accepts_legacy_dict_tool_contract_message() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]

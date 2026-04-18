@@ -5217,3 +5217,70 @@ async def test_react_loop_retries_provider_chain_exhaustion_until_success(monkey
     assert result.answer == 'done'
     assert len(requests) == 3
     assert sleep_calls == [1.0, 2.0]
+
+
+@pytest.mark.asyncio
+async def test_react_loop_restarts_provider_retry_with_refreshed_model_refs_after_runtime_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[list[str]] = []
+    sleep_calls: list[float] = []
+    current_refs = ["old-model"]
+    refreshed = {"done": False}
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_calls.append(float(delay))
+
+    monkeypatch.setattr('main.runtime.react_loop.asyncio.sleep', _fake_sleep)
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            model_refs = list(kwargs.get("model_refs") or [])
+            requests.append(model_refs)
+            if model_refs == ["old-model"]:
+                raise RuntimeError('Model provider call failed after exhausting the configured fallback chain.')
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='call:final',
+                        name='submit_final_result',
+                        arguments={
+                            'status': 'success',
+                            'delivery_status': 'final',
+                            'summary': 'done',
+                            'answer': 'done',
+                            'evidence': [],
+                            'remaining_work': [],
+                            'blocking_reason': '',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
+    loop._runtime_config_refresh_for_retry_invalidation = lambda: (
+        False
+        if refreshed["done"]
+        else refreshed.__setitem__("done", True) or current_refs.__setitem__(slice(None), ["new-model"]) or True
+    )
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-provider-refresh'),
+        node=SimpleNamespace(node_id='node-provider-refresh', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-provider-refresh","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['old-model'],
+        model_refs_supplier=lambda: list(current_refs),
+        runtime_context={'task_id': 'task-provider-refresh', 'node_id': 'node-provider-refresh'},
+        max_iterations=3,
+    )
+
+    assert result.status == 'success'
+    assert result.answer == 'done'
+    assert requests == [["old-model"], ["new-model"]]
+    assert sleep_calls == []

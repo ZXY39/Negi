@@ -28,6 +28,7 @@ from main.models import (
 )
 from main.monitoring.query_service import TaskQueryService
 from main.protocol import now_iso
+from main.runtime.react_loop import ReActToolLoop
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 from main.service.runtime_service import MainRuntimeService
 from main.service.task_stall_callback import normalize_task_stall_payload
@@ -5399,6 +5400,324 @@ async def test_runtime_frame_persists_model_visible_tool_selection_fields(tmp_pa
         }
     finally:
         await service.close()
+
+
+def test_same_turn_append_only_request_messages_reuses_previous_actual_request_prefix() -> None:
+    previous_request_messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "prompt"},
+        {"role": "assistant", "content": "assistant-1"},
+        {"role": "tool", "tool_call_id": "call-1", "name": "submit_next_stage", "content": "ok"},
+        {"role": "user", "content": "overlay-1"},
+        {"role": "user", "content": "contract-1"},
+    ]
+    current_model_messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "prompt"},
+    ]
+    pending_delta_messages = [
+        {"role": "assistant", "content": "assistant-2"},
+        {"role": "tool", "tool_call_id": "call-2", "name": "content_open", "content": "ok"},
+    ]
+    request_tail_messages = [
+        {"role": "user", "content": "overlay-2"},
+        {"role": "user", "content": "contract-2"},
+    ]
+
+    merged = ReActToolLoop._same_turn_append_only_request_messages(
+        previous_request_messages=previous_request_messages,
+        current_model_messages=current_model_messages,
+        pending_delta_messages=pending_delta_messages,
+        request_tail_messages=request_tail_messages,
+    )
+
+    assert merged == [
+        *previous_request_messages,
+        *pending_delta_messages,
+        *request_tail_messages,
+    ]
+
+
+def test_same_turn_append_only_request_messages_falls_back_when_prefix_changes() -> None:
+    previous_request_messages = [
+        {"role": "system", "content": "system-old"},
+        {"role": "user", "content": "prompt-old"},
+        {"role": "assistant", "content": "assistant-1"},
+    ]
+    current_model_messages = [
+        {"role": "system", "content": "system-new"},
+        {"role": "user", "content": "prompt-new"},
+    ]
+    request_tail_messages = [
+        {"role": "user", "content": "overlay-new"},
+        {"role": "user", "content": "contract-new"},
+    ]
+
+    merged = ReActToolLoop._same_turn_append_only_request_messages(
+        previous_request_messages=previous_request_messages,
+        current_model_messages=current_model_messages,
+        pending_delta_messages=[
+            {"role": "assistant", "content": "assistant-2"},
+        ],
+        request_tail_messages=request_tail_messages,
+    )
+
+    assert merged == [
+        *current_model_messages,
+        *request_tail_messages,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_model_visible_tool_selection_trace_reuses_prior_provider_tool_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task(
+            "reuse prior provider tool bundle",
+            session_id="web:shared",
+        )
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "messages": [
+                    {"role": "system", "content": "system prompt"},
+                    {"role": "user", "content": "user prompt"},
+                ],
+                "model_visible_tool_names": [
+                    "submit_next_stage",
+                    "content_open",
+                ],
+                "provider_tool_names": [
+                    "submit_next_stage",
+                    "content_open",
+                ],
+                "model_visible_tool_selection_trace": {
+                    "mode": "execution_tool_selection",
+                    "provider_tool_bundle_seeded": False,
+                },
+            },
+            publish_snapshot=False,
+        )
+
+        visible_tools = {
+            "submit_next_stage": _StaticTool("submit_next_stage"),
+            "content_open": _StaticTool("content_open"),
+            "web_fetch": _StaticTool("web_fetch"),
+        }
+        monkeypatch.setattr(
+            "main.service.runtime_service.build_execution_tool_selection",
+            lambda **_kwargs: SimpleNamespace(
+                hydrated_tool_names=[
+                    "submit_next_stage",
+                    "content_open",
+                    "web_fetch",
+                ],
+                candidate_tool_names=[],
+                lightweight_tool_ids=[],
+                schema_chars=0,
+                trace={},
+            ),
+        )
+        monkeypatch.setattr(
+            service,
+            "_model_visible_callable_tool_names_for_node",
+            lambda **_kwargs: [
+                "submit_next_stage",
+                "content_open",
+                "web_fetch",
+            ],
+        )
+
+        selection = service._select_model_visible_tool_schema_payload(
+            task_id=record.task_id,
+            node_id=root.node_id,
+            node_kind=root.node_kind,
+            visible_tools=visible_tools,
+            runtime_context={},
+        )
+
+        assert "web_fetch" in list(selection.get("tool_names") or [])
+        assert selection["provider_tool_names"] == [
+            "submit_next_stage",
+            "content_open",
+        ]
+        assert selection["trace"]["provider_tool_bundle_seeded"] is True
+        assert selection["trace"]["prior_provider_tool_names"] == [
+            "submit_next_stage",
+            "content_open",
+        ]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_tool_bundle_never_bypasses_stage_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task(
+            "provider tool names still respect stage lock",
+            session_id="web:shared",
+        )
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        react_loop = service.node_runner._react_loop
+        visible_tools = {
+            "submit_next_stage": _StaticTool("submit_next_stage"),
+            "web_fetch": _StaticTool("web_fetch"),
+        }
+
+        monkeypatch.setattr(
+            react_loop,
+            "_model_visible_tool_schema_selector",
+            lambda **_kwargs: {
+                "tool_names": [
+                    "submit_next_stage",
+                    "web_fetch",
+                ],
+                "provider_tool_names": [
+                    "submit_next_stage",
+                    "web_fetch",
+                ],
+                "trace": {
+                    "full_callable_tool_names": [
+                        "submit_next_stage",
+                        "web_fetch",
+                    ],
+                    "provider_tool_names": [
+                        "submit_next_stage",
+                        "web_fetch",
+                    ],
+                },
+            },
+        )
+
+        selected_tools, selection_payload = react_loop._model_visible_tools_for_iteration(
+            task_id=record.task_id,
+            node_id=root.node_id,
+            node_kind=root.node_kind,
+            visible_tools=visible_tools,
+            stage_gate={
+                "enabled": True,
+                "has_active_stage": True,
+                "transition_required": True,
+                "active_stage": {"step_index": 1, "step_total": 1},
+            },
+            runtime_context={},
+        )
+
+        assert list(selected_tools.keys()) == ["submit_next_stage"]
+        assert selection_payload["tool_names"] == ["submit_next_stage"]
+        assert selection_payload["provider_tool_names"] == [
+            "submit_next_stage",
+            "web_fetch",
+        ]
+        assert selection_payload["trace"]["stage_locked_to_submit_next_stage"] is True
+    finally:
+        await service.close()
+
+
+def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_artifact(tmp_path: Path) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+
+    service.log_service.append_node_output(
+        record.task_id,
+        record.root_node_id,
+        content='{"status":"success"}',
+        tool_calls=[],
+        usage_attempts=[
+            LLMModelAttempt(
+                model_key="sub gpt-5.4",
+                provider_id="openai",
+                provider_model="gpt-5.4",
+                usage={"input_tokens": 10, "output_tokens": 5, "cache_hit_tokens": 3},
+            )
+        ],
+        model_messages=[
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "projected user prompt"},
+        ],
+        request_messages=[
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "prepared user prompt"},
+        ],
+        prompt_cache_key="stable-cache-key-provider-bundle",
+        request_message_count=2,
+        request_message_chars=222,
+        actual_tool_schemas=[
+            {
+                "name": "submit_next_stage",
+                "description": "",
+                "parameters": {"type": "object"},
+            },
+            {
+                "name": "web_fetch",
+                "description": "",
+                "parameters": {"type": "object"},
+            },
+        ],
+        callable_tool_names=[
+            "submit_next_stage",
+        ],
+        provider_tool_names=[
+            "submit_next_stage",
+            "web_fetch",
+        ],
+        provider_tool_bundle_seeded=True,
+    )
+
+    events = service.store.list_task_events(task_id=record.task_id, limit=20)
+    model_call = [item for item in events if item["event_type"] == "task.model.call"][-1]["payload"]
+    actual_request_ref = str(model_call.get("actual_request_ref") or "")
+
+    assert model_call["callable_tool_names"] == ["submit_next_stage"]
+    assert model_call["provider_tool_names"] == ["submit_next_stage", "web_fetch"]
+    assert model_call["provider_tool_bundle_seeded"] is True
+    assert actual_request_ref.startswith("artifact:")
+
+    actual_request_payload = json.loads(service.log_service.resolve_content_ref(actual_request_ref))
+    assert actual_request_payload["callable_tool_names"] == ["submit_next_stage"]
+    assert actual_request_payload["provider_tool_names"] == ["submit_next_stage", "web_fetch"]
+    assert actual_request_payload["provider_tool_bundle_seeded"] is True
 
 
 def test_live_tree_payload_keeps_acceptance_node_kind(tmp_path: Path):

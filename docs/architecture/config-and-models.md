@@ -105,6 +105,18 @@
 
 因此，`200 OK` 只表示配置已经保存成功；它不等价于“worker 已经确认加载新配置”。
 
+还要额外记住一个新的运行时边界：
+
+- 配置刷新仍然不会把一个“已经发出去的单次 provider 请求”中途热切换到新模型。
+- 但对于已经进入 provider-failure retry 或 empty-response retry 的当前轮次，CEO/frontdoor 与节点运行时现在都会在下一次重试前检查 runtime revision。
+- 如果 revision 已变化，旧模型链的重试会失效，当前轮会用新的 model refs 重新开始，而不是继续无限重试旧链。
+
+维护上要把这理解成“重试边界上的重建”，而不是“请求中途热切模型”。如果用户反馈“改完模型链后旧重试还在跑”，重点检查：
+
+1. 对应进程是否真的执行到了 runtime refresh
+2. 当前问题是否发生在 retry 边界，而不是单次 still-in-flight 的 provider request 内
+3. 当前运行路径是 CEO/frontdoor 还是 main runtime worker/node
+
 ## 5. 模型系统不是只靠 `config.json`
 
 这是新人最容易误解的一点。

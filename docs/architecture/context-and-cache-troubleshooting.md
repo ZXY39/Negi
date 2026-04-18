@@ -248,6 +248,21 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 - 每次怀疑缓存异常时，先检查 artifact 时间线是否完整
 - 如果 artifact 不全，先修 artifact，再改上下文策略
 
+## 3.9 heartbeat 内部短 prompt 不能按 visible-turn shrink 误判
+
+heartbeat 使用的是专门的内部 prompt lane，它的稳定前缀和 request 形态本来就可能远短于当前 visible turn 的 session-owned baseline。
+
+已踩坑：
+
+- 把 heartbeat lane 的短 prompt 直接拿去和 visible-turn baseline 比长度
+- 命中 `frontdoor context shrank without an allowed reason`
+- 实际上不是上下文丢失，而是 lane 切换造成的预期缩短
+
+维护要点：
+
+- `heartbeat_internal` 的 `ceo_heartbeat` prompt lane 不能直接套用 visible-turn shrink guard
+- 排查 heartbeat 报 shrink 时，先确认它是不是在比较两个不同 lane 的 prompt 形态
+
 ## 4. 排查流程
 
 ## 4.1 先画时间线
@@ -443,3 +458,23 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 - same-turn append-only 和 fresh-turn continuity 是两套不同问题。
 - tool schema 稳定性和消息前缀稳定性要一起验证。
 - artifact 不全时，先修 artifact，再信任何 cache 结论。
+## Node Cache Stability Addendum
+
+This addendum records the April 2026 node-cache repair boundary.
+
+- Node runtime now distinguishes `tool_names` from `provider_tool_names`.
+- `tool_names` remain the authoritative callable contract for the current round.
+- `provider_tool_names` are only the provider-facing schema bundle used to stabilize cache prefixes.
+- Same-turn node requests now prefer an append-only scaffold:
+  previous actual request body + last-round assistant/tool delta + newest overlay / tool-contract tail.
+- This scaffold must not weaken stage gating or hydration rules.
+
+When node cache hits are still low after schema churn stops, compare consecutive node actual-request artifacts first.
+
+- If `actual_tool_schema_hash` is stable but cache hits stay low, inspect whether `provider_request_body.input` stopped being append-only.
+- If early `function_call` / `function_call_output` records are being replaced instead of appended, treat it as a node request-scaffold regression rather than a pure tool-schema issue.
+
+Steady-state validation target for this repair:
+
+- warm-up rounds may miss after a legitimate schema change;
+- after schema stabilizes, the later consecutive node rounds should recover to roughly 90% cache-hit ratio or better.

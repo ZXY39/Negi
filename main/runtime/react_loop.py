@@ -126,6 +126,7 @@ class ReActToolLoop:
         self._node_turn_controller = None
         self._recovery_check_engine = RecoveryCheckEngine(workspace_root=Path.cwd())
         self._model_response_timeout_seconds: float | None | object = _UNSET
+        self._runtime_config_refresh_for_retry_invalidation = None
 
     async def run(
         self,
@@ -146,6 +147,8 @@ class ReActToolLoop:
         attempts = 0
         last_contract_violations: list[str] = []
         message_history = list(messages or [])
+        previous_actual_request_messages: list[dict[str, Any]] = []
+        pending_request_delta_messages: list[dict[str, Any]] = []
         orphan_tool_result_strikes = 0
         repair_overlay_text: str | None = None
         invalid_final_submission_count = 0
@@ -207,7 +210,7 @@ class ReActToolLoop:
                 node_id=node.node_id,
                 node_kind=node.node_kind,
             )
-            visible_tools = self._visible_tools_for_iteration(
+            callable_visible_tools = self._visible_tools_for_iteration(
                 tools=current_tools,
                 node_kind=node.node_kind,
                 stage_gate=stage_gate,
@@ -216,11 +219,18 @@ class ReActToolLoop:
                 task_id=task.task_id,
                 node_id=node.node_id,
                 node_kind=node.node_kind,
-                visible_tools=visible_tools,
+                visible_tools=current_tools,
                 stage_gate=stage_gate,
                 runtime_context=runtime_context,
             )
-            tool_schemas = [tool.to_model_schema() for tool in model_visible_tools.values()]
+            provider_tool_names = self._normalized_name_list(
+                list(tool_schema_selection.get('provider_tool_names') or list(model_visible_tools.keys()))
+            )
+            tool_schemas = [
+                current_tools[name].to_model_schema()
+                for name in provider_tool_names
+                if name in current_tools
+            ]
             dynamic_contract = self._build_node_dynamic_contract(
                 node=node,
                 message_history=message_history,
@@ -254,6 +264,15 @@ class ReActToolLoop:
                 request_messages,
                 dynamic_contract,
             )
+            request_tail_messages = request_messages[len(model_messages) :]
+            request_messages = self._same_turn_append_only_request_messages(
+                previous_request_messages=previous_actual_request_messages,
+                current_model_messages=model_messages,
+                pending_delta_messages=pending_request_delta_messages,
+                request_tail_messages=request_tail_messages,
+            )
+            previous_actual_request_messages = self._prompt_message_records(request_messages)
+            pending_request_delta_messages = []
             repair_overlay_text = None
             actual_request_diagnostics = build_actual_request_diagnostics(
                 request_messages=request_messages,
@@ -314,6 +333,7 @@ class ReActToolLoop:
                     'hydrated_executor_state': list(tool_schema_selection.get('hydrated_executor_names') or []),
                     'hydrated_executor_names': list(tool_schema_selection.get('hydrated_executor_names') or []),
                     'model_visible_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
+                    'provider_tool_names': list(provider_tool_names),
                     'model_visible_tool_selection_trace': dict(tool_schema_selection.get('trace') or {}),
                     'exec_runtime_policy': (
                         dict(dynamic_contract_payload.get('exec_runtime_policy') or {})
@@ -349,6 +369,7 @@ class ReActToolLoop:
                 )
             provider_retry_count = 0
             empty_response_retry_count = 0
+            restart_with_refreshed_runtime = False
             try:
                 while True:
                     self._check_pause_or_cancel(task.task_id)
@@ -364,7 +385,7 @@ class ReActToolLoop:
                             tools=tool_schemas or None,
                             model_refs=current_model_refs,
                             tool_choice=self._repair_tool_choice(
-                                visible_tools=visible_tools,
+                                visible_tools=callable_visible_tools,
                                 stage_gate=stage_gate,
                                 invalid_final_submission_count=invalid_final_submission_count,
                                 invalid_stage_submission_count=invalid_stage_submission_count,
@@ -412,6 +433,18 @@ class ReActToolLoop:
                     except Exception as exc:
                         if not self._is_provider_chain_exhausted_error(exc):
                             raise
+                        if self._refresh_runtime_config_for_retry_invalidation():
+                            self._log_service.update_frame(
+                                task.task_id,
+                                node.node_id,
+                                lambda frame: {
+                                    **frame,
+                                    'last_error': 'Runtime config changed during provider retry; restarting with refreshed model chain.',
+                                },
+                                publish_snapshot=True,
+                            )
+                            restart_with_refreshed_runtime = True
+                            break
                         provider_retry_count += 1
                         delay_seconds = self._provider_retry_delay_seconds(provider_retry_count)
                         self._log_service.update_frame(
@@ -430,6 +463,18 @@ class ReActToolLoop:
                         await asyncio.sleep(delay_seconds)
                         continue
                     if self._is_empty_model_response(response):
+                        if self._refresh_runtime_config_for_retry_invalidation():
+                            self._log_service.update_frame(
+                                task.task_id,
+                                node.node_id,
+                                lambda frame: {
+                                    **frame,
+                                    'last_error': 'Runtime config changed during empty-response retry; restarting with refreshed model chain.',
+                                },
+                                publish_snapshot=True,
+                            )
+                            restart_with_refreshed_runtime = True
+                            break
                         empty_response_retry_count += 1
                         delay_seconds = self._empty_response_retry_delay_seconds(empty_response_retry_count)
                         self._log_service.update_frame(
@@ -452,9 +497,12 @@ class ReActToolLoop:
                 self._set_model_await_marker(task_id=task.task_id, node_id=node.node_id, marker='')
                 if node_turn_lease is not None and node_turn_controller is not None:
                     node_turn_controller.release_turn(node_turn_lease)
+            if restart_with_refreshed_runtime:
+                attempts = max(0, attempts - 1)
+                continue
             visible_tool_names = {
                 str(name or '').strip()
-                for name in visible_tools.keys()
+                for name in callable_visible_tools.keys()
                 if str(name or '').strip()
             }
             response_tool_calls = list(response.tool_calls or [])
@@ -464,7 +512,7 @@ class ReActToolLoop:
             if not response_tool_calls and visible_tool_names:
                 xml_extraction = self._extract_tool_calls_from_xml_pseudo_content(
                     response.content,
-                    visible_tools=visible_tools,
+                    visible_tools=callable_visible_tools,
                 )
                 if xml_extraction.tool_calls:
                     response_tool_calls = xml_extraction.tool_calls
@@ -521,6 +569,11 @@ class ReActToolLoop:
                 request_message_count=getattr(response, 'request_message_count', None),
                 request_message_chars=getattr(response, 'request_message_chars', None),
                 actual_tool_schemas=tool_schemas,
+                callable_tool_names=list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
+                provider_tool_names=list(provider_tool_names),
+                provider_tool_bundle_seeded=bool(
+                    dict(tool_schema_selection.get('trace') or {}).get('provider_tool_bundle_seeded')
+                ),
                 provider_request_meta=getattr(response, 'provider_request_meta', None),
                 provider_request_body=getattr(response, 'provider_request_body', None),
             )
@@ -578,6 +631,14 @@ class ReActToolLoop:
                         if combined_repair_text
                         else 'Error: repeated read-only retrieval call requires repair'
                     )
+                    pending_request_delta_messages = self._rejected_tool_turn_delta_messages(
+                        node=node,
+                        response=response,
+                        response_tool_calls=response_tool_calls,
+                        message_history=message_history,
+                        runtime_context=runtime_context,
+                        error_content=error_content,
+                    )
                     message_history = self._record_rejected_tool_turn(
                         task=task,
                         node=node,
@@ -596,6 +657,14 @@ class ReActToolLoop:
                     repair_overlay_text = combined_repair_text
                     continue
                 if final_result_mixed_turn:
+                    pending_request_delta_messages = self._rejected_tool_turn_delta_messages(
+                        node=node,
+                        response=response,
+                        response_tool_calls=response_tool_calls,
+                        message_history=message_history,
+                        runtime_context=runtime_context,
+                        error_content=self._exclusive_tool_turn_error(FINAL_RESULT_TOOL_NAME),
+                    )
                     message_history = self._record_rejected_tool_turn(
                         task=task,
                         node=node,
@@ -672,6 +741,14 @@ class ReActToolLoop:
                         f'Error: {combined_repair_text}'
                         if combined_repair_text
                         else 'Error: duplicate tool call detected; reuse the prior result or change the arguments before retrying'
+                    )
+                    pending_request_delta_messages = self._rejected_tool_turn_delta_messages(
+                        node=node,
+                        response=response,
+                        response_tool_calls=response_tool_calls,
+                        message_history=message_history,
+                        runtime_context=runtime_context,
+                        error_content=error_content,
                     )
                     message_history = self._record_rejected_tool_turn(
                         task=task,
@@ -785,6 +862,10 @@ class ReActToolLoop:
                     [item['tool_message'] for item in results],
                     existing_messages=message_history,
                 )
+                pending_request_delta_messages = [
+                    dict(assistant_message),
+                    *[dict(item) for item in list(tool_messages or []) if isinstance(item, dict)],
+                ]
                 message_history.extend(tool_messages)
                 prepared_history = self._prepare_messages(message_history, runtime_context=runtime_context)
                 self._log_service.update_node_input(
@@ -1632,6 +1713,7 @@ class ReActToolLoop:
         selected_tools = dict(visible_tools or {})
         selection_payload: dict[str, Any] = {
             'tool_names': list(selected_tools.keys()),
+            'provider_tool_names': list(selected_tools.keys()),
             'lightweight_tool_ids': [],
             'hydrated_executor_names': [],
             'trace': {},
@@ -1659,6 +1741,21 @@ class ReActToolLoop:
                 if requested_names:
                     selected_tools = {name: visible_tools[name] for name in requested_names}
                     selection_payload['tool_names'] = list(requested_names)
+                requested_provider_names: list[str] = []
+                seen_provider_names: set[str] = set()
+                for item in list(
+                    raw_selection.get('provider_tool_names')
+                    or (dict(raw_selection.get('trace') or {})).get('provider_tool_names')
+                    or selection_payload.get('tool_names')
+                    or []
+                ):
+                    normalized = str(item or '').strip()
+                    if not normalized or normalized in seen_provider_names or normalized not in visible_tools:
+                        continue
+                    seen_provider_names.add(normalized)
+                    requested_provider_names.append(normalized)
+                if requested_provider_names:
+                    selection_payload['provider_tool_names'] = list(requested_provider_names)
                 selection_payload['lightweight_tool_ids'] = [
                     str(item or '').strip()
                     for item in list(raw_selection.get('lightweight_tool_ids') or [])
@@ -1697,10 +1794,22 @@ class ReActToolLoop:
             for name in model_visible_callable_tool_names
             if name in visible_tools
         }
+        provider_tool_names = self._normalized_name_list(
+            list(selection_payload.get('provider_tool_names') or selection_payload.get('tool_names') or [])
+        )
+        provider_tool_names = [
+            name
+            for name in provider_tool_names
+            if name in visible_tools
+        ]
+        if not provider_tool_names:
+            provider_tool_names = list(model_visible_callable_tool_names)
         selection_payload['tool_names'] = list(model_visible_callable_tool_names)
+        selection_payload['provider_tool_names'] = list(provider_tool_names)
         selection_payload['trace'] = {
             **selection_trace,
             'full_callable_tool_names': list(full_callable_tool_names),
+            'provider_tool_names': list(provider_tool_names),
             'stage_locked_to_submit_next_stage': (
                 list(model_visible_callable_tool_names) == [STAGE_TOOL_NAME]
                 and list(full_callable_tool_names) != [STAGE_TOOL_NAME]
@@ -3087,43 +3196,23 @@ class ReActToolLoop:
         runtime_context: dict[str, Any],
         error_content: str,
     ) -> list[dict[str, Any]]:
-        assistant_tool_calls = [
-            {
-                'id': str(getattr(call, 'id', '') or ''),
-                'type': 'function',
-                'function': {
-                    'name': str(getattr(call, 'name', '') or ''),
-                    'arguments': json.dumps(self._normalize_tool_call_arguments(getattr(call, 'arguments', {})), ensure_ascii=False),
-                },
-            }
-            for call in list(response_tool_calls or [])
-        ]
-        assistant_message = {
-            'role': 'assistant',
-            'content': self._externalize_message_content(
-                response.content,
-                runtime_context=runtime_context,
-                display_name=f'assistant:{node.node_id}',
-                source_kind='assistant_message',
-            ),
-            'tool_calls': assistant_tool_calls,
-        }
+        delta_messages = self._rejected_tool_turn_delta_messages(
+            node=node,
+            response=response,
+            response_tool_calls=response_tool_calls,
+            message_history=message_history,
+            runtime_context=runtime_context,
+            error_content=error_content,
+        )
+        assistant_message = dict(delta_messages[0] or {}) if delta_messages else {'role': 'assistant', 'content': ''}
         tool_messages = [
-            {
-                'role': 'tool',
-                'tool_call_id': str(getattr(call, 'id', '') or ''),
-                'name': str(getattr(call, 'name', '') or ''),
-                'content': error_content,
-                'started_at': '',
-                'finished_at': '',
-                'elapsed_seconds': None,
-                'status': 'error',
-            }
-            for call in list(response_tool_calls or [])
+            dict(item)
+            for item in list(delta_messages[1:] or [])
+            if isinstance(item, dict)
         ]
         next_history = list(message_history)
         next_history.append(assistant_message)
-        next_history.extend(self._dedupe_tool_messages(tool_messages, existing_messages=next_history))
+        next_history.extend(tool_messages)
         prepared_history = self._prepare_messages(next_history, runtime_context=runtime_context)
         self._log_service.update_node_input(
             task.task_id,
@@ -3164,6 +3253,56 @@ class ReActToolLoop:
             publish_snapshot=True,
         )
         return prepared_history
+
+    def _rejected_tool_turn_delta_messages(
+        self,
+        *,
+        node,
+        response,
+        response_tool_calls: list[Any],
+        message_history: list[dict[str, Any]],
+        runtime_context: dict[str, Any],
+        error_content: str,
+    ) -> list[dict[str, Any]]:
+        assistant_tool_calls = [
+            {
+                'id': str(getattr(call, 'id', '') or ''),
+                'type': 'function',
+                'function': {
+                    'name': str(getattr(call, 'name', '') or ''),
+                    'arguments': json.dumps(self._normalize_tool_call_arguments(getattr(call, 'arguments', {})), ensure_ascii=False),
+                },
+            }
+            for call in list(response_tool_calls or [])
+        ]
+        assistant_message = {
+            'role': 'assistant',
+            'content': self._externalize_message_content(
+                response.content,
+                runtime_context=runtime_context,
+                display_name=f'assistant:{node.node_id}',
+                source_kind='assistant_message',
+            ),
+            'tool_calls': assistant_tool_calls,
+        }
+        tool_messages = [
+            {
+                'role': 'tool',
+                'tool_call_id': str(getattr(call, 'id', '') or ''),
+                'name': str(getattr(call, 'name', '') or ''),
+                'content': error_content,
+                'started_at': '',
+                'finished_at': '',
+                'elapsed_seconds': None,
+                'status': 'error',
+            }
+            for call in list(response_tool_calls or [])
+        ]
+        existing_messages = [*list(message_history), dict(assistant_message)]
+        return [
+            dict(assistant_message),
+            *self._dedupe_tool_messages(tool_messages, existing_messages=existing_messages),
+        ]
 
     @classmethod
     def _read_only_repeat_violations(
@@ -3530,6 +3669,15 @@ class ReActToolLoop:
         if attempt_count <= 1:
             return 1.0
         return float(min(10, attempt_count))
+
+    def _refresh_runtime_config_for_retry_invalidation(self) -> bool:
+        refresher = getattr(self, '_runtime_config_refresh_for_retry_invalidation', None)
+        if not callable(refresher):
+            return False
+        try:
+            return bool(refresher())
+        except Exception:
+            return False
 
     @staticmethod
     def _empty_response_retry_delay_seconds(attempt_count: int) -> float:
@@ -4156,6 +4304,31 @@ class ReActToolLoop:
             keep_latest_completed_stages=_UNCOMPACTED_COMPLETED_STAGE_WINDOWS,
             stage_tool_name=STAGE_TOOL_NAME,
         )
+
+    @staticmethod
+    def _prompt_message_records(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        return [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+
+    @classmethod
+    def _same_turn_append_only_request_messages(
+        cls,
+        *,
+        previous_request_messages: list[dict[str, Any]] | None,
+        current_model_messages: list[dict[str, Any]] | None,
+        pending_delta_messages: list[dict[str, Any]] | None,
+        request_tail_messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        current_records = cls._prompt_message_records(current_model_messages)
+        tail_records = cls._prompt_message_records(request_tail_messages)
+        live_records = [*current_records, *tail_records]
+        previous_records = cls._prompt_message_records(previous_request_messages)
+        delta_records = cls._prompt_message_records(pending_delta_messages)
+        if not previous_records or not delta_records:
+            return live_records
+        prefix_probe = current_records[: min(2, len(current_records))]
+        if prefix_probe and previous_records[: len(prefix_probe)] != prefix_probe:
+            return live_records
+        return [*previous_records, *delta_records, *tail_records]
 
     @staticmethod
     def _apply_temporary_system_overlay(messages: list[dict[str, Any]], *, overlay_text: str | None) -> list[dict[str, Any]]:

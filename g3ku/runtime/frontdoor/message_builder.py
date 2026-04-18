@@ -18,7 +18,7 @@ from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBu
 from g3ku.runtime.core_tools import resolve_core_tool_targets
 from g3ku.runtime.semantic_context_summary import (
     HERMES_FAILURE_COOLDOWN_SECONDS,
-    HERMES_MIN_CONTEXT_FLOOR,
+    G3KU_MIN_CONTEXT_FLOOR,
     build_global_summary_thresholds,
     build_long_context_summary_message,
     default_semantic_context_state,
@@ -91,7 +91,7 @@ def _resolve_ceo_context_window_tokens(loop: Any) -> int:
         resolved = 0
     if resolved > 0:
         return resolved
-    return HERMES_MIN_CONTEXT_FLOOR
+    return G3KU_MIN_CONTEXT_FLOOR
 
 
 def _externalized_completed_blocks_for_global_summary(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
