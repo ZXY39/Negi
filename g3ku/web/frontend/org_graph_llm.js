@@ -242,7 +242,7 @@
     if (state.error) return hint(`模型配置出错：${state.error}`, true);
     if (!state.bindings.length) return hint("还没有保存的模型。点击“新建配置”开始添加。", false);
     if (S.modelCatalog.roleEditing && S.modelCatalog.rolesDirty) return hint("模型链已修改，点击“保存模型链”提交。", false);
-    if (S.modelCatalog.roleEditing) return hint("拖拽左侧模型到右侧 Role Routes，完成后点击“保存模型链”。", false);
+    if (S.modelCatalog.roleEditing) return hint("拖拽左侧模型到右侧角色列，完成后点击“保存模型链”。", false);
     return hint("点击左侧模型可以查看对应 JSON 配置；点击“新建配置”可添加新模型。", false);
   }
 
@@ -1149,7 +1149,7 @@
             <span class="llm-capability-badge chat">Chat</span>
           </div>
           ${description ? `<div class="llm-binding-meta">${escv(description)}</div>` : ""}
-          <div class="model-inline-meta">${item.enabled === false ? '<span class="policy-chip neutral">Disabled</span>' : '<span class="policy-chip risk-low">Enabled</span>'}${scopes.length ? scopes.map((scope) => `<span class="policy-chip neutral">${escv(SCOPE_LABELS[scope] || scope)}</span>`).join("") : '<span class="policy-chip neutral">未进入 Role Routes</span>'}</div>
+          <div class="model-inline-meta">${item.enabled === false ? '<span class="policy-chip neutral">Disabled</span>' : '<span class="policy-chip risk-low">Enabled</span>'}${scopes.length ? scopes.map((scope) => `<span class="policy-chip neutral">${escv(SCOPE_LABELS[scope] || scope)}</span>`).join("") : '<span class="policy-chip neutral">未进入角色链</span>'}</div>
         </article>`;
     }).join("");
   }
@@ -2019,7 +2019,7 @@
     try {
       showToast({
         title: "正在保存模型链",
-        text: "正在提交当前 Role Routes 变更...",
+        text: "正在提交当前角色模型链变更...",
         kind: "success",
         persistent: true,
       });

@@ -8082,8 +8082,18 @@ textarea {
     padding-right: 4px;
 }
 
+.llm-routes-panel {
+    grid-column: auto;
+    overflow: visible;
+    padding: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+
 .model-routing-grid {
     min-height: 0;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .model-chain-card {
@@ -8102,6 +8112,12 @@ textarea {
     max-height: min(42dvh, 420px);
     overflow-y: auto;
     padding-right: 4px;
+}
+
+@media (max-width: 1200px) {
+    .model-routing-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
 }
 
 /* UI/UX Pro Max Optimized Styles for Lists and Layout */

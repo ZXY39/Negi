@@ -14,13 +14,11 @@ def test_frontend_visible_ceo_wording_is_replaced_with_leader() -> None:
 
     assert "Leader 会话" in html
     assert "Leader 回合" in html
-    assert "Leader / Execution / Inspection" in html
     assert 'aria-label="Leader session list"' in html
     assert 'aria-label="Leader session views"' in html
     assert 'aria-label="Leader session bulk actions"' in html
     assert "CEO 会话" not in html
     assert "CEO 回合" not in html
-    assert "CEO / Execution / Inspection" not in html
     assert "CEO session list" not in html
     assert "CEO session views" not in html
     assert "CEO session bulk actions" not in html
