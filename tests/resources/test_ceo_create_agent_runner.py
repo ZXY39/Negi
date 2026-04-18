@@ -2695,6 +2695,106 @@ def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix(
     ]
 
 
+def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix_despite_trailing_whitespace_drift(
+    tmp_path: Path,
+) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    previous_record_path = tmp_path / "frontdoor-request-previous.json"
+    previous_request_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "old question"},
+        {
+            "role": "user",
+            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["submit_next_stage"]}',
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "submit_next_stage",
+            "tool_call_id": "call-1",
+            "content": '{"status":"success"} ',
+        },
+    ]
+    previous_record_path.write_text(
+        json.dumps({"request_messages": previous_request_messages}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    session = SimpleNamespace(
+        _frontdoor_previous_actual_request_path=str(previous_record_path),
+        _frontdoor_previous_actual_request_history=[
+            {
+                "path": str(previous_record_path),
+                "turn_id": "turn-frontdoor-previous",
+            }
+        ],
+    )
+
+    scaffold = runner._fresh_turn_live_request_messages_from_previous_actual_request(
+        session=session,
+        stable_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "old question"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "submit_next_stage",
+                "tool_call_id": "call-1",
+                "content": '{"status":"success"}',
+            },
+            {"role": "assistant", "content": "final answer"},
+        ],
+        live_request_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "old question"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "submit_next_stage",
+                "tool_call_id": "call-1",
+                "content": '{"status":"success"}',
+            },
+            {"role": "assistant", "content": "final answer"},
+            {"role": "user", "content": "next user"},
+        ],
+    )
+
+    assert scaffold == [
+        *previous_request_messages,
+        {"role": "assistant", "content": "final answer"},
+        {"role": "user", "content": "next user"},
+    ]
+
+
 def test_fresh_turn_tool_schema_seed_reuses_previous_actual_request_schemas_when_current_is_superset(
     tmp_path: Path,
 ) -> None:
@@ -2750,6 +2850,96 @@ def test_fresh_turn_tool_schema_seed_reuses_previous_actual_request_schemas_when
     ]
 
 
+def test_runtime_agent_session_completed_continuity_bridge_requires_exact_visible_sets() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._frontdoor_completed_continuity_bridge_pending = True
+    session._frontdoor_capability_snapshot_exposure_revision = "exp:demo"
+    session._frontdoor_visible_tool_ids = ["message", "web_fetch"]
+    session._frontdoor_visible_skill_ids = ["web-access"]
+    session._frontdoor_provider_tool_schema_names = ["message", "web_fetch"]
+
+    matched = session._consume_completed_continuity_bridge(
+        current_visible_tool_ids=["web_fetch", "message"],
+        current_visible_skill_ids=["web-access"],
+    )
+
+    assert matched == {
+        "pending": True,
+        "enabled": True,
+        "exposure_revision": "exp:demo",
+        "provider_tool_schema_names": ["message", "web_fetch"],
+    }
+
+    session._frontdoor_completed_continuity_bridge_pending = True
+    mismatched = session._consume_completed_continuity_bridge(
+        current_visible_tool_ids=["message", "web_fetch", "filesystem_write"],
+        current_visible_skill_ids=["web-access"],
+    )
+
+    assert mismatched == {
+        "pending": True,
+        "enabled": False,
+        "exposure_revision": "",
+        "provider_tool_schema_names": [],
+    }
+
+
+def test_fresh_turn_tool_schema_seed_skips_expected_bridge_when_previous_names_do_not_match(
+    tmp_path: Path,
+) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    previous_record_path = tmp_path / "frontdoor-request-previous.json"
+    previous_record_path.write_text(
+        json.dumps(
+            {
+                "tool_schemas": [
+                    {"type": "function", "function": {"name": "exec", "description": "", "parameters": {"type": "object"}}},
+                    {
+                        "type": "function",
+                        "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    session = SimpleNamespace(
+        _frontdoor_previous_actual_request_path=str(previous_record_path),
+        _frontdoor_previous_actual_request_history=[
+            {
+                "path": str(previous_record_path),
+                "turn_id": "turn-frontdoor-previous",
+            }
+        ],
+    )
+    current_schemas = [
+        {"type": "function", "function": {"name": "exec", "description": "", "parameters": {"type": "object"}}},
+        {
+            "type": "function",
+            "function": {"name": "message", "description": "", "parameters": {"type": "object"}},
+        },
+        {
+            "type": "function",
+            "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+        },
+    ]
+
+    seeded_schemas, seeded_names = runner._fresh_turn_tool_schema_seed_from_previous_actual_request(
+        session=session,
+        tool_schemas=current_schemas,
+        expected_schema_names=["message", "web_fetch"],
+    )
+
+    assert seeded_names is None
+    assert seeded_schemas == current_schemas
+
+
 def test_live_request_message_records_for_state_prefers_explicit_frontdoor_live_request_messages() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
 
@@ -2774,6 +2964,354 @@ def test_live_request_message_records_for_state_prefers_explicit_frontdoor_live_
         {"role": "assistant", "content": "final answer"},
         {"role": "user", "content": "next user"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_prefix_after_message_tool_finalize(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = "web:shared"
+    runtime_session = SimpleNamespace(session_key=session_key, messages=[])
+    loop = SimpleNamespace(
+        sessions=SimpleNamespace(get_or_create=lambda key: runtime_session),
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=None,
+        temp_dir="",
+    )
+    runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
+    captured_model_messages: list[dict[str, object]] = []
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+
+    previous_request_path = tmp_path / "frontdoor-request-previous.json"
+    previous_request_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "older answer"},
+        {
+            "role": "user",
+            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["message","submit_next_stage"]}',
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-message-1",
+                    "type": "function",
+                    "function": {"name": "message", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "message",
+            "tool_call_id": "call-message-1",
+            "content": "Message sent to final:ceo-demo",
+        },
+    ]
+    previous_request_path.write_text(
+        json.dumps(
+            {
+                "request_messages": previous_request_messages,
+                "tool_schemas": [
+                    {
+                        "type": "function",
+                        "function": {"name": "message", "description": "", "parameters": {"type": "object"}},
+                    },
+                    {
+                        "type": "function",
+                        "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["message", "submit_next_stage"]}
+
+    async def _build_for_ceo(**kwargs):
+        stable_messages = list(kwargs.get("request_body_seed_messages") or [])
+        user_content = str(kwargs.get("user_content") or "").strip()
+        model_messages = [*stable_messages, {"role": "user", "content": user_content}]
+        return SimpleNamespace(
+            tool_names=["message", "submit_next_stage"],
+            model_messages=model_messages,
+            stable_messages=list(stable_messages),
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["message", "submit_next_stage"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    async def _call_model_with_tools(**kwargs):
+        captured_model_messages[:] = list(kwargs.get("messages") or [])
+        return SimpleNamespace()
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+    monkeypatch.setattr(
+        runner,
+        "_model_response_view",
+        lambda _message: SimpleNamespace(content="ok", tool_calls=[], provider_request_meta={}, provider_request_body={}),
+    )
+    monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
+    monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key=session_key),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "older answer"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-message-1",
+                        "type": "function",
+                        "function": {"name": "message", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "message",
+                "tool_call_id": "call-message-1",
+                "content": "Message sent to final:ceo-demo",
+            },
+            {"role": "assistant", "content": "final answer"},
+        ],
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_stage_state={},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
+        _semantic_context_state={"summary_text": "", "needs_refresh": False},
+        _frontdoor_hydrated_tool_names=[],
+        _frontdoor_selection_debug={},
+        _frontdoor_previous_actual_request_path=str(previous_request_path),
+        _frontdoor_previous_actual_request_history=[{"path": str(previous_request_path), "turn_id": "turn-old"}],
+        _frontdoor_actual_request_path="",
+        _frontdoor_actual_request_history=[],
+    )
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(loop=loop, session=session, session_key=session_key, on_progress=None)
+    )
+
+    prepared = await runner._graph_prepare_turn(
+        initial_persistent_state(user_input={"content": "next question", "metadata": {}}),
+        runtime=runtime,
+    )
+    await runner._graph_call_model(
+        prepared,
+        runtime=runtime,
+    )
+
+    assert captured_model_messages[: len(previous_request_messages)] == previous_request_messages
+    assert {"role": "assistant", "content": "final answer"} in captured_model_messages
+    final_answer_index = captured_model_messages.index({"role": "assistant", "content": "final answer"})
+    next_user_index = captured_model_messages.index({"role": "user", "content": "next question"})
+    assert final_answer_index < next_user_index
+
+
+@pytest.mark.asyncio
+async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_prefix_despite_trailing_whitespace_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = "web:shared"
+    runtime_session = SimpleNamespace(session_key=session_key, messages=[])
+    loop = SimpleNamespace(
+        sessions=SimpleNamespace(get_or_create=lambda key: runtime_session),
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=None,
+        temp_dir="",
+    )
+    runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
+    captured_model_messages: list[dict[str, object]] = []
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+
+    previous_request_path = tmp_path / "frontdoor-request-previous.json"
+    previous_request_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "old question"},
+        {
+            "role": "user",
+            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["message","submit_next_stage"]}',
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-message-1",
+                    "type": "function",
+                    "function": {"name": "message", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "message",
+            "tool_call_id": "call-message-1",
+            "content": "Message sent to final:ceo-demo ",
+        },
+    ]
+    previous_request_path.write_text(
+        json.dumps(
+            {
+                "request_messages": previous_request_messages,
+                "tool_schemas": [
+                    {
+                        "type": "function",
+                        "function": {"name": "message", "description": "", "parameters": {"type": "object"}},
+                    },
+                    {
+                        "type": "function",
+                        "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["message", "submit_next_stage"]}
+
+    async def _build_for_ceo(**kwargs):
+        stable_messages = list(kwargs.get("request_body_seed_messages") or [])
+        user_content = str(kwargs.get("user_content") or "").strip()
+        model_messages = [*stable_messages, {"role": "user", "content": user_content}]
+        return SimpleNamespace(
+            tool_names=["message", "submit_next_stage"],
+            model_messages=model_messages,
+            stable_messages=list(stable_messages),
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["message", "submit_next_stage"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    async def _call_model_with_tools(**kwargs):
+        captured_model_messages[:] = list(kwargs.get("messages") or [])
+        return SimpleNamespace()
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+    monkeypatch.setattr(
+        runner,
+        "_model_response_view",
+        lambda _message: SimpleNamespace(content="ok", tool_calls=[], provider_request_meta={}, provider_request_body={}),
+    )
+    monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
+    monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key=session_key),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "old question"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-message-1",
+                        "type": "function",
+                        "function": {"name": "message", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "message",
+                "tool_call_id": "call-message-1",
+                "content": "Message sent to final:ceo-demo",
+            },
+            {"role": "assistant", "content": "final answer"},
+        ],
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_stage_state={},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
+        _semantic_context_state={"summary_text": "", "needs_refresh": False},
+        _frontdoor_hydrated_tool_names=[],
+        _frontdoor_selection_debug={},
+        _frontdoor_previous_actual_request_path=str(previous_request_path),
+        _frontdoor_previous_actual_request_history=[{"path": str(previous_request_path), "turn_id": "turn-old"}],
+        _frontdoor_actual_request_path="",
+        _frontdoor_actual_request_history=[],
+    )
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(loop=loop, session=session, session_key=session_key, on_progress=None)
+    )
+
+    prepared = await runner._graph_prepare_turn(
+        initial_persistent_state(user_input={"content": "next question", "metadata": {}}),
+        runtime=runtime,
+    )
+    await runner._graph_call_model(
+        prepared,
+        runtime=runtime,
+    )
+
+    assert captured_model_messages[: len(previous_request_messages)] == previous_request_messages
+    assert {"role": "assistant", "content": "final answer"} in captured_model_messages
+    final_answer_index = captured_model_messages.index({"role": "assistant", "content": "final answer"})
+    next_user_index = captured_model_messages.index({"role": "user", "content": "next question"})
+    assert final_answer_index < next_user_index
 
 
 def test_create_agent_runner_sync_preserves_durable_frontdoor_canonical_context() -> None:

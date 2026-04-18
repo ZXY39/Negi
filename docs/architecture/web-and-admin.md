@@ -77,12 +77,14 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 
 ### Manual Pause Resume Rule
 
-- Manual pause now freezes the current turn as the previous round context instead of waiting for a textual resume merge.
+- Manual pause still means “freeze the current round as previous-round context,” but the backend no longer leaves ordinary user sessions in a long-lived resumable `paused` state.
+- The operator-visible “pause” button is now a terminal stop for the current visible turn: the backend ends the runtime state as `completed` and tags it with `stop_reason=user_pause`.
 - The next outbound user message after pause must start a new round.
 - The paused round's user message, execution trace, stage state, tool calls, and compression state are preserved in transcript and snapshot context so the next round can inherit them without rewriting the original user text.
-- Before that new user turn is dispatched, the backend now archives the previous paused assistant bubble into a persisted assistant message with `status=paused`.
+- Manual pause now writes a completed-session continuity sidecar immediately, then clears the ordinary paused/inflight restorable snapshots for that session.
+- The backend now archives the previous paused assistant bubble into a persisted assistant message with `status=paused` during the stop flow itself, not only when the next user turn is about to dispatch.
 - That archived paused assistant is durable UI history for `snapshot.ceo` restore/reconnect, but it remains hidden from prompt-history assembly and session-summary counts via `history_visible=false`.
-- Browser-side restore should therefore render that persisted paused assistant as a paused bubble rather than a completed reply, while the next turn's actual prompt inheritance still comes from paused execution context and other visible history sources.
+- Browser-side restore should therefore render that persisted paused assistant as a paused bubble rather than a completed reply. The next ordinary user turn inherits context from visible history plus completed continuity state, not from resuming the old paused turn.
 
 ### CEO Stage Trace Round Rendering Contract
 
@@ -161,7 +163,7 @@ Do not treat `ceoSessionBusy` as equivalent to "all session-list mutations must 
 
 - In the CEO session UI, deleting a local session and deleting a channel session are intentionally different operations.
 - Deleting a local session removes the session record itself. Deleting a channel session is a clear operation: the channel/account entry remains available, but the next reopened conversation must start from empty session context.
-- Backend clear handling for channel sessions must remove the persisted `SessionManager` transcript for that `china:*` session key, invalidate any in-memory cached session object, and clear the same side artifacts that local-session deletion clears for that session id, including inflight snapshots, paused execution context, uploads, and frontdoor stage-archive artifacts.
+- Backend clear handling for channel sessions must remove the persisted `SessionManager` transcript for that `china:*` session key, invalidate any in-memory cached session object, and clear the same side artifacts that local-session deletion clears for that session id, including inflight snapshots, paused execution context, completed continuity sidecars, uploads, and frontdoor stage-archive artifacts.
 - For DM channel rows, the catalog entry may still remain visible after clear because it is synthesized from enabled channel-account configuration rather than from transcript persistence alone.
 
 If an operator reports “the channel conversation was deleted but old context came back,” inspect these layers in order:
@@ -202,6 +204,7 @@ CEO/frontdoor now follows a parallel debugging pattern, but with session-scoped 
 
 - Every CEO/frontdoor `call_model` round writes the full provider-facing request to `.g3ku/web-ceo-requests/<session>/...json`.
 - Inflight / paused CEO snapshots expose only the latest `actual_request_path`, `prompt_cache_key_hash`, `actual_request_hash`, `actual_request_message_count`, `actual_tool_schema_hash`, and a short `actual_request_history`.
+- Reopened completed sessions also have a compact recovery sidecar at `.g3ku/web-ceo-continuity/<session>.json`. That file is the authority for “what baseline/stage/compression state should be restored before the first new visible turn after restart,” but it is not a replacement for the full request JSON when doing request forensics.
 - When debugging CEO prompt shrinkage or cache drops, inspect the saved request JSON first rather than inferring the request from `canonical_context`, stage rounds, or transcript-visible assistant/tool bubbles.
 - The corresponding session-state projection now has two different meanings:
   - `dynamic_appendix_messages` keeps only the latest authoritative contract for rebuild purposes.
@@ -212,6 +215,7 @@ CEO/frontdoor now follows a parallel debugging pattern, but with session-scoped 
   - `provider_request_meta` / `provider_request_body`: the adapter-final HTTP body that was actually prepared for transport
 - If cache accounting disagrees with the runtime projection, debug against `provider_request_body` first.
 - For stage-transition rounds specifically, it is now expected that the tail runtime contract may show `callable_tool_names=["submit_next_stage"]` while `provider_request_body.tools` still carries the stable runtime-visible tool bundle. That mismatch is intentional and no longer indicates a frontdoor contract leak.
+- For reopened completed sessions, the first fresh visible turn may bridge the previous `provider_tool_schema_names` and cache-family anchor only when the current `visible_tool_ids` plus `visible_skill_ids` exactly match the completed continuity snapshot. If the visible set changed, context should still restore but cache miss is allowed.
 
 ## Verification Pointers
 

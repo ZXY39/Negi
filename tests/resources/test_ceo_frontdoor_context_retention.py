@@ -514,6 +514,54 @@ async def test_finalize_turn_preserves_authoritative_request_body_baseline() -> 
 
 
 @pytest.mark.asyncio
+async def test_finalize_turn_appends_visible_output_for_self_execute_route() -> None:
+    runner = CeoFrontDoorRunner(loop=_loop_with_session("web:shared"))
+    state = {
+        "query_text": "continue",
+        "route_kind": "self_execute",
+        "final_output": "final answer",
+        "messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "latest user"},
+        ],
+        "frontdoor_request_body_messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "older user"},
+            {"role": "assistant", "content": "older answer"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "message", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "message",
+                "tool_call_id": "call-1",
+                "content": "Message sent to final:ceo-demo",
+            },
+        ],
+        "frontdoor_history_shrink_reason": "",
+        "frontdoor_stage_state": {},
+        "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
+        "heartbeat_internal": False,
+        "cron_internal": False,
+    }
+
+    finalized = await runner._graph_finalize_turn(state)
+
+    assert finalized["frontdoor_request_body_messages"] == [
+        *state["frontdoor_request_body_messages"],
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_prepare_turn_rejects_unexpected_context_shrink_without_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

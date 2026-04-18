@@ -426,6 +426,35 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return cls._frontdoor_actual_request_record_from_path(previous_path)
 
     @classmethod
+    def _fresh_turn_seed_normalized_value(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): cls._fresh_turn_seed_normalized_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._fresh_turn_seed_normalized_value(item) for item in value]
+        if isinstance(value, str):
+            return value.replace("\r\n", "\n").rstrip()
+        return value
+
+    @classmethod
+    def _fresh_turn_seed_records_match(
+        cls,
+        first: list[dict[str, Any]] | None,
+        second: list[dict[str, Any]] | None,
+    ) -> bool:
+        first_records = [dict(item) for item in list(first or []) if isinstance(item, dict)]
+        second_records = [dict(item) for item in list(second or []) if isinstance(item, dict)]
+        if len(first_records) != len(second_records):
+            return False
+        return all(
+            cls._fresh_turn_seed_normalized_value(left)
+            == cls._fresh_turn_seed_normalized_value(right)
+            for left, right in zip(first_records, second_records)
+        )
+
+    @classmethod
     def _fresh_turn_live_request_messages_from_previous_actual_request(
         cls,
         *,
@@ -444,9 +473,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         stable_len = len(stable_records)
         if body_len <= 0 or stable_len < body_len:
             return live_records
-        if stable_records[:body_len] != previous_request_body:
+        if not cls._fresh_turn_seed_records_match(stable_records[:body_len], previous_request_body):
             return live_records
-        if len(live_records) < stable_len or live_records[:stable_len] != stable_records:
+        if len(live_records) < stable_len or not cls._fresh_turn_seed_records_match(
+            live_records[:stable_len],
+            stable_records,
+        ):
             return live_records
         stable_tail = list(stable_records[body_len:])
         live_tail = list(live_records[stable_len:])
@@ -458,6 +490,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         *,
         session: Any | None,
         tool_schemas: list[dict[str, Any]] | None,
+        expected_schema_names: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], list[str] | None]:
         current_tool_schemas = [dict(item) for item in list(tool_schemas or []) if isinstance(item, dict)]
         previous_record = cls._frontdoor_previous_actual_request_record(session)
@@ -472,6 +505,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         previous_names = cls._frontdoor_tool_schema_names(previous_tool_schemas)
         if not previous_names:
             return current_tool_schemas, None
+        normalized_expected_names = [
+            str(item or "").strip()
+            for item in list(expected_schema_names or [])
+            if str(item or "").strip()
+        ]
+        if normalized_expected_names:
+            if previous_names != normalized_expected_names:
+                return current_tool_schemas, None
+            return previous_tool_schemas, list(previous_names)
         if set(previous_names).issubset(set(current_names)):
             return previous_tool_schemas, list(previous_names)
         return current_tool_schemas, None
@@ -983,6 +1025,33 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         setattr(target_session, "_compression_state", compression_state)
         setattr(target_session, "_semantic_context_state", semantic_context_state)
         setattr(target_session, "_frontdoor_hydrated_tool_names", list(hydrated_tool_names))
+        if isinstance(state, dict):
+            setattr(
+                target_session,
+                "_frontdoor_capability_snapshot_exposure_revision",
+                str(state.get("cache_family_revision") or "").strip(),
+            )
+            setattr(
+                target_session,
+                "_frontdoor_visible_tool_ids",
+                self._normalized_tool_name_state_list(
+                    state.get("rbac_visible_tool_names") or state.get("visible_tool_ids")
+                ),
+            )
+            setattr(
+                target_session,
+                "_frontdoor_visible_skill_ids",
+                self._normalized_tool_name_state_list(
+                    state.get("rbac_visible_skill_ids") or state.get("visible_skill_ids")
+                ),
+            )
+            setattr(
+                target_session,
+                "_frontdoor_provider_tool_schema_names",
+                self._normalized_tool_name_state_list(
+                    state.get("provider_tool_names") or state.get("tool_names")
+                ),
+            )
         setattr(
             target_session,
             "_frontdoor_selection_debug",
@@ -1069,6 +1138,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "_frontdoor_history_shrink_reason",
                     str(state.get("frontdoor_history_shrink_reason") or "").strip(),
                 )
+            sync_completed_continuity = getattr(target_session, "_sync_completed_continuity_snapshot", None)
+            if callable(sync_completed_continuity):
+                should_sync_continuity = incoming_has_authoritative_actual_request or (
+                    has_authoritative_actual_request
+                    and (
+                        "frontdoor_request_body_messages" in state
+                        or bool(request_body_messages)
+                        or "frontdoor_history_shrink_reason" in state
+                    )
+                )
+                if should_sync_continuity:
+                    sync_completed_continuity(
+                        source_reason=(
+                            "actual_request_sync" if incoming_has_authoritative_actual_request else "finalize"
+                        )
+                    )
 
     @staticmethod
     def _session_frontdoor_context_window_snapshot(session: Any) -> tuple[list[dict[str, Any]], str]:
@@ -2541,17 +2626,38 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         else:
             live_request_messages = self._prompt_message_records(messages)
             if session_request_body_messages:
+                continuity_bridge = {"pending": False, "enabled": False}
+                consume_continuity_bridge = getattr(session, "_consume_completed_continuity_bridge", None)
+                if callable(consume_continuity_bridge):
+                    continuity_bridge = dict(
+                        consume_continuity_bridge(
+                            current_visible_tool_ids=rbac_visible_tool_names,
+                            current_visible_skill_ids=rbac_visible_skill_ids,
+                        )
+                        or {}
+                    )
                 live_request_messages = self._fresh_turn_live_request_messages_from_previous_actual_request(
                     session=session,
                     stable_messages=stable_messages,
                     live_request_messages=live_request_messages,
                 )
-                tool_schemas, seeded_provider_tool_names = (
-                    self._fresh_turn_tool_schema_seed_from_previous_actual_request(
-                        session=session,
-                        tool_schemas=tool_schemas,
+                if bool(continuity_bridge.get("enabled")):
+                    cache_family_revision = str(
+                        continuity_bridge.get("exposure_revision") or cache_family_revision or ""
+                    ).strip()
+                seeded_provider_tool_names: list[str] | None = None
+                if not (bool(continuity_bridge.get("pending")) and not bool(continuity_bridge.get("enabled"))):
+                    tool_schemas, seeded_provider_tool_names = (
+                        self._fresh_turn_tool_schema_seed_from_previous_actual_request(
+                            session=session,
+                            tool_schemas=tool_schemas,
+                            expected_schema_names=list(
+                                continuity_bridge.get("provider_tool_schema_names") or []
+                            )
+                            if bool(continuity_bridge.get("enabled"))
+                            else None,
+                        )
                     )
-                )
                 if seeded_provider_tool_names:
                     runtime_visible_tool_names = list(seeded_provider_tool_names)
             contract = build_frontdoor_prompt_contract(
@@ -3257,12 +3363,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         ]
         frontdoor_history_shrink_reason = str(state.get("frontdoor_history_shrink_reason") or "").strip()
         finalized_stage_state = self._frontdoor_stage_state_snapshot(state)
-        if output and route_kind == "direct_reply":
+        should_append_visible_output = bool(output) and not bool(state.get("heartbeat_internal")) and not bool(
+            state.get("cron_internal")
+        )
+        if should_append_visible_output:
             messages.append({"role": "assistant", "content": output})
             authoritative_request_body_messages = [
                 *list(authoritative_request_body_messages),
                 {"role": "assistant", "content": output},
             ]
+        if output and route_kind == "direct_reply":
             result["messages"] = list(messages)
             result["frontdoor_request_body_messages"] = list(authoritative_request_body_messages)
             result["frontdoor_history_shrink_reason"] = frontdoor_history_shrink_reason

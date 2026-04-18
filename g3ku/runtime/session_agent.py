@@ -8,6 +8,7 @@ import uuid
 from collections import deque
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from loguru import logger
@@ -88,11 +89,18 @@ class RuntimeAgentSession:
         self._frontdoor_actual_request_hash: str = ""
         self._frontdoor_actual_request_message_count: int = 0
         self._frontdoor_actual_tool_schema_hash: str = ""
+        self._frontdoor_capability_snapshot_exposure_revision: str = ""
+        self._frontdoor_visible_tool_ids: list[str] = []
+        self._frontdoor_visible_skill_ids: list[str] = []
+        self._frontdoor_provider_tool_schema_names: list[str] = []
+        self._frontdoor_completed_continuity_bridge_pending: bool = False
+        self._last_stop_reason: str = ""
         self._active_turn_id: str | None = None
         self._active_batch_id: str | None = None
         self._active_user_batch_inputs: list[UserInputMessage] = []
         self._last_verified_task_ids: list[str] = []
         self._turn_lock = asyncio.Lock()
+        self._restore_completed_continuity_snapshot()
 
     @property
     def state(self) -> AgentState:
@@ -112,7 +120,176 @@ class RuntimeAgentSession:
         data["pending_tool_calls"] = sorted(self._state.pending_tool_calls)
         if self._state.last_error is not None:
             data["last_error"] = asdict(self._state.last_error)
+        if self._last_stop_reason:
+            data["stop_reason"] = self._last_stop_reason
         return data
+
+    @staticmethod
+    def _normalized_name_list(values: Any, *, sort_values: bool = False) -> list[str]:
+        normalized: list[str] = []
+        for raw in list(values or []):
+            name = str(raw or "").strip()
+            if not name or name in normalized:
+                continue
+            normalized.append(name)
+        if sort_values:
+            return sorted(normalized)
+        return normalized
+
+    def _restore_completed_continuity_snapshot(self) -> None:
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key.startswith("web:"):
+            return
+        if getattr(self._loop, "sessions", None) is None:
+            return
+        try:
+            from g3ku.runtime.web_ceo_sessions import (
+                read_completed_continuity_snapshot,
+                read_inflight_turn_snapshot,
+                read_paused_execution_context,
+            )
+        except Exception:
+            return
+        if read_inflight_turn_snapshot(session_key) is not None:
+            return
+        if read_paused_execution_context(session_key) is not None:
+            return
+        snapshot = read_completed_continuity_snapshot(session_key)
+        if not isinstance(snapshot, dict) or not snapshot:
+            return
+        self._frontdoor_request_body_messages = [
+            dict(item)
+            for item in list(snapshot.get("frontdoor_request_body_messages") or [])
+            if isinstance(item, dict)
+        ]
+        self._frontdoor_history_shrink_reason = str(
+            snapshot.get("frontdoor_history_shrink_reason") or ""
+        ).strip()
+        self._frontdoor_actual_request_path = str(
+            snapshot.get("frontdoor_actual_request_path") or ""
+        ).strip()
+        self._frontdoor_actual_request_history = [
+            dict(item)
+            for item in list(snapshot.get("frontdoor_actual_request_history") or [])
+            if isinstance(item, dict)
+        ]
+        self._frontdoor_stage_state = dict(snapshot.get("frontdoor_stage_state") or {})
+        self._frontdoor_canonical_context = dict(snapshot.get("frontdoor_canonical_context") or {})
+        self._compression_state = dict(snapshot.get("compression_state") or {})
+        self._semantic_context_state = dict(snapshot.get("semantic_context_state") or {})
+        self._frontdoor_hydrated_tool_names = self._normalized_name_list(
+            snapshot.get("hydrated_tool_names")
+        )
+        self._frontdoor_capability_snapshot_exposure_revision = str(
+            snapshot.get("capability_snapshot_exposure_revision") or ""
+        ).strip()
+        self._frontdoor_visible_tool_ids = self._normalized_name_list(snapshot.get("visible_tool_ids"))
+        self._frontdoor_visible_skill_ids = self._normalized_name_list(snapshot.get("visible_skill_ids"))
+        self._frontdoor_provider_tool_schema_names = self._normalized_name_list(
+            snapshot.get("provider_tool_schema_names")
+        )
+        bridge_path = self._frontdoor_actual_request_path
+        if not bridge_path and self._frontdoor_actual_request_history:
+            bridge_path = str(self._frontdoor_actual_request_history[-1].get("path") or "").strip()
+        self._frontdoor_completed_continuity_bridge_pending = bool(
+            bridge_path
+            and Path(bridge_path).exists()
+            and self._frontdoor_capability_snapshot_exposure_revision
+            and self._frontdoor_provider_tool_schema_names
+        )
+
+    def _consume_completed_continuity_bridge(
+        self,
+        *,
+        current_visible_tool_ids: Any,
+        current_visible_skill_ids: Any,
+    ) -> dict[str, Any]:
+        if not self._frontdoor_completed_continuity_bridge_pending:
+            return {"pending": False, "enabled": False}
+        self._frontdoor_completed_continuity_bridge_pending = False
+        stored_tool_ids = self._normalized_name_list(
+            self._frontdoor_visible_tool_ids,
+            sort_values=True,
+        )
+        stored_skill_ids = self._normalized_name_list(
+            self._frontdoor_visible_skill_ids,
+            sort_values=True,
+        )
+        current_tool_ids = self._normalized_name_list(current_visible_tool_ids, sort_values=True)
+        current_skill_ids = self._normalized_name_list(current_visible_skill_ids, sort_values=True)
+        enabled = stored_tool_ids == current_tool_ids and stored_skill_ids == current_skill_ids
+        return {
+            "pending": True,
+            "enabled": enabled,
+            "exposure_revision": (
+                self._frontdoor_capability_snapshot_exposure_revision if enabled else ""
+            ),
+            "provider_tool_schema_names": (
+                list(self._frontdoor_provider_tool_schema_names) if enabled else []
+            ),
+        }
+
+    def _sync_completed_continuity_snapshot(self, *, source_reason: str) -> None:
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key.startswith("web:"):
+            return
+        try:
+            from g3ku.runtime.web_ceo_sessions import write_completed_continuity_snapshot
+        except Exception:
+            logger.debug("Completed continuity sync unavailable for {}", session_key)
+            return
+        try:
+            write_completed_continuity_snapshot(
+                session_key,
+                {
+                    "frontdoor_request_body_messages": [
+                        dict(item)
+                        for item in list(getattr(self, "_frontdoor_request_body_messages", []) or [])
+                        if isinstance(item, dict)
+                    ],
+                    "frontdoor_history_shrink_reason": str(
+                        getattr(self, "_frontdoor_history_shrink_reason", "") or ""
+                    ).strip(),
+                    "frontdoor_actual_request_path": str(
+                        getattr(self, "_frontdoor_actual_request_path", "") or ""
+                    ).strip(),
+                    "frontdoor_actual_request_history": [
+                        dict(item)
+                        for item in list(getattr(self, "_frontdoor_actual_request_history", []) or [])
+                        if isinstance(item, dict)
+                    ],
+                    "frontdoor_stage_state": copy.deepcopy(
+                        getattr(self, "_frontdoor_stage_state", None) or {}
+                    ),
+                    "frontdoor_canonical_context": copy.deepcopy(
+                        getattr(self, "_frontdoor_canonical_context", None) or {}
+                    ),
+                    "compression_state": copy.deepcopy(getattr(self, "_compression_state", None) or {}),
+                    "semantic_context_state": copy.deepcopy(
+                        getattr(self, "_semantic_context_state", None) or {}
+                    ),
+                    "hydrated_tool_names": list(
+                        self._normalized_name_list(getattr(self, "_frontdoor_hydrated_tool_names", []))
+                    ),
+                    "capability_snapshot_exposure_revision": str(
+                        getattr(self, "_frontdoor_capability_snapshot_exposure_revision", "") or ""
+                    ).strip(),
+                    "visible_tool_ids": list(
+                        self._normalized_name_list(getattr(self, "_frontdoor_visible_tool_ids", []))
+                    ),
+                    "visible_skill_ids": list(
+                        self._normalized_name_list(getattr(self, "_frontdoor_visible_skill_ids", []))
+                    ),
+                    "provider_tool_schema_names": list(
+                        self._normalized_name_list(
+                            getattr(self, "_frontdoor_provider_tool_schema_names", [])
+                        )
+                    ),
+                    "source_reason": str(source_reason or "").strip(),
+                },
+            )
+        except Exception:
+            logger.debug("Skipped completed continuity sync for {}", session_key)
 
     def paused_execution_context_snapshot(self) -> dict[str, Any] | None:
         if self._paused_execution_context is not None:
@@ -963,6 +1140,7 @@ class RuntimeAgentSession:
         snapshot: dict[str, Any] = {
             "status": status or ("running" if self._state.is_running else "idle"),
             "compression": compression,
+            "execution_trace_summary": copy.deepcopy(canonical_context) if canonical_context else {},
         }
         if canonical_context:
             snapshot["canonical_context"] = canonical_context
@@ -1625,6 +1803,7 @@ class RuntimeAgentSession:
                 self._ensure_user_batch_id(user_input)
             self._last_prompt = user_input
             self._event_log = []
+            self._last_stop_reason = ""
             self._pending_tool_call_names.clear()
             self._pending_tool_name_calls.clear()
             self._background_tool_targets.clear()
@@ -1942,15 +2121,24 @@ class RuntimeAgentSession:
         self._pending_tool_call_names.clear()
         self._pending_tool_name_calls.clear()
         self._background_tool_targets.clear()
+        self._state.pending_interrupts = []
         self._preserved_inflight_turn = None
         if manual:
             await self._persist_manual_pause_user_messages()
+            await self._archive_paused_execution_context_for_ui_history()
+            self._state.paused = False
+            self._state.status = "completed"
+            self._last_stop_reason = "user_pause"
+            self._sync_completed_continuity_snapshot(source_reason="manual_stop")
+            self.clear_paused_execution_context()
             # Manual pause persists the current prompt's transcript state using the
             # existing turn id so the pending user message can be updated in place.
             # Clear the active turn binding again afterwards so the next real user
             # message starts a fresh transcript turn instead of overwriting the
             # paused request that was just preserved.
             self._active_turn_id = None
+        else:
+            self._last_stop_reason = ""
         await self._emit(
             "control_ack",
             action="pause",
@@ -2029,6 +2217,7 @@ class RuntimeAgentSession:
         self._set_manual_pause_waiting_reason(False)
         self._preserved_inflight_turn = None
         self.clear_paused_execution_context()
+        self._last_stop_reason = ""
         self._state.is_running = False
         self._state.paused = False
         self._state.status = "idle"

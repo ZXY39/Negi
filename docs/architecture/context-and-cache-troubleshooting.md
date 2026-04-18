@@ -194,12 +194,15 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 
 - fresh turn 直接从 stripped body + 新 user + 新 contract 开始
 - 第一条 provider request 在索引 3 就和上一轮分叉
+- fresh-turn seed 若按原始 message dict 逐字节比对 `stable_messages[:body_len] == previous_request_body`，会被微小格式漂移击穿
+- 真实案例里仅因某条 `tool` 输出末尾空格被后续规范化裁掉，seed 就误判为“不再是同一条 baseline”，退回未复用路径
 
 维护要点：
 
 - fresh-turn 第一跳可以临时使用 previous actual request scaffold
 - 但这个 scaffold 只是 request-construction aid
 - 它不能反过来变成新的 durable source of truth
+- seed 判定应基于 provider-facing 结构等价，最多只容忍这类无语义影响的行尾空白 / 换行归一化差异；不要再做脆弱的原始 dict 全等比较
 
 ## 3.6 跨普通 fresh turn 的 tool schema churn
 
@@ -230,8 +233,27 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 - `已暂停` 是上一轮的 pause ack
 - pause 之后用户再发消息，是全新的 visible turn
 - 它应该按 fresh-turn continuity 规则排查，而不是当作 pause ack 排查
+- 对普通用户 manual pause，后端现在会把当前轮 terminalize 成 `completed`；若还在按长期 paused/resume 语义排查，结论通常会跑偏
 
-## 3.8 request artifact 持久化缺口会污染结论
+## 3.8 重启后继续 completed session，不能退回 transcript/history fallback
+
+已踩坑：
+
+- 项目重启后 reopened completed session 直接从 transcript/history 重建
+- `frontdoor_request_body_messages`、actual-request scaffold、stage/compression/semantic 状态没有按最新 authoritative state 恢复
+- 结果表现成“上下文像还在，但第一跳 cache 命中突然掉光”
+
+正确分类：
+
+- inflight 恢复优先看 inflight snapshot
+- 技术性 paused / interrupt 恢复优先看 paused snapshot
+- reopened completed session 优先看 `.g3ku/web-ceo-continuity/<session>.json`
+- 只有这些都没有时，才退回 transcript/history fallback
+
+- 如果 continuity sidecar 里的 visible tool/skill 集与当前完全一致，第一跳应继续借上一轮的 family/schema anchor
+- 如果 visible 集发生变化，上下文仍应恢复，但 cache miss 可以接受，不应误判成上下文丢失
+
+## 3.9 request artifact 持久化缺口会污染结论
 
 已踩坑：
 
@@ -248,7 +270,7 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 - 每次怀疑缓存异常时，先检查 artifact 时间线是否完整
 - 如果 artifact 不全，先修 artifact，再改上下文策略
 
-## 3.9 heartbeat 内部短 prompt 不能按 visible-turn shrink 误判
+## 3.10 heartbeat 内部短 prompt 不能按 visible-turn shrink 误判
 
 heartbeat 使用的是专门的内部 prompt lane，它的稳定前缀和 request 形态本来就可能远短于当前 visible turn 的 session-owned baseline。
 
@@ -272,6 +294,7 @@ heartbeat 使用的是专门的内部 prompt lane，它的稳定前缀和 reques
 - transcript 时间线
 - request artifact 时间线
 - usage/billing 时间线
+- completed continuity sidecar（如果存在）
 - paused/inflight snapshot（如果存在）
 
 要确认：
@@ -432,17 +455,20 @@ heartbeat 使用的是专门的内部 prompt lane，它的稳定前缀和 reques
 3. finalize 补回 final assistant reply 后，下一轮 baseline 不能丢这条回复。
 4. prepare-only/no-provider 状态不能覆盖 durable baseline。
 5. manual pause 后新 turn 不能退回 transcript-only reconstruction。
-6. stable prefix 不变时，tool schema 也应尽量稳定；必要时验证 family key 不抖。
-7. `provider_request_body.input` 与高层 `request_messages` 的前缀对比结论不能长期分叉。
-8. usage 记录与 request artifact 必须能在时间线层面对得上。
-9. 非 `token_compression` / `stage_compaction` 的 shrink 一律视为失败。
+6. restarted completed session 第一跳不能退回 transcript/history fallback。
+7. stable prefix 不变时，tool schema 也应尽量稳定；必要时验证 family key 不抖。
+8. `provider_request_body.input` 与高层 `request_messages` 的前缀对比结论不能长期分叉。
+9. usage 记录与 request artifact 必须能在时间线层面对得上。
+10. 非 `token_compression` / `stage_compaction` 的 shrink 一律视为失败。
 
 ## 7. 当前仍需继续盯的风险点
 
 截至目前，下面这些地方仍值得持续关注：
 
 - pause 窗口里的 actual request artifact 是否会漏落盘
+- completed continuity sidecar 是否始终跟上最新 authoritative state，同步点是否会漏写
 - 某些相邻 turn 的 provider-visible tool schema 是否仍会无意义抖动
+- restarted completed session 第一跳的 visible-set equality bridge 是否还会被意外放宽成 superset
 - `provider_request_body.input` 与 `request_messages` 是否还存在隐藏分叉
 - 节点侧是否也存在“stripped durable baseline”和“first-hop scaffold”混淆
 - 节点侧是否也有 finalize/direct reply 没补回 baseline 的问题

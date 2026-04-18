@@ -1777,29 +1777,30 @@ async def test_runtime_agent_session_manual_pause_freezes_heartbeat_and_persists
         for event in events
         if event.type == "control_ack" and str(event.payload.get("action") or "") == "pause"
     )
-    paused_state = next(
+    completed_state = next(
         event
         for event in events
         if event.type == "state_snapshot"
-        and str((event.payload.get("state") or {}).get("status") or "") == "paused"
+        and str((event.payload.get("state") or {}).get("status") or "") == "completed"
     )
     assert pause_ack.payload["source"] == "user"
     assert all(event.type != "message_end" for event in events)
     assert heartbeat.clear_calls == []
     assert session.manual_pause_waiting_reason() is False
-    inflight = session.inflight_turn_snapshot()
-    assert inflight is not None
-    assert inflight["status"] == "paused"
-    assert web_ceo_sessions.read_inflight_turn_snapshot("web:pause-manual") is not None
-    paused_snapshot = session.paused_execution_context_snapshot()
-    assert paused_snapshot is not None
-    assert paused_snapshot["status"] == "paused"
-    assert paused_snapshot["user_message"]["content"] == "Pause and wait"
-    assert web_ceo_sessions.read_paused_execution_context("web:pause-manual") is not None
+    assert str((completed_state.payload.get("state") or {}).get("stop_reason") or "") == "user_pause"
+    assert session.inflight_turn_snapshot() is None
+    assert web_ceo_sessions.read_inflight_turn_snapshot("web:pause-manual") is None
+    assert session.paused_execution_context_snapshot() is None
+    assert web_ceo_sessions.read_paused_execution_context("web:pause-manual") is None
+    continuity = web_ceo_sessions.read_completed_continuity_snapshot("web:pause-manual")
+    assert continuity is not None
+    assert continuity["source_reason"] == "manual_stop"
 
     reloaded = SessionManager(tmp_path).get_or_create("web:pause-manual")
-    assert [message["role"] for message in reloaded.messages] == ["user"]
+    assert [message["role"] for message in reloaded.messages] == ["user", "assistant"]
     assert reloaded.messages[0]["content"] == "Pause and wait"
+    assert reloaded.messages[1]["content"] == "已暂停"
+    assert reloaded.messages[1]["status"] == "paused"
     normalized_metadata = web_ceo_sessions.normalize_ceo_metadata(reloaded.metadata, session_key="web:pause-manual")
     assert "manual_pause_waiting_reason" not in normalized_metadata
 
@@ -1865,9 +1866,11 @@ async def test_runtime_agent_session_manual_pause_dedupes_pending_transcript(
         await turn_task
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
-    assert [message["role"] for message in reloaded.messages] == ["user"]
+    assert [message["role"] for message in reloaded.messages] == ["user", "assistant"]
     assert reloaded.messages[0]["content"] == "Pause without duplicate transcript"
     assert reloaded.messages[0]["metadata"]["_transcript_state"] == "paused"
+    assert reloaded.messages[1]["content"] == "已暂停"
+    assert web_ceo_sessions.read_completed_continuity_snapshot(session_id) is not None
 
 
 @pytest.mark.asyncio
@@ -2105,6 +2108,125 @@ def test_runtime_agent_session_can_clear_paused_execution_context_explicitly(
 
     assert session.paused_execution_context_snapshot() is None
     assert web_ceo_sessions.read_paused_execution_context("web:shared") is None
+
+
+def test_web_ceo_continuity_snapshot_round_trip_and_clear(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    request_path = tmp_path / "request.json"
+    request_path.write_text("{}", encoding="utf-8")
+
+    payload = {
+        "frontdoor_request_body_messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "hello"},
+        ],
+        "frontdoor_history_shrink_reason": "",
+        "frontdoor_actual_request_path": str(request_path),
+        "frontdoor_actual_request_history": [{"path": str(request_path), "turn_id": "turn-1"}],
+        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+        "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
+        "compression_state": {"status": "ready", "text": "ok", "source": "semantic"},
+        "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
+        "hydrated_tool_names": ["web_fetch"],
+        "capability_snapshot_exposure_revision": "exp:demo",
+        "visible_tool_ids": ["message", "web_fetch"],
+        "visible_skill_ids": ["web-access"],
+        "provider_tool_schema_names": ["message", "web_fetch"],
+        "source_reason": "finalize",
+    }
+
+    web_ceo_sessions.write_completed_continuity_snapshot("web:shared", payload)
+
+    restored = web_ceo_sessions.read_completed_continuity_snapshot("web:shared")
+
+    assert isinstance(restored, dict)
+    assert restored["frontdoor_request_body_messages"] == payload["frontdoor_request_body_messages"]
+    assert restored["provider_tool_schema_names"] == ["message", "web_fetch"]
+    assert restored["source_reason"] == "finalize"
+
+    web_ceo_sessions.clear_completed_continuity_snapshot("web:shared")
+
+    assert web_ceo_sessions.read_completed_continuity_snapshot("web:shared") is None
+
+
+def test_clear_web_ceo_session_artifacts_clears_completed_continuity_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    request_path = tmp_path / "request.json"
+    request_path.write_text("{}", encoding="utf-8")
+    web_ceo_sessions.write_completed_continuity_snapshot(
+        "web:shared",
+        {
+            "frontdoor_request_body_messages": [{"role": "user", "content": "hello"}],
+            "frontdoor_history_shrink_reason": "",
+            "frontdoor_actual_request_path": str(request_path),
+            "frontdoor_actual_request_history": [{"path": str(request_path), "turn_id": "turn-1"}],
+            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "compression_state": {},
+            "semantic_context_state": {},
+            "hydrated_tool_names": [],
+            "capability_snapshot_exposure_revision": "exp:demo",
+            "visible_tool_ids": ["message"],
+            "visible_skill_ids": [],
+            "provider_tool_schema_names": ["message"],
+            "source_reason": "finalize",
+        },
+    )
+
+    assert web_ceo_sessions.read_completed_continuity_snapshot("web:shared") is not None
+
+    web_ceo_sessions.clear_web_ceo_session_artifacts(session_id="web:shared")
+
+    assert web_ceo_sessions.read_completed_continuity_snapshot("web:shared") is None
+
+
+def test_runtime_agent_session_restores_completed_continuity_snapshot_from_disk(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    request_path = tmp_path / "request.json"
+    request_path.write_text("{}", encoding="utf-8")
+    web_ceo_sessions.write_completed_continuity_snapshot(
+        "web:shared",
+        {
+            "frontdoor_request_body_messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "Resume from continuity"},
+            ],
+            "frontdoor_history_shrink_reason": "stage_compaction",
+            "frontdoor_actual_request_path": str(request_path),
+            "frontdoor_actual_request_history": [{"path": str(request_path), "turn_id": "turn-1"}],
+            "frontdoor_stage_state": {"active_stage_id": "stage-1", "transition_required": False, "stages": []},
+            "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "compression_state": {"status": "ready", "text": "ok", "source": "semantic"},
+            "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
+            "hydrated_tool_names": ["web_fetch"],
+            "capability_snapshot_exposure_revision": "exp:demo",
+            "visible_tool_ids": ["message", "web_fetch"],
+            "visible_skill_ids": ["web-access"],
+            "provider_tool_schema_names": ["message", "web_fetch"],
+            "source_reason": "finalize",
+        },
+    )
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="gpt-test", reasoning_effort=None, sessions=SessionManager(tmp_path)),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+
+    assert session._frontdoor_request_body_messages == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "Resume from continuity"},
+    ]
+    assert session._frontdoor_history_shrink_reason == "stage_compaction"
+    assert session._frontdoor_actual_request_path == str(request_path)
+    assert session._frontdoor_actual_request_history == [{"path": str(request_path), "turn_id": "turn-1"}]
+    assert session._frontdoor_stage_state == {"active_stage_id": "stage-1", "transition_required": False, "stages": []}
+    assert session._compression_state == {"status": "ready", "text": "ok", "source": "semantic"}
+    assert session._semantic_context_state == {"summary_text": "summary", "needs_refresh": False}
+    assert session._frontdoor_hydrated_tool_names == ["web_fetch"]
 
 
 def test_ceo_session_pending_interrupts_fall_back_to_paused_disk_state(tmp_path: Path, monkeypatch) -> None:

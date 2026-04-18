@@ -20,6 +20,7 @@ WEB_CEO_STATE_FILE = Path(".g3ku") / "web-ceo-state.json"
 WEB_CEO_UPLOAD_ROOT = Path(".g3ku") / "web-ceo-uploads"
 WEB_CEO_INFLIGHT_ROOT = Path(".g3ku") / "web-ceo-inflight"
 WEB_CEO_PAUSED_ROOT = Path(".g3ku") / "web-ceo-paused"
+WEB_CEO_CONTINUITY_ROOT = Path(".g3ku") / "web-ceo-continuity"
 WEB_CEO_REQUEST_ROOT = Path(".g3ku") / "web-ceo-requests"
 DEFAULT_TASK_MAX_DEPTH = 1
 DEFAULT_TASK_HARD_MAX_DEPTH = 4
@@ -33,6 +34,8 @@ _RECENT_HISTORY_TOOL_TRACE_LIMIT = 2
 _RECENT_HISTORY_TOOL_TEXT_MAX_CHARS = 96
 _TASK_RESULT_OUTPUT_MAX_CHARS = 480
 _TASK_RESULT_REASON_MAX_CHARS = 180
+_CONTINUITY_ALLOWED_SHRINK_REASONS = {"", "token_compression", "stage_compaction"}
+_CONTINUITY_ALLOWED_SOURCE_REASONS = {"actual_request_sync", "finalize", "manual_stop"}
 _CEO_CONFIG_CACHE_LOCK = threading.RLock()
 _CEO_CONFIG_CACHE: dict[str, Any] = {
     'token': None,
@@ -876,18 +879,25 @@ def frontdoor_stage_archive_task_id(session_id: str) -> str:
     return f"frontdoor-stage-archive:{str(session_id or '').strip()}"
 
 
-def inflight_snapshot_path_for_session(session_id: str, *, create: bool = True) -> Path:
+def _json_sidecar_path(root: Path, session_id: str, *, create: bool = True) -> Path:
     safe_session = safe_filename(str(session_id or "web_shared").replace(":", "_")) or "web_shared"
-    root = workspace_path() / WEB_CEO_INFLIGHT_ROOT
     directory = ensure_dir(root) if create else root
     return directory / f"{safe_session}.json"
+
+
+def inflight_snapshot_path_for_session(session_id: str, *, create: bool = True) -> Path:
+    root = workspace_path() / WEB_CEO_INFLIGHT_ROOT
+    return _json_sidecar_path(root, session_id, create=create)
 
 
 def paused_execution_context_path_for_session(session_id: str, *, create: bool = True) -> Path:
-    safe_session = safe_filename(str(session_id or "web_shared").replace(":", "_")) or "web_shared"
     root = workspace_path() / WEB_CEO_PAUSED_ROOT
-    directory = ensure_dir(root) if create else root
-    return directory / f"{safe_session}.json"
+    return _json_sidecar_path(root, session_id, create=create)
+
+
+def completed_continuity_snapshot_path_for_session(session_id: str, *, create: bool = True) -> Path:
+    root = workspace_path() / WEB_CEO_CONTINUITY_ROOT
+    return _json_sidecar_path(root, session_id, create=create)
 
 
 def actual_request_dir_for_session(session_id: str, *, create: bool = True) -> Path:
@@ -895,6 +905,57 @@ def actual_request_dir_for_session(session_id: str, *, create: bool = True) -> P
     root = workspace_path() / WEB_CEO_REQUEST_ROOT
     directory = root / safe_session
     return ensure_dir(directory) if create else directory
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    directory = ensure_dir(path.parent)
+    temp_path = directory / f"{path.name}.{uuid.uuid4().hex}.tmp"
+    temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(path)
+
+
+def _normalized_name_list(values: Any) -> list[str]:
+    normalized: list[str] = []
+    for raw in list(values or []):
+        name = str(raw or "").strip()
+        if not name or name in normalized:
+            continue
+        normalized.append(name)
+    return normalized
+
+
+def _normalized_message_records(values: Any) -> list[dict[str, Any]]:
+    return [dict(item) for item in list(values or []) if isinstance(item, dict)]
+
+
+def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict) or not payload:
+        return None
+    updated_at = str(payload.get("updated_at") or "").strip() or datetime.now().isoformat()
+    source_reason = str(payload.get("source_reason") or "").strip()
+    if source_reason not in _CONTINUITY_ALLOWED_SOURCE_REASONS:
+        source_reason = ""
+    shrink_reason = str(payload.get("frontdoor_history_shrink_reason") or "").strip()
+    if shrink_reason not in _CONTINUITY_ALLOWED_SHRINK_REASONS:
+        shrink_reason = ""
+    normalized = {
+        "frontdoor_request_body_messages": _normalized_message_records(payload.get("frontdoor_request_body_messages")),
+        "frontdoor_history_shrink_reason": shrink_reason,
+        "frontdoor_actual_request_path": str(payload.get("frontdoor_actual_request_path") or "").strip(),
+        "frontdoor_actual_request_history": _normalized_message_records(payload.get("frontdoor_actual_request_history")),
+        "frontdoor_stage_state": dict(payload.get("frontdoor_stage_state") or {}),
+        "frontdoor_canonical_context": dict(payload.get("frontdoor_canonical_context") or {}),
+        "compression_state": dict(payload.get("compression_state") or {}),
+        "semantic_context_state": dict(payload.get("semantic_context_state") or {}),
+        "hydrated_tool_names": _normalized_name_list(payload.get("hydrated_tool_names")),
+        "capability_snapshot_exposure_revision": str(payload.get("capability_snapshot_exposure_revision") or "").strip(),
+        "visible_tool_ids": _normalized_name_list(payload.get("visible_tool_ids")),
+        "visible_skill_ids": _normalized_name_list(payload.get("visible_skill_ids")),
+        "provider_tool_schema_names": _normalized_name_list(payload.get("provider_tool_schema_names")),
+        "updated_at": updated_at,
+        "source_reason": source_reason,
+    }
+    return normalized
 
 
 def persist_frontdoor_actual_request(session_id: str, *, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1001,6 +1062,36 @@ def write_paused_execution_context(session_id: str, snapshot: dict[str, Any] | N
 
 def clear_paused_execution_context(session_id: str) -> None:
     path = paused_execution_context_path_for_session(session_id, create=False)
+    path.unlink(missing_ok=True)
+
+
+def read_completed_continuity_snapshot(session_id: str) -> dict[str, Any] | None:
+    path = completed_continuity_snapshot_path_for_session(session_id, create=False)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return _normalized_completed_continuity_snapshot(payload)
+
+
+def write_completed_continuity_snapshot(session_id: str, snapshot: dict[str, Any] | None) -> None:
+    key = str(session_id or "").strip()
+    if not key:
+        return
+    path = completed_continuity_snapshot_path_for_session(key)
+    normalized = _normalized_completed_continuity_snapshot(snapshot)
+    if normalized is None:
+        path.unlink(missing_ok=True)
+        return
+    payload = dict(normalized)
+    payload["session_id"] = key
+    _atomic_write_json(path, payload)
+
+
+def clear_completed_continuity_snapshot(session_id: str) -> None:
+    path = completed_continuity_snapshot_path_for_session(session_id, create=False)
     path.unlink(missing_ok=True)
 
 
@@ -1555,6 +1646,7 @@ def create_web_ceo_session(session_manager: Any, *, session_id: str | None = Non
 def clear_web_ceo_session_artifacts(*, session_id: str, task_service: Any | None = None) -> None:
     clear_inflight_turn_snapshot(session_id)
     clear_paused_execution_context(session_id)
+    clear_completed_continuity_snapshot(session_id)
     clear_actual_request_history(session_id)
     upload_dir = upload_dir_for_session(session_id, create=False)
     if upload_dir.exists():
@@ -1614,6 +1706,7 @@ def _local_session_exists(session_manager: Any, session_id: str) -> bool:
     return (
         read_inflight_turn_snapshot(key) is not None
         or read_paused_execution_context(key) is not None
+        or read_completed_continuity_snapshot(key) is not None
     )
 
 

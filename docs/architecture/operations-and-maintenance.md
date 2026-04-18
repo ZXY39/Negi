@@ -73,6 +73,9 @@
 - `.g3ku/china-bridge/`
   China bridge 状态与日志
 
+- `.g3ku/web-ceo-continuity/`
+  completed Web CEO session continuity sidecars。重启后继续 completed session、manual pause terminal stop、以及异常中断后的最新 authoritative frontdoor baseline 恢复都先看这里。
+
 - `memory/`
   记忆相关文件、qdrant、checkpoint 等
 
@@ -148,6 +151,7 @@
 
 - `docs/architecture/context-and-cache-troubleshooting.md`
 - `.g3ku/web-ceo-requests/`
+- `.g3ku/web-ceo-continuity/`
 - `sessions/`
 - 相关的 paused / inflight snapshot
 
@@ -157,6 +161,7 @@
 - `actual_request_hash` 是否变化
 - `provider_request_body.input` 的公共前缀是否提前断裂
 - usage 记录是否能和本地 actual request artifact 对得上
+- completed session 重启后是否恢复到了 continuity sidecar，而不是直接退回 transcript/history fallback
 
 ### 工具调用异常
 

@@ -27,6 +27,7 @@ from g3ku.runtime.web_ceo_sessions import (
     main_runtime_depth_limits,
     normalize_ceo_metadata,
     normalize_task_defaults,
+    read_completed_continuity_snapshot,
     read_inflight_turn_snapshot,
     read_paused_execution_context,
     resolve_active_ceo_session_id,
@@ -129,6 +130,7 @@ def _assert_known_session(session_manager, session_id: str):
     has_restorable_artifact = (
         read_inflight_turn_snapshot(key) is not None
         or read_paused_execution_context(key) is not None
+        or read_completed_continuity_snapshot(key) is not None
     )
     if not path.exists() and not has_restorable_artifact:
         raise HTTPException(status_code=404, detail="session_not_found")
