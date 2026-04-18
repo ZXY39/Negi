@@ -591,6 +591,13 @@ class TaskLogService:
             'summary_fingerprint': '',
             'summary_last_published_at': '',
             'governance': _default_governance_state(),
+            'distribution': {
+                'active_epoch_id': '',
+                'state': '',
+                'frontier_node_ids': [],
+                'queued_epoch_count': 0,
+                'pending_mailbox_count': 0,
+            },
         }
 
     @classmethod
@@ -633,6 +640,33 @@ class TaskLogService:
             'latest_limit_reason': str(current.get('latest_limit_reason') or '').strip(),
             'supervision_disabled_after_limit': bool(current.get('supervision_disabled_after_limit')),
             'history': history_payload,
+        }
+
+    @staticmethod
+    def _sanitize_distribution_state(payload: Any) -> dict[str, Any]:
+        current = dict(payload or {}) if isinstance(payload, dict) else {}
+        frontier_node_ids: list[str] = []
+        seen: set[str] = set()
+        for item in list(current.get('frontier_node_ids') or []):
+            node_id = str(item or '').strip()
+            if not node_id or node_id in seen:
+                continue
+            seen.add(node_id)
+            frontier_node_ids.append(node_id)
+        try:
+            queued_epoch_count = max(0, int(current.get('queued_epoch_count') or 0))
+        except (TypeError, ValueError):
+            queued_epoch_count = 0
+        try:
+            pending_mailbox_count = max(0, int(current.get('pending_mailbox_count') or 0))
+        except (TypeError, ValueError):
+            pending_mailbox_count = 0
+        return {
+            'active_epoch_id': str(current.get('active_epoch_id') or '').strip(),
+            'state': str(current.get('state') or '').strip(),
+            'frontier_node_ids': frontier_node_ids,
+            'queued_epoch_count': queued_epoch_count,
+            'pending_mailbox_count': pending_mailbox_count,
         }
 
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
@@ -2332,6 +2366,8 @@ class TaskLogService:
                 current['dispatch_queued'] = self._sanitize_dispatch_counters(payload.get('dispatch_queued'))
             if 'governance' in payload:
                 current['governance'] = self._sanitize_governance_state(payload.get('governance'))
+            if 'distribution' in payload:
+                current['distribution'] = self._sanitize_distribution_state(payload.get('distribution'))
             current['updated_at'] = now_iso()
             self._store.upsert_task_runtime_meta(
                 task_id=task.task_id,
@@ -2449,6 +2485,7 @@ class TaskLogService:
         current.setdefault('summary_fingerprint', '')
         current.setdefault('summary_last_published_at', '')
         current['governance'] = self._sanitize_governance_state(current.get('governance'))
+        current['distribution'] = self._sanitize_distribution_state(current.get('distribution'))
         current['task_temp_dir'] = self._normalize_task_temp_dir(current.get('task_temp_dir'))
         try:
             current['last_stall_notice_bucket_minutes'] = max(0, int(current.get('last_stall_notice_bucket_minutes') or 0))
@@ -2527,6 +2564,7 @@ class TaskLogService:
             'last_visible_output_at': str(meta.get('last_visible_output_at') or '').strip(),
             'last_stall_notice_bucket_minutes': max(0, int(meta.get('last_stall_notice_bucket_minutes') or 0)),
             'governance': self._sanitize_governance_state(meta.get('governance')),
+            'distribution': self._sanitize_distribution_state(meta.get('distribution')),
             'frames': frames,
             'active_node_ids': [record.node_id for record in frame_records if bool(record.active)],
             'runnable_node_ids': [record.node_id for record in frame_records if bool(record.runnable)],
@@ -4069,6 +4107,7 @@ class TaskLogService:
                 'dispatch_running': dict(runtime_meta.get('dispatch_running') or {}),
                 'dispatch_queued': dict(runtime_meta.get('dispatch_queued') or {}),
                 'governance': dict(runtime_meta.get('governance') or {}),
+                'distribution': dict(runtime_meta.get('distribution') or {}),
                 'frames': [dict(record.payload or {}) for record in frame_records],
             }
         return {
@@ -4079,6 +4118,7 @@ class TaskLogService:
             'dispatch_running': self._sanitize_dispatch_counters(state.get('dispatch_running')),
             'dispatch_queued': self._sanitize_dispatch_counters(state.get('dispatch_queued')),
             'governance': self._sanitize_governance_state(state.get('governance')),
+            'distribution': self._sanitize_distribution_state(state.get('distribution')),
             'frames': [self._public_runtime_frame(item) for item in list(state.get('frames') or []) if isinstance(item, dict)],
         }
 
@@ -4094,6 +4134,7 @@ class TaskLogService:
         state['dispatch_running'] = cls._sanitize_dispatch_counters(state.get('dispatch_running'))
         state['dispatch_queued'] = cls._sanitize_dispatch_counters(state.get('dispatch_queued'))
         state['governance'] = cls._sanitize_governance_state(state.get('governance'))
+        state['distribution'] = cls._sanitize_distribution_state(state.get('distribution'))
         state['frames'] = [cls._sanitize_runtime_frame(frame) for frame in list(state.get('frames') or []) if isinstance(frame, dict)]
         return state
 

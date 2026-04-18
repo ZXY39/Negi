@@ -631,6 +631,8 @@ class SQLiteTaskStore:
             conn.execute('DELETE FROM task_terminal_outbox WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_stall_outbox WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_summary_outbox WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_node_notifications WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_message_distribution_epochs WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_events WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM artifacts WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM nodes WHERE task_id = ?', (task_id,))

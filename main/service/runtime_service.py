@@ -69,6 +69,8 @@ from main.models import (
     FAILURE_CLASS_ENGINE,
     FAILURE_CLASS_NON_RETRYABLE_BLOCKED,
     NodeRecord,
+    TaskMessageDistributionEpoch,
+    TaskNodeNotification,
     TaskArtifactRecord,
     TaskRecord,
     TokenUsageSummary,
@@ -1151,6 +1153,7 @@ class MainRuntimeService:
             return None
         if not (bool(task.is_paused) or task.status in {'success', 'failed'}):
             raise ValueError('task_not_paused')
+        self._cancel_distribution_for_force_delete(task_id=task_id, reason='task_delete')
         if self.global_scheduler.is_active(task_id):
             try:
                 await asyncio.wait_for(self.global_scheduler.wait(task_id), timeout=2.0)
@@ -2251,17 +2254,200 @@ class MainRuntimeService:
         node_ids: list[str] | None,
         message: str,
         session_id: str,
-    ) -> dict[str, Any]:
-        _ = task_ids, node_ids
+    ) -> str:
         normalized_message = str(message or '').strip()
         normalized_session_id = self._normalize_session_key(session_id)
         if not normalized_message:
             raise ValueError('message_required')
-        return {
-            'ok': False,
-            'session_id': normalized_session_id,
-            'message': 'task_append_notice_not_implemented',
+        normalized_task_ids = self._normalize_task_id_list(task_ids or [], allow_empty=True)
+        normalized_node_ids: list[str] = []
+        seen_node_ids: set[str] = set()
+        for raw_node_id in list(node_ids or []):
+            node_id = str(raw_node_id or '').strip()
+            if not node_id or node_id in seen_node_ids:
+                continue
+            seen_node_ids.add(node_id)
+            normalized_node_ids.append(node_id)
+        if not normalized_task_ids and not normalized_node_ids:
+            raise ValueError('append_notice_targets_required')
+
+        unfinished_tasks = {
+            task.task_id: task
+            for task in self.list_unfinished_tasks_for_session(normalized_session_id)
         }
+        target_tasks: dict[str, TaskRecord] = {}
+        for task_id in normalized_task_ids:
+            task = unfinished_tasks.get(task_id)
+            if task is None:
+                raise ValueError('append_notice_invalid_task_target')
+            target_tasks[task.task_id] = task
+        for node_id in normalized_node_ids:
+            node = self.store.get_node(node_id)
+            if node is None or str(getattr(node, 'node_kind', '') or '').strip().lower() == 'acceptance':
+                raise ValueError('append_notice_invalid_node_target')
+            task = unfinished_tasks.get(str(getattr(node, 'task_id', '') or '').strip())
+            if task is None:
+                raise ValueError('append_notice_invalid_task_target')
+            snapshot = self.query_service.get_tree_subtree(task.task_id, task.root_node_id)
+            visible_ids = set((snapshot.nodes_by_id or {}).keys()) if snapshot is not None else set()
+            if node_id not in visible_ids:
+                raise ValueError('append_notice_invalid_node_target')
+            target_tasks[task.task_id] = task
+        if not target_tasks:
+            raise ValueError('append_notice_invalid_task_target')
+
+        updated_task_ids: list[str] = []
+        for task_id, task in sorted(target_tasks.items()):
+            current_state = self._task_distribution_state(task_id)
+            active_epoch_id = str(current_state.get('active_epoch_id') or '').strip()
+            active_state = str(current_state.get('state') or '').strip()
+            if active_epoch_id and active_state == 'pause_requested':
+                self._coalesce_pending_root_message(task_id=task_id, root_message=normalized_message)
+            else:
+                self._queue_distribution_epoch(
+                    task_id=task_id,
+                    root_node_id=task.root_node_id,
+                    root_message=normalized_message,
+                )
+            latest_task = self.get_task(task_id)
+            if latest_task is not None and not bool(latest_task.pause_requested):
+                await self.pause_task(task_id)
+            self.log_service.update_task_runtime_meta(
+                task_id,
+                **self._distribution_runtime_meta_payload(task_id=task_id),
+            )
+            updated_task_ids.append(task_id)
+        joined_task_ids = ', '.join(updated_task_ids)
+        return f'已向任务 {joined_task_ids} 追加通知。'
+
+    def _task_distribution_epochs(self, task_id: str) -> list[TaskMessageDistributionEpoch]:
+        terminal_states = {'completed', 'failed', 'cancelled', 'cancelled_by_task_delete'}
+        return [
+            epoch
+            for epoch in list(self.store.list_active_task_message_distribution_epochs(task_id) or [])
+            if str(epoch.state or '').strip().lower() not in terminal_states
+        ]
+
+    def _task_distribution_state(self, task_id: str) -> dict[str, Any]:
+        epochs = self._task_distribution_epochs(task_id)
+        active = next(
+            (
+                epoch
+                for epoch in epochs
+                if str(epoch.state or '').strip() in {'pause_requested', 'paused', 'distributing', 'resuming'}
+            ),
+            None,
+        )
+        if active is None:
+            active = next((epoch for epoch in epochs if str(epoch.state or '').strip() == 'queued'), None)
+        queued_epoch_count = sum(
+            1
+            for epoch in epochs
+            if str(epoch.state or '').strip() in {'queued', 'pause_requested'}
+        )
+        pending_mailbox_count = 0
+        if active is not None:
+            pending_mailbox_count = sum(
+                1
+                for item in list(self.store.list_task_epoch_notifications(task_id, active.epoch_id) or [])
+                if str(item.status or '').strip() in {'pending_distribution', 'delivered'}
+            )
+        frontier_node_ids = []
+        if active is not None and isinstance(active.payload, dict):
+            frontier_node_ids = [
+                str(item or '').strip()
+                for item in list(active.payload.get('frontier_node_ids') or [])
+                if str(item or '').strip()
+            ]
+        return {
+            'active_epoch_id': str(active.epoch_id or '').strip() if active is not None else '',
+            'state': str(active.state or '').strip() if active is not None else '',
+            'frontier_node_ids': frontier_node_ids,
+            'queued_epoch_count': queued_epoch_count,
+            'pending_mailbox_count': pending_mailbox_count,
+        }
+
+    def _queue_distribution_epoch(self, *, task_id: str, root_node_id: str, root_message: str) -> dict[str, Any]:
+        epochs = self._task_distribution_epochs(task_id)
+        active_states = {'pause_requested', 'paused', 'distributing', 'resuming'}
+        next_state = 'queued' if any(str(epoch.state or '').strip() in active_states for epoch in epochs) else 'pause_requested'
+        epoch_id = new_command_id().replace('command:', 'epoch:', 1)
+        record = self.store.upsert_task_message_distribution_epoch(
+            TaskMessageDistributionEpoch(
+                epoch_id=epoch_id,
+                task_id=task_id,
+                root_node_id=str(root_node_id or '').strip(),
+                root_message=str(root_message or '').strip(),
+                state=next_state,
+                created_at=now_iso(),
+                payload={
+                    'frontier_node_ids': [],
+                    'queued_root_messages': [str(root_message or '').strip()],
+                },
+            )
+        )
+        return record.model_dump(mode='json')
+
+    def _coalesce_pending_root_message(self, *, task_id: str, root_message: str) -> dict[str, Any]:
+        epochs = self._task_distribution_epochs(task_id)
+        target = next(
+            (epoch for epoch in epochs if str(epoch.state or '').strip() == 'pause_requested'),
+            None,
+        )
+        if target is None:
+            return self._queue_distribution_epoch(
+                task_id=task_id,
+                root_node_id=str((self.get_task(task_id) or SimpleNamespace(root_node_id='')).root_node_id or '').strip(),
+                root_message=root_message,
+            )
+        payload = dict(target.payload or {})
+        queued_root_messages = [
+            str(item or '').strip()
+            for item in list(payload.get('queued_root_messages') or [])
+            if str(item or '').strip()
+        ]
+        if not queued_root_messages:
+            queued_root_messages.append(str(target.root_message or '').strip())
+        queued_root_messages.append(str(root_message or '').strip())
+        payload['queued_root_messages'] = queued_root_messages
+        updated = target.model_copy(update={'payload': payload})
+        stored = self.store.upsert_task_message_distribution_epoch(updated)
+        return stored.model_dump(mode='json')
+
+    def _distribution_runtime_meta_payload(self, *, task_id: str) -> dict[str, Any]:
+        return {
+            'distribution': self._task_distribution_state(task_id),
+        }
+
+    def _cancel_distribution_for_force_delete(self, *, task_id: str, reason: str) -> None:
+        epochs = self._task_distribution_epochs(task_id)
+        for epoch in epochs:
+            updated_epoch = epoch.model_copy(
+                update={
+                    'state': 'cancelled_by_task_delete',
+                    'error_text': str(reason or '').strip(),
+                    'completed_at': now_iso(),
+                }
+            )
+            self.store.upsert_task_message_distribution_epoch(updated_epoch)
+            for notification in list(self.store.list_task_epoch_notifications(task_id, epoch.epoch_id) or []):
+                updated_notification = notification.model_copy(
+                    update={
+                        'status': 'cancelled',
+                        'consumed_at': str(notification.consumed_at or now_iso()).strip() or now_iso(),
+                    }
+                )
+                self.store.upsert_task_node_notification(updated_notification)
+        self.log_service.update_task_runtime_meta(
+            task_id,
+            distribution={
+                'active_epoch_id': '',
+                'state': '',
+                'frontier_node_ids': [],
+                'queued_epoch_count': 0,
+                'pending_mailbox_count': 0,
+            },
+        )
 
     def list_active_task_snapshots_for_session(self, session_id: str, *, limit: int = 3) -> list[dict[str, str]]:
         unfinished = list(self.list_unfinished_tasks_for_session(session_id))
