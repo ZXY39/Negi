@@ -580,6 +580,101 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             tool_schemas=tool_schemas,
         )
 
+    def _frontdoor_send_preflight_snapshot(
+        self,
+        *,
+        state: CeoGraphState,
+        runtime: Runtime[CeoRuntimeContext],
+        langchain_tools: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        state_for_request = dict(state or {})
+        request_messages = list(state_for_request.get("messages") or [])
+        prompt_cache_key = str(state_for_request.get("prompt_cache_key") or "")
+        prompt_cache_diagnostics = dict(state_for_request.get("prompt_cache_diagnostics") or {})
+        actual_tool_schemas: list[dict[str, Any]] = []
+        if hasattr(self, "_frontdoor_prompt_contract"):
+            try:
+                runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
+                    state_for_request,
+                    tool_names=list(state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or []),
+                )
+                try:
+                    tool_schemas = self._selected_tool_schemas(list(runtime_visible_tool_names))
+                except Exception:
+                    tool_schemas = []
+                actual_tool_schemas = list(tool_schemas or [])
+                request_contract = self._frontdoor_prompt_contract(
+                    state=dict(state_for_request or {}),
+                    provider_model=str((list(state_for_request.get("model_refs") or []) or [""])[0] or "").strip(),
+                    tool_schemas=tool_schemas,
+                    overlay_text=str(state_for_request.get("turn_overlay_text") or "").strip(),
+                    session_key=str(state_for_request.get("session_key") or "").strip(),
+                    overlay_section_count=len(list(state_for_request.get("dynamic_appendix_messages") or [])),
+                )
+                request_messages = list(request_contract.request_messages)
+                prompt_cache_key = str(request_contract.prompt_cache_key or prompt_cache_key)
+                prompt_cache_diagnostics = dict(request_contract.diagnostics or prompt_cache_diagnostics)
+            except Exception:
+                if hasattr(self, "_state_message_records"):
+                    request_messages = list(getattr(self, "_state_message_records")(request_messages))
+        elif hasattr(self, "_state_message_records"):
+            request_messages = list(getattr(self, "_state_message_records")(request_messages))
+        request_messages = self._apply_turn_overlay(
+            request_messages,
+            overlay_text=str(state_for_request.get("repair_overlay_text") or "").strip(),
+        )
+        provider_request_body = {
+            "input": list(request_messages),
+            "tools": list(actual_tool_schemas or []),
+            "parallel_tool_calls": (bool(state_for_request.get("parallel_enabled")) if list(langchain_tools or []) else None),
+        }
+        model_info = self._resolve_frontdoor_send_model_context_window(
+            model_refs=list(state_for_request.get("model_refs") or []),
+        )
+        context_window_tokens = int(model_info.get("context_window_tokens") or 0)
+        estimated_total_tokens = self._estimate_frontdoor_send_total_tokens(
+            provider_request_body=provider_request_body,
+            request_messages=request_messages,
+            tool_schemas=actual_tool_schemas,
+        )
+        provider_model = self._frontdoor_model_display_name(model_info)
+        trigger_tokens = (
+            int(context_window_tokens * self._TOKEN_COMPRESSION_TRIGGER_RATIO)
+            if context_window_tokens > 0
+            else 0
+        )
+        missing_context_window = context_window_tokens <= 25_000
+        would_exceed_context_window = (
+            not missing_context_window
+            and estimated_total_tokens > context_window_tokens
+        )
+        would_trigger_token_compression = (
+            not missing_context_window
+            and not would_exceed_context_window
+            and estimated_total_tokens > trigger_tokens
+        )
+        ratio = (
+            float(estimated_total_tokens) / float(context_window_tokens)
+            if context_window_tokens > 0
+            else 0.0
+        )
+        return {
+            "request_messages": list(request_messages),
+            "tool_schemas": list(actual_tool_schemas),
+            "provider_request_body": provider_request_body,
+            "prompt_cache_key": prompt_cache_key,
+            "prompt_cache_diagnostics": dict(prompt_cache_diagnostics or {}),
+            "model_info": dict(model_info or {}),
+            "provider_model": provider_model,
+            "context_window_tokens": context_window_tokens,
+            "estimated_total_tokens": estimated_total_tokens,
+            "trigger_tokens": trigger_tokens,
+            "missing_context_window": missing_context_window,
+            "would_exceed_context_window": would_exceed_context_window,
+            "would_trigger_token_compression": would_trigger_token_compression,
+            "ratio": ratio,
+        }
+
     async def _emit_frontdoor_runtime_snapshot(
         self,
         *,
@@ -3133,70 +3228,33 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state_for_request = dict(state or {})
         langchain_tools = self._build_langchain_tools_for_state(state=state_for_request, runtime=runtime)
         while True:
-            request_messages = list(state_for_request.get("messages") or [])
-            prompt_cache_key = str(state_for_request.get("prompt_cache_key") or "")
-            prompt_cache_diagnostics = dict(state_for_request.get("prompt_cache_diagnostics") or {})
-            actual_tool_schemas: list[dict[str, Any]] = []
-            if hasattr(self, "_frontdoor_prompt_contract"):
-                try:
-                    runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
-                        state_for_request,
-                        tool_names=list(state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or []),
-                    )
-                    try:
-                        tool_schemas = self._selected_tool_schemas(list(runtime_visible_tool_names))
-                    except Exception:
-                        tool_schemas = []
-                    actual_tool_schemas = list(tool_schemas or [])
-                    request_contract = self._frontdoor_prompt_contract(
-                        state=dict(state_for_request or {}),
-                        provider_model=str((list(state_for_request.get("model_refs") or []) or [""])[0] or "").strip(),
-                        tool_schemas=tool_schemas,
-                        overlay_text=str(state_for_request.get("turn_overlay_text") or "").strip(),
-                        session_key=str(state_for_request.get("session_key") or "").strip(),
-                        overlay_section_count=len(list(state_for_request.get("dynamic_appendix_messages") or [])),
-                    )
-                    request_messages = list(request_contract.request_messages)
-                    prompt_cache_key = str(request_contract.prompt_cache_key or prompt_cache_key)
-                    prompt_cache_diagnostics = dict(request_contract.diagnostics or {})
-                except Exception:
-                    if hasattr(self, "_state_message_records"):
-                        request_messages = list(getattr(self, "_state_message_records")(request_messages))
-            elif hasattr(self, "_state_message_records"):
-                request_messages = list(getattr(self, "_state_message_records")(request_messages))
-            request_messages = self._apply_turn_overlay(
-                request_messages,
-                overlay_text=str(state_for_request.get("repair_overlay_text") or "").strip(),
+            preflight_snapshot = self._frontdoor_send_preflight_snapshot(
+                state=state_for_request,
+                runtime=runtime,
+                langchain_tools=langchain_tools,
             )
-            provider_request_body = {
-                "input": list(request_messages),
-                "tools": list(actual_tool_schemas or []),
-                "parallel_tool_calls": (bool(state_for_request.get("parallel_enabled")) if langchain_tools else None),
-            }
-            model_info = self._resolve_frontdoor_send_model_context_window(
-                model_refs=list(state_for_request.get("model_refs") or []),
-            )
-            context_window_tokens = int(model_info.get("context_window_tokens") or 0)
+            request_messages = list(preflight_snapshot.get("request_messages") or [])
+            prompt_cache_key = str(preflight_snapshot.get("prompt_cache_key") or "")
+            prompt_cache_diagnostics = dict(preflight_snapshot.get("prompt_cache_diagnostics") or {})
+            actual_tool_schemas = list(preflight_snapshot.get("tool_schemas") or [])
+            model_info = dict(preflight_snapshot.get("model_info") or {})
+            context_window_tokens = int(preflight_snapshot.get("context_window_tokens") or 0)
             if context_window_tokens <= 25_000:
                 raise self._frontdoor_missing_context_window_error(model_info=model_info)
-            estimated_total_tokens = self._estimate_frontdoor_send_total_tokens(
-                provider_request_body=provider_request_body,
-                request_messages=request_messages,
-                tool_schemas=actual_tool_schemas,
-            )
-            trigger_tokens = int(context_window_tokens * self._TOKEN_COMPRESSION_TRIGGER_RATIO)
+            estimated_total_tokens = int(preflight_snapshot.get("estimated_total_tokens") or 0)
+            trigger_tokens = int(preflight_snapshot.get("trigger_tokens") or 0)
             preflight_diagnostics = {
                 "applied": False,
                 "mode": "llm",
                 "final_request_tokens": estimated_total_tokens,
                 "trigger_tokens": trigger_tokens,
                 "max_context_tokens": context_window_tokens,
-                "provider_model": self._frontdoor_model_display_name(model_info),
+                "provider_model": str(preflight_snapshot.get("provider_model") or self._frontdoor_model_display_name(model_info)),
             }
             preflight_shrink_reason = ""
-            if estimated_total_tokens > context_window_tokens:
+            if bool(preflight_snapshot.get("would_exceed_context_window")):
                 raise self._frontdoor_context_window_exceeded_error(model_info=model_info)
-            if estimated_total_tokens > trigger_tokens:
+            if bool(preflight_snapshot.get("would_trigger_token_compression")):
                 preflight = await self._run_frontdoor_llm_token_compression(
                     state=state_for_request,
                     runtime=runtime,

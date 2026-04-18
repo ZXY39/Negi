@@ -376,6 +376,15 @@ class ApiClient {
         return this.post(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/activate`, {});
     }
 
+    static async estimateCeoComposerPreflight(sessionId, payload) {
+        const data = await this._request("POST", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/composer-preflight`, {
+            body: payload || {},
+            requestKey: `ceo:composer-preflight:${String(sessionId || "").trim()}`,
+            timeoutMs: 20000,
+        });
+        return data.item || null;
+    }
+
     static async getCeoSessionDeleteCheck(sessionId) {
         return this.get(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/delete-check`);
     }

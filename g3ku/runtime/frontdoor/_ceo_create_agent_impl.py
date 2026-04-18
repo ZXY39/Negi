@@ -10,6 +10,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command
 
+from g3ku.core.messages import UserInputMessage
+
 from ._ceo_runtime_ops import CeoFrontDoorRuntimeOps
 from .ceo_agent_middleware import (
     CeoApprovalMiddleware,
@@ -487,6 +489,82 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         refreshed = self._refresh_prompt_cache_state(state=dict(prepared))
         refreshed["agent_runtime"] = "create_agent"
         return refreshed
+
+    async def estimate_turn_preflight(
+        self,
+        *,
+        user_inputs: list[str | UserInputMessage],
+        session,
+    ) -> dict[str, Any]:
+        await self._ensure_runtime_bindings_ready()
+        normalized_inputs: list[UserInputMessage] = []
+        for raw in list(user_inputs or []):
+            item = raw if isinstance(raw, UserInputMessage) else UserInputMessage(content=str(raw))
+            text = getattr(session, "_history_text", None)
+            rendered_text = text(item.content) if callable(text) else str(getattr(item, "content", "") or "")
+            attachments = list(getattr(item, "attachments", []) or [])
+            if not str(rendered_text or "").strip() and not attachments:
+                continue
+            normalized_inputs.append(item)
+        if not normalized_inputs:
+            return {
+                "estimated_total_tokens": 0,
+                "context_window_tokens": 0,
+                "ratio": 0.0,
+                "provider_model": "",
+                "trigger_tokens": 0,
+                "would_trigger_token_compression": False,
+                "would_exceed_context_window": False,
+                "missing_context_window": False,
+            }
+        batch_query_text = ""
+        batch_query_builder = getattr(session, "_batch_query_text", None)
+        if callable(batch_query_builder):
+            batch_query_text = str(batch_query_builder(normalized_inputs) or "").strip()
+        elif len(normalized_inputs) > 1:
+            batch_query_text = "\n\n".join(
+                str(getattr(item, "content", "") or "").strip()
+                for item in normalized_inputs
+                if str(getattr(item, "content", "") or "").strip()
+            ).strip()
+        last_input = normalized_inputs[-1]
+        metadata = dict(getattr(last_input, "metadata", {}) or {})
+        if batch_query_text:
+            metadata["web_ceo_batch_query_text"] = batch_query_text
+            last_input.metadata = metadata
+        session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
+        runtime_context = CeoRuntimeContext(
+            loop=self._loop,
+            session=session,
+            session_key=session_key,
+            on_progress=None,
+        )
+        prepared = await self._prepare_turn_state(
+            user_input={
+                "content": getattr(last_input, "content", ""),
+                "metadata": dict(getattr(last_input, "metadata", {}) or {}),
+            },
+            runtime_context=runtime_context,
+        )
+        runtime_shim = type("RuntimeShim", (), {"context": runtime_context})()
+        preflight = self._frontdoor_send_preflight_snapshot(
+            state=dict(prepared or {}),
+            runtime=runtime_shim,
+            langchain_tools=self._build_langchain_tools_for_state(
+                state=dict(prepared or {}),
+                runtime=runtime_shim,
+            ),
+        )
+        return {
+            "estimated_total_tokens": int(preflight.get("estimated_total_tokens") or 0),
+            "context_window_tokens": int(preflight.get("context_window_tokens") or 0),
+            "ratio": float(preflight.get("ratio") or 0.0),
+            "provider_model": str(preflight.get("provider_model") or ""),
+            "trigger_tokens": int(preflight.get("trigger_tokens") or 0),
+            "would_trigger_token_compression": bool(preflight.get("would_trigger_token_compression")),
+            "would_exceed_context_window": bool(preflight.get("would_exceed_context_window")),
+            "missing_context_window": bool(preflight.get("missing_context_window")),
+        }
 
     @staticmethod
     def _normalized_tool_name_state_list(raw: Any) -> list[str]:

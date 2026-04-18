@@ -339,6 +339,7 @@ The important maintenance boundary is:
 - `notes/` contains optional detail bodies and should stay small and human-readable
 - `review_state.json` is per-session buffering metadata for the 5-turn ordinary review window; it is not committed user memory
 - `ops.jsonl` is not a complete failure ledger anymore; queue-head error fields are authoritative for in-flight engineering failures
+- only one live process should hold the memory-worker lease at a time; extra web/worker processes may exist, but they should leave queue consumption to the active lease holder
 
 Operator debugging order for a stuck queue head:
 
@@ -346,6 +347,13 @@ Operator debugging order for a stuck queue head:
 2. Check the queue-head `last_error_text`, `last_error_at`, `retry_after`, and `processing_started_at`.
 3. Check worker logs for provider/tool-call failures or semantic validation failures.
 4. Only after the runtime side is healthy should you debug the web `记忆管理` page.
+
+Operator debugging order for duplicated successful memory writes:
+
+1. Compare `memory/ops.jsonl` rows by `request_id`, not only by `batch_id`.
+2. If the same `request_id` appears in two successful processed rows, treat that as duplicate consumption of one queue request rather than proof that the frontdoor called `memory_write` twice.
+3. Inspect live `python -m g3ku web` / `python -m g3ku worker` processes and verify only one runtime instance should be actively consuming the memory queue.
+4. If multiple runtimes were active, treat duplicate rows as historical worker-contention evidence first, then inspect whether the current build already has the memory-worker lease and processed-request dedupe protections.
 
 ### Memory Maintenance CLI
 

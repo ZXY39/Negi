@@ -780,11 +780,15 @@
     const editor = llmState().editor;
     if (!editor || editor.mode === "memory") return editor;
     const modelKeyInput = document.getElementById("llm-model-key-input");
+    const providerSelect = document.getElementById("llm-provider-select");
+    const jsonEditor = document.getElementById("llm-json-editor");
     const retryOnInput = document.getElementById("llm-binding-retry-on");
     const retryCountInput = document.getElementById("llm-binding-retry-count");
     const singleApiKeyMaxConcurrencyInput = document.getElementById("llm-binding-single-api-key-max-concurrency");
     const contextWindowTokensInput = document.getElementById("llm-binding-context-window-tokens");
     if (modelKeyInput) editor.modelKey = trim(modelKeyInput.value || editor.modelKey);
+    if (providerSelect) editor.providerId = trim(providerSelect.value || editor.providerId);
+    if (jsonEditor) editor.jsonText = String(jsonEditor.value || editor.jsonText || "");
     if (retryOnInput) editor.retryOn = parseBindingRetryOn(retryOnInput.value || "");
     if (retryCountInput) {
       const parsed = Number.parseInt(String(retryCountInput.value || "").trim(), 10);

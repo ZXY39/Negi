@@ -464,15 +464,19 @@ The runtime boundary changed in five important ways:
 - `memory_write` and `memory_delete` now only enqueue requests into the single memory queue. They do not mutate committed memory inline.
 - `RuntimeAgentSession` and session-delete paths now enqueue autonomous review, pre-compression flush, and session-boundary flush requests instead of writing structured memory facts directly.
 - A dedicated internal memory agent now consumes the queue in FIFO same-op batches (`write` and `delete` never mix within one batch), runs with the `memory` model route, and only has a restricted tool surface for reading/writing `MEMORY.md` and note files.
+- The queue consumer is now single-active across processes: every `run_due_batch_once()` attempt must first take a workspace-local memory-worker file lock, so extra web/worker processes become passive observers instead of double-consuming the same queue head.
+- The consumer also treats `request_id` as the durable idempotency key. Before processing a batch it drops any queue rows whose `request_id` already appears in `memory/ops.jsonl`, so a stale duplicate row should not create a second successful processed batch.
 
 Maintainers should read the queue state machine like this:
 
 - `pending` means the request has not yet been claimed into a batch.
 - `processing` means the queue head batch is currently owned by the single memory worker.
+- If a process cannot take the memory-worker file lock, it should leave the queue untouched and report `worker_lease_unavailable`; this is normal in multi-process deployments where only one runtime instance should actively consume memory writes.
 - If the `memory` role is unconfigured or a provider call fails, the queue head remains `processing` with an attached error and blocks later requests.
 - A persisted `processing` head is durable restart state, not proof that a worker is currently live. After restart, the worker waits until the stored `retry_after` before retrying that same head batch.
 - `processing_started_at` records the first successful claim of that queue head batch and must stay stable across later retries; it is not a "last retry time" field.
 - Semantic-invalid model output is expected to repair inside the same processing batch before the runtime commits anything.
+- Two successful `ops.jsonl` rows with the same `request_id` are now treated as a bug signal pointing to historical multi-worker contention or an old pre-fix run, not as normal repeated writes.
 
 Maintainers should treat transient execution state as explicitly out of bounds for long-term memory:
 

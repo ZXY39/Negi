@@ -272,6 +272,16 @@ The CEO composer now has a dedicated frontdoor-compression UI path that is separ
 - The canonical message is `上下文大小超出当前模型<展示名>，请更改模型链配置后继续`.
 - `<展示名>` is expected to come from the runtime-selected model's `provider_model`, with model `key` only as fallback.
 
+### Composer Context Usage Outline
+
+- The Leader composer now has a second live-only context-size signal: a blue SVG outline around the input row.
+- That outline is backend-driven rather than a frontend-only guess. The browser debounces composer edits and calls `POST /api/ceo/sessions/{session_id}/composer-preflight`.
+- The request payload should represent the next outbound user batch for that session: existing queued follow-ups plus the current unsent draft/attachments, in FIFO order.
+- The backend estimate path is expected to reuse the same frontdoor turn-preparation and provider-bound token-estimation logic that real send uses before `token_compression` is attempted.
+- The response should include the current model-facing estimate and threshold fields, including `estimated_total_tokens`, `context_window_tokens`, `ratio`, `provider_model`, `trigger_tokens`, `would_trigger_token_compression`, and `would_exceed_context_window`.
+- The outline itself is live-only UI state. It must animate with the current ratio, clamp visual progress when the raw ratio exceeds `1.0`, and never create transcript messages, assistant bubbles, or persisted snapshot entries.
+- If the outline appears inconsistent with real send-time compression/error behavior, debug the backend preflight endpoint first. The maintenance contract is that the outline and send-time threshold checks share the same estimation logic and current model `context_window_tokens`.
+
 ## Tool Admin RBAC Contract
 
 Tool management now has a strict persisted-RBAC contract for surfaced tool families.

@@ -102,6 +102,9 @@ const S = {
     ceoQueuedFollowUps: {},
     ceoQueuedFollowUpsPersistId: null,
     ceoQueuedFollowUpDispatching: false,
+    ceoComposerUsageEstimate: null,
+    ceoComposerUsageRefreshId: null,
+    ceoComposerUsageRequestSeq: 0,
     liveDurationIntervalId: null,
     activeSessionId: "",
     ceoSessionBusy: false,
@@ -314,6 +317,10 @@ const U = {
     ceoUploadList: document.getElementById("ceo-upload-list"),
     ceoFollowUpQueue: document.getElementById("ceo-follow-up-queue"),
     ceoContextLoadNotice: document.getElementById("ceo-context-load-notice"),
+    ceoComposerOutlineShell: document.getElementById("ceo-composer-outline-shell"),
+    ceoComposerOutlineSvg: document.getElementById("ceo-composer-outline-svg"),
+    ceoComposerOutlineTrack: document.getElementById("ceo-composer-outline-track"),
+    ceoComposerOutlineProgress: document.getElementById("ceo-composer-outline-progress"),
     ceoCompressionToast: document.getElementById("ceo-compression-toast"),
     ceoCompressionToastText: document.getElementById("ceo-compression-toast-text"),
     ceoCompressionActions: document.getElementById("ceo-compression-actions"),
@@ -1222,6 +1229,7 @@ function restoreCeoComposerDraftForSession(sessionId) {
     renderPendingCeoUploads();
     renderQueuedCeoFollowUps(key);
     syncCeoInputHeight();
+    scheduleCeoComposerUsageRefresh({ immediate: true });
 }
 
 function switchCeoComposerDraft(previousSessionId, nextSessionId) {
@@ -1231,6 +1239,179 @@ function switchCeoComposerDraft(previousSessionId, nextSessionId) {
     if (previousId) setCeoComposerDraft(previousId, captureCeoComposerDraftFromUi());
     restoreCeoComposerDraftForSession(nextId);
     return true;
+}
+
+function normalizeCeoComposerUsageEstimate(sessionId, payload = null) {
+    const key = String(sessionId || "").trim();
+    const item = payload && typeof payload === "object" ? payload : {};
+    const toInt = (value) => {
+        const num = Number(value);
+        return Number.isFinite(num) && num >= 0 ? Math.floor(num) : 0;
+    };
+    const contextWindowTokens = toInt(item.context_window_tokens ?? item.contextWindowTokens);
+    const estimatedTotalTokens = toInt(item.estimated_total_tokens ?? item.estimatedTotalTokens);
+    const ratio = contextWindowTokens > 0
+        ? Math.max(0, estimatedTotalTokens) / contextWindowTokens
+        : Math.max(0, Number(item.ratio) || 0);
+    return {
+        session_id: key,
+        estimated_total_tokens: estimatedTotalTokens,
+        context_window_tokens: contextWindowTokens,
+        ratio: Math.max(0, Number.isFinite(ratio) ? ratio : 0),
+        provider_model: String(item.provider_model || item.providerModel || "").trim(),
+        trigger_tokens: toInt(item.trigger_tokens ?? item.triggerTokens),
+        would_trigger_token_compression: !!(item.would_trigger_token_compression ?? item.wouldTriggerTokenCompression),
+        would_exceed_context_window: !!(item.would_exceed_context_window ?? item.wouldExceedContextWindow),
+        missing_context_window: !!(item.missing_context_window ?? item.missingContextWindow),
+    };
+}
+
+function clearCeoComposerUsageEstimate() {
+    S.ceoComposerUsageEstimate = null;
+    syncCeoComposerUsageOutline();
+}
+
+function setCeoComposerUsageEstimate(sessionId, payload) {
+    const key = String(sessionId || "").trim();
+    if (!key) {
+        clearCeoComposerUsageEstimate();
+        return null;
+    }
+    const normalized = normalizeCeoComposerUsageEstimate(key, payload);
+    S.ceoComposerUsageEstimate = normalized;
+    syncCeoComposerUsageOutline();
+    return normalized;
+}
+
+function buildCeoComposerPreflightEntries(sessionId = activeSessionId()) {
+    const key = String(sessionId || "").trim();
+    if (!key) return [];
+    const queued = getCeoQueuedFollowUps(key).map((item) => ({
+        text: String(item?.text || ""),
+        uploads: normalizeUploadList(item?.uploads),
+    }));
+    const draftText = String(U.ceoInput?.value || "");
+    const draftUploads = normalizeUploadList(S.ceoUploads);
+    if (draftText.trim() || draftUploads.length) {
+        queued.push({ text: draftText, uploads: draftUploads });
+    }
+    return queued.filter((item) => String(item.text || "").trim() || normalizeUploadList(item.uploads).length > 0);
+}
+
+function buildCeoComposerOutlinePath(width, height, radius) {
+    const safeWidth = Math.max(1, Number(width) || 0);
+    const safeHeight = Math.max(1, Number(height) || 0);
+    const safeRadius = Math.max(0, Math.min(Number(radius) || 0, safeWidth / 2, safeHeight / 2));
+    return [
+        `M ${safeRadius} 1`,
+        `H ${safeWidth - safeRadius}`,
+        `A ${safeRadius} ${safeRadius} 0 0 1 ${safeWidth - 1} ${safeRadius}`,
+        `V ${safeHeight - safeRadius}`,
+        `A ${safeRadius} ${safeRadius} 0 0 1 ${safeWidth - safeRadius} ${safeHeight - 1}`,
+        `H ${safeRadius}`,
+        `A ${safeRadius} ${safeRadius} 0 0 1 1 ${safeHeight - safeRadius}`,
+        `V ${safeRadius}`,
+        `A ${safeRadius} ${safeRadius} 0 0 1 ${safeRadius} 1`,
+    ].join(" ");
+}
+
+function scheduleSyncCeoComposerUsageOutline() {
+    window.requestAnimationFrame(() => syncCeoComposerUsageOutline());
+}
+
+function syncCeoComposerUsageOutline() {
+    const shell = U.ceoComposerOutlineShell;
+    const svg = U.ceoComposerOutlineSvg;
+    const track = U.ceoComposerOutlineTrack;
+    const progress = U.ceoComposerOutlineProgress;
+    if (!shell || !svg || !track || !progress) return;
+    const activeSession = String(activeSessionId() || "").trim();
+    const estimate = (
+        S.ceoComposerUsageEstimate
+        && String(S.ceoComposerUsageEstimate.session_id || "").trim() === activeSession
+    ) ? S.ceoComposerUsageEstimate : null;
+    const hasEstimate = !!estimate;
+    const rect = typeof shell.getBoundingClientRect === "function"
+        ? shell.getBoundingClientRect()
+        : { width: 0, height: 0 };
+    const width = Math.max(4, Math.round(Number(rect.width) || 0));
+    const height = Math.max(4, Math.round(Number(rect.height) || 0));
+    const radius = Math.max(12, Math.min(28, Math.round(height / 2)));
+    const path = buildCeoComposerOutlinePath(width, height, radius);
+    svg.hidden = !hasEstimate || width <= 4 || height <= 4;
+    if (!svg.hidden && svg.setAttribute) {
+        svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+        svg.setAttribute("preserveAspectRatio", "none");
+    }
+    if (track.setAttribute) track.setAttribute("d", path);
+    if (progress.setAttribute) progress.setAttribute("d", path);
+    let perimeter = 0;
+    try {
+        perimeter = Number(progress.getTotalLength?.() || 0);
+    } catch (_error) {
+        perimeter = 0;
+    }
+    const ratio = hasEstimate ? Math.max(0, Math.min(1, Number(estimate.ratio) || 0)) : 0;
+    const progressLength = perimeter > 0 ? Math.max(0, Math.min(perimeter, perimeter * ratio)) : 0;
+    progress.style.strokeDasharray = perimeter > 0 ? `${progressLength} ${perimeter}` : "0 0";
+    progress.style.strokeDashoffset = "0";
+    track.style.strokeDasharray = perimeter > 0 ? `${perimeter} ${perimeter}` : "0 0";
+    shell.classList.toggle("is-active", hasEstimate && ratio > 0);
+    shell.dataset.usageState = (
+        !hasEstimate ? ""
+            : estimate.would_exceed_context_window ? "overflow"
+                : estimate.would_trigger_token_compression ? "warning"
+                    : "active"
+    );
+    shell.title = hasEstimate
+        ? `${estimate.provider_model || "current-model"} · ${estimate.estimated_total_tokens}/${estimate.context_window_tokens} TOKEN`
+        : "";
+}
+
+async function refreshCeoComposerUsageEstimate() {
+    const sessionId = String(activeSessionId() || "").trim();
+    if (!sessionId || activeSessionIsReadonly() || S.ceoUploadBusy) {
+        clearCeoComposerUsageEstimate();
+        return null;
+    }
+    const entries = buildCeoComposerPreflightEntries(sessionId);
+    if (!entries.length) {
+        clearCeoComposerUsageEstimate();
+        return null;
+    }
+    const requestSeq = ++S.ceoComposerUsageRequestSeq;
+    try {
+        const item = await ApiClient.estimateCeoComposerPreflight(sessionId, {
+            messages: entries.map((entry) => ({
+                text: String(entry.text || ""),
+                uploads: normalizeUploadList(entry.uploads).map((upload) => ({
+                    name: upload.name,
+                    path: upload.path,
+                    mime_type: upload.mime_type,
+                    kind: upload.kind,
+                    size: upload.size,
+                })),
+            })),
+        });
+        if (requestSeq !== S.ceoComposerUsageRequestSeq || sessionId !== String(activeSessionId() || "").trim()) {
+            return null;
+        }
+        return setCeoComposerUsageEstimate(sessionId, item || {});
+    } catch (error) {
+        const name = String(error?.name || "").trim();
+        const message = String(error?.message || "").trim();
+        if (name === "AbortError" || message === "Stale request" || message === "Request aborted") return null;
+        if (requestSeq === S.ceoComposerUsageRequestSeq) clearCeoComposerUsageEstimate();
+        return null;
+    }
+}
+
+function scheduleCeoComposerUsageRefresh({ immediate = false } = {}) {
+    if (S.ceoComposerUsageRefreshId) window.clearTimeout(S.ceoComposerUsageRefreshId);
+    S.ceoComposerUsageRefreshId = window.setTimeout(() => {
+        S.ceoComposerUsageRefreshId = null;
+        void refreshCeoComposerUsageEstimate();
+    }, immediate ? 0 : 260);
 }
 
 function normalizeCeoQueuedFollowUpEntry(entry = {}) {
@@ -1372,6 +1553,7 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
     U.ceoFollowUpQueue.hidden = !items.length;
     if (!items.length) {
         U.ceoFollowUpQueue.innerHTML = "";
+        scheduleCeoComposerUsageRefresh();
         return;
     }
     U.ceoFollowUpQueue.innerHTML = `
@@ -1641,6 +1823,7 @@ function setCeoSessionSnapshotCache(sessionId, entry = {}) {
     });
     schedulePersistCeoSessionSnapshotCache();
     syncCeoCompressionToast();
+    scheduleCeoComposerUsageRefresh();
     return cloneCeoSessionSnapshotCacheEntry(normalized);
 }
 
@@ -1668,6 +1851,7 @@ function clearCeoSessionSnapshotCache(sessionId) {
     S.ceoSnapshotCache = pruneCeoSessionSnapshotCache(next);
     schedulePersistCeoSessionSnapshotCache();
     syncCeoCompressionToast();
+    scheduleCeoComposerUsageRefresh();
     return true;
 }
 
@@ -2760,6 +2944,7 @@ function renderPendingCeoUploads() {
     syncCeoAttachButton();
     syncCeoPrimaryButton();
     syncCeoSessionActions();
+    scheduleCeoComposerUsageRefresh();
     icons();
 }
 
@@ -2785,6 +2970,7 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
             `).join("")}
         </div>
     `;
+    scheduleCeoComposerUsageRefresh();
     icons();
 }
 
@@ -8159,7 +8345,10 @@ function bind() {
         syncCeoInputHeight();
         syncActiveCeoComposerDraft();
         syncCeoPrimaryButton();
+        scheduleSyncCeoComposerUsageOutline();
+        scheduleCeoComposerUsageRefresh();
     });
+    window.addEventListener("resize", () => scheduleSyncCeoComposerUsageOutline());
     U.modelRefresh?.addEventListener("click", () => void loadModels());
     U.modelCreate?.addEventListener("click", startCreateModel);
     U.modelRolesCancel?.addEventListener("click", cancelModelRoleEditing);

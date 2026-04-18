@@ -3511,11 +3511,65 @@ textarea {
     --ceo-input-row-gap: 12px;
 }
 
+.ceo-composer-outline-shell {
+    position: relative;
+    min-width: 0;
+    border-radius: 30px;
+    padding: 2px;
+    --ceo-composer-outline-color: #39c5bb;
+}
+
+.ceo-composer-outline-svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+}
+
+.ceo-composer-outline-track,
+.ceo-composer-outline-progress {
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.ceo-composer-outline-track {
+    stroke: color-mix(in srgb, var(--ceo-composer-outline-color) 18%, transparent);
+    stroke-width: 2;
+    opacity: 0;
+    transition: opacity 180ms ease;
+}
+
+.ceo-composer-outline-progress {
+    stroke: var(--ceo-composer-outline-color);
+    stroke-width: 2.5;
+    opacity: 0;
+    filter: drop-shadow(0 0 10px color-mix(in srgb, var(--ceo-composer-outline-color) 28%, transparent));
+    transition:
+        stroke-dasharray 260ms cubic-bezier(0.16, 1, 0.3, 1),
+        opacity 180ms ease,
+        filter 220ms ease;
+}
+
+.ceo-composer-outline-shell.is-active .ceo-composer-outline-track,
+.ceo-composer-outline-shell.is-active .ceo-composer-outline-progress {
+    opacity: 1;
+}
+
+.ceo-composer-outline-shell[data-usage-state="warning"] .ceo-composer-outline-progress,
+.ceo-composer-outline-shell[data-usage-state="overflow"] .ceo-composer-outline-progress {
+    filter: drop-shadow(0 0 14px color-mix(in srgb, var(--ceo-composer-outline-color) 36%, transparent));
+}
+
 .ceo-input-row {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
     gap: var(--ceo-input-row-gap);
     align-items: end;
+    position: relative;
+    z-index: 1;
 }
 
 .ceo-attach-btn {
@@ -3738,6 +3792,11 @@ textarea {
 @media (prefers-reduced-motion: reduce) {
     .ceo-context-load-notice-item {
         animation: ceo-context-load-tag-reduced 10000ms linear forwards;
+    }
+
+    .ceo-composer-outline-track,
+    .ceo-composer-outline-progress {
+        transition: none;
     }
 }
 

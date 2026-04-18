@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import secrets
 import shutil
@@ -18,6 +19,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import tool
 from loguru import logger
 
+from g3ku.agent.catalog_store import _release_file_lock, _try_acquire_file_lock
 from g3ku.agent.markdown_memory import (
     MemoryEntry,
     format_memory_entry,
@@ -1171,6 +1173,23 @@ class MemoryManager:
             raise RuntimeError("memory catalog bridge is unavailable in read-only initialization mode")
         return bridge
 
+    def _memory_worker_lock_path(self) -> Path:
+        return self.mem_dir / ".worker.lock"
+
+    def _memory_worker_lock_metadata(self) -> dict[str, object]:
+        return {
+            "pid": int(os.getpid()),
+            "thread": str(threading.current_thread().name or "").strip() or "unknown",
+            "workspace": str(self.workspace),
+            "kind": "memory_worker",
+        }
+
+    def _try_acquire_memory_worker_lease(self) -> Any | None:
+        return _try_acquire_file_lock(
+            self._memory_worker_lock_path(),
+            metadata=self._memory_worker_lock_metadata(),
+        )
+
     @staticmethod
     def _request_id(prefix: str) -> str:
         return f"{prefix}_{uuid.uuid4().hex[:12]}"
@@ -1310,6 +1329,39 @@ class MemoryManager:
                 for line in self.ops_file.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
+
+    def _processed_request_ids(self) -> set[str]:
+        request_ids: set[str] = set()
+        for payload in self._read_processed_batches():
+            if not isinstance(payload, dict):
+                continue
+            for raw_request_id in list(payload.get("request_ids") or []):
+                normalized = str(raw_request_id or "").strip()
+                if normalized:
+                    request_ids.add(normalized)
+        return request_ids
+
+    def _drop_processed_queue_requests(self, *, processed_request_ids: set[str] | None = None) -> list[str]:
+        known_processed = set(processed_request_ids or set())
+        if not known_processed:
+            known_processed = self._processed_request_ids()
+        if not known_processed:
+            return []
+
+        rows = self._read_queue_requests()
+        remaining: list[MemoryQueueRequest] = []
+        dropped: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            if row.request_id in known_processed:
+                if row.request_id not in seen:
+                    dropped.append(row.request_id)
+                    seen.add(row.request_id)
+                continue
+            remaining.append(row)
+        if dropped:
+            self._write_queue_requests(remaining)
+        return dropped
 
     def _append_ops_payload(self, payload: dict[str, Any]) -> None:
         line = json.dumps(dict(payload or {}), ensure_ascii=False)
@@ -2417,74 +2469,105 @@ class MemoryManager:
         raise _MemoryAgentRuntimeError(last_error)
 
     async def run_due_batch_once(self, *, now_iso: str | None = None) -> dict[str, Any]:
-        effective_now = str(now_iso or self._now_iso()).strip()
-        batch = await self.collect_due_batch(now_iso=effective_now)
-        if batch is None or not batch.items:
-            return {"ok": True, "status": "idle", "processed": 0}
-        if str(batch.items[0].status or "pending").strip() != "processing":
-            self._mark_batch_processing(batch.items, effective_now)
+        worker_lease = self._try_acquire_memory_worker_lease()
+        if worker_lease is None:
+            return {"ok": True, "status": "worker_lease_unavailable", "processed": 0}
 
         try:
-            runtime_config, _revision, _changed = get_runtime_config()
-        except Exception as exc:
-            return self._mark_batch_error(batch, effective_now, str(exc or "memory runtime config unavailable"))
-
-        model_chain = self._memory_model_chain(runtime_config)
-        if not model_chain:
-            return self._mark_batch_blocked(batch, effective_now, "memory role not configured")
-
-        try:
-            result = await self._run_memory_agent_batch(
-                batch=batch,
-                runtime_config=runtime_config,
-                model_chain=model_chain,
+            processed_request_ids = self._processed_request_ids()
+            dropped_request_ids = self._drop_processed_queue_requests(
+                processed_request_ids=processed_request_ids,
             )
-        except Exception as exc:
-            logger.warning("memory batch failed: {}", exc)
-            return self._mark_batch_error(batch, effective_now, str(exc or "memory batch failed"))
+            effective_now = str(now_iso or self._now_iso()).strip()
+            batch = await self.collect_due_batch(now_iso=effective_now)
+            if batch is None or not batch.items:
+                if dropped_request_ids:
+                    return {
+                        "ok": True,
+                        "status": "already_processed",
+                        "processed": 0,
+                        "request_ids": list(dropped_request_ids),
+                    }
+                return {"ok": True, "status": "idle", "processed": 0}
+            duplicate_request_ids = [
+                item.request_id
+                for item in batch.items
+                if str(item.request_id or "").strip() in processed_request_ids
+            ]
+            if duplicate_request_ids:
+                self._drop_request_ids(set(duplicate_request_ids))
+                return {
+                    "ok": True,
+                    "status": "already_processed",
+                    "processed": 0,
+                    "request_ids": list(duplicate_request_ids),
+                }
+            if str(batch.items[0].status or "pending").strip() != "processing":
+                self._mark_batch_processing(batch.items, effective_now)
 
-        self._drop_request_ids({item.request_id for item in batch.items})
-        if result.get("validated") is None:
+            try:
+                runtime_config, _revision, _changed = get_runtime_config()
+            except Exception as exc:
+                return self._mark_batch_error(batch, effective_now, str(exc or "memory runtime config unavailable"))
+
+            model_chain = self._memory_model_chain(runtime_config)
+            if not model_chain:
+                return self._mark_batch_blocked(batch, effective_now, "memory role not configured")
+
+            try:
+                result = await self._run_memory_agent_batch(
+                    batch=batch,
+                    runtime_config=runtime_config,
+                    model_chain=model_chain,
+                )
+            except Exception as exc:
+                logger.warning("memory batch failed: {}", exc)
+                return self._mark_batch_error(batch, effective_now, str(exc or "memory batch failed"))
+
+            self._drop_request_ids({item.request_id for item in batch.items})
+            if result.get("validated") is None:
+                return {
+                    "ok": True,
+                    "status": "assessed_null",
+                    "op": batch.op,
+                    "processed": len(batch.items),
+                    "request_ids": [item.request_id for item in batch.items],
+                    "model_chain": list(model_chain),
+                }
+
+            self._commit_validated_write(result["validated"])
+            processed_at = self._now_iso()
+            processed_payload = {
+                "batch_id": self._request_id(batch.op),
+                "op": "write" if batch.op == "assess" else batch.op,
+                "source_op": batch.op,
+                "processed_at": processed_at,
+                "request_ids": [item.request_id for item in batch.items],
+                "request_count": len(batch.items),
+                "decision_sources": [item.decision_source for item in batch.items],
+                "payload_texts": [item.payload_text for item in batch.items],
+                "usage": {
+                    "input_tokens": int(result["usage"]["input_tokens"]),
+                    "output_tokens": int(result["usage"]["output_tokens"]),
+                    "cache_read_tokens": int(result["usage"]["cache_read_tokens"]),
+                },
+                "model_chain": list(model_chain),
+                "attempt_count": int(result["attempt_count"]),
+                "memory_chars_after": int(result["validated"].memory_chars_after),
+                "note_refs_written": list(result["validated"].note_refs_written),
+                "document_preview": result["validated"].document_preview,
+            }
+            self._append_ops_payload(processed_payload)
             return {
                 "ok": True,
-                "status": "assessed_null",
+                "status": "applied",
                 "op": batch.op,
                 "processed": len(batch.items),
                 "request_ids": [item.request_id for item in batch.items],
+                "attempt_count": int(result["attempt_count"]),
+                "usage": dict(processed_payload["usage"]),
                 "model_chain": list(model_chain),
+                "processed_at": processed_at,
             }
-
-        self._commit_validated_write(result["validated"])
-        processed_at = self._now_iso()
-        processed_payload = {
-            "batch_id": self._request_id(batch.op),
-            "op": "write" if batch.op == "assess" else batch.op,
-            "source_op": batch.op,
-            "processed_at": processed_at,
-            "request_ids": [item.request_id for item in batch.items],
-            "request_count": len(batch.items),
-            "decision_sources": [item.decision_source for item in batch.items],
-            "payload_texts": [item.payload_text for item in batch.items],
-            "usage": {
-                "input_tokens": int(result["usage"]["input_tokens"]),
-                "output_tokens": int(result["usage"]["output_tokens"]),
-                "cache_read_tokens": int(result["usage"]["cache_read_tokens"]),
-            },
-            "model_chain": list(model_chain),
-            "attempt_count": int(result["attempt_count"]),
-            "memory_chars_after": int(result["validated"].memory_chars_after),
-            "note_refs_written": list(result["validated"].note_refs_written),
-            "document_preview": result["validated"].document_preview,
-        }
-        self._append_ops_payload(processed_payload)
-        return {
-            "ok": True,
-            "status": "applied",
-            "op": batch.op,
-            "processed": len(batch.items),
-            "request_ids": [item.request_id for item in batch.items],
-            "attempt_count": int(result["attempt_count"]),
-            "usage": dict(processed_payload["usage"]),
-            "model_chain": list(model_chain),
-            "processed_at": processed_at,
-        }
+        finally:
+            _release_file_lock(worker_lease)

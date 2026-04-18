@@ -590,3 +590,95 @@ async def test_processing_started_at_survives_restart_retry(tmp_path: Path, monk
         assert _read_jsonl(tmp_path / "memory" / "ops.jsonl") == []
     finally:
         manager.close()
+
+
+@pytest.mark.asyncio
+async def test_run_due_batch_once_skips_when_worker_lease_is_unavailable(tmp_path: Path, monkeypatch) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="Prefer concise answers",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="write_1",
+            )
+        )
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(module, "_try_acquire_file_lock", lambda *args, **kwargs: None, raising=False)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        queue_items = await manager.list_queue(limit=10)
+
+        assert report == {"ok": True, "status": "worker_lease_unavailable", "processed": 0}
+        assert len(queue_items) == 1
+        assert queue_items[0]["request_id"] == "write_1"
+        assert queue_items[0]["status"] == "pending"
+        assert _read_jsonl(tmp_path / "memory" / "ops.jsonl") == []
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_run_due_batch_once_drops_request_already_recorded_in_processed_log(tmp_path: Path, monkeypatch) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="Prefer concise answers",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="write_1",
+                status="processing",
+                processing_started_at="2026-04-18T10:00:01+08:00",
+            )
+        )
+        (tmp_path / "memory" / "ops.jsonl").write_text(
+            json.dumps(
+                {
+                    "batch_id": "write_done_1",
+                    "op": "write",
+                    "source_op": "write",
+                    "processed_at": "2026-04-18T10:00:04+08:00",
+                    "request_ids": ["write_1"],
+                    "request_count": 1,
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            module,
+            "build_chat_model",
+            lambda *args, **kwargs: pytest.fail("already-processed queue item should not invoke memory model"),
+            raising=False,
+        )
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        queue_items = await manager.list_queue(limit=10)
+        processed = _read_jsonl(tmp_path / "memory" / "ops.jsonl")
+
+        assert report["ok"] is True
+        assert report["status"] == "already_processed"
+        assert report["request_ids"] == ["write_1"]
+        assert queue_items == []
+        assert len(processed) == 1
+        assert processed[0]["request_ids"] == ["write_1"]
+    finally:
+        manager.close()

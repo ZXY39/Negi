@@ -71,12 +71,12 @@ def _runtime_session(runtime_manager, session_id: str):
     return getter(session_id) if callable(getter) else None
 
 
-def _recreate_runtime_session(runtime_manager, session) -> object | None:
+def _ensure_runtime_session(runtime_manager, session) -> object | None:
+    existing = _runtime_session(runtime_manager, session.key)
+    if existing is not None:
+        return existing
     creator = getattr(runtime_manager, "get_or_create", None)
     if not callable(creator):
-        return None
-    paused_snapshot = read_paused_execution_context(session.key) or {}
-    if not isinstance(paused_snapshot, dict) or not paused_snapshot:
         return None
     normalized_metadata = normalize_ceo_metadata(getattr(session, "metadata", None), session_key=session.key)
     memory_scope = dict(normalized_metadata.get("memory_scope") or {})
@@ -89,6 +89,9 @@ def _recreate_runtime_session(runtime_manager, session) -> object | None:
         memory_channel=str(memory_scope.get("channel") or "").strip() or None,
         memory_chat_id=str(memory_scope.get("chat_id") or "").strip() or None,
     )
+    paused_snapshot = read_paused_execution_context(session.key) or {}
+    if not isinstance(paused_snapshot, dict) or not paused_snapshot:
+        return runtime_session
     state = getattr(runtime_session, "state", None)
     if state is not None:
         if not getattr(state, "pending_interrupts", None):
@@ -111,6 +114,13 @@ def _recreate_runtime_session(runtime_manager, session) -> object | None:
             str(paused_snapshot.get("frontdoor_history_shrink_reason") or "").strip(),
         )
     return runtime_session
+
+
+def _recreate_runtime_session(runtime_manager, session) -> object | None:
+    paused_snapshot = read_paused_execution_context(session.key) or {}
+    if not isinstance(paused_snapshot, dict) or not paused_snapshot:
+        return None
+    return _ensure_runtime_session(runtime_manager, session)
 
 
 def _session_is_running(runtime_manager, session_id: str) -> bool:
@@ -467,6 +477,28 @@ async def update_ceo_session_task_defaults(session_id: str, payload: dict = Body
     session.updated_at = datetime.now()
     session_manager.save(session)
     return {"ok": True, **_task_defaults_response(session)}
+
+
+@router.post("/ceo/sessions/{session_id}/composer-preflight")
+async def estimate_ceo_session_composer_preflight(session_id: str, payload: dict | None = Body(default=None)):
+    if _is_channel_session_id(session_id):
+        _raise_channel_session_readonly()
+    agent, session_manager, runtime_manager, _state_store = _sessions()
+    if agent is None:
+        raise HTTPException(status_code=503, detail="no_model_configured")
+    session = _assert_known_session(session_manager, session_id)
+    runtime_session = _ensure_runtime_session(runtime_manager, session)
+    if runtime_session is None:
+        raise HTTPException(status_code=503, detail="session_runtime_unavailable")
+    runner = getattr(agent, "multi_agent_runner", None)
+    estimator = getattr(runner, "estimate_turn_preflight", None)
+    if not callable(estimator):
+        raise HTTPException(status_code=503, detail="frontdoor_preflight_unavailable")
+    from g3ku.runtime.api.websocket_ceo import _normalize_client_user_messages
+
+    user_messages = _normalize_client_user_messages(session.key, payload or {})
+    item = await estimator(user_inputs=user_messages, session=runtime_session)
+    return {"ok": True, "session_id": session.key, "item": item}
 
 
 @router.post("/ceo/sessions/{session_id}/activate")
