@@ -3142,6 +3142,197 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
 
 
 @pytest.mark.asyncio
+async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_before_provider_send(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = "web:shared"
+    runtime_session = SimpleNamespace(session_key=session_key, messages=[])
+    loop = SimpleNamespace(
+        sessions=SimpleNamespace(get_or_create=lambda key: runtime_session),
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=None,
+        temp_dir="",
+    )
+    runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
+    captured_model_messages: list[dict[str, object]] = []
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+
+    previous_request_path = tmp_path / "frontdoor-request-previous.json"
+    previous_request_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "older answer"},
+        {
+            "role": "user",
+            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["message","submit_next_stage"]}',
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-message-1",
+                    "type": "function",
+                    "function": {"name": "message", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "message",
+            "tool_call_id": "call-message-1",
+            "content": "Message sent to final:ceo-demo",
+        },
+    ]
+    previous_request_path.write_text(
+        json.dumps(
+            {
+                "request_messages": previous_request_messages,
+                "tool_schemas": [
+                    {
+                        "type": "function",
+                        "function": {"name": "message", "description": "", "parameters": {"type": "object"}},
+                    },
+                    {
+                        "type": "function",
+                        "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["message", "submit_next_stage"]}
+
+    async def _build_for_ceo(**kwargs):
+        stable_messages = list(kwargs.get("request_body_seed_messages") or [])
+        user_content = str(kwargs.get("user_content") or "").strip()
+        model_messages = [*stable_messages, {"role": "user", "content": user_content}]
+        return SimpleNamespace(
+            tool_names=["message", "submit_next_stage"],
+            model_messages=model_messages,
+            stable_messages=list(stable_messages),
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["message", "submit_next_stage"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    async def _call_model_with_tools(**kwargs):
+        captured_model_messages[:] = list(kwargs.get("messages") or [])
+        return SimpleNamespace()
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+    monkeypatch.setattr(
+        runner,
+        "_model_response_view",
+        lambda _message: SimpleNamespace(content="ok", tool_calls=[], provider_request_meta={}, provider_request_body={}),
+    )
+    monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
+    monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
+    monkeypatch.setattr(
+        runner,
+        "_run_frontdoor_token_preflight_compaction",
+        lambda **kwargs: observed.update(
+            {
+                "request_messages": list(kwargs["request_messages"]),
+                "tool_schemas": list(kwargs["tool_schemas"]),
+            }
+        )
+        or {
+            "request_messages": list(kwargs["request_messages"]),
+            "tool_schemas": list(kwargs["tool_schemas"]),
+            "frontdoor_history_shrink_reason": "",
+            "frontdoor_token_preflight_diagnostics": {"applied": False, "final_request_tokens": 12345},
+        },
+        raising=False,
+    )
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key=session_key),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "older answer"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-message-1",
+                        "type": "function",
+                        "function": {"name": "message", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "message",
+                "tool_call_id": "call-message-1",
+                "content": "Message sent to final:ceo-demo",
+            },
+            {"role": "assistant", "content": "final answer"},
+        ],
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_stage_state={},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
+        _semantic_context_state={"summary_text": "", "needs_refresh": False},
+        _frontdoor_hydrated_tool_names=[],
+        _frontdoor_selection_debug={},
+        _frontdoor_previous_actual_request_path=str(previous_request_path),
+        _frontdoor_previous_actual_request_history=[{"path": str(previous_request_path), "turn_id": "turn-old"}],
+        _frontdoor_actual_request_path="",
+        _frontdoor_actual_request_history=[],
+    )
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(loop=loop, session=session, session_key=session_key, on_progress=None)
+    )
+
+    prepared = await runner._graph_prepare_turn(
+        initial_persistent_state(user_input={"content": "next question", "metadata": {}}),
+        runtime=runtime,
+    )
+    await runner._graph_call_model(
+        prepared,
+        runtime=runtime,
+    )
+
+    assert observed["request_messages"][: len(previous_request_messages)] == previous_request_messages
+    assert observed["tool_schemas"]
+    assert captured_model_messages[: len(previous_request_messages)] == previous_request_messages
+
+
+@pytest.mark.asyncio
 async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_prefix_despite_trailing_whitespace_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
