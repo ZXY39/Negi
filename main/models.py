@@ -201,8 +201,8 @@ class TaskMessageDistributionEpoch(Model):
     task_id: str
     root_node_id: str
     root_message: str
-    state: str = 'queued'
-    created_at: str = ''
+    state: str
+    created_at: str
     paused_at: str = ''
     distributed_at: str = ''
     completed_at: str = ''
@@ -217,8 +217,8 @@ class TaskNodeNotification(Model):
     epoch_id: str
     source_node_id: str = ''
     message: str = ''
-    status: str = 'pending_distribution'
-    created_at: str = ''
+    status: str
+    created_at: str
     delivered_at: str = ''
     consumed_at: str = ''
     payload: dict[str, Any] = Field(default_factory=dict)

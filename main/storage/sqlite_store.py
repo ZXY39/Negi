@@ -176,7 +176,6 @@ class SQLiteTaskStore:
                 task_id TEXT NOT NULL,
                 state TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 PRIMARY KEY (task_id, epoch_id)
             )
@@ -189,7 +188,6 @@ class SQLiteTaskStore:
                 epoch_id TEXT NOT NULL,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
                 payload_json TEXT NOT NULL
             )
             ''',
@@ -388,9 +386,6 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_events_session_id_seq ON task_events(session_id, seq)',
             'CREATE INDEX IF NOT EXISTS idx_task_commands_status_created_at ON task_commands(status, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_commands_task_id ON task_commands(task_id)',
-            'CREATE INDEX IF NOT EXISTS idx_task_message_distribution_epochs_task_state_created_at ON task_message_distribution_epochs(task_id, state, created_at)',
-            'CREATE INDEX IF NOT EXISTS idx_task_node_notifications_task_node_created_at ON task_node_notifications(task_id, node_id, created_at)',
-            'CREATE INDEX IF NOT EXISTS idx_task_node_notifications_task_epoch_created_at ON task_node_notifications(task_id, epoch_id, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_nodes_task_id_sort_key ON task_nodes(task_id, sort_key)',
             'CREATE INDEX IF NOT EXISTS idx_task_nodes_parent_node_id ON task_nodes(parent_node_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_details_task_id ON task_node_details(task_id)',
@@ -980,26 +975,21 @@ class SQLiteTaskStore:
         payload: TaskMessageDistributionEpoch | dict[str, Any],
     ) -> TaskMessageDistributionEpoch:
         record = payload if isinstance(payload, TaskMessageDistributionEpoch) else TaskMessageDistributionEpoch.model_validate(payload)
-        updated_at = str(record.completed_at or record.distributed_at or record.paused_at or record.created_at or '').strip()
-        if not updated_at:
-            updated_at = record.created_at
         payload_json = record.model_dump_json()
 
         def operation(conn: sqlite3.Connection) -> TaskMessageDistributionEpoch:
             conn.execute(
-                'INSERT INTO task_message_distribution_epochs (epoch_id, task_id, state, created_at, updated_at, payload_json) '
-                'VALUES (?, ?, ?, ?, ?, ?) '
+                'INSERT INTO task_message_distribution_epochs (epoch_id, task_id, state, created_at, payload_json) '
+                'VALUES (?, ?, ?, ?, ?) '
                 'ON CONFLICT(task_id, epoch_id) DO UPDATE SET '
                 'state = excluded.state, '
                 'created_at = excluded.created_at, '
-                'updated_at = excluded.updated_at, '
                 'payload_json = excluded.payload_json',
                 (
                     record.epoch_id,
                     record.task_id,
                     record.state,
                     record.created_at,
-                    updated_at,
                     payload_json,
                 ),
             )
@@ -1027,16 +1017,9 @@ class SQLiteTaskStore:
     def list_active_task_message_distribution_epochs(self, task_id: str) -> list[TaskMessageDistributionEpoch]:
         rows = self._fetchall(
             'SELECT payload_json FROM task_message_distribution_epochs '
-            'WHERE task_id = ? AND state IN (?, ?, ?, ?, ?) '
+            'WHERE task_id = ? '
             'ORDER BY created_at ASC, epoch_id ASC',
-            (
-                str(task_id or '').strip(),
-                'queued',
-                'pause_requested',
-                'paused',
-                'distributing',
-                'resuming',
-            ),
+            (str(task_id or '').strip(),),
         )
         return [self._parse(row['payload_json'], TaskMessageDistributionEpoch) for row in rows]
 
@@ -1045,22 +1028,18 @@ class SQLiteTaskStore:
         payload: TaskNodeNotification | dict[str, Any],
     ) -> TaskNodeNotification:
         record = payload if isinstance(payload, TaskNodeNotification) else TaskNodeNotification.model_validate(payload)
-        updated_at = str(record.consumed_at or record.delivered_at or record.created_at or '').strip()
-        if not updated_at:
-            updated_at = record.created_at
         payload_json = record.model_dump_json()
 
         def operation(conn: sqlite3.Connection) -> TaskNodeNotification:
             conn.execute(
-                'INSERT INTO task_node_notifications (notification_id, task_id, node_id, epoch_id, status, created_at, updated_at, payload_json) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?) '
+                'INSERT INTO task_node_notifications (notification_id, task_id, node_id, epoch_id, status, created_at, payload_json) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?) '
                 'ON CONFLICT(notification_id) DO UPDATE SET '
                 'task_id = excluded.task_id, '
                 'node_id = excluded.node_id, '
                 'epoch_id = excluded.epoch_id, '
                 'status = excluded.status, '
                 'created_at = excluded.created_at, '
-                'updated_at = excluded.updated_at, '
                 'payload_json = excluded.payload_json',
                 (
                     record.notification_id,
@@ -1069,7 +1048,6 @@ class SQLiteTaskStore:
                     record.epoch_id,
                     record.status,
                     record.created_at,
-                    updated_at,
                     payload_json,
                 ),
             )
@@ -1087,25 +1065,10 @@ class SQLiteTaskStore:
         self,
         task_id: str,
         node_id: str,
-        *,
-        statuses: list[str] | None = None,
     ) -> list[TaskNodeNotification]:
-        normalized_task_id = str(task_id or '').strip()
-        normalized_node_id = str(node_id or '').strip()
-        normalized_statuses = [
-            str(item or '').strip()
-            for item in list(statuses or [])
-            if str(item or '').strip()
-        ]
-        predicates = ['task_id = ?', 'node_id = ?']
-        params: list[object] = [normalized_task_id, normalized_node_id]
-        if normalized_statuses:
-            placeholders = ', '.join('?' for _ in normalized_statuses)
-            predicates.append(f'status IN ({placeholders})')
-            params.extend(normalized_statuses)
         rows = self._fetchall(
-            f'SELECT payload_json FROM task_node_notifications WHERE {" AND ".join(predicates)} ORDER BY created_at ASC, notification_id ASC',
-            tuple(params),
+            'SELECT payload_json FROM task_node_notifications WHERE task_id = ? AND node_id = ? ORDER BY created_at ASC, notification_id ASC',
+            (str(task_id or '').strip(), str(node_id or '').strip()),
         )
         return [self._parse(row['payload_json'], TaskNodeNotification) for row in rows]
 
