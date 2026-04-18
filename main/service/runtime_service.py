@@ -7369,6 +7369,21 @@ class CreateAsyncTaskTool(Tool):
         final_acceptance_prompt = str(kwargs.get('final_acceptance_prompt') or '').strip()
         raw_requires_final_acceptance = kwargs.get('requires_final_acceptance')
         requires_final_acceptance = bool(raw_requires_final_acceptance) or (raw_requires_final_acceptance in (None, '') and bool(final_acceptance_prompt))
+        precheck = await self._service.precheck_async_task_creation(
+            session_id=session_id,
+            task_text=str(task or '').strip(),
+            core_requirement=normalized_core_requirement,
+            execution_policy=normalized_execution_policy.model_dump(mode='json'),
+            requires_final_acceptance=requires_final_acceptance,
+            final_acceptance_prompt=final_acceptance_prompt,
+        )
+        decision = str(precheck.get('decision') or '').strip()
+        matched_task_id = str(precheck.get('matched_task_id') or '').strip()
+        reason = str(precheck.get('reason') or '').strip()
+        if decision == 'reject_duplicate':
+            return f'任务未创建：与进行中任务 {matched_task_id} 高度重复。原因：{reason}'
+        if decision == 'reject_use_append_notice':
+            return f'任务未创建：现有任务 {matched_task_id} 需要追加通知而不是新建。原因：{reason}'
         record = await self._service.create_task(
             str(task or ''),
             session_id=session_id,
