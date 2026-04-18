@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from g3ku.config.model_manager import ModelManager
+from g3ku.llm_config.enums import ProbeStatus
 
 
 def _write_runtime_config(workspace: Path, *, include_context_window_tokens: bool = True) -> None:
@@ -137,3 +139,27 @@ def test_model_manager_rejects_role_chain_save_when_model_lacks_context_window_t
 
     with pytest.raises(ValueError):
         manager.update_scope_routes_bulk({"ceo": {"model_keys": ["m"]}})
+
+
+def test_model_manager_update_model_persists_context_window_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    manager = ModelManager.load()
+    monkeypatch.setattr(
+        manager.facade.config_service,
+        "probe_draft",
+        lambda draft: SimpleNamespace(success=True, status=ProbeStatus.SUCCESS, message="ok"),
+    )
+
+    updated = manager.update_model(key="m", context_window_tokens=196000)
+
+    assert updated["context_window_tokens"] == 196000
+    assert ModelManager.load().get_model("m")["context_window_tokens"] == 196000
+    saved = json.loads((workspace / ".g3ku" / "config.json").read_text(encoding="utf-8"))
+    assert saved["models"]["catalog"][0]["contextWindowTokens"] == 196000

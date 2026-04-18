@@ -223,6 +223,7 @@ class LLMConfigFacade:
                 retry_on=binding.retry_on,
                 retry_count=binding.retry_count,
                 single_api_key_max_concurrency=binding.single_api_key_max_concurrency,
+                context_window_tokens=self._binding_context_window_tokens(record),
             )
         )
         return self.get_binding(config, binding.key)
@@ -250,6 +251,7 @@ class LLMConfigFacade:
                 raw_limit = draft_payload.get("singleApiKeyMaxConcurrency")
             binding.single_api_key_max_concurrency = normalize_single_api_key_max_concurrency(raw_limit)
         current = self._hydrate_record_secrets(self.repository.get(binding.llm_config_id))
+        binding.context_window_tokens = self._binding_context_window_tokens(current)
         merged = self._merge_draft(current, draft_payload, replace_parameters=False)
         binding.single_api_key_max_concurrency = self._validate_binding_api_key_limits(
             api_key=str(merged.api_key or ""),
@@ -274,6 +276,7 @@ class LLMConfigFacade:
         )
         self.repository.save(self._sanitize_record_for_storage(updated), last_probe_status=probe.status.value)
         self._store_record_secrets(updated)
+        binding.context_window_tokens = self._binding_context_window_tokens(updated)
         return self.get_binding(config, model_key)
 
     def set_binding_enabled(self, config: Any, model_key: str, enabled: bool) -> dict[str, Any]:
@@ -417,6 +420,16 @@ class LLMConfigFacade:
         if provider_id in {"dashscope_embedding", "dashscope_rerank"}:
             provider_id = "dashscope"
         return f"{provider_id}:{record.default_model}"
+
+    @staticmethod
+    def _binding_context_window_tokens(record: NormalizedProviderConfig | None) -> int | None:
+        if record is None:
+            return None
+        try:
+            resolved = int(dict(record.parameters or {}).get("context_window_tokens") or 0)
+        except Exception:
+            return None
+        return resolved if resolved > 0 else None
 
     @staticmethod
     def _llm_auth_overlay_key(config_id: str) -> str:

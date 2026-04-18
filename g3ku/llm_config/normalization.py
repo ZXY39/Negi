@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 from g3ku.utils.api_keys import has_api_keys
 
-from .enums import AuthMode, FieldInputType, ProtocolAdapter
+from .enums import AuthMode, Capability, FieldInputType, ProtocolAdapter
 from .models import FieldError, NormalizedProviderConfig, ProviderConfigDraft, ProviderTemplate
 from .template_registry import TemplateRegistry
 
@@ -222,6 +222,28 @@ def normalize_draft(
             continue
         parameters[field.key] = value
         errors.extend(_validate_field_constraints(field.key, value, field.constraints))
+
+    if draft.capability == Capability.CHAT:
+        raw_context_window_tokens = draft.parameters.get("context_window_tokens")
+        context_window_tokens = _parse_number(raw_context_window_tokens, integer=True)
+        if not isinstance(context_window_tokens, int):
+            errors.append(
+                FieldError(
+                    field="context_window_tokens",
+                    code="invalid_number",
+                    message="Expected a numeric value.",
+                )
+            )
+        elif context_window_tokens <= 25_000:
+            errors.append(
+                FieldError(
+                    field="context_window_tokens",
+                    code="below_min",
+                    message="Must be > 25000.",
+                )
+            )
+        else:
+            parameters["context_window_tokens"] = context_window_tokens
 
     extra_options = dict(draft.extra_options)
     if default_model not in template.suggested_models:

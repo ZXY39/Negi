@@ -16,6 +16,8 @@ from fastapi.testclient import TestClient
 import g3ku.runtime.web_ceo_sessions as web_ceo_sessions
 from g3ku.china_bridge.registry import china_channel_template
 from g3ku.config.loader import ensure_startup_config_ready
+import g3ku.config.model_manager as model_manager
+from g3ku.llm_config.enums import ProbeStatus
 from g3ku.llm_config.facade import LLMConfigFacade
 from g3ku.resources import ResourceManager
 from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
@@ -2837,6 +2839,55 @@ def test_model_retry_count_update_persists_and_refreshes_runtime(tmp_path: Path,
 
     saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
     assert saved['models']['catalog'][0]['retryCount'] == 3
+
+
+def test_model_context_window_update_persists_and_reads_back(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    captured: dict[str, object] = {}
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        captured['force'] = force
+        captured['reason'] = reason
+        return True
+
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+    monkeypatch.setattr(
+        model_manager.ModelManager.load().facade.config_service,
+        'probe_draft',
+        lambda draft: SimpleNamespace(success=True, status=ProbeStatus.SUCCESS, message='ok'),
+    )
+
+    original_load = model_manager.ModelManager.load
+
+    def _patched_load():
+        manager = original_load()
+        monkeypatch.setattr(
+            manager.facade.config_service,
+            'probe_draft',
+            lambda draft: SimpleNamespace(success=True, status=ProbeStatus.SUCCESS, message='ok'),
+        )
+        return manager
+
+    monkeypatch.setattr(model_manager.ModelManager, 'load', staticmethod(_patched_load))
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put('/api/models/m', json={'contextWindowTokens': 196000})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['ok'] is True
+    assert payload['item']['context_window_tokens'] == 196000
+    assert captured == {'force': True, 'reason': 'admin_model_update'}
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['models']['catalog'][0]['contextWindowTokens'] == 196000
 
 
 def test_model_update_returns_503_when_worker_runtime_refresh_ack_fails(tmp_path: Path, monkeypatch):
