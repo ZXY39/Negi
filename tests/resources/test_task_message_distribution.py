@@ -5,7 +5,7 @@ import pytest
 
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES, NODE_FIXED_BUILTIN_TOOL_NAMES
-from main.models import TaskMessageDistributionEpoch, TaskNodeNotification
+from main.models import SpawnChildSpec, TaskMessageDistributionEpoch, TaskNodeNotification
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
 from main.storage.sqlite_store import SQLiteTaskStore
@@ -350,5 +350,171 @@ async def test_force_delete_during_distribution_cancels_epoch_and_stops_further_
         assert service.get_task(record.task_id) is None
         assert service.store.list_active_task_message_distribution_epochs(record.task_id) == []
         assert service.store.list_task_epoch_notifications(record.task_id, epoch.epoch_id) == []
+    finally:
+        await service.close()
+
+
+def _set_spawn_operations(service: MainRuntimeService, *, root_node_id: str, payload: dict[str, object]) -> None:
+    def _mutate(metadata: dict[str, object]) -> dict[str, object]:
+        metadata["spawn_operations"] = payload
+        return metadata
+
+    service.log_service.update_node_metadata(root_node_id, _mutate)
+
+
+@pytest.mark.asyncio
+async def test_spawned_child_nodes_record_owner_round_metadata(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(
+            goal="child goal",
+            prompt="child prompt",
+            execution_policy={"mode": "focus"},
+            acceptance_prompt="check child",
+        )
+        cached_payload = {
+            "specs": [spec.model_dump(mode="json")],
+            "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
+            "completed": False,
+        }
+
+        service.node_runner._materialize_spawn_batch_children(
+            task=task,
+            parent=root,
+            specs=[spec],
+            allowed_indexes=[0],
+            cache_key="round-1",
+            cached_payload=cached_payload,
+        )
+
+        root_after = service.store.get_node(root.node_id)
+        entry = dict((((root_after.metadata or {}).get("spawn_operations") or {}).get("round-1") or {}).get("entries")[0])
+        child = service.store.get_node(entry["child_node_id"])
+        assert child is not None
+
+        acceptance = service.node_runner.create_acceptance_node(
+            task=task,
+            accepted_node=child,
+            goal="accept:child goal",
+            acceptance_prompt="check child",
+            parent_node_id=child.node_id,
+            owner_parent_node_id=root.node_id,
+            owner_round_id="round-1",
+            owner_entry_index=0,
+        )
+
+        child_detail = service.get_node_detail_payload(record.task_id, child.node_id)
+        assert child.metadata["spawn_owner_parent_node_id"] == root.node_id
+        assert child.metadata["spawn_owner_round_id"] == "round-1"
+        assert child.metadata["spawn_owner_entry_index"] == 0
+        assert child.metadata["spawn_owner_kind"] == "child"
+        assert acceptance.metadata["accepted_node_id"] == child.node_id
+        assert acceptance.metadata["spawn_owner_parent_node_id"] == root.node_id
+        assert acceptance.metadata["spawn_owner_round_id"] == "round-1"
+        assert acceptance.metadata["spawn_owner_entry_index"] == 0
+        assert acceptance.metadata["spawn_owner_kind"] == "acceptance"
+        assert child_detail is not None
+        assert child_detail["item"]["spawn_owner_parent_node_id"] == root.node_id
+        assert child_detail["item"]["spawn_owner_round_id"] == "round-1"
+        assert child_detail["item"]["latest_live_distribution_round_id"] == "round-1"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_live_distribution_children_use_latest_incomplete_spawn_round_only(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        first_spec = SpawnChildSpec(goal="first child", prompt="first prompt", execution_policy={"mode": "focus"})
+        second_spec = SpawnChildSpec(goal="second child", prompt="second prompt", execution_policy={"mode": "focus"})
+        first_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=first_spec,
+            owner_round_id="round-1",
+            owner_entry_index=0,
+        )
+        second_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=second_spec,
+            owner_round_id="round-2",
+            owner_entry_index=0,
+        )
+        _set_spawn_operations(
+            service,
+            root_node_id=root.node_id,
+            payload={
+                "round-1": {
+                    "specs": [first_spec.model_dump(mode="json")],
+                    "entries": [{"index": 0, "goal": "first child", "child_node_id": first_child.node_id}],
+                    "completed": False,
+                },
+                "round-2": {
+                    "specs": [second_spec.model_dump(mode="json")],
+                    "entries": [{"index": 0, "goal": "second child", "child_node_id": second_child.node_id}],
+                    "completed": False,
+                },
+            },
+        )
+
+        assert service.node_runner.live_distribution_child_node_ids(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+        ) == [second_child.node_id]
+        assert service.node_runner.node_is_in_live_distribution_tree(task_id=record.task_id, node_id=root.node_id) is True
+        assert service.node_runner.node_is_in_live_distribution_tree(task_id=record.task_id, node_id=first_child.node_id) is False
+        assert service.node_runner.node_is_in_live_distribution_tree(task_id=record.task_id, node_id=second_child.node_id) is True
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_spawn_round_children_are_not_distribution_targets(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy={"mode": "focus"})
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=spec,
+            owner_round_id="round-1",
+            owner_entry_index=0,
+        )
+        _set_spawn_operations(
+            service,
+            root_node_id=root.node_id,
+            payload={
+                "round-1": {
+                    "specs": [spec.model_dump(mode="json")],
+                    "entries": [{"index": 0, "goal": "child goal", "child_node_id": child.node_id}],
+                    "completed": True,
+                },
+            },
+        )
+
+        assert service.node_runner.live_distribution_child_node_ids(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+        ) == []
+        assert service.node_runner.node_is_in_live_distribution_tree(task_id=record.task_id, node_id=child.node_id) is False
     finally:
         await service.close()

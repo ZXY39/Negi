@@ -5741,6 +5741,23 @@ class MainRuntimeService:
         if detail is None:
             return None
         item = self._repair_legacy_display_payload(detail.model_dump(mode='json'))
+        runtime_node = self.store.get_node(node_id)
+        runtime_metadata = dict((runtime_node.metadata or {}) if runtime_node is not None else {})
+        latest_live_distribution_round_id = ''
+        if runtime_node is not None:
+            latest_live_round = self.node_runner._latest_incomplete_spawn_round(parent=runtime_node)
+            if latest_live_round is not None:
+                latest_live_distribution_round_id = str(latest_live_round[0] or '').strip()
+            elif self.node_runner.node_is_in_live_distribution_tree(
+                task_id=normalized_task_id,
+                node_id=node_id,
+            ):
+                latest_live_distribution_round_id = str(runtime_metadata.get('spawn_owner_round_id') or '').strip()
+        item['spawn_owner_parent_node_id'] = str(runtime_metadata.get('spawn_owner_parent_node_id') or '').strip()
+        item['spawn_owner_round_id'] = str(runtime_metadata.get('spawn_owner_round_id') or '').strip()
+        item['spawn_owner_entry_index'] = int(runtime_metadata.get('spawn_owner_entry_index') or 0)
+        item['spawn_owner_kind'] = str(runtime_metadata.get('spawn_owner_kind') or '').strip()
+        item['latest_live_distribution_round_id'] = latest_live_distribution_round_id
         latest_context = self.get_node_latest_context_payload(normalized_task_id, node_id)
         if latest_context is not None:
             if not str(item.get('actual_request_ref') or '').strip():

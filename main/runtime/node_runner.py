@@ -1718,7 +1718,13 @@ class NodeRunner:
                     exclude_node_ids=self._claimed_spawn_node_ids(entries=entries, field='child_node_id', skip_index=index),
                 )
                 if child is None:
-                    child = self._create_execution_child(task=task, parent=parent, spec=spec)
+                    child = self._create_execution_child(
+                        task=task,
+                        parent=parent,
+                        spec=spec,
+                        owner_round_id=cache_key,
+                        owner_entry_index=index,
+                    )
                 self._update_spawn_entry(
                     task_id=task.task_id,
                     parent_node_id=parent.node_id,
@@ -1727,6 +1733,13 @@ class NodeRunner:
                     index=index,
                     child_node_id=child.node_id,
                 )
+            self._stamp_spawn_owner_metadata(
+                node_id=child.node_id,
+                parent_node_id=parent.node_id,
+                owner_round_id=cache_key,
+                owner_entry_index=index,
+                owner_kind='child',
+            )
 
             child_result = await self._run_nested_node(task.task_id, child.node_id)
             child = self._store.get_node(child.node_id) or child
@@ -1823,6 +1836,9 @@ class NodeRunner:
                         goal=acceptance_goal,
                         acceptance_prompt=acceptance_prompt,
                         parent_node_id=child.node_id,
+                        owner_parent_node_id=parent.node_id,
+                        owner_round_id=cache_key,
+                        owner_entry_index=index,
                     )
                 self._update_spawn_entry(
                     task_id=task.task_id,
@@ -1833,6 +1849,13 @@ class NodeRunner:
                     acceptance_node_id=acceptance.node_id,
                     check_status='running',
                 )
+            self._stamp_spawn_owner_metadata(
+                node_id=acceptance.node_id,
+                parent_node_id=parent.node_id,
+                owner_round_id=cache_key,
+                owner_entry_index=index,
+                owner_kind='acceptance',
+            )
 
             acceptance_result = await self._run_nested_node(task.task_id, acceptance.node_id)
             acceptance = self._store.get_node(acceptance.node_id) or acceptance
@@ -2109,7 +2132,20 @@ class NodeRunner:
                 exclude_node_ids=self._claimed_spawn_node_ids(entries=entries, field='child_node_id', skip_index=index),
             )
             if child is None:
-                child = self._create_execution_child(task=task, parent=parent, spec=spec)
+                child = self._create_execution_child(
+                    task=task,
+                    parent=parent,
+                    spec=spec,
+                    owner_round_id=cache_key,
+                    owner_entry_index=index,
+                )
+            self._stamp_spawn_owner_metadata(
+                node_id=child.node_id,
+                parent_node_id=parent.node_id,
+                owner_round_id=cache_key,
+                owner_entry_index=index,
+                owner_kind='child',
+            )
             self._update_spawn_entry(
                 task_id=task.task_id,
                 parent_node_id=parent.node_id,
@@ -2304,7 +2340,15 @@ class NodeRunner:
             node_metadata.get('execution_policy', task_metadata.get('execution_policy'))
         )
 
-    def _create_execution_child(self, *, task, parent: NodeRecord, spec: SpawnChildSpec) -> NodeRecord:
+    def _create_execution_child(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        spec: SpawnChildSpec,
+        owner_round_id: str = '',
+        owner_entry_index: int = 0,
+    ) -> NodeRecord:
         execution_policy = normalize_execution_policy_metadata(spec.execution_policy)
         child_prompt = str(spec.prompt or '')
         metadata = {
@@ -2313,7 +2357,11 @@ class NodeRunner:
                 parent_node_id=parent.node_id,
                 goal=spec.goal,
                 prompt=child_prompt,
-            )
+            ),
+            'spawn_owner_parent_node_id': parent.node_id,
+            'spawn_owner_round_id': str(owner_round_id or '').strip(),
+            'spawn_owner_entry_index': int(owner_entry_index),
+            'spawn_owner_kind': 'child',
         }
         child = NodeRecord(
             node_id=new_node_id(),
@@ -2352,6 +2400,9 @@ class NodeRunner:
         goal: str,
         acceptance_prompt: str,
         parent_node_id: str | None = None,
+        owner_parent_node_id: str | None = None,
+        owner_round_id: str = '',
+        owner_entry_index: int = 0,
         metadata: dict[str, Any] | None = None,
     ) -> NodeRecord:
         execution_policy = self._resolve_execution_policy(task, node=accepted_node)
@@ -2376,6 +2427,10 @@ class NodeRunner:
                 prompt=prompt,
                 accepted_node_id=accepted_node.node_id,
             ),
+            'spawn_owner_parent_node_id': str(owner_parent_node_id or '').strip(),
+            'spawn_owner_round_id': str(owner_round_id or '').strip(),
+            'spawn_owner_entry_index': int(owner_entry_index),
+            'spawn_owner_kind': 'acceptance',
         }
         acceptance = NodeRecord(
             node_id=new_node_id(),
@@ -2399,6 +2454,104 @@ class NodeRunner:
             metadata={**base_metadata, **dict(metadata or {})},
         )
         return self._log_service.create_node(task.task_id, acceptance)
+
+    def _stamp_spawn_owner_metadata(
+        self,
+        *,
+        node_id: str,
+        parent_node_id: str,
+        owner_round_id: str,
+        owner_entry_index: int,
+        owner_kind: str,
+    ) -> None:
+        normalized_node_id = str(node_id or '').strip()
+        if not normalized_node_id:
+            return
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            metadata['spawn_owner_parent_node_id'] = str(parent_node_id or '').strip()
+            metadata['spawn_owner_round_id'] = str(owner_round_id or '').strip()
+            metadata['spawn_owner_entry_index'] = int(owner_entry_index)
+            metadata['spawn_owner_kind'] = str(owner_kind or '').strip()
+            return metadata
+
+        self._log_service.update_node_metadata(normalized_node_id, _mutate)
+
+    def _latest_incomplete_spawn_round(self, *, parent: NodeRecord) -> tuple[str, dict[str, Any]] | None:
+        operations = (parent.metadata or {}).get('spawn_operations') if isinstance(parent.metadata, dict) else {}
+        if not isinstance(operations, dict):
+            return None
+        for round_id, payload in reversed(list(operations.items())):
+            if not isinstance(payload, dict):
+                continue
+            if bool(payload.get('completed')):
+                continue
+            return str(round_id or '').strip(), copy.deepcopy(payload)
+        return None
+
+    def live_distribution_child_node_ids(self, *, task_id: str, parent_node_id: str) -> list[str]:
+        task = self._store.get_task(task_id)
+        parent = self._store.get_node(parent_node_id)
+        if task is None or parent is None or str(parent.task_id or '').strip() != str(task.task_id or '').strip():
+            return []
+        if str(parent.node_kind or '').strip().lower() != KIND_EXECUTION:
+            return []
+        latest_round = self._latest_incomplete_spawn_round(parent=parent)
+        if latest_round is None:
+            return []
+        _round_id, payload = latest_round
+        child_node_ids: list[str] = []
+        seen: set[str] = set()
+        for entry in list(payload.get('entries') or []):
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get('review_decision') or '').strip().lower() == 'blocked':
+                continue
+            child_node_id = str(entry.get('child_node_id') or '').strip()
+            if not child_node_id or child_node_id in seen:
+                continue
+            child = self._store.get_node(child_node_id)
+            if child is None or str(child.node_kind or '').strip().lower() != KIND_EXECUTION:
+                continue
+            if not self.node_is_in_live_distribution_tree(task_id=task.task_id, node_id=child_node_id):
+                continue
+            seen.add(child_node_id)
+            child_node_ids.append(child_node_id)
+        return child_node_ids
+
+    def node_is_in_live_distribution_tree(self, *, task_id: str, node_id: str) -> bool:
+        task = self._store.get_task(task_id)
+        node = self._store.get_node(node_id)
+        if task is None or node is None or str(node.task_id or '').strip() != str(task.task_id or '').strip():
+            return False
+        if str(node.node_kind or '').strip().lower() == KIND_ACCEPTANCE:
+            return False
+        if str(node.node_id or '').strip() == str(task.root_node_id or '').strip():
+            return True
+        metadata = dict(node.metadata or {})
+        if str(metadata.get('spawn_owner_kind') or '').strip().lower() != 'child':
+            return False
+        owner_parent_node_id = str(metadata.get('spawn_owner_parent_node_id') or '').strip()
+        owner_round_id = str(metadata.get('spawn_owner_round_id') or '').strip()
+        owner_entry_index = int(metadata.get('spawn_owner_entry_index') or 0)
+        if not owner_parent_node_id or not owner_round_id:
+            return False
+        parent = self._store.get_node(owner_parent_node_id)
+        if parent is None:
+            return False
+        latest_round = self._latest_incomplete_spawn_round(parent=parent)
+        if latest_round is None:
+            return False
+        latest_round_id, payload = latest_round
+        if latest_round_id != owner_round_id:
+            return False
+        entries = list(payload.get('entries') or [])
+        if owner_entry_index < 0 or owner_entry_index >= len(entries):
+            return False
+        entry = dict(entries[owner_entry_index] or {}) if isinstance(entries[owner_entry_index], dict) else {}
+        if str(entry.get('child_node_id') or '').strip() != str(node.node_id or '').strip():
+            return False
+        return self.node_is_in_live_distribution_tree(task_id=task.task_id, node_id=parent.node_id)
 
     def _compose_acceptance_prompt(
         self,
