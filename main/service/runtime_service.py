@@ -5708,13 +5708,10 @@ class MainRuntimeService:
             ]
         selection = NodeContextSelectionResult(
             mode='persisted_frame_restore',
-            memory_search_visible='memory_search' in set(callable_tool_names),
             selected_skill_ids=selected_skill_ids,
             selected_tool_names=callable_tool_names,
             candidate_skill_ids=candidate_skill_ids,
             candidate_tool_names=candidate_tool_names,
-            memory_query='',
-            retrieval_scope={},
             trace={'mode': 'persisted_frame_restore'},
         )
         return {
@@ -6090,44 +6087,9 @@ class MainRuntimeService:
                 ),
             ),
         )
-        manager = getattr(self, 'memory_manager', None)
-        # Node catalog narrowing is always selector-driven; unified_context only gates memory block retrieval.
-        if manager is None or not getattr(manager, '_feature_enabled', lambda _key: False)('unified_context'):
-            return enriched
-        prompt = str(inputs.get('prompt') or '')
-        goal = str(inputs.get('goal') or '')
-        core_requirement = str(inputs.get('core_requirement') or '')
-        if not (prompt or goal or core_requirement):
-            return enriched
-        if not bool(getattr(selection, 'memory_search_visible', False)):
-            return enriched
-        memory_query = str(getattr(selection, 'memory_query', '') or '').strip()
-        if not memory_query:
-            return enriched
-        memory_scope = self._task_memory_scope(task)
-        channel = str(memory_scope.get('channel') or 'unknown')
-        chat_id = str(memory_scope.get('chat_id') or 'unknown')
-        retrieval_scope = dict(getattr(selection, 'retrieval_scope', {}) or {})
-        try:
-            block = await manager.retrieve_block(
-                query=memory_query,
-                session_key=session_key,
-                channel=channel,
-                chat_id=chat_id,
-                search_context_types=list(retrieval_scope.get('search_context_types') or []),
-                allowed_context_types=list(retrieval_scope.get('allowed_context_types') or []),
-                allowed_resource_record_ids=list(retrieval_scope.get('allowed_resource_record_ids') or []),
-                allowed_skill_record_ids=list(retrieval_scope.get('allowed_skill_record_ids') or []),
-            )
-        except Exception:
-            return enriched
-        if not block:
-            return enriched
-        if enriched and enriched[0].get('role') == 'system':
-            base = str(enriched[0].get('content') or '')
-            enriched[0] = {**enriched[0], 'content': f"{base}\n\n{block}".strip()}
-        else:
-            enriched.insert(0, {'role': 'system', 'content': block})
+        # Node catalog narrowing stays selector-driven through the memory catalog bridge.
+        # Long-term MEMORY.md snapshot injection is CEO/frontdoor-only, so nodes do not
+        # receive an extra retrieved-memory block here.
         return enriched
 
     def summary(self, session_id: str) -> str:

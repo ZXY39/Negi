@@ -505,30 +505,16 @@ def test_compact_schema_memory_write_manifest_keeps_authoritative_schema_and_mov
     repo_root = Path(__file__).resolve().parents[2]
     manifest = yaml.safe_load((repo_root / "tools" / "memory_write" / "resource.yaml").read_text(encoding="utf-8")) or {}
     toolskill = (repo_root / "tools" / "memory_write" / "toolskills" / "SKILL.md").read_text(encoding="utf-8")
-
-    authoritative_value_schema = (
+    content_schema = (
         manifest.get("parameters", {})
         .get("properties", {})
-        .get("facts", {})
-        .get("items", {})
-        .get("properties", {})
-        .get("value", {})
-    )
-    compact_value_schema = (
-        manifest.get("model_parameters", {})
-        .get("properties", {})
-        .get("facts", {})
-        .get("items", {})
-        .get("properties", {})
-        .get("value", {})
+        .get("content", {})
     )
 
-    assert authoritative_value_schema["type"] == ["string", "number", "boolean", "object", "array", "null"]
-    assert compact_value_schema["type"] == "string"
-    assert "JSON-serialized string" in str(compact_value_schema.get("description") or "")
-    assert "time_semantics" not in str(compact_value_schema.get("description") or "")
-    assert "Serialize object/array values as JSON strings" in toolskill
-    assert "Choose `time_semantics` intentionally" in toolskill
+    assert content_schema["type"] == "string"
+    assert "queue for the memory agent" in str(content_schema.get("description") or "")
+    assert "raw memory candidate" in toolskill.lower()
+    assert "memory agent will decide the final compact `MEMORY.md` wording" in toolskill
 
 
 def test_compact_schema_resource_tool_uses_manifest_model_visible_overrides(tmp_path: Path) -> None:
@@ -550,11 +536,11 @@ def test_compact_schema_resource_tool_uses_manifest_model_visible_overrides(tmp_
 
     assert tool is not None
     schema = tool.to_model_schema()["function"]
-    value_schema = schema["parameters"]["properties"]["facts"]["items"]["properties"]["value"]
+    content_schema = schema["parameters"]["properties"]["content"]
 
-    assert schema["description"] == "Write durable memory facts. Use string values in the callable schema."
-    assert value_schema["type"] == "string"
-    assert "JSON-serialized string" in str(value_schema.get("description") or "")
+    assert schema["description"].startswith("Queue a durable long-term memory write request.")
+    assert content_schema["type"] == "string"
+    assert "queue for the memory agent" in str(content_schema.get("description") or "")
 
 
 def test_compact_schema_manifest_backed_tool_uses_normalized_model_visible_overrides(tmp_path: Path) -> None:
@@ -2191,7 +2177,6 @@ def test_tool_provider_includes_hydrated_tools_even_when_selection_cache_exclude
         ('task-hydrated-provider', 'node-hydrated-provider'): {
             'selection': NodeContextSelectionResult(
                 mode='dense_rerank',
-                memory_search_visible=False,
                 selected_tool_names=['content_open'],
                 candidate_tool_names=['content_open', 'filesystem_write'],
             )
@@ -3596,7 +3581,7 @@ async def test_react_loop_uses_latest_model_refs_from_supplier_between_turns() -
 
 
 @pytest.mark.asyncio
-async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_skills_and_retrieves_memory_only(
+async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_skills_without_memory_overlay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     selector_calls: list[dict[str, object]] = []
@@ -3614,16 +3599,8 @@ async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_sk
         selector_calls.append(dict(kwargs))
         return NodeContextSelectionResult(
             mode="visible_only",
-            memory_search_visible=True,
             selected_skill_ids=["skill-creator", "tmux"],
-            selected_tool_names=["filesystem", "memory_search"],
-            memory_query="Prompt: where is the plan\nGoal: where is the plan\nCore requirement: where is the plan",
-            retrieval_scope={
-                "search_context_types": ["memory"],
-                "allowed_context_types": ["memory"],
-                "allowed_resource_record_ids": [],
-                "allowed_skill_record_ids": [],
-            },
+            selected_tool_names=["filesystem"],
             trace={"mode": "visible_only"},
         )
 
@@ -3642,7 +3619,7 @@ async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_sk
         SimpleNamespace(skill_id='skill-creator', display_name='skill-creator', description='skill creator'),
         SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
     ]
-    service.list_effective_tool_names = lambda *, actor_role, session_id: ['filesystem', 'memory_search']
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['filesystem']
 
     task = SimpleNamespace(
         session_id="web:ceo-origin",
@@ -3668,21 +3645,10 @@ async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_sk
             "core_requirement": "where is the plan",
             "visible_skills": service.list_visible_skill_resources(actor_role="execution", session_id="web:ceo-origin"),
             "visible_tool_families": service.list_visible_tool_families(actor_role="execution", session_id="web:ceo-origin"),
-            "visible_tool_names": ["filesystem", "memory_search"],
+            "visible_tool_names": ["filesystem"],
         }
     ]
-    assert retrieve_block_calls == [
-        {
-            "query": "Prompt: where is the plan\nGoal: where is the plan\nCore requirement: where is the plan",
-            "session_key": "web:ceo-origin",
-            "channel": "web",
-            "chat_id": "shared",
-            "search_context_types": ["memory"],
-            "allowed_context_types": ["memory"],
-            "allowed_resource_record_ids": [],
-            "allowed_skill_record_ids": [],
-        }
-    ]
+    assert retrieve_block_calls == []
     dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
     assert dynamic_payload["candidate_skills"] == [
@@ -3695,11 +3661,11 @@ async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_sk
             "description": "terminal workflow",
         },
     ]
-    assert "memory block" in enriched[0]["content"]
+    assert enriched[0]["content"] == "base prompt"
 
 
 @pytest.mark.asyncio
-async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_only_retrieval(
+async def test_enrich_node_messages_uses_selector_narrowed_skills_without_memory_overlay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     retrieve_block_calls: list[dict[str, object]] = []
@@ -3716,18 +3682,10 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_onl
         _ = kwargs
         return NodeContextSelectionResult(
             mode="dense_rerank",
-            memory_search_visible=True,
             selected_skill_ids=["tmux", "skill-creator"],
             selected_tool_names=["content"],
             candidate_skill_ids=["tmux", "skill-creator"],
             candidate_tool_names=["content"],
-            memory_query="Prompt: terminal workflow\nGoal: terminal workflow\nCore requirement: terminal workflow",
-            retrieval_scope={
-                "search_context_types": ["memory"],
-                "allowed_context_types": ["memory"],
-                "allowed_resource_record_ids": [],
-                "allowed_skill_record_ids": [],
-            },
             trace={"mode": "dense_rerank"},
         )
 
@@ -3746,7 +3704,7 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_onl
         SimpleNamespace(skill_id='skill-creator', display_name='skill-creator', description='skill creator'),
         SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
     ]
-    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content', 'memory_search']
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content']
 
     task = SimpleNamespace(
         session_id="web:ceo-origin",
@@ -3763,18 +3721,7 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_onl
         ],
     )
 
-    assert retrieve_block_calls == [
-        {
-            "query": "Prompt: terminal workflow\nGoal: terminal workflow\nCore requirement: terminal workflow",
-            "session_key": "web:ceo-origin",
-            "channel": "web",
-            "chat_id": "shared",
-            "search_context_types": ["memory"],
-            "allowed_context_types": ["memory"],
-            "allowed_resource_record_ids": [],
-            "allowed_skill_record_ids": [],
-        }
-    ]
+    assert retrieve_block_calls == []
     dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
     assert dynamic_payload["candidate_skills"] == [
@@ -3793,7 +3740,7 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_and_memory_onl
             "description": "",
         }
     ]
-    assert "semantic block" in enriched[0]["content"]
+    assert enriched[0]["content"] == "base prompt"
 
 
 @pytest.mark.asyncio
@@ -3804,13 +3751,10 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
         _ = kwargs
         return NodeContextSelectionResult(
             mode="dense_rerank",
-            memory_search_visible=False,
             selected_skill_ids=["tmux"],
             selected_tool_names=["content", "exec"],
             candidate_skill_ids=["tmux"],
             candidate_tool_names=["content", "exec"],
-            memory_query="",
-            retrieval_scope={},
             trace={"mode": "dense_rerank"},
         )
 
@@ -3882,13 +3826,10 @@ async def test_enrich_node_messages_includes_exec_runtime_policy_in_dynamic_cont
         _ = kwargs
         return NodeContextSelectionResult(
             mode="dense_rerank",
-            memory_search_visible=False,
             selected_skill_ids=["tmux"],
             selected_tool_names=["content"],
             candidate_skill_ids=["tmux"],
             candidate_tool_names=["content"],
-            memory_query="",
-            retrieval_scope={},
             trace={"mode": "dense_rerank"},
         )
 
@@ -3955,13 +3896,10 @@ async def test_enrich_node_messages_locks_callable_tools_to_submit_next_stage_wi
         _ = kwargs
         return NodeContextSelectionResult(
             mode="dense_rerank",
-            memory_search_visible=False,
             selected_skill_ids=["tmux"],
             selected_tool_names=["content"],
             candidate_skill_ids=["tmux"],
             candidate_tool_names=["content"],
-            memory_query="",
-            retrieval_scope={},
             trace={"mode": "dense_rerank"},
         )
 
@@ -4027,7 +3965,7 @@ async def test_enrich_node_messages_locks_callable_tools_to_submit_next_stage_wi
 
 
 @pytest.mark.asyncio
-async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_not_visible(
+async def test_enrich_node_messages_never_injects_memory_retrieval_overlay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     retrieve_block_calls: list[dict[str, object]] = []
@@ -4044,18 +3982,10 @@ async def test_enrich_node_messages_skips_memory_retrieval_when_memory_search_no
         _ = kwargs
         return NodeContextSelectionResult(
             mode="dense_rerank",
-            memory_search_visible=False,
             selected_skill_ids=["tmux"],
             selected_tool_names=["filesystem"],
             candidate_skill_ids=["tmux"],
             candidate_tool_names=["filesystem"],
-            memory_query="",
-            retrieval_scope={
-                "search_context_types": [],
-                "allowed_context_types": [],
-                "allowed_resource_record_ids": [],
-                "allowed_skill_record_ids": [],
-            },
             trace={"mode": "dense_rerank"},
         )
 
@@ -4129,18 +4059,10 @@ async def test_enrich_node_messages_still_applies_selector_when_unified_context_
         _ = kwargs
         return NodeContextSelectionResult(
             mode="dense_rerank",
-            memory_search_visible=True,
             selected_skill_ids=["tmux"],
             selected_tool_names=["content"],
             candidate_skill_ids=["tmux"],
             candidate_tool_names=["content"],
-            memory_query="Prompt: terminal workflow\nGoal: terminal workflow\nCore requirement: terminal workflow",
-            retrieval_scope={
-                "search_context_types": ["memory"],
-                "allowed_context_types": ["memory"],
-                "allowed_resource_record_ids": [],
-                "allowed_skill_record_ids": [],
-            },
             trace={"mode": "dense_rerank"},
         )
 
@@ -4159,7 +4081,7 @@ async def test_enrich_node_messages_still_applies_selector_when_unified_context_
         SimpleNamespace(skill_id='skill-creator', display_name='skill-creator', description='skill creator'),
         SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
     ]
-    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content', 'memory_search']
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content']
 
     task = SimpleNamespace(
         session_id="web:ceo-origin",

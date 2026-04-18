@@ -129,12 +129,21 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 
 Maintenance note for surfaced fixed builtins:
 
-- Some concrete executors are both resource-backed and fixed builtins, for example CEO `exec` / `memory_search` / `memory_write` and node `content_open` / `content_search` / `exec` / loader tools.
+- Some concrete executors are both resource-backed and fixed builtins, for example CEO `exec` / `memory_write` / `memory_delete` / `memory_note` and node `content_open` / `content_search` / `exec` / loader tools.
 - These executors still remain directly callable through the fixed-builtin path when the runtime exposes them.
 - They no longer consume semantic top-k budget. CEO/frontdoor semantic narrowing now removes fixed builtin executors from the retrieval-side visible family/executor set before dense/rerank. Node context selection does the same before applying its 16-tool semantic candidate cap.
 - Treat semantic top-k as an extension-tool budget, not as a budget shared with fixed builtins. If an extension tool is missing from the shortlist, debug semantic recall against the filtered non-fixed executor set first.
 - `exec` now has a second contract axis besides RBAC: surfaced family `exec_runtime` may carry persisted `metadata.execution_mode`, and the runtime tool contract / `load_tool_context` payload is the authoritative place where the current mode is exposed to models.
 - The current supported modes are `governed` and `full_access`. `governed` keeps exec-side guardrails; `full_access` removes exec-side read-only / path / safety checks, but it does not bypass Tool Admin enablement or RBAC.
+
+Maintenance note for the memory tool family:
+
+- `memory_search` is removed from the agent-facing contract.
+- CEO/frontdoor now receives committed long-term memory through the injected `MEMORY.md` snapshot, not through a retrieval tool call.
+- `memory_note(ref)` is the only on-demand detailed-memory loader.
+- Node execution and acceptance paths no longer inject extra memory retrieval blocks; they only use the catalog bridge for tool/skill narrowing.
+- `memory_write` and `memory_delete` are queue-submit tools. They ask the memory runtime to process a later batch; they do not synchronously rewrite committed memory during the current turn.
+- The actual rewrite/delete decision is now delegated to a dedicated internal memory agent with a restricted tool surface. That internal agent is not part of the normal agent-facing tool catalog and should not be debugged as if it were a surfaced Tool Admin family.
 
 - `candidate_tool_names` / `candidate_skill_ids` 现在都采用同一语义：`RBAC 可见 ∩ 语义召回命中` 的当前候选集合。
 - 如果语义召回不可用，候选集合直接退化为 `RBAC 可见集合`，而不是停止运行。

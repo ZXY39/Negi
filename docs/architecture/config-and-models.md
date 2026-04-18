@@ -242,3 +242,32 @@ If a user reports that frontdoor compaction settings stopped working after upgra
 
 - whether they are still trying to set the removed message-count fields
 - whether they migrated to the `frontdoor_global_summary_*` token/ratio settings instead
+
+## Memory Runtime Settings Anchor
+
+`tools/memory_runtime/resource.yaml` is still the runtime settings anchor for long-term memory, but the meaning of that settings surface changed.
+
+- `document.*` now controls the Markdown notebook layout, including `memory/MEMORY.md`, `memory/notes/`, the summary character limit, and the full document character ceiling.
+- `queue.*` now controls the single durable queue, including `memory/queue.jsonl`, `memory/ops.jsonl`, batch size, and max wait time.
+- `agent.*` now controls the dedicated memory-maintenance worker behavior.
+- Older `store.*`, `retrieval.*`, and `embedding.*` sections still matter for the catalog bridge because tool/skill semantic narrowing still relies on that projection.
+
+There is now also a project-config side contract that maintainers must keep straight:
+
+- `models.roles.memory` is the dedicated model chain for the internal memory agent.
+- `agents.roleIterations.memory` controls the memory agent's model-call round cap.
+- `agents.roleConcurrency.memory` is fixed to `1`; it is persisted for config/UI symmetry but is not an operator-tunable parallelism knob.
+- `models.roles.memory` may be empty, but when it is non-empty every referenced binding must have `capability=chat`. The admin route now rejects embedding/rerank or other non-chat bindings for the memory role instead of letting the queue fail later at runtime.
+- Unlike `ceo`, `execution`, and `inspection`, the `memory` role is allowed to be empty. That does not fail config load; instead it blocks the memory queue head at runtime until the role is configured.
+
+Maintainers should no longer read `tools/memory_runtime/resource.yaml` as "structured memory database tuning only". It now mixes two boundaries:
+
+- Markdown long-term memory notebook settings
+- Catalog bridge retrieval settings
+
+When debugging "memory queue stuck" reports, check both layers in order:
+
+1. `models.roles.memory` / `agents.roleIterations.memory` in `.g3ku/config.json`
+2. `tools/memory_runtime/resource.yaml` queue/document limits
+
+Do not assume a valid CEO model chain implies a valid memory-agent chain. The memory worker no longer falls back to CEO.

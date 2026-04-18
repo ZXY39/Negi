@@ -42,6 +42,22 @@ class ApiClient {
                 return "Task worker status is temporarily stale. Wait for reconnection and try again.";
             case "task_worker_offline":
                 return "Task worker is offline. Controls are unavailable right now.";
+            case "memory_manager_unavailable":
+                return "记忆服务暂不可用，请稍后刷新。";
+            case "memory_queue_read_failed":
+                return "记忆队列暂时不可读取，请稍后刷新。";
+            case "memory_queue_unavailable":
+                return "记忆队列暂不可用，请稍后刷新。";
+            case "memory_processed_read_failed":
+                return "已处理记忆暂时不可读取，请稍后刷新。";
+            case "memory_processed_unavailable":
+                return "已处理记忆列表暂不可用，请稍后刷新。";
+            case "memory_note_unavailable":
+                return "记忆 note 预览暂不可用，请稍后刷新。";
+            case "memory_note_not_found":
+                return "未找到对应的记忆 note。";
+            case "memory_note_read_failed":
+                return "读取记忆 note 失败，请稍后重试。";
             case "llm_binding_key_exists":
                 return "配置名已存在，请使用其他配置名。";
             default:
@@ -755,6 +771,37 @@ class ApiClient {
 
     static async getLlmMemoryModels() {
         const data = await this.get("/api/llm/memory");
+        return data.item || null;
+    }
+
+    static async getMemoryQueue({ limit = 20, offset = 0 } = {}) {
+        const data = await this._request("GET", "/api/memory/queue", {
+            params: { limit, offset },
+            requestKey: `memory:queue:${offset}:${limit}`,
+        });
+        return {
+            items: data.items || [],
+            total: data.total || 0,
+            hasMore: Boolean(data.has_more ?? data.hasMore),
+        };
+    }
+
+    static async getMemoryProcessed({ limit = 20, offset = 0 } = {}) {
+        const data = await this._request("GET", "/api/memory/processed", {
+            params: { limit, offset },
+            requestKey: `memory:processed:${offset}:${limit}`,
+        });
+        return {
+            items: data.items || [],
+            total: data.total || 0,
+            hasMore: Boolean(data.has_more ?? data.hasMore),
+        };
+    }
+
+    static async getMemoryNote(ref) {
+        const data = await this._request("GET", `/api/memory/notes/${encodeURIComponent(ref)}`, {
+            requestKey: `memory:note:${String(ref || "").trim()}`,
+        });
         return data.item || null;
     }
 

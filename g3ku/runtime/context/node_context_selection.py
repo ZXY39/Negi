@@ -56,36 +56,13 @@ def _cap_ordered(values: list[str], *, limit: int) -> list[str]:
     return list(values[:capped_limit])
 
 
-def _build_memory_query(*, prompt: str, goal: str, core_requirement: str) -> str:
-    return "\n".join(
-        [
-            f"Prompt: {_normalized_text(prompt)}",
-            f"Goal: {_normalized_text(goal)}",
-            f"Core requirement: {_normalized_text(core_requirement)}",
-        ]
-    ).strip()
-
-
-def _memory_retrieval_scope(*, enabled: bool) -> dict[str, Any]:
-    memory_context_types = ["memory"] if enabled else []
-    return {
-        "search_context_types": list(memory_context_types),
-        "allowed_context_types": list(memory_context_types),
-        "allowed_resource_record_ids": [],
-        "allowed_skill_record_ids": [],
-    }
-
-
 @dataclass(slots=True)
 class NodeContextSelectionResult:
     mode: Literal["dense_rerank", "visible_only"]
-    memory_search_visible: bool
     selected_skill_ids: list[str] = field(default_factory=list)
     selected_tool_names: list[str] = field(default_factory=list)
     candidate_skill_ids: list[str] = field(default_factory=list)
     candidate_tool_names: list[str] = field(default_factory=list)
-    memory_query: str = ""
-    retrieval_scope: dict[str, Any] = field(default_factory=dict)
     trace: dict[str, Any] = field(default_factory=dict)
 
 
@@ -111,18 +88,13 @@ async def build_node_context_selection(
         visible_tool_families,
         excluded_tool_names=NODE_FIXED_BUILTIN_TOOL_NAMES,
     )
-    memory_search_visible = "memory_search" in set(normalized_tool_names)
-    selection_query = _build_memory_query(
-        prompt=prompt,
-        goal=goal,
-        core_requirement=core_requirement,
-    )
-    memory_query = (
-        selection_query
-        if memory_search_visible
-        else ""
-    )
-    retrieval_scope = _memory_retrieval_scope(enabled=memory_search_visible)
+    selection_query = "\n".join(
+        [
+            f"Prompt: {_normalized_text(prompt)}",
+            f"Goal: {_normalized_text(goal)}",
+            f"Core requirement: {_normalized_text(core_requirement)}",
+        ]
+    ).strip()
 
     dense_enabled = bool(getattr(getattr(memory_manager, "store", None), "_dense_enabled", False))
     dense_available = bool(
@@ -133,18 +105,14 @@ async def build_node_context_selection(
     if not dense_available:
         return NodeContextSelectionResult(
             mode="visible_only",
-            memory_search_visible=memory_search_visible,
             selected_skill_ids=visible_skill_ids,
             selected_tool_names=normalized_tool_names,
             candidate_skill_ids=visible_skill_ids,
             candidate_tool_names=normalized_tool_names,
-            memory_query=memory_query,
-            retrieval_scope=retrieval_scope,
             trace={
                 "mode": "visible_only",
                 "dense_enabled": dense_enabled,
                 "dense_available": False,
-                "memory_search_visible": memory_search_visible,
                 "selection_query": selection_query,
                 "visible_skill_ids": list(visible_skill_ids),
                 "visible_tool_names": list(normalized_tool_names),
@@ -163,18 +131,14 @@ async def build_node_context_selection(
     if not bool((dense_selection or {}).get("available")):
         return NodeContextSelectionResult(
             mode="visible_only",
-            memory_search_visible=memory_search_visible,
             selected_skill_ids=visible_skill_ids,
             selected_tool_names=normalized_tool_names,
             candidate_skill_ids=visible_skill_ids,
             candidate_tool_names=normalized_tool_names,
-            memory_query=memory_query,
-            retrieval_scope=retrieval_scope,
             trace={
                 "mode": "visible_only",
                 "dense_enabled": dense_enabled,
                 "dense_available": False,
-                "memory_search_visible": memory_search_visible,
                 "selection_query": selection_query,
                 "dense_selection": dict(dense_selection or {}),
                 "visible_skill_ids": list(visible_skill_ids),
@@ -194,21 +158,17 @@ async def build_node_context_selection(
     candidate_tool_names = list(selected_tool_names)
     return NodeContextSelectionResult(
         mode="dense_rerank",
-        memory_search_visible=memory_search_visible,
         selected_skill_ids=selected_skill_ids,
         selected_tool_names=selected_tool_names,
         candidate_skill_ids=selected_skill_ids,
         candidate_tool_names=candidate_tool_names,
-        memory_query=memory_query,
-        retrieval_scope=retrieval_scope,
         trace={
             "mode": "dense_rerank",
             "dense_enabled": dense_enabled,
             "dense_available": True,
-                "memory_search_visible": memory_search_visible,
-                "selection_query": selection_query,
-                "dense_selection": dict(dense_selection or {}),
-                "visible_skill_ids": list(visible_skill_ids),
-                "visible_tool_names": list(normalized_tool_names),
-            },
-        )
+            "selection_query": selection_query,
+            "dense_selection": dict(dense_selection or {}),
+            "visible_skill_ids": list(visible_skill_ids),
+            "visible_tool_names": list(normalized_tool_names),
+        },
+    )

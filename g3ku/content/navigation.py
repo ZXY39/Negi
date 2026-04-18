@@ -23,7 +23,7 @@ _MAX_WRAPPER_DEPTH = 8
 # so these delivery exceptions stay auditable and tightly scoped.
 _ALWAYS_INLINE_TOOL_RESULT_SOURCES = frozenset(
     {
-        "tool_result:memory_search",
+        "tool_result:memory_note",
         "tool_result:create_async_task_cn",
         "tool_result:task_failed_nodes_cn",
         "tool_result:task_fetch_cn",

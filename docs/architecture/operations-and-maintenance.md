@@ -69,6 +69,9 @@
   China bridge 状态与日志
 
 - `memory/`
+  Maintenance note:
+  For the queued Markdown memory runtime, inspect `memory/MEMORY.md`, `memory/notes/`, `memory/queue.jsonl`, and `memory/ops.jsonl` first. Dense store or checkpoint files are now secondary catalog/runtime projections rather than the primary long-term memory source.
+  The queue is now model-driven: a stuck queue head usually means the dedicated memory agent route, provider call, or runtime validation is failing, not that a synchronous tool write failed inline.
   记忆相关文件、qdrant、checkpoint 等
 
 - `sessions/`
@@ -288,6 +291,69 @@
 6. 若改动涉及工具系统，验证候选工具与 callable 工具行为
 7. 若改动涉及 China bridge，跑 `g3ku china-bridge doctor`
 
+## Memory Queue Workflow
+
+For the queued Markdown memory runtime, the first operator checks should now be:
+
+1. Inspect `memory/MEMORY.md` for the currently committed long-term memory snapshot.
+2. Inspect `memory/queue.jsonl` for pending write/delete/autonomous-review requests.
+3. Inspect `memory/ops.jsonl` for the last successfully applied batches.
+4. Use `g3ku memory current`, `g3ku memory queue`, and `g3ku memory flush` when you need a quick operator view without manually opening files.
+5. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend or the catalog bridge.
+
+The important maintenance boundary is:
+
+- queue files are runtime metadata, not user memory content
+- `MEMORY.md` is the only committed long-term memory source
+- `notes/` contains optional detail bodies and should stay small and human-readable
+- `ops.jsonl` is not a complete failure ledger anymore; queue-head error fields are authoritative for in-flight engineering failures
+
+Operator debugging order for a stuck queue head:
+
+1. Check whether `models.roles.memory` is empty or points to an invalid model chain.
+2. Check the queue-head `last_error_text`, `last_error_at`, `retry_after`, and `processing_started_at`.
+3. Check worker logs for provider/tool-call failures or semantic validation failures.
+4. Only after the runtime side is healthy should you debug the web `记忆管理` page.
+
+### Memory Maintenance CLI
+
+The memory CLI now has three operator-oriented maintenance commands in addition to `current`, `queue`, and `flush`:
+
+- `g3ku memory doctor`
+  Read-only health check for the queued Markdown memory layout.
+- `g3ku memory reconcile-notes`
+  Explicit note-ref reconciliation for `MEMORY.md` and `memory/notes/`.
+- `g3ku memory import-legacy <path>`
+  Minimal one-shot importer for legacy memory exports.
+
+Use them with these boundaries in mind:
+
+- `doctor` is inspection-only. It does not rewrite `MEMORY.md`, create notes, delete notes, or mutate queue state.
+- `doctor` also avoids implicit runtime bootstrap writes. If `memory/` (or `MEMORY.md`, `queue.jsonl`, `ops.jsonl`, `notes/`) does not exist yet, the command still reports health based on current disk state and does not create those paths.
+- `doctor` should be the first stop when an operator suspects notebook corruption or a blocked queue head. It checks:
+  - whether `MEMORY.md` still matches the managed Markdown block format
+  - whether every visible `ref:note_xxxx` points to an existing note file
+  - whether orphan note files exist under `memory/notes/`
+  - whether `memory/queue.jsonl` contains malformed JSON rows (reported with line-level diagnostics)
+  - whether `queue.jsonl` currently has an old `processing` head that looks stuck
+- If malformed queue rows are detected, `doctor` now reports them as explicit queue-parse issues and exits non-zero. It should not crash with a bare JSON decode exception.
+- `reconcile-notes` is the explicit repair path for note/file consistency. It may create placeholder note files for missing refs, and it only deletes orphan note files when the operator passes the explicit delete flag.
+- `import-legacy` is dry-run by default. The operator must pass `--apply` before it writes `MEMORY.md` or any note files.
+- The default dry-run path for `import-legacy` is inspection-only as well: it parses the legacy payload and prints a summary without creating `memory/`, `MEMORY.md`, `queue.jsonl`, `ops.jsonl`, or note files.
+- `import-legacy --apply` is intentionally conservative. The target memory notebook should already be empty, and the operator should not use it as a merge tool for a live non-empty queue.
+
+Recommended operator order:
+
+1. Run `g3ku memory doctor` first.
+2. If the only issues are missing note files or orphan notes, use `g3ku memory reconcile-notes`.
+3. If the notebook is empty and you are doing a controlled migration, run `g3ku memory import-legacy <path>` once without `--apply`, inspect the summary, then rerun with `--apply`.
+
+Two queue-head recovery caveats matter during operations:
+
+- A `processing` head that survives restart is expected durable state. Do not assume it means a live worker is still attached.
+- If `retry_after` is still in the future, the restarted worker should leave that head untouched and keep later items blocked. Once `retry_after` has passed, the same head becomes eligible for retry.
+- `processing_started_at` is the first-claim timestamp for that head batch. It should remain stable across retries, so a new `last_error_at` with an old `processing_started_at` is normal.
+
 ## 10. Memory Reset Workflow
 
 `memory/` now contains both user long-term memory data and unified-context retrieval state, including tool/skill catalog retrieval indexes. A full physical reset of the directory removes all of these together.
@@ -300,4 +366,4 @@ Operator expectations:
 - After reset, tool/skill semantic retrieval is also empty until the next runtime startup.
 - On startup, the runtime should rebuild catalog retrieval automatically by syncing the resource catalog back into the unified context store.
 
-If tool/skill retrieval does not return after restart, first inspect resource runtime initialization and then confirm that the memory runtime reaches a healthy RAG-backed state.
+If tool/skill retrieval does not return after restart, first inspect resource runtime initialization and then confirm that the memory runtime reaches a healthy catalog-bridge state.

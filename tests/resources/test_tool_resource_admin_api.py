@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 import g3ku.runtime.web_ceo_sessions as web_ceo_sessions
 from g3ku.china_bridge.registry import china_channel_template
 from g3ku.config.loader import ensure_startup_config_ready
+from g3ku.llm_config.facade import LLMConfigFacade
 from g3ku.resources import ResourceManager
 from g3ku.security import get_bootstrap_security_service
 from g3ku.session.manager import Session
@@ -1476,6 +1477,10 @@ def test_ceo_session_delete_allows_unfinished_related_tasks(tmp_path: Path, monk
         captured['cancelled_session'] = session_key
         return 0
 
+    async def _enqueue_session_boundary_flush(**kwargs):
+        captured.setdefault('flush_calls', []).append(dict(kwargs))
+        return {'ok': True}
+
     from g3ku.runtime.api import ceo_sessions
 
     app = FastAPI()
@@ -1483,6 +1488,7 @@ def test_ceo_session_delete_allows_unfinished_related_tasks(tmp_path: Path, monk
     ceo_sessions.get_agent = lambda: SimpleNamespace(
         sessions=manager,
         main_task_service=_TaskService(),
+        memory_manager=SimpleNamespace(enqueue_session_boundary_flush=_enqueue_session_boundary_flush),
         cancel_session_tasks=_cancel_session_tasks,
     )
     ceo_sessions.get_runtime_manager = lambda _agent: _RuntimeManager()
@@ -1499,6 +1505,14 @@ def test_ceo_session_delete_allows_unfinished_related_tasks(tmp_path: Path, monk
     assert payload['deleted'] is True
     assert payload['session_id'] == current.key
     assert captured == {
+        'flush_calls': [
+            {
+                'session_key': current.key,
+                'channel': 'web',
+                'chat_id': current.key,
+                'trigger_source': 'session_deleted',
+            }
+        ],
         'removed_session': current.key,
         'cancelled_session': current.key,
     }
@@ -2397,6 +2411,224 @@ def test_admin_memory_trace_endpoints_return_payload():
     assert retrieval.json()['items'][0]['trace_kind'] == 'retrieval'
 
 
+def test_admin_memory_queue_and_processed_endpoints_return_paged_payloads(monkeypatch):
+    class _StubMemoryManager:
+        async def list_queue_page(self, *, limit: int, offset: int):
+            assert limit == 2
+            assert offset == 1
+            return {
+                'items': [
+                    {
+                        'request_id': 'write_2',
+                        'op': 'write',
+                        'status': 'processing',
+                        'created_at': '2026-04-17T10:00:00+08:00',
+                        'processing_started_at': '2026-04-17T10:00:02+08:00',
+                        'last_error_text': '',
+                    }
+                ],
+                'total': 3,
+                'has_more': False,
+            }
+
+        async def list_processed_page(self, *, limit: int, offset: int):
+            assert limit == 2
+            assert offset == 1
+            return {
+                'items': [
+                    {
+                        'batch_id': 'batch_1',
+                        'op': 'write',
+                        'processed_at': '2026-04-17T10:00:10+08:00',
+                        'usage': {
+                            'input_tokens': 8,
+                            'output_tokens': 3,
+                            'cache_read_tokens': 2,
+                        },
+                    }
+                ],
+                'total': 4,
+                'has_more': True,
+            }
+
+    monkeypatch.setattr(admin_rest, '_runtime_memory_manager', lambda: _StubMemoryManager())
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    queue_response = client.get('/api/memory/queue?limit=2&offset=1')
+    processed_response = client.get('/api/memory/processed?limit=2&offset=1')
+
+    assert queue_response.status_code == 200
+    assert queue_response.json() == {
+        'ok': True,
+        'items': [
+            {
+                'request_id': 'write_2',
+                'op': 'write',
+                'status': 'processing',
+                'created_at': '2026-04-17T10:00:00+08:00',
+                'processing_started_at': '2026-04-17T10:00:02+08:00',
+                'last_error_text': '',
+            }
+        ],
+        'total': 3,
+        'has_more': False,
+    }
+
+    assert processed_response.status_code == 200
+    assert processed_response.json() == {
+        'ok': True,
+        'items': [
+            {
+                'batch_id': 'batch_1',
+                'op': 'write',
+                'processed_at': '2026-04-17T10:00:10+08:00',
+                'usage': {
+                    'input_tokens': 8,
+                    'output_tokens': 3,
+                    'cache_read_tokens': 2,
+                },
+            }
+        ],
+        'total': 4,
+        'has_more': True,
+    }
+
+
+def test_memory_admin_mutations_are_disabled_without_feature_flag(monkeypatch):
+    class _StubMemoryManager:
+        pass
+
+    monkeypatch.delenv('G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS', raising=False)
+    monkeypatch.setattr(admin_rest, '_runtime_memory_manager', lambda: _StubMemoryManager())
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.post('/api/memory/admin/retry-head', json={'reason': 'manual'})
+
+    assert response.status_code == 403
+    assert response.json() == {
+        'detail': {
+            'code': 'memory_admin_mutation_disabled',
+            'message': 'memory admin mutations are disabled',
+        }
+    }
+
+
+def test_memory_admin_mutation_retry_head_writes_audit_record(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'memory').mkdir(parents=True, exist_ok=True)
+
+    class _StubMemoryManager:
+        def __init__(self):
+            self.workspace = workspace
+            self._rows = [
+                {
+                    'request_id': 'write_1',
+                    'op': 'write',
+                    'status': 'processing',
+                    'retry_after': '2026-04-17T22:00:00+08:00',
+                    'last_error_text': 'temporary error',
+                }
+            ]
+
+        def _read_queue_requests(self):
+            return [dict(item) for item in self._rows]
+
+        def _write_queue_requests(self, rows):
+            self._rows = [dict(item) for item in rows]
+
+    manager = _StubMemoryManager()
+    monkeypatch.setenv('G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS', '1')
+    monkeypatch.setattr(admin_rest, '_runtime_memory_manager', lambda: manager)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.post(
+        '/api/memory/admin/retry-head',
+        json={'reason': 'manual_retry'},
+        headers={'x-request-id': 'req-memory-admin-1'},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['ok'] is True
+    assert payload['item']['request_id'] == 'write_1'
+    assert payload['item']['retry_after_cleared'] is True
+    assert manager._rows[0]['retry_after'] == ''
+
+    audit_file = workspace / 'memory' / 'admin_audit.jsonl'
+    assert audit_file.exists() is True
+    lines = [line for line in audit_file.read_text(encoding='utf-8').splitlines() if line.strip()]
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record['action'] == 'retry_head'
+    assert record['reason'] == 'manual_retry'
+    assert record['request_id'] == 'req-memory-admin-1'
+    assert record['queue_head_request_id'] == 'write_1'
+    assert record['result'] == 'ok'
+
+
+def test_memory_admin_mutation_retry_head_rolls_back_when_audit_write_fails(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'memory').mkdir(parents=True, exist_ok=True)
+
+    class _StubMemoryManager:
+        def __init__(self):
+            import threading
+
+            self.workspace = workspace
+            self._io_lock = threading.RLock()
+            self._rows = [
+                {
+                    'request_id': 'write_1',
+                    'op': 'write',
+                    'status': 'processing',
+                    'retry_after': '2026-04-17T22:00:00+08:00',
+                    'last_error_text': 'temporary error',
+                }
+            ]
+
+        def _read_queue_requests(self):
+            return [dict(item) for item in self._rows]
+
+        def _write_queue_requests(self, rows):
+            self._rows = [dict(item) for item in rows]
+
+    manager = _StubMemoryManager()
+    monkeypatch.setenv('G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS', '1')
+    monkeypatch.setattr(admin_rest, '_runtime_memory_manager', lambda: manager)
+
+    def _raise_audit_error(*args, **kwargs):
+        raise OSError('disk full')
+
+    monkeypatch.setattr(admin_rest, '_append_memory_admin_audit_event', _raise_audit_error)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.post(
+        '/api/memory/admin/retry-head',
+        json={'reason': 'manual_retry'},
+        headers={'x-request-id': 'req-memory-admin-rollback'},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        'detail': {
+            'code': 'memory_admin_audit_failed',
+            'message': 'memory admin audit write failed',
+        }
+    }
+    assert manager._rows[0]['retry_after'] == '2026-04-17T22:00:00+08:00'
+
+
 def _write_runtime_config(workspace: Path) -> None:
     (workspace / '.g3ku').mkdir(parents=True, exist_ok=True)
     (workspace / '.g3ku' / 'config.json').write_text(
@@ -2452,8 +2684,8 @@ def test_models_endpoint_returns_role_iterations(tmp_path: Path, monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert payload['ok'] is True
-    assert payload['role_iterations'] == {'ceo': 40, 'execution': 16, 'inspection': 16}
-    assert payload['role_concurrency'] == {'ceo': None, 'execution': None, 'inspection': None}
+    assert payload['role_iterations'] == {'ceo': 40, 'execution': 16, 'inspection': 16, 'memory': None}
+    assert payload['role_concurrency'] == {'ceo': None, 'execution': None, 'inspection': None, 'memory': 1}
 
 
 def test_model_retry_count_update_persists_and_refreshes_runtime(tmp_path: Path, monkeypatch):
@@ -3236,13 +3468,15 @@ def test_load_config_backfills_missing_role_iterations(tmp_path: Path, monkeypat
     assert cfg.get_role_max_iterations('ceo') is None
     assert cfg.get_role_max_iterations('execution') is None
     assert cfg.get_role_max_iterations('inspection') is None
+    assert cfg.get_role_max_iterations('memory') is None
     assert cfg.get_role_max_concurrency('ceo') is None
     assert cfg.get_role_max_concurrency('execution') is None
     assert cfg.get_role_max_concurrency('inspection') is None
+    assert cfg.get_role_max_concurrency('memory') == 1
 
     saved = json.loads(config_path.read_text(encoding='utf-8'))
-    assert saved['agents']['roleIterations'] == {'ceo': None, 'execution': None, 'inspection': None}
-    assert saved['agents']['roleConcurrency'] == {'ceo': None, 'execution': None, 'inspection': None}
+    assert saved['agents']['roleIterations'] == {'ceo': None, 'execution': None, 'inspection': None, 'memory': None}
+    assert saved['agents']['roleConcurrency'] == {'ceo': None, 'execution': None, 'inspection': None, 'memory': 1}
 
 
 def test_llm_routes_endpoint_updates_role_iterations(tmp_path: Path, monkeypatch):
@@ -3291,6 +3525,92 @@ def test_llm_routes_endpoint_updates_role_concurrency(tmp_path: Path, monkeypatc
 
     saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
     assert saved['agents']['roleConcurrency']['execution'] == 3
+
+
+def test_llm_routes_endpoint_supports_memory_scope_and_keeps_memory_concurrency_fixed(
+    tmp_path: Path,
+    monkeypatch,
+):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put(
+        '/api/llm/routes/memory',
+        json={'model_keys': ['m'], 'max_iterations': 7, 'max_concurrency': 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['route']['scope'] == 'memory'
+    assert payload['routes']['memory'] == ['m']
+    assert payload['role_iterations']['memory'] == 7
+    assert payload['role_concurrency']['memory'] == 1
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['models']['roles']['memory'] == ['m']
+    assert saved['agents']['roleIterations']['memory'] == 7
+    assert saved['agents']['roleConcurrency']['memory'] == 1
+
+
+def test_llm_routes_memory_scope_rejects_non_chat_binding(
+    tmp_path: Path,
+    monkeypatch,
+):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr(
+        LLMConfigFacade,
+        'get_binding_capability',
+        lambda self, config, model_key: 'embedding' if model_key == 'm' else 'chat',
+    )
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put('/api/llm/routes/memory', json={'model_keys': ['m']})
+
+    assert response.status_code == 400
+    assert 'chat-capable' in str(response.json().get('detail') or '')
+
+
+def test_llm_routes_memory_scope_accepts_empty_chain(
+    tmp_path: Path,
+    monkeypatch,
+):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put(
+        '/api/llm/routes/memory',
+        json={'model_keys': [], 'max_iterations': 5, 'max_concurrency': 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['route']['scope'] == 'memory'
+    assert payload['routes']['memory'] == []
+    assert payload['role_iterations']['memory'] == 5
+    assert payload['role_concurrency']['memory'] == 1
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['models']['roles']['memory'] == []
+    assert saved['agents']['roleIterations']['memory'] == 5
+    assert saved['agents']['roleConcurrency']['memory'] == 1
 
 
 def test_llm_routes_bulk_endpoint_updates_multiple_scopes_with_single_refresh(tmp_path: Path, monkeypatch):
@@ -4364,8 +4684,9 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
     _copy_repo_tools(
         workspace,
         'content',
-        'memory_search',
         'memory_write',
+        'memory_delete',
+        'memory_note',
         'memory_runtime',
         'message',
         'load_skill_context',
@@ -4403,11 +4724,13 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         assert items['task_runtime'].is_core is True
 
         memory_actions = {action.action_id: action for action in items['memory'].actions}
-        assert set(memory_actions) == {'search', 'write', 'runtime'}
-        assert memory_actions['search'].agent_visible is True
-        assert memory_actions['search'].admin_mode == 'editable'
+        assert set(memory_actions) == {'write', 'delete', 'note', 'runtime'}
         assert memory_actions['write'].agent_visible is True
         assert memory_actions['write'].admin_mode == 'editable'
+        assert memory_actions['delete'].agent_visible is True
+        assert memory_actions['delete'].admin_mode == 'editable'
+        assert memory_actions['note'].agent_visible is True
+        assert memory_actions['note'].admin_mode == 'editable'
         assert memory_actions['runtime'].agent_visible is False
         assert memory_actions['runtime'].admin_mode == 'readonly_system'
 
@@ -4436,7 +4759,7 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         visible = set(
             list_effective_tool_names(
                 subject=SimpleNamespace(actor_role='ceo'),
-                supported_tool_names=['memory_search', 'memory_write', 'memory_runtime'],
+                supported_tool_names=['memory_write', 'memory_delete', 'memory_note', 'memory_runtime'],
                 resource_registry=_Registry(),
                 policy_engine=_PolicyEngine(),
                 mutation_allowed=True,
@@ -4445,7 +4768,7 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         execution_visible = set(
             list_effective_tool_names(
                 subject=SimpleNamespace(actor_role='execution'),
-                supported_tool_names=['memory_search', 'memory_write', 'memory_runtime'],
+                supported_tool_names=['memory_write', 'memory_delete', 'memory_note', 'memory_runtime'],
                 resource_registry=_Registry(),
                 policy_engine=_PolicyEngine(),
                 mutation_allowed=True,
@@ -4454,7 +4777,7 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         inspection_visible = set(
             list_effective_tool_names(
                 subject=SimpleNamespace(actor_role='inspection'),
-                supported_tool_names=['memory_search', 'memory_write', 'memory_runtime'],
+                supported_tool_names=['memory_write', 'memory_delete', 'memory_note', 'memory_runtime'],
                 resource_registry=_Registry(),
                 policy_engine=_PolicyEngine(),
                 mutation_allowed=True,

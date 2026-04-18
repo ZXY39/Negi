@@ -1,8 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import errno
 import json
 import os
+import re
 import shutil
 from contextlib import contextmanager
 from inspect import isawaitable
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query, Request
 
 from g3ku.china_bridge.registry import (
     china_channel_aliases,
@@ -65,6 +66,7 @@ QQBOT_GATEWAY_URL = 'https://api.sgroup.qq.com/gateway'
 DINGTALK_ACCESS_TOKEN_URL = 'https://api.dingtalk.com/v1.0/oauth2/accessToken'
 WECOM_ACCESS_TOKEN_URL = 'https://qyapi.weixin.qq.com/cgi-bin/gettoken'
 FEISHU_APP_ACCESS_TOKEN_URL = 'https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal'
+MEMORY_NOTE_REF_RE = re.compile(r"^note_[a-z0-9_]+$")
 
 
 
@@ -2653,6 +2655,322 @@ def _runtime_memory_manager():
     if manager is None:
         raise HTTPException(status_code=503, detail='memory_manager_unavailable')
     return manager
+
+
+def _memory_admin_mutations_enabled() -> bool:
+    return _StandaloneResourceService._bool_env('G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS', default=False)
+
+
+def _memory_admin_mutation_disabled() -> HTTPException:
+    return HTTPException(
+        status_code=403,
+        detail={
+            'code': 'memory_admin_mutation_disabled',
+            'message': 'memory admin mutations are disabled',
+        },
+    )
+
+
+def _memory_admin_audit_path(manager: Any) -> Path:
+    workspace = Path(getattr(manager, 'workspace', Path.cwd()))
+    return workspace / 'memory' / 'admin_audit.jsonl'
+
+
+def _append_memory_admin_audit_event(manager: Any, payload: dict[str, Any]) -> None:
+    path = _memory_admin_audit_path(manager)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(dict(payload or {}), ensure_ascii=False)
+    with path.open('a', encoding='utf-8') as fh:
+        fh.write(line + '\n')
+
+
+def _queue_row_to_dict(row: Any) -> dict[str, Any]:
+    if isinstance(row, dict):
+        return dict(row)
+    field_names = getattr(type(row), '__dataclass_fields__', None)
+    if isinstance(field_names, dict):
+        return {name: getattr(row, name) for name in field_names}
+    keys = (
+        'request_id',
+        'op',
+        'decision_source',
+        'payload_text',
+        'created_at',
+        'status',
+        'processing_started_at',
+        'last_error_text',
+        'last_error_at',
+        'retry_after',
+        'trigger_source',
+        'session_key',
+    )
+    return {name: getattr(row, name) for name in keys if hasattr(row, name)}
+
+
+def _queue_row_with_update(row: Any, **updates: Any) -> Any:
+    payload = {**_queue_row_to_dict(row), **updates}
+    field_names = getattr(type(row), '__dataclass_fields__', None)
+    if isinstance(field_names, dict):
+        return row.__class__(**payload)
+    return payload
+
+
+async def _retry_memory_queue_head_with_fallback(
+    manager: Any,
+    *,
+    reason: str,
+    request_id: str,
+) -> dict[str, Any]:
+    retry_fn = getattr(manager, 'retry_queue_head', None)
+    if callable(retry_fn):
+        item = retry_fn(reason=reason)
+        if isawaitable(item):
+            item = await item
+        if isinstance(item, dict):
+            item_dict = dict(item)
+        else:
+            item_dict = _queue_row_to_dict(item)
+        try:
+            _append_memory_admin_audit_event(
+                manager,
+                {
+                    'action': 'retry_head',
+                    'reason': reason,
+                    'request_id': request_id,
+                    'queue_head_request_id': str(item_dict.get('request_id') or '').strip(),
+                    'result': 'ok',
+                    'timestamp': now_iso(),
+                },
+            )
+            item_dict['audit_logged'] = True
+        except Exception as exc:
+            item_dict['audit_logged'] = False
+            item_dict['audit_error'] = str(exc or 'memory admin audit write failed').strip()
+        return item_dict
+
+    reader = getattr(manager, '_read_queue_requests', None)
+    writer = getattr(manager, '_write_queue_requests', None)
+    if not callable(reader) or not callable(writer):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'memory_admin_retry_unavailable',
+                'message': 'memory queue retry is unavailable',
+            },
+        )
+
+    async def _mutate_and_audit() -> dict[str, Any]:
+        rows = reader()
+        if isawaitable(rows):
+            rows = await rows
+        rows = list(rows or [])
+        if not rows:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    'code': 'memory_admin_queue_empty',
+                    'message': 'memory queue is empty',
+                },
+            )
+
+        original_rows = list(rows)
+        head = rows[0]
+        head_data = _queue_row_to_dict(head)
+        if str(head_data.get('status') or '').strip().lower() != 'processing':
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    'code': 'memory_admin_retry_not_applicable',
+                    'message': 'queue head is not in processing state',
+                },
+            )
+        retry_after_cleared = bool(str(head_data.get('retry_after') or '').strip())
+        rows[0] = _queue_row_with_update(head, retry_after='')
+        write_result = writer(rows)
+        if isawaitable(write_result):
+            await write_result
+
+        try:
+            _append_memory_admin_audit_event(
+                manager,
+                {
+                    'action': 'retry_head',
+                    'reason': reason,
+                    'request_id': request_id,
+                    'queue_head_request_id': str(head_data.get('request_id') or '').strip(),
+                    'result': 'ok',
+                    'timestamp': now_iso(),
+                },
+            )
+        except Exception as exc:
+            rollback_result = writer(original_rows)
+            if isawaitable(rollback_result):
+                await rollback_result
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    'code': 'memory_admin_audit_failed',
+                    'message': 'memory admin audit write failed',
+                },
+            ) from exc
+
+        return {
+            'request_id': str(head_data.get('request_id') or '').strip(),
+            'status': str(head_data.get('status') or '').strip(),
+            'retry_after_cleared': retry_after_cleared,
+            'last_error_text': str(head_data.get('last_error_text') or '').strip(),
+            'reason': reason,
+            'audit_logged': True,
+        }
+
+    lock = getattr(manager, '_io_lock', None)
+    if hasattr(lock, '__enter__') and hasattr(lock, '__exit__'):
+        with lock:
+            return await _mutate_and_audit()
+    return await _mutate_and_audit()
+
+
+def _memory_read_error(*, code: str, message: str) -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={
+            'code': str(code or '').strip(),
+            'message': str(message or '').strip(),
+        },
+    )
+
+
+@router.get('/memory/queue')
+async def get_memory_queue(
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    manager = _runtime_memory_manager()
+    reader = getattr(manager, 'list_queue_page', None)
+    if not callable(reader):
+        raise HTTPException(status_code=503, detail='memory_queue_unavailable')
+    try:
+        payload = await reader(limit=limit, offset=offset)
+    except Exception as exc:
+        raise _memory_read_error(
+            code='memory_queue_read_failed',
+            message='记忆队列暂时不可读取，请稍后刷新。',
+        ) from exc
+    return {
+        'ok': True,
+        'items': list(payload.get('items') or []),
+        'total': int(payload.get('total', 0) or 0),
+        'has_more': bool(payload.get('has_more', False)),
+    }
+
+
+@router.get('/memory/processed')
+async def get_memory_processed(
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    manager = _runtime_memory_manager()
+    reader = getattr(manager, 'list_processed_page', None)
+    if not callable(reader):
+        raise HTTPException(status_code=503, detail='memory_processed_unavailable')
+    try:
+        payload = await reader(limit=limit, offset=offset)
+    except Exception as exc:
+        raise _memory_read_error(
+            code='memory_processed_read_failed',
+            message='已处理记忆暂时不可读取，请稍后刷新。',
+        ) from exc
+    return {
+        'ok': True,
+        'items': list(payload.get('items') or []),
+        'total': int(payload.get('total', 0) or 0),
+        'has_more': bool(payload.get('has_more', False)),
+    }
+
+
+@router.get('/memory/notes/{ref}')
+async def get_memory_note(ref: str):
+    manager = _runtime_memory_manager()
+    reader = getattr(manager, 'load_note', None)
+    if not callable(reader):
+        reader = getattr(manager, 'read_note', None)
+    if not callable(reader):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'memory_note_unavailable',
+                'message': '记忆 note 预览暂不可用，请稍后刷新。',
+            },
+        )
+    normalized_ref = str(ref or '').strip()
+    if not normalized_ref:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                'code': 'memory_note_invalid_ref',
+                'message': 'note ref is required',
+            },
+        )
+    if not MEMORY_NOTE_REF_RE.fullmatch(normalized_ref):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                'code': 'memory_note_invalid_ref',
+                'message': 'note ref must match note_[a-z0-9_]+',
+            },
+        )
+    try:
+        body = reader(normalized_ref)
+        if isawaitable(body):
+            body = await body
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                'code': 'memory_note_not_found',
+                'message': '未找到对应的记忆 note。',
+                'ref': normalized_ref,
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                'code': 'memory_note_invalid_ref',
+                'message': str(exc) or 'note ref is required',
+            },
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'memory_note_read_failed',
+                'message': '读取记忆 note 失败，请稍后重试。',
+            },
+        ) from exc
+    return {
+        'ok': True,
+        'item': {
+            'ref': normalized_ref,
+            'body': str(body or ''),
+        },
+    }
+
+
+@router.post('/memory/admin/retry-head')
+async def retry_memory_queue_head(request: Request, payload: dict | None = Body(default=None)):
+    if not _memory_admin_mutations_enabled():
+        raise _memory_admin_mutation_disabled()
+
+    manager = _runtime_memory_manager()
+    reason = str((payload or {}).get('reason') or 'manual').strip() or 'manual'
+    request_id = str(request.headers.get('x-request-id') or '').strip()
+    item = await _retry_memory_queue_head_with_fallback(
+        manager,
+        reason=reason,
+        request_id=request_id,
+    )
+    return {'ok': True, 'item': item}
 
 
 @router.post('/memory/dense-index/reset')

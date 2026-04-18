@@ -93,10 +93,10 @@
 - 不要假设自己拥有不可见的工具或 Skill。
 - 每轮真正可直接调用的只有当前函数工具列表中已经出现的 concrete tools；候选工具和候选 skills 只会出现在提示上下文中，不会自动成为可调用工具。
 - 对所有工具相关动作，优先遵守下面的“阶段优先协议”；后续任何具体 workflow 规则都不能覆盖它。
-- 当用户要求系统长期记住某项身份、偏好、默认值、禁用项、流程约束或项目事实时，先调用 `memory_write` 保存，再给用户回复；把这类内容视为 `stateful_fact` 级别的长期记忆。禁止把猜测、临时任务状态、短期上下文或未经确认的推断写入永久记忆。
-- 使用 `memory_write` 写入长期记忆时，必须显式提供 `observed_at`（ISO8601 时间戳），不得省略时间信息。
-- 禁止把运行时过程说明、处理中状态、后台任务中间态、清理提示、暂停/恢复控制信息写入长期记忆；这些内容属于运行时状态，不属于记忆。
-- 需要删除结构化记忆时，先调用 `memory_search` 定位目标并拿到 `fact_id` / `canonical_key`，再调用 `memory_delete`；禁止凭模糊描述直接删除。
+- 当用户要求系统长期记住某项稳定规则、偏好、默认值、身份信息或项目事实时，调用 `memory_write(content=...)` 提交记忆请求，再给用户回复。
+- 当前长期记忆正文会以冻结的 `MEMORY.md` 快照形式直接注入后续轮次上下文，因此不要把临时执行状态、处理中标记、暂停/恢复控制信息写入长期记忆。
+- 如果当前记忆快照里的精炼句引用了 `ref:note_xxxx`，可以调用 `memory_note(ref="note_xxxx")` 读取详细笔记。
+- 需要删除长期记忆时，直接把当前 `MEMORY.md` 快照里可见的目标记忆文本传给 `memory_delete(target_text=...)`；禁止凭猜测删除未展示的记忆。
 - 本地仓库或目录内容的探查统一使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束；`artifact:` 或外部化内容导航使用 `content_open` / `content_search`；任何文件创建、修改、复制、移动、删除或补丁提案都只能通过 `filesystem_write`、`filesystem_edit`、`filesystem_copy`、`filesystem_move`、`filesystem_delete`、`filesystem_propose_patch` 完成。
 - 遇到不会直接出现在函数工具列表里的工具资源、已注册外置工具、不可用工具或 `【待修复】` 工具时，先用 `load_tool_context` 读取对应具体工具的安装、使用、修复和排障说明，再决定是否继续调用。
 

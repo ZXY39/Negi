@@ -384,6 +384,7 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
         "ceo": list(cfg.models.roles.ceo),
         "execution": list(cfg.models.roles.execution),
         "inspection": list(cfg.models.roles.inspection),
+        "memory": list(cfg.models.roles.memory),
     }
     return catalog, routes
 
@@ -414,11 +415,13 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
                 "ceo": cfg.get_role_max_iterations("ceo"),
                 "execution": cfg.get_role_max_iterations("execution"),
                 "inspection": cfg.get_role_max_iterations("inspection"),
+                "memory": cfg.get_role_max_iterations("memory"),
             },
             "roleConcurrency": {
                 "ceo": cfg.get_role_max_concurrency("ceo"),
                 "execution": cfg.get_role_max_concurrency("execution"),
                 "inspection": cfg.get_role_max_concurrency("inspection"),
+                "memory": cfg.get_role_max_concurrency("memory"),
             },
             "multiAgent": {
                 "orchestratorModelKey": cfg.agents.multi_agent.orchestrator_model_key,
@@ -572,6 +575,19 @@ def _ensure_role_concurrency_defaults(raw_data: dict[str, Any]) -> bool:
     )
 
 
+def _ensure_model_role_defaults(raw_data: dict[str, Any]) -> bool:
+    models = raw_data.get("models")
+    if not isinstance(models, dict):
+        return False
+    roles = models.get("roles")
+    if not isinstance(roles, dict):
+        return False
+    if "memory" in roles:
+        return False
+    roles["memory"] = []
+    return True
+
+
 def _migrate_removed_ceo_frontdoor_implementation(raw_data: dict[str, Any]) -> bool:
     agents = raw_data.get("agents")
     if not isinstance(agents, dict):
@@ -646,6 +662,7 @@ def load_config(config_path: Path | None = None) -> Config:
     changed = changed or llm_changed
     changed = _ensure_role_iterations_defaults(raw_data) or changed
     changed = _ensure_role_concurrency_defaults(raw_data) or changed
+    changed = _ensure_model_role_defaults(raw_data) or changed
     changed = _migrate_removed_ceo_frontdoor_implementation(raw_data) or changed
     security = get_bootstrap_security_service(Path.cwd())
     migrated = _migrate_config(

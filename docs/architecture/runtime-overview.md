@@ -408,18 +408,41 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 
 ## 9. Memory Runtime Notes
 
-The memory runtime is now journal-first. `memory/sync_journal.jsonl` is the source of truth; the other files under `memory/` are derived projections or retrieval indexes.
+The long-term memory runtime is no longer journal-first or structured-fact-first, and it is no longer a rule-only batch rewriter.
 
-- `memory/structured_current.jsonl` is the active long-term fact projection.
-- `memory/structured_history.jsonl` and `memory/audit.jsonl` are history/audit projections.
-- SQLite / FTS / Qdrant / `memory/context_store/` are unified-context retrieval projections.
+- `memory/MEMORY.md` is now the only committed long-term memory source of truth.
+- `memory/notes/` stores optional detailed note bodies referenced by `ref:note_xxxx`.
+- `memory/queue.jsonl` stores the single durable queue, including per-request processing state such as `pending`, `processing`, retry timing, and the latest error text.
+- `memory/ops.jsonl` now stores only successfully applied batches. Engineering failures remain visible through the queue head state instead of being copied into a second “failed history” lane.
+- Dense/sparse catalog projections may still exist for tool/skill narrowing, but they are no longer the long-term memory truth source.
 
-Two maintenance boundaries changed with the single-user long-term memory model:
+The runtime boundary changed in five important ways:
 
-- Structured long-term memory no longer relies on frontdoor-provided `scope` to separate user preference slots. Dedup/replacement semantics now depend on stable identity fields such as category, entity, attribute, and time semantics.
-- Runtime process notes, pause/resume control data, background-task progress notes, and other transient execution state should not enter long-term memory through `memory_write`. Those belong in transcript/session/task runtime state.
+- CEO/frontdoor turns now read one frozen `MEMORY.md` snapshot at prompt-assembly time and inject it directly into the turn overlay.
+- Same-turn hot memory updates do not change the current prompt; newly committed memory only affects later turns.
+- `memory_write` and `memory_delete` now only enqueue requests into the single memory queue. They do not mutate committed memory inline.
+- `RuntimeAgentSession` and session-delete paths now enqueue autonomous review, pre-compression flush, and session-boundary flush requests instead of writing structured memory facts directly.
+- A dedicated internal memory agent now consumes the queue in FIFO same-op batches (`write` and `delete` never mix within one batch), runs with the `memory` model route, and only has a restricted tool surface for reading/writing `MEMORY.md` and note files.
 
-Because tool/skill catalog retrieval shares the unified context store, a full reset of `memory/` removes both user memory and catalog retrieval data. Catalog retrieval must be rebuilt after startup.
+Maintainers should read the queue state machine like this:
+
+- `pending` means the request has not yet been claimed into a batch.
+- `processing` means the queue head batch is currently owned by the single memory worker.
+- If the `memory` role is unconfigured or a provider call fails, the queue head remains `processing` with an attached error and blocks later requests.
+- A persisted `processing` head is durable restart state, not proof that a worker is currently live. After restart, the worker waits until the stored `retry_after` before retrying that same head batch.
+- `processing_started_at` records the first successful claim of that queue head batch and must stay stable across later retries; it is not a "last retry time" field.
+- Semantic-invalid model output is expected to repair inside the same processing batch before the runtime commits anything.
+
+Maintainers should treat transient execution state as explicitly out of bounds for long-term memory:
+
+- pause/resume control data
+- in-progress task status
+- temporary repair markers
+- runtime-only coordination notes
+
+Those belong in transcript, session, task, or stage runtime state, not in `MEMORY.md`.
+
+Because tool/skill catalog narrowing still shares the legacy catalog bridge, a destructive reset of `memory/` may still remove catalog retrieval data together with user memory content. Catalog sync must be rebuilt after startup.
 
 ## CEO Frontdoor Legacy Compression Removal
 

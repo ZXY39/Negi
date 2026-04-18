@@ -70,6 +70,10 @@
                 <i data-lucide="wrench"></i>
                 <span>Tool 管理</span>
             </button>
+            <button class="nav-item" data-view="memory" type="button">
+                <i data-lucide="brain"></i>
+                <span>记忆管理</span>
+            </button>
             <button class="nav-item" data-view="models" type="button">
                 <i data-lucide="cpu"></i>
                 <span>模型配置</span>
@@ -348,6 +352,51 @@
                         aria-modal="true" aria-hidden="true" aria-labelledby="tool-detail-title" tabindex="-1">
                         <div id="tool-detail-empty" class="empty-state resource-empty">请选择一个 Tool 查看或编辑权限配置。</div>
                         <div id="tool-detail-content" class="resource-detail-shell"></div>
+                    </section>
+                </div>
+            </section>
+
+            <section id="view-memory" class="view-section" style="display: none;">
+                <header class="content-header resource-header compact-resource-header">
+                    <div class="resource-header-title">
+                        <h1>记忆管理</h1>
+                        <p class="subtitle">查看未出队记忆队列与已成功处理批次。当前页面默认只读，不开放副作用运维按钮。</p>
+                    </div>
+                    <div class="resource-header-actions compact-resource-header-actions">
+                        <button id="memory-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
+                    </div>
+                </header>
+
+                <div class="memory-layout">
+                    <div id="memory-page-error-banner" class="memory-banner" role="status" aria-live="polite" hidden></div>
+                    <div id="memory-queue-blocked-banner" class="memory-banner warning" role="status" aria-live="polite" hidden>队首阻塞整个队列</div>
+                    <div id="memory-admin-actions" hidden aria-hidden="true"></div>
+                    <section class="resource-detail-panel memory-column">
+                        <div class="panel-header">
+                            <div>
+                                <h3>未出队的记忆队列</h3>
+                                <p class="subtitle">按真实队列顺序 oldest-first 展示。</p>
+                            </div>
+                        </div>
+                        <div id="memory-queue-list" class="memory-list"></div>
+                        <div class="memory-footer">
+                            <div id="memory-queue-info" class="resource-page-indicator" aria-live="polite">共 0 项</div>
+                            <button id="memory-queue-more-btn" class="toolbar-btn ghost" type="button">加载更多</button>
+                        </div>
+                    </section>
+
+                    <section class="resource-detail-panel memory-column">
+                        <div class="panel-header">
+                            <div>
+                                <h3>已处理的记忆</h3>
+                                <p class="subtitle">仅显示成功处理批次，newest-first 展示。</p>
+                            </div>
+                        </div>
+                        <div id="memory-processed-list" class="memory-list"></div>
+                        <div class="memory-footer">
+                            <div id="memory-processed-info" class="resource-page-indicator" aria-live="polite">共 0 项</div>
+                            <button id="memory-processed-more-btn" class="toolbar-btn ghost" type="button">加载更多</button>
+                        </div>
                     </section>
                 </div>
             </section>

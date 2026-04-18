@@ -18,6 +18,7 @@ ROLE_SCOPE_ALIASES = {
     "ceo": "ceo",
     "execution": "execution",
     "inspection": "inspection",
+    "memory": "memory",
     "checker": "inspection",
 }
 
@@ -26,11 +27,13 @@ DEFAULT_ROLE_MAX_ITERATIONS = {
     "ceo": None,
     "execution": None,
     "inspection": None,
+    "memory": None,
 }
 DEFAULT_ROLE_MAX_CONCURRENCY = {
     "ceo": None,
     "execution": None,
     "inspection": None,
+    "memory": 1,
 }
 DEFAULT_NODE_DISPATCH_CONCURRENCY = {
     "execution": 8,
@@ -184,13 +187,14 @@ class AgentDefaults(Base):
 
 
 class RoleIterationConfig(Base):
-    """Per-role loop limits for CEO, execution, and inspection runtimes."""
+    """Per-role loop limits for CEO, execution, inspection, and memory runtimes."""
 
     ceo: int | None = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["ceo"], ge=0)
     execution: int | None = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["execution"], ge=0)
     inspection: int | None = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["inspection"], ge=0)
+    memory: int | None = Field(default=DEFAULT_ROLE_MAX_ITERATIONS["memory"], ge=0)
 
-    @field_validator("ceo", "execution", "inspection", mode="before")
+    @field_validator("ceo", "execution", "inspection", "memory", mode="before")
     @classmethod
     def _normalize_iterations(cls, value: Any, info: ValidationInfo) -> int | None:
         if value is None:
@@ -201,11 +205,12 @@ class RoleIterationConfig(Base):
 
 
 class RoleConcurrencyConfig(Base):
-    """Per-role parallel work caps for CEO, execution, and inspection runtimes."""
+    """Per-role parallel work caps for CEO, execution, inspection, and memory runtimes."""
 
     ceo: int | None = Field(default=DEFAULT_ROLE_MAX_CONCURRENCY["ceo"], ge=0)
     execution: int | None = Field(default=DEFAULT_ROLE_MAX_CONCURRENCY["execution"], ge=0)
     inspection: int | None = Field(default=DEFAULT_ROLE_MAX_CONCURRENCY["inspection"], ge=0)
+    memory: int = Field(default=DEFAULT_ROLE_MAX_CONCURRENCY["memory"], ge=1, le=1)
 
     @field_validator("ceo", "execution", "inspection", mode="before")
     @classmethod
@@ -215,6 +220,18 @@ class RoleConcurrencyConfig(Base):
         if isinstance(value, str) and not value.strip():
             return DEFAULT_ROLE_MAX_CONCURRENCY[info.field_name]
         return int(value)
+
+    @field_validator("memory", mode="before")
+    @classmethod
+    def _normalize_memory_concurrency(cls, value: Any) -> int:
+        if value is None:
+            return 1
+        if isinstance(value, str) and not value.strip():
+            return 1
+        normalized = int(value)
+        if normalized != 1:
+            raise ValueError("agents.roleConcurrency.memory is fixed at 1")
+        return 1
 
 
 class ModelFallbackTarget(Base):
@@ -368,8 +385,9 @@ class RoleModelRoutingConfig(Base):
     ceo: list[str] = Field(default_factory=list)
     execution: list[str] = Field(default_factory=list)
     inspection: list[str] = Field(default_factory=list)
+    memory: list[str] = Field(default_factory=list)
 
-    @field_validator("ceo", "execution", "inspection", mode="before")
+    @field_validator("ceo", "execution", "inspection", "memory", mode="before")
     @classmethod
     def _normalize_chain(cls, value: Any) -> list[str]:
         items = value if isinstance(value, list) else []
@@ -700,8 +718,9 @@ class MemoryAssemblyConfig(Base):
             'task_summary',
             'task_list',
             'task_progress',
-            'memory_search',
             'memory_write',
+            'memory_delete',
+            'memory_note',
             'message',
             'task_runtime',
             'skill_access',

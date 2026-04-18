@@ -1778,27 +1778,26 @@ class RuntimeAgentSession:
                     assistant_metadata=assistant_metadata,
                 )
                 if internal_source is None and getattr(self._loop, "memory_manager", None) is not None:
-                    batch_messages = [
-                        {"role": "user", "content": self._history_text(item.content)}
+                    user_messages = [
+                        self._history_text(item.content)
                         for item in self._current_user_batch_inputs(user_input)
                         if self._history_text(item.content).strip()
                     ]
                     try:
-                        await self._loop.memory_manager.ingest_turn(
+                        await self._loop.memory_manager.enqueue_autonomous_review(
                             session_key=self._state.session_key,
                             channel=self._memory_channel,
                             chat_id=self._memory_chat_id,
-                            messages=[
-                                *batch_messages,
-                                {"role": "assistant", "content": output},
-                            ],
+                            user_messages=user_messages,
+                            assistant_text=output,
+                            turn_id=self._current_turn_id(user_input),
                         )
                     except Exception:
                         await self._emit(
                             "message_delta",
                             channel="analysis",
                             kind="persistence_warning",
-                            text="Memory ingest failed; turn history is still available in session transcript.",
+                            text="Memory review enqueue failed; turn history is still available in session transcript.",
                         )
             await self._emit(
                 "message_end",

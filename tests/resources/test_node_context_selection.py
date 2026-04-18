@@ -102,22 +102,14 @@ async def test_node_selector_without_memory_search_permission_still_uses_dense_s
         "Core requirement: inspect browser workflow"
     )
     assert result.mode == "dense_rerank"
-    assert result.memory_search_visible is False
-    assert result.memory_query == ""
     assert result.selected_skill_ids == ["skill-b"]
     assert result.selected_tool_names == []
     assert result.candidate_skill_ids == ["skill-b"]
     assert result.candidate_tool_names == []
-    assert result.retrieval_scope == {
-        "search_context_types": [],
-        "allowed_context_types": [],
-        "allowed_resource_record_ids": [],
-        "allowed_skill_record_ids": [],
-    }
 
 
 @pytest.mark.asyncio
-async def test_node_selector_with_memory_search_permission_emits_memory_only_retrieval_scope(
+async def test_node_selector_dense_rerank_remains_catalog_only_even_with_extra_visible_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _node_context_selection_module()
@@ -144,25 +136,19 @@ async def test_node_selector_with_memory_search_permission_emits_memory_only_ret
         core_requirement="inspect browser workflow",
         visible_skills=[SimpleNamespace(skill_id="skill-a")],
         visible_tool_families=[SimpleNamespace(tool_id="filesystem")],
-        visible_tool_names=["filesystem", "memory_search"],
+        visible_tool_names=["filesystem", "memory_note"],
     )
 
     assert result.mode == "dense_rerank"
-    assert result.memory_search_visible is True
-    assert result.memory_query
-    assert "inspect browser workflow" in result.memory_query
-    assert "Core requirement" in result.memory_query
-    assert captured["query_text"] == result.memory_query
+    assert captured["query_text"] == (
+        "Prompt: inspect browser workflow\n"
+        "Goal: inspect browser workflow\n"
+        "Core requirement: inspect browser workflow"
+    )
     assert result.selected_skill_ids == ["skill-a"]
     assert result.selected_tool_names == ["filesystem"]
     assert result.candidate_skill_ids == ["skill-a"]
     assert result.candidate_tool_names == ["filesystem"]
-    assert result.retrieval_scope == {
-        "search_context_types": ["memory"],
-        "allowed_context_types": ["memory"],
-        "allowed_resource_record_ids": [],
-        "allowed_skill_record_ids": [],
-    }
 
 
 @pytest.mark.asyncio

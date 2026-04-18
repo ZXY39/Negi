@@ -32,7 +32,7 @@ def test_frontend_visible_ceo_wording_is_replaced_with_leader() -> None:
     assert "当前没有可暂停的 CEO 回合。" not in app_js
     assert "不能在 CEO 面板直接发送。" not in app_js
 
-    assert 'const SCOPE_LABELS = { ceo: "Leader", execution: "Execution", inspection: "Inspection" };' in llm_js
+    assert 'const SCOPE_LABELS = { ceo: "Leader", execution: "Execution", inspection: "Inspection", memory: "Memory" };' in llm_js
     assert 'const SCOPE_LABELS = { ceo: "CEO", execution: "Execution", inspection: "Inspection" };' not in llm_js
 
     assert "主Agent（Leader）角色" in api_client_js

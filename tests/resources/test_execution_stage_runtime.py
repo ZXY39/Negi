@@ -387,11 +387,10 @@ async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrich
         task=task,
         visible_skills=visible_skills,
         visible_tool_families=visible_tool_families,
-        visible_tool_names=["content", "filesystem", "memory_search"],
+        visible_tool_names=["content", "filesystem"],
         tool_instances={
             "content": _StaticTool("content"),
             "filesystem": _StaticTool("filesystem"),
-            "memory_search": _StaticTool("memory_search"),
         },
     )
 
@@ -399,11 +398,8 @@ async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrich
         selector_calls.append(dict(kwargs))
         return NodeContextSelectionResult(
             mode="dense_rerank",
-            memory_search_visible=False,
             selected_skill_ids=["tmux"],
             selected_tool_names=["content"],
-            memory_query="",
-            retrieval_scope={},
             trace={"mode": "dense_rerank"},
         )
 
@@ -462,11 +458,10 @@ async def test_tool_provider_uses_full_visible_tool_fallback_when_selector_retur
             _tool_family("content_navigation", "content", primary_executor_name="content"),
             _tool_family("filesystem", "filesystem"),
         ],
-        visible_tool_names=["content", "filesystem", "memory_search"],
+        visible_tool_names=["content", "filesystem"],
         tool_instances={
             "content": _StaticTool("content"),
             "filesystem": _StaticTool("filesystem"),
-            "memory_search": _StaticTool("memory_search"),
         },
     )
 
@@ -474,11 +469,8 @@ async def test_tool_provider_uses_full_visible_tool_fallback_when_selector_retur
         _ = kwargs
         return NodeContextSelectionResult(
             mode="visible_only",
-            memory_search_visible=True,
             selected_skill_ids=[],
-            selected_tool_names=["content", "filesystem", "memory_search"],
-            memory_query="Prompt: inspect filesystem fallback",
-            retrieval_scope={},
+            selected_tool_names=["content", "filesystem"],
             trace={"mode": "visible_only"},
         )
 
@@ -491,7 +483,7 @@ async def test_tool_provider_uses_full_visible_tool_fallback_when_selector_retur
     await service._prepare_node_context_selection(task=task, node=node)
     provided = service._tool_provider(node)
 
-    assert set(provided) == {"content", "filesystem", "memory_search"}
+    assert set(provided) == {"content", "filesystem"}
 
 
 @pytest.mark.asyncio
@@ -529,11 +521,8 @@ async def test_node_build_tools_preserves_protocol_tools_when_callable_tools_are
         _ = kwargs
         return NodeContextSelectionResult(
             mode="dense_rerank",
-            memory_search_visible=False,
             selected_skill_ids=[],
             selected_tool_names=["content"],
-            memory_query="",
-            retrieval_scope={},
             trace={"mode": "dense_rerank"},
         )
 

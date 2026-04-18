@@ -332,14 +332,17 @@ class RuntimeBootstrapBridge:
             if manager_cls is None:
                 raise RuntimeError('memory manager class is not configured')
             self._loop.memory_manager = manager_cls(self._loop.workspace, cfg)
+            start = getattr(self._loop.memory_manager, 'start', None)
+            if callable(start):
+                start()
             self._loop._store = getattr(self._loop.memory_manager, 'store', None)
             self._loop._store_enabled = self._loop._store is not None
             if getattr(self._loop, 'main_task_service', None) is not None:
                 self._loop.main_task_service.memory_manager = self._loop.memory_manager
             if self._loop._store is not None:
-                logger.info('Memory runtime enabled with RAG store ({})', type(self._loop._store).__name__)
+                logger.info('Memory runtime enabled with catalog store ({})', type(self._loop._store).__name__)
             else:
-                logger.warning('Memory runtime enabled in legacy fallback mode (RAG store unavailable).')
+                logger.info('Memory runtime enabled without a catalog store projection.')
             self._schedule_catalog_bootstrap()
         except Exception as exc:
             logger.warning('Memory runtime init failed: {}', exc)

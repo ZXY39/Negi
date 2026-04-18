@@ -2,12 +2,13 @@ const MODEL_SCOPES = [
     { key: "ceo", label: "主Agent" },
     { key: "execution", label: "执行" },
     { key: "inspection", label: "检验" },
+    { key: "memory", label: "记忆" },
 ];
 
-const EMPTY_MODEL_ROLES = () => ({ ceo: [], execution: [], inspection: [] });
-const DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "" });
-const DEFAULT_ROLE_ITERATIONS = () => ({ ceo: null, execution: null, inspection: null });
-const DEFAULT_ROLE_CONCURRENCY = () => ({ ceo: null, execution: null, inspection: null });
+const EMPTY_MODEL_ROLES = () => ({ ceo: [], execution: [], inspection: [], memory: [] });
+const DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "", memory: "" });
+const DEFAULT_ROLE_ITERATIONS = () => ({ ceo: null, execution: null, inspection: null, memory: null });
+const DEFAULT_ROLE_CONCURRENCY = () => ({ ceo: null, execution: null, inspection: null, memory: 1 });
 const TREE_SCALE_MIN = 0.12;
 const TREE_SCALE_MAX = 3.5;
 const TREE_SCALE_FACTOR = 1.12;
@@ -253,6 +254,28 @@ const S = {
     toolAutosavePending: false,
     toolPage: 1,
     toolPageSize: RESOURCE_PAGE_SIZES[0],
+    memoryLoadedOnce: false,
+    memoryBusy: false,
+    memoryError: "",
+    memoryQueueItems: [],
+    memoryQueueTotal: 0,
+    memoryQueueHasMore: false,
+    memoryQueuePageSize: 20,
+    memoryProcessedItems: [],
+    memoryProcessedTotal: 0,
+    memoryProcessedHasMore: false,
+    memoryProcessedPageSize: 20,
+    memoryQueueExpanded: {},
+    memoryProcessedExpanded: {},
+    memoryNotePreview: {
+        open: false,
+        busy: false,
+        ref: "",
+        body: "",
+        error: "",
+        requestToken: 0,
+    },
+    memoryPollIntervalId: null,
     communications: [],
     communicationBridge: null,
     selectedCommunication: null,
@@ -298,9 +321,27 @@ const U = {
     viewTasks: document.getElementById("view-tasks-list"),
     viewSkills: document.getElementById("view-skills"),
     viewTools: document.getElementById("view-tools"),
+    viewMemory: document.getElementById("view-memory"),
     viewModels: document.getElementById("view-models"),
     viewCommunications: document.getElementById("view-communications"),
     viewTaskDetails: document.getElementById("view-task-details"),
+    memoryAdminActions: document.getElementById("memory-admin-actions"),
+    memoryPageErrorBanner: document.getElementById("memory-page-error-banner"),
+    memoryQueueBlockedBanner: document.getElementById("memory-queue-blocked-banner"),
+    memoryRefresh: document.getElementById("memory-refresh-btn"),
+    memoryQueueList: document.getElementById("memory-queue-list"),
+    memoryQueueInfo: document.getElementById("memory-queue-info"),
+    memoryQueueMore: document.getElementById("memory-queue-more-btn"),
+    memoryProcessedList: document.getElementById("memory-processed-list"),
+    memoryProcessedInfo: document.getElementById("memory-processed-info"),
+    memoryProcessedMore: document.getElementById("memory-processed-more-btn"),
+    memoryNoteBackdrop: null,
+    memoryNoteDrawer: null,
+    memoryNoteTitle: null,
+    memoryNoteSubtitle: null,
+    memoryNoteStatus: null,
+    memoryNoteBody: null,
+    memoryNoteClose: null,
     modelHint: document.getElementById("sidebar-model-hint"),
     modelRefresh: document.getElementById("model-refresh-btn"),
     modelCreate: document.getElementById("model-create-btn"),
@@ -5981,9 +6022,21 @@ async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.k
 }
 
 function renderRoleLimitControl({ scopeKey, kind, label, value, editing }) {
+    const isFixedMemoryConcurrency = scopeKey === "memory" && kind === "concurrency";
     const modeName = `model-role-${kind}-mode-${scopeKey}`;
-    const inputValue = value == null ? "" : String(value);
+    const inputValue = value == null ? (isFixedMemoryConcurrency ? "1" : "") : String(value);
     const isCustom = value != null;
+    if (isFixedMemoryConcurrency) {
+        return `
+        <div class="model-role-limit-field" data-model-role-limit-kind="${esc(kind)}" data-model-role-limit-scope="${esc(scopeKey)}" data-model-role-fixed="1" data-model-role-fixed-value="1">
+            <span class="model-role-iterations-label">${esc(label)}</span>
+            <div class="model-inline-meta">
+                <span class="policy-chip neutral">固定 1</span>
+                <span class="policy-chip neutral">只读</span>
+            </div>
+            <input class="model-role-iterations-input model-role-limit-input spinless-number-input" type="number" min="1" max="1" step="1" inputmode="numeric" value="1" disabled data-model-role-limit-input="${esc(kind)}">
+        </div>`;
+    }
     return `
         <div class="model-role-limit-field" data-model-role-limit-kind="${esc(kind)}" data-model-role-limit-scope="${esc(scopeKey)}">
             <span class="model-role-iterations-label">${esc(label)}</span>
@@ -6013,6 +6066,19 @@ function syncRoleIterationDraftsFromInputs({ requireValid = false } = {}) {
         if (!scope || !kind) return;
         const input = group.querySelector("[data-model-role-limit-input]");
         if (!(input instanceof HTMLInputElement)) return;
+        const fixed = String(group.dataset.modelRoleFixed || "").trim() === "1";
+        if (fixed) {
+            const fixedValue = normalizeInt(group.dataset.modelRoleFixedValue, 1);
+            if (kind === "concurrency" && modelScopeConcurrency(scope, "draft") !== fixedValue) {
+                S.modelCatalog.roleConcurrencyDrafts[scope] = fixedValue;
+                changed = true;
+            }
+            input.disabled = true;
+            input.value = String(fixedValue);
+            input.classList.remove("is-invalid");
+            input.setCustomValidity("");
+            return;
+        }
         const scopeLabel = MODEL_SCOPES.find((item) => item.key === scope)?.label || scope;
         const selectedMode = group.querySelector("[data-model-role-limit-mode]:checked");
         const mode = selectedMode instanceof HTMLInputElement ? String(selectedMode.value || "unlimited") : "unlimited";
@@ -7474,6 +7540,411 @@ function clearToolSelection() {
     renderToolDetail();
 }
 
+function memoryStatusLabel(status) {
+    const normalized = String(status || "").trim().toLowerCase();
+    if (normalized === "processing") return "处理中";
+    return "待处理";
+}
+
+function memoryOpLabel(op) {
+    return String(op || "").trim().toLowerCase() === "delete" ? "删除" : "增加";
+}
+
+const NOTE_REF_RE = /\bref:(note_[a-z0-9_]+)\b/g;
+const MEMORY_VIEW_POLL_MS = 15000;
+
+function renderMemoryNoteRefChip(noteRef) {
+    noteRef = String(noteRef || "").trim();
+    if (!noteRef) return "";
+    return `<button type="button" class="memory-note-ref-trigger" data-memory-note-ref="${esc(noteRef)}">ref:${esc(noteRef)}</button>`;
+}
+
+function renderMemoryNoteRefList(noteRefs) {
+    const items = [...new Set((Array.isArray(noteRefs) ? noteRefs : [])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean))];
+    if (!items.length) return "-";
+    return `<span class="memory-note-ref-list">${items.map((noteRef) => renderMemoryNoteRefChip(noteRef)).join("")}</span>`;
+}
+
+function renderMemoryTextWithNoteRefs(text) {
+    const value = String(text || "");
+    if (!value) return "";
+    NOTE_REF_RE.lastIndex = 0;
+    let cursor = 0;
+    let html = "";
+    let match = NOTE_REF_RE.exec(value);
+    while (match) {
+        const matchIndex = Number(match.index || 0);
+        const matchText = String(match[0] || "");
+        const noteRef = String(match[1] || "").trim();
+        html += esc(value.slice(cursor, matchIndex));
+        html += renderMemoryNoteRefChip(noteRef);
+        cursor = matchIndex + matchText.length;
+        match = NOTE_REF_RE.exec(value);
+    }
+    NOTE_REF_RE.lastIndex = 0;
+    html += esc(value.slice(cursor));
+    return html;
+}
+
+function ensureMemoryNotePreviewUi() {
+    if (U.memoryNoteBackdrop && U.memoryNoteDrawer) return;
+    const host = U.viewMemory || document.body;
+    const backdrop = document.createElement("div");
+    backdrop.id = "memory-note-preview-backdrop";
+    backdrop.className = "detail-backdrop";
+    backdrop.setAttribute("aria-hidden", "true");
+    const drawer = document.createElement("section");
+    drawer.id = "memory-note-preview-drawer";
+    drawer.className = "panel detail-drawer memory-note-preview-drawer";
+    drawer.setAttribute("role", "dialog");
+    drawer.setAttribute("aria-modal", "true");
+    drawer.setAttribute("aria-hidden", "true");
+    drawer.setAttribute("aria-labelledby", "memory-note-preview-title");
+    drawer.tabIndex = -1;
+    drawer.innerHTML = `
+        <div class="detail-modal-header">
+            <div class="memory-note-preview-head">
+                <h2 id="memory-note-preview-title">只读 Note 预览</h2>
+                <p id="memory-note-preview-subtitle" class="subtitle">仅展示 note 正文，不支持编辑或保存。</p>
+            </div>
+            <button type="button" class="toolbar-btn ghost" data-memory-note-close data-modal-close>关闭</button>
+        </div>
+        <div class="detail-modal-body">
+            <div class="memory-note-preview-shell">
+                <div id="memory-note-preview-status" class="memory-note-preview-status"></div>
+                <pre id="memory-note-preview-body" class="memory-note-preview-body"></pre>
+            </div>
+        </div>
+    `;
+    host.appendChild(backdrop);
+    host.appendChild(drawer);
+    U.memoryNoteBackdrop = backdrop;
+    U.memoryNoteDrawer = drawer;
+    U.memoryNoteTitle = drawer.querySelector("#memory-note-preview-title");
+    U.memoryNoteSubtitle = drawer.querySelector("#memory-note-preview-subtitle");
+    U.memoryNoteStatus = drawer.querySelector("#memory-note-preview-status");
+    U.memoryNoteBody = drawer.querySelector("#memory-note-preview-body");
+    U.memoryNoteClose = drawer.querySelector("[data-memory-note-close]");
+    U.memoryNoteClose?.addEventListener("click", () => closeMemoryNotePreview());
+    U.memoryNoteBackdrop?.addEventListener("click", () => closeMemoryNotePreview());
+}
+
+function renderMemoryNotePreview() {
+    ensureMemoryNotePreviewUi();
+    const noteRef = String(S.memoryNotePreview.ref || "").trim();
+    if (U.memoryNoteTitle) U.memoryNoteTitle.textContent = noteRef ? `只读 Note 预览 · ${noteRef}` : "只读 Note 预览";
+    if (U.memoryNoteSubtitle) U.memoryNoteSubtitle.textContent = "仅展示 note 正文，不支持编辑或保存。";
+    if (U.memoryNoteStatus) {
+        const errorText = String(S.memoryNotePreview.error || "").trim();
+        if (S.memoryNotePreview.busy) {
+            U.memoryNoteStatus.textContent = "正在加载 note 正文...";
+            U.memoryNoteStatus.hidden = false;
+            U.memoryNoteStatus.classList.remove("is-error");
+        } else if (errorText) {
+            U.memoryNoteStatus.textContent = errorText;
+            U.memoryNoteStatus.hidden = false;
+            U.memoryNoteStatus.classList.add("is-error");
+        } else {
+            U.memoryNoteStatus.textContent = noteRef ? `当前预览：${noteRef}` : "";
+            U.memoryNoteStatus.hidden = !noteRef;
+            U.memoryNoteStatus.classList.remove("is-error");
+        }
+    }
+    if (U.memoryNoteBody) {
+        U.memoryNoteBody.textContent = S.memoryNotePreview.busy
+            ? ""
+            : String(S.memoryNotePreview.body || "").trim() || "当前 note 没有正文。";
+    }
+    setDrawerOpen(U.memoryNoteBackdrop, U.memoryNoteDrawer, !!S.memoryNotePreview.open);
+}
+
+function closeMemoryNotePreview() {
+    S.memoryNotePreview.open = false;
+    renderMemoryNotePreview();
+}
+
+async function openMemoryNotePreview(noteRef) {
+    const normalizedRef = String(noteRef || "").trim();
+    if (!normalizedRef) return;
+    ensureMemoryNotePreviewUi();
+    S.memoryNotePreview.open = true;
+    S.memoryNotePreview.busy = true;
+    S.memoryNotePreview.ref = normalizedRef;
+    S.memoryNotePreview.body = "";
+    S.memoryNotePreview.error = "";
+    S.memoryNotePreview.requestToken += 1;
+    const requestToken = S.memoryNotePreview.requestToken;
+    renderMemoryNotePreview();
+    try {
+        const item = await ApiClient.getMemoryNote(noteRef);
+        if (requestToken !== S.memoryNotePreview.requestToken) return;
+        S.memoryNotePreview.ref = String(item?.ref || normalizedRef).trim() || normalizedRef;
+        S.memoryNotePreview.body = String(item?.body || "");
+        S.memoryNotePreview.error = "";
+    } catch (error) {
+        if (requestToken !== S.memoryNotePreview.requestToken) return;
+        S.memoryNotePreview.error = error?.message || "读取记忆 note 失败";
+        showToast({ title: "Note 预览失败", text: S.memoryNotePreview.error, kind: "error" });
+    } finally {
+        if (requestToken !== S.memoryNotePreview.requestToken) return;
+        S.memoryNotePreview.busy = false;
+        renderMemoryNotePreview();
+    }
+}
+
+function setMemoryCardExpanded(kind, key, expanded) {
+    const target = kind === "processed" ? S.memoryProcessedExpanded : S.memoryQueueExpanded;
+    if (!key) return;
+    target[key] = !!expanded;
+}
+
+function renderMemoryQueueCard(item) {
+    const requestId = String(item?.request_id || "").trim();
+    const expanded = !!S.memoryQueueExpanded[requestId];
+    const statusText = memoryStatusLabel(item?.status);
+    const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "");
+    const processingStartedAt = formatCompactTime(item?.processing_started_at) || String(item?.processing_started_at || "");
+    const errorText = String(item?.last_error_text || "").trim();
+    const lastErrorAt = formatCompactTime(item?.last_error_at) || String(item?.last_error_at || "");
+    const retryAfter = formatCompactTime(item?.retry_after) || String(item?.retry_after || "");
+    return `
+        <details class="memory-card"${expanded ? " open" : ""} data-memory-card="queue" data-memory-key="${esc(requestId)}">
+            <summary>
+                <div class="memory-card-summary">
+                    <div class="memory-card-head">
+                        <div class="memory-card-title">
+                            <span class="status-badge" data-status="${esc(String(item?.status || "pending"))}">${esc(statusText)}</span>
+                            <span class="policy-chip neutral">${esc(requestId || "pending")}</span>
+                        </div>
+                        <div class="memory-card-meta">
+                            <span>入队时间：${esc(createdAt || "-")}</span>
+                        </div>
+                    </div>
+                    ${errorText ? `<div class="memory-card-error">${esc(errorText)}</div>` : ""}
+                </div>
+            </summary>
+            <div class="memory-card-body">
+                <div class="memory-card-body-text memory-card-body-text-rich">${renderMemoryTextWithNoteRefs(String(item?.payload_text || ""))}</div>
+                <div class="memory-card-field-grid">
+                    <div class="memory-card-field"><span class="memory-card-field-label">状态：</span><span>${esc(statusText || "-")}</span></div>
+                    <div class="memory-card-field"><span class="memory-card-field-label">入队时间：</span><span>${esc(createdAt || "-")}</span></div>
+                    <div class="memory-card-field"><span class="memory-card-field-label">开始处理：</span><span>${esc(processingStartedAt || "-")}</span></div>
+                    <div class="memory-card-field"><span class="memory-card-field-label">最近错误：</span><span>${esc(errorText || "-")}</span></div>
+                    <div class="memory-card-field"><span class="memory-card-field-label">最近报错时间：</span><span>${esc(lastErrorAt || "-")}</span></div>
+                    <div class="memory-card-field"><span class="memory-card-field-label">下次重试：</span><span>${esc(retryAfter || "-")}</span></div>
+                </div>
+                <div class="memory-card-body-meta">
+                    <div>决定源：${esc(String(item?.decision_source || "") || "-")}</div>
+                    <div>触发来源：${esc(String(item?.trigger_source || "") || "-")}</div>
+                </div>
+            </div>
+        </details>
+    `;
+}
+
+function renderMemoryProcessedCard(item) {
+    const batchId = String(item?.batch_id || "").trim();
+    const expanded = !!S.memoryProcessedExpanded[batchId];
+    const usage = item?.usage && typeof item.usage === "object" ? item.usage : {};
+    const payloadTexts = Array.isArray(item?.payload_texts) ? item.payload_texts : [];
+    const noteRefs = Array.isArray(item?.note_refs_written) ? item.note_refs_written : [];
+    const modelChain = Array.isArray(item?.model_chain) ? item.model_chain : [];
+    return `
+        <details class="memory-card"${expanded ? " open" : ""} data-memory-card="processed" data-memory-key="${esc(batchId)}">
+            <summary>
+                <div class="memory-card-summary">
+                    <div class="memory-card-head">
+                        <div class="memory-card-title">
+                            <span class="status-badge" data-status="success">${esc(memoryOpLabel(item?.op))}</span>
+                            <span class="policy-chip neutral">${esc(batchId || "batch")}</span>
+                            <span class="policy-chip neutral">${esc(String(item?.request_count || payloadTexts.length || 0))} 条</span>
+                        </div>
+                        <div class="memory-card-meta">
+                            <span>处理时间 ${esc(formatCompactTime(item?.processed_at) || String(item?.processed_at || ""))}</span>
+                            <span>输入 ${esc(String(usage.input_tokens || 0))}</span>
+                            <span>输出 ${esc(String(usage.output_tokens || 0))}</span>
+                            <span>命中 ${esc(String(usage.cache_read_tokens || 0))}</span>
+                        </div>
+                    </div>
+                </div>
+            </summary>
+            <div class="memory-card-body">
+                <div class="memory-card-body-meta">
+                    <div>模型链：${esc(modelChain.join(" -> ") || "-")}</div>
+                    <div>尝试次数：${esc(String(item?.attempt_count || 0))}</div>
+                    <div>写入 notes：${renderMemoryNoteRefList(noteRefs)}</div>
+                    <div>结果摘要：<span class="memory-card-inline-rich">${renderMemoryTextWithNoteRefs(String(item?.document_preview || "")) || "-"}</span></div>
+                </div>
+                <div class="memory-card-body-text memory-card-body-text-rich">${renderMemoryTextWithNoteRefs(payloadTexts.join("\n\n---\n\n"))}</div>
+            </div>
+        </details>
+    `;
+}
+
+function currentMemoryQueueBlockedText() {
+    const queueHead = Array.isArray(S.memoryQueueItems) && S.memoryQueueItems.length ? S.memoryQueueItems[0] : null;
+    const errorText = String(queueHead?.last_error_text || "").trim();
+    if (!queueHead || String(queueHead?.status || "").trim().toLowerCase() !== "processing" || !errorText) return "";
+    const retryAfter = String(queueHead?.retry_after || "").trim();
+    const retryText = retryAfter ? `，下次重试：${formatCompactTime(retryAfter) || retryAfter}` : "";
+    return `队首阻塞：${errorText}${retryText}`;
+}
+
+function stopMemoryViewAutoRefresh() {
+    if (S.memoryPollIntervalId) {
+        window.clearInterval(S.memoryPollIntervalId);
+        S.memoryPollIntervalId = null;
+    }
+}
+
+function startMemoryViewAutoRefresh() {
+    if (S.memoryPollIntervalId) return;
+    S.memoryPollIntervalId = window.setInterval(() => {
+        if (S.view !== "memory") return;
+        void loadMemoryView({ quiet: true });
+    }, MEMORY_VIEW_POLL_MS);
+}
+
+function bindMemoryCardToggles() {
+    if (U.memoryQueueList instanceof HTMLElement) {
+        U.memoryQueueList.querySelectorAll("details[data-memory-card='queue']").forEach((card) => {
+            if (!(card instanceof HTMLDetailsElement)) return;
+            if (card.dataset.memoryToggleBound === "1") return;
+            card.dataset.memoryToggleBound = "1";
+            card.addEventListener("toggle", () => {
+                setMemoryCardExpanded("queue", card.dataset.memoryKey || "", card.open);
+            });
+        });
+    }
+    if (U.memoryProcessedList instanceof HTMLElement) {
+        U.memoryProcessedList.querySelectorAll("details[data-memory-card='processed']").forEach((card) => {
+            if (!(card instanceof HTMLDetailsElement)) return;
+            if (card.dataset.memoryToggleBound === "1") return;
+            card.dataset.memoryToggleBound = "1";
+            card.addEventListener("toggle", () => {
+                setMemoryCardExpanded("processed", card.dataset.memoryKey || "", card.open);
+            });
+        });
+    }
+}
+
+function renderMemoryAdminActions() {
+    if (!U.memoryAdminActions) return;
+    U.memoryAdminActions.hidden = true;
+    U.memoryAdminActions.setAttribute("aria-hidden", "true");
+    U.memoryAdminActions.innerHTML = "";
+}
+
+function renderMemoryView() {
+    renderMemoryAdminActions();
+    if (U.memoryQueueBlockedBanner) {
+        const blockedText = currentMemoryQueueBlockedText();
+        U.memoryQueueBlockedBanner.hidden = !blockedText;
+        U.memoryQueueBlockedBanner.textContent = blockedText ? `队首阻塞整个队列。${blockedText}` : "队首阻塞整个队列";
+    }
+    if (U.memoryPageErrorBanner) {
+        const hasError = !!String(S.memoryError || "").trim();
+        U.memoryPageErrorBanner.hidden = !hasError;
+        U.memoryPageErrorBanner.textContent = hasError ? String(S.memoryError || "").trim() : "";
+    }
+    if (U.memoryQueueList) {
+        if (S.memoryBusy && !S.memoryQueueItems.length) {
+            U.memoryQueueList.innerHTML = '<div class="empty-state compact">正在加载记忆队列...</div>';
+        } else if (!S.memoryQueueItems.length) {
+            U.memoryQueueList.innerHTML = '<div class="empty-state compact">当前没有未出队记忆。</div>';
+        } else {
+            U.memoryQueueList.innerHTML = S.memoryQueueItems.map((item) => renderMemoryQueueCard(item)).join("");
+        }
+    }
+    if (U.memoryProcessedList) {
+        if (S.memoryBusy && !S.memoryProcessedItems.length) {
+            U.memoryProcessedList.innerHTML = '<div class="empty-state compact">正在加载已处理批次...</div>';
+        } else if (!S.memoryProcessedItems.length) {
+            U.memoryProcessedList.innerHTML = '<div class="empty-state compact">当前还没有已处理记忆。</div>';
+        } else {
+            U.memoryProcessedList.innerHTML = S.memoryProcessedItems.map((item) => renderMemoryProcessedCard(item)).join("");
+        }
+    }
+    if (U.memoryQueueInfo) U.memoryQueueInfo.textContent = `共 ${S.memoryQueueTotal} 项`;
+    if (U.memoryProcessedInfo) U.memoryProcessedInfo.textContent = `共 ${S.memoryProcessedTotal} 项`;
+    if (U.memoryQueueMore) U.memoryQueueMore.disabled = S.memoryBusy || !S.memoryQueueHasMore;
+    if (U.memoryProcessedMore) U.memoryProcessedMore.disabled = S.memoryBusy || !S.memoryProcessedHasMore;
+    bindMemoryCardToggles();
+    icons();
+}
+
+async function loadMemoryView({ force = false, quiet = false } = {}) {
+    if (S.memoryBusy) return;
+    S.memoryBusy = true;
+    if (force) S.memoryError = "";
+    renderMemoryView();
+    try {
+        const queueLimit = Math.max(normalizeInt(S.memoryQueueItems.length, 0), S.memoryQueuePageSize);
+        const processedLimit = Math.max(normalizeInt(S.memoryProcessedItems.length, 0), S.memoryProcessedPageSize);
+        const [queue, processed] = await Promise.all([
+            ApiClient.getMemoryQueue({ limit: queueLimit, offset: 0 }),
+            ApiClient.getMemoryProcessed({ limit: processedLimit, offset: 0 }),
+        ]);
+        S.memoryQueueItems = Array.isArray(queue?.items) ? queue.items : [];
+        S.memoryQueueTotal = normalizeInt(queue?.total, 0);
+        S.memoryQueueHasMore = !!queue?.hasMore;
+        S.memoryProcessedItems = Array.isArray(processed?.items) ? processed.items : [];
+        S.memoryProcessedTotal = normalizeInt(processed?.total, 0);
+        S.memoryProcessedHasMore = !!processed?.hasMore;
+        S.memoryLoadedOnce = true;
+        S.memoryError = "";
+    } catch (error) {
+        S.memoryLoadedOnce = true;
+        S.memoryError = error?.message || "记忆数据加载失败";
+        if (!quiet) showToast({ title: "记忆加载失败", text: S.memoryError, kind: "error" });
+    } finally {
+        S.memoryBusy = false;
+        renderMemoryView();
+    }
+}
+
+async function loadMoreMemoryQueue() {
+    if (S.memoryBusy || !S.memoryQueueHasMore) return;
+    S.memoryBusy = true;
+    renderMemoryView();
+    try {
+        const payload = await ApiClient.getMemoryQueue({
+            limit: S.memoryQueuePageSize,
+            offset: S.memoryQueueItems.length,
+        });
+        S.memoryQueueItems = [...S.memoryQueueItems, ...(Array.isArray(payload?.items) ? payload.items : [])];
+        S.memoryQueueTotal = normalizeInt(payload?.total, S.memoryQueueTotal);
+        S.memoryQueueHasMore = !!payload?.hasMore;
+    } catch (error) {
+        showToast({ title: "加载失败", text: error?.message || "记忆队列加载失败", kind: "error" });
+    } finally {
+        S.memoryBusy = false;
+        renderMemoryView();
+    }
+}
+
+async function loadMoreMemoryProcessed() {
+    if (S.memoryBusy || !S.memoryProcessedHasMore) return;
+    S.memoryBusy = true;
+    renderMemoryView();
+    try {
+        const payload = await ApiClient.getMemoryProcessed({
+            limit: S.memoryProcessedPageSize,
+            offset: S.memoryProcessedItems.length,
+        });
+        S.memoryProcessedItems = [...S.memoryProcessedItems, ...(Array.isArray(payload?.items) ? payload.items : [])];
+        S.memoryProcessedTotal = normalizeInt(payload?.total, S.memoryProcessedTotal);
+        S.memoryProcessedHasMore = !!payload?.hasMore;
+    } catch (error) {
+        showToast({ title: "加载失败", text: error?.message || "已处理记忆加载失败", kind: "error" });
+    } finally {
+        S.memoryBusy = false;
+        renderMemoryView();
+    }
+}
+
 function clearCommunicationSelection() {
     S.selectedCommunication = null;
     S.communicationDirty = false;
@@ -7486,7 +7957,7 @@ function clearCommunicationSelection() {
 }
 
 function switchView(view) {
-    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, models: U.viewModels, communications: U.viewCommunications, "task-details": U.viewTaskDetails };
+    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, memory: U.viewMemory, models: U.viewModels, communications: U.viewCommunications, "task-details": U.viewTaskDetails };
     const navView = view === "task-details" ? "tasks" : view;
     S.view = navView;
     U.nav.forEach((btn) => btn.classList.toggle("active", btn.dataset.view === navView));
@@ -7518,8 +7989,15 @@ function switchView(view) {
     } else if (typeof stopTaskWorkerStatusPolling === "function") {
         stopTaskWorkerStatusPolling();
     }
+    if (view !== "memory" && S.memoryNotePreview.open) closeMemoryNotePreview();
+    if (view === "memory") startMemoryViewAutoRefresh();
+    else stopMemoryViewAutoRefresh();
     if (view === "skills") void loadSkills();
     if (view === "tools") void loadTools();
+    if (view === "memory") {
+        if (!S.memoryLoadedOnce) void loadMemoryView();
+        else void loadMemoryView({ quiet: true });
+    }
     if (view === "models") void loadModels();
     if (view === "communications") void loadCommunications();
 }
@@ -7541,6 +8019,21 @@ function bind() {
     U.projectExit?.addEventListener("click", () => void requestProjectExit());
     U.nav.forEach((btn) => btn.addEventListener("click", () => switchView(btn.dataset.view)));
     U.backToTasks?.addEventListener("click", () => switchView("tasks"));
+    U.memoryRefresh?.addEventListener("click", () => void loadMemoryView({ force: true }));
+    U.memoryQueueMore?.addEventListener("click", () => void loadMoreMemoryQueue());
+    U.memoryProcessedMore?.addEventListener("click", () => void loadMoreMemoryProcessed());
+    U.memoryQueueList?.addEventListener("click", (e) => {
+        const trigger = e.target instanceof Element ? e.target.closest("[data-memory-note-ref]") : null;
+        if (!trigger) return;
+        e.preventDefault();
+        void openMemoryNotePreview(trigger.dataset.memoryNoteRef || "");
+    });
+    U.memoryProcessedList?.addEventListener("click", (e) => {
+        const trigger = e.target instanceof Element ? e.target.closest("[data-memory-note-ref]") : null;
+        if (!trigger) return;
+        e.preventDefault();
+        void openMemoryNotePreview(trigger.dataset.memoryNoteRef || "");
+    });
     U.taskTokenButton?.addEventListener("click", () => setTaskTokenStatsOpen(true));
     U.taskTokenClose?.addEventListener("click", () => setTaskTokenStatsOpen(false));
     U.taskTokenBackdrop?.addEventListener("click", () => setTaskTokenStatsOpen(false));
@@ -7950,6 +8443,10 @@ function bind() {
             setTaskTokenStatsOpen(false);
             return;
         }
+        if (S.memoryNotePreview.open) {
+            closeMemoryNotePreview();
+            return;
+        }
         if (U.taskDetailDrawer?.classList.contains("is-open")) {
             clearAgentSelection();
             return;
@@ -8022,10 +8519,3 @@ function init() {
 
 document.addEventListener("DOMContentLoaded", maybeInit);
 window.addEventListener("g3ku:boot-unlocked", maybeInit);
-
-
-
-
-
-
-
