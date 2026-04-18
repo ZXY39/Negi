@@ -2149,6 +2149,38 @@ def test_web_ceo_continuity_snapshot_round_trip_and_clear(tmp_path: Path, monkey
     assert web_ceo_sessions.read_completed_continuity_snapshot("web:shared") is None
 
 
+def test_completed_continuity_snapshot_round_trips_token_preflight_diagnostics(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    request_path = tmp_path / "request.json"
+    request_path.write_text("{}", encoding="utf-8")
+
+    payload = {
+        "frontdoor_request_body_messages": [{"role": "system", "content": "SYSTEM"}],
+        "frontdoor_history_shrink_reason": "token_compression",
+        "frontdoor_actual_request_path": str(request_path),
+        "frontdoor_actual_request_history": [{"path": str(request_path), "turn_id": "turn-1"}],
+        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+        "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
+        "compression_state": {"status": "ready", "text": "ok", "source": "semantic"},
+        "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
+        "frontdoor_token_preflight_diagnostics": {"applied": True, "final_request_tokens": 28000, "trigger_tokens": 20000},
+        "hydrated_tool_names": ["web_fetch"],
+        "capability_snapshot_exposure_revision": "exp:demo",
+        "visible_tool_ids": ["message", "web_fetch"],
+        "visible_skill_ids": ["web-access"],
+        "provider_tool_schema_names": ["message", "web_fetch"],
+        "source_reason": "finalize",
+    }
+
+    web_ceo_sessions.write_completed_continuity_snapshot("web:shared", payload)
+
+    restored = web_ceo_sessions.read_completed_continuity_snapshot("web:shared")
+
+    assert isinstance(restored, dict)
+    assert restored["frontdoor_history_shrink_reason"] == "token_compression"
+    assert restored["frontdoor_token_preflight_diagnostics"]["final_request_tokens"] == 28000
+
+
 def test_clear_web_ceo_session_artifacts_clears_completed_continuity_snapshot(
     tmp_path: Path,
     monkeypatch,

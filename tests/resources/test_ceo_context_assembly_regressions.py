@@ -2502,7 +2502,7 @@ async def test_message_builder_renders_retained_raw_stage_blocks_from_stage_stat
 
 
 @pytest.mark.asyncio
-async def test_message_builder_injects_global_summary_block_and_includes_hidden_heartbeat_execution_context(
+async def test_message_builder_does_not_inject_global_summary_block_during_history_assembly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prompt_builder = _SplitPromptBuilder()
@@ -2519,16 +2519,18 @@ async def test_message_builder_injects_global_summary_block_and_includes_hidden_
         metadata={"source": "heartbeat", "history_visible": False},
     )
 
-    captured_messages: list[dict[str, object]] = []
+    summary_calls = 0
 
     async def _fake_summary(messages, *, max_output_tokens, model_key=None):
+        nonlocal summary_calls
         _ = max_output_tokens, model_key
-        captured_messages.extend(list(messages or []))
+        summary_calls += 1
         return "## 长期目标\n继续当前任务"
 
     monkeypatch.setattr(
         "g3ku.runtime.frontdoor.message_builder.summarize_global_context_model_first",
         _fake_summary,
+        raising=False,
     )
     monkeypatch.setattr(
         "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
@@ -2549,14 +2551,14 @@ async def test_message_builder_injects_global_summary_block_and_includes_hidden_
     )
 
     stable_contents = [str(item.get("content") or "") for item in result.stable_messages]
-    assert any(content.startswith("[G3KU_LONG_CONTEXT_SUMMARY_V1]") for content in stable_contents)
-    assert any("Heartbeat finished a background inspection." in str(item.get("content") or "") for item in captured_messages)
-    assert result.trace["global_summary_present"] is True
+    assert not any(content.startswith("[G3KU_LONG_CONTEXT_SUMMARY_V1]") for content in stable_contents)
+    assert summary_calls == 0
+    assert result.trace["global_summary_present"] is False
     semantic_state = dict(result.trace.get("semantic_context_state") or {})
     compression_state = dict(result.trace.get("compression_state_payload") or {})
-    assert semantic_state.get("summary_text") == "## 长期目标\n继续当前任务"
-    assert compression_state.get("status") == "ready"
-    assert compression_state.get("source") == "semantic"
+    assert semantic_state.get("summary_text") == ""
+    assert compression_state.get("status") == ""
+    assert compression_state.get("source") == ""
 
 
 @pytest.mark.asyncio
@@ -2608,7 +2610,7 @@ async def test_message_builder_trace_reports_pre_summary_and_effective_prompt_to
 
 
 @pytest.mark.asyncio
-async def test_message_builder_reuses_covered_global_summary_without_recomputation(
+async def test_message_builder_does_not_recompute_or_reuse_global_summary_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prompt_builder = _SplitPromptBuilder()
@@ -2632,6 +2634,7 @@ async def test_message_builder_reuses_covered_global_summary_without_recomputati
     monkeypatch.setattr(
         "g3ku.runtime.frontdoor.message_builder.summarize_global_context_model_first",
         _fake_summary,
+        raising=False,
     )
     monkeypatch.setattr(
         "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
@@ -2659,6 +2662,7 @@ async def test_message_builder_reuses_covered_global_summary_without_recomputati
     )
 
     assert summary_calls == 0
+    assert result.trace["global_summary_present"] is False
     assert result.trace["semantic_context_state"]["summary_text"] == "## Goals\nExisting summary"
 
 
@@ -2728,7 +2732,7 @@ async def test_message_builder_directly_continues_request_body_seed_without_stag
 
 
 @pytest.mark.asyncio
-async def test_message_builder_reuses_existing_summary_while_failure_cooldown_is_active(
+async def test_message_builder_ignores_global_summary_failure_cooldown_during_history_assembly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prompt_builder = _SplitPromptBuilder()
@@ -2752,6 +2756,7 @@ async def test_message_builder_reuses_existing_summary_while_failure_cooldown_is
     monkeypatch.setattr(
         "g3ku.runtime.frontdoor.message_builder.summarize_global_context_model_first",
         _fake_summary,
+        raising=False,
     )
     monkeypatch.setattr(
         "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
@@ -2779,6 +2784,7 @@ async def test_message_builder_reuses_existing_summary_while_failure_cooldown_is
     )
 
     assert summary_calls == 0
+    assert result.trace["global_summary_present"] is False
     assert result.trace["semantic_context_state"]["summary_text"] == "## Goals\nExisting summary"
     assert result.trace["semantic_context_state"]["failure_cooldown_until"] == "2999-01-01T00:00:00"
 
@@ -2806,6 +2812,7 @@ async def test_message_builder_uses_resolved_ceo_context_window_instead_of_loop_
     monkeypatch.setattr(
         "g3ku.runtime.frontdoor.message_builder.summarize_global_context_model_first",
         _fake_summary,
+        raising=False,
     )
     monkeypatch.setattr(
         "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
@@ -2830,7 +2837,7 @@ async def test_message_builder_uses_resolved_ceo_context_window_instead_of_loop_
 
 
 @pytest.mark.asyncio
-async def test_message_builder_global_summary_uses_externalized_compression_block_without_archive_readback(
+async def test_message_builder_keeps_externalized_compression_block_without_global_summary_readback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prompt_builder = _SplitPromptBuilder()
@@ -2839,16 +2846,18 @@ async def test_message_builder_global_summary_uses_externalized_compression_bloc
     loop.context_length = 200_000
     builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
 
-    captured_messages: list[dict[str, object]] = []
+    summary_calls = 0
 
     async def _fake_summary(messages, *, max_output_tokens, model_key=None):
+        nonlocal summary_calls
         _ = max_output_tokens, model_key
-        captured_messages.extend(list(messages or []))
+        summary_calls += 1
         return "## Goals\nUse the externalized block only"
 
     monkeypatch.setattr(
         "g3ku.runtime.frontdoor.message_builder.summarize_global_context_model_first",
         _fake_summary,
+        raising=False,
     )
     monkeypatch.setattr(
         "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
@@ -2871,7 +2880,7 @@ async def test_message_builder_global_summary_uses_externalized_compression_bloc
         },
     )
 
-    await builder.build_for_ceo(
+    result = await builder.build_for_ceo(
         session=_session(),
         query_text="continue",
         exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
@@ -2881,10 +2890,11 @@ async def test_message_builder_global_summary_uses_externalized_compression_bloc
         frontdoor_stage_state=frontdoor_stage_state,
     )
 
-    rendered = "\n\n".join(str(item.get("content") or "") for item in captured_messages)
+    rendered = "\n\n".join(str(item.get("content") or "") for item in result.stable_messages)
     assert "[G3KU_STAGE_EXTERNALIZED_V1]" in rendered
     assert "artifact:artifact:frontdoor-stage-archive" in rendered
     assert "archived summary" in rendered
+    assert summary_calls == 0
 
 
 @pytest.mark.asyncio

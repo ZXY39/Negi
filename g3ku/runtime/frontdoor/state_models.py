@@ -39,6 +39,7 @@ class CeoPersistentState(TypedDict, total=False):
     frontdoor_live_request_messages: list[dict[str, Any]]
     frontdoor_request_body_messages: list[dict[str, Any]]
     frontdoor_history_shrink_reason: str
+    frontdoor_token_preflight_diagnostics: dict[str, Any]
 
     turn_overlay_text: str | None
 
@@ -192,6 +193,7 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "frontdoor_live_request_messages": [],
         "frontdoor_request_body_messages": [],
         "frontdoor_history_shrink_reason": "",
+        "frontdoor_token_preflight_diagnostics": {},
 
         "used_tools": [],
 
