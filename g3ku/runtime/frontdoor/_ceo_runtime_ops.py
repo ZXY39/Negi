@@ -19,6 +19,7 @@ from g3ku.json_schema_utils import (
     attach_raw_parameters_schema,
     build_args_schema_model,
     normalize_runtime_tool_arguments_dict,
+    sanitize_provider_parameters_schema,
 )
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
@@ -219,22 +220,10 @@ def _ceo_model_compatible_parameters_schema(tool_name: str, schema: dict[str, An
     return normalized
 
 
-def _strip_schema_descriptions(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            str(key): _strip_schema_descriptions(item)
-            for key, item in value.items()
-            if str(key) != "description"
-        }
-    if isinstance(value, list):
-        return [_strip_schema_descriptions(item) for item in value]
-    return value
-
-
 def _provider_visible_tool_contract(tool: Tool) -> tuple[str, dict[str, Any] | None]:
     _model_description, model_parameters = _model_visible_tool_contract(tool)
     compatible_parameters = _ceo_model_compatible_parameters_schema(tool.name, model_parameters)
-    stripped_parameters = _strip_schema_descriptions(compatible_parameters)
+    stripped_parameters = sanitize_provider_parameters_schema(compatible_parameters)
     return "", stripped_parameters if isinstance(stripped_parameters, dict) else compatible_parameters
 
 

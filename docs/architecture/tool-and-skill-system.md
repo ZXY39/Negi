@@ -500,4 +500,6 @@ The provider-facing bundle is also intentionally minimal:
 
 - Rich tool and skill descriptions stay in the tail runtime contract.
 - Provider `tools[]` should keep only the smallest callable schema required for function calling.
+- Provider-facing schemas are now sanitized before transport: descriptive text and unsupported JSON Schema combinators such as `anyOf`, `oneOf`, and `allOf` are stripped or flattened into a simpler supported shape.
+- Runtime-side tool validation remains the authority for argument correctness. Do not assume a provider-facing schema still preserves every branch of the richer internal contract.
 - If cache misses correlate with a large `actual_tool_schema_hash` delta, first check whether provider schemas accidentally regressed from this minimal/stable form.

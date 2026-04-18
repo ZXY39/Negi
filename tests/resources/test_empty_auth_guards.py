@@ -282,6 +282,96 @@ async def test_responses_provider_uses_request_timeout_for_http_client(monkeypat
     assert captured["timeout"] == 7.5
 
 
+@pytest.mark.asyncio
+async def test_responses_provider_sanitizes_tool_schema_combinators_before_transport(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeStream:
+        async def __aenter__(self):
+            return SimpleNamespace(status_code=200)
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+        def stream(self, *args, **kwargs):
+            captured["json"] = dict(kwargs.get("json") or {})
+            return _FakeStream()
+
+    async def _fake_consume_sse(response):
+        _ = response
+        return "ok", [], "stop", {}
+
+    monkeypatch.setattr("g3ku.providers.responses_provider.httpx.AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr("g3ku.providers.responses_provider._consume_sse", _fake_consume_sse)
+
+    provider = ResponsesProvider(api_key="test-key", api_base="https://example.com/v1")
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        model="demo",
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "schema_demo",
+                    "description": "demo",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "target": {
+                                "anyOf": [{"type": "string"}, {"type": "null"}],
+                                "description": "nullable id",
+                            },
+                            "mode": {
+                                "oneOf": [{"type": "string"}, {"type": "integer"}],
+                            },
+                            "payload": {
+                                "allOf": [
+                                    {
+                                        "type": "object",
+                                        "properties": {"id": {"type": "string"}},
+                                    },
+                                    {"required": ["id"]},
+                                ]
+                            },
+                        },
+                        "anyOf": [{"required": ["target"]}, {"required": ["mode"]}],
+                    },
+                },
+            }
+        ],
+        request_timeout_seconds=7.5,
+    )
+
+    assert response.content == "ok"
+    body = dict(captured.get("json") or {})
+    parameters = dict(((body.get("tools") or [])[0] or {}).get("parameters") or {})
+    properties = dict(parameters.get("properties") or {})
+    payload_schema = dict(properties.get("payload") or {})
+
+    assert "anyOf" not in parameters
+    assert "oneOf" not in parameters
+    assert "allOf" not in parameters
+    assert "anyOf" not in properties.get("target", {})
+    assert "oneOf" not in properties.get("mode", {})
+    assert "allOf" not in payload_schema
+    assert properties.get("target", {}).get("type") == "string"
+    assert properties.get("mode", {}).get("type") == "string"
+    assert payload_schema.get("type") == "object"
+    assert "id" in dict(payload_schema.get("properties") or {})
+
+
 def _capture_responses_provider_logs(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     sink: list[str] = []
 

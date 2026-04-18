@@ -16,6 +16,7 @@ _DEFAULT_OBJECT_SCHEMA: dict[str, Any] = {
     "properties": {},
     "required": [],
 }
+_UNSUPPORTED_PROVIDER_SCHEMA_COMBINATORS = ("anyOf", "oneOf", "allOf")
 _FIELD_EXAMPLES: dict[str, str] = {
     "path": "/absolute/path/to/example.txt",
     "url": "https://example.com",
@@ -41,6 +42,143 @@ def normalize_object_json_schema(schema: dict[str, Any] | None) -> dict[str, Any
     payload["properties"] = dict(properties) if isinstance(properties, dict) else {}
     payload["required"] = list(required) if isinstance(required, list) else []
     return payload
+
+
+def _provider_schema_has_explicit_shape(schema: dict[str, Any]) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    return any(
+        key in schema
+        for key in ("type", "properties", "items", "enum", "const", "additionalProperties")
+    )
+
+
+def _merge_provider_schema_dicts(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(base) if isinstance(base, dict) else {}
+    for raw_key, raw_value in dict(overlay or {}).items():
+        key = str(raw_key)
+        value = copy.deepcopy(raw_value)
+        if key == "required":
+            existing = [
+                str(item or "").strip()
+                for item in list(merged.get("required") or [])
+                if str(item or "").strip()
+            ]
+            for item in list(value or []):
+                normalized = str(item or "").strip()
+                if normalized and normalized not in existing:
+                    existing.append(normalized)
+            if existing:
+                merged["required"] = existing
+            continue
+        if key == "properties":
+            existing_properties = dict(merged.get("properties") or {})
+            for property_name, property_value in dict(value or {}).items():
+                normalized_name = str(property_name)
+                if (
+                    isinstance(existing_properties.get(normalized_name), dict)
+                    and isinstance(property_value, dict)
+                ):
+                    existing_properties[normalized_name] = _merge_provider_schema_dicts(
+                        dict(existing_properties.get(normalized_name) or {}),
+                        property_value,
+                    )
+                else:
+                    existing_properties[normalized_name] = copy.deepcopy(property_value)
+            if existing_properties:
+                merged["properties"] = existing_properties
+            continue
+        if key == "items":
+            if isinstance(merged.get("items"), dict) and isinstance(value, dict):
+                merged["items"] = _merge_provider_schema_dicts(dict(merged.get("items") or {}), value)
+            else:
+                merged["items"] = value
+            continue
+        if key == "additionalProperties":
+            if isinstance(merged.get("additionalProperties"), dict) and isinstance(value, dict):
+                merged["additionalProperties"] = _merge_provider_schema_dicts(
+                    dict(merged.get("additionalProperties") or {}),
+                    value,
+                )
+            else:
+                merged["additionalProperties"] = value
+            continue
+        if key == "type":
+            if not str(merged.get("type") or "").strip() and value not in (None, ""):
+                merged["type"] = value
+            continue
+        if key not in merged:
+            merged[key] = value
+    return merged
+
+
+def _preferred_provider_schema_branch(branches: list[dict[str, Any]]) -> dict[str, Any]:
+    normalized_branches = [
+        sanitize_provider_parameters_schema(branch)
+        for branch in list(branches or [])
+        if isinstance(branch, dict)
+    ]
+    filtered = [
+        dict(branch)
+        for branch in normalized_branches
+        if isinstance(branch, dict) and str(branch.get("type") or "").strip().lower() != "null"
+    ]
+    if not filtered:
+        return {}
+
+    def _branch_score(schema: dict[str, Any]) -> tuple[int, int]:
+        return (
+            int(str(schema.get("type") or "").strip().lower() == "object") * 100
+            + int("properties" in schema) * 50
+            + int("items" in schema) * 40
+            + int("enum" in schema or "const" in schema) * 30
+            + int("type" in schema) * 20
+            + int("additionalProperties" in schema) * 10,
+            len(schema),
+        )
+
+    return max(filtered, key=_branch_score)
+
+
+def sanitize_provider_parameters_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(schema, dict):
+        return {}
+    payload = copy.deepcopy(schema)
+    combinator_branches: dict[str, list[Any]] = {}
+    for name in _UNSUPPORTED_PROVIDER_SCHEMA_COMBINATORS:
+        raw_value = payload.pop(name, None)
+        combinator_branches[name] = list(raw_value) if isinstance(raw_value, list) else []
+    sanitized: dict[str, Any] = {}
+    for raw_key, raw_value in payload.items():
+        key = str(raw_key)
+        if key == "description":
+            continue
+        if isinstance(raw_value, dict):
+            sanitized[key] = sanitize_provider_parameters_schema(raw_value)
+            continue
+        if isinstance(raw_value, list):
+            sanitized[key] = [
+                sanitize_provider_parameters_schema(item) if isinstance(item, dict) else copy.deepcopy(item)
+                for item in raw_value
+            ]
+            continue
+        sanitized[key] = copy.deepcopy(raw_value)
+
+    for branch in combinator_branches["allOf"]:
+        if isinstance(branch, dict):
+            sanitized = _merge_provider_schema_dicts(
+                sanitized,
+                sanitize_provider_parameters_schema(branch),
+            )
+
+    if not _provider_schema_has_explicit_shape(sanitized):
+        preferred_branch = _preferred_provider_schema_branch(
+            [*combinator_branches["anyOf"], *combinator_branches["oneOf"]]
+        )
+        if preferred_branch:
+            sanitized = _merge_provider_schema_dicts(sanitized, preferred_branch)
+
+    return sanitized
 
 
 class _PydanticSchemaBuilder:

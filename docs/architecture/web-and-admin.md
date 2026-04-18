@@ -245,6 +245,7 @@ CEO/frontdoor now follows a parallel debugging pattern, but with session-scoped 
   - `request_messages` / `tool_schemas`: the runtime-side request projection before the provider adapter rewrites it
   - `provider_request_meta` / `provider_request_body`: the adapter-final HTTP body that was actually prepared for transport
 - If cache accounting disagrees with the runtime projection, debug against `provider_request_body` first.
+- If a `/responses` gateway fails only when tools are present, inspect `provider_request_body.tools` before blaming the model route. The transport-facing schema bundle is intentionally sanitized to avoid unsupported combinators such as `anyOf`, `oneOf`, and `allOf`.
 - For stage-transition rounds specifically, it is now expected that the tail runtime contract may show `callable_tool_names=["submit_next_stage"]` while `provider_request_body.tools` still carries the stable runtime-visible tool bundle. That mismatch is intentional and no longer indicates a frontdoor contract leak.
 - For reopened completed sessions, the first fresh visible turn may bridge the previous `provider_tool_schema_names` and cache-family anchor only when the current `visible_tool_ids` plus `visible_skill_ids` exactly match the completed continuity snapshot. If the visible set changed, context should still restore but cache miss is allowed.
 
