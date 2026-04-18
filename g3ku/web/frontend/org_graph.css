@@ -3517,6 +3517,7 @@ textarea {
     border-radius: 30px;
     padding: 2px;
     --ceo-composer-outline-color: #39c5bb;
+    transition: box-shadow 180ms ease;
 }
 
 .ceo-composer-outline-svg {
@@ -3526,6 +3527,7 @@ textarea {
     height: 100%;
     overflow: visible;
     pointer-events: none;
+    z-index: 2;
 }
 
 .ceo-composer-outline-track,
@@ -3537,16 +3539,16 @@ textarea {
 
 .ceo-composer-outline-track {
     stroke: color-mix(in srgb, var(--ceo-composer-outline-color) 18%, transparent);
-    stroke-width: 2;
+    stroke-width: 3;
     opacity: 0;
     transition: opacity 180ms ease;
 }
 
 .ceo-composer-outline-progress {
     stroke: var(--ceo-composer-outline-color);
-    stroke-width: 2.5;
+    stroke-width: 4;
     opacity: 0;
-    filter: drop-shadow(0 0 10px color-mix(in srgb, var(--ceo-composer-outline-color) 28%, transparent));
+    filter: drop-shadow(0 0 12px color-mix(in srgb, var(--ceo-composer-outline-color) 32%, transparent));
     transition:
         stroke-dasharray 260ms cubic-bezier(0.16, 1, 0.3, 1),
         opacity 180ms ease,
@@ -3556,6 +3558,27 @@ textarea {
 .ceo-composer-outline-shell.is-active .ceo-composer-outline-track,
 .ceo-composer-outline-shell.is-active .ceo-composer-outline-progress {
     opacity: 1;
+}
+
+.ceo-composer-outline-shell:focus-within .ceo-composer-outline-track,
+.ceo-composer-outline-shell:focus-within .ceo-composer-outline-progress {
+    opacity: 0;
+}
+
+.ceo-composer-outline-shell.is-active textarea:not(:focus) {
+    border-color: color-mix(in srgb, var(--ceo-composer-outline-color) 76%, var(--border-color));
+    box-shadow:
+        var(--shadow-md),
+        0 0 0 3px color-mix(in srgb, var(--ceo-composer-outline-color) 84%, transparent),
+        0 0 22px color-mix(in srgb, var(--ceo-composer-outline-color) 22%, transparent);
+}
+
+.ceo-composer-outline-shell.is-force-visible textarea:not(:focus) {
+    border-color: color-mix(in srgb, var(--ceo-composer-outline-color) 88%, var(--border-color));
+    box-shadow:
+        var(--shadow-md),
+        0 0 0 4px color-mix(in srgb, var(--ceo-composer-outline-color) 94%, transparent),
+        0 0 28px color-mix(in srgb, var(--ceo-composer-outline-color) 30%, transparent);
 }
 
 .ceo-composer-outline-shell[data-usage-state="warning"] .ceo-composer-outline-progress,
@@ -3705,6 +3728,7 @@ textarea {
     max-width: min(100%, 420px);
     display: inline-flex;
     align-items: center;
+    gap: 10px;
     min-height: 34px;
     padding: 9px 14px;
     border-radius: 999px;
@@ -3726,19 +3750,10 @@ textarea {
     min-width: 0;
 }
 
-.ceo-context-load-notice-meta {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    flex: 0 0 auto;
-    margin-left: 12px;
-}
-
 .ceo-context-load-notice-risk-dot {
     width: 8px;
     height: 8px;
     flex: 0 0 auto;
-    margin-left: 10px;
     border-radius: 999px;
     background: var(--text-muted);
     box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 12%, transparent);

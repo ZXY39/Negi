@@ -103,6 +103,7 @@ const S = {
     ceoQueuedFollowUpsPersistId: null,
     ceoQueuedFollowUpDispatching: false,
     ceoComposerUsageEstimate: null,
+    ceoComposerUsagePinnedEntries: null,
     ceoComposerUsageRefreshId: null,
     ceoComposerUsageRequestSeq: 0,
     liveDurationIntervalId: null,
@@ -1281,6 +1282,32 @@ function setCeoComposerUsageEstimate(sessionId, payload) {
     return normalized;
 }
 
+function setCeoComposerUsagePinnedEntries(sessionId, entries = []) {
+    const key = String(sessionId || "").trim();
+    const normalizedEntries = (Array.isArray(entries) ? entries : [])
+        .map((entry) => ({
+            text: String(entry?.text || ""),
+            uploads: normalizeUploadList(entry?.uploads),
+        }))
+        .filter((entry) => entry.text.trim() || entry.uploads.length > 0);
+    if (!key || !normalizedEntries.length) {
+        S.ceoComposerUsagePinnedEntries = null;
+        return null;
+    }
+    S.ceoComposerUsagePinnedEntries = {
+        session_id: key,
+        entries: normalizedEntries,
+    };
+    return S.ceoComposerUsagePinnedEntries;
+}
+
+function clearCeoComposerUsagePinnedEntries(sessionId = activeSessionId()) {
+    const key = String(sessionId || "").trim();
+    if (!S.ceoComposerUsagePinnedEntries) return;
+    if (key && String(S.ceoComposerUsagePinnedEntries.session_id || "").trim() !== key) return;
+    S.ceoComposerUsagePinnedEntries = null;
+}
+
 function buildCeoComposerPreflightEntries(sessionId = activeSessionId()) {
     const key = String(sessionId || "").trim();
     if (!key) return [];
@@ -1293,23 +1320,44 @@ function buildCeoComposerPreflightEntries(sessionId = activeSessionId()) {
     if (draftText.trim() || draftUploads.length) {
         queued.push({ text: draftText, uploads: draftUploads });
     }
+    if (!queued.length && S.ceoTurnActive) {
+        const pinned = S.ceoComposerUsagePinnedEntries;
+        if (pinned && String(pinned.session_id || "").trim() === key) {
+            return (Array.isArray(pinned.entries) ? pinned.entries : []).map((entry) => ({
+                text: String(entry?.text || ""),
+                uploads: normalizeUploadList(entry?.uploads),
+            }));
+        }
+        const snapshotEntry = getCeoSessionSnapshotCache(key);
+        const inflightTurn = normalizeCeoSnapshotInflight(snapshotEntry?.inflight_turn);
+        const userMessage = inflightTurn?.user_message && typeof inflightTurn.user_message === "object"
+            ? inflightTurn.user_message
+            : null;
+        const snapshotText = String(userMessage?.content || "");
+        const snapshotUploads = normalizeUploadList(userMessage?.attachments);
+        if (snapshotText.trim() || snapshotUploads.length) {
+            return [{ text: snapshotText, uploads: snapshotUploads }];
+        }
+    }
     return queued.filter((item) => String(item.text || "").trim() || normalizeUploadList(item.uploads).length > 0);
 }
 
-function buildCeoComposerOutlinePath(width, height, radius) {
+function buildCeoComposerOutlinePath(x, y, width, height, radius) {
+    const safeX = Math.max(0, Number(x) || 0);
+    const safeY = Math.max(0, Number(y) || 0);
     const safeWidth = Math.max(1, Number(width) || 0);
     const safeHeight = Math.max(1, Number(height) || 0);
     const safeRadius = Math.max(0, Math.min(Number(radius) || 0, safeWidth / 2, safeHeight / 2));
     return [
-        `M ${safeRadius} 1`,
-        `H ${safeWidth - safeRadius}`,
-        `A ${safeRadius} ${safeRadius} 0 0 1 ${safeWidth - 1} ${safeRadius}`,
-        `V ${safeHeight - safeRadius}`,
-        `A ${safeRadius} ${safeRadius} 0 0 1 ${safeWidth - safeRadius} ${safeHeight - 1}`,
-        `H ${safeRadius}`,
-        `A ${safeRadius} ${safeRadius} 0 0 1 1 ${safeHeight - safeRadius}`,
-        `V ${safeRadius}`,
-        `A ${safeRadius} ${safeRadius} 0 0 1 ${safeRadius} 1`,
+        `M ${safeX + safeRadius} ${safeY + 1}`,
+        `H ${safeX + safeWidth - safeRadius}`,
+        `A ${safeRadius} ${safeRadius} 0 0 1 ${safeX + safeWidth - 1} ${safeY + safeRadius}`,
+        `V ${safeY + safeHeight - safeRadius}`,
+        `A ${safeRadius} ${safeRadius} 0 0 1 ${safeX + safeWidth - safeRadius} ${safeY + safeHeight - 1}`,
+        `H ${safeX + safeRadius}`,
+        `A ${safeRadius} ${safeRadius} 0 0 1 ${safeX + 1} ${safeY + safeHeight - safeRadius}`,
+        `V ${safeY + safeRadius}`,
+        `A ${safeRadius} ${safeRadius} 0 0 1 ${safeX + safeRadius} ${safeY + 1}`,
     ].join(" ");
 }
 
@@ -1329,14 +1377,25 @@ function syncCeoComposerUsageOutline() {
         && String(S.ceoComposerUsageEstimate.session_id || "").trim() === activeSession
     ) ? S.ceoComposerUsageEstimate : null;
     const hasEstimate = !!estimate;
+    const shouldForceVisible = !!activeSession && !!S.ceoTurnActive && !hasEstimate;
     const rect = typeof shell.getBoundingClientRect === "function"
         ? shell.getBoundingClientRect()
         : { width: 0, height: 0 };
     const width = Math.max(4, Math.round(Number(rect.width) || 0));
     const height = Math.max(4, Math.round(Number(rect.height) || 0));
-    const radius = Math.max(12, Math.min(28, Math.round(height / 2)));
-    const path = buildCeoComposerOutlinePath(width, height, radius);
-    svg.hidden = !hasEstimate || width <= 4 || height <= 4;
+    const leadingWidth = Math.max(
+        0,
+        Math.round(Number(U.ceoAttach?.getBoundingClientRect?.().width) || 58)
+    );
+    const outlineOffsetX = Math.max(0, leadingWidth + 12);
+    const outlineX = Math.min(width - 4, outlineOffsetX + 2);
+    const outlineWidth = Math.max(4, width - outlineX - 2);
+    const outlineY = 2;
+    const outlineHeight = Math.max(4, height - 4);
+    const radius = Math.max(16, Math.min(30, Math.round(outlineHeight / 2)));
+    const path = buildCeoComposerOutlinePath(outlineX, outlineY, outlineWidth, outlineHeight, radius);
+    const visible = hasEstimate || shouldForceVisible;
+    svg.hidden = !visible || width <= 4 || height <= 4;
     if (!svg.hidden && svg.setAttribute) {
         svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
         svg.setAttribute("preserveAspectRatio", "none");
@@ -1349,14 +1408,16 @@ function syncCeoComposerUsageOutline() {
     } catch (_error) {
         perimeter = 0;
     }
-    const ratio = hasEstimate ? Math.max(0, Math.min(1, Number(estimate.ratio) || 0)) : 0;
+    const ratio = hasEstimate ? Math.max(0, Math.min(1, Number(estimate.ratio) || 0)) : 1;
     const progressLength = perimeter > 0 ? Math.max(0, Math.min(perimeter, perimeter * ratio)) : 0;
     progress.style.strokeDasharray = perimeter > 0 ? `${progressLength} ${perimeter}` : "0 0";
     progress.style.strokeDashoffset = "0";
     track.style.strokeDasharray = perimeter > 0 ? `${perimeter} ${perimeter}` : "0 0";
-    shell.classList.toggle("is-active", hasEstimate && ratio > 0);
+    shell.classList.toggle("is-active", visible && ratio > 0);
+    shell.classList.toggle("is-force-visible", shouldForceVisible);
     shell.dataset.usageState = (
-        !hasEstimate ? ""
+        shouldForceVisible ? "force"
+            : !hasEstimate ? ""
             : estimate.would_exceed_context_window ? "overflow"
                 : estimate.would_trigger_token_compression ? "warning"
                     : "active"
@@ -3152,6 +3213,7 @@ function sendImmediateCeoMessage({ text = "", uploads = [], scrollMode = "bottom
     if (turn) S.ceoPendingTurns.push(turn);
     S.ceoTurnActive = true;
     S.ceoPauseBusy = false;
+    setCeoComposerUsagePinnedEntries(activeSessionId(), [{ text: normalizedText, uploads: normalizedUploads }]);
     setCeoSessionSnapshotCache(activeSessionId(), {
         inflight_turn: {
             source: "user",
@@ -3165,6 +3227,8 @@ function sendImmediateCeoMessage({ text = "", uploads = [], scrollMode = "bottom
     if (patchCeoSessionRuntimeState(activeSessionId(), true)) renderCeoSessions();
     syncCeoSessionActions();
     syncCeoPrimaryButton();
+    scheduleSyncCeoComposerUsageOutline();
+    scheduleCeoComposerUsageRefresh({ immediate: true });
     return true;
 }
 
@@ -3206,6 +3270,7 @@ function sendImmediateCeoMessageBatch(entries = [], { scrollMode = "bottom" } = 
     const lastEntry = normalizedEntries[normalizedEntries.length - 1];
     S.ceoTurnActive = true;
     S.ceoPauseBusy = false;
+    setCeoComposerUsagePinnedEntries(activeSessionId(), normalizedEntries);
     setCeoSessionSnapshotCache(activeSessionId(), {
         inflight_turn: {
             source: "user",
@@ -3219,6 +3284,8 @@ function sendImmediateCeoMessageBatch(entries = [], { scrollMode = "bottom" } = 
     if (patchCeoSessionRuntimeState(activeSessionId(), true)) renderCeoSessions();
     syncCeoSessionActions();
     syncCeoPrimaryButton();
+    scheduleSyncCeoComposerUsageOutline();
+    scheduleCeoComposerUsageRefresh({ immediate: true });
     return true;
 }
 
@@ -4003,9 +4070,15 @@ function parseJsonObjectText(raw = "") {
     }
 }
 
-function isCeoContextLoaderToolName(toolName = "") {
+function ceoContextLoaderKind(toolName = "") {
     const normalized = String(toolName || "").trim().toLowerCase();
-    return normalized === "load_tool_context" || normalized === "load_skill_context";
+    if (normalized === "load_tool_context" || normalized === "load_tool_context_v2") return "tool";
+    if (normalized === "load_skill_context" || normalized === "load_skill_context_v2") return "skill";
+    return "";
+}
+
+function isCeoContextLoaderToolName(toolName = "") {
+    return !!ceoContextLoaderKind(toolName);
 }
 
 function clearCeoContextLoadNoticeTimer(noticeId = "") {
@@ -4102,25 +4175,22 @@ function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOT
     item.classList?.add?.(`risk-${normalizedRiskLevel}`);
     item.dataset.riskLevel = normalizedRiskLevel;
     item.dataset.noticeId = noticeId;
-    const textEl = document.createElement("span");
-    textEl.className = "ceo-context-load-notice-text";
-    textEl.textContent = normalizedText;
-    item.appendChild(textEl);
-    const metaEl = document.createElement("span");
-    metaEl.className = "ceo-context-load-notice-meta";
-    const riskDotEl = document.createElement("span");
-    riskDotEl.className = `ceo-context-load-notice-risk-dot risk-${normalizedRiskLevel}`;
-    riskDotEl.setAttribute("aria-hidden", "true");
-    metaEl.appendChild(riskDotEl);
     const iconName = ceoContextLoadNoticeIconName(normalizedKind);
     if (iconName) {
         const kindIconEl = document.createElement("span");
         kindIconEl.className = "ceo-context-load-notice-kind-icon";
         kindIconEl.setAttribute("aria-hidden", "true");
         kindIconEl.innerHTML = `<i data-lucide="${iconName}"></i>`;
-        metaEl.appendChild(kindIconEl);
+        item.appendChild(kindIconEl);
     }
-    item.appendChild(metaEl);
+    const textEl = document.createElement("span");
+    textEl.className = "ceo-context-load-notice-text";
+    textEl.textContent = normalizedText;
+    item.appendChild(textEl);
+    const riskDotEl = document.createElement("span");
+    riskDotEl.className = `ceo-context-load-notice-risk-dot risk-${normalizedRiskLevel}`;
+    riskDotEl.setAttribute("aria-hidden", "true");
+    item.appendChild(riskDotEl);
     noticeEl.appendChild(item);
     syncCeoContextLoadNoticeVisibility();
     icons();
@@ -4138,8 +4208,8 @@ function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOT
 }
 
 function extractCeoContextLoadTarget(toolName = "", rawText = "") {
-    const normalizedTool = String(toolName || "").trim().toLowerCase();
-    const key = normalizedTool === "load_skill_context" ? "skill_id" : "tool_id";
+    const loaderKind = ceoContextLoaderKind(toolName);
+    const key = loaderKind === "skill" ? "skill_id" : "tool_id";
     const text = String(rawText || "").trim();
     if (!text) return "";
     const payload = parseJsonObjectText(text);
@@ -4167,9 +4237,9 @@ function extractCeoContextLoadTarget(toolName = "", rawText = "") {
 }
 
 function buildCeoContextLoadNotice(toolName = "", targetId = "") {
-    const normalizedTool = String(toolName || "").trim().toLowerCase();
+    const loaderKind = ceoContextLoaderKind(toolName);
     const normalizedTargetId = String(targetId || "").trim();
-    if (normalizedTool === "load_skill_context") {
+    if (loaderKind === "skill") {
         return normalizedTargetId
             ? `\u5df2\u52a0\u8f7d skill ${normalizedTargetId}`
             : "\u5df2\u52a0\u8f7d skill";
@@ -4212,8 +4282,9 @@ function ensureCeoContextLoadNoticeKeys(turn) {
 
 function maybeShowCeoContextLoadNotice(turn, { toolName = "", status = "", detailTexts = [] } = {}) {
     const normalizedTool = String(toolName || "").trim().toLowerCase();
+    const loaderKind = ceoContextLoaderKind(normalizedTool);
     const normalizedStatus = String(status || "").trim().toLowerCase();
-    if (!isCeoContextLoaderToolName(normalizedTool) || normalizedStatus !== "success") return false;
+    if (!loaderKind || normalizedStatus !== "success") return false;
     if (String(turn?.source || "").trim().toLowerCase() === "history") return false;
     const keys = ensureCeoContextLoadNoticeKeys(turn);
     let targetId = "";
@@ -4225,10 +4296,9 @@ function maybeShowCeoContextLoadNotice(turn, { toolName = "", status = "", detai
     const signature = `${normalizedTool}:${targetId || noticeText}`;
     if (keys?.has(signature)) return true;
     keys?.add(signature);
-    const noticeKind = normalizedTool === "load_skill_context" ? "skill" : "tool";
     showCeoContextLoadNotice(noticeText, {
-        kind: noticeKind,
-        riskLevel: resolveCeoContextLoadNoticeRiskLevel(noticeKind, targetId),
+        kind: loaderKind,
+        riskLevel: resolveCeoContextLoadNoticeRiskLevel(loaderKind, targetId),
     });
     return true;
 }

@@ -976,7 +976,7 @@
   }
 
   function bindingDraftPayload({ requireModelKey = false } = {}) {
-    const editor = syncBindingInputs();
+    const editor = reconcileBindingContextWindowTokens();
     const modelKey = trim(editor?.modelKey);
     const retryOn = Array.isArray(editor?.retryOn) ? editor.retryOn.map((item) => trim(item)).filter(Boolean) : [];
     const retryCount = Number.parseInt(String(editor?.retryCount ?? 0), 10);

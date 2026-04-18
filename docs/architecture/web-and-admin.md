@@ -101,12 +101,15 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 ### 3. Context Loader Notices
 
 - Successful CEO/frontdoor `load_tool_context` and `load_skill_context` calls are no longer shown as ordinary `Interaction Flow` steps under the assistant bubble.
+- Frontend loader-notice detection must treat both legacy and v2 loader names as the same UI family:
+  - `load_tool_context` / `load_tool_context_v2` => tool notice
+  - `load_skill_context` / `load_skill_context_v2` => skill notice
 - Instead, the browser shows a short-lived composer notice above the input row, using the loaded `tool_id` or `skill_id` when the runtime payload exposes it.
 - These notices are intentionally stackable rather than single-slot: multiple successful loader calls may coexist in one right-aligned floating column that lines up with the send-button edge.
-- The type-specific styling now comes from a right-edge icon instead of the older leading green dot:
+- The type-specific styling now comes from a leading icon instead of the older leading green dot:
   - tool notices use the same `wrench` icon family as the sidebar Tool page
   - skill notices use the same `sparkles` icon family as the sidebar Skill page
-- The risk-colored dot remains present so operators can still distinguish low / medium / high loader risk at a glance.
+- The risk-colored dot remains present on the trailing edge so operators can still distinguish low / medium / high loader risk at a glance.
 - The intended motion contract is still "launch from the composer, settle into the notice stack, then fade out"; the full lifecycle is currently about 5 seconds per notice.
 - That notice is intentionally live-only UI state. It should fade away after a short timeout and must not be appended into the persisted CEO session `messages` list.
 
