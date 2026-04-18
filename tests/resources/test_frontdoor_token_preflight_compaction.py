@@ -5,6 +5,7 @@ from g3ku.runtime.frontdoor.token_preflight_compaction import (
     FrontdoorTokenPreflightPolicy,
     build_frontdoor_token_preflight_policy,
     compact_frontdoor_history_zone,
+    estimate_frontdoor_provider_request_tokens,
     should_run_frontdoor_token_preflight,
 )
 
@@ -40,3 +41,36 @@ def test_frontdoor_compaction_keeps_active_stage_and_latest_three_completed_stag
     assert result.retained_completed_stage_ids == ["stage-3", "stage-4", "stage-5"]
     assert result.active_stage_id == "stage-6"
     assert result.compacted_block_tokens <= 5000
+
+
+def test_frontdoor_token_preflight_estimates_large_provider_payload_without_summary_truncation() -> None:
+    huge_text = "A" * 120_000
+    estimated = estimate_frontdoor_provider_request_tokens(
+        provider_request_body={
+            "model": "gpt-5.2",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": huge_text,
+                        }
+                    ],
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec",
+                    "description": "Run a command",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+            "parallel_tool_calls": True,
+        },
+        request_messages=[],
+        tool_schemas=[],
+    )
+
+    assert estimated >= 20_000

@@ -380,6 +380,18 @@ heartbeat 使用的是专门的内部 prompt lane，它的稳定前缀和 reques
 - 优先回到 `stage_compaction` / continuity baseline handoff 链路
 - 不要把所有缩短都归因到 token preflight
 
+另外要额外排一类很隐蔽的误判：
+
+- preflight 的 token estimator 必须基于原始 `provider_request_body` 估算
+- 不能复用面向摘要/展示的 serializer，再把超长字段截成固定前后两段后估算
+
+典型症状是：
+
+- `provider_request_body` 明明已经很大
+- 但 `frontdoor_token_preflight_diagnostics.final_request_tokens` 却长期卡在一个异常偏小、几乎不随请求增长变化的常数
+
+如果看到这种现象，先按“estimator 低估导致压缩阈值永远打不到”排查，不要先怀疑 `trigger_tokens` 配置失效。
+
 ## 5. 修改节点上下文策略时必须重点验证的地方
 
 下面这些检查点不只适用于 CEO/frontdoor，后续改 node context strategy 时也必须逐条过。

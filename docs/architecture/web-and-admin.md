@@ -345,15 +345,15 @@ This is intentionally different from both ordinary tool interaction steps and he
 
 - Backend reminder events are emitted only as websocket live events.
 - The payload includes `turn_id`, `execution_id`, `tool_name`, `elapsed_seconds`, `reminder_count`, `decision`, `label`, `source="reminder"`, and optional `terminal`.
-- The frontend renders the reminder inside the active pending CEO turn, below the `Interaction Flow`, using a dedicated reminder block.
-- The frontend must update the existing reminder in place for the same `execution_id`; it must not create a new assistant bubble and must not append a new interaction step.
+- The frontend must not create a new assistant bubble and must not append a new interaction step for reminder events.
+- The current CEO frontend also no longer renders `label` as a visible reminder block under the pending turn. These events are kept as live-only bookkeeping signals so the UI stays clean while the authoritative tool outcome still arrives through the ordinary tool/error/final-reply path.
 
 ### Persistence Rules
 
 - Reminder events are not part of `snapshot.ceo.messages`.
 - They must not be persisted into the transcript-backed CEO message list.
 - Refresh/reconnect should not restore an old reminder from cached snapshot state.
-- The reminder block should be cleared when the tool finishes, the turn finalizes, the turn is discarded, or a `terminal=true` reminder event arrives.
+- Any ephemeral reminder state should be cleared when the tool finishes, the turn finalizes, the turn is discarded, or a `terminal=true` reminder event arrives.
 
 ### Decision Semantics
 
@@ -361,7 +361,7 @@ This is intentionally different from both ordinary tool interaction steps and he
 - `decision=stop` means the sidecar requested `stop_tool_execution`; the main turn will later surface the actual tool failure through the ordinary tool-result path.
 - `decision=unavailable` means the reminder sidecar failed or could not make a valid stop decision, so the tool keeps running.
 
-Operators should therefore read the reminder block as live guidance only. The authoritative end state still arrives through the normal CEO tool/error/final-reply events.
+Operators should therefore treat `ceo.tool.reminder` as a live runtime signal, not as durable conversation UI. The authoritative end state still arrives through the normal CEO tool/error/final-reply events.
 
 ## Node Actual Request Forensics
 

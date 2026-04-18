@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool
@@ -59,6 +62,7 @@ class CeoReminderSnapshot:
     semantic_context_state: dict[str, Any]
     hydrated_tool_names: list[str]
     frontdoor_selection_debug: dict[str, Any]
+    frontdoor_actual_request_path: str
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> "CeoReminderSnapshot | None":
@@ -81,6 +85,7 @@ class CeoReminderSnapshot:
                 if str(item or "").strip()
             ],
             frontdoor_selection_debug=dict(payload.get("frontdoor_selection_debug") or {}),
+            frontdoor_actual_request_path=str(payload.get("frontdoor_actual_request_path") or "").strip(),
         )
 
 
@@ -343,6 +348,129 @@ class CeoToolReminderService:
     def start_execution(self, record: InlineToolExecutionRecord) -> asyncio.Task[Any]:
         return asyncio.create_task(self._run(record.execution_id), name=f"ceo-inline-reminder:{record.execution_id}")
 
+    @staticmethod
+    def _actual_request_record_from_path(path_text: str) -> dict[str, Any]:
+        path = Path(str(path_text or "").strip())
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    @classmethod
+    def _actual_request_record_for_reminder(
+        cls,
+        *,
+        snapshot: CeoReminderSnapshot | None,
+        runtime_session: Any | None,
+    ) -> dict[str, Any]:
+        path_text = ""
+        if snapshot is not None:
+            path_text = str(snapshot.frontdoor_actual_request_path or "").strip()
+        if not path_text and runtime_session is not None:
+            path_text = str(getattr(runtime_session, "_frontdoor_actual_request_path", "") or "").strip()
+        return cls._actual_request_record_from_path(path_text)
+
+    @staticmethod
+    def _prompt_message_records(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        return [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+
+    @staticmethod
+    def _tool_schema_records(tool_schemas: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        return [dict(item) for item in list(tool_schemas or []) if isinstance(item, dict)]
+
+    @staticmethod
+    def _parse_text_decision(value: Any) -> str:
+        raw = str(CeoToolReminderService._content_text(value) or "").strip()
+        if not raw:
+            return ""
+        compact = raw.strip()
+        if compact.startswith("{"):
+            try:
+                parsed = json.loads(compact)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                decision = str(parsed.get("decision") or "").strip().lower()
+                if decision in {"stop", "continue"}:
+                    return decision
+        for line in compact.splitlines():
+            token = re.sub(r"[^A-Z_]+", "", str(line or "").strip().upper())
+            if token == "STOP":
+                return "stop"
+            if token == "CONTINUE":
+                return "continue"
+        match = re.match(r"^\s*([A-Za-z_]+)", compact)
+        if not match:
+            return ""
+        token = re.sub(r"[^A-Z_]+", "", match.group(1).upper())
+        if token == "STOP":
+            return "stop"
+        if token == "CONTINUE":
+            return "continue"
+        return ""
+
+    async def _decide_from_actual_request_scaffold(
+        self,
+        *,
+        record: InlineToolExecutionRecord,
+        snapshot: CeoReminderSnapshot,
+        actual_request_record: dict[str, Any],
+        reminder_messages: list[dict[str, Any]],
+    ) -> CeoReminderDecision | None:
+        request_messages = self._prompt_message_records(
+            actual_request_record.get("request_messages") or actual_request_record.get("messages")
+        )
+        if not request_messages:
+            return None
+        tool_schemas = self._tool_schema_records(actual_request_record.get("tool_schemas"))
+        model_refs = [
+            str(item or "").strip()
+            for item in list(actual_request_record.get("model_refs") or []) 
+            if str(item or "").strip()
+        ] or self._resolve_ceo_model_refs()
+        parallel_tool_calls = actual_request_record.get("parallel_tool_calls")
+        normalized_parallel_tool_calls = (
+            bool(parallel_tool_calls)
+            if isinstance(parallel_tool_calls, bool)
+            else None
+        )
+        prompt_cache_key = str(actual_request_record.get("prompt_cache_key") or "").strip() or None
+        chat_backend = self._resolve_chat_backend()
+        response = await chat_backend.chat(
+            messages=[*request_messages, *reminder_messages],
+            tools=(list(tool_schemas) if tool_schemas else None),
+            model_refs=model_refs,
+            parallel_tool_calls=normalized_parallel_tool_calls,
+            prompt_cache_key=prompt_cache_key,
+        )
+        decision_excerpt = self._content_text(getattr(response, "content", "")).strip()
+        parsed_decision = self._parse_text_decision(decision_excerpt)
+        elapsed_seconds = max(0.0, time.monotonic() - record.started_at)
+        if parsed_decision == "stop":
+            return CeoReminderDecision(
+                decision="stop",
+                label=self._stop_label(
+                    tool_name=record.tool_name,
+                    elapsed_seconds=elapsed_seconds,
+                    reminder_count=record.reminder_count,
+                ),
+                model_decision_excerpt=decision_excerpt,
+            )
+        if parsed_decision == "continue":
+            return CeoReminderDecision(
+                decision="continue",
+                label=self._continue_label(
+                    tool_name=record.tool_name,
+                    elapsed_seconds=elapsed_seconds,
+                    reminder_count=record.reminder_count,
+                ),
+                model_decision_excerpt=decision_excerpt,
+            )
+        return None
+
     async def execution_finished(self, record: InlineToolExecutionRecord) -> None:
         if not record.reminder_visible:
             return
@@ -472,7 +600,8 @@ class CeoToolReminderService:
                 "role": "user",
                 "content": (
                     "This is a live-only reminder. Decide only whether to keep waiting or stop the running tool call. "
-                    "Do not start any new tool chain. The only tool you may call is `stop_tool_execution`."
+                    "Reply with exactly one uppercase word: STOP or CONTINUE. Do not start any new tool chain. "
+                    "Do not call any tools."
                 ),
             },
         ]
@@ -484,6 +613,19 @@ class CeoToolReminderService:
                     "content": f"Current visible assistant draft before this reminder:\n{snapshot.assistant_text}",
                 },
             )
+        actual_request_record = self._actual_request_record_for_reminder(
+            snapshot=snapshot,
+            runtime_session=record.runtime_session,
+        )
+        if actual_request_record:
+            scaffold_decision = await self._decide_from_actual_request_scaffold(
+                record=record,
+                snapshot=snapshot,
+                actual_request_record=actual_request_record,
+                reminder_messages=reminder_messages,
+            )
+            if scaffold_decision is not None:
+                return scaffold_decision
         persisted_session = None
         sessions = getattr(self._loop, "sessions", None)
         if sessions is not None and hasattr(sessions, "get_or_create"):

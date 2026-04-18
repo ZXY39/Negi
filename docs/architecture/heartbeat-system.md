@@ -38,9 +38,9 @@ CEO frontdoor direct long-running tools now use a live-only sidecar reminder lan
 
 - Inline executions register in `InlineToolExecutionRegistry`, not in the detached `ToolExecutionManager` background-execution path.
 - Reminder windows are fixed at `30 / 60 / 120 / 240 / 600` seconds, and after the 600-second window they repeat every 600 seconds.
-- `CeoToolReminderService` rebuilds CEO context read-only with `CeoMessageBuilder.build_for_ceo(..., ephemeral_tail_messages=...)`.
-- The sidecar model reuses the CEO main model binding, but its callable tool surface is restricted to `stop_tool_execution`.
-- Reminder text is live-only UI state and must not be persisted into transcript, canonical context, semantic summary, or history injection.
+- When the main turn already has an authoritative CEO actual-request JSON, `CeoToolReminderService` reuses that saved `request_messages` / `tool_schemas` / `prompt_cache_key` / `parallel_tool_calls` scaffold as the provider-facing cache prefix and appends only live reminder-tail messages. It falls back to a read-only `CeoMessageBuilder.build_for_ceo(..., ephemeral_tail_messages=...)` rebuild only when no actual-request scaffold exists yet.
+- The sidecar still reuses the CEO main model binding, but its decision channel is now text-only (`STOP` / `CONTINUE`). Even when it reuses the main turn's full provider-visible tool bundle for cache-prefix stability, it must not execute arbitrary returned tool calls.
+- Reminder labels remain live-only event data and must not be persisted into transcript, canonical context, semantic summary, or history injection.
 
 ## Reminder Failure Semantics
 
@@ -65,7 +65,7 @@ If the tool finishes successfully before the stop lands, the runtime clears the 
 ## Web/UI Boundary
 
 - The sidecar publishes `ceo.tool.reminder` live websocket events.
-- These events are rendered under the current pending CEO turn only.
+- Browsers may keep these events entirely non-visual; the current CEO frontend no longer renders the reminder label as a visible text block under the pending turn.
 - They do not become `snapshot.ceo` messages and are not restored on refresh or reconnect.
 
 When debugging a “reminder appeared but the transcript stayed clean” report, that is the intended contract.

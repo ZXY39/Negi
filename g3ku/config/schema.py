@@ -595,7 +595,7 @@ class MemoryStoreBackendConfig(Base):
 
     backend: Literal["hybrid"] = "hybrid"
     qdrant_path: str = "memory/qdrant"
-    qdrant_collection: str = "g3ku_memory_v1"
+    qdrant_collection: str = "g3ku_memory"
     sqlite_path: str = "memory/memory.db"
 
 

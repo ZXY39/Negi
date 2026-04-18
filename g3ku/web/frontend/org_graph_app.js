@@ -3292,6 +3292,7 @@ function renderCeoToolEventsIntoTurn(turn, toolEvents = [], { source = "" } = {}
     if (!turn?.listEl || !turn?.flowEl) return 0;
     const normalizedSource = normalizeCeoTurnSource(source || turn.source || "user");
     const events = normalizeCeoSnapshotToolEvents(toolEvents);
+    const wasFlowOpen = !!turn.flowEl.open;
     resetCeoToolFlow(turn);
     events.forEach((event) => {
         applyCeoToolEventToTurn(turn, {
@@ -3300,13 +3301,16 @@ function renderCeoToolEventsIntoTurn(turn, toolEvents = [], { source = "" } = {}
         });
     });
     if (events.length) syncCeoTurnLoadingOnlyState(turn, false);
+    if (events.length) {
+        turn.flowEl.hidden = false;
+        turn.flowEl.open = wasFlowOpen;
+    }
     if (!events.length) updateCeoTurnMeta(turn, "等待工具开始...");
     return events.length;
 }
 
 function renderCeoStageTraceIntoTurn(turn, canonicalContext = null) {
     if (!turn?.listEl || !turn?.flowEl) return 0;
-    maybeShowCeoContextLoadNoticesFromSummary(turn, canonicalContext);
     const summary = filterCeoInteractionFlowSummary(canonicalContext);
     if (!summary?.stages?.length) {
         resetCeoToolFlow(turn);
@@ -3320,6 +3324,7 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null) {
         || typeof displayTaskStageStatus !== "function") {
         return 0;
     }
+    const wasFlowOpen = !!turn.flowEl.open;
     syncCeoTurnLoadingOnlyState(turn, false);
     resetCeoToolFlow(turn);
     turn.listEl.classList?.add?.("task-trace-list");
@@ -3337,7 +3342,7 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null) {
     turn.steps = roundCount || stageCount;
     turn.lastExecutionTraceSummary = summary;
     turn.flowEl.hidden = false;
-    turn.flowEl.open = true;
+    turn.flowEl.open = wasFlowOpen;
     updateCeoTurnMeta(turn, `${stageCount} 个阶段 · ${roundCount} 轮工具`);
     if (typeof bindTraceOutputAutoLoad === "function") bindTraceOutputAutoLoad(turn.listEl);
     if (typeof hydrateTraceOutputBlocks === "function") {
@@ -3393,7 +3398,6 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         }
         if (stageRoundCount) {
             turn.flowEl.hidden = false;
-            turn.flowEl.open = status !== "completed";
         }
         icons();
     }, { scrollMode: "preserve" });
@@ -3516,7 +3520,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
         el.innerHTML = `
             <div class="msg-content ceo-turn-content">
                 <div class="assistant-text pending">${renderCeoAssistantLoadingMarkup()}</div>
-                <details class="interaction-flow" open hidden>
+                <details class="interaction-flow" hidden>
                     <summary class="interaction-flow-summary">
                         <span class="interaction-flow-title">Interaction Flow</span>
                         <span class="interaction-flow-meta">等待工具开始...</span>
@@ -3741,11 +3745,12 @@ function handleCeoToolReminder(payload = {}) {
             clearCeoToolReminder(turn, { executionId, force: terminal || !label });
             return true;
         }
-        if (!turn.reminderEl) return false;
         turn.reminderExecutionId = executionId || String(turn.reminderExecutionId || "").trim();
-        turn.reminderEl.textContent = label;
-        turn.reminderEl.hidden = false;
-        turn.reminderEl.setAttribute?.("aria-hidden", "false");
+        if (turn.reminderEl) {
+            turn.reminderEl.textContent = "";
+            turn.reminderEl.hidden = true;
+            turn.reminderEl.setAttribute?.("aria-hidden", "true");
+        }
         return true;
     }, { scrollMode: "preserve" });
 }
@@ -4498,7 +4503,6 @@ function applyCeoToolEventToTurn(turn, event = {}) {
     item.dataset.previewDetailText = normalizeInteractionDetailText(detail);
     syncCeoBackgroundDetailState(item, { rawDetail: rawText });
     turn.flowEl.hidden = false;
-    turn.flowEl.open = true;
     turn.hasError = turn.hasError || status === "error";
     trimCeoToolSteps(turn);
     updateCeoTurnMeta(turn, stage.meta);

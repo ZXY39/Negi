@@ -3640,6 +3640,7 @@ textarea {
     bottom: calc(var(--ceo-input-leading-width) + 12px);
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-auto-flow: row dense;
     align-items: start;
     column-gap: 10px;
     row-gap: 8px;

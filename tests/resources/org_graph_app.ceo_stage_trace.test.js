@@ -203,7 +203,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, S, U };`,
         context
     );
     context.__testExports.U.ceoCompressionToast = new StubHTMLElement();
@@ -369,11 +369,8 @@ test("ceo stage trace does not count successful loader-only rounds toward displa
     assert.equal(renderedSteps, 1);
     assert.match(turn.listEl.innerHTML, /0\/5/);
     assert.doesNotMatch(turn.listEl.innerHTML, /load_skill_context/);
-    assert.equal(U.ceoContextLoadNotice.children.length, 1);
-    assert.match(String(U.ceoContextLoadNotice.children[0].className || ""), /is-skill/);
-    assert.equal(noticeRiskClass(U.ceoContextLoadNotice.children[0]), "risk-high");
-    assert.match(noticeText(U.ceoContextLoadNotice.children[0]), /skill-creator/);
-    assert.doesNotMatch(noticeText(U.ceoContextLoadNotice.children[0]), /\[/);
+    assert.equal(U.ceoContextLoadNotice.children.length, 0);
+    assert.equal(U.ceoContextLoadNotice.hidden, true);
 });
 
 test("ceo legacy tool flow hides submit_next_stage events until stage trace arrives", () => {
@@ -490,9 +487,103 @@ test("ceo stage trace hides successful loader tools from interaction flow render
     assert.equal(renderedSteps, 1);
     assert.doesNotMatch(turn.listEl.innerHTML, /load_tool_context/);
     assert.match(turn.listEl.innerHTML, /memory_note/);
-    assert.equal(U.ceoContextLoadNotice.children.length, 1);
-    assert.equal(noticeRiskClass(U.ceoContextLoadNotice.children[0]), "risk-medium");
-    assert.match(noticeText(U.ceoContextLoadNotice.children[0]), /filesystem_write/);
+    assert.equal(U.ceoContextLoadNotice.children.length, 0);
+    assert.equal(U.ceoContextLoadNotice.hidden, true);
+});
+
+test("ceo stage trace keeps interaction flow collapsed by default", () => {
+    const { renderCeoStageTraceIntoTurn } = loadApp();
+    const turn = makeTurn({ text: "" });
+
+    const renderedSteps = renderCeoStageTraceIntoTurn(turn, {
+        stages: [
+            {
+                stage_id: "frontdoor-stage-1",
+                stage_goal: "inspect repository",
+                status: "running",
+                tool_round_budget: 3,
+                rounds: [
+                    {
+                        round_id: "round-1",
+                        round_index: 1,
+                        tools: [
+                            {
+                                tool_name: "memory_note",
+                                status: "success",
+                                output_text: "ok",
+                            },
+                        ],
+                    },
+                ],
+            },
+        ],
+    });
+
+    assert.equal(renderedSteps, 1);
+    assert.equal(turn.flowEl.hidden, false);
+    assert.equal(turn.flowEl.open, false);
+});
+
+test("ceo live tool events do not auto-expand interaction flow", () => {
+    const { applyCeoToolEventToTurn } = loadApp();
+    const turn = makeTurn({ text: "" });
+
+    const item = applyCeoToolEventToTurn(turn, {
+        tool_name: "memory_note",
+        status: "running",
+        kind: "tool_start",
+        text: '{"query": "repo"}',
+        tool_call_id: "memory-note:1",
+        source: "user",
+    });
+
+    assert.ok(item);
+    assert.equal(turn.flowEl.hidden, false);
+    assert.equal(turn.flowEl.open, false);
+});
+
+test("ceo snapshot patch preserves a manually expanded interaction flow", () => {
+    const { patchCeoInflightTurn, S } = loadApp();
+    const turn = makeTurn({ text: "" });
+    turn.source = "user";
+    turn.turnId = "turn-stage-1";
+    turn.flowEl.hidden = false;
+    turn.flowEl.open = true;
+    S.activeSessionId = "web:test";
+    S.ceoPendingTurns = [turn];
+
+    const patched = patchCeoInflightTurn({
+        turn_id: "turn-stage-1",
+        source: "user",
+        status: "running",
+        canonical_context: {
+            stages: [
+                {
+                    stage_id: "frontdoor-stage-1",
+                    stage_goal: "inspect repository",
+                    status: "running",
+                    tool_round_budget: 3,
+                    rounds: [
+                        {
+                            round_id: "round-1",
+                            round_index: 1,
+                            tools: [
+                                {
+                                    tool_name: "memory_note",
+                                    status: "success",
+                                    output_text: "ok",
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        },
+    });
+
+    assert.equal(patched, true);
+    assert.equal(turn.flowEl.hidden, false);
+    assert.equal(turn.flowEl.open, true);
 });
 
 test("ceo snapshot tool normalization preserves distinct tool_call_id values for same-name events", () => {

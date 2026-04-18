@@ -7,14 +7,6 @@ from typing import Any
 from g3ku.runtime.context.summarizer import estimate_tokens, truncate_by_tokens
 
 G3KU_MIN_CONTEXT_FLOOR = 20_000
-HERMES_TRIGGER_RATIO = 0.10
-HERMES_TARGET_RATIO = 0.20
-HERMES_MIN_OUTPUT_TOKENS = 2000
-HERMES_MAX_OUTPUT_RATIO = 0.05
-HERMES_MAX_OUTPUT_TOKENS_CEILING = 12_000
-HERMES_PRESSURE_WARN_RATIO = 0.85
-HERMES_FORCE_REFRESH_RATIO = 0.95
-HERMES_FAILURE_COOLDOWN_SECONDS = 600
 LONG_CONTEXT_SUMMARY_PREFIX = "[G3KU_LONG_CONTEXT_SUMMARY_V1]"
 
 
@@ -277,13 +269,13 @@ def build_global_summary_thresholds(
     *,
     context_window_tokens: int,
     compressed_zone_tokens: int,
-    trigger_ratio: float = HERMES_TRIGGER_RATIO,
-    target_ratio: float = HERMES_TARGET_RATIO,
-    min_output_tokens: int = HERMES_MIN_OUTPUT_TOKENS,
-    max_output_ratio: float = HERMES_MAX_OUTPUT_RATIO,
-    max_output_tokens_ceiling: int = HERMES_MAX_OUTPUT_TOKENS_CEILING,
-    pressure_warn_ratio: float = HERMES_PRESSURE_WARN_RATIO,
-    force_refresh_ratio: float = HERMES_FORCE_REFRESH_RATIO,
+    trigger_ratio: float = 0.10,
+    target_ratio: float = 0.20,
+    min_output_tokens: int = 2000,
+    max_output_ratio: float = 0.05,
+    max_output_tokens_ceiling: int = 12_000,
+    pressure_warn_ratio: float = 0.85,
+    force_refresh_ratio: float = 0.95,
 ) -> dict[str, int]:
     context_tokens = max(1, int(context_window_tokens or 0))
     compressed_tokens = max(0, int(compressed_zone_tokens or 0))
@@ -306,15 +298,7 @@ def build_global_summary_thresholds(
 
 
 __all__ = [
-    "HERMES_FAILURE_COOLDOWN_SECONDS",
-    "HERMES_FORCE_REFRESH_RATIO",
-    "HERMES_MAX_OUTPUT_RATIO",
-    "HERMES_MAX_OUTPUT_TOKENS_CEILING",
     "G3KU_MIN_CONTEXT_FLOOR",
-    "HERMES_MIN_OUTPUT_TOKENS",
-    "HERMES_PRESSURE_WARN_RATIO",
-    "HERMES_TARGET_RATIO",
-    "HERMES_TRIGGER_RATIO",
     "LONG_CONTEXT_SUMMARY_PREFIX",
     "build_global_summary_thresholds",
     "build_long_context_summary_message",

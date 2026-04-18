@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.semantic_context_summary import estimate_message_tokens
 
 FRONTDOOR_COMPACTED_HISTORY_MAX_TOKENS = 5000
@@ -54,8 +55,8 @@ def estimate_frontdoor_provider_request_tokens(
             "input": list(request_messages),
             "tools": list(tool_schemas or []),
         }
-    return estimate_message_tokens(
-        [{"role": "system", "content": json.dumps(payload, ensure_ascii=False, default=str)}]
+    return estimate_tokens(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
     )
 
 
