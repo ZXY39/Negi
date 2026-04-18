@@ -1784,7 +1784,7 @@ async def test_stage_summary_is_exposed_in_live_runtime_frame(tmp_path: Path):
         await service.close()
 
 
-def test_submit_next_stage_tool_schema_budget_max_is_fifteen() -> None:
+def test_submit_next_stage_tool_schema_budget_range_is_one_to_ten() -> None:
     async def _submit(
         stage_goal: str,
         tool_round_budget: int,
@@ -1800,8 +1800,8 @@ def test_submit_next_stage_tool_schema_budget_max_is_fifteen() -> None:
 
     tool = SubmitNextStageTool(_submit)
 
-    assert tool.parameters['properties']['tool_round_budget']['minimum'] == 5
-    assert tool.parameters['properties']['tool_round_budget']['maximum'] == 15
+    assert tool.parameters['properties']['tool_round_budget']['minimum'] == 1
+    assert tool.parameters['properties']['tool_round_budget']['maximum'] == 10
     assert 'completed_stage_summary' in tool.parameters['properties']
     assert 'key_refs' in tool.parameters['properties']
     assert tool.parameters['properties']['key_refs']['items']['required'] == ['ref', 'note']
@@ -1869,7 +1869,7 @@ def test_submit_final_result_tool_schema_is_hard_switched_to_final_or_blocked() 
 
 
 @pytest.mark.asyncio
-async def test_submit_next_stage_rejects_budget_outside_five_to_fifteen(tmp_path: Path):
+async def test_submit_next_stage_rejects_budget_above_ten(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / 'runtime.sqlite3',
@@ -1880,19 +1880,19 @@ async def test_submit_next_stage_rejects_budget_outside_five_to_fifteen(tmp_path
     )
     try:
         record = await _create_web_task(service)
-        with pytest.raises(ValueError, match='tool_round_budget must be between 5 and 15'):
+        with pytest.raises(ValueError, match='tool_round_budget must be between 1 and 10'):
             service.log_service.submit_next_stage(
                 record.task_id,
                 record.root_node_id,
                 stage_goal='预算校验；优先派生：无；自行完成：拒绝超出上限的阶段预算',
-                tool_round_budget=16,
+                tool_round_budget=11,
             )
     finally:
         await service.close()
 
 
 @pytest.mark.asyncio
-async def test_submit_next_stage_rejects_budget_below_five(tmp_path: Path):
+async def test_submit_next_stage_rejects_budget_below_one(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / 'runtime.sqlite3',
@@ -1903,12 +1903,12 @@ async def test_submit_next_stage_rejects_budget_below_five(tmp_path: Path):
     )
     try:
         record = await _create_web_task(service)
-        with pytest.raises(ValueError, match='tool_round_budget must be between 5 and 15'):
+        with pytest.raises(ValueError, match='tool_round_budget must be between 1 and 10'):
             service.log_service.submit_next_stage(
                 record.task_id,
                 record.root_node_id,
                 stage_goal='budget validation lower bound',
-                tool_round_budget=4,
+                tool_round_budget=0,
             )
     finally:
         await service.close()

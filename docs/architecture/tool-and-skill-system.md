@@ -139,14 +139,12 @@ Maintenance note for surfaced fixed builtins:
 Maintenance note for the memory tool family:
 
 - `memory_search` is removed from the agent-facing contract.
-- CEO/frontdoor now receives committed long-term memory through the injected `MEMORY.md` snapshot in the stable prefix, not through a retrieval tool call or a dynamic overlay block.
+- CEO/frontdoor now receives committed long-term memory through the injected `MEMORY.md` snapshot, not through a retrieval tool call.
 - `memory_note(ref)` is the only on-demand detailed-memory loader.
 - Node execution and acceptance paths no longer inject extra memory retrieval blocks; they only use the catalog bridge for tool/skill narrowing.
 - That catalog bridge is now catalog-only: it owns context-record storage and dense/sparse tool-skill narrowing data, but it no longer delegates through the old `rag_memory` long-term memory runtime.
 - `memory_write` and `memory_delete` are queue-submit tools. They ask the memory runtime to process a later batch; they do not synchronously rewrite committed memory during the current turn.
-- Agent-facing `memory_delete` is now id-based: the model must use ids visible in the current `MEMORY.md` snapshot rather than passing visible text blocks back into the delete tool.
-- The actual rewrite/delete/add decision is now delegated to a dedicated internal memory agent with a restricted tool surface. That internal agent is not part of the normal agent-facing tool catalog and should not be debugged as if it were a surfaced Tool Admin family.
-- The internal memory pipeline is now two-stage for autonomous review windows: `assess` first, then real memory processing only when the assessor does not return `null`.
+- The actual rewrite/delete decision is now delegated to a dedicated internal memory agent with a restricted tool surface. That internal agent is not part of the normal agent-facing tool catalog and should not be debugged as if it were a surfaced Tool Admin family.
 
 - `candidate_tool_names` / `candidate_skill_ids` 现在都采用同一语义：`RBAC 可见 ∩ 语义召回命中` 的当前候选集合。
 - 如果语义召回不可用，候选集合直接退化为 `RBAC 可见集合`，而不是停止运行。
@@ -233,7 +231,7 @@ Maintenance note for hydration LRU:
 - 但这条前门规则不再等价于“provider-facing callable tool schemas 也只剩 `submit_next_stage`”。为了保持 prompt cache 前缀稳定，provider body 里的 `tools` 继续使用稳定的 runtime-visible tool bundle；真正的阶段控制回到动态合同和 `execute_tools` stage gate。
 - execution / acceptance 节点现在也采用同样的 contract 收紧，而且没有类似 `cron_internal` 的例外：只要没有有效阶段，当前轮模型可见的 callable tool 列表就只剩 `submit_next_stage`。
 - 当前保留的特例是 `cron_internal`：为了继续支持 cron 自移除，这类内部轮次不会被收紧到只剩 `submit_next_stage`。
-- `submit_next_stage` 的阶段预算现在在 execution / acceptance / CEO-frontdoor 三条路径上统一为 `5-15`；运行时仍允许在预算未耗尽前提前切到下一阶段，因此预算应理解为“本阶段声明的上限窗口”，而不是“必须烧满的最小轮数”。
+- `submit_next_stage` 的阶段预算现在在 execution / acceptance / CEO-frontdoor 三条路径上统一为 `1-10`；运行时仍允许在预算未耗尽前提前切到下一阶段，因此预算应理解为“本阶段声明的上限窗口”，而不是“必须烧满的最小轮数”。
 - 这不影响 candidate 语义。`candidate_tool_names` / `candidate_skill_ids` 仍继续表达“RBAC 可见 ∩ 语义召回命中”的候选集合，只是这些候选在无有效阶段时不会同时出现在 agent-facing callable contract 里。
 - 维护时要区分两份前门工具集合：`tool_names` 继续保存阶段内可恢复的完整 callable pool，而“这一刻 agent-facing 合同里暴露给模型的 callable tools”要通过前门 callable-tool helper 结合 `frontdoor_stage_state` 再算一次。不要把前者直接当作当前轮的模型可见函数列表，也不要把 agent-facing callable 收紧误解成 provider body 里的 `tools` 已同步收紧。
 - approval interrupt 在暂停前会把 `frontdoor_stage_state`、`compression_state`、`semantic_context_state`、`hydrated_tool_names`、`tool_call_payloads` 与 `frontdoor_selection_debug` 一并写进 interrupt payload；恢复后如果这些字段丢失，应按“frontdoor canonical runtime contract / runtime state 损坏”排查。
