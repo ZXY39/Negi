@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from main.errors import TaskPausedError, describe_exception
 from main.models import NodeFinalResult, normalize_final_acceptance_metadata
+from main.protocol import now_iso
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 
 _DEFAULT_NODE_DISPATCH_LIMITS = {
@@ -514,19 +515,40 @@ class TaskActorService:
             for item in list(payload.pop('next_frontier_node_ids') or [])
             if str(item or '').strip()
         ]
-        updated_state = 'distributing' if next_frontier else 'resuming'
         payload['frontier_node_ids'] = list(next_frontier)
+        if next_frontier:
+            self._store.upsert_task_message_distribution_epoch(
+                refreshed_epoch.model_copy(update={'state': 'distributing', 'payload': payload})
+            )
+            self._log_service.update_task_runtime_meta(
+                task_id,
+                distribution={
+                    'active_epoch_id': epoch_id,
+                    'state': 'distributing',
+                    'frontier_node_ids': list(next_frontier),
+                    'queued_epoch_count': int(distribution.get('queued_epoch_count') or 0),
+                    'pending_mailbox_count': int(distribution.get('pending_mailbox_count') or 0),
+                },
+            )
+            return True
         self._store.upsert_task_message_distribution_epoch(
-            refreshed_epoch.model_copy(update={'state': updated_state, 'payload': payload})
+            refreshed_epoch.model_copy(
+                update={
+                    'state': 'completed',
+                    'completed_at': now_iso(),
+                    'payload': payload,
+                }
+            )
         )
+        self.clear_pause(task_id)
         self._log_service.update_task_runtime_meta(
             task_id,
             distribution={
-                'active_epoch_id': epoch_id,
-                'state': updated_state,
-                'frontier_node_ids': list(next_frontier),
-                'queued_epoch_count': int(distribution.get('queued_epoch_count') or 0),
-                'pending_mailbox_count': int(distribution.get('pending_mailbox_count') or 0),
+                'active_epoch_id': '',
+                'state': '',
+                'frontier_node_ids': [],
+                'queued_epoch_count': 0,
+                'pending_mailbox_count': 0,
             },
         )
         return True

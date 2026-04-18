@@ -980,3 +980,164 @@ async def test_acceptance_nodes_are_never_direct_distribution_targets(tmp_path: 
             )
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_delivered_mailbox_message_is_appended_at_next_safe_boundary(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "stage_status": "active",
+                "stage_goal": "old stage",
+                "messages": [
+                    {"role": "system", "content": "system seed"},
+                    {"role": "user", "content": "historic request"},
+                ],
+            },
+        )
+        service.store.upsert_task_node_notification(
+            TaskNodeNotification(
+                notification_id="notif:safe-boundary",
+                task_id=record.task_id,
+                node_id=root.node_id,
+                epoch_id="epoch:safe-boundary",
+                source_node_id=root.node_id,
+                message="新增董事会验收格式",
+                status="delivered",
+                created_at=now_iso(),
+                delivered_at=now_iso(),
+                consumed_at="",
+                payload={},
+            )
+        )
+
+        resumed = await service.node_runner._resume_react_state(task=task, node=root)
+
+        notifications = service.store.list_task_node_notifications(record.task_id, root.node_id)
+        frame = service.log_service.read_runtime_frame(record.task_id, root.node_id) or {}
+
+        assert resumed["messages"][-1]["role"] == "user"
+        assert resumed["messages"][-1]["content"] == "新增董事会验收格式"
+        assert notifications[0].status == "consumed"
+        assert frame.get("stage_status") == ""
+        assert frame.get("stage_goal") == ""
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_node_rebuilds_history_from_latest_runtime_refs_before_consuming_message(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy={"mode": "focus"})
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=spec,
+            owner_round_id="round-1",
+            owner_entry_index=0,
+        )
+        service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": child.node_id,
+                "depth": child.depth,
+                "node_kind": child.node_kind,
+                "phase": "before_model",
+                "messages": [
+                    {"role": "system", "content": "system seed"},
+                    {"role": "user", "content": "historic child request"},
+                ],
+            },
+        )
+        service.log_service.remove_frame(record.task_id, child.node_id)
+        service.store.update_node(
+            child.node_id,
+            lambda current: current.model_copy(
+                update={
+                    "status": "success",
+                    "updated_at": now_iso(),
+                    "final_output": "child succeeded",
+                }
+            ),
+        )
+        service._deliver_distribution_message(
+            task_id=record.task_id,
+            epoch_id="epoch:rebuild-history",
+            source_node_id=root.node_id,
+            target_node_id=child.node_id,
+            message="必须补充风险分层",
+        )
+        updated_child = service.store.get_node(child.node_id)
+        assert updated_child is not None
+
+        resumed = await service.node_runner._resume_react_state(task=task, node=updated_child)
+
+        assert resumed["messages"][1]["content"] == "historic child request"
+        assert resumed["messages"][-1]["content"] == "必须补充风险分层"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_epoch_completes_and_task_resumes_ordinary_execution(tmp_path: Path) -> None:
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_message_distribution",
+                        "arguments": {
+                            "children": [],
+                            "notes": "leaf node finished distribution",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        epoch = await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="新增董事会验收格式",
+            frontier_node_ids=[record.root_node_id],
+        )
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        updated_task = service.get_task(record.task_id)
+        updated_epoch = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
+        runtime_meta = service.log_service.read_task_runtime_meta(record.task_id) or {}
+        distribution = dict(runtime_meta.get("distribution") or {})
+
+        assert updated_task is not None
+        assert updated_task.pause_requested is False
+        assert updated_task.is_paused is False
+        assert updated_epoch is not None
+        assert updated_epoch.state == "completed"
+        assert distribution["state"] == ""
+        assert distribution["frontier_node_ids"] == []
+    finally:
+        await service.close()

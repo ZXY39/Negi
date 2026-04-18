@@ -27,6 +27,7 @@ from main.models import (
     normalize_result_payload,
 )
 from main.prompts import load_prompt
+from main.protocol import now_iso
 from main.runtime.internal_tools import (
     SpawnChildNodesTool,
     SubmitFinalResultTool,
@@ -376,6 +377,19 @@ class NodeRunner:
         return await self.run_node(task_id, node_id)
 
     async def _resume_react_state(self, *, task, node: NodeRecord) -> dict[str, Any]:
+        notifications = self._pending_node_notifications(task_id=task.task_id, node_id=node.node_id)
+        if notifications:
+            messages = await self._base_messages_for_reactivated_or_live_node(task=task, node=node)
+            messages = self._append_mailbox_messages(messages=messages, notifications=notifications)
+            self._consume_node_notifications(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                notification_ids=[str(item.notification_id or '').strip() for item in notifications],
+            )
+            self._close_active_stage_for_message_consumption(task_id=task.task_id, node_id=node.node_id)
+            return {
+                'messages': messages,
+            }
         frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
         if isinstance(frame.get('messages'), list) and frame.get('messages'):
             return {
@@ -384,6 +398,87 @@ class NodeRunner:
         return {
             'messages': await self._build_messages(task=task, node=node),
         }
+
+    def _pending_node_notifications(self, *, task_id: str, node_id: str) -> list[Any]:
+        return [
+            item
+            for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
+            if str(item.status or '').strip() == 'delivered'
+        ]
+
+    @staticmethod
+    def _message_list_from_payload(payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            return [dict(item) for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            for key in ('request_messages', 'model_messages', 'messages'):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [dict(item) for item in value if isinstance(item, dict)]
+        return []
+
+    async def _base_messages_for_reactivated_or_live_node(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
+        frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
+        if isinstance(frame.get('messages'), list) and frame.get('messages'):
+            return [dict(item) for item in list(frame.get('messages') or []) if isinstance(item, dict)]
+        metadata = dict(node.metadata or {})
+        for key in ('latest_runtime_actual_request_ref', 'latest_runtime_messages_ref'):
+            ref = str(metadata.get(key) or '').strip()
+            if not ref:
+                continue
+            resolved = str(self._log_service.resolve_content_ref(ref) or '').strip()
+            if not resolved:
+                continue
+            try:
+                parsed = json.loads(resolved)
+            except Exception:
+                parsed = None
+            message_list = self._message_list_from_payload(parsed)
+            if message_list:
+                return message_list
+        return await self._build_messages(task=task, node=node)
+
+    def _append_mailbox_messages(self, *, messages: list[dict[str, Any]], notifications: list[Any]) -> list[dict[str, Any]]:
+        appended = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+        for notification in list(notifications or []):
+            text = str(getattr(notification, 'message', '') or '').strip()
+            if not text:
+                continue
+            appended.append({'role': 'user', 'content': text})
+        return appended
+
+    def _consume_node_notifications(self, *, task_id: str, node_id: str, notification_ids: list[str]) -> None:
+        ids = {str(item or '').strip() for item in list(notification_ids or []) if str(item or '').strip()}
+        if not ids:
+            return
+        for notification in list(self._store.list_task_node_notifications(task_id, node_id) or []):
+            if str(notification.notification_id or '').strip() not in ids:
+                continue
+            self._store.upsert_task_node_notification(
+                notification.model_copy(
+                    update={
+                        'status': 'consumed',
+                        'consumed_at': now_iso(),
+                    }
+                )
+            )
+
+    def _close_active_stage_for_message_consumption(self, *, task_id: str, node_id: str) -> None:
+        self._log_service.update_frame(
+            task_id,
+            node_id,
+            lambda frame: {
+                **dict(frame or {}),
+                'phase': 'before_model',
+                'stage_mode': '',
+                'stage_status': '',
+                'stage_goal': '',
+                'stage_total_steps': 0,
+                'active_round_id': '',
+                'active_round_tool_call_ids': [],
+            },
+            publish_snapshot=False,
+        )
 
     def _distribution_runtime_state(self, task_id: str) -> dict[str, Any]:
         runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
