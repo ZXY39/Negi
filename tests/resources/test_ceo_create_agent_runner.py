@@ -5297,8 +5297,14 @@ async def test_create_agent_frontdoor_execute_tool_call_normalizes_nested_array_
 @pytest.mark.asyncio
 async def test_create_agent_frontdoor_execute_tool_call_omits_unset_optional_nested_fields() -> None:
     class _FakeMemoryManager:
-        async def upsert_structured_memory_facts(self, **kwargs):
-            return {"ok": True, "facts": kwargs.get("facts")}
+        async def enqueue_write_request(self, **kwargs):
+            return {
+                "ok": True,
+                "session_key": kwargs.get("session_key"),
+                "decision_source": kwargs.get("decision_source"),
+                "payload_text": kwargs.get("payload_text"),
+                "trigger_source": kwargs.get("trigger_source"),
+            }
 
     captured: dict[str, object] = {}
 
@@ -5310,17 +5316,7 @@ async def test_create_agent_frontdoor_execute_tool_call_omits_unset_optional_nes
     langchain_tool = ceo_runtime_ops._build_langchain_tool(tool, _executor)
     await langchain_tool.ainvoke(
         {
-            "facts": [
-                {
-                    "category": "preference",
-                    "entity": "user",
-                    "attribute": "default_document_save_location",
-                    "value": "desktop",
-                    "observed_at": "2026-04-09T13:46:20+08:00",
-                    "time_semantics": "durable_until_replaced",
-                    "source_excerpt": "remember this preference",
-                }
-            ]
+            "content": "remember this preference",
         }
     )
 
@@ -5343,24 +5339,17 @@ async def test_create_agent_frontdoor_execute_tool_call_omits_unset_optional_nes
         tool=tool,
         tool_name="memory_write",
         arguments=dict(captured["arguments"] or {}),
-        runtime_context={},
+        runtime_context={"session_key": "web:shared"},
         on_progress=None,
     )
 
     payload = json.loads(result_text)
     assert status == "success"
     assert payload["ok"] is True
-    assert payload["facts"] == [
-        {
-            "category": "preference",
-            "entity": "user",
-            "attribute": "default_document_save_location",
-            "value": "desktop",
-            "observed_at": "2026-04-09T13:46:20+08:00",
-            "time_semantics": "durable_until_replaced",
-            "source_excerpt": "remember this preference",
-        }
-    ]
+    assert payload["session_key"] == "web:shared"
+    assert payload["decision_source"] == "user"
+    assert payload["payload_text"] == "remember this preference"
+    assert payload["trigger_source"] == "memory_write_tool"
 
 
 @pytest.mark.asyncio
