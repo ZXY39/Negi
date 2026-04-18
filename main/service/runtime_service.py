@@ -446,6 +446,13 @@ class MainRuntimeService:
             max_concurrent_tasks=None if execution_runtime_enabled else 4,
             per_task_limit=1,
         )
+        self.task_actor_service.distribution_resume_callback = (
+            lambda task_id: asyncio.get_running_loop().call_soon(
+                lambda normalized_task_id=str(task_id or '').strip(): asyncio.create_task(
+                    self.global_scheduler.enqueue_task(normalized_task_id)
+                )
+            )
+        )
         self.tool_pressure_monitor = WorkerPressureMonitor(
             controller=self.adaptive_tool_budget_controller,
             store=self.store,
@@ -2302,10 +2309,11 @@ class MainRuntimeService:
             current_state = self._task_distribution_state(task_id)
             active_epoch_id = str(current_state.get('active_epoch_id') or '').strip()
             active_state = str(current_state.get('state') or '').strip()
+            queued_epoch: dict[str, Any] | None = None
             if active_epoch_id and active_state == 'pause_requested':
                 self._coalesce_pending_root_message(task_id=task_id, root_message=normalized_message)
             else:
-                self._queue_distribution_epoch(
+                queued_epoch = self._queue_distribution_epoch(
                     task_id=task_id,
                     root_node_id=task.root_node_id,
                     root_message=normalized_message,
@@ -2317,6 +2325,8 @@ class MainRuntimeService:
                 task_id,
                 **self._distribution_runtime_meta_payload(task_id=task_id),
             )
+            if queued_epoch is not None and str(queued_epoch.get('state') or '').strip() == 'pause_requested':
+                await self._schedule_distribution_epoch(task)
             updated_task_ids.append(task_id)
         joined_task_ids = ', '.join(updated_task_ids)
         return f'已向任务 {joined_task_ids} 追加通知。'
@@ -2450,6 +2460,17 @@ class MainRuntimeService:
             },
         )
 
+    async def _schedule_distribution_epoch(self, task: TaskRecord) -> None:
+        if self.execution_mode in {'embedded', 'worker'}:
+            await self.global_scheduler.enqueue_task(task.task_id)
+            return
+        self._enqueue_task_command(
+            command_type='resume_task',
+            task_id=task.task_id,
+            session_id=task.session_id,
+            payload={'task_id': task.task_id},
+        )
+
     def _deliver_distribution_message(
         self,
         *,
@@ -2465,18 +2486,27 @@ class MainRuntimeService:
         if str(target.node_kind or '').strip().lower() != 'execution':
             raise ValueError('distribution_target_must_be_execution_node')
         notification = self.store.upsert_task_node_notification(
-            TaskNodeNotification(
-                notification_id=new_command_id().replace('command:', 'notif:', 1),
-                task_id=str(task_id or '').strip(),
-                node_id=str(target_node_id or '').strip(),
-                epoch_id=str(epoch_id or '').strip(),
-                source_node_id=str(source_node_id or '').strip(),
-                message=str(message or '').strip(),
-                status='delivered',
-                created_at=now_iso(),
-                delivered_at=now_iso(),
-                consumed_at='',
-                payload={},
+            next(
+                (
+                    item
+                    for item in list(self.store.list_task_node_notifications(task_id, target_node_id) or [])
+                    if str(item.epoch_id or '').strip() == str(epoch_id or '').strip()
+                    and str(item.source_node_id or '').strip() == str(source_node_id or '').strip()
+                    and str(item.message or '').strip() == str(message or '').strip()
+                ),
+                TaskNodeNotification(
+                    notification_id=new_command_id().replace('command:', 'notif:', 1),
+                    task_id=str(task_id or '').strip(),
+                    node_id=str(target_node_id or '').strip(),
+                    epoch_id=str(epoch_id or '').strip(),
+                    source_node_id=str(source_node_id or '').strip(),
+                    message=str(message or '').strip(),
+                    status='delivered',
+                    created_at=now_iso(),
+                    delivered_at=now_iso(),
+                    consumed_at='',
+                    payload={},
+                ),
             )
         )
         self._reactivate_execution_node_for_distribution(

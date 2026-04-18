@@ -1029,7 +1029,7 @@ async def test_delivered_mailbox_message_is_appended_at_next_safe_boundary(tmp_p
 
         assert resumed["messages"][-1]["role"] == "user"
         assert resumed["messages"][-1]["content"] == "新增董事会验收格式"
-        assert notifications[0].status == "consumed"
+        assert notifications[0].status == "delivered"
         assert frame.get("stage_status") == ""
         assert frame.get("stage_goal") == ""
     finally:

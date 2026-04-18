@@ -320,6 +320,17 @@ class NodeRunner:
                     max_parallel_tool_calls=self._max_parallel_tool_calls_for(node),
                 ),
             )
+            pending_notification_ids = [
+                str(item or '').strip()
+                for item in list(react_state.get('pending_notification_ids') or [])
+                if str(item or '').strip()
+            ]
+            if pending_notification_ids:
+                self._consume_node_notifications(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    notification_ids=pending_notification_ids,
+                )
             if self._pause_requested(task_id):
                 self._mark_finished(task_id, node.node_id, result)
                 self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
@@ -381,14 +392,10 @@ class NodeRunner:
         if notifications:
             messages = await self._base_messages_for_reactivated_or_live_node(task=task, node=node)
             messages = self._append_mailbox_messages(messages=messages, notifications=notifications)
-            self._consume_node_notifications(
-                task_id=task.task_id,
-                node_id=node.node_id,
-                notification_ids=[str(item.notification_id or '').strip() for item in notifications],
-            )
             self._close_active_stage_for_message_consumption(task_id=task.task_id, node_id=node.node_id)
             return {
                 'messages': messages,
+                'pending_notification_ids': [str(item.notification_id or '').strip() for item in notifications],
             }
         frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
         if isinstance(frame.get('messages'), list) and frame.get('messages'):
@@ -490,14 +497,14 @@ class NodeRunner:
             return False
         distribution = self._distribution_runtime_state(task_id)
         state = str(distribution.get('state') or '').strip()
-        if state not in {'paused', 'distributing'}:
+        if state not in {'pause_requested', 'paused', 'distributing'}:
             return False
         frontier_node_ids = [
             str(item or '').strip()
             for item in list(distribution.get('frontier_node_ids') or [])
             if str(item or '').strip()
         ]
-        if state == 'paused' and not frontier_node_ids:
+        if state in {'pause_requested', 'paused'} and not frontier_node_ids:
             frontier_node_ids = [str(task.root_node_id or '').strip()]
         return str(node_id or '').strip() in frontier_node_ids
 
@@ -628,6 +635,13 @@ class NodeRunner:
         if active_epoch is None:
             return NodeFinalResult(status='success', summary='distribution epoch missing')
         epoch_id, distribution, epoch = active_epoch
+        already_distributed = {
+            str(item or '').strip()
+            for item in list((epoch.payload or {}).get('distributed_node_ids') or [])
+            if str(item or '').strip()
+        }
+        if str(node.node_id or '').strip() in already_distributed:
+            return NodeFinalResult(status='success', summary=f'distribution turn already completed for {node.node_id}')
         incoming_message = self._distribution_node_message(task_id=task.task_id, node=node, epoch=epoch)
         live_child_node_ids = self.live_distribution_child_node_ids(task_id=task.task_id, parent_node_id=node.node_id)
         child_payloads = self._distribution_child_payloads(task_id=task.task_id, child_node_ids=live_child_node_ids)

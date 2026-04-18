@@ -2258,7 +2258,13 @@ class TaskLogService:
                 metadata['invalidated_at'] = invalidated_at
                 return record.model_copy(
                     update={
+                        'status': 'in_progress',
                         'updated_at': invalidated_at,
+                        'final_output': '',
+                        'final_output_ref': '',
+                        'failure_reason': '',
+                        'check_result': '',
+                        'check_result_ref': '',
                         'metadata': metadata,
                     }
                 )

@@ -331,6 +331,7 @@ class TaskActorService:
                 default=_DEFAULT_NODE_DISPATCH_LIMITS['inspection'],
             ),
         }
+        self.distribution_resume_callback = None
         self._node_runner.nested_node_executor = self._execute_nested_node
         self._node_runner.cancel_node_subtree_executor = self._cancel_node_subtree
 
@@ -371,7 +372,7 @@ class TaskActorService:
                 )
             else:
                 distribution = self._distribution_runtime_state(task_id)
-                if str(distribution.get('state') or '').strip() in {'paused', 'distributing'}:
+                if str(distribution.get('state') or '').strip() in {'pause_requested', 'paused', 'distributing'}:
                     distribution_result = await self._run_distribution_epoch(task_id)
                     if distribution_result is not None:
                         return
@@ -490,7 +491,7 @@ class TaskActorService:
             for item in list(distribution.get('frontier_node_ids') or [])
             if str(item or '').strip()
         ]
-        if state == 'paused':
+        if state in {'pause_requested', 'paused'}:
             frontier = frontier or [str(task.root_node_id or '').strip()]
             payload = dict(epoch.payload or {})
             payload['frontier_node_ids'] = list(frontier)
@@ -531,6 +532,32 @@ class TaskActorService:
                 },
             )
             return True
+        queued_epochs = [
+            item
+            for item in list(self._store.list_active_task_message_distribution_epochs(task_id) or [])
+            if str(item.state or '').strip() == 'queued'
+        ]
+        if queued_epochs:
+            next_epoch = queued_epochs[0]
+            next_payload = dict(next_epoch.payload or {})
+            next_payload['frontier_node_ids'] = [str(task.root_node_id or '').strip()]
+            next_payload.setdefault('distributed_node_ids', [])
+            next_payload['next_frontier_node_ids'] = []
+            self._store.upsert_task_message_distribution_epoch(
+                next_epoch.model_copy(update={'state': 'distributing', 'payload': next_payload})
+            )
+            remaining_queued = max(0, len(queued_epochs) - 1)
+            self._log_service.update_task_runtime_meta(
+                task_id,
+                distribution={
+                    'active_epoch_id': next_epoch.epoch_id,
+                    'state': 'distributing',
+                    'frontier_node_ids': [str(task.root_node_id or '').strip()],
+                    'queued_epoch_count': remaining_queued,
+                    'pending_mailbox_count': int(distribution.get('pending_mailbox_count') or 0),
+                },
+            )
+            return await self._run_distribution_epoch(task_id)
         self._store.upsert_task_message_distribution_epoch(
             refreshed_epoch.model_copy(
                 update={
@@ -551,6 +578,11 @@ class TaskActorService:
                 'pending_mailbox_count': 0,
             },
         )
+        resume_callback = self.distribution_resume_callback
+        if callable(resume_callback):
+            result = resume_callback(task_id)
+            if asyncio.iscoroutine(result):
+                await result
         return True
 
     async def _run_final_acceptance_if_needed(self, task_id: str) -> NodeFinalResult:
