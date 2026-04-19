@@ -13,7 +13,7 @@ from g3ku.agent.tools.base import Tool
 from g3ku.runtime.memory_scope import normalize_memory_scope
 from g3ku.runtime.project_environment import current_project_environment
 from main.errors import TaskPausedError, describe_exception
-from main.ids import new_node_id
+from main.ids import new_command_id, new_node_id
 from main.models import (
     NodeFinalResult,
     NodeRecord,
@@ -27,7 +27,18 @@ from main.models import (
     normalize_result_payload,
 )
 from main.prompts import load_prompt
-from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool, SubmitNextStageTool
+from main.protocol import now_iso
+from main.runtime.append_notice_context import (
+    APPEND_NOTICE_CONTEXT_KEY,
+    normalize_append_notice_context,
+    record_consumed_notifications,
+)
+from main.runtime.internal_tools import (
+    SpawnChildNodesTool,
+    SubmitFinalResultTool,
+    SubmitMessageDistributionTool,
+    SubmitNextStageTool,
+)
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
@@ -92,6 +103,7 @@ class NodeRunner:
         self.governance_child_created_observer = None
         self.governance_spawn_refusal_supplier = None
         self._spawn_operation_locks: dict[str, asyncio.Lock] = {}
+        self.distribution_delivery_callback = None
 
     @staticmethod
     def _normalized_status(value: Any) -> str:
@@ -268,6 +280,8 @@ class NodeRunner:
             raise ValueError(f'missing task or node: {task_id} / {node_id}')
         if node.status in {STATUS_SUCCESS, STATUS_FAILED}:
             return self._result_from_record(node)
+        if self._distribution_mode_active(task_id=task_id, node_id=node.node_id):
+            return await self._run_distribution_node(task=task, node=node)
         if self._pause_requested(task_id):
             self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
             raise TaskPausedError(task_id)
@@ -311,6 +325,27 @@ class NodeRunner:
                     max_parallel_tool_calls=self._max_parallel_tool_calls_for(node),
                 ),
             )
+            pending_notification_ids = [
+                str(item or '').strip()
+                for item in list(react_state.get('pending_notification_ids') or [])
+                if str(item or '').strip()
+            ]
+            if pending_notification_ids:
+                pending_notifications = self._notifications_by_ids(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    notification_ids=pending_notification_ids,
+                )
+                if pending_notifications:
+                    self._record_consumed_notice_context(
+                        node_id=node.node_id,
+                        notifications=pending_notifications,
+                    )
+                self._consume_node_notifications(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    notification_ids=pending_notification_ids,
+                )
             if self._pause_requested(task_id):
                 self._mark_finished(task_id, node.node_id, result)
                 self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
@@ -368,6 +403,15 @@ class NodeRunner:
         return await self.run_node(task_id, node_id)
 
     async def _resume_react_state(self, *, task, node: NodeRecord) -> dict[str, Any]:
+        notifications = self._pending_node_notifications(task_id=task.task_id, node_id=node.node_id)
+        if notifications:
+            messages = await self._base_messages_for_reactivated_or_live_node(task=task, node=node)
+            messages = self._append_mailbox_messages(messages=messages, notifications=notifications)
+            self._close_active_stage_for_message_consumption(task_id=task.task_id, node_id=node.node_id)
+            return {
+                'messages': messages,
+                'pending_notification_ids': [str(item.notification_id or '').strip() for item in notifications],
+            }
         frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
         if isinstance(frame.get('messages'), list) and frame.get('messages'):
             return {
@@ -376,6 +420,383 @@ class NodeRunner:
         return {
             'messages': await self._build_messages(task=task, node=node),
         }
+
+    def _pending_node_notifications(self, *, task_id: str, node_id: str) -> list[Any]:
+        return [
+            item
+            for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
+            if str(item.status or '').strip() == 'delivered'
+        ]
+
+    def _notifications_by_ids(self, *, task_id: str, node_id: str, notification_ids: list[str]) -> list[dict[str, Any]]:
+        ids = {str(item or '').strip() for item in list(notification_ids or []) if str(item or '').strip()}
+        if not ids:
+            return []
+        items: list[dict[str, Any]] = []
+        for notification in list(self._store.list_task_node_notifications(task_id, node_id) or []):
+            notification_id = str(notification.notification_id or '').strip()
+            if notification_id not in ids:
+                continue
+            items.append(notification.model_dump(mode='json'))
+        return items
+
+    @staticmethod
+    def _message_list_from_payload(payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            return [dict(item) for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            for key in ('request_messages', 'model_messages', 'messages'):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [dict(item) for item in value if isinstance(item, dict)]
+        return []
+
+    async def _base_messages_for_reactivated_or_live_node(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
+        frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
+        if isinstance(frame.get('messages'), list) and frame.get('messages'):
+            return [dict(item) for item in list(frame.get('messages') or []) if isinstance(item, dict)]
+        metadata = dict(node.metadata or {})
+        for key in ('latest_runtime_actual_request_ref', 'latest_runtime_messages_ref'):
+            ref = str(metadata.get(key) or '').strip()
+            if not ref:
+                continue
+            resolved = str(self._log_service.resolve_content_ref(ref) or '').strip()
+            if not resolved:
+                continue
+            try:
+                parsed = json.loads(resolved)
+            except Exception:
+                parsed = None
+            message_list = self._message_list_from_payload(parsed)
+            if message_list:
+                return message_list
+        return await self._build_messages(task=task, node=node)
+
+    def _append_mailbox_messages(self, *, messages: list[dict[str, Any]], notifications: list[Any]) -> list[dict[str, Any]]:
+        appended = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+        for notification in list(notifications or []):
+            text = str(getattr(notification, 'message', '') or '').strip()
+            if not text:
+                continue
+            appended.append({'role': 'user', 'content': text})
+        return appended
+
+    def _consume_node_notifications(self, *, task_id: str, node_id: str, notification_ids: list[str]) -> None:
+        ids = {str(item or '').strip() for item in list(notification_ids or []) if str(item or '').strip()}
+        if not ids:
+            return
+        for notification in list(self._store.list_task_node_notifications(task_id, node_id) or []):
+            if str(notification.notification_id or '').strip() not in ids:
+                continue
+            self._store.upsert_task_node_notification(
+                notification.model_copy(
+                    update={
+                        'status': 'consumed',
+                        'consumed_at': now_iso(),
+                    }
+                )
+            )
+
+    def _record_consumed_notice_context(self, *, node_id: str, notifications: list[dict[str, Any]]) -> None:
+        consumed_at = now_iso()
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            context = normalize_append_notice_context(metadata.get(APPEND_NOTICE_CONTEXT_KEY))
+            metadata[APPEND_NOTICE_CONTEXT_KEY] = record_consumed_notifications(
+                context,
+                notifications=list(notifications or []),
+                consumed_at=consumed_at,
+            )
+            return metadata
+
+        self._log_service.update_node_metadata(node_id, _mutate)
+
+    def _close_active_stage_for_message_consumption(self, *, task_id: str, node_id: str) -> None:
+        self._log_service.update_frame(
+            task_id,
+            node_id,
+            lambda frame: {
+                **dict(frame or {}),
+                'phase': 'before_model',
+                'stage_mode': '',
+                'stage_status': '',
+                'stage_goal': '',
+                'stage_total_steps': 0,
+                'active_round_id': '',
+                'active_round_tool_call_ids': [],
+            },
+            publish_snapshot=False,
+        )
+
+    def _distribution_runtime_state(self, task_id: str) -> dict[str, Any]:
+        runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
+        return dict(runtime_meta.get('distribution') or {})
+
+    def _distribution_mode_active(self, *, task_id: str, node_id: str) -> bool:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return False
+        distribution = self._distribution_runtime_state(task_id)
+        state = str(distribution.get('state') or '').strip()
+        if state not in {'pause_requested', 'paused', 'distributing'}:
+            return False
+        frontier_node_ids = [
+            str(item or '').strip()
+            for item in list(distribution.get('frontier_node_ids') or [])
+            if str(item or '').strip()
+        ]
+        if state in {'pause_requested', 'paused'} and not frontier_node_ids:
+            frontier_node_ids = [str(task.root_node_id or '').strip()]
+        return str(node_id or '').strip() in frontier_node_ids
+
+    def _active_distribution_epoch(self, task_id: str) -> tuple[str, dict[str, Any], Any] | None:
+        distribution = self._distribution_runtime_state(task_id)
+        epoch_id = str(distribution.get('active_epoch_id') or '').strip()
+        if not epoch_id:
+            return None
+        epoch = self._store.get_task_message_distribution_epoch(task_id, epoch_id)
+        if epoch is None:
+            return None
+        return epoch_id, distribution, epoch
+
+    def _distribution_provider_tools(self, tool: SubmitMessageDistributionTool) -> list[dict[str, Any]]:
+        return [
+            {
+                'type': 'function',
+                'function': {
+                    'name': tool.name,
+                    'description': tool.description,
+                    'parameters': tool.parameters,
+                },
+            }
+        ]
+
+    @staticmethod
+    def _distribution_response_arguments(response: Any) -> dict[str, Any]:
+        tool_calls = getattr(response, 'tool_calls', None)
+        if isinstance(response, dict):
+            tool_calls = response.get('tool_calls')
+        for item in list(tool_calls or []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name') or '').strip()
+            function = item.get('function') if isinstance(item.get('function'), dict) else {}
+            if not name:
+                name = str(function.get('name') or '').strip()
+            if name != 'submit_message_distribution':
+                continue
+            arguments = function.get('arguments') if isinstance(function, dict) else None
+            if arguments is None:
+                arguments = item.get('arguments')
+            if isinstance(arguments, str):
+                try:
+                    parsed = json.loads(arguments)
+                except Exception:
+                    parsed = {}
+                return dict(parsed or {}) if isinstance(parsed, dict) else {}
+            return dict(arguments or {}) if isinstance(arguments, dict) else {}
+        return {}
+
+    def _distribution_root_message(self, *, epoch) -> str:
+        payload = dict(epoch.payload or {})
+        queued_root_messages = [
+            str(item or '').strip()
+            for item in list(payload.get('queued_root_messages') or [])
+            if str(item or '').strip()
+        ]
+        if not queued_root_messages:
+            queued_root_messages = [str(epoch.root_message or '').strip()]
+        return '\n\n'.join(item for item in queued_root_messages if item)
+
+    def _distribution_node_message(self, *, task_id: str, node: NodeRecord, epoch) -> str:
+        if str(node.node_id or '').strip() == str(epoch.root_node_id or '').strip():
+            return self._distribution_root_message(epoch=epoch)
+        messages = [
+            str(item.message or '').strip()
+            for item in list(self._store.list_task_node_notifications(task_id, node.node_id) or [])
+            if str(item.epoch_id or '').strip() == str(epoch.epoch_id or '').strip()
+            and str(item.status or '').strip() == 'delivered'
+            and str(item.message or '').strip()
+        ]
+        return '\n\n'.join(messages)
+
+    def _distribution_child_payloads(self, *, task_id: str, child_node_ids: list[str]) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        for child_node_id in list(child_node_ids or []):
+            child = self._store.get_node(child_node_id)
+            if child is None or str(child.task_id or '').strip() != str(task_id or '').strip():
+                continue
+            payloads.append(
+                {
+                    'node_id': child.node_id,
+                    'goal': str(child.goal or ''),
+                    'prompt_summary': ' '.join(str(child.prompt or '').split())[:240],
+                    'status': str(child.status or ''),
+                }
+            )
+        return payloads
+
+    def _persist_distribution_delivery(
+        self,
+        *,
+        task_id: str,
+        epoch_id: str,
+        source_node_id: str,
+        target_node_id: str,
+        message: str,
+    ) -> None:
+        callback = self.distribution_delivery_callback
+        if callable(callback):
+            callback(
+                task_id=task_id,
+                epoch_id=epoch_id,
+                source_node_id=source_node_id,
+                target_node_id=target_node_id,
+                message=message,
+            )
+            return
+        self._store.upsert_task_node_notification(
+            {
+                'notification_id': new_command_id().replace('command:', 'notif:', 1),
+                'task_id': task_id,
+                'node_id': target_node_id,
+                'epoch_id': epoch_id,
+                'source_node_id': source_node_id,
+                'message': str(message or '').strip(),
+                'status': 'delivered',
+                'created_at': _now(),
+                'delivered_at': _now(),
+                'consumed_at': '',
+                'payload': {},
+            }
+        )
+
+    async def _run_distribution_node(self, *, task, node: NodeRecord) -> NodeFinalResult:
+        active_epoch = self._active_distribution_epoch(task.task_id)
+        if active_epoch is None:
+            return NodeFinalResult(status='success', summary='distribution epoch missing')
+        epoch_id, distribution, epoch = active_epoch
+        already_distributed = {
+            str(item or '').strip()
+            for item in list((epoch.payload or {}).get('distributed_node_ids') or [])
+            if str(item or '').strip()
+        }
+        if str(node.node_id or '').strip() in already_distributed:
+            return NodeFinalResult(status='success', summary=f'distribution turn already completed for {node.node_id}')
+        incoming_message = self._distribution_node_message(task_id=task.task_id, node=node, epoch=epoch)
+        live_child_node_ids = self.live_distribution_child_node_ids(task_id=task.task_id, parent_node_id=node.node_id)
+        child_payloads = self._distribution_child_payloads(task_id=task.task_id, child_node_ids=live_child_node_ids)
+        prompt_messages = [
+            {'role': 'system', 'content': load_prompt('node_message_distribution.md').strip()},
+            {
+                'role': 'user',
+                'content': json.dumps(
+                    {
+                        'task_id': task.task_id,
+                        'node_id': node.node_id,
+                        'goal': str(node.goal or ''),
+                        'prompt_summary': ' '.join(str(node.prompt or '').split())[:400],
+                        'incoming_message': incoming_message,
+                        'live_children': child_payloads,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            },
+        ]
+        decision_tool = SubmitMessageDistributionTool(lambda payload: payload)
+        response = await self._react_loop._chat_with_optional_extensions(
+            messages=prompt_messages,
+            tools=self._distribution_provider_tools(decision_tool),
+            model_refs=self._model_refs_for(node),
+            tool_choice={'type': 'function', 'function': {'name': decision_tool.name}},
+            parallel_tool_calls=False,
+        )
+        arguments = self._distribution_response_arguments(response)
+        submitted = await decision_tool.execute(
+            children=list(arguments.get('children') or []),
+            notes=str(arguments.get('notes') or ''),
+        )
+        valid_child_ids = set(live_child_node_ids)
+        delivered_child_ids: list[str] = []
+        for item in list(submitted.get('children') or []):
+            if not isinstance(item, dict):
+                continue
+            target_node_id = str(item.get('target_node_id') or '').strip()
+            child_message = str(item.get('message') or '').strip()
+            if not target_node_id or not child_message or target_node_id not in valid_child_ids:
+                continue
+            self._persist_distribution_delivery(
+                task_id=task.task_id,
+                epoch_id=epoch_id,
+                source_node_id=node.node_id,
+                target_node_id=target_node_id,
+                message=child_message,
+            )
+            if target_node_id not in delivered_child_ids:
+                delivered_child_ids.append(target_node_id)
+        self._log_service.update_frame(
+            task.task_id,
+            node.node_id,
+            lambda frame: {
+                **dict(frame or {}),
+                'node_id': node.node_id,
+                'depth': int(node.depth or 0),
+                'node_kind': node.node_kind,
+                'phase': 'message_distribution',
+            },
+            publish_snapshot=True,
+        )
+        epoch_payload = dict(epoch.payload or {})
+        distributed_node_ids = [
+            str(item or '').strip()
+            for item in list(epoch_payload.get('distributed_node_ids') or [])
+            if str(item or '').strip()
+        ]
+        if node.node_id not in distributed_node_ids:
+            distributed_node_ids.append(node.node_id)
+        next_frontier_node_ids = [
+            str(item or '').strip()
+            for item in list(epoch_payload.get('next_frontier_node_ids') or [])
+            if str(item or '').strip()
+        ]
+        for child_node_id in delivered_child_ids:
+            if child_node_id not in next_frontier_node_ids:
+                next_frontier_node_ids.append(child_node_id)
+        self._store.upsert_task_message_distribution_epoch(
+            epoch.model_copy(
+                update={
+                    'state': 'distributing',
+                    'payload': {
+                        **epoch_payload,
+                        'distributed_node_ids': distributed_node_ids,
+                        'next_frontier_node_ids': next_frontier_node_ids,
+                    },
+                }
+            )
+        )
+        self._log_service.update_task_runtime_meta(
+            task.task_id,
+            distribution={
+                'active_epoch_id': epoch_id,
+                'state': str(distribution.get('state') or 'distributing') or 'distributing',
+                'frontier_node_ids': [
+                    str(item or '').strip()
+                    for item in list(distribution.get('frontier_node_ids') or [])
+                    if str(item or '').strip()
+                ],
+                'queued_epoch_count': int(distribution.get('queued_epoch_count') or 0),
+                'pending_mailbox_count': int(distribution.get('pending_mailbox_count') or 0) + len(delivered_child_ids),
+            },
+        )
+        return NodeFinalResult(
+            status='success',
+            summary=f'distribution turn completed for {node.node_id}',
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason='',
+        )
 
     def _flush_latest_valid_result_if_paused(self, *, task_id: str, node_id: str) -> NodeFinalResult | None:
         latest = self._store.get_node(node_id)
@@ -1718,7 +2139,13 @@ class NodeRunner:
                     exclude_node_ids=self._claimed_spawn_node_ids(entries=entries, field='child_node_id', skip_index=index),
                 )
                 if child is None:
-                    child = self._create_execution_child(task=task, parent=parent, spec=spec)
+                    child = self._create_execution_child(
+                        task=task,
+                        parent=parent,
+                        spec=spec,
+                        owner_round_id=cache_key,
+                        owner_entry_index=index,
+                    )
                 self._update_spawn_entry(
                     task_id=task.task_id,
                     parent_node_id=parent.node_id,
@@ -1727,6 +2154,13 @@ class NodeRunner:
                     index=index,
                     child_node_id=child.node_id,
                 )
+            self._stamp_spawn_owner_metadata(
+                node_id=child.node_id,
+                parent_node_id=parent.node_id,
+                owner_round_id=cache_key,
+                owner_entry_index=index,
+                owner_kind='child',
+            )
 
             child_result = await self._run_nested_node(task.task_id, child.node_id)
             child = self._store.get_node(child.node_id) or child
@@ -1823,6 +2257,9 @@ class NodeRunner:
                         goal=acceptance_goal,
                         acceptance_prompt=acceptance_prompt,
                         parent_node_id=child.node_id,
+                        owner_parent_node_id=parent.node_id,
+                        owner_round_id=cache_key,
+                        owner_entry_index=index,
                     )
                 self._update_spawn_entry(
                     task_id=task.task_id,
@@ -1833,6 +2270,13 @@ class NodeRunner:
                     acceptance_node_id=acceptance.node_id,
                     check_status='running',
                 )
+            self._stamp_spawn_owner_metadata(
+                node_id=acceptance.node_id,
+                parent_node_id=parent.node_id,
+                owner_round_id=cache_key,
+                owner_entry_index=index,
+                owner_kind='acceptance',
+            )
 
             acceptance_result = await self._run_nested_node(task.task_id, acceptance.node_id)
             acceptance = self._store.get_node(acceptance.node_id) or acceptance
@@ -2109,7 +2553,20 @@ class NodeRunner:
                 exclude_node_ids=self._claimed_spawn_node_ids(entries=entries, field='child_node_id', skip_index=index),
             )
             if child is None:
-                child = self._create_execution_child(task=task, parent=parent, spec=spec)
+                child = self._create_execution_child(
+                    task=task,
+                    parent=parent,
+                    spec=spec,
+                    owner_round_id=cache_key,
+                    owner_entry_index=index,
+                )
+            self._stamp_spawn_owner_metadata(
+                node_id=child.node_id,
+                parent_node_id=parent.node_id,
+                owner_round_id=cache_key,
+                owner_entry_index=index,
+                owner_kind='child',
+            )
             self._update_spawn_entry(
                 task_id=task.task_id,
                 parent_node_id=parent.node_id,
@@ -2304,7 +2761,15 @@ class NodeRunner:
             node_metadata.get('execution_policy', task_metadata.get('execution_policy'))
         )
 
-    def _create_execution_child(self, *, task, parent: NodeRecord, spec: SpawnChildSpec) -> NodeRecord:
+    def _create_execution_child(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        spec: SpawnChildSpec,
+        owner_round_id: str = '',
+        owner_entry_index: int = 0,
+    ) -> NodeRecord:
         execution_policy = normalize_execution_policy_metadata(spec.execution_policy)
         child_prompt = str(spec.prompt or '')
         metadata = {
@@ -2313,7 +2778,11 @@ class NodeRunner:
                 parent_node_id=parent.node_id,
                 goal=spec.goal,
                 prompt=child_prompt,
-            )
+            ),
+            'spawn_owner_parent_node_id': parent.node_id,
+            'spawn_owner_round_id': str(owner_round_id or '').strip(),
+            'spawn_owner_entry_index': int(owner_entry_index),
+            'spawn_owner_kind': 'child',
         }
         child = NodeRecord(
             node_id=new_node_id(),
@@ -2352,6 +2821,9 @@ class NodeRunner:
         goal: str,
         acceptance_prompt: str,
         parent_node_id: str | None = None,
+        owner_parent_node_id: str | None = None,
+        owner_round_id: str = '',
+        owner_entry_index: int = 0,
         metadata: dict[str, Any] | None = None,
     ) -> NodeRecord:
         execution_policy = self._resolve_execution_policy(task, node=accepted_node)
@@ -2376,6 +2848,10 @@ class NodeRunner:
                 prompt=prompt,
                 accepted_node_id=accepted_node.node_id,
             ),
+            'spawn_owner_parent_node_id': str(owner_parent_node_id or '').strip(),
+            'spawn_owner_round_id': str(owner_round_id or '').strip(),
+            'spawn_owner_entry_index': int(owner_entry_index),
+            'spawn_owner_kind': 'acceptance',
         }
         acceptance = NodeRecord(
             node_id=new_node_id(),
@@ -2399,6 +2875,104 @@ class NodeRunner:
             metadata={**base_metadata, **dict(metadata or {})},
         )
         return self._log_service.create_node(task.task_id, acceptance)
+
+    def _stamp_spawn_owner_metadata(
+        self,
+        *,
+        node_id: str,
+        parent_node_id: str,
+        owner_round_id: str,
+        owner_entry_index: int,
+        owner_kind: str,
+    ) -> None:
+        normalized_node_id = str(node_id or '').strip()
+        if not normalized_node_id:
+            return
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            metadata['spawn_owner_parent_node_id'] = str(parent_node_id or '').strip()
+            metadata['spawn_owner_round_id'] = str(owner_round_id or '').strip()
+            metadata['spawn_owner_entry_index'] = int(owner_entry_index)
+            metadata['spawn_owner_kind'] = str(owner_kind or '').strip()
+            return metadata
+
+        self._log_service.update_node_metadata(normalized_node_id, _mutate)
+
+    def _latest_incomplete_spawn_round(self, *, parent: NodeRecord) -> tuple[str, dict[str, Any]] | None:
+        operations = (parent.metadata or {}).get('spawn_operations') if isinstance(parent.metadata, dict) else {}
+        if not isinstance(operations, dict):
+            return None
+        for round_id, payload in reversed(list(operations.items())):
+            if not isinstance(payload, dict):
+                continue
+            if bool(payload.get('completed')):
+                continue
+            return str(round_id or '').strip(), copy.deepcopy(payload)
+        return None
+
+    def live_distribution_child_node_ids(self, *, task_id: str, parent_node_id: str) -> list[str]:
+        task = self._store.get_task(task_id)
+        parent = self._store.get_node(parent_node_id)
+        if task is None or parent is None or str(parent.task_id or '').strip() != str(task.task_id or '').strip():
+            return []
+        if str(parent.node_kind or '').strip().lower() != KIND_EXECUTION:
+            return []
+        latest_round = self._latest_incomplete_spawn_round(parent=parent)
+        if latest_round is None:
+            return []
+        _round_id, payload = latest_round
+        child_node_ids: list[str] = []
+        seen: set[str] = set()
+        for entry in list(payload.get('entries') or []):
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get('review_decision') or '').strip().lower() == 'blocked':
+                continue
+            child_node_id = str(entry.get('child_node_id') or '').strip()
+            if not child_node_id or child_node_id in seen:
+                continue
+            child = self._store.get_node(child_node_id)
+            if child is None or str(child.node_kind or '').strip().lower() != KIND_EXECUTION:
+                continue
+            if not self.node_is_in_live_distribution_tree(task_id=task.task_id, node_id=child_node_id):
+                continue
+            seen.add(child_node_id)
+            child_node_ids.append(child_node_id)
+        return child_node_ids
+
+    def node_is_in_live_distribution_tree(self, *, task_id: str, node_id: str) -> bool:
+        task = self._store.get_task(task_id)
+        node = self._store.get_node(node_id)
+        if task is None or node is None or str(node.task_id or '').strip() != str(task.task_id or '').strip():
+            return False
+        if str(node.node_kind or '').strip().lower() == KIND_ACCEPTANCE:
+            return False
+        if str(node.node_id or '').strip() == str(task.root_node_id or '').strip():
+            return True
+        metadata = dict(node.metadata or {})
+        if str(metadata.get('spawn_owner_kind') or '').strip().lower() != 'child':
+            return False
+        owner_parent_node_id = str(metadata.get('spawn_owner_parent_node_id') or '').strip()
+        owner_round_id = str(metadata.get('spawn_owner_round_id') or '').strip()
+        owner_entry_index = int(metadata.get('spawn_owner_entry_index') or 0)
+        if not owner_parent_node_id or not owner_round_id:
+            return False
+        parent = self._store.get_node(owner_parent_node_id)
+        if parent is None:
+            return False
+        latest_round = self._latest_incomplete_spawn_round(parent=parent)
+        if latest_round is None:
+            return False
+        latest_round_id, payload = latest_round
+        if latest_round_id != owner_round_id:
+            return False
+        entries = list(payload.get('entries') or [])
+        if owner_entry_index < 0 or owner_entry_index >= len(entries):
+            return False
+        entry = dict(entries[owner_entry_index] or {}) if isinstance(entries[owner_entry_index], dict) else {}
+        if str(entry.get('child_node_id') or '').strip() != str(node.node_id or '').strip():
+            return False
+        return self.node_is_in_live_distribution_tree(task_id=task.task_id, node_id=parent.node_id)
 
     def _compose_acceptance_prompt(
         self,

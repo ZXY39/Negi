@@ -98,16 +98,27 @@ G3KU 当前的工具/技能体系已经不是“所有东西都一次性注入�
 
 Maintenance note for CEO/frontdoor task lifecycle tools:
 
-- `create_async_task` remains the only task-lifecycle tool exposed to CEO/frontdoor for spawning new detached work.
+- CEO/frontdoor now has two fixed task-lifecycle builtins with different contracts:
+  - `create_async_task` for spawning new detached work
+  - `task_append_notice` for appending new requirements, constraints, or acceptance expectations to an existing unfinished task in the current session
 - `create_async_task` no longer creates work unconditionally. Before `MainRuntimeService` creates a task, it runs a duplicate precheck against the current session's unfinished task pool.
 - That duplicate precheck is intentionally hybrid:
   - a deterministic exact-match layer for normalized target text and exact keyword fingerprints
   - an inspection-model review for fuzzy duplicates and "this should update an existing task instead" cases
 - The inspection-model review may return `approve_new`, `reject_duplicate`, or `reject_use_append_notice`.
-- `reject_use_append_notice` means the caller should update an existing unfinished task instead of creating a new detached task. The current version only blocks creation and returns that guidance; the append-notice tool itself is still a later addition.
+- `reject_use_append_notice` means the caller should update an existing unfinished task instead of creating a new detached task. The rejection wording and frontdoor parser now point explicitly at `task_append_notice`.
 - Tool-result parsing on the frontdoor side must only treat the explicit success form `创建任务成功task:...` as a verified dispatch. A rejection message may still mention an existing `task:...` id, but that text must not be treated as a newly created task.
+- `task_append_notice` success text must stay in the "updated existing task" lane, for example `已向任务 task:xxx 追加通知。`; it must not look like detached task creation and must not create `verified_task_ids` / `route_kind=task_dispatch`.
 - The old `continue_task` tool and its continuation / retry-in-place semantics are removed.
 - Maintainers should treat any later follow-up on a failed task as ordinary new planning/execution, not as a hidden continuation lane.
+
+Maintenance note for node distribution mode:
+
+- v1 keeps `task_append_notice` CEO-only. Ordinary execution and acceptance nodes do not receive this tool in their builtin set.
+- The runtime does introduce a separate internal control tool for node distribution turns: `submit_message_distribution`.
+- That tool is not part of ordinary execution visibility. It is only used inside task message distribution mode together with compact prompt `main/prompts/node_message_distribution.md`.
+- In distribution mode, the node is temporarily in a control-only lane: inspect the current mailbox message, inspect the current live execution children, and decide which children receive rewritten follow-up messages.
+- Distribution mode must not expose ordinary node tools. If maintainers see `exec`, `spawn_child_nodes`, content tools, or other ordinary executors during a compact distribution turn, treat that as a contract regression.
 
 其中 `content_describe`、`content_open`、`content_search` 是新的 split content navigation builtin tools，但它们并不是三套彼此独立的读取逻辑。维护上应把它们理解成“同一 content navigation 契约的三个入口”：
 

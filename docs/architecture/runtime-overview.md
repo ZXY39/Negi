@@ -152,8 +152,22 @@ Maintenance note for `create_async_task` duplicate precheck:
 - Before creating a new task, the service compares the candidate request against the current session's unfinished task pool.
 - The deterministic rule layer only blocks exact duplicates, using normalized target text and exact keyword fingerprint matching.
 - If the exact-rule layer allows the request and unfinished tasks exist, an inspection-model review may still return `approve_new`, `reject_duplicate`, or `reject_use_append_notice`.
-- `reject_use_append_notice` means the new request is really an update to an existing unfinished task rather than a new detached work item. In the current version this blocks creation and points the caller toward a later append-notice path.
+- `reject_use_append_notice` means the new request is really an update to an existing unfinished task rather than a new detached work item. The rejection now points explicitly at CEO/frontdoor builtin `task_append_notice`.
 - Frontdoor dispatch bookkeeping must therefore distinguish "tool call happened" from "new task was actually created". A rejection message may still mention an old `task:...` id, but that does not count as a fresh dispatch.
+
+Maintenance note for `task_append_notice` and task message distribution:
+
+- `task_append_notice` is a CEO-only task-lifecycle builtin for appending new requirements, constraints, or acceptance expectations to an unfinished task in the current session. It is not a generic task-editing tool and it must not be treated as detached task creation.
+- The runtime now treats appended task messages as a task-level control transaction: it persists a distribution epoch plus durable node mailboxes before ordinary execution sees the new message.
+- The first public step is queue/coalesce in `MainRuntimeService.task_append_notice(...)`. That step validates session/task scope, requests the existing pause barrier, and writes operator-visible `runtime_meta.distribution`.
+- Once the task enters distribution mode, the work still goes through the existing `TaskActorService` / `TaskNodeDispatcher` / `NodeRunner` path. There is no sidecar execution lane for node distribution turns.
+- Distribution turns are compact control turns. They use `node_message_distribution.md` plus internal tool `submit_message_distribution`, not the ordinary execution prompt/tool bundle.
+- Delivery to child execution nodes creates durable mailbox rows. If the target execution node was terminal, delivery reactivates it; if its old acceptance node exists, that acceptance node is invalidated and detached from the current effective spawn-entry chain instead of being deleted.
+- Ordinary execution consumes delivered mailbox rows only at safe boundaries inside `_resume_react_state(...)`: the previous active stage is closed, mailbox rows become user messages in durable node history order, and the rows are then marked `consumed`.
+- Consumed append-notice messages now also persist into node-local `append_notice_context` metadata. This is a second prompt-assembly truth source used specifically to keep notice requirements visible across stage compaction and later compression-stage archival.
+- During ordinary node prompt assembly, raw notices received since the last compression-stage rollover render as a dedicated non-compressible tail block before any `STAGE_COMPACT` / `STAGE_EXTERNALIZED` blocks.
+- When execution-stage archival creates a new compression stage, the runtime rolls the previously uncompressed notice interval into a compressed notice-tail segment and keeps that segment ahead of the archived stage block. Maintainers debugging “notice disappeared after compression” should inspect `append_notice_context`, not only the raw mailbox rows.
+- Force delete wins over message distribution. Before task rows disappear, the runtime cancels active epochs, cancels or purges mailbox rows, clears `runtime_meta.distribution`, and prevents later queue wakeups from resuming the deleted task.
 
 对于异步任务的回传，还要补一个当前维护边界：
 

@@ -19,6 +19,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     STAGE_EXTERNALIZED_PREFIX as _STAGE_EXTERNALIZED_PREFIX,
     completed_stage_blocks as _shared_completed_stage_blocks,
     current_stage_active_window as _shared_current_stage_active_window,
+    decompose_stage_prompt_messages as _shared_decompose_stage_prompt_messages,
     is_stage_context_message as _shared_is_stage_context_message,
     prepare_stage_prompt_messages as _shared_prepare_stage_prompt_messages,
     retained_completed_stage_ids as _shared_retained_completed_stage_ids,
@@ -34,6 +35,7 @@ from main.governance.exec_tool_policy import EXEC_TOOL_EXECUTOR_NAME, EXEC_TOOL_
 from main.errors import TaskPausedError, describe_exception
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_actual_request_diagnostics, build_stable_prompt_cache_key
+from main.runtime.append_notice_context import APPEND_NOTICE_CONTEXT_KEY, build_append_notice_tail_messages
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
@@ -4298,11 +4300,44 @@ class ReActToolLoop:
     def _prepare_messages(self, messages: list[dict[str, Any]], *, runtime_context: dict[str, Any]) -> list[dict[str, Any]]:
         normalized_messages = strip_node_dynamic_contract_messages(messages)
         stage_state = self._execution_stage_state_for_runtime(runtime_context=runtime_context)
-        return _shared_prepare_stage_prompt_messages(
+        parts = _shared_decompose_stage_prompt_messages(
             normalized_messages,
             stage_state=stage_state,
             keep_latest_completed_stages=_UNCOMPACTED_COMPLETED_STAGE_WINDOWS,
             stage_tool_name=STAGE_TOOL_NAME,
+        )
+        visible_user_messages = [
+            str(item.get('content') or '').strip()
+            for item in list(parts.get('active_window') or [])
+            if isinstance(item, dict) and str(item.get('role') or '').strip().lower() == 'user'
+        ]
+        notice_tail_messages = self._append_notice_tail_messages(
+            runtime_context=runtime_context,
+            visible_user_messages=visible_user_messages,
+        )
+        return [
+            *list(parts.get('prefix') or []),
+            *notice_tail_messages,
+            *list(parts.get('completed_blocks') or []),
+            *list(parts.get('active_window') or []),
+        ]
+
+    def _append_notice_tail_messages(
+        self,
+        *,
+        runtime_context: dict[str, Any],
+        visible_user_messages: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        store = getattr(self._log_service, '_store', None)
+        getter = getattr(store, 'get_node', None) if store is not None else None
+        if not callable(getter):
+            return []
+        node = getter(str(runtime_context.get('node_id') or '').strip())
+        if node is None or not isinstance(getattr(node, 'metadata', None), dict):
+            return []
+        return build_append_notice_tail_messages(
+            node.metadata.get(APPEND_NOTICE_CONTEXT_KEY),
+            visible_user_messages=list(visible_user_messages or []),
         )
 
     @staticmethod

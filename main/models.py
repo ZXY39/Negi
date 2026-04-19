@@ -196,6 +196,34 @@ class TaskArtifactRecord(Model):
     created_at: str
 
 
+class TaskMessageDistributionEpoch(Model):
+    epoch_id: str
+    task_id: str
+    root_node_id: str
+    root_message: str
+    state: str
+    created_at: str
+    paused_at: str = ''
+    distributed_at: str = ''
+    completed_at: str = ''
+    error_text: str = ''
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskNodeNotification(Model):
+    notification_id: str
+    task_id: str
+    node_id: str
+    epoch_id: str
+    source_node_id: str = ''
+    message: str = ''
+    status: str
+    created_at: str
+    delivered_at: str = ''
+    consumed_at: str = ''
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class NodeToolFileChange(Model):
     path: str = ''
     change_type: Literal['created', 'modified', 'deleted'] = 'modified'

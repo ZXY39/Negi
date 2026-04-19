@@ -17,6 +17,7 @@ from main.monitoring.execution_trace import build_execution_trace
 from main.token_usage import aggregate_node_token_usage
 from main.monitoring.models import (
     LatestTaskNodeOutput,
+    TaskDistributionState,
     TaskListItem,
     TaskLiveChildPipeline,
     TaskLiveFrame,
@@ -190,6 +191,7 @@ class TaskQueryService:
             'dispatch_limits': {'execution': 0, 'inspection': 0},
             'dispatch_running': {'execution': 0, 'inspection': 0},
             'dispatch_queued': {'execution': 0, 'inspection': 0},
+            'distribution': TaskDistributionState().model_dump(mode='json'),
             'frames': [],
         }
         counts = {
@@ -982,6 +984,7 @@ class TaskQueryService:
         dispatch_limits = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_limits'))
         dispatch_running = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_running'))
         dispatch_queued = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_queued'))
+        distribution = TaskDistributionState.model_validate(runtime_meta.get('distribution') or {})
         if not frames:
             if any(dispatch_limits.values()) or any(dispatch_running.values()) or any(dispatch_queued.values()):
                 return TaskLiveState(
@@ -992,6 +995,18 @@ class TaskQueryService:
                     dispatch_running=dispatch_running,
                     dispatch_queued=dispatch_queued,
                     frames=[],
+                    distribution=distribution,
+                )
+            if distribution.active_epoch_id or distribution.state or distribution.frontier_node_ids or distribution.pending_mailbox_count or distribution.queued_epoch_count:
+                return TaskLiveState(
+                    active_node_ids=[],
+                    runnable_node_ids=[],
+                    waiting_node_ids=[],
+                    dispatch_limits=dispatch_limits,
+                    dispatch_running=dispatch_running,
+                    dispatch_queued=dispatch_queued,
+                    frames=[],
+                    distribution=distribution,
                 )
             return None
         live_frames: list[TaskLiveFrame] = []
@@ -1052,6 +1067,7 @@ class TaskQueryService:
             dispatch_running=dispatch_running,
             dispatch_queued=dispatch_queued,
             frames=live_frames,
+            distribution=distribution,
         )
 
     @staticmethod
@@ -1448,13 +1464,25 @@ class TaskQueryService:
         active_node_ids = [str(item) for item in list(runtime_state.get('active_node_ids') or []) if str(item or '').strip()]
         runnable_node_ids = [str(item) for item in list(runtime_state.get('runnable_node_ids') or []) if str(item or '').strip()]
         waiting_node_ids = [str(item) for item in list(runtime_state.get('waiting_node_ids') or []) if str(item or '').strip()]
-        if not frames and not active_node_ids and not runnable_node_ids and not waiting_node_ids:
+        distribution = TaskDistributionState.model_validate(runtime_state.get('distribution') or {})
+        if (
+            not frames
+            and not active_node_ids
+            and not runnable_node_ids
+            and not waiting_node_ids
+            and not distribution.active_epoch_id
+            and not distribution.state
+            and not distribution.frontier_node_ids
+            and not distribution.pending_mailbox_count
+            and not distribution.queued_epoch_count
+        ):
             return None
         return TaskLiveState(
             active_node_ids=active_node_ids,
             runnable_node_ids=runnable_node_ids,
             waiting_node_ids=waiting_node_ids,
             frames=frames,
+            distribution=distribution,
         )
 
     @staticmethod
@@ -1471,6 +1499,12 @@ class TaskQueryService:
         if live_state is None:
             return []
         lines: list[str] = []
+        distribution = live_state.distribution
+        if distribution.active_epoch_id or distribution.state:
+            lines.append(
+                f'- distribution {distribution.state or "active"} epoch={distribution.active_epoch_id or "(pending)"} '
+                f'frontier={len(list(distribution.frontier_node_ids or []))} pending_mailbox={int(distribution.pending_mailbox_count or 0)}'
+            )
         for frame in list(live_state.frames or []):
             running_tools = sum(1 for item in frame.tool_calls if str(item.status or '').strip().lower() in {'queued', 'running'})
             total_tools = len(list(frame.tool_calls or []))

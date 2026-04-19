@@ -51,6 +51,11 @@ from main.monitoring.models import (
 from main.monitoring.task_event_writer import TaskEventWriter
 from main.monitoring.task_projector import TaskProjector
 from main.protocol import build_envelope, now_iso
+from main.runtime.append_notice_context import (
+    APPEND_NOTICE_CONTEXT_KEY,
+    normalize_append_notice_context,
+    roll_append_notice_context_for_compression_stage,
+)
 from main.runtime.chat_backend import build_actual_request_diagnostics
 from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
 from main.token_usage import aggregate_node_token_usage, build_token_usage_from_attempts, merge_token_usage_by_model, merge_token_usage_records
@@ -531,7 +536,7 @@ class TaskLogService:
                 str(item.get('node_id') or '')
                 for item in frames
                 if (
-                    str(item.get('phase') or '') in {'before_model', 'waiting_tool_results', 'after_model'}
+                    str(item.get('phase') or '') in {'before_model', 'waiting_tool_results', 'after_model', 'message_distribution'}
                     or cls._frame_has_active_tools(item)
                 )
                 and str(item.get('node_id') or '').strip()
@@ -591,6 +596,13 @@ class TaskLogService:
             'summary_fingerprint': '',
             'summary_last_published_at': '',
             'governance': _default_governance_state(),
+            'distribution': {
+                'active_epoch_id': '',
+                'state': '',
+                'frontier_node_ids': [],
+                'queued_epoch_count': 0,
+                'pending_mailbox_count': 0,
+            },
         }
 
     @classmethod
@@ -633,6 +645,33 @@ class TaskLogService:
             'latest_limit_reason': str(current.get('latest_limit_reason') or '').strip(),
             'supervision_disabled_after_limit': bool(current.get('supervision_disabled_after_limit')),
             'history': history_payload,
+        }
+
+    @staticmethod
+    def _sanitize_distribution_state(payload: Any) -> dict[str, Any]:
+        current = dict(payload or {}) if isinstance(payload, dict) else {}
+        frontier_node_ids: list[str] = []
+        seen: set[str] = set()
+        for item in list(current.get('frontier_node_ids') or []):
+            node_id = str(item or '').strip()
+            if not node_id or node_id in seen:
+                continue
+            seen.add(node_id)
+            frontier_node_ids.append(node_id)
+        try:
+            queued_epoch_count = max(0, int(current.get('queued_epoch_count') or 0))
+        except (TypeError, ValueError):
+            queued_epoch_count = 0
+        try:
+            pending_mailbox_count = max(0, int(current.get('pending_mailbox_count') or 0))
+        except (TypeError, ValueError):
+            pending_mailbox_count = 0
+        return {
+            'active_epoch_id': str(current.get('active_epoch_id') or '').strip(),
+            'state': str(current.get('state') or '').strip(),
+            'frontier_node_ids': frontier_node_ids,
+            'queued_epoch_count': queued_epoch_count,
+            'pending_mailbox_count': pending_mailbox_count,
         }
 
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
@@ -1933,7 +1972,11 @@ class TaskLogService:
             node_id,
             lambda current: current.model_copy(
                 update={
-                    'metadata': {**dict(current.metadata or {}), _EXECUTION_STAGE_METADATA_KEY: payload},
+                    'metadata': self._execution_stage_metadata_with_notice_context(
+                        metadata=dict(current.metadata or {}),
+                        state=state,
+                        payload=payload,
+                    ),
                     'updated_at': now_iso(),
                 }
             ),
@@ -1942,6 +1985,38 @@ class TaskLogService:
             self._sync_node_read_models_locked(updated)
             self._publish_task_node_patch_locked(task=task, node=updated)
         return updated
+
+    @staticmethod
+    def _execution_stage_metadata_with_notice_context(
+        *,
+        metadata: dict[str, Any],
+        state: ExecutionStageState,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        next_metadata = {**dict(metadata or {}), _EXECUTION_STAGE_METADATA_KEY: payload}
+        notice_context = normalize_append_notice_context(next_metadata.get(APPEND_NOTICE_CONTEXT_KEY))
+        known_segment_ids = {
+            str(item.get('compression_stage_id') or '').strip()
+            for item in list(notice_context.get('compression_segments') or [])
+            if str(item.get('compression_stage_id') or '').strip()
+        }
+        for stage in list(state.stages or []):
+            if str(stage.stage_kind or '') != _EXECUTION_STAGE_KIND_COMPRESSION:
+                continue
+            stage_id = str(stage.stage_id or '').strip()
+            if not stage_id or stage_id in known_segment_ids:
+                continue
+            notice_context = roll_append_notice_context_for_compression_stage(
+                notice_context,
+                compression_stage_id=stage_id,
+                created_at=str(stage.finished_at or stage.created_at or now_iso()),
+            )
+            known_segment_ids.add(stage_id)
+        if list(notice_context.get('notice_records') or []) or list(notice_context.get('compression_segments') or []):
+            next_metadata[APPEND_NOTICE_CONTEXT_KEY] = notice_context
+        else:
+            next_metadata.pop(APPEND_NOTICE_CONTEXT_KEY, None)
+        return next_metadata
 
     def _sync_execution_stage_frame_locked(self, *, task_id: str, node_id: str, state: ExecutionStageState) -> None:
         payload = self._execution_stage_frame_payload(state)
@@ -2205,6 +2280,82 @@ class TaskLogService:
                     self._publish_task_node_patch_locked(task=task, node=updated)
             return updated
 
+    def invalidate_acceptance_node(self, task_id: str, node_id: str, *, epoch_id: str, reason: str) -> NodeRecord | None:
+        with self._task_lock(task_id):
+            task = self._store.get_task(task_id)
+            acceptance = self._store.get_node(node_id)
+            if task is None or acceptance is None or str(acceptance.task_id or '').strip() != str(task_id or '').strip():
+                return None
+            if str(acceptance.node_kind or '').strip().lower() != 'acceptance':
+                return None
+
+            invalidated_at = now_iso()
+
+            def _mutate_acceptance(record: NodeRecord) -> NodeRecord:
+                metadata = dict(record.metadata or {})
+                metadata['invalidated'] = True
+                metadata['invalidated_by_epoch_id'] = str(epoch_id or '').strip()
+                metadata['invalidated_reason'] = str(reason or '').strip()
+                metadata['invalidated_at'] = invalidated_at
+                return record.model_copy(
+                    update={
+                        'status': 'in_progress',
+                        'updated_at': invalidated_at,
+                        'final_output': '',
+                        'final_output_ref': '',
+                        'failure_reason': '',
+                        'check_result': '',
+                        'check_result_ref': '',
+                        'metadata': metadata,
+                    }
+                )
+
+            updated_acceptance = self._store.update_node(node_id, _mutate_acceptance)
+            if updated_acceptance is None:
+                return None
+
+            metadata = dict(updated_acceptance.metadata or {})
+            owner_parent_node_id = str(metadata.get('spawn_owner_parent_node_id') or '').strip()
+            owner_round_id = str(metadata.get('spawn_owner_round_id') or '').strip()
+            owner_entry_index = int(metadata.get('spawn_owner_entry_index') or 0)
+            if owner_parent_node_id and owner_round_id:
+                parent = self._store.get_node(owner_parent_node_id)
+                if parent is not None and str(parent.task_id or '').strip() == str(task_id or '').strip():
+                    def _mutate_parent(parent_metadata: dict[str, Any]) -> dict[str, Any]:
+                        operations = dict(parent_metadata.get('spawn_operations') or {})
+                        payload = dict(operations.get(owner_round_id) or {})
+                        entries = list(payload.get('entries') or [])
+                        if 0 <= owner_entry_index < len(entries) and isinstance(entries[owner_entry_index], dict):
+                            entry = dict(entries[owner_entry_index] or {})
+                            if str(entry.get('acceptance_node_id') or '').strip() == str(node_id or '').strip():
+                                entry['check_status'] = 'pending'
+                                entries[owner_entry_index] = entry
+                                payload['entries'] = entries
+                                operations[owner_round_id] = payload
+                                parent_metadata['spawn_operations'] = operations
+                        return parent_metadata
+
+                    self.update_node_metadata(owner_parent_node_id, _mutate_parent)
+
+            accepted_node_id = str(metadata.get('accepted_node_id') or updated_acceptance.parent_node_id or '').strip()
+            if accepted_node_id:
+                cleared_child = self._store.update_node(
+                    accepted_node_id,
+                    lambda record: record.model_copy(
+                        update={
+                            'updated_at': invalidated_at,
+                            'check_result': '',
+                            'check_result_ref': '',
+                        }
+                    ),
+                )
+                if cleared_child is not None:
+                    self._sync_node_read_models_locked(cleared_child)
+
+            self._sync_node_read_models_locked(updated_acceptance)
+            self.refresh_task_view(task_id, mark_unread=True)
+            return updated_acceptance
+
     def ensure_node_output_externalized(self, task_id: str, node_id: str) -> NodeRecord | None:
         with self._task_lock(task_id):
             record = self._store.get_node(node_id)
@@ -2332,6 +2483,8 @@ class TaskLogService:
                 current['dispatch_queued'] = self._sanitize_dispatch_counters(payload.get('dispatch_queued'))
             if 'governance' in payload:
                 current['governance'] = self._sanitize_governance_state(payload.get('governance'))
+            if 'distribution' in payload:
+                current['distribution'] = self._sanitize_distribution_state(payload.get('distribution'))
             current['updated_at'] = now_iso()
             self._store.upsert_task_runtime_meta(
                 task_id=task.task_id,
@@ -2449,6 +2602,7 @@ class TaskLogService:
         current.setdefault('summary_fingerprint', '')
         current.setdefault('summary_last_published_at', '')
         current['governance'] = self._sanitize_governance_state(current.get('governance'))
+        current['distribution'] = self._sanitize_distribution_state(current.get('distribution'))
         current['task_temp_dir'] = self._normalize_task_temp_dir(current.get('task_temp_dir'))
         try:
             current['last_stall_notice_bucket_minutes'] = max(0, int(current.get('last_stall_notice_bucket_minutes') or 0))
@@ -2527,6 +2681,7 @@ class TaskLogService:
             'last_visible_output_at': str(meta.get('last_visible_output_at') or '').strip(),
             'last_stall_notice_bucket_minutes': max(0, int(meta.get('last_stall_notice_bucket_minutes') or 0)),
             'governance': self._sanitize_governance_state(meta.get('governance')),
+            'distribution': self._sanitize_distribution_state(meta.get('distribution')),
             'frames': frames,
             'active_node_ids': [record.node_id for record in frame_records if bool(record.active)],
             'runnable_node_ids': [record.node_id for record in frame_records if bool(record.runnable)],
@@ -3332,7 +3487,7 @@ class TaskLogService:
             **payload,
         }
         runnable = bool(
-            str(next_frame.get('phase') or '') in {'before_model', 'waiting_tool_results', 'after_model'}
+            str(next_frame.get('phase') or '') in {'before_model', 'waiting_tool_results', 'after_model', 'message_distribution'}
             or self._frame_has_active_tools(next_frame)
         )
         waiting = bool(
@@ -4069,6 +4224,7 @@ class TaskLogService:
                 'dispatch_running': dict(runtime_meta.get('dispatch_running') or {}),
                 'dispatch_queued': dict(runtime_meta.get('dispatch_queued') or {}),
                 'governance': dict(runtime_meta.get('governance') or {}),
+                'distribution': dict(runtime_meta.get('distribution') or {}),
                 'frames': [dict(record.payload or {}) for record in frame_records],
             }
         return {
@@ -4079,6 +4235,7 @@ class TaskLogService:
             'dispatch_running': self._sanitize_dispatch_counters(state.get('dispatch_running')),
             'dispatch_queued': self._sanitize_dispatch_counters(state.get('dispatch_queued')),
             'governance': self._sanitize_governance_state(state.get('governance')),
+            'distribution': self._sanitize_distribution_state(state.get('distribution')),
             'frames': [self._public_runtime_frame(item) for item in list(state.get('frames') or []) if isinstance(item, dict)],
         }
 
@@ -4094,6 +4251,7 @@ class TaskLogService:
         state['dispatch_running'] = cls._sanitize_dispatch_counters(state.get('dispatch_running'))
         state['dispatch_queued'] = cls._sanitize_dispatch_counters(state.get('dispatch_queued'))
         state['governance'] = cls._sanitize_governance_state(state.get('governance'))
+        state['distribution'] = cls._sanitize_distribution_state(state.get('distribution'))
         state['frames'] = [cls._sanitize_runtime_frame(frame) for frame in list(state.get('frames') or []) if isinstance(frame, dict)]
         return state
 

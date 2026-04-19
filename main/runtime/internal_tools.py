@@ -293,6 +293,60 @@ class SpawnChildNodesTool(Tool):
         )
 
 
+class SubmitMessageDistributionTool(Tool):
+    def __init__(
+        self,
+        submit_callback: Callable[[dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]],
+    ) -> None:
+        self._submit_callback = submit_callback
+
+    @property
+    def name(self) -> str:
+        return 'submit_message_distribution'
+
+    @property
+    def description(self) -> str:
+        return 'Submit per-child message delivery decisions for the current distribution turn.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'children': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'target_node_id': {'type': 'string'},
+                            'message': {'type': 'string'},
+                            'reason': {'type': 'string'},
+                        },
+                        'required': ['target_node_id', 'message'],
+                    },
+                },
+                'notes': {'type': 'string'},
+            },
+            'required': ['children'],
+        }
+
+    async def execute(
+        self,
+        children: list[dict[str, Any]],
+        notes: str = '',
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        _ = kwargs
+        payload = {
+            'children': [dict(item) for item in list(children or []) if isinstance(item, dict)],
+            'notes': str(notes or '').strip(),
+        }
+        result = self._submit_callback(payload)
+        if isinstance(result, Awaitable):
+            return await result
+        return dict(result or {}) if isinstance(result, dict) else payload
+
+
 class SubmitFinalResultTool(Tool):
     def __init__(
         self,

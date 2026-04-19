@@ -13,7 +13,13 @@ from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel
 
-from main.models import NodeRecord, TaskArtifactRecord, TaskRecord
+from main.models import (
+    NodeRecord,
+    TaskArtifactRecord,
+    TaskMessageDistributionEpoch,
+    TaskNodeNotification,
+    TaskRecord,
+)
 from main.monitoring.models import (
     TaskProjectionMetaRecord,
     TaskProjectionNodeDetailRecord,
@@ -162,6 +168,27 @@ class SQLiteTaskStore:
                 error_text TEXT NOT NULL DEFAULT '',
                 payload_json TEXT NOT NULL,
                 result_json TEXT NOT NULL DEFAULT ''
+            )
+            ''',
+            '''
+            CREATE TABLE IF NOT EXISTS task_message_distribution_epochs (
+                epoch_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY (task_id, epoch_id)
+            )
+            ''',
+            '''
+            CREATE TABLE IF NOT EXISTS task_node_notifications (
+                notification_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                epoch_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL
             )
             ''',
             '''
@@ -604,6 +631,8 @@ class SQLiteTaskStore:
             conn.execute('DELETE FROM task_terminal_outbox WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_stall_outbox WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_summary_outbox WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_node_notifications WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_message_distribution_epochs WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_events WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM artifacts WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM nodes WHERE task_id = ?', (task_id,))
@@ -942,6 +971,119 @@ class SQLiteTaskStore:
                 command_id,
             ),
         )
+
+    def upsert_task_message_distribution_epoch(
+        self,
+        payload: TaskMessageDistributionEpoch | dict[str, Any],
+    ) -> TaskMessageDistributionEpoch:
+        record = payload if isinstance(payload, TaskMessageDistributionEpoch) else TaskMessageDistributionEpoch.model_validate(payload)
+        payload_json = record.model_dump_json()
+
+        def operation(conn: sqlite3.Connection) -> TaskMessageDistributionEpoch:
+            conn.execute(
+                'INSERT INTO task_message_distribution_epochs (epoch_id, task_id, state, created_at, payload_json) '
+                'VALUES (?, ?, ?, ?, ?) '
+                'ON CONFLICT(task_id, epoch_id) DO UPDATE SET '
+                'state = excluded.state, '
+                'created_at = excluded.created_at, '
+                'payload_json = excluded.payload_json',
+                (
+                    record.epoch_id,
+                    record.task_id,
+                    record.state,
+                    record.created_at,
+                    payload_json,
+                ),
+            )
+            row = conn.execute(
+                'SELECT payload_json FROM task_message_distribution_epochs WHERE task_id = ? AND epoch_id = ?',
+                (record.task_id, record.epoch_id),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError('task_message_distribution_epoch_persist_failed')
+            return self._parse(row['payload_json'], TaskMessageDistributionEpoch)
+
+        return self._run_write(operation)
+
+    def get_task_message_distribution_epoch(
+        self,
+        task_id: str,
+        epoch_id: str,
+    ) -> TaskMessageDistributionEpoch | None:
+        row = self._fetchone(
+            'SELECT payload_json FROM task_message_distribution_epochs WHERE task_id = ? AND epoch_id = ?',
+            (str(task_id or '').strip(), str(epoch_id or '').strip()),
+        )
+        return self._parse(row['payload_json'], TaskMessageDistributionEpoch) if row else None
+
+    def list_active_task_message_distribution_epochs(self, task_id: str) -> list[TaskMessageDistributionEpoch]:
+        rows = self._fetchall(
+            'SELECT payload_json FROM task_message_distribution_epochs '
+            'WHERE task_id = ? '
+            'ORDER BY created_at ASC, epoch_id ASC',
+            (str(task_id or '').strip(),),
+        )
+        return [self._parse(row['payload_json'], TaskMessageDistributionEpoch) for row in rows]
+
+    def upsert_task_node_notification(
+        self,
+        payload: TaskNodeNotification | dict[str, Any],
+    ) -> TaskNodeNotification:
+        record = payload if isinstance(payload, TaskNodeNotification) else TaskNodeNotification.model_validate(payload)
+        payload_json = record.model_dump_json()
+
+        def operation(conn: sqlite3.Connection) -> TaskNodeNotification:
+            conn.execute(
+                'INSERT INTO task_node_notifications (notification_id, task_id, node_id, epoch_id, status, created_at, payload_json) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?) '
+                'ON CONFLICT(notification_id) DO UPDATE SET '
+                'task_id = excluded.task_id, '
+                'node_id = excluded.node_id, '
+                'epoch_id = excluded.epoch_id, '
+                'status = excluded.status, '
+                'created_at = excluded.created_at, '
+                'payload_json = excluded.payload_json',
+                (
+                    record.notification_id,
+                    record.task_id,
+                    record.node_id,
+                    record.epoch_id,
+                    record.status,
+                    record.created_at,
+                    payload_json,
+                ),
+            )
+            row = conn.execute(
+                'SELECT payload_json FROM task_node_notifications WHERE notification_id = ?',
+                (record.notification_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError('task_node_notification_persist_failed')
+            return self._parse(row['payload_json'], TaskNodeNotification)
+
+        return self._run_write(operation)
+
+    def list_task_node_notifications(
+        self,
+        task_id: str,
+        node_id: str,
+    ) -> list[TaskNodeNotification]:
+        rows = self._fetchall(
+            'SELECT payload_json FROM task_node_notifications WHERE task_id = ? AND node_id = ? ORDER BY created_at ASC, notification_id ASC',
+            (str(task_id or '').strip(), str(node_id or '').strip()),
+        )
+        return [self._parse(row['payload_json'], TaskNodeNotification) for row in rows]
+
+    def list_task_epoch_notifications(
+        self,
+        task_id: str,
+        epoch_id: str,
+    ) -> list[TaskNodeNotification]:
+        rows = self._fetchall(
+            'SELECT payload_json FROM task_node_notifications WHERE task_id = ? AND epoch_id = ? ORDER BY created_at ASC, notification_id ASC',
+            (str(task_id or '').strip(), str(epoch_id or '').strip()),
+        )
+        return [self._parse(row['payload_json'], TaskNodeNotification) for row in rows]
 
     @staticmethod
     def _parse_iso_datetime(value: Any) -> datetime | None:
