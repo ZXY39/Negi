@@ -396,6 +396,35 @@ heartbeat 使用的是专门的内部 prompt lane，它的稳定前缀和 reques
 
 如果看到这种现象，先按“estimator 低估导致压缩阈值永远打不到”排查，不要先怀疑 `trigger_tokens` 配置失效。
 
+## 4.6 节点 / distribution token preflight 排查要点
+
+当前 execution / acceptance 节点在真正发 provider 请求前也会走最后一层 node send token preflight，同样包括 `message_distribution` 控制轮。
+
+但有两个边界必须分清：
+
+- `message_distribution` 包含在 node send preflight 里
+- `spawn review` 是外部检验通道，故意不在 node preflight 合同里，不要把它的 prompt / request 行为和节点正常运行路径混为一谈
+
+排查时先看节点 runtime frame 或 actual-request artifact 里的：
+
+- `token_preflight_diagnostics`
+- `history_shrink_reason`
+- `prompt_cache_key_hash`
+- `actual_request_hash`
+- `actual_request_message_count`
+
+如果 `token_preflight_diagnostics.applied=true`：
+
+- 预期 `history_shrink_reason` 为 `token_compression`
+- 如果 actual request 看起来明显变短，但 `prompt_cache_key_hash` 没变，这是正常的“live request 被压缩但 caller-side family 未换”行为，不要误判成 family churn
+- 节点启动后的 restart / resume 第一跳新请求可以复用“已经过 token compression 的 actual request scaffold”；这也不是 context loss，而是合法的延续路径
+
+如果 preflight 在节点端还没有发送模型前就失败：
+
+- 先看是否是 `context_window_tokens <= 25000` 这种硬错误配置
+- 再看是否是 preview builder / provider payload 估算出错
+- 这类“没有模型请求”的卡顿，优先查 preflight 合同和配置解析，而不是先怀疑 tool loop 或 queue scheduler
+
 ## 5. 修改节点上下文策略时必须重点验证的地方
 
 下面这些检查点不只适用于 CEO/frontdoor，后续改 node context strategy 时也必须逐条过。

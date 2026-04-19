@@ -12,6 +12,37 @@ from main.service.runtime_service import MainRuntimeService
 from main.storage.sqlite_store import SQLiteTaskStore
 
 
+@pytest.fixture(autouse=True)
+def _default_node_send_preflight_context_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    import main.runtime.react_loop as react_loop_module
+    from main.runtime.chat_backend import SendModelContextWindowInfo
+
+    def _resolve(**kwargs) -> SendModelContextWindowInfo:
+        refs = list(kwargs.get("model_refs") or [])
+        model_key = str(refs[0] or "").strip() if refs else ""
+        return SendModelContextWindowInfo(
+            model_key=model_key,
+            provider_id="test",
+            provider_model=f"test:{model_key}" if model_key else "test",
+            resolved_model=model_key,
+            context_window_tokens=32000,
+            resolution_error="",
+        )
+
+    monkeypatch.setattr(
+        react_loop_module,
+        "get_runtime_config",
+        lambda **_: (SimpleNamespace(), 0, False),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        react_loop_module.runtime_chat_backend,
+        "resolve_send_model_context_window_info",
+        _resolve,
+        raising=False,
+    )
+
+
 def test_task_message_distribution_storage_round_trip(tmp_path: Path) -> None:
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     try:
@@ -957,6 +988,70 @@ async def test_distribution_leaf_node_does_not_spawn_further_distribution_turns(
         assert distribution["frontier_node_ids"] == []
         assert refreshed_epoch is not None
         assert refreshed_epoch.payload.get("distributed_node_ids") == [record.root_node_id]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_turn_runs_node_send_preflight(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_message_distribution",
+                        "arguments": {
+                            "children": [],
+                            "notes": "leaf node has no current live execution children",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="新增董事会验收格式",
+            frontier_node_ids=[record.root_node_id],
+        )
+
+        observed: dict[str, object] = {}
+
+        def _fake_preflight(**kwargs):
+            observed.update(dict(kwargs))
+            return (
+                [
+                    *list(kwargs.get("request_messages") or []),
+                    {"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2]\n{\"kind\":\"distribution-test\"}"},
+                ],
+                {"applied": True, "mode": "marker"},
+                "token_compression",
+                "",
+            )
+
+        monkeypatch.setattr(
+            service._react_loop,
+            "run_node_send_preflight_for_control_turn",
+            _fake_preflight,
+        )
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        assert observed["task_id"] == record.task_id
+        assert observed["node_id"] == record.root_node_id
+        assert observed["tool_choice"] == {
+            "type": "function",
+            "name": "submit_message_distribution",
+        }
+        assert observed["parallel_tool_calls"] is False
+        assert len(backend.calls) == 1
+        rendered = "\n".join(str(item.get("content") or "") for item in list(backend.calls[0].get("messages") or []))
+        assert "[G3KU_TOKEN_COMPACT_V2]" in rendered
     finally:
         await service.close()
 

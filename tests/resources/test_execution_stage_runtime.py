@@ -28,6 +28,37 @@ from main.service.runtime_service import MainRuntimeService
 runtime_service_module = importlib.import_module("main.service.runtime_service")
 
 
+@pytest.fixture(autouse=True)
+def _default_node_send_preflight_context_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    import main.runtime.react_loop as react_loop_module
+    from main.runtime.chat_backend import SendModelContextWindowInfo
+
+    def _resolve(**kwargs) -> SendModelContextWindowInfo:
+        refs = list(kwargs.get("model_refs") or [])
+        model_key = str(refs[0] or "").strip() if refs else ""
+        return SendModelContextWindowInfo(
+            model_key=model_key,
+            provider_id="test",
+            provider_model=f"test:{model_key}" if model_key else "test",
+            resolved_model=model_key,
+            context_window_tokens=32000,
+            resolution_error="",
+        )
+
+    monkeypatch.setattr(
+        react_loop_module,
+        "get_runtime_config",
+        lambda **_: (SimpleNamespace(), 0, False),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        react_loop_module.runtime_chat_backend,
+        "resolve_send_model_context_window_info",
+        _resolve,
+        raising=False,
+    )
+
+
 class _DummyChatBackend:
     async def chat(self, **kwargs):
         raise AssertionError(f"chat backend should not be called in this test: {kwargs!r}")

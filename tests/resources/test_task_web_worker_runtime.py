@@ -41,6 +41,37 @@ from main.service.task_terminal_callback import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _default_node_send_preflight_context_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    import main.runtime.react_loop as react_loop_module
+    from main.runtime.chat_backend import SendModelContextWindowInfo
+
+    def _resolve(**kwargs) -> SendModelContextWindowInfo:
+        refs = list(kwargs.get("model_refs") or [])
+        model_key = str(refs[0] or "").strip() if refs else ""
+        return SendModelContextWindowInfo(
+            model_key=model_key,
+            provider_id="test",
+            provider_model=f"test:{model_key}" if model_key else "test",
+            resolved_model=model_key,
+            context_window_tokens=32000,
+            resolution_error="",
+        )
+
+    monkeypatch.setattr(
+        react_loop_module,
+        "get_runtime_config",
+        lambda **_: (SimpleNamespace(), 0, False),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        react_loop_module.runtime_chat_backend,
+        "resolve_send_model_context_window_info",
+        _resolve,
+        raising=False,
+    )
+
+
 class _DummyChatBackend:
     async def chat(self, **kwargs):
         raise AssertionError(f"chat backend should not be called in this test: {kwargs!r}")
@@ -7635,7 +7666,12 @@ async def test_spawn_review_request_uses_root_to_parent_path_tree_and_stage_goal
         )
 
         assert backend.calls
-        call = backend.calls[-1]
+        call = next(
+            candidate
+            for candidate in backend.calls
+            if len(list(candidate.get("messages") or [])) >= 2
+            and '"parent_node_id"' in str((candidate.get("messages") or [None, {}])[1].get("content") or "")
+        )
         payload = json.loads(str(call["messages"][1]["content"]))
         assert payload["parent_node_id"] == parent.node_id
         assert payload["spawn_request"]["requested_specs"][0]["goal"] == "new child"
@@ -7644,6 +7680,67 @@ async def test_spawn_review_request_uses_root_to_parent_path_tree_and_stage_goal
         assert root.node_id in payload["path_tree_text"]
         assert parent.node_id in payload["path_tree_text"]
         assert existing_child.node_id not in payload["path_tree_text"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_review_does_not_use_node_send_preflight(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    backend = _SpawnReviewToolCallChatBackend(
+        arguments={"allowed_indexes": [0], "blocked_specs": []}
+    )
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task("spawn review preflight boundary", session_id="web:shared")
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            node = service.get_node(node_id)
+            assert node is not None
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary=f"{node.goal} done",
+                    answer=f"{node.goal} done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+        monkeypatch.setattr(
+            service._react_loop,
+            "run_node_send_preflight_for_control_turn",
+            lambda **kwargs: (_ for _ in ()).throw(
+                AssertionError(f"spawn review must not use node send preflight: {kwargs!r}")
+            ),
+        )
+
+        results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[SpawnChildSpec(goal="allowed child", prompt="allowed prompt", execution_policy=_execution_policy())],
+            call_id="spawn-review-preflight-boundary",
+        )
+
+        assert len(results) == 1
+        assert results[0].node_output == "allowed child done"
+        assert len(backend.calls) == 1
+        assert backend.calls[0].get("tool_choice") is None
     finally:
         await service.close()
 

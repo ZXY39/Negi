@@ -739,12 +739,58 @@ class NodeRunner:
             },
         ]
         decision_tool = SubmitMessageDistributionTool(lambda payload: payload)
+        distribution_tools = self._distribution_provider_tools(decision_tool)
+        tool_choice = {
+            'type': 'function',
+            'name': decision_tool.name,
+        }
+        model_refs = self._model_refs_for(node)
+        (
+            prompt_messages,
+            token_preflight_diagnostics,
+            history_shrink_reason,
+            preflight_failure_reason,
+        ) = self._react_loop.run_node_send_preflight_for_control_turn(
+            task_id=str(task.task_id),
+            node_id=str(node.node_id),
+            model_refs=list(model_refs or []),
+            request_messages=prompt_messages,
+            tool_schemas=distribution_tools,
+            prompt_cache_key='',
+            tool_choice=tool_choice,
+            parallel_tool_calls=False,
+        )
+        self._log_service.update_frame(
+            task.task_id,
+            node.node_id,
+            lambda frame: {
+                **dict(frame or {}),
+                'node_id': node.node_id,
+                'depth': int(node.depth or 0),
+                'node_kind': node.node_kind,
+                'phase': 'message_distribution',
+                'token_preflight_diagnostics': dict(token_preflight_diagnostics or {}),
+                'history_shrink_reason': str(history_shrink_reason or '').strip(),
+                'last_error': str(preflight_failure_reason or '').strip(),
+            },
+            publish_snapshot=True,
+        )
+        if str(preflight_failure_reason or '').strip():
+            return NodeFinalResult(
+                status='failed',
+                delivery_status='blocked',
+                summary='node send token preflight failed',
+                answer='',
+                evidence=[],
+                remaining_work=[],
+                blocking_reason=str(preflight_failure_reason or '').strip(),
+            )
         response = await self._react_loop._chat_with_optional_extensions(
             messages=prompt_messages,
-            tools=self._distribution_provider_tools(decision_tool),
-            model_refs=self._model_refs_for(node),
+            tools=distribution_tools,
+            model_refs=model_refs,
             # Responses-style gateways expect the flat function selector shape here.
-            tool_choice={'type': 'function', 'name': decision_tool.name},
+            tool_choice=tool_choice,
             parallel_tool_calls=False,
         )
         arguments = self._distribution_response_arguments(response)
@@ -779,6 +825,8 @@ class NodeRunner:
                 'depth': int(node.depth or 0),
                 'node_kind': node.node_kind,
                 'phase': 'message_distribution',
+                'token_preflight_diagnostics': dict(token_preflight_diagnostics or {}),
+                'history_shrink_reason': str(history_shrink_reason or '').strip(),
             },
             publish_snapshot=True,
         )
@@ -1323,6 +1371,9 @@ class NodeRunner:
                 if invalid_response_count > 0
                 else list(messages)
             )
+            # Spawn review is an external inspection lane. It intentionally does not reuse
+            # node send token preflight, which only applies to execution/acceptance sends
+            # plus message_distribution control turns.
             try:
                 response = await backend.chat(
                     messages=request_messages,

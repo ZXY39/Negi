@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from g3ku.config.schema import Config
@@ -28,6 +29,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     STAGE_EXTERNALIZED_PREFIX as _STAGE_EXTERNALIZED_PREFIX,
 )
 from g3ku.utils.api_keys import iter_api_key_retry_slots
+from main.runtime.send_token_preflight import estimate_runtime_provider_request_preview_tokens
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
 from main.runtime.node_turn_controller import NodeTurnLease
 _MODEL_CHAIN_HARD_TIMEOUT_SAFETY_SECONDS = 15.0
@@ -50,6 +52,155 @@ class ChatBackend(Protocol):
         node_turn_lease: NodeTurnLease | None = None,
         model_concurrency_controller: ModelKeyConcurrencyController | None = None,
     ) -> LLMResponse: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SendModelContextWindowInfo:
+    model_key: str
+    provider_id: str
+    provider_model: str
+    resolved_model: str
+    context_window_tokens: int
+    resolution_error: str = ""
+
+
+def resolve_send_model_context_window_info(
+    *,
+    config: Config,
+    model_refs: list[str] | None,
+) -> SendModelContextWindowInfo:
+    refs = [
+        str(item or "").strip()
+        for item in list(model_refs or [])
+        if str(item or "").strip()
+    ]
+    model_key = refs[0] if refs else ""
+    if not model_key:
+        return SendModelContextWindowInfo(
+            model_key="",
+            provider_id="",
+            provider_model="",
+            resolved_model="",
+            context_window_tokens=0,
+            resolution_error="model_refs_empty",
+        )
+    try:
+        target = build_provider_from_model_key(config, model_key)
+    except Exception as exc:
+        return SendModelContextWindowInfo(
+            model_key=model_key,
+            provider_id="",
+            provider_model="",
+            resolved_model="",
+            context_window_tokens=0,
+            resolution_error=str(exc or exc.__class__.__name__).strip() or exc.__class__.__name__,
+        )
+    raw = dict(getattr(target, "model_parameters", {}) or {}).get("context_window_tokens")
+    try:
+        context_window_tokens = int(raw or 0)
+    except (TypeError, ValueError):
+        context_window_tokens = 0
+    provider_id = str(getattr(target, "provider_id", "") or "").strip()
+    resolved_model = str(getattr(target, "model_id", "") or "").strip()
+    provider_model = f"{provider_id}:{resolved_model}" if provider_id and resolved_model else model_key
+    resolution_error = "" if context_window_tokens > 0 else "context_window_tokens_missing"
+    return SendModelContextWindowInfo(
+        model_key=model_key,
+        provider_id=provider_id,
+        provider_model=provider_model,
+        resolved_model=resolved_model,
+        context_window_tokens=max(0, int(context_window_tokens or 0)),
+        resolution_error=resolution_error,
+    )
+
+
+def resolve_send_model_context_window_tokens(
+    *,
+    config: Config,
+    model_refs: list[str] | None,
+) -> int:
+    """
+    Runtime-authoritative context-window resolver for node/runtime sends.
+
+    This deliberately goes through the managed config path (`resolve_chat_target` via
+    `build_provider_from_model_key`) rather than role defaults or hard-coded heuristics.
+    """
+
+    info = resolve_send_model_context_window_info(config=config, model_refs=model_refs)
+    return int(info.context_window_tokens or 0)
+
+
+def build_send_provider_request_preview(
+    *,
+    config: Config,
+    messages: list[dict],
+    tools: list[dict] | None,
+    model_refs: list[str],
+    tool_choice: str | dict[str, Any] | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    reasoning_effort: str | None = None,
+    parallel_tool_calls: bool | None = None,
+    prompt_cache_key: str | None = None,
+) -> dict[str, Any]:
+    """
+    Shared provider-request preview surface for node/runtime sends.
+
+    This mirrors the arguments that eventually reach the provider `chat(...)` method, but it is
+    side-effect free and suitable for token estimation / preflight decisions.
+    """
+
+    refs = [str(item or "").strip() for item in list(model_refs or []) if str(item or "").strip()]
+    if not refs:
+        raise ValueError("model_refs must not be empty")
+    target = build_provider_from_model_key(config, refs[0])
+    request_messages = sanitize_provider_messages(messages)
+    normalized_tools = normalize_openai_tool_definitions(tools)
+    stable_prompt_cache_key = str(
+        prompt_cache_key
+        or build_stable_prompt_cache_key(
+            request_messages,
+            normalized_tools,
+            str(getattr(target, "model_id", "") or ""),
+        )
+    ).strip()
+    return {
+        "messages": request_messages,
+        "tools": normalized_tools or None,
+        "model": str(getattr(target, "model_id", "") or ""),
+        "tool_choice": tool_choice if tool_choice is not None else "auto",
+        "parallel_tool_calls": parallel_tool_calls,
+        "prompt_cache_key": stable_prompt_cache_key or None,
+        **_resolve_model_request_parameters(
+            target,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+        ),
+    }
+
+
+def estimate_send_provider_request_preview_tokens(*, preview_payload: dict[str, Any] | None) -> int:
+    """
+    Token-estimation helper for send-side request previews.
+    """
+
+    payload = dict(preview_payload or {})
+    if not payload:
+        return 0
+    return estimate_runtime_provider_request_preview_tokens(
+        provider_request_body=payload,
+        request_messages=[
+            dict(item)
+            for item in list(payload.get("messages") or [])
+            if isinstance(item, dict)
+        ],
+        tool_schemas=[
+            dict(item)
+            for item in list(payload.get("tools") or [])
+            if isinstance(item, dict)
+        ],
+    )
 
 
 def _json_compact(value) -> str:
@@ -481,10 +632,23 @@ class ConfigChatBackend:
                         raise RuntimeError(f"All configured API keys are disabled for model {ref}")
                     retry_count = normalized_retry_count(getattr(base_target, "retry_count", 0))
                     move_to_next_model = False
-                    stable_prompt_cache_key = str(prompt_cache_key or build_stable_prompt_cache_key(messages, tools, base_target.model_id))
+                    preview_payload = build_send_provider_request_preview(
+                        config=self._config,
+                        messages=messages,
+                        tools=tools,
+                        model_refs=[ref],
+                        tool_choice=tool_choice,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        reasoning_effort=reasoning_effort,
+                        parallel_tool_calls=parallel_tool_calls,
+                        prompt_cache_key=prompt_cache_key,
+                    )
+                    request_messages = sanitize_provider_messages(preview_payload.get("messages"))
+                    request_tools = list(preview_payload.get("tools") or []) or None
+                    stable_prompt_cache_key = str(preview_payload.get("prompt_cache_key") or "").strip()
                     for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count, key_indexes=api_key_indexes):
                         target = base_target
-                        request_messages = sanitize_provider_messages(messages)
                         request_message_count, request_message_chars = _message_stats(request_messages)
                         permit_lease: ModelKeyPermitLease | None = None
                         use_held_turn_permit = bool(
@@ -511,21 +675,11 @@ class ConfigChatBackend:
                                     key_index=selected_api_key_index,
                                 )
                             provider_kwargs = {
-                                **{
-                                    'messages': request_messages,
-                                    'tools': tools,
-                                    'model': target.model_id,
-                                    'tool_choice': tool_choice if tool_choice is not None else 'auto',
-                                    'parallel_tool_calls': parallel_tool_calls,
-                                    'prompt_cache_key': stable_prompt_cache_key,
-                                    'request_timeout_seconds': None if bool(getattr(target.provider, 'manages_request_timeout_internally', False)) else attempt_timeout_seconds,
-                                },
-                                **_resolve_model_request_parameters(
-                                    target,
-                                    max_tokens=max_tokens,
-                                    temperature=temperature,
-                                    reasoning_effort=reasoning_effort,
-                                ),
+                                **dict(preview_payload or {}),
+                                'messages': request_messages,
+                                'tools': request_tools,
+                                'model': target.model_id,
+                                'request_timeout_seconds': None if bool(getattr(target.provider, 'manages_request_timeout_internally', False)) else attempt_timeout_seconds,
                             }
                             outer_attempt_timeout_seconds = None if bool(getattr(target.provider, 'manages_request_timeout_internally', False)) else attempt_timeout_seconds
                             response = await wait_for_model_attempt(

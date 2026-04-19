@@ -35,16 +35,24 @@ from main.governance.exec_tool_policy import EXEC_TOOL_EXECUTOR_NAME, EXEC_TOOL_
 from main.errors import TaskPausedError, describe_exception
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_actual_request_diagnostics, build_stable_prompt_cache_key
-from main.runtime.append_notice_context import APPEND_NOTICE_CONTEXT_KEY, build_append_notice_tail_messages
+from main.runtime.append_notice_context import (
+    APPEND_NOTICE_CONTEXT_KEY,
+    APPEND_NOTICE_TAIL_PREFIX,
+    build_append_notice_tail_messages,
+)
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
     inject_node_dynamic_contract_message,
+    is_node_dynamic_contract_message,
     strip_node_dynamic_contract_messages,
     upsert_node_dynamic_contract_message,
 )
 from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
+from g3ku.config.live_runtime import get_runtime_config
+from main.runtime import chat_backend as runtime_chat_backend
+from main.runtime import send_token_preflight as runtime_send_token_preflight
 from main.runtime.stage_budget import (
     DEFAULT_NON_BUDGET_STAGE_TOOLS,
     FINAL_RESULT_TOOL_NAME,
@@ -77,6 +85,9 @@ _INVALID_FINAL_SUBMISSION_LIMIT = 5
 _INVALID_STAGE_SUBMISSION_LIMIT = 5
 _STAGE_ONLY_TRANSITION_LIMIT = 5
 _DEFAULT_MODEL_RESPONSE_TIMEOUT_SECONDS = 120.0
+_NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS = 25000
+_NODE_TOKEN_COMPACT_MARKER = "[G3KU_TOKEN_COMPACT_V2]"
+_NODE_TOKEN_COMPACTION_RECENT_TAIL_COUNT = 12
 _RESULT_REQUIRED_KEYS = (
     'status',
     'delivery_status',
@@ -286,10 +297,6 @@ class ReActToolLoop:
             previous_actual_request_messages = self._prompt_message_records(request_messages)
             pending_request_delta_messages = []
             repair_overlay_text = None
-            actual_request_diagnostics = build_actual_request_diagnostics(
-                request_messages=request_messages,
-                tool_schemas=tool_schemas,
-            )
             current_model_refs = list(
                 model_refs_supplier() if callable(model_refs_supplier) else model_refs
             )
@@ -299,6 +306,31 @@ class ReActToolLoop:
                 model_messages=model_messages,
                 tool_schemas=tool_schemas,
                 model_refs=current_model_refs,
+            )
+            current_tool_choice = self._repair_tool_choice(
+                visible_tools=callable_visible_tools,
+                stage_gate=stage_gate,
+                invalid_final_submission_count=invalid_final_submission_count,
+                invalid_stage_submission_count=invalid_stage_submission_count,
+            )
+            (
+                request_messages,
+                token_preflight_diagnostics,
+                history_shrink_reason,
+                preflight_failure_reason,
+            ) = self._apply_node_send_token_preflight(
+                task_id=str(task.task_id),
+                node_id=str(node.node_id),
+                model_refs=current_model_refs,
+                request_messages=request_messages,
+                tool_schemas=tool_schemas,
+                prompt_cache_key=turn_prompt_cache_key,
+                tool_choice=current_tool_choice,
+                parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
+            )
+            actual_request_diagnostics = build_actual_request_diagnostics(
+                request_messages=request_messages,
+                tool_schemas=tool_schemas,
             )
             allowed_content_refs = self._collect_content_refs(request_messages)
             self._log_service.update_node_input(task.task_id, node.node_id, json.dumps(model_messages, ensure_ascii=False, indent=2))
@@ -360,11 +392,17 @@ class ReActToolLoop:
                     'actual_request_hash': str(actual_request_diagnostics.get('actual_request_hash') or ''),
                     'actual_request_message_count': int(actual_request_diagnostics.get('actual_request_message_count') or 0),
                     'actual_tool_schema_hash': str(actual_request_diagnostics.get('actual_tool_schema_hash') or ''),
+                    'token_preflight_diagnostics': dict(token_preflight_diagnostics or {}),
+                    'history_shrink_reason': str(history_shrink_reason or '').strip(),
                     **self._execution_stage_frame_payload(node_kind=node.node_kind, stage_gate=stage_gate),
-                    'last_error': '',
+                    'last_error': str(preflight_failure_reason or '').strip(),
                 },
                 publish_snapshot=True,
             )
+            if str(preflight_failure_reason or '').strip():
+                return self._token_preflight_failure(
+                    reason=str(preflight_failure_reason or '').strip(),
+                )
             node_turn_lease = None
             node_turn_controller = getattr(self, '_node_turn_controller', None)
             primary_model_ref = str(current_model_refs[0] or '').strip()
@@ -396,12 +434,7 @@ class ReActToolLoop:
                             messages=request_messages,
                             tools=tool_schemas or None,
                             model_refs=current_model_refs,
-                            tool_choice=self._repair_tool_choice(
-                                visible_tools=callable_visible_tools,
-                                stage_gate=stage_gate,
-                                invalid_final_submission_count=invalid_final_submission_count,
-                                invalid_stage_submission_count=invalid_stage_submission_count,
-                            ),
+                            tool_choice=current_tool_choice,
                             parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
                             prompt_cache_key=turn_prompt_cache_key,
                             node_turn_lease=node_turn_lease,
@@ -2921,6 +2954,313 @@ class ReActToolLoop:
                 tool_names=tool_names,
                 content_excerpt=content_excerpt,
             ),
+        )
+
+    @staticmethod
+    def _token_preflight_failure(*, reason: str) -> NodeFinalResult:
+        normalized_reason = str(reason or '').strip() or 'token preflight failed'
+        return NodeFinalResult(
+            status='failed',
+            delivery_status='blocked',
+            summary='node send token preflight failed',
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason=normalized_reason,
+        )
+
+    @staticmethod
+    def _is_append_notice_tail_message(message: dict[str, Any]) -> bool:
+        if str((message or {}).get("role") or "").strip().lower() != "assistant":
+            return False
+        return str((message or {}).get("content") or "").strip().startswith(APPEND_NOTICE_TAIL_PREFIX)
+
+    @classmethod
+    def _split_request_messages_for_token_compaction(
+        cls,
+        *,
+        request_messages: list[dict[str, Any]] | None,
+        recent_tail_count: int = _NODE_TOKEN_COMPACTION_RECENT_TAIL_COUNT,
+    ) -> dict[str, Any]:
+        normalized = [
+            dict(item)
+            for item in list(request_messages or [])
+            if isinstance(item, dict)
+        ]
+        contract_tail: list[dict[str, Any]] = []
+        while normalized and is_node_dynamic_contract_message(normalized[-1]):
+            contract_tail.insert(0, normalized.pop())
+
+        system_prefix: list[dict[str, Any]] = []
+        while normalized and str(normalized[0].get("role") or "").strip().lower() == "system":
+            system_prefix.append(normalized.pop(0))
+
+        bootstrap_user: list[dict[str, Any]] = []
+        if normalized and str(normalized[0].get("role") or "").strip().lower() == "user":
+            bootstrap_user.append(normalized.pop(0))
+
+        append_notice_tail: list[dict[str, Any]] = []
+        while normalized and cls._is_append_notice_tail_message(normalized[0]):
+            append_notice_tail.append(normalized.pop(0))
+
+        body_messages = list(normalized)
+        keep_recent = max(1, int(recent_tail_count or 0))
+        recent_tail = body_messages[-keep_recent:] if len(body_messages) > keep_recent else list(body_messages)
+        compressible_history = body_messages[:-keep_recent] if len(body_messages) > keep_recent else []
+        return {
+            "system_prefix": system_prefix,
+            "bootstrap_user": bootstrap_user,
+            "append_notice_tail": append_notice_tail,
+            "compressible_history": compressible_history,
+            "recent_tail": recent_tail,
+            "contract_tail": contract_tail,
+        }
+
+    @classmethod
+    def _rewrite_request_messages_for_token_compaction(
+        cls,
+        *,
+        node_id: str = "",
+        request_messages: list[dict[str, Any]] | None,
+        compressed_text: str = "",
+        recent_tail_count: int = _NODE_TOKEN_COMPACTION_RECENT_TAIL_COUNT,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        parts = cls._split_request_messages_for_token_compaction(
+            request_messages=request_messages,
+            recent_tail_count=recent_tail_count,
+        )
+        if not any(list(parts.get(key) or []) for key in parts):
+            return [], {}
+
+        compacted_payload = {
+            "kind": "node_token_compaction_llm" if str(compressed_text or "").strip() else "node_send_token_compaction",
+            "node_id": str(node_id or "").strip(),
+            "history_message_count": len(list(parts.get("compressible_history") or [])),
+            "compacted_message_count": len(list(parts.get("compressible_history") or [])),
+            "retained_recent_tail_count": len(list(parts.get("recent_tail") or [])),
+            "contract_message_count": len(list(parts.get("contract_tail") or [])),
+            "append_notice_tail_count": len(list(parts.get("append_notice_tail") or [])),
+        }
+        compacted_block = {
+            "role": "assistant",
+            "content": (
+                f"{_NODE_TOKEN_COMPACT_MARKER}\n"
+                f"{json.dumps(compacted_payload, ensure_ascii=False, sort_keys=True)}"
+                f"{f'\\n\\n{str(compressed_text or '').strip()}' if str(compressed_text or '').strip() else ''}"
+            ).strip(),
+        }
+        rewritten = [
+            *list(parts.get("system_prefix") or []),
+            *list(parts.get("bootstrap_user") or []),
+            *list(parts.get("append_notice_tail") or []),
+            compacted_block,
+            *list(parts.get("recent_tail") or []),
+            *list(parts.get("contract_tail") or []),
+        ]
+        return rewritten, compacted_payload
+
+    def _estimate_node_send_preflight_tokens(
+        self,
+        *,
+        config: Any,
+        model_refs: list[str],
+        request_messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]],
+        prompt_cache_key: str,
+        tool_choice: str | dict[str, Any] | None,
+        parallel_tool_calls: bool | None,
+    ) -> tuple[int, str]:
+        preview_error = ""
+        preview_payload: dict[str, Any] | None = None
+        if config is not None and list(model_refs or []):
+            try:
+                preview_payload = runtime_chat_backend.build_send_provider_request_preview(
+                    config=config,
+                    messages=request_messages,
+                    tools=tool_schemas,
+                    model_refs=model_refs,
+                    tool_choice=tool_choice,
+                    parallel_tool_calls=parallel_tool_calls,
+                    prompt_cache_key=prompt_cache_key,
+                )
+            except Exception as exc:
+                preview_error = str(exc or exc.__class__.__name__).strip() or exc.__class__.__name__
+        if preview_payload:
+            return (
+                int(
+                    runtime_chat_backend.estimate_send_provider_request_preview_tokens(
+                        preview_payload=preview_payload,
+                    )
+                    or 0
+                ),
+                preview_error,
+            )
+        return (
+            int(
+                runtime_send_token_preflight.estimate_runtime_provider_request_preview_tokens(
+                    provider_request_body=None,
+                    request_messages=request_messages,
+                    tool_schemas=tool_schemas,
+                )
+                or 0
+            ),
+            preview_error,
+        )
+
+    def _apply_node_send_token_preflight(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        model_refs: list[str],
+        request_messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]],
+        prompt_cache_key: str = "",
+        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any], str, str]:
+        _ = task_id, node_id
+        normalized_model_refs = [
+            str(item or "").strip()
+            for item in list(model_refs or [])
+            if str(item or "").strip()
+        ]
+        history_shrink_reason = ""
+        failure_reason = ""
+
+        try:
+            config, _revision, _changed = get_runtime_config(force=False)
+        except Exception as exc:
+            config = None
+            resolution_error = str(exc or exc.__class__.__name__).strip() or exc.__class__.__name__
+        else:
+            resolution_error = ""
+
+        try:
+            info = runtime_chat_backend.resolve_send_model_context_window_info(
+                config=config,
+                model_refs=normalized_model_refs,
+            )
+        except Exception as exc:
+            info = runtime_chat_backend.SendModelContextWindowInfo(
+                model_key=normalized_model_refs[0] if normalized_model_refs else "",
+                provider_id="",
+                provider_model="",
+                resolved_model="",
+                context_window_tokens=0,
+                resolution_error=(
+                    resolution_error
+                    or str(exc or exc.__class__.__name__).strip()
+                    or exc.__class__.__name__
+                ),
+            )
+
+        context_window_tokens = max(0, int(getattr(info, "context_window_tokens", 0) or 0))
+        estimated_total_tokens, preview_error = self._estimate_node_send_preflight_tokens(
+            config=config,
+            model_refs=normalized_model_refs,
+            request_messages=request_messages,
+            tool_schemas=tool_schemas,
+            prompt_cache_key=str(prompt_cache_key or "").strip(),
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+        )
+        snapshot = runtime_send_token_preflight.build_runtime_send_token_preflight_snapshot(
+            context_window_tokens=context_window_tokens,
+            estimated_total_tokens=estimated_total_tokens,
+        )
+
+        token_preflight_diagnostics: dict[str, Any] = {
+            "applied": False,
+            "model_key": str(getattr(info, "model_key", "") or "").strip(),
+            "provider_model": str(getattr(info, "provider_model", "") or "").strip(),
+            "resolution_error": str(getattr(info, "resolution_error", "") or "").strip(),
+            "context_window_tokens": int(snapshot.context_window_tokens or 0),
+            "estimated_total_tokens": int(snapshot.estimated_total_tokens or 0),
+            "trigger_tokens": int(snapshot.trigger_tokens or 0),
+            "effective_trigger_tokens": int(snapshot.effective_trigger_tokens or 0),
+            "ratio": float(snapshot.ratio or 0.0),
+            "would_exceed_context_window": bool(snapshot.would_exceed_context_window),
+            "would_trigger_token_compression": bool(snapshot.would_trigger_token_compression),
+            "final_request_tokens": int(snapshot.estimated_total_tokens or 0),
+        }
+        if preview_error:
+            token_preflight_diagnostics["preview_estimation_error"] = preview_error
+
+        if context_window_tokens <= _NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS:
+            failure_reason = (
+                f"context_window_tokens <= {_NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS} "
+                f"(got {context_window_tokens})"
+            )
+        elif int(estimated_total_tokens or 0) > int(context_window_tokens or 0):
+            failure_reason = (
+                f"estimated_total_tokens ({int(estimated_total_tokens or 0)}) exceeded "
+                f"context_window_tokens ({int(context_window_tokens or 0)}) before compression"
+            )
+        elif snapshot.would_trigger_token_compression:
+            rewritten_messages, compact_payload = self._rewrite_request_messages_for_token_compaction(
+                node_id=node_id,
+                request_messages=request_messages,
+            )
+            request_messages = rewritten_messages
+            final_request_tokens, rewritten_preview_error = self._estimate_node_send_preflight_tokens(
+                config=config,
+                model_refs=normalized_model_refs,
+                request_messages=request_messages,
+                tool_schemas=tool_schemas,
+                prompt_cache_key=str(prompt_cache_key or "").strip(),
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+            )
+            token_preflight_diagnostics.update(
+                {
+                    "applied": True,
+                    "mode": "marker",
+                    "history_shrink_reason": "token_compression",
+                    "final_request_tokens": int(final_request_tokens or 0),
+                    "compaction_payload": dict(compact_payload or {}),
+                }
+            )
+            if rewritten_preview_error:
+                token_preflight_diagnostics["rewritten_preview_estimation_error"] = rewritten_preview_error
+            history_shrink_reason = "token_compression"
+            if int(final_request_tokens or 0) > int(context_window_tokens or 0):
+                failure_reason = (
+                    f"final_request_tokens ({int(final_request_tokens or 0)}) exceeded "
+                    f"context_window_tokens ({int(context_window_tokens or 0)}) after compression"
+                )
+
+        if failure_reason:
+            token_preflight_diagnostics["error"] = str(failure_reason or "").strip()
+
+        return (
+            request_messages,
+            token_preflight_diagnostics,
+            history_shrink_reason,
+            failure_reason,
+        )
+
+    def run_node_send_preflight_for_control_turn(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        model_refs: list[str],
+        request_messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]],
+        prompt_cache_key: str = "",
+        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any], str, str]:
+        return self._apply_node_send_token_preflight(
+            task_id=task_id,
+            node_id=node_id,
+            model_refs=model_refs,
+            request_messages=request_messages,
+            tool_schemas=tool_schemas,
+            prompt_cache_key=prompt_cache_key,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
         )
 
     @staticmethod

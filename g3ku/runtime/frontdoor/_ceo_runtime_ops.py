@@ -23,7 +23,6 @@ from g3ku.json_schema_utils import (
     normalize_runtime_tool_arguments_dict,
     sanitize_provider_parameters_schema,
 )
-from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
@@ -47,7 +46,16 @@ from g3ku.runtime.frontdoor.token_preflight_compaction import (
 )
 from main.models import normalize_execution_policy_metadata
 from main.protocol import now_iso
-from main.runtime.chat_backend import build_actual_request_diagnostics, build_prompt_cache_diagnostics
+from main.runtime.chat_backend import (
+    build_actual_request_diagnostics,
+    build_prompt_cache_diagnostics,
+    resolve_send_model_context_window_info,
+)
+from main.runtime.send_token_preflight import (
+    build_runtime_send_token_preflight_snapshot,
+    compute_runtime_send_token_preflight_thresholds,
+    should_trigger_runtime_token_compression,
+)
 from main.runtime.internal_tools import SubmitNextStageTool
 from main.runtime.stage_budget import (
     STAGE_TOOL_NAME,
@@ -519,55 +527,26 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 config, _revision, _changed = get_runtime_config(force=False)
             except Exception:
                 config = None
-        provider_id = ""
-        provider_model = model_key
-        resolved_model = model_key
-        context_window_tokens = 0
-        if config is not None:
-            try:
-                managed = config.get_managed_model(model_key)
-            except Exception:
-                managed = None
-            if managed is not None:
-                provider_id = str(getattr(managed, "provider_id", "") or "").strip().lower()
-                provider_model = str(getattr(managed, "provider_model", "") or model_key).strip() or model_key
-                resolved_model = str(getattr(managed, "default_model", "") or provider_model or model_key).strip() or model_key
-                raw_context_window_tokens = getattr(managed, "context_window_tokens", None)
-                try:
-                    context_window_tokens = int(raw_context_window_tokens or 0)
-                except (TypeError, ValueError):
-                    context_window_tokens = 0
-            try:
-                target = resolve_chat_target(config, model_key)
-            except Exception:
-                target = None
-            if target is not None:
-                resolved_provider_model = str(
-                    getattr(target, "resolved_model", None)
-                    or provider_model
-                    or model_key
-                ).strip()
-                target_provider_id = str(getattr(target, "provider_id", "") or "").strip()
-                provider_id = target_provider_id.lower()
-                resolved_model = resolved_provider_model or resolved_model or provider_model or model_key
-                if target_provider_id and ":" not in resolved_provider_model:
-                    provider_model = f"{target_provider_id}:{resolved_provider_model}"
-                else:
-                    provider_model = resolved_provider_model or provider_model or model_key
-                try:
-                    target_context_window_tokens = int(
-                        dict(getattr(target, "model_parameters", None) or {}).get("context_window_tokens") or 0
-                    )
-                except (TypeError, ValueError):
-                    target_context_window_tokens = 0
-                if target_context_window_tokens > 0:
-                    context_window_tokens = target_context_window_tokens
+        if config is None:
+            return {
+                "model_key": model_key,
+                "provider_id": "",
+                "provider_model": model_key,
+                "resolved_model": model_key,
+                "context_window_tokens": 0,
+                "resolution_error": "runtime_config_unavailable",
+            }
+        info = resolve_send_model_context_window_info(
+            config=config,
+            model_refs=model_refs,
+        )
         return {
             "model_key": model_key,
-            "provider_id": provider_id,
-            "provider_model": provider_model or model_key,
-            "resolved_model": resolved_model or provider_model or model_key,
-            "context_window_tokens": context_window_tokens,
+            "provider_id": str(info.provider_id or "").strip(),
+            "provider_model": str(info.provider_model or model_key).strip() or model_key,
+            "resolved_model": str(info.resolved_model or info.provider_model or model_key).strip() or model_key,
+            "context_window_tokens": int(info.context_window_tokens or 0),
+            "resolution_error": str(info.resolution_error or "").strip(),
         }
 
     @staticmethod
@@ -646,9 +625,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     def _frontdoor_missing_context_window_error(self, *, model_info: dict[str, Any] | None) -> FrontdoorCompressionRuntimeError:
         display_name = self._frontdoor_model_display_name(model_info)
+        resolution_error = str(dict(model_info or {}).get("resolution_error") or "").strip()
+        detail_suffix = f" 原因: {resolution_error}" if resolution_error else ""
         return FrontdoorCompressionRuntimeError(
             code="model_context_window_missing",
-            message=f"当前模型{display_name}未配置最大上下文TOKEN，请更改模型链配置后继续",
+            message=f"当前模型{display_name}未配置最大上下文TOKEN，请更改模型链配置后继续{detail_suffix}",
             recoverable=True,
         )
 
@@ -733,16 +714,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             tool_schemas=actual_tool_schemas,
         )
         provider_model = self._frontdoor_model_display_name(model_info)
-        trigger_tokens = (
-            int(context_window_tokens * self._TOKEN_COMPRESSION_TRIGGER_RATIO)
-            if context_window_tokens > 0
-            else 0
+        thresholds = compute_runtime_send_token_preflight_thresholds(
+            context_window_tokens=context_window_tokens,
         )
-        effective_trigger_tokens = (
-            int(trigger_tokens * self._TOKEN_COMPRESSION_ESTIMATE_SAFETY_RATIO)
-            if trigger_tokens > 0
-            else 0
-        )
+        trigger_tokens = int(thresholds.trigger_tokens or 0)
+        effective_trigger_tokens = int(thresholds.effective_trigger_tokens or 0)
         missing_context_window = context_window_tokens <= 25_000
         would_exceed_context_window = (
             not missing_context_window
@@ -751,13 +727,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         would_trigger_token_compression = (
             not missing_context_window
             and not would_exceed_context_window
-            and estimated_total_tokens >= effective_trigger_tokens
+            and should_trigger_runtime_token_compression(
+                estimated_total_tokens=estimated_total_tokens,
+                thresholds=thresholds,
+            )
         )
-        ratio = (
-            float(estimated_total_tokens) / float(context_window_tokens)
-            if context_window_tokens > 0
-            else 0.0
-        )
+        ratio = build_runtime_send_token_preflight_snapshot(
+            context_window_tokens=context_window_tokens,
+            estimated_total_tokens=estimated_total_tokens,
+        ).ratio
         return {
             "request_messages": list(request_messages),
             "tool_schemas": list(actual_tool_schemas),

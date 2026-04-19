@@ -69,6 +69,59 @@ async def test_graph_call_model_raises_when_request_already_exceeds_context_wind
         await runner._graph_call_model(state, runtime=runtime)
 
 
+@pytest.mark.asyncio
+async def test_graph_call_model_surfaces_resolution_error_when_context_window_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "ceo_primary",
+            "provider_model": "openai:gpt-5.2",
+            "context_window_tokens": 0,
+            "resolution_error": "bad binding",
+        },
+        raising=False,
+    )
+
+    state = {
+        "messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "hello"},
+        ],
+        "model_refs": ["ceo_primary"],
+        "parallel_enabled": False,
+        "prompt_cache_key": "cache-key",
+        "iteration": 0,
+        "max_iterations": 3,
+        "session_key": "web:shared",
+        "tool_names": [],
+        "provider_tool_names": [],
+        "candidate_tool_names": [],
+        "candidate_tool_items": [],
+        "hydrated_tool_names": [],
+        "visible_skill_ids": [],
+        "candidate_skill_ids": [],
+        "rbac_visible_tool_names": [],
+        "rbac_visible_skill_ids": [],
+        "turn_overlay_text": "",
+        "repair_overlay_text": None,
+        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+        "frontdoor_history_shrink_reason": "",
+        "frontdoor_token_preflight_diagnostics": {},
+    }
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=None, session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")), session_key="web:shared", on_progress=None)
+    )
+
+    with pytest.raises(RuntimeError, match="bad binding"):
+        await runner._graph_call_model(state, runtime=runtime)
+
+
 def test_frontdoor_send_preflight_snapshot_uses_provider_request_preview_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

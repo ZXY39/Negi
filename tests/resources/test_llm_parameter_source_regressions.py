@@ -148,6 +148,7 @@ def test_normalize_draft_omits_optional_model_parameters_when_left_blank() -> No
         default_model="custom-model",
         parameters={
             "api_mode": "custom-direct",
+            "context_window_tokens": 200_000,
             "max_tokens": None,
             "temperature": "",
             "reasoning_effort": "",
@@ -163,6 +164,7 @@ def test_normalize_draft_omits_optional_model_parameters_when_left_blank() -> No
     assert "reasoning_effort" not in normalized.parameters
     assert "timeout_s" not in normalized.parameters
     assert normalized.parameters["api_mode"] == "custom-direct"
+    assert normalized.parameters["context_window_tokens"] == 200_000
 
 
 def test_migration_cleans_legacy_default_model_parameters_from_saved_records(tmp_path) -> None:
@@ -473,8 +475,33 @@ async def test_config_chat_backend_recommends_dynamic_hard_timeout_from_model_ch
 
 
 @pytest.mark.asyncio
-async def test_react_loop_no_longer_passes_hardcoded_model_parameter_defaults() -> None:
+async def test_react_loop_no_longer_passes_hardcoded_model_parameter_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main.runtime.react_loop as react_loop_module
+    from main.runtime.chat_backend import SendModelContextWindowInfo
+
     captured: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        react_loop_module,
+        "get_runtime_config",
+        lambda **_: (SimpleNamespace(), 0, False),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        react_loop_module.runtime_chat_backend,
+        "resolve_send_model_context_window_info",
+        lambda **_: SendModelContextWindowInfo(
+            model_key="fake",
+            provider_id="test",
+            provider_model="test:fake",
+            resolved_model="fake",
+            context_window_tokens=32000,
+            resolution_error="",
+        ),
+        raising=False,
+    )
 
     class _Backend:
         async def chat(self, **kwargs):
@@ -691,3 +718,114 @@ async def test_g3ku_chat_model_adapter_preserves_provider_request_payload_metada
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
         "tool_choice": "auto",
     }
+
+
+def test_runtime_send_token_preflight_threshold_math_is_ceo_aligned() -> None:
+    """
+    Regression guard: node/runtime send-side token preflight must share the CEO threshold semantics:
+    - trigger_tokens = int(context_window_tokens * 0.80)
+    - effective_trigger_tokens = int(trigger_tokens * 0.95)
+    - triggers when estimated_total_tokens >= effective_trigger_tokens
+    """
+
+    from main.runtime.send_token_preflight import (
+        compute_runtime_send_token_preflight_thresholds,
+        should_trigger_runtime_token_compression,
+    )
+
+    # Use a non-round context window to ensure the behavior is int() truncation, not rounding.
+    context_window_tokens = 100_001
+    thresholds = compute_runtime_send_token_preflight_thresholds(
+        context_window_tokens=context_window_tokens,
+    )
+
+    assert thresholds.context_window_tokens == context_window_tokens
+    assert thresholds.trigger_tokens == int(context_window_tokens * 0.80)
+    assert thresholds.effective_trigger_tokens == int(thresholds.trigger_tokens * 0.95)
+
+    assert should_trigger_runtime_token_compression(
+        estimated_total_tokens=thresholds.effective_trigger_tokens - 1,
+        thresholds=thresholds,
+    ) is False
+    assert should_trigger_runtime_token_compression(
+        estimated_total_tokens=thresholds.effective_trigger_tokens,
+        thresholds=thresholds,
+    ) is True
+
+
+def test_build_send_provider_request_preview_sanitizes_messages_and_synthesizes_prompt_cache_key(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        chat_backend_module,
+        "build_provider_from_model_key",
+        lambda config, ref, api_key_index=None: ProviderTarget(
+            provider_ref=str(ref),
+            provider_id="custom",
+            model_id="custom-model",
+            provider=SimpleNamespace(),
+            model_parameters={"context_window_tokens": 32000},
+            retry_on=[],
+            retry_count=0,
+            api_key_count=0,
+        ),
+    )
+
+    raw_messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "invalid", "content": "drop-me"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "filesystem_write", "arguments": {"path": "/tmp/demo"}},
+                }
+            ],
+        },
+    ]
+    raw_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "filesystem_write",
+                "description": "write file",
+                "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+            },
+        }
+    ]
+
+    preview = chat_backend_module.build_send_provider_request_preview(
+        config=SimpleNamespace(),
+        messages=raw_messages,
+        tools=raw_tools,
+        model_refs=["primary"],
+        prompt_cache_key=None,
+    )
+
+    assert preview["messages"] == chat_backend_module.sanitize_provider_messages(raw_messages)
+    assert preview["tools"] == chat_backend_module.normalize_openai_tool_definitions(raw_tools)
+    assert preview["prompt_cache_key"] == chat_backend_module.build_stable_prompt_cache_key(
+        preview["messages"],
+        preview["tools"],
+        "custom-model",
+    )
+
+
+def test_resolve_send_model_context_window_info_preserves_resolution_error_details(monkeypatch) -> None:
+    monkeypatch.setattr(
+        chat_backend_module,
+        "build_provider_from_model_key",
+        lambda config, ref, api_key_index=None: (_ for _ in ()).throw(RuntimeError("bad binding")),
+    )
+
+    info = chat_backend_module.resolve_send_model_context_window_info(
+        config=SimpleNamespace(),
+        model_refs=["primary"],
+    )
+
+    assert info.model_key == "primary"
+    assert info.context_window_tokens == 0
+    assert "bad binding" in info.resolution_error

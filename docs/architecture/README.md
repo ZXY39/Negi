@@ -32,3 +32,5 @@ Start here when you are new to the repository or when a change crosses subsystem
 ## Current Maintenance Note
 
 The CEO long-running direct-tool reminder lane is now documented as a live-only sidecar, not as a heartbeat turn. If you are debugging reminder UI, timeout-stop failures, or `ceo.tool.reminder`, read `runtime-overview.md`, `web-and-admin.md`, and `heartbeat-system.md` together.
+
+Node execution and `message_distribution` turns now also have a final send-side token preflight before provider dispatch. If you are debugging node cache misses, restart-seed continuity, or “distribution resumed but no new LLM request” symptoms, read `runtime-overview.md` and `context-and-cache-troubleshooting.md` together before changing node prompt assembly.
