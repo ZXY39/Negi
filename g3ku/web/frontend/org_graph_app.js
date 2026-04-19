@@ -1512,12 +1512,15 @@ function normalizeCeoQueuedFollowUpEntry(entry = {}) {
     const text = String(entry?.text || "");
     const uploads = cloneCeoSnapshotAttachments(entry?.uploads);
     if (!text.trim() && !uploads.length) return null;
-    return {
+    const normalized = {
         id: String(entry?.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`).trim(),
         text,
         uploads,
         queued_at: String(entry?.queued_at || "").trim() || new Date().toISOString(),
     };
+    const runtimeSentAt = String(entry?.runtime_sent_at || entry?.runtimeSentAt || "").trim();
+    if (runtimeSentAt) normalized.runtime_sent_at = runtimeSentAt;
+    return normalized;
 }
 
 function cloneCeoQueuedFollowUpEntry(entry = null) {
@@ -1631,6 +1634,63 @@ function removeCeoQueuedFollowUp(sessionId, entryId) {
     if (!key || !targetId) return [];
     const current = getCeoQueuedFollowUps(key).filter((item) => String(item?.id || "").trim() !== targetId);
     return setCeoQueuedFollowUps(key, current);
+}
+
+function markCeoQueuedFollowUpsRuntimeSent(sessionId, entryIds = []) {
+    const key = String(sessionId || "").trim();
+    if (!key) return [];
+    const targetIds = new Set(
+        (Array.isArray(entryIds) ? entryIds : [])
+            .map((item) => String(item || "").trim())
+            .filter(Boolean)
+    );
+    if (!targetIds.size) return getCeoQueuedFollowUps(key);
+    const sentAt = new Date().toISOString();
+    const current = getCeoQueuedFollowUps(key).map((item) => {
+        const entryId = String(item?.id || "").trim();
+        if (!entryId || !targetIds.has(entryId)) return item;
+        return {
+            ...item,
+            runtime_sent_at: sentAt,
+        };
+    });
+    return setCeoQueuedFollowUps(key, current);
+}
+
+function pruneRuntimeSentCeoFollowUps(sessionId = activeSessionId()) {
+    const key = String(sessionId || "").trim();
+    if (!key) return [];
+    const retained = getCeoQueuedFollowUps(key).filter((item) => !String(item?.runtime_sent_at || "").trim());
+    return setCeoQueuedFollowUps(key, retained);
+}
+
+function sendActiveCeoFollowUpsToRuntime(sessionId = activeSessionId()) {
+    const key = String(sessionId || "").trim();
+    if (!key) return false;
+    const queued = getCeoQueuedFollowUps(key).filter((item) => !String(item?.runtime_sent_at || "").trim());
+    if (!queued.length) return false;
+    const wsOpenState = Number(WebSocket?.OPEN ?? 1);
+    if (!S.ceoWs || S.ceoWs.readyState !== wsOpenState) {
+        addMsg("Connection is not ready yet. Please try again in a moment.", "system");
+        initCeoWs();
+        return false;
+    }
+    S.ceoWs.send(JSON.stringify({
+        type: "client.user_message",
+        session_id: key,
+        messages: queued.map((item) => ({
+            text: String(item?.text || ""),
+            uploads: normalizeUploadList(item?.uploads).map((upload) => ({
+                name: upload.name,
+                path: upload.path,
+                mime_type: upload.mime_type,
+                kind: upload.kind,
+                size: upload.size,
+            })),
+        })),
+    }));
+    markCeoQueuedFollowUpsRuntimeSent(key, queued.map((item) => String(item?.id || "").trim()));
+    return true;
 }
 
 function shiftCeoQueuedFollowUp(sessionId) {
@@ -3160,7 +3220,10 @@ function applyCeoState(state = {}, meta = {}) {
     if (paused) finalizePausedCeoTurn("已暂停", { source, turnId });
     syncCeoSessionActions();
     syncCeoPrimaryButton();
-    if (!running && !paused) maybeDispatchQueuedCeoFollowUps();
+    if (!running && !paused) {
+        pruneRuntimeSentCeoFollowUps(activeSessionId());
+        maybeDispatchQueuedCeoFollowUps();
+    }
 }
 
 function handleCeoControlAck(payload = {}) {
@@ -3179,6 +3242,7 @@ function handleCeoControlAck(payload = {}) {
     finalizePausedCeoTurn("已暂停", { source, turnId });
     syncCeoSessionActions();
     syncCeoPrimaryButton();
+    pruneRuntimeSentCeoFollowUps(activeSessionId());
     maybeDispatchQueuedCeoFollowUps();
 }
 
@@ -3188,6 +3252,7 @@ function handleCeoError(payload = {}) {
     if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
     syncCeoSessionActions();
     syncCeoPrimaryButton();
+    pruneRuntimeSentCeoFollowUps(activeSessionId());
     if (["frontdoor_context_window_exceeded", "model_context_window_missing"].includes(String(payload?.code || "").trim())) {
         showToast({
             title: "上下文超限",
@@ -3329,17 +3394,19 @@ function maybeDispatchQueuedCeoFollowUps() {
     if (S.ceoQueuedFollowUpDispatching || S.ceoTurnActive || S.ceoSessionBusy || S.ceoSessionCatalogBusy) return false;
     const sessionId = activeSessionId();
     if (!sessionId) return false;
-    const queued = getCeoQueuedFollowUps(sessionId);
+    const current = getCeoQueuedFollowUps(sessionId);
+    const queued = current.filter((item) => !String(item?.runtime_sent_at || "").trim());
     if (!queued.length) return false;
     S.ceoQueuedFollowUpDispatching = true;
     try {
-        setCeoQueuedFollowUps(sessionId, []);
+        const retained = current.filter((item) => String(item?.runtime_sent_at || "").trim());
+        setCeoQueuedFollowUps(sessionId, retained);
         const sent = sendImmediateCeoMessageBatch(
             queued.map((item) => ({ text: item.text, uploads: item.uploads })),
             { scrollMode: "bottom" }
         );
         if (!sent) {
-            setCeoQueuedFollowUps(sessionId, queued);
+            setCeoQueuedFollowUps(sessionId, current);
             return false;
         }
         return true;
@@ -4900,6 +4967,8 @@ function finalizeCeoTurn(text, meta = {}) {
                 inflight_turn: inflightMatchesSource ? null : inflightTurn,
             };
         });
+        pruneRuntimeSentCeoFollowUps(sessionId);
+        maybeDispatchQueuedCeoFollowUps();
         return;
     }
     mutateCeoFeed(() => {
@@ -7560,6 +7629,7 @@ function sendCeoMessage() {
     try {
         if (S.ceoTurnActive) {
             enqueueCeoFollowUp(activeSessionId(), { text, uploads });
+            sendActiveCeoFollowUpsToRuntime(activeSessionId());
         } else {
             const sent = sendImmediateCeoMessage({ text, uploads, scrollMode: "bottom" });
             if (!sent) return;

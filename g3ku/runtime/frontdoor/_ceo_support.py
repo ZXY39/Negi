@@ -141,7 +141,7 @@ class CeoFrontDoorSupport:
             "- If the exit condition is already satisfied, or the user has clearly asked to stop/cancel this recurring task, immediately call the cron tool once with action='remove' and the current job_id.",
             "- After removing the current job, return one short plain-text confirmation only.",
             "- If the exit condition is not satisfied, do not call any tool and return plain text only.",
-            "- Never call the message tool. Never create, update, list, or remove any other cron job.",
+            "- Never create, update, list, or remove any other cron job.",
         ]
         if not explicit:
             lines.append("- This is a legacy cron job with no stored explicit exit condition; only 'user asked to stop' can end it.")

@@ -2129,9 +2129,9 @@ def test_web_ceo_continuity_snapshot_round_trip_and_clear(tmp_path: Path, monkey
         "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
         "hydrated_tool_names": ["web_fetch"],
         "capability_snapshot_exposure_revision": "exp:demo",
-        "visible_tool_ids": ["message", "web_fetch"],
+        "visible_tool_ids": ["exec", "web_fetch"],
         "visible_skill_ids": ["web-access"],
-        "provider_tool_schema_names": ["message", "web_fetch"],
+        "provider_tool_schema_names": ["exec", "web_fetch"],
         "source_reason": "finalize",
     }
 
@@ -2141,7 +2141,7 @@ def test_web_ceo_continuity_snapshot_round_trip_and_clear(tmp_path: Path, monkey
 
     assert isinstance(restored, dict)
     assert restored["frontdoor_request_body_messages"] == payload["frontdoor_request_body_messages"]
-    assert restored["provider_tool_schema_names"] == ["message", "web_fetch"]
+    assert restored["provider_tool_schema_names"] == ["exec", "web_fetch"]
     assert restored["source_reason"] == "finalize"
 
     web_ceo_sessions.clear_completed_continuity_snapshot("web:shared")
@@ -2166,9 +2166,9 @@ def test_completed_continuity_snapshot_round_trips_token_preflight_diagnostics(t
         "frontdoor_token_preflight_diagnostics": {"applied": True, "final_request_tokens": 28000, "trigger_tokens": 20000},
         "hydrated_tool_names": ["web_fetch"],
         "capability_snapshot_exposure_revision": "exp:demo",
-        "visible_tool_ids": ["message", "web_fetch"],
+        "visible_tool_ids": ["exec", "web_fetch"],
         "visible_skill_ids": ["web-access"],
-        "provider_tool_schema_names": ["message", "web_fetch"],
+        "provider_tool_schema_names": ["exec", "web_fetch"],
         "source_reason": "finalize",
     }
 
@@ -2201,9 +2201,9 @@ def test_clear_web_ceo_session_artifacts_clears_completed_continuity_snapshot(
             "semantic_context_state": {},
             "hydrated_tool_names": [],
             "capability_snapshot_exposure_revision": "exp:demo",
-            "visible_tool_ids": ["message"],
+            "visible_tool_ids": ["exec"],
             "visible_skill_ids": [],
-            "provider_tool_schema_names": ["message"],
+            "provider_tool_schema_names": ["exec"],
             "source_reason": "finalize",
         },
     )
@@ -2235,9 +2235,9 @@ def test_runtime_agent_session_restores_completed_continuity_snapshot_from_disk(
             "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
             "hydrated_tool_names": ["web_fetch"],
             "capability_snapshot_exposure_revision": "exp:demo",
-            "visible_tool_ids": ["message", "web_fetch"],
+            "visible_tool_ids": ["exec", "web_fetch"],
             "visible_skill_ids": ["web-access"],
-            "provider_tool_schema_names": ["message", "web_fetch"],
+            "provider_tool_schema_names": ["exec", "web_fetch"],
             "source_reason": "finalize",
         },
     )
@@ -4837,6 +4837,154 @@ def test_ceo_websocket_unknown_local_session_falls_back_to_existing_active_sessi
     assert not session_manager.get_path(missing_session_id).exists()
 
 
+@pytest.mark.asyncio
+async def test_ceo_websocket_queues_running_turn_follow_up_and_chains_next_turn(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _mock_workspace(monkeypatch, tmp_path)
+
+    async def _ensure_services(_agent) -> None:
+        return None
+
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
+
+    class _FollowUpChainingSession:
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(
+                status="idle",
+                is_running=False,
+                paused=False,
+                pending_interrupts=[],
+            )
+            self._listeners = set()
+            self.prompt_payloads: list[UserInputMessage] = []
+            self.prompt_batch_payloads: list[list[UserInputMessage]] = []
+            self.queued_follow_up_payloads: list[list[UserInputMessage]] = []
+            self._queued_follow_ups: list[UserInputMessage] = []
+            self.allow_first_turn_finish = asyncio.Event()
+
+        def subscribe(self, listener):
+            self._listeners.add(listener)
+
+            def _unsubscribe() -> None:
+                self._listeners.discard(listener)
+
+            return _unsubscribe
+
+        def state_dict(self) -> dict[str, object]:
+            return {"status": self.state.status, "is_running": self.state.is_running}
+
+        def inflight_turn_snapshot(self):
+            return None
+
+        async def _emit(self, event_type: str, **payload) -> None:
+            event = AgentEvent(type=event_type, timestamp="2026-04-19T12:00:00", payload=payload)
+            for listener in list(self._listeners):
+                result = listener(event)
+                if hasattr(result, "__await__"):
+                    await result
+
+        async def prompt(self, user_message) -> SimpleNamespace:
+            self.prompt_payloads.append(user_message)
+            self.state.status = "running"
+            self.state.is_running = True
+            await self._emit("state_snapshot", state=self.state_dict())
+            if len(self.prompt_payloads) == 1:
+                await self.allow_first_turn_finish.wait()
+            self.state.status = "completed"
+            self.state.is_running = False
+            await self._emit(
+                "message_end",
+                role="assistant",
+                text="first reply" if len(self.prompt_payloads) == 1 else "second reply",
+                source="user",
+                turn_id="turn-1" if len(self.prompt_payloads) == 1 else "turn-2",
+            )
+            await self._emit("state_snapshot", state=self.state_dict())
+            return SimpleNamespace(output="first reply" if len(self.prompt_payloads) == 1 else "second reply")
+
+        async def prompt_batch(self, user_messages) -> SimpleNamespace:
+            self.prompt_batch_payloads.append(list(user_messages))
+            self.state.status = "running"
+            self.state.is_running = True
+            await self._emit("state_snapshot", state=self.state_dict())
+            self.state.status = "completed"
+            self.state.is_running = False
+            await self._emit(
+                "message_end",
+                role="assistant",
+                text="second reply",
+                source="user",
+                turn_id="turn-2",
+            )
+            await self._emit("state_snapshot", state=self.state_dict())
+            return SimpleNamespace(output="second reply")
+
+        async def queue_follow_up_batch(self, user_messages, persist_transcript: bool = True):
+            _ = persist_transcript
+            batch = list(user_messages or [])
+            self.queued_follow_up_payloads.append(batch)
+            self._queued_follow_ups.extend(batch)
+            return batch
+
+        def drain_queued_follow_up_messages(self) -> list[UserInputMessage]:
+            batch = list(self._queued_follow_ups)
+            self._queued_follow_ups = []
+            return batch
+
+    session_id = "web:ceo-running-follow-up"
+    live_session = _FollowUpChainingSession()
+    agent = SimpleNamespace(
+        sessions=SessionManager(tmp_path),
+        main_task_service=_TaskService(),
+    )
+    runtime_manager = SimpleNamespace(
+        get=lambda key: live_session if str(key or "") == session_id else None,
+        get_or_create=lambda **kwargs: live_session,
+    )
+
+    monkeypatch.setattr(websocket_ceo, "get_agent", lambda: agent)
+    monkeypatch.setattr(websocket_ceo, "get_runtime_manager", lambda _agent=None: runtime_manager)
+
+    client = TestClient(_build_app())
+    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
+        _recv_until(ws, lambda payload: payload.get("type") == "ceo.sessions.snapshot")
+
+        ws.send_json({"type": "client.user_message", "text": "Original request"})
+        _recv_until(
+            ws,
+            lambda payload: payload.get("type") == "ceo.state"
+            and str(payload.get("data", {}).get("state", {}).get("status") or "") == "running",
+        )
+
+        ws.send_json({"type": "client.user_message", "text": "Queued follow-up"})
+        live_session.allow_first_turn_finish.set()
+
+        second_reply, seen = _recv_until(
+            ws,
+            lambda payload: payload.get("type") == "ceo.reply.final"
+            and str(payload.get("data", {}).get("text") or "") == "second reply",
+            limit=40,
+        )
+
+    assert second_reply["data"]["text"] == "second reply"
+    assert len(live_session.queued_follow_up_payloads) == 1
+    assert websocket_ceo._history_text(live_session.queued_follow_up_payloads[0][0].content) == "Queued follow-up"
+    assert [websocket_ceo._history_text(item.content) for item in live_session.prompt_payloads] == [
+        "Original request",
+        "Queued follow-up",
+    ]
+    assert live_session.prompt_batch_payloads == []
+    assert all(
+        not (
+            payload.get("type") == "error"
+            and str(payload.get("data", {}).get("code") or "") == "ceo_turn_in_progress"
+        )
+        for payload in seen
+    )
+
+
 def test_ceo_websocket_filters_heartbeat_internal_message_end() -> None:
     assert websocket_ceo._should_forward_message_end(
         {"role": "assistant", "text": "normal reply", "heartbeat_internal": False}
@@ -5519,12 +5667,12 @@ async def test_ceo_frontdoor_prepare_turn_uses_separate_prompt_lane_for_heartbea
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["message"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec"]}
 
     async def _build_for_ceo(**kwargs):
         _ = kwargs
         return SimpleNamespace(
-            tool_names=["message"],
+            tool_names=["exec"],
             model_messages=[
                 {"role": "system", "content": "frontdoor fallback"},
                 {"role": "user", "content": "fallback heartbeat user"},
@@ -5593,7 +5741,6 @@ async def test_ceo_frontdoor_prepare_turn_uses_separate_prompt_lane_for_heartbea
     ]
     assert state_update["messages"] == [
         {"role": "system", "content": "heartbeat stable system"},
-        {"role": "user", "content": "heartbeat request bundle"},
     ]
     assert state_update["stable_messages"] == [{"role": "system", "content": "heartbeat stable system"}]
     assert state_update["dynamic_appendix_messages"] == [{"role": "user", "content": "heartbeat event bundle"}]

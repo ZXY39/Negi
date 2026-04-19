@@ -22,6 +22,7 @@ if "litellm" not in sys.modules:
 import g3ku.shells.web as web_shell
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.registry import ToolRegistry
+from g3ku.core.messages import UserInputMessage
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.context.types import ContextAssemblyResult
@@ -414,6 +415,15 @@ async def test_ceo_frontdoor_runner_directly_executes_visible_tool_without_stage
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_model": "openai_codex:gpt-test",
+            "context_window_tokens": 128000,
+        },
+    )
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
@@ -470,6 +480,15 @@ async def test_ceo_frontdoor_runner_does_not_duplicate_current_user_when_builder
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_model": "openai_codex:gpt-test",
+            "context_window_tokens": 128000,
+        },
+    )
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
@@ -486,6 +505,118 @@ async def test_ceo_frontdoor_runner_does_not_duplicate_current_user_when_builder
     assert output == "done"
     messages = list(backend.calls[0]["messages"] or [])
     assert [str(item.get("content") or "") for item in messages].count("follow up") == 1
+
+
+@pytest.mark.asyncio
+async def test_graph_call_model_injects_running_turn_follow_up_messages_before_provider_send(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    captured: dict[str, object] = {}
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([]),
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _call_model_with_tools(**kwargs):
+        captured["messages"] = list(kwargs.get("messages") or [])
+        return object()
+
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_model": "openai_codex:gpt-test",
+            "context_window_tokens": 128000,
+        },
+    )
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+    monkeypatch.setattr(
+        runner,
+        "_model_response_view",
+        lambda _message: SimpleNamespace(
+            content="done",
+            tool_calls=[],
+            finish_reason="stop",
+            error_text="",
+            provider_request_meta={},
+            provider_request_body={},
+        ),
+    )
+    monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"content": "done"})
+    monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
+
+    queued_follow_ups = [UserInputMessage(content="Please also include the risk matrix.")]
+
+    async def _take_follow_up_batch_for_call_model():
+        if not queued_follow_ups:
+            return []
+        drained = list(queued_follow_ups)
+        queued_follow_ups.clear()
+        return drained
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        take_follow_up_batch_for_call_model=_take_follow_up_batch_for_call_model,
+    )
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(
+            session=session,
+            session_key="web:shared",
+            on_progress=None,
+        )
+    )
+
+    await runner._graph_call_model(
+        {
+            "session_key": "web:shared",
+            "messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "original request"},
+                {"role": "assistant", "content": "working on it"},
+            ],
+            "frontdoor_request_body_messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "original request"},
+                {"role": "assistant", "content": "working on it"},
+            ],
+            "prompt_cache_key": "cache-key",
+            "prompt_cache_diagnostics": {},
+            "model_refs": ["openai_codex:gpt-test"],
+            "parallel_enabled": False,
+            "provider_tool_names": [],
+            "tool_names": [],
+            "dynamic_appendix_messages": [],
+            "turn_overlay_text": None,
+        },
+        runtime=runtime,
+    )
+
+    request_messages = list(captured.get("messages") or [])
+    assert [str(item.get("content") or "") for item in request_messages[-2:]] == [
+        "working on it",
+        "Please also include the risk matrix.",
+    ]
+    assert str(request_messages[-1].get("role") or "") == "user"
 
 
 @pytest.mark.asyncio
@@ -543,6 +674,15 @@ async def test_ceo_frontdoor_runner_executes_xml_tool_call_directly_without_repa
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_model": "openai_codex:gpt-test",
+            "context_window_tokens": 128000,
+        },
+    )
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
@@ -625,6 +765,15 @@ async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload_after
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_model": "openai_codex:gpt-test",
+            "context_window_tokens": 128000,
+        },
+    )
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
@@ -689,6 +838,15 @@ async def test_ceo_frontdoor_runner_retries_empty_turn_until_valid_result(monkey
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_model": "openai_codex:gpt-test",
+            "context_window_tokens": 128000,
+        },
+    )
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
@@ -771,12 +929,16 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
                 ],
                 finish_reason="tool_calls",
             ),
-            LLMResponse(
-                content="后台修复任务已经建立，任务号 `task:demo-123`。我先继续排查，完成后直接把结果同步给你。",
-                finish_reason="stop",
-            ),
-        ]
-    )
+                LLMResponse(
+                    content="后台修复任务已经建立，任务号 `task:demo-123`。我先继续排查，完成后直接把结果同步给你。",
+                    finish_reason="stop",
+                ),
+                LLMResponse(
+                    content="后台修复任务已经建立，任务号 `task:demo-123`。我先继续排查，完成后直接把结果同步给你。",
+                    finish_reason="stop",
+                ),
+            ]
+        )
     loop = SimpleNamespace(
         _ensure_checkpointer_ready=_noop_ready,
         sessions=SessionManager(tmp_path),
@@ -791,7 +953,7 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
         resource_manager=None,
         tool_execution_manager=None,
         _memory_runtime_settings=SimpleNamespace(
-            assembly=SimpleNamespace(frontdoor_interrupt_tool_names=["message"])
+            assembly=SimpleNamespace(frontdoor_interrupt_tool_names=["create_async_task"])
         ),
     )
     runner = CeoFrontDoorRunner(loop=loop)
@@ -808,6 +970,15 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_model": "openai_codex:gpt-test",
+            "context_window_tokens": 128000,
+        },
+    )
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
@@ -822,7 +993,7 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
     output = await runner.run_turn(user_input=SimpleNamespace(content="帮我查有没有上下文管理 skill"), session=session)
 
     assert output == "后台修复任务已经建立，任务号 `task:demo-123`。我先继续排查，完成后直接把结果同步给你。"
-    assert len(backend.calls) == 3
+    assert len(backend.calls) == 4
 
 
 

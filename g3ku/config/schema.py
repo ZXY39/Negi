@@ -708,7 +708,7 @@ class MemoryAssemblyConfig(Base):
     frontdoor_compaction_trigger_ratio: float = Field(default=0.10, ge=0.0, le=1.0)
     frontdoor_interrupt_approval_enabled: bool = False
     frontdoor_interrupt_tool_names: list[str] = Field(
-        default_factory=lambda: ["message", "create_async_task"]
+        default_factory=lambda: ["create_async_task"]
     )
     core_tools: list[str] = Field(
         default_factory=lambda: [

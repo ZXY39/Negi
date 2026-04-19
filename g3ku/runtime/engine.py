@@ -162,14 +162,12 @@ class AgentRuntimeEngine:
         return f"{text[:max_chars]}...(truncated {len(text) - max_chars} chars)"
 
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
-        for name in ('message', 'cron'):
+        _ = message_id
+        for name in ('cron',):
             tool = self.tools.get(name)
             if tool is None or not hasattr(tool, 'set_context'):
                 continue
-            if name == 'message':
-                tool.set_context(channel, chat_id, message_id)
-            else:
-                tool.set_context(channel, chat_id)
+            tool.set_context(channel, chat_id)
 
     def _register_active_task(self, session_key: str, task: asyncio.Task[Any]) -> None:
         key = str(session_key or '').strip()

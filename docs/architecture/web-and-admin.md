@@ -94,9 +94,11 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 ### 2. Queued Follow-Ups
 
 - Browser-side queued follow-ups are stored per session and rendered above the composer.
-- Sending while a turn is active enqueues a follow-up instead of interrupting the current turn.
-- Once the session becomes dispatchable again, queued follow-ups are drained in FIFO order into one fresh outbound batch.
-- Each queued item still remains its own user message in the frontend timeline and in transcript persistence; batching only changes how the next LLM call is assembled.
+- Sending while a turn is active still does not interrupt the current turn, but the browser now forwards that follow-up to the backend immediately instead of waiting for the turn to go idle first.
+- The backend-owned follow-up queue is authoritative once that send succeeds. The local chip list remains a UI affordance only, and chips that were already handed off to the runtime must not be re-sent when the turn later closes.
+- CEO/frontdoor now consumes queued follow-ups at the safe boundary right before the next `call_model` send of the same visible turn. The runtime appends them as independent `user` messages to the current request body instead of concatenating them into one synthetic supplement string.
+- If the current visible turn finishes before another `call_model` round happens, the backend immediately starts the next fresh user turn from the queued follow-ups after the current turn closes.
+- Each queued item still remains its own user message in transcript persistence; batching only changes which next LLM request sees that group first.
 
 ### 3. Context Loader Notices
 
@@ -146,7 +148,7 @@ The backend contract behind that UI behavior is:
 
 - Heartbeat turns count as active session work for the composer button and queueing logic.
 - Queued follow-ups should not interrupt heartbeat execution.
-- Once heartbeat finishes and the session becomes dispatchable again, queued follow-ups may begin draining automatically.
+- Active-turn follow-ups are now forwarded to the backend during heartbeat execution as well. They may be merged into the next safe `call_model` boundary of that same running turn, or become the next fresh user batch immediately after heartbeat finishes if no same-turn model round remains.
 
 ### Task Hall Action Contract
 

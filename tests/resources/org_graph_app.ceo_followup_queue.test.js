@@ -231,8 +231,8 @@ test("primary button shows send when there is input during an active turn", () =
     assert.match(U.ceoSend.innerHTML, /发送/);
 });
 
-test("sending while a turn is active queues follow-up instead of pausing immediately", () => {
-    const { S, U, handleCeoPrimaryAction, __context } = loadApp();
+test("sending while a turn is active queues follow-up and sends it to the runtime immediately", () => {
+    const { S, U, handleCeoPrimaryAction, socket, __context } = loadApp();
     S.ceoTurnActive = true;
     U.ceoInput.value = "前10个";
 
@@ -241,6 +241,11 @@ test("sending while a turn is active queues follow-up instead of pausing immedia
     assert.equal(__context.__pauseRequested || 0, 0);
     assert.equal(Array.isArray(S.ceoQueuedFollowUps?.["web:test"]), true);
     assert.equal(S.ceoQueuedFollowUps["web:test"].length, 1);
+    assert.equal(socket.sent.length, 1);
+    assert.equal(socket.sent[0]?.type, "client.user_message");
+    assert.equal(socket.sent[0]?.session_id, "web:test");
+    assert.equal(Array.isArray(socket.sent[0]?.messages), true);
+    assert.equal(socket.sent[0].messages.length, 1);
     assert.equal(S.ceoQueuedFollowUps["web:test"][0].text, "前10个");
     assert.equal((__context.__showToastCalls || []).length, 0);
 });

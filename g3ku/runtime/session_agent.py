@@ -2085,13 +2085,10 @@ class RuntimeAgentSession:
                 live_context=live_context,
             )
 
-    async def prompt_batch(
+    def _normalize_user_batch_inputs(
         self,
         messages: list[str | UserInputMessage],
-        *,
-        persist_transcript: bool = True,
-        live_context: dict[str, str] | None = None,
-    ) -> RunResult:
+    ) -> list[UserInputMessage]:
         normalized_inputs: list[UserInputMessage] = []
         for raw in list(messages or []):
             item = raw if isinstance(raw, UserInputMessage) else UserInputMessage(content=str(raw))
@@ -2101,6 +2098,42 @@ class RuntimeAgentSession:
             if not text.strip() and not item.attachments:
                 continue
             normalized_inputs.append(item)
+        return normalized_inputs
+
+    def _assign_transcript_batch_without_activating(
+        self,
+        user_inputs: list[UserInputMessage],
+        *,
+        batch_id: str | None = None,
+    ) -> list[UserInputMessage]:
+        resolved_batch_id = str(batch_id or "").strip() or self._new_batch_id()
+        prepared: list[UserInputMessage] = []
+        for item in list(user_inputs or []):
+            if not isinstance(item, UserInputMessage):
+                continue
+            metadata = dict(item.metadata or {})
+            turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip() or self._new_turn_id()
+            metadata[_TRANSCRIPT_TURN_ID_KEY] = turn_id
+            metadata[_TRANSCRIPT_BATCH_ID_KEY] = resolved_batch_id
+            item.metadata = metadata
+            prepared.append(item)
+        return prepared
+
+    @staticmethod
+    def _user_input_turn_id(user_input: UserInputMessage | None) -> str:
+        if not isinstance(user_input, UserInputMessage):
+            return ""
+        metadata = dict(user_input.metadata or {})
+        return str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip()
+
+    async def prompt_batch(
+        self,
+        messages: list[str | UserInputMessage],
+        *,
+        persist_transcript: bool = True,
+        live_context: dict[str, str] | None = None,
+    ) -> RunResult:
+        normalized_inputs = self._normalize_user_batch_inputs(messages)
         if not normalized_inputs:
             raise ValueError("prompt_batch_requires_messages")
         combined_query_text = self._batch_query_text(normalized_inputs)
@@ -2117,6 +2150,61 @@ class RuntimeAgentSession:
                 persist_transcript=persist_transcript,
                 live_context=live_context,
             )
+
+    async def queue_follow_up_batch(
+        self,
+        messages: list[str | UserInputMessage],
+        *,
+        persist_transcript: bool = True,
+    ) -> list[UserInputMessage]:
+        normalized_inputs = self._normalize_user_batch_inputs(messages)
+        if not normalized_inputs:
+            return []
+        queued_inputs = self._assign_transcript_batch_without_activating(normalized_inputs)
+        self._state.queued_follow_up_messages.extend(queued_inputs)
+        if persist_transcript:
+            await self._persist_pending_user_messages(user_inputs=queued_inputs)
+        return list(queued_inputs)
+
+    async def take_follow_up_batch_for_call_model(self) -> list[UserInputMessage]:
+        queued_inputs = [
+            item
+            for item in list(self._state.queued_follow_up_messages or [])
+            if isinstance(item, UserInputMessage)
+        ]
+        self._state.queued_follow_up_messages.clear()
+        if not queued_inputs:
+            return []
+        drained_inputs = self._assign_transcript_batch_without_activating(queued_inputs)
+        existing_inputs = [
+            item
+            for item in list(self._active_user_batch_inputs or [])
+            if isinstance(item, UserInputMessage)
+        ]
+        seen_turn_ids = {
+            self._user_input_turn_id(item)
+            for item in existing_inputs
+            if self._user_input_turn_id(item)
+        }
+        for item in drained_inputs:
+            turn_id = self._user_input_turn_id(item)
+            if turn_id and turn_id in seen_turn_ids:
+                continue
+            existing_inputs.append(item)
+            if turn_id:
+                seen_turn_ids.add(turn_id)
+        self._active_user_batch_inputs = list(existing_inputs)
+        await self._persist_pending_user_messages(user_inputs=drained_inputs)
+        return list(drained_inputs)
+
+    def drain_queued_follow_up_messages(self) -> list[UserInputMessage]:
+        queued_inputs = [
+            item
+            for item in list(self._state.queued_follow_up_messages or [])
+            if isinstance(item, UserInputMessage)
+        ]
+        self._state.queued_follow_up_messages.clear()
+        return queued_inputs
 
     async def continue_(self, *, live_context: dict[str, str] | None = None) -> RunResult:
         return await self.prompt(self._last_prompt, live_context=live_context)

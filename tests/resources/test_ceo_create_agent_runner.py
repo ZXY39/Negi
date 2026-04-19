@@ -299,7 +299,7 @@ def test_memory_assembly_config_no_longer_exposes_frontdoor_global_summary_setti
     assert not hasattr(cfg, "frontdoor_summarizer_trigger_message_count")
     assert not hasattr(cfg, "frontdoor_summarizer_keep_message_count")
     assert cfg.frontdoor_interrupt_approval_enabled is False
-    assert cfg.frontdoor_interrupt_tool_names == ["message", "create_async_task"]
+    assert cfg.frontdoor_interrupt_tool_names == ["create_async_task"]
     assert not hasattr(cfg, "frontdoor_global_summary_trigger_ratio")
     assert not hasattr(cfg, "frontdoor_global_summary_target_ratio")
     assert not hasattr(cfg, "frontdoor_global_summary_min_output_tokens")
@@ -2851,7 +2851,7 @@ def test_fresh_turn_tool_schema_seed_reuses_previous_actual_request_schemas_when
             {"type": "function", "function": {"name": "exec", "description": "", "parameters": {"type": "object"}}},
             {
                 "type": "function",
-                "function": {"name": "message", "description": "", "parameters": {"type": "object"}},
+                "function": {"name": "web_fetch", "description": "", "parameters": {"type": "object"}},
             },
             {
                 "type": "function",
@@ -2879,12 +2879,12 @@ def test_runtime_agent_session_completed_continuity_bridge_requires_exact_visibl
     )
     session._frontdoor_completed_continuity_bridge_pending = True
     session._frontdoor_capability_snapshot_exposure_revision = "exp:demo"
-    session._frontdoor_visible_tool_ids = ["message", "web_fetch"]
+    session._frontdoor_visible_tool_ids = ["exec", "web_fetch"]
     session._frontdoor_visible_skill_ids = ["web-access"]
-    session._frontdoor_provider_tool_schema_names = ["message", "web_fetch"]
+    session._frontdoor_provider_tool_schema_names = ["exec", "web_fetch"]
 
     matched = session._consume_completed_continuity_bridge(
-        current_visible_tool_ids=["web_fetch", "message"],
+        current_visible_tool_ids=["web_fetch", "exec"],
         current_visible_skill_ids=["web-access"],
     )
 
@@ -2892,12 +2892,12 @@ def test_runtime_agent_session_completed_continuity_bridge_requires_exact_visibl
         "pending": True,
         "enabled": True,
         "exposure_revision": "exp:demo",
-        "provider_tool_schema_names": ["message", "web_fetch"],
+        "provider_tool_schema_names": ["exec", "web_fetch"],
     }
 
     session._frontdoor_completed_continuity_bridge_pending = True
     mismatched = session._consume_completed_continuity_bridge(
-        current_visible_tool_ids=["message", "web_fetch", "filesystem_write"],
+        current_visible_tool_ids=["exec", "web_fetch", "filesystem_write"],
         current_visible_skill_ids=["web-access"],
     )
 
@@ -2942,7 +2942,7 @@ def test_fresh_turn_tool_schema_seed_skips_expected_bridge_when_previous_names_d
         {"type": "function", "function": {"name": "exec", "description": "", "parameters": {"type": "object"}}},
         {
             "type": "function",
-            "function": {"name": "message", "description": "", "parameters": {"type": "object"}},
+            "function": {"name": "web_fetch", "description": "", "parameters": {"type": "object"}},
         },
         {
             "type": "function",
@@ -2953,7 +2953,7 @@ def test_fresh_turn_tool_schema_seed_skips_expected_bridge_when_previous_names_d
     seeded_schemas, seeded_names = runner._fresh_turn_tool_schema_seed_from_previous_actual_request(
         session=session,
         tool_schemas=current_schemas,
-        expected_schema_names=["message", "web_fetch"],
+        expected_schema_names=["exec", "web_fetch"],
     )
 
     assert seeded_names is None
@@ -3013,24 +3013,24 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
         {"role": "assistant", "content": "older answer"},
         {
             "role": "user",
-            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["message","submit_next_stage"]}',
+            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["exec","submit_next_stage"]}',
         },
         {
             "role": "assistant",
             "content": "",
             "tool_calls": [
                 {
-                    "id": "call-message-1",
+                    "id": "call-exec-1",
                     "type": "function",
-                    "function": {"name": "message", "arguments": "{}"},
+                    "function": {"name": "exec", "arguments": "{}"},
                 }
             ],
         },
         {
             "role": "tool",
-            "name": "message",
-            "tool_call_id": "call-message-1",
-            "content": "Message sent to final:ceo-demo",
+            "name": "exec",
+            "tool_call_id": "call-exec-1",
+            "content": "Command finished for final:ceo-demo",
         },
     ]
     previous_request_path.write_text(
@@ -3040,7 +3040,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
                 "tool_schemas": [
                     {
                         "type": "function",
-                        "function": {"name": "message", "description": "", "parameters": {"type": "object"}},
+                        "function": {"name": "exec", "description": "", "parameters": {"type": "object"}},
                     },
                     {
                         "type": "function",
@@ -3055,14 +3055,14 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["message", "submit_next_stage"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec", "submit_next_stage"]}
 
     async def _build_for_ceo(**kwargs):
         stable_messages = list(kwargs.get("request_body_seed_messages") or [])
         user_content = str(kwargs.get("user_content") or "").strip()
         model_messages = [*stable_messages, {"role": "user", "content": user_content}]
         return SimpleNamespace(
-            tool_names=["message", "submit_next_stage"],
+            tool_names=["exec", "submit_next_stage"],
             model_messages=model_messages,
             stable_messages=list(stable_messages),
             dynamic_appendix_messages=[],
@@ -3073,7 +3073,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
                 "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["message", "submit_next_stage"],
+                    "visible_tool_ids": ["exec", "submit_next_stage"],
                     "visible_skill_ids": [],
                 },
             },
@@ -3124,17 +3124,17 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
                 "content": "",
                 "tool_calls": [
                     {
-                        "id": "call-message-1",
+                        "id": "call-exec-1",
                         "type": "function",
-                        "function": {"name": "message", "arguments": "{}"},
+                        "function": {"name": "exec", "arguments": "{}"},
                     }
                 ],
             },
             {
                 "role": "tool",
-                "name": "message",
-                "tool_call_id": "call-message-1",
-                "content": "Message sent to final:ceo-demo",
+                "name": "exec",
+                "tool_call_id": "call-exec-1",
+                "content": "Command finished for final:ceo-demo",
             },
             {"role": "assistant", "content": "final answer"},
         ],
@@ -3198,24 +3198,24 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
         {"role": "assistant", "content": "older answer"},
         {
             "role": "user",
-            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["message","submit_next_stage"]}',
+            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["exec","submit_next_stage"]}',
         },
         {
             "role": "assistant",
             "content": "",
             "tool_calls": [
                 {
-                    "id": "call-message-1",
+                    "id": "call-exec-1",
                     "type": "function",
-                    "function": {"name": "message", "arguments": "{}"},
+                    "function": {"name": "exec", "arguments": "{}"},
                 }
             ],
         },
         {
             "role": "tool",
-            "name": "message",
-            "tool_call_id": "call-message-1",
-            "content": "Message sent to final:ceo-demo",
+            "name": "exec",
+            "tool_call_id": "call-exec-1",
+            "content": "Command finished for final:ceo-demo",
         },
     ]
     previous_request_path.write_text(
@@ -3225,7 +3225,7 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
                 "tool_schemas": [
                     {
                         "type": "function",
-                        "function": {"name": "message", "description": "", "parameters": {"type": "object"}},
+                        "function": {"name": "exec", "description": "", "parameters": {"type": "object"}},
                     },
                     {
                         "type": "function",
@@ -3240,14 +3240,14 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["message", "submit_next_stage"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec", "submit_next_stage"]}
 
     async def _build_for_ceo(**kwargs):
         stable_messages = list(kwargs.get("request_body_seed_messages") or [])
         user_content = str(kwargs.get("user_content") or "").strip()
         model_messages = [*stable_messages, {"role": "user", "content": user_content}]
         return SimpleNamespace(
-            tool_names=["message", "submit_next_stage"],
+            tool_names=["exec", "submit_next_stage"],
             model_messages=model_messages,
             stable_messages=list(stable_messages),
             dynamic_appendix_messages=[],
@@ -3258,7 +3258,7 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
                 "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["message", "submit_next_stage"],
+                    "visible_tool_ids": ["exec", "submit_next_stage"],
                     "visible_skill_ids": [],
                 },
             },
@@ -3332,17 +3332,17 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
                 "content": "",
                 "tool_calls": [
                     {
-                        "id": "call-message-1",
+                        "id": "call-exec-1",
                         "type": "function",
-                        "function": {"name": "message", "arguments": "{}"},
+                        "function": {"name": "exec", "arguments": "{}"},
                     }
                 ],
             },
             {
                 "role": "tool",
-                "name": "message",
-                "tool_call_id": "call-message-1",
-                "content": "Message sent to final:ceo-demo",
+                "name": "exec",
+                "tool_call_id": "call-exec-1",
+                "content": "Command finished for final:ceo-demo",
             },
             {"role": "assistant", "content": "final answer"},
         ],
@@ -3402,24 +3402,24 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
         {"role": "user", "content": "old question"},
         {
             "role": "user",
-            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["message","submit_next_stage"]}',
+            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["exec","submit_next_stage"]}',
         },
         {
             "role": "assistant",
             "content": "",
             "tool_calls": [
                 {
-                    "id": "call-message-1",
+                    "id": "call-exec-1",
                     "type": "function",
-                    "function": {"name": "message", "arguments": "{}"},
+                    "function": {"name": "exec", "arguments": "{}"},
                 }
             ],
         },
         {
             "role": "tool",
-            "name": "message",
-            "tool_call_id": "call-message-1",
-            "content": "Message sent to final:ceo-demo ",
+            "name": "exec",
+            "tool_call_id": "call-exec-1",
+            "content": "Command finished for final:ceo-demo ",
         },
     ]
     previous_request_path.write_text(
@@ -3429,7 +3429,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
                 "tool_schemas": [
                     {
                         "type": "function",
-                        "function": {"name": "message", "description": "", "parameters": {"type": "object"}},
+                        "function": {"name": "exec", "description": "", "parameters": {"type": "object"}},
                     },
                     {
                         "type": "function",
@@ -3444,14 +3444,14 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["message", "submit_next_stage"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec", "submit_next_stage"]}
 
     async def _build_for_ceo(**kwargs):
         stable_messages = list(kwargs.get("request_body_seed_messages") or [])
         user_content = str(kwargs.get("user_content") or "").strip()
         model_messages = [*stable_messages, {"role": "user", "content": user_content}]
         return SimpleNamespace(
-            tool_names=["message", "submit_next_stage"],
+            tool_names=["exec", "submit_next_stage"],
             model_messages=model_messages,
             stable_messages=list(stable_messages),
             dynamic_appendix_messages=[],
@@ -3462,7 +3462,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
                 "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["message", "submit_next_stage"],
+                    "visible_tool_ids": ["exec", "submit_next_stage"],
                     "visible_skill_ids": [],
                 },
             },
@@ -3513,17 +3513,17 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
                 "content": "",
                 "tool_calls": [
                     {
-                        "id": "call-message-1",
+                        "id": "call-exec-1",
                         "type": "function",
-                        "function": {"name": "message", "arguments": "{}"},
+                        "function": {"name": "exec", "arguments": "{}"},
                     }
                 ],
             },
             {
                 "role": "tool",
-                "name": "message",
-                "tool_call_id": "call-message-1",
-                "content": "Message sent to final:ceo-demo",
+                "name": "exec",
+                "tool_call_id": "call-exec-1",
+                "content": "Command finished for final:ceo-demo",
             },
             {"role": "assistant", "content": "final answer"},
         ],
@@ -3708,15 +3708,15 @@ async def test_prepare_turn_keeps_provider_schema_hash_stable_when_web_fetch_is_
     session_key = "web:frontdoor-cache"
     runtime_session = SimpleNamespace(session_key=session_key, messages=[])
     tools = {
-        "message": _NamedSchemaTool(
-            name="message",
-            description="Send a message to the user over the external channel.",
+        "exec": _NamedSchemaTool(
+            name="exec",
+            description="Run a command in the current workspace.",
             parameters={
                 "type": "object",
                 "properties": {
-                    "content": {"type": "string", "description": "Message content to send."},
+                    "command": {"type": "string", "description": "Command to execute."},
                 },
-                "required": ["content"],
+                "required": ["command"],
             },
         ),
         "submit_next_stage": _NamedSchemaTool(
@@ -3765,13 +3765,13 @@ async def test_prepare_turn_keeps_provider_schema_hash_stable_when_web_fetch_is_
         return {
             "skills": [],
             "tool_families": [],
-            "tool_names": ["message", "submit_next_stage", "web_fetch"],
+            "tool_names": ["exec", "submit_next_stage", "web_fetch"],
         }
 
     captured_builds: list[dict[str, object]] = []
     assembly_tool_name_sets = [
-        ["message", "submit_next_stage"],
-        ["message", "submit_next_stage", "web_fetch"],
+        ["exec", "submit_next_stage"],
+        ["exec", "submit_next_stage", "web_fetch"],
     ]
     assembly_candidate_sets = [
         ["web_fetch"],
@@ -3807,7 +3807,7 @@ async def test_prepare_turn_keeps_provider_schema_hash_stable_when_web_fetch_is_
                 "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["message", "submit_next_stage", "web_fetch"],
+                    "visible_tool_ids": ["exec", "submit_next_stage", "web_fetch"],
                     "visible_skill_ids": [],
                 },
             },
@@ -3850,8 +3850,8 @@ async def test_prepare_turn_keeps_provider_schema_hash_stable_when_web_fetch_is_
         ),
     )
 
-    assert first_prepared["provider_tool_names"] == ["message", "submit_next_stage", "web_fetch"]
-    assert second_prepared["provider_tool_names"] == ["message", "submit_next_stage", "web_fetch"]
+    assert first_prepared["provider_tool_names"] == ["exec", "submit_next_stage", "web_fetch"]
+    assert second_prepared["provider_tool_names"] == ["exec", "submit_next_stage", "web_fetch"]
     assert (
         first_prepared["prompt_cache_diagnostics"]["actual_tool_schema_hash"]
         == second_prepared["prompt_cache_diagnostics"]["actual_tool_schema_hash"]
@@ -5922,7 +5922,7 @@ async def test_create_agent_runner_keeps_pending_interrupt_contract_coherent() -
 
 @pytest.mark.asyncio
 async def test_create_agent_runner_preserves_full_tool_call_payload_batch_from_interrupt_state() -> None:
-    subset_payloads = [{"id": "call-1", "name": "message", "arguments": {"content": "safe subset"}}]
+    subset_payloads = [{"id": "call-1", "name": "exec", "arguments": {"command": "safe subset"}}]
     full_payloads = subset_payloads + [
         {"id": "call-2", "name": "create_async_task", "arguments": {"task": "risky full batch"}}
     ]

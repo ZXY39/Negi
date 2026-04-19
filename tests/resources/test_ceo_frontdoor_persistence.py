@@ -271,21 +271,21 @@ class _InterruptingCompiledGraph:
         )
 
 
-class _MessageTool(Tool):
+class _ExecTool(Tool):
     @property
     def name(self) -> str:
-        return "message"
+        return "exec"
 
     @property
     def description(self) -> str:
-        return "send message"
+        return "run command"
 
     @property
     def parameters(self) -> dict[str, object]:
         return {
             "type": "object",
-            "properties": {"content": {"type": "string"}},
-            "required": ["content"],
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
         }
 
     async def execute(self, **kwargs):
@@ -452,7 +452,7 @@ def test_ceo_frontdoor_review_tool_calls_ignores_resume_payload_tool_call_overri
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
     original_payloads = [{"name": "create_async_task", "arguments": {"task": "original"}}]
-    override_payloads = [{"name": "message", "arguments": {"content": "mutated"}}]
+    override_payloads = [{"name": "exec", "arguments": {"command": "mutated"}}]
 
     monkeypatch.setattr(
         ceo_runtime_ops,
@@ -545,12 +545,12 @@ async def test_ceo_frontdoor_prepare_turn_keeps_runtime_only_objects_out_of_chec
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["message"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec"]}
 
     async def _build_for_ceo(**kwargs):
         _ = kwargs
         return SimpleNamespace(
-            tool_names=["message"],
+            tool_names=["exec"],
             model_messages=[{"role": "system", "content": "SYSTEM PROMPT"}],
         )
 
@@ -587,7 +587,7 @@ async def test_ceo_frontdoor_prepare_turn_keeps_runtime_only_objects_out_of_chec
         "content": "persist safely",
         "metadata": {"cron_job_id": "cron-1"},
     }
-    assert state_update["tool_names"] == ["message"]
+    assert state_update["tool_names"] == ["exec"]
     assert state_update["prompt_cache_key"] == "cache-key"
     assert "runtime_context" not in state_update
     assert "visible_tools" not in state_update
@@ -628,12 +628,12 @@ async def test_ceo_frontdoor_prepare_turn_passes_checkpoint_messages_to_builder(
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["message"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec"]}
 
     async def _build_for_ceo(**kwargs):
         captured.update(kwargs)
         return SimpleNamespace(
-            tool_names=["message"],
+            tool_names=["exec"],
             model_messages=[{"role": "system", "content": "SYSTEM PROMPT"}],
         )
 
@@ -1162,13 +1162,13 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
             ],
             "dynamic_appendix_messages": [],
             "turn_overlay_text": "",
-            "tool_names": ["message", "load_tool_context", "exec", "submit_next_stage"],
+            "tool_names": ["exec", "load_tool_context", "submit_next_stage"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
             "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["message", "load_tool_context", "exec", "submit_next_stage"],
+            "rbac_visible_tool_names": ["exec", "load_tool_context", "submit_next_stage"],
             "rbac_visible_skill_ids": [],
             "frontdoor_stage_state": {
                 "active_stage_id": "frontdoor-stage-1",
@@ -1201,7 +1201,7 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
     )
 
     assert selected_tool_schema_requests
-    assert selected_tool_schema_requests[-1] == ["message", "load_tool_context", "exec", "submit_next_stage"]
+    assert selected_tool_schema_requests[-1] == ["exec", "load_tool_context", "submit_next_stage"]
     replaced_messages = [dict(item) for item in list(update["messages"] or []) if isinstance(item, dict)]
     appended_contract = _frontdoor_tool_contract_payload(replaced_messages[-1])
     assert appended_contract is not None
@@ -1244,7 +1244,7 @@ def test_memory_assembly_config_exposes_frontdoor_runtime_defaults() -> None:
     assert not hasattr(config, "frontdoor_summarizer_trigger_message_count")
     assert not hasattr(config, "frontdoor_summarizer_keep_message_count")
     assert config.frontdoor_interrupt_approval_enabled is False
-    assert config.frontdoor_interrupt_tool_names == ["message", "create_async_task"]
+    assert config.frontdoor_interrupt_tool_names == ["create_async_task"]
 
 
 @pytest.mark.asyncio
@@ -1276,12 +1276,12 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["message"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec"]}
 
     async def _build_for_ceo(**kwargs):
         _ = kwargs
         return SimpleNamespace(
-            tool_names=["message"],
+            tool_names=["exec"],
             model_messages=[
                 {"role": "system", "content": "SYSTEM PROMPT"},
                 {"role": "user", "content": "question one"},
@@ -1400,19 +1400,19 @@ async def test_ceo_frontdoor_prepare_turn_prompt_cache_key_changes_when_stable_p
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["message"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec"]}
 
     prompt_variants = iter(
         [
             SimpleNamespace(
-                tool_names=["message"],
+                tool_names=["exec"],
                 model_messages=[
                     {"role": "system", "content": "SYSTEM PROMPT A"},
                     {"role": "user", "content": "same question"},
                 ],
             ),
             SimpleNamespace(
-                tool_names=["message"],
+                tool_names=["exec"],
                 model_messages=[
                     {"role": "system", "content": "SYSTEM PROMPT B"},
                     {"role": "user", "content": "same question"},
@@ -1466,21 +1466,21 @@ async def test_ceo_frontdoor_prepare_turn_records_prompt_cache_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    class _MessageTool(Tool):
+    class _ExecTool(Tool):
         @property
         def name(self) -> str:
-            return "message"
+            return "exec"
 
         @property
         def description(self) -> str:
-            return "send message"
+            return "run command"
 
         @property
         def parameters(self) -> dict[str, object]:
             return {
                 "type": "object",
-                "properties": {"content": {"type": "string"}},
-                "required": ["content"],
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
             }
 
         async def execute(self, **kwargs):
@@ -1497,7 +1497,7 @@ async def test_ceo_frontdoor_prepare_turn_records_prompt_cache_diagnostics(
         _checkpointer=None,
         _store=None,
         main_task_service=None,
-        tools={"message": _MessageTool()},
+        tools={"exec": _ExecTool()},
         max_iterations=8,
         workspace=tmp_path,
         temp_dir=str(tmp_path / "tmp"),
@@ -1506,12 +1506,12 @@ async def test_ceo_frontdoor_prepare_turn_records_prompt_cache_diagnostics(
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["message"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec"]}
 
     async def _build_for_ceo(**kwargs):
         _ = kwargs
         return SimpleNamespace(
-            tool_names=["message"],
+            tool_names=["exec"],
             model_messages=[
                 {"role": "system", "content": "SYSTEM PROMPT"},
                 {"role": "user", "content": "question one"},
@@ -1652,7 +1652,7 @@ async def test_graph_prepare_turn_real_session_path_drops_summary_fields(
         _checkpointer=None,
         _store=None,
         main_task_service=None,
-        tools={"message": _MessageTool()},
+        tools={"exec": _ExecTool()},
         max_iterations=8,
         workspace=tmp_path,
         temp_dir=str(tmp_path / "tmp"),
@@ -1661,12 +1661,12 @@ async def test_graph_prepare_turn_real_session_path_drops_summary_fields(
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["message"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec"]}
 
     async def _build_for_ceo(**kwargs):
         _ = kwargs
         return SimpleNamespace(
-            tool_names=["message"],
+            tool_names=["exec"],
             model_messages=[
                 {"role": "system", "content": "SYSTEM PROMPT"},
                 {"role": "user", "content": "question one"},

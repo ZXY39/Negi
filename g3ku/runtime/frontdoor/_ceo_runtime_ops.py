@@ -16,6 +16,7 @@ from langgraph.types import interrupt
 
 from g3ku.agent.tools.base import Tool
 from g3ku.config.live_runtime import get_runtime_config
+from g3ku.core.messages import UserInputMessage
 from g3ku.json_schema_utils import (
     attach_raw_parameters_schema,
     build_args_schema_model,
@@ -2704,7 +2705,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not bool(getattr(assembly_cfg, "frontdoor_interrupt_approval_enabled", False)):
             return set()
         raw_names = list(
-            getattr(assembly_cfg, "frontdoor_interrupt_tool_names", ["message", "create_async_task"]) or []
+            getattr(assembly_cfg, "frontdoor_interrupt_tool_names", ["create_async_task"]) or []
         )
         return {str(name).strip() for name in raw_names if str(name).strip()}
 
@@ -3145,23 +3146,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if main_service is not None:
             await main_service.startup()
 
-        for name in ("message", "cron"):
+        for name in ("cron",):
             tool = self._loop.tools.get(name)
             if tool is not None and hasattr(tool, "set_context"):
-                if name == "message":
-                    tool.set_context(
-                        getattr(session, "_channel", "cli"),
-                        getattr(session, "_chat_id", session.state.session_key),
-                        None,
-                    )
-                else:
-                    tool.set_context(
-                        getattr(session, "_channel", "cli"),
-                        getattr(session, "_chat_id", session.state.session_key),
-                    )
-        message_tool = self._loop.tools.get("message")
-        if message_tool is not None and hasattr(message_tool, "start_turn"):
-            message_tool.start_turn()
+                tool.set_context(
+                    getattr(session, "_channel", "cli"),
+                    getattr(session, "_chat_id", session.state.session_key),
+                )
 
         exposure = await self._resolver.resolve_for_actor(
             actor_role="ceo",
@@ -3532,6 +3523,69 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "next_step": "call_model",
         }
 
+    async def _consume_session_follow_up_messages_before_call_model(
+        self,
+        *,
+        state: CeoGraphState,
+        runtime: Runtime[CeoRuntimeContext],
+    ) -> dict[str, Any]:
+        session = getattr(getattr(runtime, "context", None), "session", None)
+        if session is None:
+            return {}
+        take_follow_ups = getattr(session, "take_follow_up_batch_for_call_model", None)
+        if not callable(take_follow_ups):
+            return {}
+        drained = take_follow_ups()
+        if hasattr(drained, "__await__"):
+            drained = await drained
+        queued_inputs = [
+            item
+            for item in list(drained or [])
+            if isinstance(item, UserInputMessage)
+        ]
+        if not queued_inputs:
+            return {}
+        request_body_messages = [
+            dict(item)
+            for item in list(
+                state.get("frontdoor_request_body_messages")
+                or state.get("messages")
+                or getattr(session, "_frontdoor_request_body_messages", [])
+                or []
+            )
+            if isinstance(item, dict)
+        ]
+        if request_body_messages:
+            request_body_messages = self._request_body_messages_without_tool_contracts(request_body_messages)
+        follow_up_messages: list[dict[str, Any]] = []
+        follow_up_texts: list[str] = []
+        for item in queued_inputs:
+            follow_up_messages.append({"role": "user", "content": self._model_content(getattr(item, "content", ""))})
+            follow_up_text = self._content_text(getattr(item, "content", ""))
+            if follow_up_text.strip():
+                follow_up_texts.append(follow_up_text)
+        if not follow_up_messages:
+            return {}
+        updated_request_body_messages = [*request_body_messages, *follow_up_messages]
+        current_query_text = str(state.get("query_text") or "").strip()
+        appended_query_text = "\n\n".join(follow_up_texts).strip()
+        merged_query_text = "\n\n".join(
+            part
+            for part in (current_query_text, appended_query_text)
+            if str(part or "").strip()
+        ).strip()
+        update = {
+            "messages": list(updated_request_body_messages),
+            "frontdoor_request_body_messages": list(updated_request_body_messages),
+        }
+        if merged_query_text:
+            update["query_text"] = merged_query_text
+        self._sync_runtime_session_frontdoor_state(
+            state={**dict(state or {}), **update},
+            runtime=runtime,
+        )
+        return update
+
     async def _graph_call_model(
         self,
         state: CeoGraphState,
@@ -3544,6 +3598,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             raise RuntimeError("CEO frontdoor exceeded maximum iterations")
 
         state_for_request = dict(state or {})
+        follow_up_update = await self._consume_session_follow_up_messages_before_call_model(
+            state=state_for_request,
+            runtime=runtime,
+        )
+        if follow_up_update:
+            state_for_request = {**state_for_request, **follow_up_update}
         langchain_tools = self._build_langchain_tools_for_state(state=state_for_request, runtime=runtime)
         while True:
             preflight_snapshot = self._frontdoor_send_preflight_snapshot(

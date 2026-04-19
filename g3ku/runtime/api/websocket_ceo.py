@@ -805,19 +805,39 @@ async def ceo_websocket(websocket: WebSocket):
         except Exception:
             return
 
-    async def _run_user_turn(user_message: str | UserInputMessage | list[UserInputMessage]) -> None:
-        try:
-            if isinstance(user_message, list):
-                if len(user_message) == 1:
-                    await session.prompt(user_message[0])
-                else:
-                    prompt_batch = getattr(session, 'prompt_batch', None)
-                    if callable(prompt_batch):
-                        await prompt_batch(user_message)
-                    else:
-                        await session.prompt(user_message[-1])
+    async def _invoke_user_turn(user_message: str | UserInputMessage | list[UserInputMessage]) -> None:
+        if isinstance(user_message, list):
+            if len(user_message) == 1:
+                await session.prompt(user_message[0])
             else:
-                await session.prompt(user_message)
+                prompt_batch = getattr(session, 'prompt_batch', None)
+                if callable(prompt_batch):
+                    await prompt_batch(user_message)
+                else:
+                    await session.prompt(user_message[-1])
+        else:
+            await session.prompt(user_message)
+
+    async def _drain_queued_follow_ups() -> list[UserInputMessage]:
+        drain_follow_ups = getattr(session, 'drain_queued_follow_up_messages', None)
+        if not callable(drain_follow_ups):
+            return []
+        drained = await _maybe_await(drain_follow_ups())
+        return [
+            item
+            for item in list(drained or [])
+            if isinstance(item, UserInputMessage)
+        ]
+
+    async def _run_user_turn(user_message: str | UserInputMessage | list[UserInputMessage]) -> None:
+        current_payload = user_message
+        try:
+            while True:
+                await _invoke_user_turn(current_payload)
+                queued_follow_ups = await _drain_queued_follow_ups()
+                if not queued_follow_ups:
+                    break
+                current_payload = list(queued_follow_ups)
         except asyncio.CancelledError:
             return
         except Exception as exc:
@@ -1043,6 +1063,46 @@ async def ceo_websocket(websocket: WebSocket):
                 continue
             if not user_messages:
                 continue
+            if _current_session_is_running() or (current_turn_task is not None and not current_turn_task.done()):
+                queue_follow_up_batch = getattr(session, 'queue_follow_up_batch', None)
+                if not callable(queue_follow_up_batch):
+                    await _safe_send(
+                        build_envelope(
+                            channel='ceo',
+                            session_id=session_id,
+                            type='error',
+                            data={'code': 'ceo_turn_in_progress'},
+                        )
+                    )
+                    continue
+                try:
+                    await _maybe_await(queue_follow_up_batch(user_messages, persist_transcript=True))
+                except Exception as exc:
+                    await _safe_send(
+                        build_envelope(
+                            channel='ceo',
+                            session_id=session_id,
+                            type='error',
+                            data={
+                                'code': 'ceo_follow_up_enqueue_failed',
+                                'message': str(exc),
+                            },
+                        )
+                    )
+                    continue
+                persisted = transcript_store.get_or_create(session_id)
+                preview_text = _history_text(user_messages[-1].content)
+                _publish_ceo_session_patch(
+                    agent=agent,
+                    transcript_store=transcript_store,
+                    runtime_manager=runtime_manager,
+                    state_store=state_store,
+                    session_id=session_id,
+                    preview_text=preview_text,
+                    message_count=len(transcript_messages(persisted)),
+                    is_running=True,
+                )
+                continue
             if bool(getattr(session, "has_blocking_tool_execution", lambda: False)()):
                 await _safe_send(
                     build_envelope(
@@ -1053,16 +1113,6 @@ async def ceo_websocket(websocket: WebSocket):
                             'code': 'ceo_blocked_by_running_tool',
                             'message': '当前会话仍在等待长工具结束，暂不接收新的用户输入。',
                         },
-                    )
-                )
-                continue
-            if _current_session_is_running() or (current_turn_task is not None and not current_turn_task.done()):
-                await _safe_send(
-                    build_envelope(
-                        channel='ceo',
-                        session_id=session_id,
-                        type='error',
-                        data={'code': 'ceo_turn_in_progress'},
                     )
                 )
                 continue

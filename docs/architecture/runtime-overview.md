@@ -117,6 +117,7 @@
 - 这条 archived paused assistant 的职责是让刷新/重连后的 UI 能重建上一轮暂停气泡，并保留审计痕迹；它不是下一轮 prompt 的可见原始历史
 - 因此普通用户下一轮 frontdoor/history compaction 现在应继续依赖可见 transcript 加 completed continuity sidecar 恢复出的 baseline / stage / compression / semantic 状态；session 列表的 `preview_text` / `message_count` 这类 operator summary 也应继续过滤掉这条 hidden paused assistant
 - 如果用户在运行中连续补充多条消息，运行时会把它们作为“同一轮 LLM 调用前的一批独立 user message”一起持久化并一起注入模型，而不是拼接成一条 `补充要求` 文本
+- Web CEO websocket 现在会在当前可见 turn 仍在运行时立刻把这批 follow-up 交给 session 侧后端队列；如果当前 turn 在进入下一次 `call_model` 之前就结束，websocket 会直接从这批 follow-up 接续启动下一轮 fresh user turn，而不是把它们留到前端再重发
 
 如果这里被改回“pause 后仍把新输入合并回原 user message”，典型回归就是：
 
