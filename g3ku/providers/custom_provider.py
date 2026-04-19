@@ -8,6 +8,7 @@ import json_repair
 from openai import AsyncOpenAI
 
 from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, normalize_usage_payload
+from g3ku.json_schema_utils import normalize_openai_tool_definitions
 from g3ku.providers.streaming_timeouts import (
     StreamingDiagnostics,
     consume_openai_like_chat_stream,
@@ -64,7 +65,10 @@ class CustomProvider(LLMProvider):
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
         if tools:
-            kwargs.update(tools=tools, tool_choice=tool_choice if tool_choice is not None else "auto")
+            kwargs.update(
+                tools=normalize_openai_tool_definitions(tools),
+                tool_choice=tool_choice if tool_choice is not None else "auto",
+            )
             if parallel_tool_calls is not None:
                 kwargs["parallel_tool_calls"] = bool(parallel_tool_calls)
         endpoint = f"{self.api_base.rstrip('/')}/chat/completions" if self.api_base else None

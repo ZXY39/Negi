@@ -80,6 +80,7 @@ class RuntimeAgentSession:
         self._frontdoor_selection_debug: dict[str, Any] = {}
         self._frontdoor_request_body_messages: list[dict[str, Any]] = []
         self._frontdoor_history_shrink_reason: str = ""
+        self._frontdoor_pending_shrink_reason: str = ""
         self._frontdoor_token_preflight_diagnostics: dict[str, Any] = {}
         self._frontdoor_compression_generation_seq: int = 0
         self._active_frontdoor_compression_generation: int | None = None
@@ -182,7 +183,7 @@ class RuntimeAgentSession:
         self._frontdoor_stage_state = dict(snapshot.get("frontdoor_stage_state") or {})
         self._frontdoor_canonical_context = dict(snapshot.get("frontdoor_canonical_context") or {})
         self._compression_state = dict(snapshot.get("compression_state") or {})
-        self._semantic_context_state = {}
+        self._semantic_context_state = dict(snapshot.get("semantic_context_state") or {})
         self._frontdoor_hydrated_tool_names = self._normalized_name_list(
             snapshot.get("hydrated_tool_names")
         )
@@ -245,6 +246,9 @@ class RuntimeAgentSession:
             logger.debug("Completed continuity sync unavailable for {}", session_key)
             return
         try:
+            shrink_reason = str(getattr(self, "_frontdoor_history_shrink_reason", "") or "").strip()
+            if not shrink_reason:
+                shrink_reason = str(getattr(self, "_frontdoor_pending_shrink_reason", "") or "").strip()
             write_completed_continuity_snapshot(
                 session_key,
                 {
@@ -253,9 +257,7 @@ class RuntimeAgentSession:
                         for item in list(getattr(self, "_frontdoor_request_body_messages", []) or [])
                         if isinstance(item, dict)
                     ],
-                    "frontdoor_history_shrink_reason": str(
-                        getattr(self, "_frontdoor_history_shrink_reason", "") or ""
-                    ).strip(),
+                    "frontdoor_history_shrink_reason": shrink_reason,
                     "frontdoor_token_preflight_diagnostics": copy.deepcopy(
                         getattr(self, "_frontdoor_token_preflight_diagnostics", None) or {}
                     ),
@@ -274,6 +276,9 @@ class RuntimeAgentSession:
                         getattr(self, "_frontdoor_canonical_context", None) or {}
                     ),
                     "compression_state": copy.deepcopy(getattr(self, "_compression_state", None) or {}),
+                    "semantic_context_state": copy.deepcopy(
+                        getattr(self, "_semantic_context_state", None) or {}
+                    ),
                     "hydrated_tool_names": list(
                         self._normalized_name_list(getattr(self, "_frontdoor_hydrated_tool_names", []))
                     ),
@@ -1024,6 +1029,7 @@ class RuntimeAgentSession:
         generation_id = self._active_frontdoor_compression_generation
         if generation_id is None:
             return
+        self._frontdoor_pending_shrink_reason = "token_compression"
         self._cancelled_frontdoor_compression_generations.add(generation_id)
 
     def _is_frontdoor_compression_generation_cancelled(self, generation_id: int) -> bool:

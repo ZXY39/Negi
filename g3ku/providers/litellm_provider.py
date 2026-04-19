@@ -15,6 +15,7 @@ os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
 import litellm
 from litellm import acompletion
 
+from g3ku.json_schema_utils import normalize_openai_tool_definitions
 from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, normalize_usage_payload
 from g3ku.providers.registry import find_by_model, find_gateway
 from g3ku.providers.streaming_timeouts import (
@@ -264,7 +265,7 @@ class LiteLLMProvider(LLMProvider):
             kwargs["drop_params"] = True
         
         if tools:
-            kwargs["tools"] = tools
+            kwargs["tools"] = normalize_openai_tool_definitions(tools)
             kwargs["tool_choice"] = tool_choice if tool_choice is not None else "auto"
             if parallel_tool_calls is not None:
                 kwargs["parallel_tool_calls"] = bool(parallel_tool_calls)

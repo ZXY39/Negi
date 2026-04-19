@@ -5,6 +5,7 @@ import json
 from typing import Any, Protocol
 
 from g3ku.config.schema import Config
+from g3ku.json_schema_utils import normalize_openai_tool_definitions
 from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
@@ -157,10 +158,8 @@ def sanitize_provider_messages(messages: list[dict[str, Any]] | None) -> list[di
 
 def _tool_signature(tools: list[dict] | None) -> list[dict[str, object]]:
     signatures: list[dict[str, object]] = []
-    for item in list(tools or []):
-        if not isinstance(item, dict):
-            continue
-        function = item.get('function') if item.get('type') == 'function' else item
+    for item in normalize_openai_tool_definitions(tools):
+        function = item.get('function') if isinstance(item.get('function'), dict) else {}
         if not isinstance(function, dict):
             continue
         signatures.append(

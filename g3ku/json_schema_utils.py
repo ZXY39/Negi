@@ -337,7 +337,7 @@ def normalize_runtime_tool_arguments_dict(arguments: dict[str, Any] | None) -> d
     return {}
 
 
-def to_openai_tool_definition(tool: Any) -> dict[str, Any]:
+def _tool_definition_from_runtime_tool(tool: Any) -> dict[str, Any]:
     raw_schema = get_attached_raw_parameters_schema(tool)
     if raw_schema is not None:
         return {
@@ -349,6 +349,73 @@ def to_openai_tool_definition(tool: Any) -> dict[str, Any]:
             },
         }
     return convert_to_openai_tool(tool)
+
+
+def normalize_openai_tool_definition(tool: Any) -> dict[str, Any]:
+    if not isinstance(tool, dict):
+        return _tool_definition_from_runtime_tool(tool)
+
+    nested_function = tool.get("function") if isinstance(tool.get("function"), dict) else None
+    source_function = dict(nested_function or tool)
+    name = str(source_function.get("name") or "").strip()
+    if not name:
+        return {}
+
+    normalized: dict[str, Any] = {
+        str(key): copy.deepcopy(value)
+        for key, value in tool.items()
+        if str(key) not in {"function", "name", "description", "parameters"}
+    }
+    normalized["type"] = "function"
+    normalized["function"] = {
+        "name": name,
+        "description": str(source_function.get("description") or "").strip(),
+        "parameters": sanitize_provider_parameters_schema(
+            source_function.get("parameters") if isinstance(source_function.get("parameters"), dict) else {}
+        ),
+    }
+    return normalized
+
+
+def normalize_openai_tool_definitions(tools: list[Any] | None) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for tool in list(tools or []):
+        record = normalize_openai_tool_definition(tool)
+        if isinstance(record, dict) and record:
+            normalized.append(record)
+    return normalized
+
+
+def normalize_responses_tool_definition(tool: Any) -> dict[str, Any]:
+    normalized_openai = normalize_openai_tool_definition(tool)
+    if not normalized_openai:
+        return {}
+    function = dict(normalized_openai.get("function") or {})
+    normalized_flat = {
+        str(key): copy.deepcopy(value)
+        for key, value in normalized_openai.items()
+        if str(key) != "function"
+    }
+    normalized_flat["type"] = "function"
+    normalized_flat["name"] = str(function.get("name") or "").strip()
+    normalized_flat["description"] = str(function.get("description") or "").strip()
+    normalized_flat["parameters"] = sanitize_provider_parameters_schema(
+        function.get("parameters") if isinstance(function.get("parameters"), dict) else {}
+    )
+    return normalized_flat
+
+
+def normalize_responses_tool_definitions(tools: list[Any] | None) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for tool in list(tools or []):
+        record = normalize_responses_tool_definition(tool)
+        if isinstance(record, dict) and record:
+            normalized.append(record)
+    return normalized
+
+
+def to_openai_tool_definition(tool: Any) -> dict[str, Any]:
+    return normalize_openai_tool_definition(tool)
 
 
 def build_example_from_schema(schema: dict[str, Any] | None, *, field_name: str = "") -> Any:

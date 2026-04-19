@@ -60,6 +60,9 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 - `request_messages`
 - `tool_schemas`
 - `provider_request_body`
+- `usage`
+- `frontdoor_token_preflight_diagnostics`
+- `frontdoor_history_shrink_reason`
 - `prompt_cache_key_hash`
 - `actual_request_hash`
 - `stable_prefix_hash`
@@ -80,6 +83,7 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 - `provider_request_body.input`
 - `provider_request_body.tools`
 - `provider_request_body.parallel_tool_calls`
+- 濡傛灉 `frontdoor_token_preflight_diagnostics.final_request_tokens` 宸茬粡鎺ヨ繎 `effective_trigger_tokens`锛屼絾 usage 杩樻槸鏄庢樉鏇撮珮锛屼紭鍏堟寜鈥滀及绠楀亸灏忊€濇帓鏌ワ紝涓嶈鍏堟€€鐤?cache family churn
 
 常见情况：
 
@@ -429,6 +433,12 @@ heartbeat 使用的是专门的内部 prompt lane，它的稳定前缀和 reques
 - schema 顺序
 - 是否有无意义的增删
 - 这些变化是否影响 `prompt_cache_key_hash`
+
+Maintenance note:
+
+- Wrapped OpenAI-style tool definitions (`{"type":"function","function":{...}}`) and flat persisted function records (`{"type":"function","name":...,"parameters":...}`) now count as the same logical tool contract.
+- Provider adapters and `actual_tool_schema_hash` / `tool_signature_hash` diagnostics should both use the same shared normalization path before transport or hashing.
+- If a future provider needs a provider-specific tool wire format, normalize first and only then project into the final transport shape. Do not re-implement flat-vs-wrapped compatibility separately inside each provider.
 
 如果 stable prefix 没变，但 family key 变了，通常就是 schema churn。
 

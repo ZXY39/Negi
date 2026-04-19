@@ -684,6 +684,71 @@ async def test_responses_provider_times_out_when_stream_goes_idle_after_first_ch
 
 
 @pytest.mark.asyncio
+async def test_responses_provider_preserves_flat_function_tool_schemas_in_transport_payload(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_consume_sse(_diagnostics):
+        return "ok", [], "stop", {}
+
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+
+        async def aread(self):
+            return b""
+
+    class _FakeStream:
+        async def __aenter__(self):
+            return _FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            _ = exc_type, exc, tb
+            return None
+
+        def stream(self, method, url, *, headers=None, json=None):
+            captured["method"] = method
+            captured["url"] = url
+            captured["headers"] = dict(headers or {})
+            captured["body"] = dict(json or {})
+            return _FakeStream()
+
+    monkeypatch.setattr("g3ku.providers.responses_provider.httpx.AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(responses_provider_module, "_consume_sse", _fake_consume_sse)
+
+    flat_tool_schema = {
+        "type": "function",
+        "name": "exec",
+        "description": "Run a command",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    }
+
+    provider = ResponsesProvider(api_key="test-key", api_base="https://example.com/v1")
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        tools=[flat_tool_schema],
+        model="demo",
+    )
+
+    assert response.provider_request_body["tools"] == [flat_tool_schema]
+    assert dict(captured["body"])["tools"] == [flat_tool_schema]
+
+
+@pytest.mark.asyncio
 async def test_chat_backend_skips_outer_total_timeout_for_internally_managed_stream_provider(monkeypatch) -> None:
     captured: list[dict[str, object]] = []
 
@@ -902,6 +967,68 @@ async def test_custom_provider_fallback_defaults_to_120_seconds_without_explicit
 
 
 @pytest.mark.asyncio
+async def test_custom_provider_normalizes_flat_function_tool_schemas_before_transport(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            calls.append(dict(kwargs))
+            if kwargs.get("stream"):
+                raise RuntimeError("stream unsupported by upstream")
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="ok", tool_calls=[]),
+                        finish_reason="stop",
+                    )
+                ],
+                usage={},
+            )
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args, kwargs
+            self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+    monkeypatch.setattr("g3ku.providers.custom_provider.AsyncOpenAI", _FakeAsyncOpenAI)
+
+    flat_tool_schema = {
+        "type": "function",
+        "name": "exec",
+        "description": "Run a command",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    }
+
+    provider = CustomProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        tools=[flat_tool_schema],
+        model="demo",
+    )
+
+    assert response.content == "ok"
+    assert len(calls) == 2
+    assert calls[1]["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "exec",
+                "description": "Run a command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_litellm_provider_falls_back_to_non_streaming_when_streaming_unsupported(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
@@ -938,6 +1065,68 @@ async def test_litellm_provider_falls_back_to_non_streaming_when_streaming_unsup
     assert calls[0]["stream"] is True
     assert "stream" not in calls[1]
     assert calls[1]["timeout"] == 9.5
+
+
+@pytest.mark.asyncio
+async def test_litellm_provider_normalizes_flat_function_tool_schemas_before_transport(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    async def _fake_acompletion(**kwargs):
+        calls.append(dict(kwargs))
+        if kwargs.get("stream"):
+            raise RuntimeError("stream unsupported by provider")
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="ok", tool_calls=[]),
+                    finish_reason="stop",
+                )
+            ],
+            usage={},
+        )
+
+    monkeypatch.setattr("g3ku.providers.litellm_provider.acompletion", _fake_acompletion)
+
+    flat_tool_schema = {
+        "type": "function",
+        "name": "exec",
+        "description": "Run a command",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    }
+
+    provider = LiteLLMProvider(
+        api_key="test-key",
+        api_base="https://example.com/v1",
+        default_model="openai/gpt-4.1",
+        provider_name="openai",
+    )
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        tools=[flat_tool_schema],
+        model="openai/gpt-4.1",
+        request_timeout_seconds=9.5,
+    )
+
+    assert response.content == "ok"
+    assert len(calls) == 2
+    assert calls[1]["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "exec",
+                "description": "Run a command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1166,6 +1355,46 @@ async def test_openai_codex_provider_times_out_when_stream_goes_idle_after_first
 
     assert response.finish_reason == "error"
     assert "idle timeout" in str(response.content or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_openai_codex_provider_preserves_flat_function_tool_schemas_in_transport_payload(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_request_codex(url, headers, body, verify, timeout):
+        captured["url"] = url
+        captured["headers"] = dict(headers or {})
+        captured["body"] = dict(body or {})
+        captured["verify"] = verify
+        captured["timeout"] = timeout
+        return "ok", [], "stop", {}
+
+    monkeypatch.setattr(
+        "g3ku.providers.openai_codex_provider.get_codex_token",
+        lambda: SimpleNamespace(account_id="acct", access="token"),
+    )
+    monkeypatch.setattr("g3ku.providers.openai_codex_provider._request_codex", _fake_request_codex)
+
+    flat_tool_schema = {
+        "type": "function",
+        "name": "exec",
+        "description": "Run a command",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    }
+
+    provider = OpenAICodexProvider(default_model="openai_codex/gpt-5.1-codex")
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "ping"}],
+        tools=[flat_tool_schema],
+        model="openai_codex/gpt-5.1-codex",
+    )
+
+    assert response.provider_request_body["tools"] == [flat_tool_schema]
+    assert dict(captured["body"])["tools"] == [flat_tool_schema]
 
 
 def test_build_openai_headers_omits_empty_authorization() -> None:
