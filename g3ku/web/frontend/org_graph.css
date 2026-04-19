@@ -3565,14 +3565,6 @@ textarea {
     opacity: 0;
 }
 
-.ceo-composer-outline-shell.is-active textarea:not(:focus) {
-    border-color: color-mix(in srgb, var(--ceo-composer-outline-color) 76%, var(--border-color));
-    box-shadow:
-        var(--shadow-md),
-        0 0 0 3px color-mix(in srgb, var(--ceo-composer-outline-color) 84%, transparent),
-        0 0 22px color-mix(in srgb, var(--ceo-composer-outline-color) 22%, transparent);
-}
-
 .ceo-composer-outline-shell.is-force-visible textarea:not(:focus) {
     border-color: color-mix(in srgb, var(--ceo-composer-outline-color) 88%, var(--border-color));
     box-shadow:

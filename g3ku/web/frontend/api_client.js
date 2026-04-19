@@ -379,7 +379,6 @@ class ApiClient {
     static async estimateCeoComposerPreflight(sessionId, payload) {
         const data = await this._request("POST", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/composer-preflight`, {
             body: payload || {},
-            requestKey: `ceo:composer-preflight:${String(sessionId || "").trim()}`,
             timeoutMs: 20000,
         });
         return data.item || null;

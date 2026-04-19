@@ -106,6 +106,8 @@ const S = {
     ceoComposerUsagePinnedEntries: null,
     ceoComposerUsageRefreshId: null,
     ceoComposerUsageRequestSeq: 0,
+    ceoComposerUsageBusy: false,
+    ceoComposerUsageNeedsRefresh: false,
     liveDurationIntervalId: null,
     activeSessionId: "",
     ceoSessionBusy: false,
@@ -1409,7 +1411,15 @@ function syncCeoComposerUsageOutline() {
         perimeter = 0;
     }
     const ratio = hasEstimate ? Math.max(0, Math.min(1, Number(estimate.ratio) || 0)) : 1;
-    const progressLength = perimeter > 0 ? Math.max(0, Math.min(perimeter, perimeter * ratio)) : 0;
+    const rawProgressLength = perimeter > 0 ? Math.max(0, Math.min(perimeter, perimeter * ratio)) : 0;
+    const minimumVisibleLength = (
+        hasEstimate && ratio > 0 && perimeter > 0
+    ) ? Math.min(perimeter, Math.max(20, perimeter * 0.035)) : 0;
+    const progressLength = shouldForceVisible
+        ? perimeter
+        : hasEstimate && ratio > 0
+            ? Math.max(rawProgressLength, minimumVisibleLength)
+            : rawProgressLength;
     progress.style.strokeDasharray = perimeter > 0 ? `${progressLength} ${perimeter}` : "0 0";
     progress.style.strokeDashoffset = "0";
     track.style.strokeDasharray = perimeter > 0 ? `${perimeter} ${perimeter}` : "0 0";
@@ -1473,11 +1483,28 @@ async function refreshCeoComposerUsageEstimate() {
     }
 }
 
+async function runCeoComposerUsageRefresh() {
+    if (S.ceoComposerUsageBusy) {
+        S.ceoComposerUsageNeedsRefresh = true;
+        return null;
+    }
+    S.ceoComposerUsageBusy = true;
+    try {
+        return await refreshCeoComposerUsageEstimate();
+    } finally {
+        S.ceoComposerUsageBusy = false;
+        if (S.ceoComposerUsageNeedsRefresh) {
+            S.ceoComposerUsageNeedsRefresh = false;
+            scheduleCeoComposerUsageRefresh({ immediate: true });
+        }
+    }
+}
+
 function scheduleCeoComposerUsageRefresh({ immediate = false } = {}) {
     if (S.ceoComposerUsageRefreshId) window.clearTimeout(S.ceoComposerUsageRefreshId);
     S.ceoComposerUsageRefreshId = window.setTimeout(() => {
         S.ceoComposerUsageRefreshId = null;
-        void refreshCeoComposerUsageEstimate();
+        void runCeoComposerUsageRefresh();
     }, immediate ? 0 : 260);
 }
 
@@ -1868,6 +1895,15 @@ function getCeoSessionSnapshotCache(sessionId) {
     return cloneCeoSessionSnapshotCacheEntry(S.ceoSnapshotCache?.[key] || null);
 }
 
+function hasActiveCeoComposerUsageEstimate(sessionId = activeSessionId()) {
+    const key = String(sessionId || "").trim();
+    if (!key) return false;
+    return !!(
+        S.ceoComposerUsageEstimate
+        && String(S.ceoComposerUsageEstimate.session_id || "").trim() === key
+    );
+}
+
 function setCeoSessionSnapshotCache(sessionId, entry = {}) {
     const key = String(sessionId || entry?.session_id || "").trim();
     if (!key) return null;
@@ -1890,7 +1926,7 @@ function setCeoSessionSnapshotCache(sessionId, entry = {}) {
     });
     schedulePersistCeoSessionSnapshotCache();
     syncCeoCompressionToast();
-    scheduleCeoComposerUsageRefresh();
+    if (!hasActiveCeoComposerUsageEstimate(key)) scheduleCeoComposerUsageRefresh();
     return cloneCeoSessionSnapshotCacheEntry(normalized);
 }
 
@@ -1918,7 +1954,7 @@ function clearCeoSessionSnapshotCache(sessionId) {
     S.ceoSnapshotCache = pruneCeoSessionSnapshotCache(next);
     schedulePersistCeoSessionSnapshotCache();
     syncCeoCompressionToast();
-    scheduleCeoComposerUsageRefresh();
+    if (!hasActiveCeoComposerUsageEstimate(key)) scheduleCeoComposerUsageRefresh();
     return true;
 }
 
