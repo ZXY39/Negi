@@ -3067,14 +3067,18 @@ class ReActToolLoop:
     def _estimate_node_send_preflight_tokens(
         self,
         *,
+        task_id: str,
+        node_id: str,
         config: Any,
         model_refs: list[str],
+        provider_model: str,
         request_messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
         prompt_cache_key: str,
         tool_choice: str | dict[str, Any] | None,
         parallel_tool_calls: bool | None,
-    ) -> tuple[int, str]:
+        allow_usage_ground_truth: bool = True,
+    ) -> dict[str, Any]:
         preview_error = ""
         preview_payload: dict[str, Any] | None = None
         if config is not None and list(model_refs or []):
@@ -3091,26 +3095,189 @@ class ReActToolLoop:
             except Exception as exc:
                 preview_error = str(exc or exc.__class__.__name__).strip() or exc.__class__.__name__
         if preview_payload:
-            return (
-                int(
-                    runtime_chat_backend.estimate_send_provider_request_preview_tokens(
-                        preview_payload=preview_payload,
-                    )
-                    or 0
-                ),
-                preview_error,
+            preview_estimate_tokens = int(
+                runtime_chat_backend.estimate_send_provider_request_preview_tokens(
+                    preview_payload=preview_payload,
+                )
+                or 0
             )
-        return (
-            int(
+        else:
+            preview_estimate_tokens = int(
                 runtime_send_token_preflight.estimate_runtime_provider_request_preview_tokens(
                     provider_request_body=None,
                     request_messages=request_messages,
                     tool_schemas=tool_schemas,
                 )
                 or 0
-            ),
-            preview_error,
+            )
+
+        previous_effective_input_tokens = 0
+        delta_estimate_tokens = 0
+        comparable_to_previous_request = False
+        if allow_usage_ground_truth:
+            previous_truth = self._resolve_previous_node_observed_input_truth(
+                task_id=task_id,
+                node_id=node_id,
+            )
+            previous_effective_input_tokens = int(previous_truth.get('effective_input_tokens') or 0)
+            previous_provider_model = str(previous_truth.get('provider_model') or '').strip()
+            if (
+                previous_effective_input_tokens > 0
+                and previous_provider_model
+                and self._provider_models_match(previous_provider_model, str(provider_model or '').strip())
+            ):
+                previous_record = self._resolve_previous_node_actual_request_record(
+                    task_id=task_id,
+                    node_id=node_id,
+                )
+                previous_truth_hash = str(previous_truth.get('actual_request_hash') or '').strip()
+                previous_record_hash = str(previous_record.get('actual_request_hash') or '').strip()
+                if previous_truth_hash and previous_record_hash and previous_truth_hash == previous_record_hash:
+                    delta_estimate_tokens, comparable_to_previous_request = self._append_only_delta_estimate_tokens(
+                        previous_request_messages=[
+                            dict(item)
+                            for item in list(previous_record.get('request_messages') or previous_record.get('messages') or [])
+                            if isinstance(item, dict)
+                        ],
+                        current_request_messages=request_messages,
+                        previous_tool_schemas=[
+                            dict(item)
+                            for item in list(previous_record.get('actual_tool_schemas') or previous_record.get('tool_schemas') or [])
+                            if isinstance(item, dict)
+                        ],
+                        current_tool_schemas=tool_schemas,
+                    )
+        hybrid_estimate = runtime_send_token_preflight.build_runtime_hybrid_send_token_estimate(
+            preview_estimate_tokens=preview_estimate_tokens,
+            previous_effective_input_tokens=previous_effective_input_tokens,
+            delta_estimate_tokens=delta_estimate_tokens,
+            comparable_to_previous_request=comparable_to_previous_request,
         )
+        return {
+            'final_estimate_tokens': int(hybrid_estimate.final_estimate_tokens or 0),
+            'preview_estimate_tokens': int(hybrid_estimate.preview_estimate_tokens or 0),
+            'usage_based_estimate_tokens': int(hybrid_estimate.usage_based_estimate_tokens or 0),
+            'delta_estimate_tokens': int(hybrid_estimate.delta_estimate_tokens or 0),
+            'effective_input_tokens': int(previous_effective_input_tokens or 0),
+            'estimate_source': str(hybrid_estimate.estimate_source or 'preview_estimate'),
+            'comparable_to_previous_request': bool(hybrid_estimate.comparable_to_previous_request),
+            'preview_estimation_error': preview_error,
+        }
+
+    def _resolve_previous_node_actual_request_record(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+    ) -> dict[str, Any]:
+        frame = self._runtime_frame(task_id, node_id) or {}
+        actual_request_ref = str(frame.get('actual_request_ref') or '').strip()
+        store = getattr(self._log_service, '_store', None)
+        get_node = getattr(store, 'get_node', None)
+        node = get_node(node_id) if callable(get_node) else None
+        metadata = dict(getattr(node, 'metadata', {}) or {}) if node is not None else {}
+        if not actual_request_ref:
+            actual_request_ref = str(metadata.get('latest_runtime_actual_request_ref') or '').strip()
+        if not actual_request_ref:
+            return {}
+        resolved = self._resolve_content_ref(actual_request_ref)
+        if not str(resolved or '').strip():
+            resolver = getattr(self._log_service, 'resolve_content_ref', None)
+            if callable(resolver):
+                try:
+                    resolved = str(resolver(actual_request_ref) or '')
+                except Exception:
+                    resolved = ''
+        if not str(resolved or '').strip():
+            return {}
+        try:
+            payload = json.loads(resolved)
+        except Exception:
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    def _resolve_previous_node_observed_input_truth(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+    ) -> dict[str, Any]:
+        frame = self._runtime_frame(task_id, node_id) or {}
+        if isinstance(frame.get('observed_input_truth'), dict):
+            return dict(frame.get('observed_input_truth') or {})
+        store = getattr(self._log_service, '_store', None)
+        get_node = getattr(store, 'get_node', None)
+        node = get_node(node_id) if callable(get_node) else None
+        metadata = dict(getattr(node, 'metadata', {}) or {}) if node is not None else {}
+        if isinstance(metadata.get('latest_runtime_observed_input_truth'), dict):
+            return dict(metadata.get('latest_runtime_observed_input_truth') or {})
+        record = self._resolve_previous_node_actual_request_record(
+            task_id=task_id,
+            node_id=node_id,
+        )
+        if isinstance(record.get('observed_input_truth'), dict):
+            return dict(record.get('observed_input_truth') or {})
+        return {}
+
+    def _append_only_delta_estimate_tokens(
+        self,
+        *,
+        previous_request_messages: list[dict[str, Any]],
+        current_request_messages: list[dict[str, Any]],
+        previous_tool_schemas: list[dict[str, Any]],
+        current_tool_schemas: list[dict[str, Any]],
+    ) -> tuple[int, bool]:
+        previous_records = self._prompt_message_records(previous_request_messages)
+        current_records = self._prompt_message_records(current_request_messages)
+        if not previous_records or len(current_records) < len(previous_records):
+            return 0, False
+        if not self._fresh_turn_seed_records_match(current_records[: len(previous_records)], previous_records):
+            return 0, False
+        previous_tool_schema_hash = str(
+            build_actual_request_diagnostics(
+                request_messages=[],
+                tool_schemas=previous_tool_schemas,
+            ).get('actual_tool_schema_hash')
+            or ''
+        ).strip()
+        current_tool_schema_hash = str(
+            build_actual_request_diagnostics(
+                request_messages=[],
+                tool_schemas=current_tool_schemas,
+            ).get('actual_tool_schema_hash')
+            or ''
+        ).strip()
+        if previous_tool_schema_hash != current_tool_schema_hash:
+            return 0, False
+        previous_estimate_tokens = int(
+            runtime_send_token_preflight.estimate_runtime_provider_request_preview_tokens(
+                provider_request_body=None,
+                request_messages=previous_records,
+                tool_schemas=previous_tool_schemas,
+            )
+            or 0
+        )
+        current_estimate_tokens = int(
+            runtime_send_token_preflight.estimate_runtime_provider_request_preview_tokens(
+                provider_request_body=None,
+                request_messages=current_records,
+                tool_schemas=current_tool_schemas,
+            )
+            or 0
+        )
+        return max(0, current_estimate_tokens - previous_estimate_tokens), True
+
+    @staticmethod
+    def _provider_models_match(previous_provider_model: str, current_provider_model: str) -> bool:
+        previous_raw = str(previous_provider_model or '').strip()
+        current_raw = str(current_provider_model or '').strip()
+        if not previous_raw or not current_raw:
+            return False
+        if previous_raw == current_raw:
+            return True
+        previous_model = previous_raw.split(':', 1)[1].strip() if ':' in previous_raw else previous_raw
+        current_model = current_raw.split(':', 1)[1].strip() if ':' in current_raw else current_raw
+        return bool(previous_model and current_model and previous_model == current_model)
 
     def _apply_node_send_token_preflight(
         self,
@@ -3161,18 +3328,22 @@ class ReActToolLoop:
             )
 
         context_window_tokens = max(0, int(getattr(info, "context_window_tokens", 0) or 0))
-        estimated_total_tokens, preview_error = self._estimate_node_send_preflight_tokens(
+        estimate_payload = self._estimate_node_send_preflight_tokens(
+            task_id=task_id,
+            node_id=node_id,
             config=config,
             model_refs=normalized_model_refs,
+            provider_model=str(getattr(info, "provider_model", "") or "").strip(),
             request_messages=request_messages,
             tool_schemas=tool_schemas,
             prompt_cache_key=str(prompt_cache_key or "").strip(),
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
         )
+        final_estimate_tokens = int(estimate_payload.get('final_estimate_tokens') or 0)
         snapshot = runtime_send_token_preflight.build_runtime_send_token_preflight_snapshot(
             context_window_tokens=context_window_tokens,
-            estimated_total_tokens=estimated_total_tokens,
+            estimated_total_tokens=final_estimate_tokens,
         )
 
         token_preflight_diagnostics: dict[str, Any] = {
@@ -3187,53 +3358,137 @@ class ReActToolLoop:
             "ratio": float(snapshot.ratio or 0.0),
             "would_exceed_context_window": bool(snapshot.would_exceed_context_window),
             "would_trigger_token_compression": bool(snapshot.would_trigger_token_compression),
-            "final_request_tokens": int(snapshot.estimated_total_tokens or 0),
+            "preview_estimate_tokens": int(estimate_payload.get('preview_estimate_tokens') or 0),
+            "usage_based_estimate_tokens": int(estimate_payload.get('usage_based_estimate_tokens') or 0),
+            "delta_estimate_tokens": int(estimate_payload.get('delta_estimate_tokens') or 0),
+            "effective_input_tokens": int(estimate_payload.get('effective_input_tokens') or 0),
+            "estimate_source": str(estimate_payload.get('estimate_source') or 'preview_estimate'),
+            "comparable_to_previous_request": bool(estimate_payload.get('comparable_to_previous_request')),
+            "final_estimate_tokens": int(final_estimate_tokens or 0),
+            "final_request_tokens": int(final_estimate_tokens or 0),
         }
-        if preview_error:
-            token_preflight_diagnostics["preview_estimation_error"] = preview_error
+        if str(estimate_payload.get('preview_estimation_error') or '').strip():
+            token_preflight_diagnostics["preview_estimation_error"] = str(
+                estimate_payload.get('preview_estimation_error') or ''
+            ).strip()
 
         if context_window_tokens <= _NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS:
             failure_reason = (
                 f"context_window_tokens <= {_NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS} "
                 f"(got {context_window_tokens})"
             )
-        elif int(estimated_total_tokens or 0) > int(context_window_tokens or 0):
-            failure_reason = (
-                f"estimated_total_tokens ({int(estimated_total_tokens or 0)}) exceeded "
-                f"context_window_tokens ({int(context_window_tokens or 0)}) before compression"
+        else:
+            should_attempt_compaction = bool(
+                snapshot.would_trigger_token_compression
+                or int(final_estimate_tokens or 0) > int(context_window_tokens or 0)
             )
-        elif snapshot.would_trigger_token_compression:
-            rewritten_messages, compact_payload = self._rewrite_request_messages_for_token_compaction(
-                node_id=node_id,
-                request_messages=request_messages,
-            )
-            request_messages = rewritten_messages
-            final_request_tokens, rewritten_preview_error = self._estimate_node_send_preflight_tokens(
-                config=config,
-                model_refs=normalized_model_refs,
-                request_messages=request_messages,
-                tool_schemas=tool_schemas,
-                prompt_cache_key=str(prompt_cache_key or "").strip(),
-                tool_choice=tool_choice,
-                parallel_tool_calls=parallel_tool_calls,
-            )
-            token_preflight_diagnostics.update(
-                {
-                    "applied": True,
-                    "mode": "marker",
-                    "history_shrink_reason": "token_compression",
-                    "final_request_tokens": int(final_request_tokens or 0),
-                    "compaction_payload": dict(compact_payload or {}),
-                }
-            )
-            if rewritten_preview_error:
-                token_preflight_diagnostics["rewritten_preview_estimation_error"] = rewritten_preview_error
-            history_shrink_reason = "token_compression"
-            if int(final_request_tokens or 0) > int(context_window_tokens or 0):
-                failure_reason = (
-                    f"final_request_tokens ({int(final_request_tokens or 0)}) exceeded "
-                    f"context_window_tokens ({int(context_window_tokens or 0)}) after compression"
+            if should_attempt_compaction:
+                rewritten_messages, compact_payload = self._rewrite_request_messages_for_token_compaction(
+                    node_id=node_id,
+                    request_messages=request_messages,
                 )
+                request_messages = rewritten_messages
+                pre_compaction_snapshot = dict(token_preflight_diagnostics)
+                rewritten_estimate_payload = self._estimate_node_send_preflight_tokens(
+                    task_id=task_id,
+                    node_id=node_id,
+                    config=config,
+                    model_refs=normalized_model_refs,
+                    provider_model=str(getattr(info, "provider_model", "") or "").strip(),
+                    request_messages=request_messages,
+                    tool_schemas=tool_schemas,
+                    prompt_cache_key=str(prompt_cache_key or "").strip(),
+                    tool_choice=tool_choice,
+                    parallel_tool_calls=parallel_tool_calls,
+                    allow_usage_ground_truth=False,
+                )
+                post_compaction_tokens = int(rewritten_estimate_payload.get('final_estimate_tokens') or 0)
+                post_compaction_snapshot = runtime_send_token_preflight.build_runtime_send_token_preflight_snapshot(
+                    context_window_tokens=context_window_tokens,
+                    estimated_total_tokens=post_compaction_tokens,
+                )
+                token_preflight_diagnostics.update(
+                    {
+                        "applied": True,
+                        "mode": "marker",
+                        "history_shrink_reason": "token_compression",
+                        "pre_compaction_estimated_total_tokens": int(
+                            pre_compaction_snapshot.get('estimated_total_tokens') or 0
+                        ),
+                        "pre_compaction_ratio": float(pre_compaction_snapshot.get('ratio') or 0.0),
+                        "pre_compaction_would_exceed_context_window": bool(
+                            pre_compaction_snapshot.get('would_exceed_context_window')
+                        ),
+                        "pre_compaction_would_trigger_token_compression": bool(
+                            pre_compaction_snapshot.get('would_trigger_token_compression')
+                        ),
+                        "pre_compaction_preview_estimate_tokens": int(
+                            pre_compaction_snapshot.get('preview_estimate_tokens') or 0
+                        ),
+                        "pre_compaction_usage_based_estimate_tokens": int(
+                            pre_compaction_snapshot.get('usage_based_estimate_tokens') or 0
+                        ),
+                        "pre_compaction_delta_estimate_tokens": int(
+                            pre_compaction_snapshot.get('delta_estimate_tokens') or 0
+                        ),
+                        "pre_compaction_effective_input_tokens": int(
+                            pre_compaction_snapshot.get('effective_input_tokens') or 0
+                        ),
+                        "pre_compaction_estimate_source": str(
+                            pre_compaction_snapshot.get('estimate_source') or 'preview_estimate'
+                        ),
+                        "pre_compaction_comparable_to_previous_request": bool(
+                            pre_compaction_snapshot.get('comparable_to_previous_request')
+                        ),
+                        "pre_compaction_final_estimate_tokens": int(
+                            pre_compaction_snapshot.get('final_estimate_tokens') or 0
+                        ),
+                        "estimated_total_tokens": int(post_compaction_snapshot.estimated_total_tokens or 0),
+                        "ratio": float(post_compaction_snapshot.ratio or 0.0),
+                        "would_exceed_context_window": bool(post_compaction_snapshot.would_exceed_context_window),
+                        "would_trigger_token_compression": bool(
+                            post_compaction_snapshot.would_trigger_token_compression
+                        ),
+                        "preview_estimate_tokens": int(
+                            rewritten_estimate_payload.get('preview_estimate_tokens') or 0
+                        ),
+                        "usage_based_estimate_tokens": int(
+                            rewritten_estimate_payload.get('usage_based_estimate_tokens') or 0
+                        ),
+                        "delta_estimate_tokens": int(
+                            rewritten_estimate_payload.get('delta_estimate_tokens') or 0
+                        ),
+                        "effective_input_tokens": int(
+                            rewritten_estimate_payload.get('effective_input_tokens') or 0
+                        ),
+                        "estimate_source": str(
+                            rewritten_estimate_payload.get('estimate_source') or 'preview_estimate'
+                        ),
+                        "comparable_to_previous_request": bool(
+                            rewritten_estimate_payload.get('comparable_to_previous_request')
+                        ),
+                        "final_estimate_tokens": int(post_compaction_tokens or 0),
+                        "post_compaction_estimate_tokens": int(post_compaction_tokens or 0),
+                        "rewritten_preview_estimate_tokens": int(
+                            rewritten_estimate_payload.get('preview_estimate_tokens') or 0
+                        ),
+                        "post_compaction_estimate_source": str(
+                            rewritten_estimate_payload.get('estimate_source') or 'preview_estimate'
+                        ),
+                        "final_request_tokens": int(post_compaction_tokens or 0),
+                        "compaction_payload": dict(compact_payload or {}),
+                    }
+                )
+                if str(rewritten_estimate_payload.get('preview_estimation_error') or '').strip():
+                    token_preflight_diagnostics["rewritten_preview_estimation_error"] = str(
+                        rewritten_estimate_payload.get('preview_estimation_error') or ''
+                    ).strip()
+                history_shrink_reason = "token_compression"
+                if int(post_compaction_tokens or 0) > int(context_window_tokens or 0):
+                    failure_reason = (
+                        f"final_request_tokens ({int(post_compaction_tokens or 0)}) exceeded "
+                        f"context_window_tokens ({int(context_window_tokens or 0)}) after compression"
+                    )
 
         if failure_reason:
             token_preflight_diagnostics["error"] = str(failure_reason or "").strip()

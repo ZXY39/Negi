@@ -23,16 +23,16 @@ The browser shell now has a top-level `记忆管理` page. This is intentionally
 - The left rail exposes `记忆管理` as its own top-level navigation item, not as a nested subsection of model configuration.
 - The page shows two independent columns:
   - unprocessed queue items, oldest-first, in real queue order
-  - successful processed batches, newest-first
+  - terminal processed batches, newest-first, including both applied and discarded outcomes
 - Queue cards default to collapsed and show runtime-owned state such as `pending` / `processing`, enqueue time, and the latest engineering error when present.
-- Processed cards default to collapsed and show batch-owned metadata such as processed time, op type, token usage, model chain, attempts, and note refs.
+- Processed cards default to collapsed and show batch-owned metadata such as processed time, terminal status, op type, token usage, model chain, attempts, discard reason when present, and note refs.
 - Queue / processed expanded bodies treat `ref:note_xxxx` as a read-only preview trigger. Clicking a note ref opens a frontend-owned drawer/modal that only fetches and displays the note body; it must not expose edit or save controls.
 - The page is read-only in v1. There are no browser buttons for retry, delete, edit, or force-flush.
 
 ### Backend Responsibilities
 
 - `GET /api/memory/queue` returns queue-owned runtime state directly from `memory/queue.jsonl`, including `status`, retry/error fields, and pagination metadata.
-- `GET /api/memory/processed` returns only successful batch records from `memory/ops.jsonl`, also with pagination metadata.
+- `GET /api/memory/processed` returns terminal batch records from `memory/ops.jsonl`, including both applied rows and durable discarded rows, also with pagination metadata.
 - `GET /api/memory/notes/{ref}` is the minimal read-only note preview contract for the memory page. It returns the note body for an existing `ref:note_xxxx` entry and returns a clear not-found error when the referenced note file is missing.
 - `POST /api/memory/admin/retry-head` exists as a guarded operator contract, but it is disabled by default. When `G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS` is not enabled, the backend returns `403` with `detail.code=memory_admin_mutation_disabled`; successful calls append an audit record to `memory/admin_audit.jsonl`.
 - Older admin memory endpoints such as dense-index reset/rebuild and runtime stats still exist, but they are no longer the primary operator path for understanding whether long-term memory is healthy.
@@ -41,7 +41,7 @@ The browser shell now has a top-level `记忆管理` page. This is intentionally
 
 - If the memory page looks wrong but the raw JSON from `/api/memory/queue` or `/api/memory/processed` is correct, debug `g3ku/web/frontend/*`.
 - If a `ref:note_xxxx` chip renders but the preview drawer cannot load, compare the frontend `ApiClient.getMemoryNote(...)` request with `GET /api/memory/notes/{ref}` before debugging the memory runtime itself.
-- If the page is missing fields, ordering, or error state already in the API response, debug the admin endpoints or `g3ku/agent/memory_agent_runtime.py`.
+- If the page is missing fields, ordering, discarded statuses, or request-artifact links already in the API response, debug the admin endpoints or `g3ku/agent/memory_agent_runtime.py`.
 - If the queue page is stuck on one `processing` batch, treat that as a backend/runtime issue first, not as a frontend pagination bug.
 - Browser-side memory management remains read-only by default. If an operator expects a retry button in the UI, first check whether the feature was intentionally kept backend-only for the current build rather than debugging missing DOM wiring.
 

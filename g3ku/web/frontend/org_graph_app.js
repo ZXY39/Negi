@@ -1291,6 +1291,8 @@ function normalizeCeoRuntimeUsageDiagnostics(payload = null) {
         max_context_tokens: maxContextTokens,
         trigger_tokens: toInt(item.trigger_tokens ?? item.triggerTokens),
         effective_trigger_tokens: toInt(item.effective_trigger_tokens ?? item.effectiveTriggerTokens),
+        effective_input_tokens: toInt(item.effective_input_tokens ?? item.effectiveInputTokens),
+        estimate_source: String(item.estimate_source || item.estimateSource || "").trim(),
         provider_model: providerModel,
         applied: !!item.applied,
     };
@@ -1319,6 +1321,8 @@ function normalizeCeoRuntimeUsageEstimate(sessionId, inflightTurn = null) {
         would_trigger_token_compression: activeTriggerTokens > 0 && estimatedTotalTokens >= activeTriggerTokens,
         would_exceed_context_window: estimatedTotalTokens > contextWindowTokens,
         missing_context_window: false,
+        effective_input_tokens: Number(diagnostics.effective_input_tokens || 0),
+        estimate_source: String(diagnostics.estimate_source || "").trim(),
         source: "runtime_snapshot",
     };
 }

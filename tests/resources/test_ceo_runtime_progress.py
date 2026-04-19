@@ -2163,7 +2163,13 @@ def test_completed_continuity_snapshot_round_trips_token_preflight_diagnostics(t
         "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
         "compression_state": {"status": "ready", "text": "ok", "source": "semantic"},
         "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
-        "frontdoor_token_preflight_diagnostics": {"applied": True, "final_request_tokens": 28000, "trigger_tokens": 20000},
+        "frontdoor_token_preflight_diagnostics": {
+            "applied": True,
+            "final_request_tokens": 28000,
+            "trigger_tokens": 20000,
+            "estimate_source": "usage_plus_delta",
+            "effective_input_tokens": 24000,
+        },
         "hydrated_tool_names": ["web_fetch"],
         "capability_snapshot_exposure_revision": "exp:demo",
         "visible_tool_ids": ["exec", "web_fetch"],
@@ -2179,6 +2185,8 @@ def test_completed_continuity_snapshot_round_trips_token_preflight_diagnostics(t
     assert isinstance(restored, dict)
     assert restored["frontdoor_history_shrink_reason"] == "token_compression"
     assert restored["frontdoor_token_preflight_diagnostics"]["final_request_tokens"] == 28000
+    assert restored["frontdoor_token_preflight_diagnostics"]["estimate_source"] == "usage_plus_delta"
+    assert restored["frontdoor_token_preflight_diagnostics"]["effective_input_tokens"] == 24000
 
 
 def test_clear_web_ceo_session_artifacts_clears_completed_continuity_snapshot(

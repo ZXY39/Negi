@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from g3ku.providers.base import normalize_usage_payload
 from g3ku.runtime.context.summarizer import estimate_tokens
 
 # CEO-aligned send-preflight constants shared by frontdoor and node/runtime callers.
@@ -31,6 +32,26 @@ class RuntimeSendTokenPreflightSnapshot:
     would_exceed_context_window: bool
     would_trigger_token_compression: bool
     ratio: float
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeObservedInputTruth:
+    effective_input_tokens: int
+    input_tokens: int
+    cache_hit_tokens: int
+    provider_model: str
+    actual_request_hash: str
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeHybridSendTokenEstimate:
+    final_estimate_tokens: int
+    preview_estimate_tokens: int
+    usage_based_estimate_tokens: int
+    delta_estimate_tokens: int
+    estimate_source: str
+    comparable_to_previous_request: bool
 
 
 def estimate_runtime_provider_request_preview_tokens(
@@ -94,12 +115,9 @@ def build_runtime_send_token_preflight_snapshot(
         thresholds.context_window_tokens > 0
         and int(estimated_total_tokens or 0) > int(thresholds.context_window_tokens or 0)
     )
-    would_trigger_token_compression = (
-        not would_exceed_context_window
-        and should_trigger_runtime_token_compression(
-            estimated_total_tokens=int(estimated_total_tokens or 0),
-            thresholds=thresholds,
-        )
+    would_trigger_token_compression = should_trigger_runtime_token_compression(
+        estimated_total_tokens=int(estimated_total_tokens or 0),
+        thresholds=thresholds,
     )
     ratio = (
         float(int(estimated_total_tokens or 0)) / float(thresholds.context_window_tokens)
@@ -117,11 +135,73 @@ def build_runtime_send_token_preflight_snapshot(
     )
 
 
+def build_runtime_observed_input_truth(
+    *,
+    usage: Any,
+    provider_model: str,
+    actual_request_hash: str,
+    source: str,
+) -> RuntimeObservedInputTruth:
+    normalized = normalize_usage_payload(usage or {})
+    input_tokens = max(0, int(normalized.get("input_tokens") or 0))
+    cache_hit_tokens = max(0, int(normalized.get("cache_hit_tokens") or 0))
+    return RuntimeObservedInputTruth(
+        effective_input_tokens=max(0, input_tokens + cache_hit_tokens),
+        input_tokens=input_tokens,
+        cache_hit_tokens=cache_hit_tokens,
+        provider_model=str(provider_model or "").strip(),
+        actual_request_hash=str(actual_request_hash or "").strip(),
+        source=str(source or "").strip() or "provider_usage",
+    )
+
+
+def build_runtime_hybrid_send_token_estimate(
+    *,
+    preview_estimate_tokens: int,
+    previous_effective_input_tokens: int,
+    delta_estimate_tokens: int,
+    comparable_to_previous_request: bool,
+) -> RuntimeHybridSendTokenEstimate:
+    normalized_preview_estimate_tokens = max(0, int(preview_estimate_tokens or 0))
+    normalized_previous_effective_input_tokens = max(
+        0,
+        int(previous_effective_input_tokens or 0),
+    )
+    normalized_delta_estimate_tokens = max(0, int(delta_estimate_tokens or 0))
+    usage_based_estimate_tokens = (
+        normalized_previous_effective_input_tokens + normalized_delta_estimate_tokens
+        if comparable_to_previous_request and normalized_previous_effective_input_tokens > 0
+        else 0
+    )
+    final_estimate_tokens = max(
+        normalized_preview_estimate_tokens,
+        usage_based_estimate_tokens,
+    )
+    estimate_source = (
+        "usage_plus_delta"
+        if usage_based_estimate_tokens >= normalized_preview_estimate_tokens
+        and usage_based_estimate_tokens > 0
+        else "preview_estimate"
+    )
+    return RuntimeHybridSendTokenEstimate(
+        final_estimate_tokens=final_estimate_tokens,
+        preview_estimate_tokens=normalized_preview_estimate_tokens,
+        usage_based_estimate_tokens=usage_based_estimate_tokens,
+        delta_estimate_tokens=normalized_delta_estimate_tokens,
+        estimate_source=estimate_source,
+        comparable_to_previous_request=bool(comparable_to_previous_request),
+    )
+
+
 __all__ = [
     "RUNTIME_SEND_TOKEN_COMPRESSION_ESTIMATE_SAFETY_RATIO",
     "RUNTIME_SEND_TOKEN_COMPRESSION_TRIGGER_RATIO",
+    "RuntimeHybridSendTokenEstimate",
+    "RuntimeObservedInputTruth",
     "RuntimeSendTokenPreflightSnapshot",
     "RuntimeSendTokenPreflightThresholds",
+    "build_runtime_hybrid_send_token_estimate",
+    "build_runtime_observed_input_truth",
     "build_runtime_send_token_preflight_snapshot",
     "compute_runtime_send_token_preflight_thresholds",
     "estimate_runtime_provider_request_preview_tokens",

@@ -5909,6 +5909,7 @@ class MainRuntimeService:
         actual_request_hash = ''
         actual_request_message_count = 0
         actual_tool_schema_hash = ''
+        observed_input_truth: dict[str, Any] = {}
         if frame is not None:
             frame_payload = dict(frame.payload or {})
             actual_request_ref = str(frame_payload.get('actual_request_ref') or '').strip()
@@ -5917,6 +5918,8 @@ class MainRuntimeService:
             actual_request_hash = str(frame_payload.get('actual_request_hash') or '').strip()
             actual_request_message_count = int(frame_payload.get('actual_request_message_count') or 0)
             actual_tool_schema_hash = str(frame_payload.get('actual_tool_schema_hash') or '').strip()
+            if isinstance(frame_payload.get('observed_input_truth'), dict):
+                observed_input_truth = dict(frame_payload.get('observed_input_truth') or {})
         metadata = dict(node.metadata or {})
         if not actual_request_ref:
             actual_request_ref = str(metadata.get('latest_runtime_actual_request_ref') or '').strip()
@@ -5930,6 +5933,8 @@ class MainRuntimeService:
             actual_request_message_count = int(metadata.get('latest_runtime_actual_request_message_count') or 0)
         if not actual_tool_schema_hash:
             actual_tool_schema_hash = str(metadata.get('latest_runtime_actual_tool_schema_hash') or '').strip()
+        if not observed_input_truth and isinstance(metadata.get('latest_runtime_observed_input_truth'), dict):
+            observed_input_truth = dict(metadata.get('latest_runtime_observed_input_truth') or {})
         ref = actual_request_ref or messages_ref
         if not ref:
             metadata = dict(node.metadata or {})
@@ -5952,6 +5957,7 @@ class MainRuntimeService:
             'actual_request_hash': actual_request_hash,
             'actual_request_message_count': actual_request_message_count,
             'actual_tool_schema_hash': actual_tool_schema_hash,
+            'observed_input_truth': observed_input_truth,
         }
 
     def record_node_file_change(self, task_id: str, node_id: str, *, path: str, change_type: str) -> None:

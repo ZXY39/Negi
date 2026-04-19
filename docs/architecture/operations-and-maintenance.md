@@ -343,9 +343,10 @@ For the queued Markdown memory runtime, the first operator checks should now be:
 
 1. Inspect `memory/MEMORY.md` for the currently committed long-term memory snapshot.
 2. Inspect `memory/queue.jsonl` for pending `write` / `delete` / `assess` requests.
-3. Inspect `memory/ops.jsonl` for the last successfully applied batches.
-4. Use `g3ku memory current`, `g3ku memory queue`, and `g3ku memory flush` when you need a quick operator view without manually opening files.
-5. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend or the catalog bridge.
+3. Inspect `memory/ops.jsonl` for the latest terminal batch history, including both applied rows and durable discarded rows.
+4. If a processed row exposes `request_artifact_paths`, inspect the referenced files under `.g3ku/memory-requests/` before blaming prompt assembly or the provider adapter.
+5. Use `g3ku memory current`, `g3ku memory queue`, and `g3ku memory flush` when you need a quick operator view without manually opening files.
+6. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend or the catalog bridge.
 
 The important maintenance boundary is:
 
@@ -353,7 +354,7 @@ The important maintenance boundary is:
 - `MEMORY.md` is the only committed long-term memory source
 - `notes/` contains optional detail bodies and should stay small and human-readable
 - `review_state.json` is per-session buffering metadata for the 5-turn ordinary review window; it is not committed user memory
-- `ops.jsonl` is not a complete failure ledger anymore; queue-head error fields are authoritative for in-flight engineering failures
+- `ops.jsonl` is terminal history, not an in-flight retry log: applied rows and durable discarded outcomes belong there, while queue-head error fields remain authoritative for engineering failures that are still retryable
 - only one live process should hold the memory-worker lease at a time; extra web/worker processes may exist, but they should leave queue consumption to the active lease holder
 
 Operator debugging order for a stuck queue head:
@@ -428,7 +429,7 @@ Operator interpretation of the three queue entry types:
 
 - `write`: explicit or already-refined memory text waiting for real memory processing
 - `delete`: id-based memory deletion waiting for real memory processing
-- `assess`: buffered ordinary-turn/compression window waiting for the assessor lane; if the assessor returns `null`, no committed memory change follows
+- `assess`: buffered ordinary-turn/compression window waiting for the assessor lane; if the assessor returns `null`, rejects the batch, or the batch fails runtime precheck, no committed memory change follows and the runtime records a durable discarded row in `memory/ops.jsonl`
 
 ## 10. Memory Reset Workflow
 

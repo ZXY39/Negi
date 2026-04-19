@@ -98,13 +98,16 @@ def _fake_response(
     content: str = "",
     tool_calls: list[dict[str, object]] | None = None,
     usage: dict[str, int] | None = None,
+    response_metadata: dict[str, object] | None = None,
 ) -> object:
     usage_payload = dict(usage or {})
+    metadata = {"token_usage": usage_payload}
+    metadata.update(dict(response_metadata or {}))
     return SimpleNamespace(
         content=content,
         tool_calls=list(tool_calls or []),
         usage_metadata=usage_payload,
-        response_metadata={"token_usage": usage_payload},
+        response_metadata=metadata,
     )
 
 
@@ -360,10 +363,108 @@ async def test_v2_run_due_batch_once_drops_assess_batch_when_assessor_returns_nu
         monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: assessor_model, raising=False)
 
         report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        processed = _read_jsonl(tmp_path / "memory" / "ops.jsonl")
 
-        assert report["status"] == "assessed_null"
+        assert report["status"] == "discarded"
+        assert report["discard_reason"] == "assessed_null"
         assert await manager.list_queue(limit=10) == []
-        assert _read_jsonl(tmp_path / "memory" / "ops.jsonl") == []
+        assert len(processed) == 1
+        assert processed[0]["status"] == "discarded"
+        assert processed[0]["discard_reason"] == "assessed_null"
+        assert processed[0]["request_ids"] == ["assess_1"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_run_due_batch_once_records_rejected_assess_batch_in_processed_history(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="assess",
+                decision_source="self",
+                payload_text="window payload",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="assess_1",
+                session_key="web:shared",
+            )
+        )
+        assessor_model = _FakeToolCallingModel(
+            [
+                _fake_response(
+                    content="plain text reply without tool call",
+                    usage={"input_tokens": 2, "output_tokens": 1, "cache_read_tokens": 0},
+                )
+            ]
+        )
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: assessor_model, raising=False)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        processed = _read_jsonl(tmp_path / "memory" / "ops.jsonl")
+
+        assert report["status"] == "discarded"
+        assert report["discard_reason"] == "rejected"
+        assert await manager.list_queue(limit=10) == []
+        assert len(processed) == 1
+        assert processed[0]["status"] == "discarded"
+        assert processed[0]["discard_reason"] == "rejected"
+        assert processed[0]["request_ids"] == ["assess_1"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_run_due_batch_once_records_precheck_failed_batch_in_processed_history(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="assess",
+                decision_source="self",
+                payload_text="",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="assess_1",
+                session_key="web:shared",
+            )
+        )
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            module,
+            "build_chat_model",
+            lambda *args, **kwargs: pytest.fail("precheck-failed batch should not invoke memory model"),
+            raising=False,
+        )
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        processed = _read_jsonl(tmp_path / "memory" / "ops.jsonl")
+
+        assert report["status"] == "discarded"
+        assert report["discard_reason"] == "precheck_failed"
+        assert await manager.list_queue(limit=10) == []
+        assert len(processed) == 1
+        assert processed[0]["status"] == "discarded"
+        assert processed[0]["discard_reason"] == "precheck_failed"
+        assert processed[0]["request_ids"] == ["assess_1"]
     finally:
         manager.close()
 
@@ -394,6 +495,11 @@ async def test_v2_run_due_batch_once_processes_assess_batch_into_memory_write(tm
                         }
                     ],
                     usage={"input_tokens": 2, "output_tokens": 1, "cache_read_tokens": 0},
+                    response_metadata={
+                        "provider_request_id": "provider-assess-1",
+                        "provider_request_meta": {"provider": "responses", "endpoint": "/responses"},
+                        "provider_request_body": {"model": "gpt-5.2", "input": [{"role": "user", "content": "assess"}]},
+                    },
                 )
             ]
         )
@@ -415,6 +521,11 @@ async def test_v2_run_due_batch_once_processes_assess_batch_into_memory_write(tm
                         }
                     ],
                     usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
+                    response_metadata={
+                        "provider_request_id": "provider-agent-1",
+                        "provider_request_meta": {"provider": "responses", "endpoint": "/responses"},
+                        "provider_request_body": {"model": "gpt-5.2", "input": [{"role": "user", "content": "apply"}]},
+                    },
                 ),
                 _fake_response(content="done", usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0}),
             ]
@@ -438,6 +549,13 @@ async def test_v2_run_due_batch_once_processes_assess_batch_into_memory_write(tm
         assert "id:" in snapshot_text
         assert processed[0]["source_op"] == "assess"
         assert processed[0]["op"] == "write"
+        assert processed[0]["status"] == "applied"
+        assert processed[0]["provider_request_ids"] == ["provider-assess-1", "provider-agent-1"]
+        assert len(processed[0]["request_artifact_paths"]) == 2
+        for artifact_path in processed[0]["request_artifact_paths"]:
+            artifact = json.loads(Path(artifact_path).read_text(encoding="utf-8"))
+            assert artifact["queue_request_ids"] == ["assess_1"]
+            assert str(artifact["provider_request_id"]).startswith("provider-")
     finally:
         manager.close()
 

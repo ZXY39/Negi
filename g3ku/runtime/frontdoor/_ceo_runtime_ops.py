@@ -32,6 +32,7 @@ from g3ku.providers.openai_codex_provider import (
     _prompt_cache_key as _preview_prompt_cache_key,
     _strip_model_prefix as _preview_strip_model_prefix,
 )
+from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
@@ -39,10 +40,7 @@ from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
     FRONTDOOR_COMPACTED_HISTORY_MAX_TOKENS,
     FrontdoorTokenPreflightResult,
-    build_frontdoor_token_preflight_policy,
     compact_frontdoor_history_zone,
-    estimate_frontdoor_provider_request_tokens,
-    should_run_frontdoor_token_preflight,
 )
 from main.models import normalize_execution_policy_metadata
 from main.protocol import now_iso
@@ -52,6 +50,8 @@ from main.runtime.chat_backend import (
     resolve_send_model_context_window_info,
 )
 from main.runtime.send_token_preflight import (
+    build_runtime_hybrid_send_token_estimate,
+    build_runtime_observed_input_truth,
     build_runtime_send_token_preflight_snapshot,
     compute_runtime_send_token_preflight_thresholds,
     should_trigger_runtime_token_compression,
@@ -126,6 +126,52 @@ class FrontdoorCompressionRuntimeError(RuntimeError):
         self.code = str(code or "").strip() or "runtime_error"
         self.message = str(message or "").strip()
         self.recoverable = bool(recoverable)
+
+
+@dataclass(frozen=True, slots=True)
+class _FrontdoorTokenPreflightPolicy:
+    max_context_tokens: int
+    trigger_ratio: float
+    trigger_tokens: int
+
+
+def _build_frontdoor_token_preflight_policy(
+    *,
+    max_context_tokens: int,
+    trigger_ratio: float,
+) -> _FrontdoorTokenPreflightPolicy:
+    normalized_max = max(0, int(max_context_tokens or 0))
+    normalized_ratio = max(0.0, float(trigger_ratio or 0.0))
+    return _FrontdoorTokenPreflightPolicy(
+        max_context_tokens=normalized_max,
+        trigger_ratio=normalized_ratio,
+        trigger_tokens=int(normalized_max * normalized_ratio),
+    )
+
+
+def _estimate_frontdoor_provider_request_tokens(
+    *,
+    provider_request_body: dict[str, Any] | None,
+    request_messages: list[dict[str, Any]],
+    tool_schemas: list[dict[str, Any]],
+) -> int:
+    payload = dict(provider_request_body or {})
+    if not payload:
+        payload = {
+            "input": list(request_messages),
+            "tools": list(tool_schemas or []),
+        }
+    return estimate_tokens(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+    )
+
+
+def _should_run_frontdoor_token_preflight(
+    *,
+    final_request_tokens: int,
+    policy: _FrontdoorTokenPreflightPolicy,
+) -> bool:
+    return int(final_request_tokens or 0) >= int(policy.trigger_tokens)
 
 
 class _CeoStructuredTool(StructuredTool):
@@ -446,7 +492,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         provider_request_body: dict[str, Any] | None,
     ) -> FrontdoorTokenPreflightResult:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
-        policy = build_frontdoor_token_preflight_policy(
+        policy = _build_frontdoor_token_preflight_policy(
             max_context_tokens=int(
                 getattr(assembly_cfg, "frontdoor_compaction_max_context_tokens", 200000) or 200000
             ),
@@ -454,7 +500,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 getattr(assembly_cfg, "frontdoor_compaction_trigger_ratio", 0.10) or 0.10
             ),
         )
-        final_request_tokens = estimate_frontdoor_provider_request_tokens(
+        final_request_tokens = _estimate_frontdoor_provider_request_tokens(
             provider_request_body=provider_request_body,
             request_messages=request_messages,
             tool_schemas=tool_schemas,
@@ -465,7 +511,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "trigger_tokens": int(policy.trigger_tokens),
             "max_context_tokens": int(policy.max_context_tokens),
         }
-        if not should_run_frontdoor_token_preflight(
+        if not _should_run_frontdoor_token_preflight(
             final_request_tokens=final_request_tokens,
             policy=policy,
         ):
@@ -485,7 +531,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             request_messages=request_messages,
             compacted_history=compacted_history,
         )
-        rewritten_tokens = estimate_frontdoor_provider_request_tokens(
+        rewritten_tokens = _estimate_frontdoor_provider_request_tokens(
             provider_request_body=None,
             request_messages=rewritten_messages,
             tool_schemas=tool_schemas,
@@ -648,7 +694,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         request_messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
     ) -> int:
-        return estimate_frontdoor_provider_request_tokens(
+        return _estimate_frontdoor_provider_request_tokens(
             provider_request_body=provider_request_body,
             request_messages=request_messages,
             tool_schemas=tool_schemas,
@@ -708,34 +754,66 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             parallel_tool_calls=(bool(state_for_request.get("parallel_enabled")) if list(langchain_tools or []) else None),
         )
         context_window_tokens = int(model_info.get("context_window_tokens") or 0)
-        estimated_total_tokens = self._estimate_frontdoor_send_total_tokens(
+        preview_estimate_tokens = self._estimate_frontdoor_send_total_tokens(
             provider_request_body=provider_request_body,
             request_messages=request_messages,
             tool_schemas=actual_tool_schemas,
         )
+        session = getattr(getattr(runtime, "context", None), "session", None)
         provider_model = self._frontdoor_model_display_name(model_info)
+        latest_record = self._frontdoor_latest_actual_request_record(
+            session=session,
+            state=state_for_request,
+        )
+        previous_truth = self._frontdoor_previous_observed_input_truth(
+            session=session,
+            state=state_for_request,
+            latest_record=latest_record,
+        )
+        previous_effective_input_tokens = int(previous_truth.get("effective_input_tokens") or 0)
+        delta_estimate_tokens = 0
+        comparable_to_previous_request = False
+        previous_provider_model = str(previous_truth.get("provider_model") or "").strip()
+        previous_truth_hash = str(previous_truth.get("actual_request_hash") or "").strip()
+        latest_record_hash = str(latest_record.get("actual_request_hash") or "").strip()
+        if (
+            previous_effective_input_tokens > 0
+            and previous_provider_model
+            and self._frontdoor_provider_models_match(previous_provider_model, provider_model)
+            and previous_truth_hash
+            and latest_record_hash
+            and previous_truth_hash == latest_record_hash
+        ):
+            delta_estimate_tokens, comparable_to_previous_request = self._frontdoor_append_only_delta_estimate_tokens(
+                previous_request_messages=[
+                    dict(item)
+                    for item in list(latest_record.get("request_messages") or latest_record.get("messages") or [])
+                    if isinstance(item, dict)
+                ],
+                current_request_messages=request_messages,
+                previous_tool_schemas=[
+                    dict(item)
+                    for item in list(latest_record.get("tool_schemas") or [])
+                    if isinstance(item, dict)
+                ],
+                current_tool_schemas=actual_tool_schemas,
+            )
+        hybrid_estimate = build_runtime_hybrid_send_token_estimate(
+            preview_estimate_tokens=int(preview_estimate_tokens or 0),
+            previous_effective_input_tokens=previous_effective_input_tokens,
+            delta_estimate_tokens=delta_estimate_tokens,
+            comparable_to_previous_request=comparable_to_previous_request,
+        )
         thresholds = compute_runtime_send_token_preflight_thresholds(
             context_window_tokens=context_window_tokens,
         )
         trigger_tokens = int(thresholds.trigger_tokens or 0)
         effective_trigger_tokens = int(thresholds.effective_trigger_tokens or 0)
         missing_context_window = context_window_tokens <= 25_000
-        would_exceed_context_window = (
-            not missing_context_window
-            and estimated_total_tokens > context_window_tokens
-        )
-        would_trigger_token_compression = (
-            not missing_context_window
-            and not would_exceed_context_window
-            and should_trigger_runtime_token_compression(
-                estimated_total_tokens=estimated_total_tokens,
-                thresholds=thresholds,
-            )
-        )
-        ratio = build_runtime_send_token_preflight_snapshot(
+        snapshot = build_runtime_send_token_preflight_snapshot(
             context_window_tokens=context_window_tokens,
-            estimated_total_tokens=estimated_total_tokens,
-        ).ratio
+            estimated_total_tokens=int(hybrid_estimate.final_estimate_tokens or 0),
+        )
         return {
             "request_messages": list(request_messages),
             "tool_schemas": list(actual_tool_schemas),
@@ -745,13 +823,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "model_info": dict(model_info or {}),
             "provider_model": provider_model,
             "context_window_tokens": context_window_tokens,
-            "estimated_total_tokens": estimated_total_tokens,
+            "estimated_total_tokens": int(snapshot.estimated_total_tokens or 0),
+            "preview_estimate_tokens": int(hybrid_estimate.preview_estimate_tokens or 0),
+            "usage_based_estimate_tokens": int(hybrid_estimate.usage_based_estimate_tokens or 0),
+            "delta_estimate_tokens": int(hybrid_estimate.delta_estimate_tokens or 0),
+            "effective_input_tokens": int(previous_effective_input_tokens or 0),
+            "estimate_source": str(hybrid_estimate.estimate_source or "preview_estimate"),
+            "comparable_to_previous_request": bool(hybrid_estimate.comparable_to_previous_request),
+            "final_estimate_tokens": int(hybrid_estimate.final_estimate_tokens or 0),
             "trigger_tokens": trigger_tokens,
             "effective_trigger_tokens": effective_trigger_tokens,
             "missing_context_window": missing_context_window,
-            "would_exceed_context_window": would_exceed_context_window,
-            "would_trigger_token_compression": would_trigger_token_compression,
-            "ratio": ratio,
+            "would_exceed_context_window": bool(snapshot.would_exceed_context_window),
+            "would_trigger_token_compression": bool(snapshot.would_trigger_token_compression),
+            "ratio": float(snapshot.ratio or 0.0),
         }
 
     async def _emit_frontdoor_runtime_snapshot(
@@ -1029,6 +1114,135 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not previous_path:
             return {}
         return cls._frontdoor_actual_request_record_from_path(previous_path)
+
+    @classmethod
+    def _frontdoor_latest_actual_request_record(
+        cls,
+        *,
+        session: Any | None,
+        state: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        candidates = (
+            (
+                [
+                    dict(item)
+                    for item in list((state or {}).get("frontdoor_actual_request_history") or [])
+                    if isinstance(item, dict)
+                ],
+                str((state or {}).get("frontdoor_actual_request_path") or "").strip(),
+            ),
+            (
+                [
+                    dict(item)
+                    for item in list(getattr(session, "_frontdoor_actual_request_history", []) or [])
+                    if isinstance(item, dict)
+                ],
+                str(getattr(session, "_frontdoor_actual_request_path", "") or "").strip(),
+            ),
+        )
+        for history, fallback_path in candidates:
+            latest_path = str((history[-1].get("path") if history else "") or fallback_path or "").strip()
+            if not latest_path:
+                continue
+            record = cls._frontdoor_actual_request_record_from_path(latest_path)
+            if record:
+                return record
+        return cls._frontdoor_previous_actual_request_record(session)
+
+    @staticmethod
+    def _frontdoor_provider_models_match(previous_provider_model: str, current_provider_model: str) -> bool:
+        previous_raw = str(previous_provider_model or "").strip()
+        current_raw = str(current_provider_model or "").strip()
+        if not previous_raw or not current_raw:
+            return False
+        if previous_raw == current_raw:
+            return True
+        previous_model = previous_raw.split(":", 1)[1].strip() if ":" in previous_raw else previous_raw
+        current_model = current_raw.split(":", 1)[1].strip() if ":" in current_raw else current_raw
+        return bool(previous_model and current_model and previous_model == current_model)
+
+    @staticmethod
+    def _frontdoor_previous_observed_input_truth(
+        *,
+        session: Any | None,
+        state: dict[str, Any] | None,
+        latest_record: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        record = dict(latest_record or {})
+        if isinstance(record.get("observed_input_truth"), dict):
+            return dict(record.get("observed_input_truth") or {})
+        diagnostics = dict((state or {}).get("frontdoor_token_preflight_diagnostics") or {})
+        if isinstance(diagnostics.get("observed_input_truth"), dict):
+            return dict(diagnostics.get("observed_input_truth") or {})
+        session_diagnostics = dict(getattr(session, "_frontdoor_token_preflight_diagnostics", {}) or {})
+        if isinstance(session_diagnostics.get("observed_input_truth"), dict):
+            return dict(session_diagnostics.get("observed_input_truth") or {})
+        return {}
+
+    @classmethod
+    def _frontdoor_append_only_delta_estimate_tokens(
+        cls,
+        *,
+        previous_request_messages: list[dict[str, Any]] | None,
+        current_request_messages: list[dict[str, Any]] | None,
+        previous_tool_schemas: list[dict[str, Any]] | None,
+        current_tool_schemas: list[dict[str, Any]] | None,
+    ) -> tuple[int, bool]:
+        previous_records = [dict(item) for item in list(previous_request_messages or []) if isinstance(item, dict)]
+        current_records = [dict(item) for item in list(current_request_messages or []) if isinstance(item, dict)]
+        if not previous_records or len(current_records) < len(previous_records):
+            return 0, False
+        if not cls._fresh_turn_seed_records_match(current_records[: len(previous_records)], previous_records):
+            return 0, False
+        previous_tool_schema_hash = str(
+            build_actual_request_diagnostics(
+                request_messages=[],
+                tool_schemas=[
+                    dict(item)
+                    for item in list(previous_tool_schemas or [])
+                    if isinstance(item, dict)
+                ],
+            ).get("actual_tool_schema_hash")
+            or ""
+        ).strip()
+        current_tool_schema_hash = str(
+            build_actual_request_diagnostics(
+                request_messages=[],
+                tool_schemas=[
+                    dict(item)
+                    for item in list(current_tool_schemas or [])
+                    if isinstance(item, dict)
+                ],
+            ).get("actual_tool_schema_hash")
+            or ""
+        ).strip()
+        if previous_tool_schema_hash != current_tool_schema_hash:
+            return 0, False
+        previous_estimate_tokens = int(
+            _estimate_frontdoor_provider_request_tokens(
+                provider_request_body=None,
+                request_messages=previous_records,
+                tool_schemas=[
+                    dict(item)
+                    for item in list(previous_tool_schemas or [])
+                    if isinstance(item, dict)
+                ],
+            )
+            or 0
+        )
+        current_estimate_tokens = int(
+            _estimate_frontdoor_provider_request_tokens(
+                provider_request_body=None,
+                request_messages=current_records,
+                tool_schemas=[
+                    dict(item)
+                    for item in list(current_tool_schemas or [])
+                    if isinstance(item, dict)
+                ],
+            )
+            or 0
+        )
+        return max(0, current_estimate_tokens - previous_estimate_tokens), True
 
     @classmethod
     def _fresh_turn_seed_normalized_value(cls, value: Any) -> Any:
@@ -1859,26 +2073,39 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 turn_id = ""
         if not turn_id:
             turn_id = str(getattr(target_session, "_active_turn_id", "") or "").strip()
+        payload = self._build_frontdoor_request_artifact_payload(
+            state=state,
+            session_key=session_key,
+            turn_id=turn_id,
+            request_messages=request_messages,
+            tool_schemas=tool_schemas,
+            prompt_cache_key=prompt_cache_key,
+            prompt_cache_diagnostics=prompt_cache_diagnostics,
+            parallel_tool_calls=parallel_tool_calls,
+            provider_request_meta=provider_request_meta,
+            provider_request_body=provider_request_body,
+            usage=usage,
+            request_kind="frontdoor_actual_request",
+            request_lane="visible_frontdoor",
+        )
         record = persist_frontdoor_actual_request(
             session_key,
-            payload=self._build_frontdoor_request_artifact_payload(
-                state=state,
-                session_key=session_key,
-                turn_id=turn_id,
-                request_messages=request_messages,
-                tool_schemas=tool_schemas,
-                prompt_cache_key=prompt_cache_key,
-                prompt_cache_diagnostics=prompt_cache_diagnostics,
-                parallel_tool_calls=parallel_tool_calls,
-                provider_request_meta=provider_request_meta,
-                provider_request_body=provider_request_body,
-                usage=usage,
-                request_kind="frontdoor_actual_request",
-                request_lane="visible_frontdoor",
-            ),
+            payload=payload,
         )
         if not record:
             return {}
+        observed_input_truth = (
+            copy.deepcopy(dict(payload.get("observed_input_truth") or {}))
+            if isinstance(payload, dict)
+            else {}
+        )
+        frontdoor_token_preflight_diagnostics = (
+            copy.deepcopy(dict(payload.get("frontdoor_token_preflight_diagnostics") or {}))
+            if isinstance(payload, dict)
+            else {}
+        )
+        if observed_input_truth:
+            record["observed_input_truth"] = copy.deepcopy(observed_input_truth)
         authoritative_request_body_messages = self._request_body_messages_without_tool_contracts(request_messages)
         existing_history = [
             dict(item)
@@ -1899,6 +2126,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             setattr(target_session, "_frontdoor_actual_request_hash", str(record.get("actual_request_hash") or "").strip())
             setattr(target_session, "_frontdoor_actual_request_message_count", int(record.get("actual_request_message_count") or 0))
             setattr(target_session, "_frontdoor_actual_tool_schema_hash", str(record.get("actual_tool_schema_hash") or "").strip())
+            if frontdoor_token_preflight_diagnostics:
+                setattr(
+                    target_session,
+                    "_frontdoor_token_preflight_diagnostics",
+                    copy.deepcopy(frontdoor_token_preflight_diagnostics),
+                )
         return {
             "frontdoor_actual_request_path": str(record.get("path") or "").strip(),
             "frontdoor_actual_request_history": list(existing_history),
@@ -1907,7 +2140,51 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "frontdoor_actual_request_hash": str(record.get("actual_request_hash") or "").strip(),
             "frontdoor_actual_request_message_count": int(record.get("actual_request_message_count") or 0),
             "frontdoor_actual_tool_schema_hash": str(record.get("actual_tool_schema_hash") or "").strip(),
+            "frontdoor_token_preflight_diagnostics": copy.deepcopy(frontdoor_token_preflight_diagnostics),
         }
+
+    @staticmethod
+    def _frontdoor_observed_input_truth(
+        *,
+        usage: dict[str, Any] | None,
+        provider_model: str,
+        actual_request_hash: str,
+    ) -> dict[str, Any]:
+        normalized_usage = normalize_usage_payload(usage)
+        if not normalized_usage:
+            return {}
+        truth = build_runtime_observed_input_truth(
+            usage=normalized_usage,
+            provider_model=str(provider_model or "").strip(),
+            actual_request_hash=str(actual_request_hash or "").strip(),
+            source="provider_usage",
+        )
+        if int(truth.input_tokens or 0) <= 0 and int(truth.cache_hit_tokens or 0) <= 0:
+            return {}
+        return {
+            "effective_input_tokens": int(truth.effective_input_tokens or 0),
+            "input_tokens": int(truth.input_tokens or 0),
+            "cache_hit_tokens": int(truth.cache_hit_tokens or 0),
+            "provider_model": str(truth.provider_model or "").strip(),
+            "actual_request_hash": str(truth.actual_request_hash or "").strip(),
+            "source": str(truth.source or "").strip(),
+        }
+
+    @staticmethod
+    def _frontdoor_diagnostics_with_observed_input_truth(
+        diagnostics: dict[str, Any] | None,
+        observed_input_truth: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        merged = copy.deepcopy(dict(diagnostics or {}))
+        truth = dict(observed_input_truth or {})
+        if not truth:
+            return merged
+        merged["observed_input_truth"] = copy.deepcopy(truth)
+        merged["effective_input_tokens"] = int(truth.get("effective_input_tokens") or 0)
+        merged["input_tokens"] = int(truth.get("input_tokens") or 0)
+        merged["cache_hit_tokens"] = int(truth.get("cache_hit_tokens") or 0)
+        merged["effective_input_tokens_source"] = str(truth.get("source") or "provider_usage")
+        return merged
 
     def _build_frontdoor_request_artifact_payload(
         self,
@@ -1929,6 +2206,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> dict[str, Any]:
         diagnostics = dict(prompt_cache_diagnostics or {})
         provider_model = str((list(state.get("model_refs") or []) or [""])[0] or "").strip()
+        resolved_provider_model = str(
+            dict(state.get("frontdoor_token_preflight_diagnostics") or {}).get("provider_model")
+            or provider_model
+            or ""
+        ).strip()
+        observed_input_truth = self._frontdoor_observed_input_truth(
+            usage=usage,
+            provider_model=resolved_provider_model,
+            actual_request_hash=str(diagnostics.get("actual_request_hash") or "").strip(),
+        )
+        frontdoor_token_preflight_diagnostics = self._frontdoor_diagnostics_with_observed_input_truth(
+            dict(state.get("frontdoor_token_preflight_diagnostics") or {}),
+            observed_input_truth,
+        )
         return {
             "type": str(request_kind or "").strip() or "frontdoor_actual_request",
             "request_kind": str(request_kind or "").strip() or "frontdoor_actual_request",
@@ -1937,16 +2228,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "turn_id": str(turn_id or "").strip(),
             "parent_request_id": str(parent_request_id or "").strip(),
             "created_at": now_iso(),
-            "provider_model": provider_model,
+            "provider_model": resolved_provider_model,
             "model_refs": [
                 str(item or "").strip()
                 for item in list(state.get("model_refs") or [])
                 if str(item or "").strip()
             ],
             "frontdoor_history_shrink_reason": str(state.get("frontdoor_history_shrink_reason") or "").strip(),
-            "frontdoor_token_preflight_diagnostics": copy.deepcopy(
-                dict(state.get("frontdoor_token_preflight_diagnostics") or {})
-            ),
+            "frontdoor_token_preflight_diagnostics": copy.deepcopy(frontdoor_token_preflight_diagnostics),
             "parallel_tool_calls": parallel_tool_calls,
             "prompt_cache_key": str(prompt_cache_key or "").strip(),
             "prompt_cache_key_hash": str(diagnostics.get("prompt_cache_key_hash") or "").strip(),
@@ -1956,6 +2245,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "tool_signature_hash": str(diagnostics.get("tool_signature_hash") or "").strip(),
             "stable_prefix_hash": str(diagnostics.get("stable_prefix_hash") or "").strip(),
             "dynamic_appendix_hash": str(diagnostics.get("dynamic_appendix_hash") or "").strip(),
+            "observed_input_truth": copy.deepcopy(observed_input_truth),
             "messages": [dict(item) for item in list(request_messages or []) if isinstance(item, dict)],
             "request_messages": [dict(item) for item in list(request_messages or []) if isinstance(item, dict)],
             "tool_schemas": [dict(item) for item in list(tool_schemas or []) if isinstance(item, dict)],
@@ -3612,18 +3902,32 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "applied": False,
                 "mode": "llm",
                 "final_request_tokens": estimated_total_tokens,
+                "estimated_total_tokens": estimated_total_tokens,
+                "preview_estimate_tokens": int(preflight_snapshot.get("preview_estimate_tokens") or 0),
+                "usage_based_estimate_tokens": int(preflight_snapshot.get("usage_based_estimate_tokens") or 0),
+                "delta_estimate_tokens": int(preflight_snapshot.get("delta_estimate_tokens") or 0),
+                "effective_input_tokens": int(preflight_snapshot.get("effective_input_tokens") or 0),
+                "estimate_source": str(preflight_snapshot.get("estimate_source") or "preview_estimate"),
+                "comparable_to_previous_request": bool(preflight_snapshot.get("comparable_to_previous_request")),
+                "final_estimate_tokens": int(preflight_snapshot.get("final_estimate_tokens") or estimated_total_tokens),
                 "trigger_tokens": trigger_tokens,
                 "effective_trigger_tokens": int(preflight_snapshot.get("effective_trigger_tokens") or 0),
                 "max_context_tokens": context_window_tokens,
                 "provider_model": str(preflight_snapshot.get("provider_model") or self._frontdoor_model_display_name(model_info)),
+                "would_exceed_context_window": bool(preflight_snapshot.get("would_exceed_context_window")),
+                "would_trigger_token_compression": bool(preflight_snapshot.get("would_trigger_token_compression")),
+                "ratio": float(preflight_snapshot.get("ratio") or 0.0),
             }
             preflight_shrink_reason = ""
-            if bool(preflight_snapshot.get("would_exceed_context_window")):
-                raise self._frontdoor_context_window_exceeded_error(model_info=model_info)
-            if bool(preflight_snapshot.get("would_trigger_token_compression")):
+            should_attempt_token_compression = bool(
+                preflight_snapshot.get("would_trigger_token_compression")
+                or preflight_snapshot.get("would_exceed_context_window")
+            )
+            if should_attempt_token_compression:
                 runtime_session = getattr(getattr(runtime, "context", None), "session", None)
                 if runtime_session is not None:
                     setattr(runtime_session, "_frontdoor_pending_shrink_reason", "token_compression")
+                pre_compaction_diagnostics = dict(preflight_diagnostics)
                 preflight = await self._run_frontdoor_llm_token_compression(
                     state=state_for_request,
                     runtime=runtime,
@@ -3632,8 +3936,64 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     tool_schemas=actual_tool_schemas,
                 )
                 request_messages = list(preflight.request_messages)
+                post_compaction_tokens = int(preflight.final_request_tokens or 0)
+                post_compaction_snapshot = build_runtime_send_token_preflight_snapshot(
+                    context_window_tokens=context_window_tokens,
+                    estimated_total_tokens=post_compaction_tokens,
+                )
                 preflight_diagnostics = {
-                    **preflight_diagnostics,
+                    **dict(preflight.diagnostics or {}),
+                    "applied": True,
+                    "mode": "llm",
+                    "final_request_tokens": post_compaction_tokens,
+                    "estimated_total_tokens": int(post_compaction_snapshot.estimated_total_tokens or 0),
+                    "preview_estimate_tokens": int(post_compaction_tokens or 0),
+                    "usage_based_estimate_tokens": 0,
+                    "delta_estimate_tokens": 0,
+                    "effective_input_tokens": 0,
+                    "estimate_source": "preview_estimate",
+                    "comparable_to_previous_request": False,
+                    "final_estimate_tokens": int(post_compaction_tokens or 0),
+                    "trigger_tokens": trigger_tokens,
+                    "effective_trigger_tokens": int(preflight_snapshot.get("effective_trigger_tokens") or 0),
+                    "max_context_tokens": context_window_tokens,
+                    "provider_model": str(
+                        preflight_snapshot.get("provider_model") or self._frontdoor_model_display_name(model_info)
+                    ),
+                    "ratio": float(post_compaction_snapshot.ratio or 0.0),
+                    "would_exceed_context_window": bool(post_compaction_snapshot.would_exceed_context_window),
+                    "would_trigger_token_compression": bool(post_compaction_snapshot.would_trigger_token_compression),
+                    "pre_compaction_estimated_total_tokens": int(
+                        pre_compaction_diagnostics.get("estimated_total_tokens") or 0
+                    ),
+                    "pre_compaction_preview_estimate_tokens": int(
+                        pre_compaction_diagnostics.get("preview_estimate_tokens") or 0
+                    ),
+                    "pre_compaction_usage_based_estimate_tokens": int(
+                        pre_compaction_diagnostics.get("usage_based_estimate_tokens") or 0
+                    ),
+                    "pre_compaction_delta_estimate_tokens": int(
+                        pre_compaction_diagnostics.get("delta_estimate_tokens") or 0
+                    ),
+                    "pre_compaction_effective_input_tokens": int(
+                        pre_compaction_diagnostics.get("effective_input_tokens") or 0
+                    ),
+                    "pre_compaction_estimate_source": str(
+                        pre_compaction_diagnostics.get("estimate_source") or "preview_estimate"
+                    ),
+                    "pre_compaction_comparable_to_previous_request": bool(
+                        pre_compaction_diagnostics.get("comparable_to_previous_request")
+                    ),
+                    "pre_compaction_final_estimate_tokens": int(
+                        pre_compaction_diagnostics.get("final_estimate_tokens") or 0
+                    ),
+                    "pre_compaction_ratio": float(pre_compaction_diagnostics.get("ratio") or 0.0),
+                    "pre_compaction_would_exceed_context_window": bool(
+                        pre_compaction_diagnostics.get("would_exceed_context_window")
+                    ),
+                    "pre_compaction_would_trigger_token_compression": bool(
+                        pre_compaction_diagnostics.get("would_trigger_token_compression")
+                    ),
                     **dict(preflight.diagnostics or {}),
                 }
                 preflight_shrink_reason = str(preflight.history_shrink_reason or "").strip()

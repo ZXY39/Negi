@@ -58,6 +58,7 @@ from main.runtime.append_notice_context import (
 )
 from main.runtime.chat_backend import build_actual_request_diagnostics
 from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
+from main.runtime.send_token_preflight import build_runtime_observed_input_truth
 from main.token_usage import aggregate_node_token_usage, build_token_usage_from_attempts, merge_token_usage_by_model, merge_token_usage_records
 
 
@@ -986,6 +987,18 @@ class TaskLogService:
                 provider_request_meta=provider_request_meta,
                 provider_request_body=provider_request_body,
             )
+            if actual_request_payload is not None:
+                observed_input_truth = self._build_observed_input_truth_from_attempts(
+                    usage_attempts=usage_attempts,
+                    actual_request_hash=str(actual_request_payload.get('actual_request_hash') or '').strip(),
+                )
+                if observed_input_truth:
+                    actual_request_payload['observed_input_truth'] = dict(observed_input_truth)
+            else:
+                observed_input_truth = self._build_observed_input_truth_from_attempts(
+                    usage_attempts=usage_attempts,
+                    actual_request_hash='',
+                )
             actual_request_ref = self._persist_actual_request_artifact(
                 task_id=task_id,
                 node_id=node_id,
@@ -1028,13 +1041,21 @@ class TaskLogService:
                 )
                 update: dict[str, Any] = {'output': output, 'updated_at': changed_at}
                 if actual_request_payload is not None:
-                    update['metadata'] = {
+                    metadata_update = {
                         **dict(record.metadata or {}),
                         'latest_runtime_actual_request_ref': actual_request_ref,
                         'latest_runtime_prompt_cache_key_hash': resolved_prompt_cache_key_hash,
                         'latest_runtime_actual_request_hash': resolved_actual_request_hash,
                         'latest_runtime_actual_request_message_count': resolved_actual_request_message_count,
                         'latest_runtime_actual_tool_schema_hash': resolved_actual_tool_schema_hash,
+                    }
+                    if observed_input_truth:
+                        metadata_update['latest_runtime_observed_input_truth'] = dict(observed_input_truth)
+                    update['metadata'] = metadata_update
+                elif observed_input_truth:
+                    update['metadata'] = {
+                        **dict(record.metadata or {}),
+                        'latest_runtime_observed_input_truth': dict(observed_input_truth),
                     }
                 if delta_usage is not None and bool(getattr(record.token_usage, 'tracked', False)):
                     update['token_usage'] = merge_token_usage_records([record.token_usage, delta_usage], tracked=True)
@@ -1060,6 +1081,11 @@ class TaskLogService:
                             'actual_request_hash': resolved_actual_request_hash,
                             'actual_request_message_count': resolved_actual_request_message_count,
                             'actual_tool_schema_hash': resolved_actual_tool_schema_hash,
+                            **(
+                                {'observed_input_truth': dict(observed_input_truth)}
+                                if observed_input_truth
+                                else {}
+                            ),
                         },
                         publish_snapshot=False,
                     )
@@ -1094,6 +1120,7 @@ class TaskLogService:
                         callable_tool_names=callable_tool_names,
                         provider_tool_names=provider_tool_names,
                         provider_tool_bundle_seeded=provider_tool_bundle_seeded,
+                        observed_input_truth=observed_input_truth,
                     )
                     self._event_writer.append_task_model_call(
                         task_id=task_id,
@@ -1488,6 +1515,39 @@ class TaskLogService:
             return str(value)
 
     @classmethod
+    def _build_observed_input_truth_from_attempts(
+        cls,
+        *,
+        usage_attempts: list[Any] | None,
+        actual_request_hash: str,
+    ) -> dict[str, Any]:
+        attempts = list(usage_attempts or [])
+        selected_attempt = None
+        for attempt in reversed(attempts):
+            usage = getattr(attempt, 'usage', None)
+            if dict(usage or {}):
+                selected_attempt = attempt
+                break
+        if selected_attempt is None:
+            return {}
+        truth = build_runtime_observed_input_truth(
+            usage=getattr(selected_attempt, 'usage', None),
+            provider_model=str(getattr(selected_attempt, 'provider_model', '') or '').strip(),
+            actual_request_hash=str(actual_request_hash or '').strip(),
+            source='provider_usage',
+        )
+        if int(truth.input_tokens or 0) <= 0 and int(truth.cache_hit_tokens or 0) <= 0:
+            return {}
+        return {
+            'effective_input_tokens': int(truth.effective_input_tokens or 0),
+            'input_tokens': int(truth.input_tokens or 0),
+            'cache_hit_tokens': int(truth.cache_hit_tokens or 0),
+            'provider_model': str(truth.provider_model or '').strip(),
+            'actual_request_hash': str(truth.actual_request_hash or '').strip(),
+            'source': str(truth.source or '').strip(),
+        }
+
+    @classmethod
     def _actual_request_artifact_payload(
         cls,
         *,
@@ -1628,6 +1688,7 @@ class TaskLogService:
         provider_tool_names: list[str] | None = None,
         provider_tool_bundle_seeded: bool = False,
         actual_request_ref: str = '',
+        observed_input_truth: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         message_list = list(model_messages or [])
         request_list = list(request_messages or message_list)
@@ -1673,6 +1734,11 @@ class TaskLogService:
             'provider_tool_bundle_seeded': bool(provider_tool_bundle_seeded),
             'tool_signature_hash': str(actual_request_diagnostics.get('actual_tool_schema_hash') or ''),
             **actual_request_diagnostics,
+            'observed_input_truth': (
+                TaskLogService._json_safe_value(dict(observed_input_truth or {}))
+                if dict(observed_input_truth or {})
+                else {}
+            ),
             'delta_usage': delta_usage.model_dump(mode='json'),
             'delta_usage_by_model': [item.model_dump(mode='json') for item in list(delta_usage_by_model or [])],
         }

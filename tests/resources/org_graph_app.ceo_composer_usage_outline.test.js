@@ -131,6 +131,7 @@ function loadApp() {
             S,
             U,
             refreshCeoComposerUsageEstimate,
+            activeCeoRuntimeUsageEstimate,
             buildCeoComposerPreflightEntries,
             syncCeoComposerUsageOutline,
             applyCeoState,
@@ -622,7 +623,7 @@ test("active turn does not enqueue composer-preflight refreshes while runtime re
 });
 
 test("active turn prefers runtime next-request snapshot over stale composer estimate and refreshes immediately", () => {
-    const { S, U, __context } = loadApp();
+    const { S, U, __context, activeCeoRuntimeUsageEstimate } = loadApp();
     S.activeSessionId = "web:test";
     S.ceoTurnActive = true;
     S.ceoComposerUsageEstimate = {
@@ -650,6 +651,8 @@ test("active turn prefers runtime next-request snapshot over stale composer esti
                 trigger_tokens: 48640,
                 effective_trigger_tokens: 48640,
                 provider_model: "openai:gpt-5.4",
+                estimate_source: "usage_plus_delta",
+                effective_input_tokens: 20313,
             },
             actual_request_message_count: 12,
         },
@@ -661,4 +664,7 @@ test("active turn prefers runtime next-request snapshot over stale composer esti
     assert.match(U.ceoComposerUsageBrain.title, /21000\/64000 TOKEN/);
     assert.equal(U.ceoComposerUsageBrain.attributes["aria-label"], U.ceoComposerUsageBrain.title);
     assert.equal(U.ceoComposerUsageBrain.dataset.usageState, "active");
+    const runtimeEstimate = activeCeoRuntimeUsageEstimate("web:test");
+    assert.equal(runtimeEstimate.estimate_source, "usage_plus_delta");
+    assert.equal(runtimeEstimate.effective_input_tokens, 20313);
 });

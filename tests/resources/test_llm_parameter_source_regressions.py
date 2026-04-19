@@ -753,6 +753,113 @@ def test_runtime_send_token_preflight_threshold_math_is_ceo_aligned() -> None:
     ) is True
 
 
+def test_runtime_send_token_preflight_snapshot_keeps_compression_trigger_true_when_over_window() -> None:
+    from main.runtime.send_token_preflight import build_runtime_send_token_preflight_snapshot
+
+    snapshot = build_runtime_send_token_preflight_snapshot(
+        context_window_tokens=25_001,
+        estimated_total_tokens=25_512,
+    )
+
+    assert snapshot.would_exceed_context_window is True
+    assert snapshot.would_trigger_token_compression is True
+    assert snapshot.effective_trigger_tokens == int(int(25_001 * 0.80) * 0.95)
+
+
+def test_runtime_observed_input_truth_uses_input_plus_cache_hit_tokens() -> None:
+    from main.runtime.send_token_preflight import build_runtime_observed_input_truth
+
+    truth = build_runtime_observed_input_truth(
+        usage={"input_tokens": 12000, "cache_hit_tokens": 3400},
+        provider_model="responses:gpt-5.4",
+        actual_request_hash="req-hash",
+        source="provider_usage",
+    )
+
+    assert truth.input_tokens == 12000
+    assert truth.cache_hit_tokens == 3400
+    assert truth.effective_input_tokens == 15400
+    assert truth.provider_model == "responses:gpt-5.4"
+    assert truth.actual_request_hash == "req-hash"
+    assert truth.source == "provider_usage"
+
+
+def test_runtime_observed_input_truth_accepts_cache_read_tokens_alias() -> None:
+    from main.runtime.send_token_preflight import build_runtime_observed_input_truth
+
+    truth = build_runtime_observed_input_truth(
+        usage={"input_tokens": 8000, "cache_read_tokens": 2200},
+        provider_model="custom:model",
+        actual_request_hash="req-hash",
+        source="provider_usage",
+    )
+
+    assert truth.input_tokens == 8000
+    assert truth.cache_hit_tokens == 2200
+    assert truth.effective_input_tokens == 10200
+
+
+def test_runtime_hybrid_estimate_prefers_conservative_upper_bound() -> None:
+    from main.runtime.send_token_preflight import build_runtime_hybrid_send_token_estimate
+
+    estimate = build_runtime_hybrid_send_token_estimate(
+        preview_estimate_tokens=12840,
+        previous_effective_input_tokens=20313,
+        delta_estimate_tokens=1800,
+        comparable_to_previous_request=True,
+    )
+
+    assert estimate.preview_estimate_tokens == 12840
+    assert estimate.usage_based_estimate_tokens == 22113
+    assert estimate.delta_estimate_tokens == 1800
+    assert estimate.final_estimate_tokens == 22113
+    assert estimate.estimate_source == "usage_plus_delta"
+    assert estimate.comparable_to_previous_request is True
+
+
+def test_frontdoor_token_preflight_re_exports_ground_truth_helpers() -> None:
+    from g3ku.runtime.frontdoor.token_preflight_compaction import (
+        RuntimeHybridSendTokenEstimate,
+        RuntimeObservedInputTruth,
+        build_runtime_hybrid_send_token_estimate,
+        build_runtime_observed_input_truth,
+    )
+
+    truth = build_runtime_observed_input_truth(
+        usage={"input_tokens": 10, "cache_hit_tokens": 4},
+        provider_model="demo:model",
+        actual_request_hash="req",
+        source="provider_usage",
+    )
+    estimate = build_runtime_hybrid_send_token_estimate(
+        preview_estimate_tokens=8,
+        previous_effective_input_tokens=14,
+        delta_estimate_tokens=3,
+        comparable_to_previous_request=True,
+    )
+
+    assert isinstance(truth, RuntimeObservedInputTruth)
+    assert truth.effective_input_tokens == 14
+    assert isinstance(estimate, RuntimeHybridSendTokenEstimate)
+    assert estimate.final_estimate_tokens == 17
+
+
+def test_frontdoor_token_preflight_policy_preserves_invalid_context_window_as_zero() -> None:
+    from g3ku.runtime.frontdoor._ceo_runtime_ops import (
+        _FrontdoorTokenPreflightPolicy,
+        _build_frontdoor_token_preflight_policy,
+    )
+
+    policy = _build_frontdoor_token_preflight_policy(
+        max_context_tokens=0,
+        trigger_ratio=0.8,
+    )
+
+    assert isinstance(policy, _FrontdoorTokenPreflightPolicy)
+    assert policy.max_context_tokens == 0
+    assert policy.trigger_tokens == 0
+
+
 def test_build_send_provider_request_preview_sanitizes_messages_and_synthesizes_prompt_cache_key(
     monkeypatch,
 ) -> None:

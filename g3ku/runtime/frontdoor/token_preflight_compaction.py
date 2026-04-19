@@ -4,13 +4,16 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from main.runtime.send_token_preflight import (
     RUNTIME_SEND_TOKEN_COMPRESSION_ESTIMATE_SAFETY_RATIO,
     RUNTIME_SEND_TOKEN_COMPRESSION_TRIGGER_RATIO,
+    RuntimeHybridSendTokenEstimate,
+    RuntimeObservedInputTruth,
     RuntimeSendTokenPreflightSnapshot,
     RuntimeSendTokenPreflightThresholds,
+    build_runtime_hybrid_send_token_estimate,
+    build_runtime_observed_input_truth,
     build_runtime_send_token_preflight_snapshot,
     compute_runtime_send_token_preflight_thresholds,
     estimate_runtime_provider_request_preview_tokens,
@@ -18,13 +21,6 @@ from main.runtime.send_token_preflight import (
 )
 
 FRONTDOOR_COMPACTED_HISTORY_MAX_TOKENS = 5000
-
-
-@dataclass(frozen=True, slots=True)
-class FrontdoorTokenPreflightPolicy:
-    max_context_tokens: int
-    trigger_ratio: float
-    trigger_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,41 +37,6 @@ class FrontdoorCompactedHistory:
     retained_completed_stage_ids: list[str]
     compacted_block: dict[str, Any]
     compacted_block_tokens: int
-
-
-def build_frontdoor_token_preflight_policy(*, max_context_tokens: int, trigger_ratio: float) -> FrontdoorTokenPreflightPolicy:
-    normalized_max = max(1, int(max_context_tokens or 0))
-    normalized_ratio = max(0.0, float(trigger_ratio or 0.0))
-    return FrontdoorTokenPreflightPolicy(
-        max_context_tokens=normalized_max,
-        trigger_ratio=normalized_ratio,
-        trigger_tokens=int(normalized_max * normalized_ratio),
-    )
-
-
-def estimate_frontdoor_provider_request_tokens(
-    *,
-    provider_request_body: dict[str, Any] | None,
-    request_messages: list[dict[str, Any]],
-    tool_schemas: list[dict[str, Any]],
-) -> int:
-    payload = dict(provider_request_body or {})
-    if not payload:
-        payload = {
-            "input": list(request_messages),
-            "tools": list(tool_schemas or []),
-        }
-    return estimate_tokens(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
-    )
-
-
-def should_run_frontdoor_token_preflight(
-    *,
-    final_request_tokens: int,
-    policy: FrontdoorTokenPreflightPolicy,
-) -> bool:
-    return int(final_request_tokens or 0) >= int(policy.trigger_tokens)
 
 
 def compact_frontdoor_history_zone(
@@ -127,16 +88,16 @@ __all__ = [
     "RUNTIME_SEND_TOKEN_COMPRESSION_ESTIMATE_SAFETY_RATIO",
     "RUNTIME_SEND_TOKEN_COMPRESSION_TRIGGER_RATIO",
     "FrontdoorCompactedHistory",
-    "FrontdoorTokenPreflightPolicy",
     "FrontdoorTokenPreflightResult",
+    "RuntimeHybridSendTokenEstimate",
+    "RuntimeObservedInputTruth",
     "RuntimeSendTokenPreflightSnapshot",
     "RuntimeSendTokenPreflightThresholds",
-    "build_frontdoor_token_preflight_policy",
+    "build_runtime_hybrid_send_token_estimate",
+    "build_runtime_observed_input_truth",
     "build_runtime_send_token_preflight_snapshot",
     "compact_frontdoor_history_zone",
-    "estimate_frontdoor_provider_request_tokens",
     "estimate_runtime_provider_request_preview_tokens",
     "compute_runtime_send_token_preflight_thresholds",
-    "should_run_frontdoor_token_preflight",
     "should_trigger_runtime_token_compression",
 ]

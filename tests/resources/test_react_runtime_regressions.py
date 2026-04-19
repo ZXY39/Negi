@@ -5524,3 +5524,440 @@ async def test_node_send_preflight_fails_when_post_compression_overflows(
 
     assert result.status == "failed"
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_node_preflight_uses_previous_effective_input_tokens_when_preview_underestimates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main.runtime.react_loop as react_loop_module
+    from main.runtime.chat_backend import SendModelContextWindowInfo
+
+    calls: list[list[dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        react_loop_module,
+        "get_runtime_config",
+        lambda **_: (SimpleNamespace(), 0, False),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        react_loop_module.runtime_chat_backend,
+        "resolve_send_model_context_window_info",
+        lambda **_: SendModelContextWindowInfo(
+            model_key="fake",
+            provider_id="test",
+            provider_model="test:fake",
+            resolved_model="fake",
+            context_window_tokens=25001,
+            resolution_error="",
+        ),
+        raising=False,
+    )
+
+    def _estimate(**kwargs) -> int:
+        request_messages = list(kwargs.get("request_messages") or [])
+        rendered = "\n".join(
+            str(item.get("content") or "") for item in request_messages if isinstance(item, dict)
+        )
+        return 11000 if "[G3KU_TOKEN_COMPACT_V2]" in rendered else 12840
+
+    monkeypatch.setattr(
+        react_loop_module.runtime_send_token_preflight,
+        "estimate_runtime_provider_request_preview_tokens",
+        _estimate,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        react_loop_module.ReActToolLoop,
+        "_resolve_previous_node_observed_input_truth",
+        lambda self, **_: {
+            "effective_input_tokens": 20313,
+            "input_tokens": 20313,
+            "cache_hit_tokens": 0,
+            "provider_model": "test:fake",
+            "actual_request_hash": "prev-request-hash",
+            "source": "provider_usage",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        react_loop_module.ReActToolLoop,
+        "_resolve_previous_node_actual_request_record",
+        lambda self, **_: {
+            "actual_request_hash": "prev-request-hash",
+            "request_messages": [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": '{"task_id":"task-preflight-usage-plus-delta","goal":"demo"}'},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "message_type": "node_runtime_tool_contract",
+                            "callable_tool_names": ["submit_final_result"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            "tool_schemas": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "submit_final_result",
+                        "description": "submit final result",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        react_loop_module.ReActToolLoop,
+        "_append_only_delta_estimate_tokens",
+        lambda self, **_: (1800, True),
+        raising=False,
+    )
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            calls.append([dict(item) for item in list(kwargs.get("messages") or [])])
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "done",
+                            "answer": "done",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 3},
+            )
+
+    log_service = _FakeLogService()
+    observed_frame: dict[str, object] = {}
+
+    class _FramingBackend(_Backend):
+        async def chat(self, **kwargs):
+            observed_frame.update(
+                log_service.read_runtime_frame(
+                    "task-preflight-usage-plus-delta",
+                    "node-preflight-usage-plus-delta",
+                )
+            )
+            return await super().chat(**kwargs)
+
+    loop = ReActToolLoop(chat_backend=_FramingBackend(), log_service=log_service, max_iterations=2)
+    result = await loop.run(
+        task=SimpleNamespace(task_id="task-preflight-usage-plus-delta"),
+        node=SimpleNamespace(node_id="node-preflight-usage-plus-delta", depth=0, node_kind="execution"),
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-preflight-usage-plus-delta","goal":"demo"}'},
+        ],
+        tools={"submit_final_result": _submit_final_result_tool()},
+        model_refs=["fake"],
+        runtime_context={"task_id": "task-preflight-usage-plus-delta", "node_id": "node-preflight-usage-plus-delta"},
+        max_iterations=2,
+    )
+
+    assert result.status == "success"
+    assert len(calls) == 1
+    rendered = "\n".join(str(item.get("content") or "") for item in calls[0])
+    assert "[G3KU_TOKEN_COMPACT_V2]" in rendered
+
+    diagnostics = observed_frame.get("token_preflight_diagnostics")
+    assert isinstance(diagnostics, dict)
+    assert diagnostics["estimate_source"] == "preview_estimate"
+    assert diagnostics["comparable_to_previous_request"] is False
+    assert diagnostics["effective_input_tokens"] == 0
+    assert diagnostics["final_estimate_tokens"] == 11000
+    assert diagnostics["pre_compaction_estimate_source"] == "usage_plus_delta"
+    assert diagnostics["pre_compaction_comparable_to_previous_request"] is True
+    assert diagnostics["pre_compaction_effective_input_tokens"] == 20313
+    assert diagnostics["pre_compaction_final_estimate_tokens"] >= 22113
+    assert diagnostics["pre_compaction_estimated_total_tokens"] >= 22113
+    assert diagnostics["estimated_total_tokens"] == 11000
+    assert diagnostics["would_exceed_context_window"] is False
+
+
+@pytest.mark.asyncio
+async def test_node_preflight_attempts_compression_before_failing_when_pre_compaction_estimate_exceeds_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main.runtime.react_loop as react_loop_module
+    from main.runtime.chat_backend import SendModelContextWindowInfo
+
+    calls: list[list[dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        react_loop_module,
+        "get_runtime_config",
+        lambda **_: (SimpleNamespace(), 0, False),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        react_loop_module.runtime_chat_backend,
+        "resolve_send_model_context_window_info",
+        lambda **_: SendModelContextWindowInfo(
+            model_key="fake",
+            provider_id="test",
+            provider_model="test:fake",
+            resolved_model="fake",
+            context_window_tokens=25001,
+            resolution_error="",
+        ),
+        raising=False,
+    )
+
+    def _estimate(**kwargs) -> int:
+        request_messages = list(kwargs.get("request_messages") or [])
+        rendered = "\n".join(
+            str(item.get("content") or "") for item in request_messages if isinstance(item, dict)
+        )
+        return 25110 if "[G3KU_TOKEN_COMPACT_V2]" in rendered else 26000
+
+    monkeypatch.setattr(
+        react_loop_module.runtime_send_token_preflight,
+        "estimate_runtime_provider_request_preview_tokens",
+        _estimate,
+        raising=False,
+    )
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            calls.append([dict(item) for item in list(kwargs.get("messages") or [])])
+            raise RuntimeError("chat should not be called when preflight fails")
+
+    log_service = _FakeLogService()
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=2)
+    result = await loop.run(
+        task=SimpleNamespace(task_id="task-preflight-compress-before-fail"),
+        node=SimpleNamespace(node_id="node-preflight-compress-before-fail", depth=0, node_kind="execution"),
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-preflight-compress-before-fail","goal":"demo"}'},
+        ],
+        tools={"submit_final_result": _submit_final_result_tool()},
+        model_refs=["fake"],
+        runtime_context={"task_id": "task-preflight-compress-before-fail", "node_id": "node-preflight-compress-before-fail"},
+        max_iterations=2,
+    )
+
+    diagnostics = log_service.read_runtime_frame(
+        "task-preflight-compress-before-fail",
+        "node-preflight-compress-before-fail",
+    ).get("token_preflight_diagnostics")
+
+    assert result.status == "failed"
+    assert calls == []
+    assert isinstance(diagnostics, dict)
+    assert diagnostics["applied"] is True
+    assert diagnostics["estimate_source"] == "preview_estimate"
+    assert diagnostics["comparable_to_previous_request"] is False
+    assert diagnostics["effective_input_tokens"] == 0
+    assert diagnostics["final_estimate_tokens"] == 25110
+    assert diagnostics["pre_compaction_estimated_total_tokens"] == 26000
+    assert diagnostics["estimated_total_tokens"] == 25110
+    assert "after compression" in str(result.blocking_reason or "")
+    assert "after compression" in str(diagnostics.get("error") or "")
+
+
+@pytest.mark.asyncio
+async def test_node_preflight_falls_back_to_preview_when_request_is_not_append_only_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main.runtime.react_loop as react_loop_module
+    from main.runtime.chat_backend import SendModelContextWindowInfo
+
+    calls: list[list[dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        react_loop_module,
+        "get_runtime_config",
+        lambda **_: (SimpleNamespace(), 0, False),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        react_loop_module.runtime_chat_backend,
+        "resolve_send_model_context_window_info",
+        lambda **_: SendModelContextWindowInfo(
+            model_key="fake",
+            provider_id="test",
+            provider_model="test:fake",
+            resolved_model="fake",
+            context_window_tokens=25001,
+            resolution_error="",
+        ),
+        raising=False,
+    )
+
+    monkeypatch.setattr(
+        react_loop_module.runtime_send_token_preflight,
+        "estimate_runtime_provider_request_preview_tokens",
+        lambda **kwargs: 12840,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        react_loop_module.ReActToolLoop,
+        "_resolve_previous_node_observed_input_truth",
+        lambda self, **_: {
+            "effective_input_tokens": 20313,
+            "input_tokens": 20313,
+            "cache_hit_tokens": 0,
+            "provider_model": "test:fake",
+            "actual_request_hash": "prev-request-hash",
+            "source": "provider_usage",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        react_loop_module.ReActToolLoop,
+        "_append_only_delta_estimate_tokens",
+        lambda self, **_: (1800, False),
+        raising=False,
+    )
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            calls.append([dict(item) for item in list(kwargs.get("messages") or [])])
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "done",
+                            "answer": "done",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 3},
+            )
+
+    log_service = _FakeLogService()
+    observed_frame: dict[str, object] = {}
+
+    class _FramingBackend(_Backend):
+        async def chat(self, **kwargs):
+            observed_frame.update(
+                log_service.read_runtime_frame(
+                    "task-preflight-preview-fallback",
+                    "node-preflight-preview-fallback",
+                )
+            )
+            return await super().chat(**kwargs)
+
+    loop = ReActToolLoop(chat_backend=_FramingBackend(), log_service=log_service, max_iterations=2)
+    result = await loop.run(
+        task=SimpleNamespace(task_id="task-preflight-preview-fallback"),
+        node=SimpleNamespace(node_id="node-preflight-preview-fallback", depth=0, node_kind="execution"),
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-preflight-preview-fallback","goal":"demo"}'},
+        ],
+        tools={"submit_final_result": _submit_final_result_tool()},
+        model_refs=["fake"],
+        runtime_context={"task_id": "task-preflight-preview-fallback", "node_id": "node-preflight-preview-fallback"},
+        max_iterations=2,
+    )
+
+    assert result.status == "success"
+    assert len(calls) == 1
+    rendered = "\n".join(str(item.get("content") or "") for item in calls[0])
+    assert "[G3KU_TOKEN_COMPACT_V2]" not in rendered
+
+    diagnostics = observed_frame.get("token_preflight_diagnostics")
+    assert isinstance(diagnostics, dict)
+    assert diagnostics["estimate_source"] == "preview_estimate"
+    assert diagnostics["comparable_to_previous_request"] is False
+    assert diagnostics["usage_based_estimate_tokens"] == 0
+
+
+def test_node_preflight_provider_model_match_accepts_resolved_prefix_form() -> None:
+    assert ReActToolLoop._provider_models_match("gpt-5.4", "openai:gpt-5.4") is True
+    assert ReActToolLoop._provider_models_match("openai:gpt-5.4", "gpt-5.4") is True
+    assert ReActToolLoop._provider_models_match("openai:gpt-5.4", "anthropic:claude-sonnet-4") is False
+
+
+def test_node_preflight_falls_back_to_preview_when_observed_truth_hash_mismatches_latest_request_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main.runtime.react_loop as react_loop_module
+
+    monkeypatch.setattr(
+        react_loop_module.runtime_send_token_preflight,
+        "estimate_runtime_provider_request_preview_tokens",
+        lambda **kwargs: 12840,
+        raising=False,
+    )
+
+    log_service = _FakeLogService()
+    log_service._store._node = SimpleNamespace(
+        metadata={
+            "latest_runtime_observed_input_truth": {
+                "effective_input_tokens": 20313,
+                "input_tokens": 20313,
+                "cache_hit_tokens": 0,
+                "provider_model": "test:fake",
+                "actual_request_hash": "truth-hash",
+                "source": "provider_usage",
+            },
+            "latest_runtime_actual_request_ref": "artifact:latest-request",
+        }
+    )
+    monkeypatch.setattr(
+        log_service,
+        "resolve_content_ref",
+        lambda ref: json.dumps(
+            {
+                "actual_request_hash": "record-hash",
+                "request_messages": [
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": "prompt"},
+                ],
+                "tool_schemas": [],
+            },
+            ensure_ascii=False,
+        ),
+        raising=False,
+    )
+
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+    estimate_payload = loop._estimate_node_send_preflight_tokens(
+        task_id="task-hash-mismatch",
+        node_id="node-hash-mismatch",
+        config=None,
+        model_refs=["fake"],
+        provider_model="test:fake",
+        request_messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "prompt"},
+            {"role": "assistant", "content": "next"},
+        ],
+        tool_schemas=[],
+        prompt_cache_key="cache-key",
+        tool_choice=None,
+        parallel_tool_calls=None,
+    )
+
+    assert estimate_payload["estimate_source"] == "preview_estimate"
+    assert estimate_payload["comparable_to_previous_request"] is False
+    assert estimate_payload["usage_based_estimate_tokens"] == 0

@@ -479,7 +479,8 @@ The long-term memory runtime is no longer journal-first or structured-fact-first
 - `memory/MEMORY.md` is now the only committed long-term memory source of truth.
 - `memory/notes/` stores optional detailed note bodies referenced by `ref:note_xxxx`.
 - `memory/queue.jsonl` stores the single durable queue, including per-request processing state such as `pending`, `processing`, retry timing, and the latest error text.
-- `memory/ops.jsonl` now stores only successfully applied batches. Engineering failures remain visible through the queue head state instead of being copied into a second “failed history” lane.
+- `memory/ops.jsonl` now stores terminal batch history, not just successful writes. Applied batches and durable discarded outcomes such as `assessed_null`, `rejected`, and `precheck_failed` all land here, while transient provider/config failures still remain on the queue head.
+- `.g3ku/memory-requests/` stores provider-facing memory request artifacts for hops that expose request metadata. Processed rows may point at these artifact paths for later forensics.
 - Dense/sparse catalog projections may still exist for tool/skill narrowing, but they are no longer the long-term memory truth source.
 
 The runtime boundary changed in five important ways:
@@ -487,10 +488,10 @@ The runtime boundary changed in five important ways:
 - CEO/frontdoor turns now read one frozen `MEMORY.md` snapshot at prompt-assembly time and inject it directly into the turn overlay.
 - Same-turn hot memory updates do not change the current prompt; newly committed memory only affects later turns.
 - `memory_write` and `memory_delete` now only enqueue requests into the single memory queue. They do not mutate committed memory inline.
-- `RuntimeAgentSession` and session-delete paths now enqueue autonomous review, pre-compression flush, and session-boundary flush requests instead of writing structured memory facts directly.
+- `RuntimeAgentSession` now buffers autonomous-review windows in `memory/review_state.json` and only auto-enqueues memory assessment at two points: the configured ordinary-turn window threshold and compression-stage flushes (`token_compression` / `stage_compaction`). Unsupported flush sources must leave the buffered window intact instead of manufacturing a queue row.
 - A dedicated internal memory agent now consumes the queue in FIFO same-op batches (`write` and `delete` never mix within one batch), runs with the `memory` model route, and only has a restricted tool surface for reading/writing `MEMORY.md` and note files.
 - The queue consumer is now single-active across processes: every `run_due_batch_once()` attempt must first take a workspace-local memory-worker file lock, so extra web/worker processes become passive observers instead of double-consuming the same queue head.
-- The consumer also treats `request_id` as the durable idempotency key. Before processing a batch it drops any queue rows whose `request_id` already appears in `memory/ops.jsonl`, so a stale duplicate row should not create a second successful processed batch.
+- The consumer also treats `request_id` as the durable idempotency key. Before processing a batch it drops any queue rows whose `request_id` already appears in `memory/ops.jsonl`, so a stale duplicate row should not create a second terminal processed record.
 
 Maintainers should read the queue state machine like this:
 
@@ -500,8 +501,8 @@ Maintainers should read the queue state machine like this:
 - If the `memory` role is unconfigured or a provider call fails, the queue head remains `processing` with an attached error and blocks later requests.
 - A persisted `processing` head is durable restart state, not proof that a worker is currently live. After restart, the worker waits until the stored `retry_after` before retrying that same head batch.
 - `processing_started_at` records the first successful claim of that queue head batch and must stay stable across later retries; it is not a "last retry time" field.
-- Semantic-invalid model output is expected to repair inside the same processing batch before the runtime commits anything.
-- Two successful `ops.jsonl` rows with the same `request_id` are now treated as a bug signal pointing to historical multi-worker contention or an old pre-fix run, not as normal repeated writes.
+- Semantic-invalid model output is expected to repair inside the same processing batch before the runtime commits anything. If the batch still fails runtime precheck or the memory assessor/agent never produces a valid terminal tool result, the runtime now drops that queue batch into durable discarded history instead of leaving it as an endlessly retrying queue item.
+- Two terminal `ops.jsonl` rows with the same `request_id` are now treated as a bug signal pointing to historical multi-worker contention or an old pre-fix run, not as normal repeated writes.
 
 Maintainers should treat transient execution state as explicitly out of bounds for long-term memory:
 
@@ -615,12 +616,16 @@ The prompt token trace also changed:
 - `effective_prompt_tokens` is the estimate for the final model request actually sent after prompt assembly.
 - CEO/frontdoor now also runs a final token preflight immediately before provider send. This happens after fresh-turn request seeding, completed-continuity bridge decisions, provider tool-schema seeding, and frozen `MEMORY.md` injection have already produced the authoritative request projection.
 - Execution and acceptance nodes now have an equivalent final gate in `ReActToolLoop.run()`: after same-turn append-only request assembly but before chat dispatch, the runtime resolves the selected node model context window, estimates the provider-bound payload, and decides whether live-only token compression is required.
+- Both gates are now provider-agnostic ground-truth preflights rather than pure local estimators. They normalize provider usage first, compute `effective_input_tokens = input_tokens + cache_hit_tokens`, and only reuse that truth when continuity is provable against the previous actual request.
+- The authoritative preflight decision value is now `max(preview_estimate_tokens, usage_based_estimate_tokens)`. `usage_based_estimate_tokens` itself is only allowed when the runtime can prove append-only continuity plus stable enough tool schema continuity; otherwise the runtime must bail out to `preview_estimate`.
+- Both node runtime and CEO/frontdoor now use compression-first ordering. If the hybrid final estimate is already over the trigger or even over the full context window, runtime must still attempt live token compaction before producing the final overflow failure, except for the hard configuration guard `context_window_tokens <= 25000`.
 - The same node preflight helper is also used by `message_distribution` control turns in `NodeRunner._run_distribution_node()`. `spawn review` is intentionally excluded because it is an external inspection lane, not part of node-context continuity.
 - Node-side token compression is a live request rewrite only. It can shorten the provider-bound `request_messages`, but it must not rewrite durable stage history, frame `messages`, or the stable prompt-cache family inputs derived from `model_messages`.
 - When node preflight does shrink a send, the runtime frame now records `history_shrink_reason=token_compression` plus `token_preflight_diagnostics`. Maintainers should treat those fields as the node-side equivalent of frontdoor preflight observability.
 - The node preflight threshold contract is intentionally aligned with CEO/frontdoor: trigger at `context_window_tokens * 0.80 * 0.95`, and treat `context_window_tokens <= 25000` as a hard configuration failure rather than a soft hint.
 - That preflight is the final gate for provider-bound request size. If it compacts the request, `frontdoor_history_shrink_reason` must be `token_compression`; the runtime must not invent a second competing shrink-reason field.
 - The preflight emits additive diagnostics as `frontdoor_token_preflight_diagnostics` on graph state, inflight/paused snapshots, and completed continuity sidecars. Maintainers should treat that payload as observability for the final gate, not as a replacement for the request-body baseline contract.
+- For both node `token_preflight_diagnostics` and `frontdoor_token_preflight_diagnostics`, top-level fields now describe the authoritative post-compaction request when compaction was actually applied. The pre-compaction hybrid reasoning is preserved under `pre_compaction_*` keys so operators can still audit why compaction happened without confusing it with the request that was finally sent.
 - That preflight estimate must be derived from the raw provider-bound payload, not from summary-oriented serializers that truncate long fields for readability. If a huge `provider_request_body` still produces a tiny, suspiciously stable `final_request_tokens`, treat the estimator as broken before questioning the compression threshold.
 - For `/responses`-style providers, the preflight estimate now uses the adapter-final payload shape rather than the pre-adapter `request_messages` projection, because the transport rewrite can materially change the final token count.
 - The trigger also keeps a small safety margin below the nominal compression threshold (`effective_trigger_tokens`). This is intentional: maintainers should treat it as protection against estimator drift, not as evidence that the model context window itself changed.

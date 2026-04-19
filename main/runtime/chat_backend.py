@@ -331,6 +331,21 @@ def _tool_signature_hash(tools: list[dict] | None) -> str:
     return hashlib.sha256(_json_compact(tool_signatures).encode('utf-8')).hexdigest()
 
 
+def _normalize_model_attempts(attempts: list[LLMModelAttempt] | None) -> list[LLMModelAttempt]:
+    normalized_attempts: list[LLMModelAttempt] = []
+    for attempt in list(attempts or []):
+        normalized_attempts.append(
+            LLMModelAttempt(
+                model_key=str(getattr(attempt, 'model_key', '') or '').strip(),
+                provider_id=str(getattr(attempt, 'provider_id', '') or '').strip(),
+                provider_model=str(getattr(attempt, 'provider_model', '') or '').strip(),
+                usage=normalize_usage_payload(getattr(attempt, 'usage', None)),
+                finish_reason=str(getattr(attempt, 'finish_reason', 'stop') or 'stop'),
+            )
+        )
+    return normalized_attempts
+
+
 def build_actual_request_diagnostics(
     *,
     request_messages: list[dict[str, Any]] | None,
@@ -715,7 +730,7 @@ class ConfigChatBackend:
                         response.usage = normalize_usage_payload(response.usage)
                         response.request_message_count = request_message_count
                         response.request_message_chars = request_message_chars
-                        response_attempts = list(response.attempts or [])
+                        response_attempts = _normalize_model_attempts(response.attempts)
                         if not response_attempts:
                             response_attempts = [
                                 LLMModelAttempt(

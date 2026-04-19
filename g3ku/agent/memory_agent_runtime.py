@@ -31,6 +31,7 @@ from g3ku.agent.memory_catalog_bridge import MemoryCatalogBridge
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.chatmodels import build_chat_model
+from main.runtime.chat_backend import build_actual_request_diagnostics
 from main.prompts import load_prompt
 
 _NOTE_REF_RE = re.compile(r"\bref:(?P<ref>[a-z0-9_]+)\b")
@@ -538,6 +539,7 @@ class _MemoryAttemptResult:
     session: _MemoryToolSession
     usage: dict[str, int]
     final_text: str
+    request_artifacts: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -562,6 +564,8 @@ class MemoryManager:
         self.workspace = Path(workspace)
         self.config = config
         self._read_only_init = bool(read_only_init)
+        self.runtime_dir = self.workspace / ".g3ku"
+        self.request_artifacts_dir = self.runtime_dir / "memory-requests"
         self.mem_dir = self.workspace / "memory"
         self.memory_file = self.workspace / str(config.document.memory_file)
         self.notes_dir = self.workspace / str(config.document.notes_dir)
@@ -587,6 +591,8 @@ class MemoryManager:
         )
 
     def _ensure_layout(self) -> None:
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        self.request_artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.mem_dir.mkdir(parents=True, exist_ok=True)
         self.notes_dir.mkdir(parents=True, exist_ok=True)
         if not self.memory_file.exists():
@@ -1588,6 +1594,8 @@ class MemoryManager:
         runtime_config: Any,
         before_text: str,
         repair_reason: str,
+        queue_request_ids: list[str],
+        model_chain: list[str],
     ) -> _MemoryAttemptResult:
         session = _MemoryToolSession(snapshot_text=before_text, notes_dir=self.notes_dir)
         tools = self._memory_agent_tools(session)
@@ -1603,12 +1611,24 @@ class MemoryManager:
             ),
         ]
         usage_total = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
+        request_artifacts: list[dict[str, Any]] = []
         round_limit = int(runtime_config.get_role_max_iterations("memory") or 8)
         round_limit = max(round_limit, 1)
         final_text = ""
         for _ in range(round_limit):
+            request_messages = self._memory_request_messages(messages)
             response = await model.ainvoke(messages)
             self._merge_usage(usage_total, self._extract_usage(response))
+            artifact = self._persist_memory_request_artifact(
+                phase="agent",
+                batch_op=batch.op,
+                queue_request_ids=queue_request_ids,
+                model_chain=model_chain,
+                request_messages=request_messages,
+                response=response,
+            )
+            if artifact is not None:
+                request_artifacts.append(artifact)
             final_text = self._response_text(response)
             tool_calls = self._normalize_tool_calls(response)
             if not tool_calls:
@@ -1623,7 +1643,12 @@ class MemoryManager:
                         name=str(tool_call.get("name") or ""),
                     )
                 )
-        return _MemoryAttemptResult(session=session, usage=usage_total, final_text=final_text)
+        return _MemoryAttemptResult(
+            session=session,
+            usage=usage_total,
+            final_text=final_text,
+            request_artifacts=request_artifacts,
+        )
 
     def _memory_agent_tools(self, session: _MemoryToolSession):
         @tool("memory_read_note")
@@ -1886,6 +1911,198 @@ class MemoryManager:
         return normalized
 
     @staticmethod
+    def _allowed_review_flush_sources() -> set[str]:
+        return {"token_compression", "stage_compaction"}
+
+    @staticmethod
+    def _compact_review_stage_summary(canonical_summary: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(canonical_summary, dict):
+            return None
+        compact: dict[str, Any] = {}
+        active_stage_id = str(canonical_summary.get("active_stage_id") or "").strip()
+        if active_stage_id:
+            compact["active_stage_id"] = active_stage_id
+        stages: list[dict[str, str]] = []
+        for raw_stage in list(canonical_summary.get("stages") or []):
+            if not isinstance(raw_stage, dict):
+                continue
+            entry: dict[str, str] = {}
+            for key in ("stage_id", "stage_goal", "completed_stage_summary"):
+                value = str(raw_stage.get(key) or "").strip()
+                if value:
+                    entry[key] = value
+            if entry:
+                stages.append(entry)
+        if stages:
+            compact["stages"] = stages
+        return compact or None
+
+    @staticmethod
+    def _message_to_request_dict(message: Any) -> dict[str, Any]:
+        if isinstance(message, dict):
+            return dict(message)
+        if isinstance(message, SystemMessage):
+            role = "system"
+        elif isinstance(message, HumanMessage):
+            role = "user"
+        elif isinstance(message, ToolMessage):
+            role = "tool"
+        else:
+            role = "assistant"
+        payload = {
+            "role": role,
+            "content": MemoryManager._response_text(message),
+        }
+        if role == "tool":
+            name = str(getattr(message, "name", "") or "").strip()
+            tool_call_id = str(getattr(message, "tool_call_id", "") or "").strip()
+            if name:
+                payload["name"] = name
+            if tool_call_id:
+                payload["tool_call_id"] = tool_call_id
+        elif role == "assistant":
+            tool_calls = MemoryManager._normalize_tool_calls(message)
+            if tool_calls:
+                payload["tool_calls"] = tool_calls
+        return payload
+
+    def _memory_request_messages(self, messages: list[Any]) -> list[dict[str, Any]]:
+        return [self._message_to_request_dict(message) for message in list(messages or [])]
+
+    @staticmethod
+    def _extract_provider_request_metadata(response: Any) -> dict[str, Any]:
+        metadata = getattr(response, "response_metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return {
+            "provider_request_id": str(
+                metadata.get("provider_request_id") or metadata.get("request_id") or ""
+            ).strip(),
+            "provider_request_meta": metadata.get("provider_request_meta"),
+            "provider_request_body": metadata.get("provider_request_body"),
+        }
+
+    def _persist_memory_request_artifact(
+        self,
+        *,
+        phase: str,
+        batch_op: str,
+        queue_request_ids: list[str],
+        model_chain: list[str],
+        request_messages: list[dict[str, Any]],
+        response: Any,
+    ) -> dict[str, Any] | None:
+        provider_metadata = self._extract_provider_request_metadata(response)
+        if not (
+            provider_metadata["provider_request_id"]
+            or provider_metadata["provider_request_meta"] is not None
+            or provider_metadata["provider_request_body"] is not None
+        ):
+            return None
+        artifact_id = self._request_id("memory_request")
+        artifact_path = self.request_artifacts_dir / f"{artifact_id}.json"
+        payload = {
+            "artifact_id": artifact_id,
+            "created_at": self._now_iso(),
+            "phase": str(phase or "").strip() or "memory",
+            "batch_op": str(batch_op or "").strip() or "write",
+            "queue_request_ids": [str(item or "").strip() for item in list(queue_request_ids or []) if str(item or "").strip()],
+            "model_chain": [str(item or "").strip() for item in list(model_chain or []) if str(item or "").strip()],
+            "request_messages": list(request_messages or []),
+            "actual_request_diagnostics": build_actual_request_diagnostics(
+                request_messages=request_messages,
+                tool_schemas=None,
+            ),
+            "provider_request_id": provider_metadata["provider_request_id"],
+            "provider_request_meta": provider_metadata["provider_request_meta"],
+            "provider_request_body": provider_metadata["provider_request_body"],
+        }
+        artifact_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return {
+            "artifact_id": artifact_id,
+            "path": str(artifact_path.resolve()),
+            "provider_request_id": provider_metadata["provider_request_id"],
+        }
+
+    @staticmethod
+    def _provider_request_ids_from_artifacts(request_artifacts: list[dict[str, Any]]) -> list[str]:
+        provider_request_ids: list[str] = []
+        seen: set[str] = set()
+        for artifact in list(request_artifacts or []):
+            provider_request_id = str((artifact or {}).get("provider_request_id") or "").strip()
+            if not provider_request_id or provider_request_id in seen:
+                continue
+            seen.add(provider_request_id)
+            provider_request_ids.append(provider_request_id)
+        return provider_request_ids
+
+    @staticmethod
+    def _request_artifact_paths(request_artifacts: list[dict[str, Any]]) -> list[str]:
+        return [
+            str((artifact or {}).get("path") or "").strip()
+            for artifact in list(request_artifacts or [])
+            if str((artifact or {}).get("path") or "").strip()
+        ]
+
+    @staticmethod
+    def _precheck_batch_for_processing(batch: MemoryBatch) -> str:
+        if not isinstance(batch, MemoryBatch) or not list(batch.items or []):
+            return "empty_batch"
+        for item in batch.items:
+            if not str(item.payload_text or "").strip():
+                return "empty_payload_text"
+        return ""
+
+    def _append_terminal_history(
+        self,
+        *,
+        batch: MemoryBatch,
+        status: str,
+        op: str,
+        processed_at: str,
+        discard_reason: str = "",
+        usage: dict[str, int] | None = None,
+        model_chain: list[str] | None = None,
+        attempt_count: int = 0,
+        validated: _MemoryValidatedWrite | None = None,
+        provider_request_ids: list[str] | None = None,
+        request_artifact_paths: list[str] | None = None,
+        error: str = "",
+    ) -> dict[str, Any]:
+        payload = {
+            "batch_id": self._request_id(batch.op),
+            "op": str(op or "").strip() or batch.op,
+            "source_op": batch.op,
+            "status": str(status or "").strip() or "applied",
+            "processed_at": str(processed_at or "").strip() or self._now_iso(),
+            "request_ids": [item.request_id for item in batch.items],
+            "request_count": len(batch.items),
+            "decision_sources": [item.decision_source for item in batch.items],
+            "payload_texts": [item.payload_text for item in batch.items],
+            "usage": {
+                "input_tokens": int((usage or {}).get("input_tokens", 0) or 0),
+                "output_tokens": int((usage or {}).get("output_tokens", 0) or 0),
+                "cache_read_tokens": int((usage or {}).get("cache_read_tokens", 0) or 0),
+            },
+            "model_chain": [str(item or "").strip() for item in list(model_chain or []) if str(item or "").strip()],
+            "attempt_count": int(attempt_count or 0),
+            "provider_request_ids": [str(item or "").strip() for item in list(provider_request_ids or []) if str(item or "").strip()],
+            "request_artifact_paths": [str(item or "").strip() for item in list(request_artifact_paths or []) if str(item or "").strip()],
+        }
+        normalized_discard_reason = str(discard_reason or "").strip()
+        if normalized_discard_reason:
+            payload["discard_reason"] = normalized_discard_reason
+        normalized_error = str(error or "").strip()
+        if normalized_error:
+            payload["error"] = normalized_error
+        if validated is not None:
+            payload["memory_chars_after"] = int(validated.memory_chars_after)
+            payload["note_refs_written"] = list(validated.note_refs_written)
+            payload["document_preview"] = validated.document_preview
+        self._append_ops_payload(payload)
+        return payload
+
+    @staticmethod
     def _review_turn_payload(
         *,
         turn_id: str,
@@ -1921,6 +2138,35 @@ class MemoryManager:
             sections.append(f"## 窗口回合 {index}")
             sections.append(payload_text)
         return "\n\n".join(sections).strip()
+
+    @staticmethod
+    def _review_turn_payload(
+        *,
+        turn_id: str,
+        user_messages: list[str],
+        assistant_text: str,
+        compression_summary: dict[str, Any] | None,
+        canonical_summary: dict[str, Any] | None,
+    ) -> str:
+        _ = compression_summary
+        parts = [f"[turn_id] {str(turn_id or '').strip() or '(unknown)'}"]
+        normalized_user_messages = [
+            str(item or "").strip()
+            for item in list(user_messages or [])
+            if str(item or "").strip()
+        ]
+        if normalized_user_messages:
+            parts.append("user_messages:")
+            parts.extend(f"- {item}" for item in normalized_user_messages)
+        assistant = str(assistant_text or "").strip()
+        if assistant:
+            parts.append("assistant_text:")
+            parts.append(assistant)
+        compact_stage_summary = MemoryManager._compact_review_stage_summary(canonical_summary)
+        if isinstance(compact_stage_summary, dict) and compact_stage_summary:
+            parts.append("stage_summary:")
+            parts.append(json.dumps(compact_stage_summary, ensure_ascii=False, sort_keys=True))
+        return "\n".join(str(item) for item in parts if str(item).strip()).strip()
 
     async def record_turn_for_review(
         self,
@@ -1996,6 +2242,9 @@ class MemoryManager:
         normalized_session = str(session_key or "").strip()
         if not normalized_session:
             return {"ok": True, "status": "ignored", "reason": "missing_session_key"}
+        normalized_trigger = str(trigger_source or "").strip() or "token_compression"
+        if normalized_trigger not in self._allowed_review_flush_sources():
+            return {"ok": True, "status": "ignored", "reason": "unsupported_trigger_source"}
         state = self._read_review_state()
         sessions = dict(state.get("sessions") or {})
         session_state = dict(sessions.get(normalized_session) or {})
@@ -2014,7 +2263,7 @@ class MemoryManager:
             created_at=self._now_iso(),
             request_id=self._request_id("assess"),
             session_key=normalized_session,
-            trigger_source=str(trigger_source or "").strip() or "token_compression",
+            trigger_source=normalized_trigger,
         )
         sessions[normalized_session] = {"pending_turns": []}
         self._write_review_state({"sessions": sessions})
@@ -2220,6 +2469,8 @@ class MemoryManager:
         *,
         batch: MemoryBatch,
         runtime_config: Any,
+        model_chain: list[str],
+        queue_request_ids: list[str],
     ) -> dict[str, Any]:
         result_holder = {"content": None}
 
@@ -2239,11 +2490,23 @@ class MemoryManager:
             HumanMessage(content=self._memory_assessor_user_prompt(batch=batch)),
         ]
         usage_total = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
+        request_artifacts: list[dict[str, Any]] = []
         round_limit = int(runtime_config.get_role_max_iterations("memory") or 6)
         round_limit = max(round_limit, 1)
         for _ in range(round_limit):
+            request_messages = self._memory_request_messages(messages)
             response = await model.ainvoke(messages)
             self._merge_usage(usage_total, self._extract_usage(response))
+            artifact = self._persist_memory_request_artifact(
+                phase="assessor",
+                batch_op=batch.op,
+                queue_request_ids=queue_request_ids,
+                model_chain=model_chain,
+                request_messages=request_messages,
+                response=response,
+            )
+            if artifact is not None:
+                request_artifacts.append(artifact)
             final_text = self._response_text(response)
             tool_calls = self._normalize_tool_calls(response)
             if not tool_calls:
@@ -2261,11 +2524,18 @@ class MemoryManager:
             if result_holder["content"] is not None:
                 break
         if result_holder["content"] is None:
-            raise _MemoryAgentRuntimeError("memory assessor must call memory_assessment_result")
+            return {
+                "assessed_text": None,
+                "usage": usage_total,
+                "request_artifacts": request_artifacts,
+                "discard_reason": "rejected",
+                "error": "memory assessor must call memory_assessment_result",
+            }
         assessed_text = str(result_holder["content"] or "").strip()
         return {
             "assessed_text": None if assessed_text.lower() == "null" else assessed_text,
             "usage": usage_total,
+            "request_artifacts": request_artifacts,
         }
 
     def _build_validated_write_from_apply_batch(
@@ -2412,11 +2682,30 @@ class MemoryManager:
     ) -> dict[str, Any]:
         before_text = self.snapshot_text()
         total_usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
+        request_artifacts: list[dict[str, Any]] = []
+        queue_request_ids = [item.request_id for item in batch.items if str(item.request_id or "").strip()]
 
         processing_batch = batch
         if batch.op == "assess":
-            assess_result = await self._run_memory_assessor_batch(batch=batch, runtime_config=runtime_config)
+            assess_result = await self._run_memory_assessor_batch(
+                batch=batch,
+                runtime_config=runtime_config,
+                model_chain=model_chain,
+                queue_request_ids=queue_request_ids,
+            )
             self._merge_usage(total_usage, assess_result["usage"])
+            request_artifacts.extend(list(assess_result.get("request_artifacts") or []))
+            if str(assess_result.get("discard_reason") or "").strip():
+                return {
+                    "validated": None,
+                    "usage": total_usage,
+                    "attempt_count": 1,
+                    "assessed_text": None,
+                    "discard_reason": str(assess_result.get("discard_reason") or "").strip(),
+                    "error": str(assess_result.get("error") or "").strip(),
+                    "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
+                    "request_artifact_paths": self._request_artifact_paths(request_artifacts),
+                }
             assessed_text = assess_result.get("assessed_text")
             if assessed_text is None:
                 return {
@@ -2424,6 +2713,9 @@ class MemoryManager:
                     "usage": total_usage,
                     "attempt_count": 1,
                     "assessed_text": None,
+                    "discard_reason": "assessed_null",
+                    "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
+                    "request_artifact_paths": self._request_artifact_paths(request_artifacts),
                 }
             processing_batch = MemoryBatch(
                 op="write",
@@ -2449,8 +2741,11 @@ class MemoryManager:
                 runtime_config=runtime_config,
                 before_text=before_text,
                 repair_reason=repair_reason,
+                queue_request_ids=queue_request_ids,
+                model_chain=model_chain,
             )
             self._merge_usage(total_usage, attempt.usage)
+            request_artifacts.extend(list(attempt.request_artifacts or []))
             try:
                 validated = self._validate_candidate_state(
                     batch=processing_batch,
@@ -2462,11 +2757,22 @@ class MemoryManager:
                     "usage": total_usage,
                     "attempt_count": attempt_index + 1,
                     "assessed_text": None if batch.op != "assess" else processing_batch.items[0].payload_text,
+                    "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
+                    "request_artifact_paths": self._request_artifact_paths(request_artifacts),
                 }
             except _MemoryAgentValidationError as exc:
                 last_error = str(exc or "memory agent output invalid").strip()
                 continue
-        raise _MemoryAgentRuntimeError(last_error)
+        return {
+            "validated": None,
+            "usage": total_usage,
+            "attempt_count": total_attempts,
+            "assessed_text": None if batch.op != "assess" else processing_batch.items[0].payload_text,
+            "discard_reason": "rejected",
+            "error": last_error,
+            "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
+            "request_artifact_paths": self._request_artifact_paths(request_artifacts),
+        }
 
     async def run_due_batch_once(self, *, now_iso: str | None = None) -> dict[str, Any]:
         worker_lease = self._try_acquire_memory_worker_lease()
@@ -2502,6 +2808,27 @@ class MemoryManager:
                     "processed": 0,
                     "request_ids": list(duplicate_request_ids),
                 }
+            precheck_error = self._precheck_batch_for_processing(batch)
+            if precheck_error:
+                self._drop_request_ids({item.request_id for item in batch.items})
+                processed_at = self._now_iso()
+                self._append_terminal_history(
+                    batch=batch,
+                    status="discarded",
+                    op=batch.op,
+                    processed_at=processed_at,
+                    discard_reason="precheck_failed",
+                    error=precheck_error,
+                )
+                return {
+                    "ok": True,
+                    "status": "discarded",
+                    "discard_reason": "precheck_failed",
+                    "op": batch.op,
+                    "processed": len(batch.items),
+                    "request_ids": [item.request_id for item in batch.items],
+                    "processed_at": processed_at,
+                }
             if str(batch.items[0].status or "pending").strip() != "processing":
                 self._mark_batch_processing(batch.items, effective_now)
 
@@ -2525,39 +2852,55 @@ class MemoryManager:
                 return self._mark_batch_error(batch, effective_now, str(exc or "memory batch failed"))
 
             self._drop_request_ids({item.request_id for item in batch.items})
-            if result.get("validated") is None:
+            discard_reason = str(result.get("discard_reason") or "").strip()
+            if discard_reason:
+                processed_at = self._now_iso()
+                self._append_terminal_history(
+                    batch=batch,
+                    status="discarded",
+                    op=batch.op,
+                    processed_at=processed_at,
+                    discard_reason=discard_reason,
+                    usage=result.get("usage"),
+                    model_chain=model_chain,
+                    attempt_count=int(result.get("attempt_count", 0) or 0),
+                    provider_request_ids=list(result.get("provider_request_ids") or []),
+                    request_artifact_paths=list(result.get("request_artifact_paths") or []),
+                    error=str(result.get("error") or "").strip(),
+                )
                 return {
                     "ok": True,
-                    "status": "assessed_null",
+                    "status": "discarded",
+                    "discard_reason": discard_reason,
                     "op": batch.op,
                     "processed": len(batch.items),
                     "request_ids": [item.request_id for item in batch.items],
+                    "attempt_count": int(result.get("attempt_count", 0) or 0),
+                    "usage": {
+                        "input_tokens": int((result.get("usage") or {}).get("input_tokens", 0) or 0),
+                        "output_tokens": int((result.get("usage") or {}).get("output_tokens", 0) or 0),
+                        "cache_read_tokens": int((result.get("usage") or {}).get("cache_read_tokens", 0) or 0),
+                    },
                     "model_chain": list(model_chain),
+                    "provider_request_ids": list(result.get("provider_request_ids") or []),
+                    "request_artifact_paths": list(result.get("request_artifact_paths") or []),
+                    "processed_at": processed_at,
                 }
 
             self._commit_validated_write(result["validated"])
             processed_at = self._now_iso()
-            processed_payload = {
-                "batch_id": self._request_id(batch.op),
-                "op": "write" if batch.op == "assess" else batch.op,
-                "source_op": batch.op,
-                "processed_at": processed_at,
-                "request_ids": [item.request_id for item in batch.items],
-                "request_count": len(batch.items),
-                "decision_sources": [item.decision_source for item in batch.items],
-                "payload_texts": [item.payload_text for item in batch.items],
-                "usage": {
-                    "input_tokens": int(result["usage"]["input_tokens"]),
-                    "output_tokens": int(result["usage"]["output_tokens"]),
-                    "cache_read_tokens": int(result["usage"]["cache_read_tokens"]),
-                },
-                "model_chain": list(model_chain),
-                "attempt_count": int(result["attempt_count"]),
-                "memory_chars_after": int(result["validated"].memory_chars_after),
-                "note_refs_written": list(result["validated"].note_refs_written),
-                "document_preview": result["validated"].document_preview,
-            }
-            self._append_ops_payload(processed_payload)
+            processed_payload = self._append_terminal_history(
+                batch=batch,
+                status="applied",
+                op="write" if batch.op == "assess" else batch.op,
+                processed_at=processed_at,
+                usage=result.get("usage"),
+                model_chain=model_chain,
+                attempt_count=int(result["attempt_count"]),
+                validated=result["validated"],
+                provider_request_ids=list(result.get("provider_request_ids") or []),
+                request_artifact_paths=list(result.get("request_artifact_paths") or []),
+            )
             return {
                 "ok": True,
                 "status": "applied",
@@ -2567,6 +2910,8 @@ class MemoryManager:
                 "attempt_count": int(result["attempt_count"]),
                 "usage": dict(processed_payload["usage"]),
                 "model_chain": list(model_chain),
+                "provider_request_ids": list(processed_payload["provider_request_ids"]),
+                "request_artifact_paths": list(processed_payload["request_artifact_paths"]),
                 "processed_at": processed_at,
             }
         finally:

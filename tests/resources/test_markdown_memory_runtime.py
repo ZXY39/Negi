@@ -215,13 +215,16 @@ def _fake_response(
     content: str = "",
     tool_calls: list[dict[str, object]] | None = None,
     usage: dict[str, int] | None = None,
+    response_metadata: dict[str, object] | None = None,
 ) -> object:
     usage_payload = dict(usage or {})
+    metadata = {"token_usage": usage_payload}
+    metadata.update(dict(response_metadata or {}))
     return SimpleNamespace(
         content=content,
         tool_calls=list(tool_calls or []),
         usage_metadata=usage_payload,
-        response_metadata={"token_usage": usage_payload},
+        response_metadata=metadata,
     )
 
 
@@ -657,6 +660,84 @@ async def test_v2_flush_review_window_queues_assess_before_threshold_on_compress
 
         state = manager._read_review_state()
         assert state["sessions"]["web:shared"]["pending_turns"] == []
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_flush_review_window_ignores_non_compression_trigger(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-1",
+            user_messages=["user 1"],
+            assistant_text="assistant 1",
+            compression_summary={"status": "running", "text": "should not persist"},
+            canonical_summary={"stages": []},
+        )
+
+        result = await manager.flush_review_window(
+            session_key="web:shared",
+            trigger_source="pre_compression_flush",
+        )
+        queue_items = await manager.list_queue(limit=10)
+
+        assert result["status"] == "ignored"
+        assert result["reason"] == "unsupported_trigger_source"
+        assert queue_items == []
+        state = manager._read_review_state()
+        assert len(state["sessions"]["web:shared"]["pending_turns"]) == 1
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_review_turn_payload_keeps_only_user_assistant_and_stage_summary(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        canonical_summary = {
+            "active_stage_id": "frontdoor-stage-2",
+            "stages": [
+                {
+                    "stage_id": "frontdoor-stage-1",
+                    "stage_goal": "collect candidate pool",
+                    "completed_stage_summary": "verified current ranking methodology",
+                    "rounds": [
+                        {
+                            "tools": [
+                                {
+                                    "tool_name": "web_fetch",
+                                    "output_text": "HUGE_TOOL_OUTPUT_SHOULD_NOT_APPEAR",
+                                }
+                            ]
+                        }
+                    ],
+                    "contract_revision": "exp:should-not-appear",
+                }
+            ],
+        }
+        result = await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-1",
+            user_messages=["user wants a durable preference"],
+            assistant_text="assistant confirmed the preference",
+            compression_summary={"status": "running", "text": "TOKEN_COMPACTION_SHOULD_NOT_APPEAR"},
+            canonical_summary=canonical_summary,
+        )
+
+        assert result["status"] == "buffered"
+        state = manager._read_review_state()
+        payload_text = state["sessions"]["web:shared"]["pending_turns"][0]["payload_text"]
+        assert "user wants a durable preference" in payload_text
+        assert "assistant confirmed the preference" in payload_text
+        assert "collect candidate pool" in payload_text
+        assert "verified current ranking methodology" in payload_text
+        assert "HUGE_TOOL_OUTPUT_SHOULD_NOT_APPEAR" not in payload_text
+        assert "TOKEN_COMPACTION_SHOULD_NOT_APPEAR" not in payload_text
+        assert "exp:should-not-appear" not in payload_text
     finally:
         manager.close()
 

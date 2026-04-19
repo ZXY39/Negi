@@ -378,11 +378,24 @@ heartbeat 使用的是专门的内部 prompt lane，它的稳定前缀和 reques
 
 - 预期 `frontdoor_history_shrink_reason` 为 `token_compression`
 - 如果 diagnostics 显示已触发 preflight，但 shrink reason 不是 `token_compression`，优先按 runtime bug 排查
+- 先区分当前看的到底是压缩前还是压缩后的值：top-level `final_request_tokens` / `estimated_total_tokens` 现在代表压缩后真正要发出去的 request；若需要解释为什么会触发压缩，再看 `pre_compaction_*`
 
 如果 diagnostics 显示未触发 preflight，但请求仍明显缩短：
 
 - 优先回到 `stage_compaction` / continuity baseline handoff 链路
 - 不要把所有缩短都归因到 token preflight
+
+额外要看三类 ground-truth 字段：
+
+- `effective_input_tokens`
+- `delta_estimate_tokens`
+- `comparable_to_previous_request`
+
+排查经验：
+
+- `estimate_source=usage_plus_delta` 说明 runtime 已经确认 continuity 足够稳定，并且 `final_request_tokens` 可能明显高于 preview-only 估算
+- `estimate_source=preview_estimate` 不一定表示 usage 不存在，也可能只是 continuity 不可证明；这时优先看 `comparable_to_previous_request=false` 的原因，而不是先怀疑阈值
+- 如果 top-level已是压缩后值，而你想知道“为什么这轮会先压缩”，应看 `pre_compaction_estimate_source` / `pre_compaction_final_estimate_tokens` / `pre_compaction_effective_input_tokens`
 
 另外要额外排一类很隐蔽的误判：
 
@@ -418,12 +431,21 @@ heartbeat 使用的是专门的内部 prompt lane，它的稳定前缀和 reques
 - 预期 `history_shrink_reason` 为 `token_compression`
 - 如果 actual request 看起来明显变短，但 `prompt_cache_key_hash` 没变，这是正常的“live request 被压缩但 caller-side family 未换”行为，不要误判成 family churn
 - 节点启动后的 restart / resume 第一跳新请求可以复用“已经过 token compression 的 actual request scaffold”；这也不是 context loss，而是合法的延续路径
+- 节点 diagnostics 的 top-level字段现在同样在 compaction 后切到“最终真正要发的 request”，而压缩前 hybrid 判断保留在 `pre_compaction_*`
 
 如果 preflight 在节点端还没有发送模型前就失败：
 
 - 先看是否是 `context_window_tokens <= 25000` 这种硬错误配置
 - 再看是否是 preview builder / provider payload 估算出错
 - 这类“没有模型请求”的卡顿，优先查 preflight 合同和配置解析，而不是先怀疑 tool loop 或 queue scheduler
+
+如果你在节点侧看到“上一轮 provider usage 明明很大，但这轮还是没触发压缩”，按下面顺序排：
+
+- 先看 `effective_input_tokens` 是否真的落盘到了最新 `observed_input_truth`
+- 再看 `actual_request_hash` 是否与上一轮 actual-request artifact 对得上
+- 再看 `comparable_to_previous_request` 是否因为 append-only 或 tool schema 校验失败而退回了 preview-only
+
+只有这三项都成立、而 `final_estimate_tokens` 仍明显偏小，才该怀疑 hybrid estimator 本身。
 
 ## 5. 修改节点上下文策略时必须重点验证的地方
 
