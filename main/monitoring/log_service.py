@@ -51,6 +51,11 @@ from main.monitoring.models import (
 from main.monitoring.task_event_writer import TaskEventWriter
 from main.monitoring.task_projector import TaskProjector
 from main.protocol import build_envelope, now_iso
+from main.runtime.append_notice_context import (
+    APPEND_NOTICE_CONTEXT_KEY,
+    normalize_append_notice_context,
+    roll_append_notice_context_for_compression_stage,
+)
 from main.runtime.chat_backend import build_actual_request_diagnostics
 from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
 from main.token_usage import aggregate_node_token_usage, build_token_usage_from_attempts, merge_token_usage_by_model, merge_token_usage_records
@@ -1967,7 +1972,11 @@ class TaskLogService:
             node_id,
             lambda current: current.model_copy(
                 update={
-                    'metadata': {**dict(current.metadata or {}), _EXECUTION_STAGE_METADATA_KEY: payload},
+                    'metadata': self._execution_stage_metadata_with_notice_context(
+                        metadata=dict(current.metadata or {}),
+                        state=state,
+                        payload=payload,
+                    ),
                     'updated_at': now_iso(),
                 }
             ),
@@ -1976,6 +1985,38 @@ class TaskLogService:
             self._sync_node_read_models_locked(updated)
             self._publish_task_node_patch_locked(task=task, node=updated)
         return updated
+
+    @staticmethod
+    def _execution_stage_metadata_with_notice_context(
+        *,
+        metadata: dict[str, Any],
+        state: ExecutionStageState,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        next_metadata = {**dict(metadata or {}), _EXECUTION_STAGE_METADATA_KEY: payload}
+        notice_context = normalize_append_notice_context(next_metadata.get(APPEND_NOTICE_CONTEXT_KEY))
+        known_segment_ids = {
+            str(item.get('compression_stage_id') or '').strip()
+            for item in list(notice_context.get('compression_segments') or [])
+            if str(item.get('compression_stage_id') or '').strip()
+        }
+        for stage in list(state.stages or []):
+            if str(stage.stage_kind or '') != _EXECUTION_STAGE_KIND_COMPRESSION:
+                continue
+            stage_id = str(stage.stage_id or '').strip()
+            if not stage_id or stage_id in known_segment_ids:
+                continue
+            notice_context = roll_append_notice_context_for_compression_stage(
+                notice_context,
+                compression_stage_id=stage_id,
+                created_at=str(stage.finished_at or stage.created_at or now_iso()),
+            )
+            known_segment_ids.add(stage_id)
+        if list(notice_context.get('notice_records') or []) or list(notice_context.get('compression_segments') or []):
+            next_metadata[APPEND_NOTICE_CONTEXT_KEY] = notice_context
+        else:
+            next_metadata.pop(APPEND_NOTICE_CONTEXT_KEY, None)
+        return next_metadata
 
     def _sync_execution_stage_frame_locked(self, *, task_id: str, node_id: str, state: ExecutionStageState) -> None:
         payload = self._execution_stage_frame_payload(state)

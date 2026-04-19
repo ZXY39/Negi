@@ -130,10 +130,12 @@ Maintenance note for `task_append_notice` / task message distribution:
   - `task_node_notifications` rows for the task
   - `task_runtime_meta.distribution`
   - the current runtime frames for the frontier nodes
+  - the target node's `append_notice_context` metadata when the symptom is “notice vanished after compaction/compression”
 - `pause_requested` means the append-notice transaction has requested the existing pause barrier but ordinary execution has not yet consumed the next distribution step.
 - `distributing` means the active frontier is currently being processed through the ordinary task/node dispatcher. This is still queue-controlled node work, not a sidecar lane.
 - After the final frontier finishes, v1 clears distribution state and schedules the next ordinary task run instead of keeping a long-lived `resuming` marker in runtime meta.
 - If a child execution node was previously terminal and now appears active again after append-notice, check whether its old acceptance node was logically invalidated rather than deleted. The acceptance record should still exist for audit, but it should no longer be authoritative for the current spawn entry.
+- If a notice appears in mailbox rows but not in the next model request, inspect whether it is still in the raw notice window or has already been rolled into a compressed notice-tail segment. Those tail blocks are now intentionally kept ahead of stage archive blocks in prompt assembly.
 - If force delete is requested during message distribution, deletion should win immediately. Do not wait for the epoch to finish naturally; confirm instead that epochs/mailboxes were cancelled or purged before the task row disappeared.
 
 如果任务已经创建，但表现为“响应明显变慢”“长时间停在 `model.chat.await_response`”或“前端只看到 task-event 在刷”，优先同时对照：

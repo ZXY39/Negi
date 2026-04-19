@@ -28,6 +28,11 @@ from main.models import (
 )
 from main.prompts import load_prompt
 from main.protocol import now_iso
+from main.runtime.append_notice_context import (
+    APPEND_NOTICE_CONTEXT_KEY,
+    normalize_append_notice_context,
+    record_consumed_notifications,
+)
 from main.runtime.internal_tools import (
     SpawnChildNodesTool,
     SubmitFinalResultTool,
@@ -326,6 +331,16 @@ class NodeRunner:
                 if str(item or '').strip()
             ]
             if pending_notification_ids:
+                pending_notifications = self._notifications_by_ids(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    notification_ids=pending_notification_ids,
+                )
+                if pending_notifications:
+                    self._record_consumed_notice_context(
+                        node_id=node.node_id,
+                        notifications=pending_notifications,
+                    )
                 self._consume_node_notifications(
                     task_id=task.task_id,
                     node_id=node.node_id,
@@ -413,6 +428,18 @@ class NodeRunner:
             if str(item.status or '').strip() == 'delivered'
         ]
 
+    def _notifications_by_ids(self, *, task_id: str, node_id: str, notification_ids: list[str]) -> list[dict[str, Any]]:
+        ids = {str(item or '').strip() for item in list(notification_ids or []) if str(item or '').strip()}
+        if not ids:
+            return []
+        items: list[dict[str, Any]] = []
+        for notification in list(self._store.list_task_node_notifications(task_id, node_id) or []):
+            notification_id = str(notification.notification_id or '').strip()
+            if notification_id not in ids:
+                continue
+            items.append(notification.model_dump(mode='json'))
+        return items
+
     @staticmethod
     def _message_list_from_payload(payload: Any) -> list[dict[str, Any]]:
         if isinstance(payload, list):
@@ -469,6 +496,20 @@ class NodeRunner:
                     }
                 )
             )
+
+    def _record_consumed_notice_context(self, *, node_id: str, notifications: list[dict[str, Any]]) -> None:
+        consumed_at = now_iso()
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            context = normalize_append_notice_context(metadata.get(APPEND_NOTICE_CONTEXT_KEY))
+            metadata[APPEND_NOTICE_CONTEXT_KEY] = record_consumed_notifications(
+                context,
+                notifications=list(notifications or []),
+                consumed_at=consumed_at,
+            )
+            return metadata
+
+        self._log_service.update_node_metadata(node_id, _mutate)
 
     def _close_active_stage_for_message_consumption(self, *, task_id: str, node_id: str) -> None:
         self._log_service.update_frame(
