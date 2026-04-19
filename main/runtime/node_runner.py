@@ -313,6 +313,7 @@ class NodeRunner:
                     task=task,
                     node=node,
                     messages=list(react_state.get('messages') or []),
+                    request_body_seed_messages=list(react_state.get('request_body_seed_messages') or []),
                     tools=tools,
                     tools_supplier=lambda current_task=task, current_node=node: self._build_tools(
                         task=current_task,
@@ -404,6 +405,7 @@ class NodeRunner:
 
     async def _resume_react_state(self, *, task, node: NodeRecord) -> dict[str, Any]:
         notifications = self._pending_node_notifications(task_id=task.task_id, node_id=node.node_id)
+        request_body_seed_messages = self._latest_actual_request_seed_messages(task=task, node=node)
         if notifications:
             messages = await self._base_messages_for_reactivated_or_live_node(task=task, node=node)
             messages = self._append_mailbox_messages(messages=messages, notifications=notifications)
@@ -411,14 +413,17 @@ class NodeRunner:
             return {
                 'messages': messages,
                 'pending_notification_ids': [str(item.notification_id or '').strip() for item in notifications],
+                'request_body_seed_messages': request_body_seed_messages,
             }
         frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
         if isinstance(frame.get('messages'), list) and frame.get('messages'):
             return {
                 'messages': list(frame.get('messages') or []),
+                'request_body_seed_messages': request_body_seed_messages,
             }
         return {
             'messages': await self._build_messages(task=task, node=node),
+            'request_body_seed_messages': request_body_seed_messages,
         }
 
     def _pending_node_notifications(self, *, task_id: str, node_id: str) -> list[Any]:
@@ -449,6 +454,35 @@ class NodeRunner:
                 value = payload.get(key)
                 if isinstance(value, list):
                     return [dict(item) for item in value if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def _request_messages_from_payload(payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, dict):
+            value = payload.get('request_messages')
+            if isinstance(value, list):
+                return [dict(item) for item in value if isinstance(item, dict)]
+        return []
+
+    def _latest_actual_request_seed_messages(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
+        frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
+        metadata = dict(node.metadata or {})
+        for ref in (
+            str(frame.get('actual_request_ref') or '').strip(),
+            str(metadata.get('latest_runtime_actual_request_ref') or '').strip(),
+        ):
+            if not ref:
+                continue
+            resolved = str(self._log_service.resolve_content_ref(ref) or '').strip()
+            if not resolved:
+                continue
+            try:
+                parsed = json.loads(resolved)
+            except Exception:
+                parsed = None
+            message_list = self._request_messages_from_payload(parsed)
+            if message_list:
+                return message_list
         return []
 
     async def _base_messages_for_reactivated_or_live_node(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:

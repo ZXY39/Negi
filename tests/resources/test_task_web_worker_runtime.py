@@ -28,6 +28,7 @@ from main.models import (
 )
 from main.monitoring.query_service import TaskQueryService
 from main.protocol import now_iso
+from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 from main.service.runtime_service import MainRuntimeService
@@ -43,6 +44,52 @@ from main.service.task_terminal_callback import (
 class _DummyChatBackend:
     async def chat(self, **kwargs):
         raise AssertionError(f"chat backend should not be called in this test: {kwargs!r}")
+
+
+class _CapturedRequestFinalResultChatBackend:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.call_count = 0
+
+    async def chat(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        self.call_count += 1
+        if self.call_count == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:stage",
+                        name="submit_next_stage",
+                        arguments={
+                            "stage_goal": "resume after restart",
+                            "tool_round_budget": 5,
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 12, "output_tokens": 4, "cache_hit_tokens": 0},
+            )
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call:final",
+                    name="submit_final_result",
+                    arguments={
+                        "status": "success",
+                        "delivery_status": "final",
+                        "summary": "done",
+                        "answer": "done",
+                        "evidence": [{"kind": "artifact", "note": "captured resumed request"}],
+                        "remaining_work": [],
+                        "blocking_reason": "",
+                    },
+                )
+            ],
+            finish_reason="tool_calls",
+            usage={"input_tokens": 12, "output_tokens": 4, "cache_hit_tokens": 0},
+        )
 
 
 class _SpawnReviewToolCallChatBackend:
@@ -5466,6 +5513,166 @@ def test_same_turn_append_only_request_messages_falls_back_when_prefix_changes()
         *current_model_messages,
         *request_tail_messages,
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_node_after_restart_reuses_persisted_actual_request_prefix_for_first_resumed_request(tmp_path: Path):
+    store_path = tmp_path / "runtime.sqlite3"
+    tasks_dir = tmp_path / "tasks"
+    artifacts_dir = tmp_path / "artifacts"
+    governance_path = tmp_path / "governance.sqlite3"
+
+    seed_service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=store_path,
+        files_base_dir=tasks_dir,
+        artifact_dir=artifacts_dir,
+        governance_store_path=governance_path,
+        execution_mode="web",
+        execution_model_refs=["fake"],
+        acceptance_model_refs=["fake"],
+    )
+
+    previous_request_messages = [
+        {"role": "system", "content": "node system prompt"},
+        {"role": "user", "content": "projected user prompt"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call:stage",
+                    "type": "function",
+                    "function": {
+                        "name": "submit_next_stage",
+                        "arguments": json.dumps(
+                            {"stage_goal": "carry forward prior round", "tool_round_budget": 5},
+                            ensure_ascii=False,
+                        ),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "submit_next_stage",
+            "tool_call_id": "call:stage",
+            "content": '{"status":"success"}',
+        },
+    ]
+
+    record = await _create_web_task(seed_service)
+    root = seed_service.get_node(record.root_node_id)
+    assert root is not None
+
+    seed_service.log_service.upsert_frame(
+        record.task_id,
+        {
+            "node_id": root.node_id,
+            "depth": root.depth,
+            "node_kind": root.node_kind,
+            "phase": "before_model",
+            "messages": [
+                {"role": "system", "content": "node system prompt"},
+                {"role": "user", "content": "projected user prompt"},
+            ],
+            "prompt_cache_key_hash": "family-hash-stable",
+            "actual_request_hash": "legacy-request-hash",
+            "actual_request_message_count": len(previous_request_messages),
+        },
+        publish_snapshot=False,
+    )
+    seed_service.log_service.append_node_output(
+        record.task_id,
+        root.node_id,
+        content='{"status":"success"}',
+        tool_calls=[],
+        usage_attempts=[
+            LLMModelAttempt(
+                model_key="sub gpt-5.4",
+                provider_id="openai",
+                provider_model="gpt-5.4",
+                usage={"input_tokens": 14, "output_tokens": 6},
+            )
+        ],
+        model_messages=[
+            {"role": "system", "content": "node system prompt"},
+            {"role": "user", "content": "projected user prompt"},
+        ],
+        request_messages=previous_request_messages,
+        prompt_cache_key="stable-family-key-for-restart",
+        request_message_count=len(previous_request_messages),
+        request_message_chars=321,
+        actual_tool_schemas=[
+            {
+                "name": "submit_next_stage",
+                "description": "advance stage",
+                "parameters": {"type": "object"},
+            }
+        ],
+        provider_request_meta={"provider": "openai"},
+        provider_request_body={"input": previous_request_messages},
+    )
+
+    seeded_detail = seed_service.get_node_detail_payload(record.task_id, root.node_id)
+    assert seeded_detail is not None
+    assert seeded_detail["item"]["actual_request_message_count"] == len(previous_request_messages)
+    await seed_service.close()
+
+    backend = _CapturedRequestFinalResultChatBackend()
+    restarted = MainRuntimeService(
+        chat_backend=backend,
+        store_path=store_path,
+        files_base_dir=tasks_dir,
+        artifact_dir=artifacts_dir,
+        governance_store_path=governance_path,
+        execution_mode="web",
+        execution_model_refs=["fake"],
+        acceptance_model_refs=["fake"],
+    )
+
+    try:
+        task = restarted.get_task(record.task_id)
+        root = restarted.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        react_state = await restarted.node_runner._resume_react_state(task=task, node=root)
+        tools = {
+            "submit_next_stage": SubmitNextStageTool(
+                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs, final: restarted.node_runner._submit_next_stage(
+                    task_id=task.task_id,
+                    node_id=root.node_id,
+                    stage_goal=stage_goal,
+                    tool_round_budget=tool_round_budget,
+                    completed_stage_summary=completed_stage_summary,
+                    key_refs=key_refs,
+                    final=final,
+                )
+            ),
+            "submit_final_result": SubmitFinalResultTool(
+                lambda payload: restarted.node_runner._submit_final_result(payload),
+                node_kind=root.node_kind,
+            ),
+        }
+        result = await restarted.node_runner._react_loop.run(
+            task=task,
+            node=root,
+            messages=list(react_state.get("messages") or []),
+            request_body_seed_messages=list(react_state.get("request_body_seed_messages") or []),
+            tools=tools,
+            model_refs=["fake"],
+            runtime_context=restarted.node_runner._runtime_context(task=task, node=root),
+            max_iterations=4,
+        )
+
+        assert result.status == "success"
+        assert backend.calls
+        captured_request_messages = list(backend.calls[0].get("messages") or [])
+        assert captured_request_messages[: len(previous_request_messages)] == previous_request_messages
+        assert len(captured_request_messages) >= len(previous_request_messages)
+    finally:
+        await restarted.close()
 
 
 @pytest.mark.asyncio
