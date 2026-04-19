@@ -37,7 +37,7 @@ async def test_prepare_turn_reuses_session_context_window_for_new_user_turn(
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["message", "submit_next_stage"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec", "submit_next_stage"]}
 
     async def _build_for_ceo(**kwargs):
         captured.update(kwargs)
@@ -46,7 +46,7 @@ async def test_prepare_turn_reuses_session_context_window_for_new_user_turn(
         if str(kwargs.get("user_content") or "").strip():
             model_messages.append({"role": "user", "content": kwargs["user_content"]})
         return SimpleNamespace(
-            tool_names=["message", "submit_next_stage"],
+            tool_names=["exec", "submit_next_stage"],
             model_messages=model_messages,
             stable_messages=list(seed_messages),
             dynamic_appendix_messages=[],
@@ -57,7 +57,7 @@ async def test_prepare_turn_reuses_session_context_window_for_new_user_turn(
                 "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["message", "submit_next_stage"],
+                    "visible_tool_ids": ["exec", "submit_next_stage"],
                     "visible_skill_ids": [],
                 },
             },
@@ -162,7 +162,7 @@ async def test_prepare_turn_passes_session_request_body_as_direct_continuation_s
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["message", "submit_next_stage"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec", "submit_next_stage"]}
 
     async def _build_for_ceo(**kwargs):
         captured.update(kwargs)
@@ -172,7 +172,7 @@ async def test_prepare_turn_passes_session_request_body_as_direct_continuation_s
         if str(kwargs.get("user_content") or "").strip():
             model_messages.append({"role": "user", "content": kwargs["user_content"]})
         return SimpleNamespace(
-            tool_names=["message", "submit_next_stage"],
+            tool_names=["exec", "submit_next_stage"],
             model_messages=model_messages,
             stable_messages=list(seed_messages),
             dynamic_appendix_messages=[],
@@ -183,7 +183,7 @@ async def test_prepare_turn_passes_session_request_body_as_direct_continuation_s
                 "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["message", "submit_next_stage"],
+                    "visible_tool_ids": ["exec", "submit_next_stage"],
                     "visible_skill_ids": [],
                 },
             },
@@ -260,7 +260,7 @@ async def test_prepare_turn_prefers_session_request_body_seed_over_visible_check
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["message", "submit_next_stage"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec", "submit_next_stage"]}
 
     async def _build_for_ceo(**kwargs):
         captured.update(kwargs)
@@ -270,7 +270,7 @@ async def test_prepare_turn_prefers_session_request_body_seed_over_visible_check
         if str(kwargs.get("user_content") or "").strip():
             model_messages.append({"role": "user", "content": kwargs["user_content"]})
         return SimpleNamespace(
-            tool_names=["message", "submit_next_stage"],
+            tool_names=["exec", "submit_next_stage"],
             model_messages=model_messages,
             stable_messages=list(seed_messages),
             dynamic_appendix_messages=[],
@@ -281,7 +281,7 @@ async def test_prepare_turn_prefers_session_request_body_seed_over_visible_check
                 "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["message", "submit_next_stage"],
+                    "visible_tool_ids": ["exec", "submit_next_stage"],
                     "visible_skill_ids": [],
                 },
             },
@@ -377,7 +377,7 @@ async def test_prepare_turn_recovers_request_body_seed_from_paused_snapshot_when
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["message", "submit_next_stage"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec", "submit_next_stage"]}
 
     async def _build_for_ceo(**kwargs):
         captured.update(kwargs)
@@ -386,7 +386,7 @@ async def test_prepare_turn_recovers_request_body_seed_from_paused_snapshot_when
         if str(kwargs.get("user_content") or "").strip():
             model_messages.append({"role": "user", "content": kwargs["user_content"]})
         return SimpleNamespace(
-            tool_names=["message", "submit_next_stage"],
+            tool_names=["exec", "submit_next_stage"],
             model_messages=model_messages,
             stable_messages=list(seed_messages),
             dynamic_appendix_messages=[],
@@ -397,7 +397,7 @@ async def test_prepare_turn_recovers_request_body_seed_from_paused_snapshot_when
                 "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["message", "submit_next_stage"],
+                    "visible_tool_ids": ["exec", "submit_next_stage"],
                     "visible_skill_ids": [],
                 },
             },
@@ -536,15 +536,15 @@ async def test_finalize_turn_appends_visible_output_for_self_execute_route() -> 
                     {
                         "id": "call-1",
                         "type": "function",
-                        "function": {"name": "message", "arguments": "{}"},
+                        "function": {"name": "exec", "arguments": "{}"},
                     }
                 ],
             },
             {
                 "role": "tool",
-                "name": "message",
+                "name": "exec",
                 "tool_call_id": "call-1",
-                "content": "Message sent to final:ceo-demo",
+                "content": "Command finished for final:ceo-demo",
             },
         ],
         "frontdoor_history_shrink_reason": "",
@@ -640,6 +640,120 @@ async def test_prepare_turn_rejects_unexpected_context_shrink_without_reason(
             initial_persistent_state(user_input={"content": "new question", "metadata": {}}),
             runtime=runtime,
         )
+
+
+@pytest.mark.asyncio
+async def test_prepare_turn_ignores_runtime_only_tool_metadata_when_checking_context_shrink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = "web:shared"
+    loop = _loop_with_session(session_key)
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(prompt_cache_contract, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["submit_next_stage"]}
+
+    raw_baseline = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "u1"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "exec", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "exec",
+            "tool_call_id": "call-1",
+            "content": '{"status":"success"}',
+            "status": "success",
+            "started_at": "2026-04-19T14:41:05+08:00",
+            "finished_at": "2026-04-19T14:41:20+08:00",
+            "elapsed_seconds": 15.2,
+        },
+    ]
+    normalized_baseline = [
+        {
+            key: value
+            for key, value in message.items()
+            if key in {"role", "content", "tool_calls", "tool_call_id", "name"}
+        }
+        for message in raw_baseline
+    ]
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            tool_names=["submit_next_stage"],
+            model_messages=[
+                *normalized_baseline,
+                {"role": "user", "content": "new question"},
+            ],
+            stable_messages=[
+                *normalized_baseline,
+                {"role": "user", "content": "new question"},
+            ],
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["submit_next_stage"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key=session_key),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=list(raw_baseline),
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_stage_state={},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={},
+        _semantic_context_state={},
+        _frontdoor_hydrated_tool_names=[],
+        _frontdoor_selection_debug={},
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=loop, session=session, session_key=session_key, on_progress=None)
+    )
+
+    prepared = await runner._graph_prepare_turn(
+        initial_persistent_state(user_input={"content": "new question", "metadata": {}}),
+        runtime=runtime,
+    )
+
+    assert prepared["frontdoor_history_shrink_reason"] == ""
+    assert prepared["frontdoor_request_body_messages"] == [
+        *normalized_baseline,
+        {"role": "user", "content": "new question"},
+    ]
 
 
 @pytest.mark.asyncio

@@ -72,6 +72,7 @@ from .canonical_context import (
     merge_turn_stage_state_into_canonical_context,
     normalize_frontdoor_canonical_context,
 )
+from .message_builder import CeoMessageBuilder
 from .prompt_cache_contract import build_frontdoor_prompt_contract
 from .state_models import (
     CeoFrontdoorInterrupted,
@@ -3464,8 +3465,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             or ""
         ).strip()
         if session_request_body_messages and not heartbeat_internal:
-            previous_tokens = estimate_message_tokens(session_request_body_messages)
-            next_tokens = estimate_message_tokens(persisted_messages)
+            # Compare shrink on the same provider-facing shape. Session continuity
+            # baselines may still carry runtime-only tool metadata such as status
+            # or timing fields, but those fields are stripped when the next visible
+            # turn rebuilds its request-body seed.
+            previous_tokens = estimate_message_tokens(
+                CeoMessageBuilder._request_body_seed_records(session_request_body_messages)
+            )
+            next_tokens = estimate_message_tokens(
+                CeoMessageBuilder._request_body_seed_records(persisted_messages)
+            )
             if next_tokens < previous_tokens and shrink_reason not in self._ALLOWED_FRONTDOOR_SHRINK_REASONS.difference({""}):
                 raise RuntimeError("frontdoor context shrank without an allowed reason")
         parallel_enabled, max_parallel_tool_calls = self._parallel_tool_settings()
