@@ -2221,6 +2221,231 @@ def test_handle_task_terminal_refreshes_selected_node_detail() -> None:
     assert result["forceRefresh"] is True
 
 
+def test_render_tree_shows_distribution_notice_and_forces_yellow_connector_mode() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+
+        class StubClassList {
+          constructor(owner) {
+            this.owner = owner;
+            this.tokens = new Set();
+          }
+          add(...tokens) {
+            tokens.filter(Boolean).forEach((token) => this.tokens.add(String(token)));
+            this.owner.className = [...this.tokens].join(" ");
+          }
+          remove(...tokens) {
+            tokens.filter(Boolean).forEach((token) => this.tokens.delete(String(token)));
+            this.owner.className = [...this.tokens].join(" ");
+          }
+          contains(token) {
+            return this.tokens.has(String(token));
+          }
+          toggle(token, force) {
+            const normalized = String(token);
+            const shouldAdd = force === undefined ? !this.tokens.has(normalized) : !!force;
+            if (shouldAdd) this.tokens.add(normalized);
+            else this.tokens.delete(normalized);
+            this.owner.className = [...this.tokens].join(" ");
+            return shouldAdd;
+          }
+        }
+
+        class StubElement {
+          constructor(tagName = "div") {
+            this.tagName = String(tagName || "div").toUpperCase();
+            this.children = [];
+            this.dataset = {};
+            this.style = {};
+            this.hidden = false;
+            this.disabled = false;
+            this.className = "";
+            this.classList = new StubClassList(this);
+            this.attributes = {};
+            this.innerHTML = "";
+            this.textContent = "";
+            this.parentNode = null;
+            this.title = "";
+          }
+          appendChild(child) {
+            if (child && typeof child === "object") child.parentNode = this;
+            this.children.push(child);
+            return child;
+          }
+          setAttribute(name, value) {
+            this.attributes[String(name)] = String(value);
+          }
+          addEventListener() {}
+          querySelector() { return null; }
+          querySelectorAll() { return []; }
+        }
+
+        global.window = global;
+        global.HTMLElement = StubElement;
+        global.Element = StubElement;
+        global.HTMLButtonElement = StubElement;
+        global.HTMLInputElement = StubElement;
+        global.HTMLSelectElement = StubElement;
+        global.DocumentFragment = StubElement;
+        global.document = {
+          createElement(tagName) { return new StubElement(tagName); },
+        };
+        global.S = {
+          currentTaskId: "task:test",
+          currentTask: { metadata: {} },
+          taskSummary: { active_node_count: 0, runnable_node_count: 0, waiting_node_count: 0 },
+          taskRuntimeSummary: {
+            distribution: {
+              active_epoch_id: "epoch:demo",
+              state: "distributing",
+              frontier_node_ids: ["root"],
+              queued_epoch_count: 0,
+              pending_mailbox_count: 0,
+            },
+          },
+          treeRootNodeId: "root",
+          treeNodesById: {
+            root: {
+              node_id: "root",
+              title: "Root",
+              status: "in_progress",
+              node_kind: "execution",
+              rounds: [],
+              auxiliary_child_ids: [],
+              default_round_id: "",
+            },
+          },
+          treeView: null,
+          treeSelectedRoundByNodeId: {},
+          treePan: {
+            offsetX: 0,
+            offsetY: 0,
+            scale: 1,
+            suppressClickNodeId: null,
+          },
+          selectedNodeId: null,
+          taskNodeDetails: {},
+          treeLargeMode: false,
+        };
+        global.U = {
+          tree: new StubElement("div"),
+          tdActiveCount: new StubElement("span"),
+          taskTreeResetRounds: new StubElement("button"),
+          taskSelectionEmpty: new StubElement("div"),
+          detail: new StubElement("div"),
+          nodeEmpty: new StubElement("div"),
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        global.treeNormalizeInt = global.normalizeInt;
+        global.esc = (value) => String(value ?? "");
+        global.icons = () => {};
+        global.setTaskDetailOpen = () => {};
+        global.captureTaskDetailViewState = () => ({});
+        global.stashTaskDetailViewState = () => {};
+        global.scheduleTaskDetailSessionPersist = () => {};
+        global.findTreeNode = () => null;
+        global.resolveExecutionTreeDensity = () => ({ mode: "default", stats: { totalItems: 1, maxBreadth: 1 } });
+        global.hasManualTreeRoundSelections = () => false;
+        global.showAgent = () => Promise.resolve();
+        global.enhanceResourceSelects = () => {};
+        global.formatTokenCount = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        renderTree();
+
+        const wrapper = U.tree.children.find((item) => item instanceof StubElement && String(item.className || "").includes("execution-tree"));
+        const notice = U.tree.children.find((item) => item instanceof StubElement && String(item.className || "").includes("task-tree-distribution-bubble"));
+        console.log(JSON.stringify({
+          hasWrapper: !!wrapper,
+          wrapperClassName: wrapper?.className || "",
+          noticeText: notice?.textContent || "",
+          childCount: U.tree.children.length,
+        }));
+        """
+    )
+
+    assert result["hasWrapper"] is True
+    assert "execution-tree--distribution-active" in result["wrapperClassName"]
+    assert result["noticeText"] == "接收到新消息，分发中"
+
+
+def test_build_execution_trace_steps_inserts_notice_pseudo_stage_before_latest_real_stage() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {};
+        global.U = {};
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        global.treeNormalizeInt = global.normalizeInt;
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.formatCompactTime = (value) => String(value || "");
+        global.displayTaskStageStatus = (value) => String(value || "");
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const steps = buildExecutionTraceSteps(
+          {
+            initial_prompt: "root prompt",
+            stages: [
+              {
+                stage_id: "stage:1",
+                stage_index: 1,
+                stage_goal: "collect sources",
+                status: "completed",
+                tool_round_budget: 3,
+                tool_rounds_used: 1,
+                rounds: [],
+                tool_calls: [],
+              },
+            ],
+          },
+          {
+            append_notice_messages: [
+              {
+                notification_id: "notif:1",
+                message: "改成男性角色Top20",
+                consumed_at: "2026-04-19T15:26:11+08:00",
+              },
+            ],
+          }
+        );
+
+        console.log(JSON.stringify({
+          traceKeys: steps.map((item) => item.traceKey),
+          titles: steps.map((item) => item.title),
+          noticeBody: steps[1]?.bodyHtml || "",
+          noticeClass: steps[1]?.extraClass || "",
+        }));
+        """
+    )
+
+    assert result["traceKeys"][0] == "initial_prompt"
+    assert result["traceKeys"][1].startswith("notice:")
+    assert result["traceKeys"][2] == "stage:stage:1"
+    assert result["titles"][1] == "消息通知"
+    assert "已接收到消息：改成男性角色Top20" in result["noticeBody"]
+    assert result["noticeClass"] == "task-trace-step--notice"
+
+
 def test_task_detail_html_renders_governance_panel() -> None:
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
 

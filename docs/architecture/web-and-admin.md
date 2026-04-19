@@ -156,6 +156,15 @@ The backend contract behind that UI behavior is:
 - `retry`, `continue-evaluate`, and `open continuation` actions are removed from both the UI flow and the REST surface.
 - Task list and task detail status pills now derive from the current task `status` plus final-acceptance state; legacy continuation metadata fields are ignored even if older task records still carry them.
 
+### Task Message Distribution UI Contract
+
+- When the current task enters message distribution mode (`runtime_summary.distribution.active_epoch_id/state` is present), the task-tree view now surfaces a task-local sticky notice above the tree with text `接收到新消息，分发中`.
+- During the same distribution window, the execution-tree wrapper switches into a dedicated distribution visual mode and forces all connector lines into the same yellow family, regardless of the individual node success/running/failed color mapping.
+- This is intentionally task-scoped UI state, not a global shell toast. It should follow the currently opened task detail view and disappear when `runtime_summary.distribution` clears.
+- Node detail now receives durable `append_notice_messages` from the backend query contract. The frontend must not reconstruct these from raw mailbox tables or by parsing prompt tail blocks.
+- In the execution-trace panel, those messages render as a pseudo stage named `消息通知`. It is displayed alongside real stages, but it is not an execution stage in runtime state and it must not participate in stage progress or round-budget calculations.
+- The pseudo stage uses the normal trace-step shell plus a dedicated yellow visual treatment. Maintainers should treat it as a presentation-only layer built from backend-provided notice history rather than as a new stage kind.
+
 ### Task Depth Default Contract
 
 - The task-hall "global task tree depth" control is a global main-runtime default, backed by `PUT /api/main-runtime/settings`.

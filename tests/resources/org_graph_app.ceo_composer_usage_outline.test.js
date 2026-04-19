@@ -125,6 +125,8 @@ function loadApp() {
             refreshCeoComposerUsageEstimate,
             buildCeoComposerPreflightEntries,
             syncCeoComposerUsageOutline,
+            applyCeoState,
+            setCeoSessionSnapshotCache,
         };`,
         context
     );
@@ -215,6 +217,22 @@ test("active turn forces visible outline before estimate arrives", () => {
     assert.equal(U.ceoComposerOutlineShell.classList.contains("is-active"), true);
     assert.equal(U.ceoComposerOutlineShell.classList.contains("is-force-visible"), true);
     assert.equal(U.ceoComposerOutlineProgress.style.strokeDasharray, "400 400");
+});
+
+test("running state transition immediately shows force-visible outline before estimate returns", () => {
+    const { applyCeoState, S, U } = loadApp();
+    S.activeSessionId = "web:test";
+    S.ceoTurnActive = false;
+    S.ceoComposerUsageEstimate = null;
+    U.ceoComposerOutlineShell = new StubHTMLElement();
+    U.ceoComposerOutlineSvg = new StubSVGElement();
+    U.ceoComposerOutlineTrack = new StubSVGPathElement();
+    U.ceoComposerOutlineProgress = new StubSVGPathElement();
+
+    applyCeoState({ status: "running", is_running: true }, { source: "user", turn_id: "turn-1" });
+
+    assert.equal(U.ceoComposerOutlineShell.classList.contains("is-active"), true);
+    assert.equal(U.ceoComposerOutlineShell.classList.contains("is-force-visible"), true);
 });
 
 test("estimate mode no longer paints a full textarea border fallback", () => {

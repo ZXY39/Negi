@@ -186,6 +186,51 @@ async def test_task_append_notice_requests_pause_then_creates_distribution_epoch
         await service.close()
 
 
+@pytest.mark.asyncio
+async def test_node_detail_exposes_consumed_append_notice_messages(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("鏁寸悊閲嶇偣瀹㈡埛娴佸け淇″彿", session_id="web:ceo-demo")
+        root = service.store.get_node(record.root_node_id)
+        assert root is not None
+
+        service.log_service.update_node_metadata(
+            root.node_id,
+            lambda metadata: {
+                **metadata,
+                "append_notice_context": {
+                    "notice_records": [
+                        {
+                            "notification_id": "notif:notice-1",
+                            "epoch_id": "epoch:notice",
+                            "source_node_id": "node:source",
+                            "message": "改成男性角色Top20",
+                            "consumed_at": "2026-04-19T15:26:11+08:00",
+                            "compression_stage_id": "",
+                        }
+                    ],
+                    "compression_segments": [],
+                },
+            },
+        )
+
+        detail = service.query_service.get_node_detail(record.task_id, root.node_id, detail_level="full")
+
+        assert detail is not None
+        assert detail.append_notice_messages == [
+            {
+                "notification_id": "notif:notice-1",
+                "epoch_id": "epoch:notice",
+                "source_node_id": "node:source",
+                "message": "改成男性角色Top20",
+                "consumed_at": "2026-04-19T15:26:11+08:00",
+                "compression_stage_id": "",
+            }
+        ]
+    finally:
+        await service.close()
+
+
 
 @pytest.mark.asyncio
 async def test_compression_notice_tail_block_precedes_externalized_stage_block(tmp_path: Path) -> None:
@@ -745,6 +790,45 @@ def test_submit_message_distribution_tool_schema_uses_explicit_child_targets() -
     assert "target_node_id" in item["properties"]
     assert "message" in item["properties"]
     assert "reason" in item["properties"]
+
+
+@pytest.mark.asyncio
+async def test_distribution_turn_uses_responses_compatible_flat_function_tool_choice(tmp_path: Path) -> None:
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_message_distribution",
+                        "arguments": {
+                            "children": [],
+                            "notes": "no child receives the notice in this turn",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record = await service.create_task("distribution tool choice test", session_id="web:ceo-demo")
+        await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="append notice for distribution tool choice",
+            frontier_node_ids=[record.root_node_id],
+        )
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        assert len(backend.calls) == 1
+        assert backend.calls[0]["tool_choice"] == {
+            "type": "function",
+            "name": "submit_message_distribution",
+        }
+    finally:
+        await service.close()
 
 
 @pytest.mark.asyncio

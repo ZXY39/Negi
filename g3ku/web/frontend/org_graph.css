@@ -1107,6 +1107,26 @@ textarea {
     pointer-events: none;
 }
 
+.task-tree-distribution-bubble {
+    position: sticky;
+    top: var(--space-3);
+    z-index: 4;
+    width: fit-content;
+    max-width: min(720px, calc(100% - var(--space-6)));
+    margin: 0 auto var(--space-3);
+    padding: 10px 14px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, #f59e0b 44%, var(--border-color));
+    background: color-mix(in srgb, #f59e0b 14%, var(--bg-app));
+    box-shadow: 0 12px 32px rgba(245, 158, 11, 0.12);
+    color: color-mix(in srgb, #92400e 88%, var(--text-primary));
+    font-size: 0.84rem;
+    font-weight: 700;
+    line-height: 1.35;
+    text-align: center;
+    pointer-events: none;
+}
+
 .tree-container.is-panning {
     cursor: grabbing;
     user-select: none;
@@ -1157,6 +1177,13 @@ textarea {
     --tree-node-max-width: 236px;
     --tree-node-padding-y: 0.625rem;
     --tree-node-padding-x: 0.75rem;
+}
+
+.execution-tree.execution-tree--distribution-active {
+    --tree-line: color-mix(in srgb, #f59e0b 72%, white 28%);
+    --tree-line-running: color-mix(in srgb, #f59e0b 72%, white 28%);
+    --tree-line-success: color-mix(in srgb, #f59e0b 72%, white 28%);
+    --tree-line-failed: color-mix(in srgb, #f59e0b 72%, white 28%);
 }
 
 .execution-tree-list {
@@ -3274,6 +3301,16 @@ textarea {
 
 .task-trace-step[open] {
     box-shadow: var(--shadow-sm);
+}
+
+.task-trace-step--notice {
+    border-color: color-mix(in srgb, #f59e0b 42%, transparent);
+    background: color-mix(in srgb, #f59e0b 10%, var(--bg-app));
+}
+
+.task-trace-step--notice::before {
+    background: #f59e0b;
+    box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.14);
 }
 
 .task-trace-summary {

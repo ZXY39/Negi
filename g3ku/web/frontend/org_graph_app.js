@@ -224,6 +224,7 @@ const S = {
         dragState: null,
     },
     treeView: null,
+    taskRuntimeSummary: null,
     treeSelectedRoundByNodeId: {},
     treePan: {
         active: false,
@@ -3218,6 +3219,7 @@ function applyCeoState(state = {}, meta = {}) {
         }
     }
     if (paused) finalizePausedCeoTurn("已暂停", { source, turnId });
+    scheduleSyncCeoComposerUsageOutline();
     syncCeoSessionActions();
     syncCeoPrimaryButton();
     if (!running && !paused) {

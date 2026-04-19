@@ -180,6 +180,7 @@ class TaskNodeDetail(Model):
     execution_trace_summary: dict[str, Any] = Field(default_factory=dict)
     execution_trace_ref: str = ''
     latest_spawn_round_id: str = ''
+    append_notice_messages: list[dict[str, Any]] = Field(default_factory=list)
     direct_child_results: list[dict[str, Any]] = Field(default_factory=list)
     spawn_review_rounds: list[dict[str, Any]] = Field(default_factory=list)
     artifacts_preview: list[dict[str, Any]] = Field(default_factory=list)

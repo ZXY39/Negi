@@ -743,7 +743,8 @@ class NodeRunner:
             messages=prompt_messages,
             tools=self._distribution_provider_tools(decision_tool),
             model_refs=self._model_refs_for(node),
-            tool_choice={'type': 'function', 'function': {'name': decision_tool.name}},
+            # Responses-style gateways expect the flat function selector shape here.
+            tool_choice={'type': 'function', 'name': decision_tool.name},
             parallel_tool_calls=False,
         )
         arguments = self._distribution_response_arguments(response)

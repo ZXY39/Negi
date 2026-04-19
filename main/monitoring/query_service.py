@@ -15,6 +15,7 @@ from main.models import (
 )
 from main.monitoring.execution_trace import build_execution_trace
 from main.token_usage import aggregate_node_token_usage
+from main.runtime.append_notice_context import APPEND_NOTICE_CONTEXT_KEY, normalize_append_notice_context
 from main.monitoring.models import (
     LatestTaskNodeOutput,
     TaskDistributionState,
@@ -282,6 +283,29 @@ class TaskQueryService:
             )
             if execution_trace:
                 execution_trace_summary = self._execution_trace_summary(execution_trace)
+        append_notice_context = normalize_append_notice_context(
+            ((runtime_node.metadata or {}) if runtime_node is not None and isinstance(runtime_node.metadata, dict) else {}).get(
+                APPEND_NOTICE_CONTEXT_KEY
+            )
+        )
+        append_notice_messages = [
+            {
+                'notification_id': str(item.get('notification_id') or '').strip(),
+                'epoch_id': str(item.get('epoch_id') or '').strip(),
+                'source_node_id': str(item.get('source_node_id') or '').strip(),
+                'message': str(item.get('message') or '').strip(),
+                'consumed_at': str(item.get('consumed_at') or '').strip(),
+                'compression_stage_id': str(item.get('compression_stage_id') or '').strip(),
+            }
+            for item in list(append_notice_context.get('notice_records') or [])
+            if isinstance(item, dict) and str(item.get('message') or '').strip()
+        ]
+        append_notice_messages.sort(
+            key=lambda item: (
+                str(item.get('consumed_at') or ''),
+                str(item.get('notification_id') or ''),
+            )
+        )
         detail = TaskNodeDetail(
             node_id=str(payload.get('node_id') or detail_record.node_id),
             task_id=str(payload.get('task_id') or detail_record.task_id),
@@ -323,6 +347,7 @@ class TaskQueryService:
             execution_trace_summary=execution_trace_summary,
             execution_trace_ref=execution_trace_ref,
             latest_spawn_round_id=str(payload.get('latest_spawn_round_id') or ''),
+            append_notice_messages=append_notice_messages,
             direct_child_results=[
                 dict(item)
                 for item in list(payload.get('direct_child_results') or [])

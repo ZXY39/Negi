@@ -932,6 +932,7 @@ function resetTaskView() {
     clearTaskDetailSession();
     S.currentTask = null;
     S.taskSummary = null;
+    S.taskRuntimeSummary = null;
     S.rootNode = null;
     S.frontier = [];
     S.recentModelCalls = [];
@@ -1267,6 +1268,7 @@ function handleTaskEvent(payload) {
         const waitingNodeIds = Array.isArray(runtimeSummary?.waiting_node_ids) ? runtimeSummary.waiting_node_ids : [];
         const hasTreeContext = !!String(S.treeRootNodeId || "").trim();
         S.frontier = frames;
+        S.taskRuntimeSummary = runtimeSummary || null;
         S.liveFrameMap = indexTaskLiveFrames(frames);
         S.taskSummary = {
             ...(S.taskSummary || {}),

@@ -1394,9 +1394,28 @@ function buildExecutionTraceSteps(trace, node) {
         open: false,
         bodyHtml: renderTraceField("内容", trace.initial_prompt, "暂无初始提示词"),
     };
+    const appendNoticeMessages = Array.isArray(node?.append_notice_messages) ? node.append_notice_messages : [];
+    const noticeTraceStep = appendNoticeMessages.length
+        ? {
+            traceKey: `notice:${appendNoticeMessages.map((item) => String(item?.notification_id || "").trim()).filter(Boolean).join("|") || "messages"}`,
+            title: "消息通知",
+            status: "info",
+            open: false,
+            extraClass: "task-trace-step--notice",
+            bodyHtml: renderTraceField(
+                "内容",
+                appendNoticeMessages
+                    .map((item) => `已接收到消息：${String(item?.message || "").trim()}`)
+                    .filter(Boolean)
+                    .join("\n"),
+                "暂无消息通知",
+            ),
+        }
+        : null;
     if (Array.isArray(trace?.stages) && trace.stages.length) {
         return [
             initialPromptStep,
+            ...(noticeTraceStep ? [noticeTraceStep] : []),
             ...trace.stages.map((stage, index) => ({
                 traceKey: `stage:${stage.stage_id || stage.stage_index || index}`,
                 title: formatExecutionStageTitle(stage),
@@ -1409,6 +1428,7 @@ function buildExecutionTraceSteps(trace, node) {
     }
     return [
         initialPromptStep,
+        ...(noticeTraceStep ? [noticeTraceStep] : []),
         ...trace.tool_steps.map((step, index) => ({
             traceKey: `tool:${step.tool_call_id || index}:${step.tool_name || "tool"}`,
             title: `Tool - ${step.tool_name || "tool"}`,
@@ -1828,14 +1848,33 @@ function buildTaskTreeRecoveryBubble(text) {
     return bubble;
 }
 
+function activeTaskDistributionState() {
+    const distribution = S.taskRuntimeSummary?.distribution;
+    if (!distribution || typeof distribution !== "object") return null;
+    const activeEpochId = String(distribution.active_epoch_id || "").trim();
+    const state = String(distribution.state || "").trim();
+    return activeEpochId || state ? distribution : null;
+}
+
+function buildTaskTreeDistributionBubble(text = "接收到新消息，分发中") {
+    const bubble = document.createElement("div");
+    bubble.className = "task-tree-distribution-bubble";
+    bubble.setAttribute("role", "status");
+    bubble.setAttribute("aria-live", "polite");
+    bubble.textContent = String(text || "").trim() || "接收到新消息，分发中";
+    return bubble;
+}
+
 function renderTree() {
     if (!String(S.treeRootNodeId || "").trim()) return;
     const recoveryNotice = String(S.currentTask?.metadata?.recovery_notice || "").trim();
+    const distributionState = activeTaskDistributionState();
     S.treeView = buildExecutionTreeFromSnapshot(S.treeRootNodeId, S.treeSelectedRoundByNodeId);
     syncTaskTreeHeaderState(S.treeView);
     if (!S.treeView) {
         U.tree.innerHTML = "";
         if (recoveryNotice) U.tree.appendChild(buildTaskTreeRecoveryBubble(recoveryNotice));
+        if (distributionState) U.tree.appendChild(buildTaskTreeDistributionBubble());
         const emptyState = document.createElement("div");
         emptyState.className = "empty-state";
         emptyState.textContent = "No nodes to display.";
@@ -1862,6 +1901,9 @@ function renderTree() {
     }
     if (layoutDensity.mode === "dense") {
         wrapper.classList.add("execution-tree--dense");
+    }
+    if (distributionState) {
+        wrapper.classList.add("execution-tree--distribution-active");
     }
     const rootList = document.createElement("ul");
     rootList.className = "execution-tree-list";
@@ -1962,6 +2004,7 @@ function renderTree() {
     wrapper.style.transform = `translate(${Math.round(S.treePan.offsetX)}px, ${Math.round(S.treePan.offsetY)}px) scale(${S.treePan.scale})`;
     U.tree.innerHTML = "";
     if (recoveryNotice) U.tree.appendChild(buildTaskTreeRecoveryBubble(recoveryNotice));
+    if (distributionState) U.tree.appendChild(buildTaskTreeDistributionBubble());
     U.tree.appendChild(wrapper);
     if (typeof enhanceResourceSelects === "function") enhanceResourceSelects();
     if (S.selectedNodeId) {
@@ -2421,6 +2464,7 @@ function applyTaskPayload(payload) {
     const recentModelCalls = Array.isArray(payload.recent_model_calls) ? payload.recent_model_calls : [];
     S.currentTask = payload.task;
     S.taskSummary = payload.summary || null;
+    S.taskRuntimeSummary = payload.runtime_summary || null;
     S.taskGovernance = mergeTaskGovernance(
         payload.governance || payload.runtime_summary?.governance || {},
         S.taskGovernance || {},
