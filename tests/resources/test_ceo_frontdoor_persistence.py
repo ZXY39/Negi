@@ -681,6 +681,18 @@ async def test_ceo_frontdoor_call_model_returns_json_safe_response_payload(
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
 
     monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_id": "openai_codex",
+            "provider_model": "openai_codex:gpt-test",
+            "resolved_model": "gpt-test",
+            "context_window_tokens": 32000,
+        },
+        raising=False,
+    )
 
     async def _call_model_with_tools(**kwargs):
         _ = kwargs
@@ -761,6 +773,18 @@ async def test_ceo_frontdoor_call_model_rebuilds_request_messages_from_stable_an
     )
 
     monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_id": "openai_codex",
+            "provider_model": "openai_codex:gpt-test",
+            "resolved_model": "gpt-test",
+            "context_window_tokens": 32000,
+        },
+        raising=False,
+    )
 
     async def _call_model_with_tools(**kwargs):
         captured.update(kwargs)
@@ -863,12 +887,28 @@ async def test_ceo_frontdoor_call_model_persists_actual_request_to_disk(
         ],
     )
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "ceo_primary",
+            "provider_model": "openai:gpt-5.2",
+            "context_window_tokens": 32000,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **_: 1200, raising=False)
 
     async def _call_model_with_tools(**kwargs):
         return AIMessage(
             content="plain reply",
             response_metadata={
                 "finish_reason": "stop",
+                "usage": {
+                    "input_tokens": 123,
+                    "output_tokens": 9,
+                    "cache_hit_tokens": 45,
+                },
                 "provider_request_meta": {
                     "provider": "responses",
                     "endpoint": "https://example.test/v1/responses",
@@ -933,6 +973,8 @@ async def test_ceo_frontdoor_call_model_persists_actual_request_to_disk(
     assert payload["prompt_cache_key"] == update["prompt_cache_key"]
     assert payload["actual_request_hash"] == update["prompt_cache_diagnostics"]["actual_request_hash"]
     assert payload["actual_request_message_count"] == update["prompt_cache_diagnostics"]["actual_request_message_count"]
+    assert payload["frontdoor_token_preflight_diagnostics"] == update["frontdoor_token_preflight_diagnostics"]
+    assert payload["frontdoor_history_shrink_reason"] == update["frontdoor_history_shrink_reason"]
     assert payload["request_messages"]
     assert payload["tool_schemas"]
     assert payload["provider_request_meta"] == {
@@ -945,6 +987,11 @@ async def test_ceo_frontdoor_call_model_persists_actual_request_to_disk(
         "prompt_cache_key": "cache-key",
         "tool_choice": "auto",
     }
+    assert payload["usage"] == {
+        "input_tokens": 123,
+        "output_tokens": 9,
+        "cache_hit_tokens": 45,
+    }
     assert update["frontdoor_actual_request_history"]
 
 
@@ -955,6 +1002,18 @@ async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_insid
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
 
     monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_id": "openai_codex",
+            "provider_model": "openai_codex:gpt-test",
+            "resolved_model": "gpt-test",
+            "context_window_tokens": 32000,
+        },
+        raising=False,
+    )
 
     async def _call_model_with_tools(**kwargs):
         _ = kwargs
@@ -1063,6 +1122,18 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
 
     monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_id": "openai_codex",
+            "provider_model": "openai_codex:gpt-test",
+            "resolved_model": "gpt-test",
+            "context_window_tokens": 32000,
+        },
+        raising=False,
+    )
 
     selected_tool_schema_requests: list[list[str]] = []
 

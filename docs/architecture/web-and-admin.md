@@ -241,6 +241,7 @@ Node detail and latest-context views now expose two different debugging surfaces
 CEO/frontdoor now follows a parallel debugging pattern, but with session-scoped files instead of task artifacts.
 
 - Every CEO/frontdoor `call_model` round writes the full provider-facing request to `.g3ku/web-ceo-requests/<session>/...json`.
+- The same request-artifact timeline now also includes internal frontdoor lanes such as `token_compression` and `inline_tool_reminder`, not only visible provider sends.
 - Inflight / paused CEO snapshots expose only the latest `actual_request_path`, `prompt_cache_key_hash`, `actual_request_hash`, `actual_request_message_count`, `actual_tool_schema_hash`, and a short `actual_request_history`.
 - Reopened completed sessions also have a compact recovery sidecar at `.g3ku/web-ceo-continuity/<session>.json`. That file is the authority for “what baseline/stage/compression state should be restored before the first new visible turn after restart,” but it is not a replacement for the full request JSON when doing request forensics.
 - When debugging CEO prompt shrinkage or cache drops, inspect the saved request JSON first rather than inferring the request from `canonical_context`, stage rounds, or transcript-visible assistant/tool bubbles.
@@ -251,6 +252,7 @@ CEO/frontdoor now follows a parallel debugging pattern, but with session-scoped 
 - For `/responses`-style providers, that saved JSON now includes both layers:
   - `request_messages` / `tool_schemas`: the runtime-side request projection before the provider adapter rewrites it
   - `provider_request_meta` / `provider_request_body`: the adapter-final HTTP body that was actually prepared for transport
+- The saved JSON also carries `usage`, `frontdoor_history_shrink_reason`, and `frontdoor_token_preflight_diagnostics`, so the web/admin debugging flow can compare preflight estimates, allowed shrink reasons, and billed token usage from one record.
 - If cache accounting disagrees with the runtime projection, debug against `provider_request_body` first.
 - If a `/responses` gateway fails only when tools are present, inspect `provider_request_body.tools` before blaming the model route. The transport-facing schema bundle is intentionally sanitized to avoid unsupported combinators such as `anyOf`, `oneOf`, and `allOf`.
 - For stage-transition rounds specifically, it is now expected that the tail runtime contract may show `callable_tool_names=["submit_next_stage"]` while `provider_request_body.tools` still carries the stable runtime-visible tool bundle. That mismatch is intentional and no longer indicates a frontdoor contract leak.

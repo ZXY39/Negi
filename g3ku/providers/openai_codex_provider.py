@@ -14,7 +14,7 @@ import httpx
 from loguru import logger
 from oauth_cli_kit import get_token as get_codex_token
 
-from g3ku.json_schema_utils import sanitize_provider_parameters_schema
+from g3ku.json_schema_utils import normalize_responses_tool_definitions
 from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, normalize_usage_payload
 from g3ku.providers.streaming_timeouts import (
     StreamingChunkTimeoutError,
@@ -268,21 +268,8 @@ class _CodexSSEDiagnosticsProxy:
 
 
 def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert OpenAI function-calling schema to Codex flat format."""
-    converted: list[dict[str, Any]] = []
-    for tool in tools:
-        fn = (tool.get("function") or {}) if tool.get("type") == "function" else tool
-        name = fn.get("name")
-        if not name:
-            continue
-        params = fn.get("parameters") or {}
-        converted.append({
-            "type": "function",
-            "name": name,
-            "description": fn.get("description") or "",
-            "parameters": sanitize_provider_parameters_schema(params if isinstance(params, dict) else {}),
-        })
-    return converted
+    """Convert shared tool schemas into Responses/Codex flat function format."""
+    return normalize_responses_tool_definitions(tools)
 
 
 def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:

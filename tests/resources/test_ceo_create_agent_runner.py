@@ -473,6 +473,41 @@ def test_build_prompt_cache_diagnostics_surfaces_prefix_reason_and_actual_reques
     assert str(diagnostics["actual_tool_schema_hash"]).strip()
 
 
+def test_build_prompt_cache_diagnostics_accepts_flat_function_tool_schemas() -> None:
+    diagnostics = build_prompt_cache_diagnostics(
+        stable_messages=[{"role": "system", "content": "stable system"}],
+        dynamic_appendix_messages=[{"role": "assistant", "content": "dynamic appendix"}],
+        tool_schemas=[
+            {
+                "type": "function",
+                "name": "exec",
+                "description": "Run a command",
+                "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+            }
+        ],
+        provider_model="gpt-5.2",
+        scope="ceo_inline_tool_reminder",
+        prompt_cache_key="cache-key",
+        actual_request_messages=[
+            {"role": "system", "content": "stable system"},
+            {"role": "assistant", "content": "dynamic appendix"},
+            {"role": "user", "content": "current user turn"},
+        ],
+        actual_tool_schemas=[
+            {
+                "type": "function",
+                "name": "exec",
+                "description": "Run a command",
+                "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+            }
+        ],
+    )
+
+    assert str(diagnostics["tool_signature_hash"]).strip()
+    assert str(diagnostics["actual_tool_schema_hash"]).strip()
+    assert diagnostics["tool_signature_hash"] == diagnostics["actual_tool_schema_hash"]
+
+
 def test_ceo_runner_always_selects_create_agent_impl(monkeypatch) -> None:
     class _New:
         def __init__(self, *, loop) -> None:

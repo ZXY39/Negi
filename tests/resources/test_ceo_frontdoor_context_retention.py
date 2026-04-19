@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -639,6 +640,316 @@ async def test_prepare_turn_rejects_unexpected_context_shrink_without_reason(
             initial_persistent_state(user_input={"content": "new question", "metadata": {}}),
             runtime=runtime,
         )
+
+
+@pytest.mark.asyncio
+async def test_prepare_turn_allows_shorter_context_after_followup_token_compression_artifact(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = "web:shared"
+    loop = _loop_with_session(session_key)
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(prompt_cache_contract, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["submit_next_stage"]}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            tool_names=["submit_next_stage"],
+            model_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "new question"},
+            ],
+            stable_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "new question"},
+            ],
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["submit_next_stage"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    actual_request_path = tmp_path / "frontdoor-visible-request.json"
+    actual_request_path.write_text(
+        json.dumps(
+            {
+                "request_messages": [
+                    {"role": "system", "content": "SYSTEM"},
+                    {"role": "user", "content": "u1"},
+                    {"role": "assistant", "content": "a1"},
+                    {"role": "tool", "name": "exec", "tool_call_id": "call-1", "content": '{"status":"success"}'},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    token_compression_path = tmp_path / "frontdoor-token-compression.json"
+    token_compression_path.write_text(
+        json.dumps(
+            {
+                "request_lane": "token_compression",
+                "parent_request_id": "visible-request-1",
+                "turn_id": "turn-1",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key=session_key),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "tool", "name": "exec", "tool_call_id": "call-1", "content": '{"status":"success"}'},
+        ],
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_actual_request_path=str(actual_request_path),
+        _frontdoor_actual_request_history=[
+            {
+                "request_id": "visible-request-1",
+                "turn_id": "turn-1",
+                "path": str(actual_request_path),
+            }
+        ],
+        _frontdoor_stage_state={},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={},
+        _semantic_context_state={},
+        _frontdoor_hydrated_tool_names=[],
+        _frontdoor_selection_debug={},
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=loop, session=session, session_key=session_key, on_progress=None)
+    )
+
+    prepared = await runner._graph_prepare_turn(
+        initial_persistent_state(user_input={"content": "new question", "metadata": {}}),
+        runtime=runtime,
+    )
+
+    assert prepared["frontdoor_history_shrink_reason"] == "token_compression"
+
+
+@pytest.mark.asyncio
+async def test_prepare_turn_uses_previous_actual_request_history_for_followup_token_compression_artifact(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = "web:shared"
+    loop = _loop_with_session(session_key)
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(prompt_cache_contract, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["submit_next_stage"]}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            tool_names=["submit_next_stage"],
+            model_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "new question"},
+            ],
+            stable_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "new question"},
+            ],
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["submit_next_stage"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    actual_request_path = tmp_path / "frontdoor-visible-request.json"
+    actual_request_path.write_text(
+        json.dumps({"request_messages": [{"role": "system", "content": "SYSTEM"}]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (tmp_path / "frontdoor-token-compression.json").write_text(
+        json.dumps(
+            {
+                "request_lane": "token_compression",
+                "parent_request_id": "visible-request-1",
+                "turn_id": "turn-1",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key=session_key),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "tool", "name": "exec", "tool_call_id": "call-1", "content": '{"status":"success"}'},
+        ],
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_actual_request_path="",
+        _frontdoor_actual_request_history=[],
+        _frontdoor_previous_actual_request_path=str(actual_request_path),
+        _frontdoor_previous_actual_request_history=[
+            {
+                "request_id": "visible-request-1",
+                "turn_id": "turn-1",
+                "path": str(actual_request_path),
+            }
+        ],
+        _frontdoor_stage_state={},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={},
+        _semantic_context_state={},
+        _frontdoor_hydrated_tool_names=[],
+        _frontdoor_selection_debug={},
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=loop, session=session, session_key=session_key, on_progress=None)
+    )
+
+    prepared = await runner._graph_prepare_turn(
+        initial_persistent_state(user_input={"content": "new question", "metadata": {}}),
+        runtime=runtime,
+    )
+
+    assert prepared["frontdoor_history_shrink_reason"] == "token_compression"
+
+
+@pytest.mark.asyncio
+async def test_prepare_turn_allows_shorter_context_with_pending_token_compression_shrink_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = "web:shared"
+    loop = _loop_with_session(session_key)
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(prompt_cache_contract, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["submit_next_stage"]}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            tool_names=["submit_next_stage"],
+            model_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "new question"},
+            ],
+            stable_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "new question"},
+            ],
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["submit_next_stage"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key=session_key),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "tool", "name": "exec", "tool_call_id": "call-1", "content": '{"status":"success"}'},
+        ],
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_pending_shrink_reason="token_compression",
+        _frontdoor_stage_state={},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={},
+        _semantic_context_state={},
+        _frontdoor_hydrated_tool_names=[],
+        _frontdoor_selection_debug={},
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=loop, session=session, session_key=session_key, on_progress=None)
+    )
+
+    prepared = await runner._graph_prepare_turn(
+        initial_persistent_state(user_input={"content": "new question", "metadata": {}}),
+        runtime=runtime,
+    )
+
+    assert prepared["frontdoor_history_shrink_reason"] == "token_compression"
+    assert session._frontdoor_pending_shrink_reason == ""
 
 
 @pytest.mark.asyncio

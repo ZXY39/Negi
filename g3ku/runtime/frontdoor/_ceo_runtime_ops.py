@@ -23,8 +23,15 @@ from g3ku.json_schema_utils import (
     sanitize_provider_parameters_schema,
 )
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
+from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
+from g3ku.providers.openai_codex_provider import (
+    _convert_messages as _preview_responses_messages,
+    _convert_tools as _preview_responses_tools,
+    _prompt_cache_key as _preview_prompt_cache_key,
+    _strip_model_prefix as _preview_strip_model_prefix,
+)
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
@@ -39,7 +46,7 @@ from g3ku.runtime.frontdoor.token_preflight_compaction import (
 )
 from main.models import normalize_execution_policy_metadata
 from main.protocol import now_iso
-from main.runtime.chat_backend import build_actual_request_diagnostics
+from main.runtime.chat_backend import build_actual_request_diagnostics, build_prompt_cache_diagnostics
 from main.runtime.internal_tools import SubmitNextStageTool
 from main.runtime.stage_budget import (
     STAGE_TOOL_NAME,
@@ -330,6 +337,7 @@ def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any
 class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     _ALLOWED_FRONTDOOR_SHRINK_REASONS = frozenset({"", "token_compression", "stage_compaction"})
     _TOKEN_COMPRESSION_TRIGGER_RATIO = 0.80
+    _TOKEN_COMPRESSION_ESTIMATE_SAFETY_RATIO = 0.95
 
     @staticmethod
     def _is_frontdoor_tool_contract_record(record: dict[str, Any] | None) -> bool:
@@ -496,14 +504,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> dict[str, Any]:
         model_key = str((list(model_refs or []) or [""])[0] or "").strip()
         if not model_key:
-            return {"model_key": "", "provider_model": "", "context_window_tokens": 0}
+            return {
+                "model_key": "",
+                "provider_id": "",
+                "provider_model": "",
+                "resolved_model": "",
+                "context_window_tokens": 0,
+            }
         config = getattr(self._loop, "app_config", None)
         if config is None:
             try:
                 config, _revision, _changed = get_runtime_config(force=False)
             except Exception:
                 config = None
+        provider_id = ""
         provider_model = model_key
+        resolved_model = model_key
         context_window_tokens = 0
         if config is not None:
             try:
@@ -511,7 +527,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             except Exception:
                 managed = None
             if managed is not None:
+                provider_id = str(getattr(managed, "provider_id", "") or "").strip().lower()
                 provider_model = str(getattr(managed, "provider_model", "") or model_key).strip() or model_key
+                resolved_model = str(getattr(managed, "default_model", "") or provider_model or model_key).strip() or model_key
                 raw_context_window_tokens = getattr(managed, "context_window_tokens", None)
                 try:
                     context_window_tokens = int(raw_context_window_tokens or 0)
@@ -527,9 +545,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     or provider_model
                     or model_key
                 ).strip()
-                provider_id = str(getattr(target, "provider_id", "") or "").strip()
-                if provider_id and ":" not in resolved_provider_model:
-                    provider_model = f"{provider_id}:{resolved_provider_model}"
+                target_provider_id = str(getattr(target, "provider_id", "") or "").strip()
+                provider_id = target_provider_id.lower()
+                resolved_model = resolved_provider_model or resolved_model or provider_model or model_key
+                if target_provider_id and ":" not in resolved_provider_model:
+                    provider_model = f"{target_provider_id}:{resolved_provider_model}"
                 else:
                     provider_model = resolved_provider_model or provider_model or model_key
                 try:
@@ -542,9 +562,80 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     context_window_tokens = target_context_window_tokens
         return {
             "model_key": model_key,
+            "provider_id": provider_id,
             "provider_model": provider_model or model_key,
+            "resolved_model": resolved_model or provider_model or model_key,
             "context_window_tokens": context_window_tokens,
         }
+
+    @staticmethod
+    def _frontdoor_preview_provider_id(*, model_info: dict[str, Any] | None) -> str:
+        payload = dict(model_info or {})
+        provider_id = str(payload.get("provider_id") or "").strip().lower()
+        if provider_id:
+            return provider_id
+        for candidate in (
+            str(payload.get("model_key") or "").strip(),
+            str(payload.get("provider_model") or "").strip(),
+        ):
+            prefix, sep, _rest = candidate.partition(":")
+            normalized_prefix = prefix.strip().lower()
+            if sep and normalized_prefix in {"responses", "openai_codex"}:
+                return normalized_prefix
+        return ""
+
+    def _build_frontdoor_provider_request_body_preview(
+        self,
+        *,
+        request_messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]],
+        model_info: dict[str, Any] | None,
+        prompt_cache_key: str,
+        parallel_tool_calls: bool | None,
+    ) -> dict[str, Any]:
+        provider_id = self._frontdoor_preview_provider_id(model_info=model_info)
+        if provider_id not in {"responses", "openai_codex"}:
+            return {
+                "input": list(request_messages),
+                "tools": list(tool_schemas or []),
+                "parallel_tool_calls": parallel_tool_calls,
+            }
+        resolved_model = str(
+            dict(model_info or {}).get("resolved_model")
+            or dict(model_info or {}).get("provider_model")
+            or dict(model_info or {}).get("model_key")
+            or ""
+        ).strip()
+        system_prompt, input_items = _preview_responses_messages(list(request_messages or []))
+        if system_prompt:
+            input_items.insert(
+                0,
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": f"[SYSTEM]\n{system_prompt}\n[END SYSTEM]"}],
+                },
+            )
+        preview_body: dict[str, Any] = {
+            "model": (
+                _preview_strip_model_prefix(resolved_model)
+                if provider_id == "openai_codex"
+                else resolved_model
+            ),
+            "store": False,
+            "stream": True,
+            "instructions": system_prompt,
+            "input": input_items,
+            "text": {"verbosity": "medium"},
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": str(prompt_cache_key or _preview_prompt_cache_key(list(request_messages or []))),
+        }
+        if tool_schemas:
+            preview_body["tools"] = _preview_responses_tools(list(tool_schemas or []))
+            preview_body["tool_choice"] = "auto"
+            preview_body["parallel_tool_calls"] = (
+                bool(parallel_tool_calls) if parallel_tool_calls is not None else True
+            )
+        return preview_body
 
     @staticmethod
     def _frontdoor_model_display_name(model_info: dict[str, Any] | None) -> str:
@@ -623,13 +714,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             request_messages,
             overlay_text=str(state_for_request.get("repair_overlay_text") or "").strip(),
         )
-        provider_request_body = {
-            "input": list(request_messages),
-            "tools": list(actual_tool_schemas or []),
-            "parallel_tool_calls": (bool(state_for_request.get("parallel_enabled")) if list(langchain_tools or []) else None),
-        }
         model_info = self._resolve_frontdoor_send_model_context_window(
             model_refs=list(state_for_request.get("model_refs") or []),
+        )
+        provider_request_body = self._build_frontdoor_provider_request_body_preview(
+            request_messages=request_messages,
+            tool_schemas=actual_tool_schemas,
+            model_info=model_info,
+            prompt_cache_key=prompt_cache_key,
+            parallel_tool_calls=(bool(state_for_request.get("parallel_enabled")) if list(langchain_tools or []) else None),
         )
         context_window_tokens = int(model_info.get("context_window_tokens") or 0)
         estimated_total_tokens = self._estimate_frontdoor_send_total_tokens(
@@ -643,6 +736,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if context_window_tokens > 0
             else 0
         )
+        effective_trigger_tokens = (
+            int(trigger_tokens * self._TOKEN_COMPRESSION_ESTIMATE_SAFETY_RATIO)
+            if trigger_tokens > 0
+            else 0
+        )
         missing_context_window = context_window_tokens <= 25_000
         would_exceed_context_window = (
             not missing_context_window
@@ -651,7 +749,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         would_trigger_token_compression = (
             not missing_context_window
             and not would_exceed_context_window
-            and estimated_total_tokens > trigger_tokens
+            and estimated_total_tokens >= effective_trigger_tokens
         )
         ratio = (
             float(estimated_total_tokens) / float(context_window_tokens)
@@ -669,6 +767,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "context_window_tokens": context_window_tokens,
             "estimated_total_tokens": estimated_total_tokens,
             "trigger_tokens": trigger_tokens,
+            "effective_trigger_tokens": effective_trigger_tokens,
             "missing_context_window": missing_context_window,
             "would_exceed_context_window": would_exceed_context_window,
             "would_trigger_token_compression": would_trigger_token_compression,
@@ -706,12 +805,21 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if normalized_body and str(normalized_body[0].get("role") or "").strip().lower() == "system":
             system_prefix = [dict(normalized_body[0])]
             normalized_body = normalized_body[1:]
+        model_info = self._resolve_frontdoor_send_model_context_window(model_refs=model_refs)
+        prompt_cache_key = str(state.get("prompt_cache_key") or "").strip()
+        parallel_tool_calls = bool(state.get("parallel_enabled")) if list(tool_schemas or []) else None
         recent_tail_count = min(len(normalized_body), 4)
         if recent_tail_count <= 0 or len(normalized_body) <= recent_tail_count:
             return FrontdoorTokenPreflightResult(
                 request_messages=list(request_messages),
                 final_request_tokens=self._estimate_frontdoor_send_total_tokens(
-                    provider_request_body=None,
+                    provider_request_body=self._build_frontdoor_provider_request_body_preview(
+                        request_messages=request_messages,
+                        tool_schemas=tool_schemas,
+                        model_info=model_info,
+                        prompt_cache_key=prompt_cache_key,
+                        parallel_tool_calls=parallel_tool_calls,
+                    ),
                     request_messages=request_messages,
                     tool_schemas=tool_schemas,
                 ),
@@ -720,7 +828,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
         older_history_messages = [dict(item) for item in normalized_body[:-recent_tail_count]]
         recent_tail = [dict(item) for item in normalized_body[-recent_tail_count:]]
-        model_info = self._resolve_frontdoor_send_model_context_window(model_refs=model_refs)
         session = getattr(getattr(runtime, "context", None), "session", None)
         generation_id: int | None = None
         begin_generation = getattr(session, "_begin_frontdoor_compression_generation", None)
@@ -787,8 +894,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 parallel_tool_calls=None,
                 prompt_cache_key="",
             )
-            if _compression_cancelled():
-                raise asyncio.CancelledError()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -800,6 +905,41 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             raise
         try:
             response_view = self._model_response_view(compressed_message)
+            self._persist_frontdoor_internal_request_artifact(
+                state=state,
+                runtime=runtime,
+                request_messages=list(compression_prompt_messages),
+                tool_schemas=[],
+                prompt_cache_key="",
+                prompt_cache_diagnostics=build_prompt_cache_diagnostics(
+                    stable_messages=list(compression_prompt_messages),
+                    dynamic_appendix_messages=[],
+                    tool_schemas=[],
+                    provider_model=self._frontdoor_model_display_name(model_info),
+                    scope="ceo_frontdoor_token_compression",
+                    prompt_cache_key="",
+                    actual_request_messages=list(compression_prompt_messages),
+                    actual_tool_schemas=[],
+                ),
+                parallel_tool_calls=None,
+                provider_request_meta=(
+                    dict(response_view.provider_request_meta or {})
+                    if isinstance(response_view.provider_request_meta, dict)
+                    else {}
+                ),
+                provider_request_body=(
+                    dict(response_view.provider_request_body or {})
+                    if isinstance(response_view.provider_request_body, dict)
+                    else {}
+                ),
+                usage=self._model_response_usage(compressed_message),
+                request_lane="token_compression",
+                parent_request_id=str(state.get("frontdoor_actual_request_history", [{}])[-1].get("request_id") or "").strip()
+                if list(state.get("frontdoor_actual_request_history") or [])
+                else "",
+            )
+            if _compression_cancelled():
+                raise asyncio.CancelledError()
             compressed_text = self._content_text(response_view.content).strip()
             if _compression_cancelled():
                 raise asyncio.CancelledError()
@@ -823,7 +963,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             }
             rewritten_messages = [*system_prefix, compacted_block, *recent_tail, *contract_messages]
             rewritten_tokens = self._estimate_frontdoor_send_total_tokens(
-                provider_request_body=None,
+                provider_request_body=self._build_frontdoor_provider_request_body_preview(
+                    request_messages=rewritten_messages,
+                    tool_schemas=tool_schemas,
+                    model_info=model_info,
+                    prompt_cache_key=prompt_cache_key,
+                    parallel_tool_calls=parallel_tool_calls,
+                ),
                 request_messages=rewritten_messages,
                 tool_schemas=tool_schemas,
             )
@@ -1610,6 +1756,56 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     )
 
     @staticmethod
+    def _session_followup_token_compression_shrink_reason(session: Any) -> str:
+        history_candidates = (
+            (
+                list(getattr(session, "_frontdoor_actual_request_history", []) or []),
+                str(getattr(session, "_frontdoor_actual_request_path", "") or "").strip(),
+            ),
+            (
+                list(getattr(session, "_frontdoor_previous_actual_request_history", []) or []),
+                str(getattr(session, "_frontdoor_previous_actual_request_path", "") or "").strip(),
+            ),
+        )
+        for raw_history, fallback_path in history_candidates:
+            actual_request_history = [
+                dict(item)
+                for item in list(raw_history or [])
+                if isinstance(item, dict)
+            ]
+            latest_record = dict(actual_request_history[-1]) if actual_request_history else {}
+            parent_request_id = str(latest_record.get("request_id") or "").strip()
+            latest_request_path = str(
+                latest_record.get("path")
+                or fallback_path
+                or ""
+            ).strip()
+            latest_turn_id = str(latest_record.get("turn_id") or "").strip()
+            if not parent_request_id or not latest_request_path:
+                continue
+            request_dir = Path(latest_request_path).parent
+            if not request_dir.exists():
+                continue
+            try:
+                artifact_paths = sorted(request_dir.glob("*.json"), reverse=True)
+            except Exception:
+                continue
+            for artifact_path in artifact_paths:
+                try:
+                    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if str(payload.get("request_lane") or "").strip() != "token_compression":
+                    continue
+                if str(payload.get("parent_request_id") or "").strip() != parent_request_id:
+                    continue
+                artifact_turn_id = str(payload.get("turn_id") or "").strip()
+                if latest_turn_id and artifact_turn_id and artifact_turn_id != latest_turn_id:
+                    continue
+                return "token_compression"
+        return ""
+
+    @staticmethod
     def _session_frontdoor_context_window_snapshot(session: Any) -> tuple[list[dict[str, Any]], str]:
         baseline = [
             dict(item)
@@ -1617,6 +1813,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(item, dict)
         ]
         shrink_reason = str(getattr(session, "_frontdoor_history_shrink_reason", "") or "").strip()
+        if not shrink_reason:
+            shrink_reason = str(getattr(session, "_frontdoor_pending_shrink_reason", "") or "").strip()
+        if not shrink_reason:
+            shrink_reason = CeoFrontDoorRuntimeOps._session_followup_token_compression_shrink_reason(session)
+        if shrink_reason:
+            setattr(session, "_frontdoor_history_shrink_reason", shrink_reason)
+            if str(getattr(session, "_frontdoor_pending_shrink_reason", "") or "").strip():
+                setattr(session, "_frontdoor_pending_shrink_reason", "")
         if baseline:
             return baseline, shrink_reason
         paused_snapshot_supplier = getattr(session, "paused_execution_context_snapshot", None)
@@ -1633,6 +1837,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             setattr(session, "_frontdoor_request_body_messages", list(paused_baseline))
         if paused_shrink_reason:
             setattr(session, "_frontdoor_history_shrink_reason", paused_shrink_reason)
+        elif paused_baseline:
+            resumed_shrink_reason = str(getattr(session, "_frontdoor_pending_shrink_reason", "") or "").strip()
+            if resumed_shrink_reason:
+                paused_shrink_reason = resumed_shrink_reason
+                setattr(session, "_frontdoor_pending_shrink_reason", "")
+                setattr(session, "_frontdoor_history_shrink_reason", resumed_shrink_reason)
+        if not paused_shrink_reason and paused_baseline:
+            resumed_shrink_reason = CeoFrontDoorRuntimeOps._session_followup_token_compression_shrink_reason(session)
+            if resumed_shrink_reason:
+                paused_shrink_reason = resumed_shrink_reason
+                setattr(session, "_frontdoor_history_shrink_reason", resumed_shrink_reason)
         if paused_baseline or paused_shrink_reason:
             return paused_baseline, paused_shrink_reason
         return baseline, shrink_reason
@@ -1649,6 +1864,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         parallel_tool_calls: bool | None,
         provider_request_meta: dict[str, Any] | None = None,
         provider_request_body: dict[str, Any] | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         session_key = str(state.get("session_key") or getattr(getattr(runtime, "context", None), "session_key", "") or "").strip()
         if not session_key:
@@ -1663,44 +1879,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 turn_id = ""
         if not turn_id:
             turn_id = str(getattr(target_session, "_active_turn_id", "") or "").strip()
-        diagnostics = dict(prompt_cache_diagnostics or {})
-        provider_model = str((list(state.get("model_refs") or []) or [""])[0] or "").strip()
         record = persist_frontdoor_actual_request(
             session_key,
-            payload={
-                "type": "frontdoor_actual_request",
-                "session_key": session_key,
-                "turn_id": turn_id,
-                "created_at": now_iso(),
-                "provider_model": provider_model,
-                "model_refs": [
-                    str(item or "").strip()
-                    for item in list(state.get("model_refs") or [])
-                    if str(item or "").strip()
-                ],
-                "parallel_tool_calls": parallel_tool_calls,
-                "prompt_cache_key": str(prompt_cache_key or "").strip(),
-                "prompt_cache_key_hash": str(diagnostics.get("prompt_cache_key_hash") or "").strip(),
-                "actual_request_hash": str(diagnostics.get("actual_request_hash") or "").strip(),
-                "actual_request_message_count": int(diagnostics.get("actual_request_message_count") or 0),
-                "actual_tool_schema_hash": str(diagnostics.get("actual_tool_schema_hash") or "").strip(),
-                "tool_signature_hash": str(diagnostics.get("tool_signature_hash") or "").strip(),
-                "stable_prefix_hash": str(diagnostics.get("stable_prefix_hash") or "").strip(),
-                "dynamic_appendix_hash": str(diagnostics.get("dynamic_appendix_hash") or "").strip(),
-                "messages": [dict(item) for item in list(request_messages or []) if isinstance(item, dict)],
-                "request_messages": [dict(item) for item in list(request_messages or []) if isinstance(item, dict)],
-                "tool_schemas": [dict(item) for item in list(tool_schemas or []) if isinstance(item, dict)],
-                "provider_request_meta": (
-                    dict(provider_request_meta or {})
-                    if isinstance(provider_request_meta, dict)
-                    else {}
-                ),
-                "provider_request_body": (
-                    dict(provider_request_body or {})
-                    if isinstance(provider_request_body, dict)
-                    else {}
-                ),
-            },
+            payload=self._build_frontdoor_request_artifact_payload(
+                state=state,
+                session_key=session_key,
+                turn_id=turn_id,
+                request_messages=request_messages,
+                tool_schemas=tool_schemas,
+                prompt_cache_key=prompt_cache_key,
+                prompt_cache_diagnostics=prompt_cache_diagnostics,
+                parallel_tool_calls=parallel_tool_calls,
+                provider_request_meta=provider_request_meta,
+                provider_request_body=provider_request_body,
+                usage=usage,
+                request_kind="frontdoor_actual_request",
+                request_lane="visible_frontdoor",
+            ),
         )
         if not record:
             return {}
@@ -1733,6 +1928,118 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "frontdoor_actual_request_message_count": int(record.get("actual_request_message_count") or 0),
             "frontdoor_actual_tool_schema_hash": str(record.get("actual_tool_schema_hash") or "").strip(),
         }
+
+    def _build_frontdoor_request_artifact_payload(
+        self,
+        *,
+        state: CeoGraphState,
+        session_key: str,
+        turn_id: str,
+        request_messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]] | None,
+        prompt_cache_key: str,
+        prompt_cache_diagnostics: dict[str, Any] | None,
+        parallel_tool_calls: bool | None,
+        provider_request_meta: dict[str, Any] | None = None,
+        provider_request_body: dict[str, Any] | None = None,
+        usage: dict[str, Any] | None = None,
+        request_kind: str,
+        request_lane: str,
+        parent_request_id: str = "",
+    ) -> dict[str, Any]:
+        diagnostics = dict(prompt_cache_diagnostics or {})
+        provider_model = str((list(state.get("model_refs") or []) or [""])[0] or "").strip()
+        return {
+            "type": str(request_kind or "").strip() or "frontdoor_actual_request",
+            "request_kind": str(request_kind or "").strip() or "frontdoor_actual_request",
+            "request_lane": str(request_lane or "").strip() or "visible_frontdoor",
+            "session_key": str(session_key or "").strip(),
+            "turn_id": str(turn_id or "").strip(),
+            "parent_request_id": str(parent_request_id or "").strip(),
+            "created_at": now_iso(),
+            "provider_model": provider_model,
+            "model_refs": [
+                str(item or "").strip()
+                for item in list(state.get("model_refs") or [])
+                if str(item or "").strip()
+            ],
+            "frontdoor_history_shrink_reason": str(state.get("frontdoor_history_shrink_reason") or "").strip(),
+            "frontdoor_token_preflight_diagnostics": copy.deepcopy(
+                dict(state.get("frontdoor_token_preflight_diagnostics") or {})
+            ),
+            "parallel_tool_calls": parallel_tool_calls,
+            "prompt_cache_key": str(prompt_cache_key or "").strip(),
+            "prompt_cache_key_hash": str(diagnostics.get("prompt_cache_key_hash") or "").strip(),
+            "actual_request_hash": str(diagnostics.get("actual_request_hash") or "").strip(),
+            "actual_request_message_count": int(diagnostics.get("actual_request_message_count") or 0),
+            "actual_tool_schema_hash": str(diagnostics.get("actual_tool_schema_hash") or "").strip(),
+            "tool_signature_hash": str(diagnostics.get("tool_signature_hash") or "").strip(),
+            "stable_prefix_hash": str(diagnostics.get("stable_prefix_hash") or "").strip(),
+            "dynamic_appendix_hash": str(diagnostics.get("dynamic_appendix_hash") or "").strip(),
+            "messages": [dict(item) for item in list(request_messages or []) if isinstance(item, dict)],
+            "request_messages": [dict(item) for item in list(request_messages or []) if isinstance(item, dict)],
+            "tool_schemas": [dict(item) for item in list(tool_schemas or []) if isinstance(item, dict)],
+            "provider_request_meta": (
+                dict(provider_request_meta or {})
+                if isinstance(provider_request_meta, dict)
+                else {}
+            ),
+            "provider_request_body": (
+                dict(provider_request_body or {})
+                if isinstance(provider_request_body, dict)
+                else {}
+            ),
+            "usage": normalize_usage_payload(usage),
+        }
+
+    def _persist_frontdoor_internal_request_artifact(
+        self,
+        *,
+        state: CeoGraphState,
+        runtime: Runtime[CeoRuntimeContext],
+        request_messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]] | None,
+        prompt_cache_key: str,
+        prompt_cache_diagnostics: dict[str, Any],
+        parallel_tool_calls: bool | None,
+        provider_request_meta: dict[str, Any] | None = None,
+        provider_request_body: dict[str, Any] | None = None,
+        usage: dict[str, Any] | None = None,
+        request_lane: str,
+        parent_request_id: str = "",
+    ) -> dict[str, Any]:
+        session_key = str(state.get("session_key") or getattr(getattr(runtime, "context", None), "session_key", "") or "").strip()
+        if not session_key:
+            return {}
+        target_session = getattr(getattr(runtime, "context", None), "session", None)
+        turn_id = ""
+        turn_id_getter = getattr(target_session, "_current_turn_id", None) if target_session is not None else None
+        if callable(turn_id_getter):
+            try:
+                turn_id = str(turn_id_getter()).strip()
+            except Exception:
+                turn_id = ""
+        if not turn_id:
+            turn_id = str(getattr(target_session, "_active_turn_id", "") or "").strip()
+        return persist_frontdoor_actual_request(
+            session_key,
+            payload=self._build_frontdoor_request_artifact_payload(
+                state=state,
+                session_key=session_key,
+                turn_id=turn_id,
+                request_messages=request_messages,
+                tool_schemas=tool_schemas,
+                prompt_cache_key=prompt_cache_key,
+                prompt_cache_diagnostics=prompt_cache_diagnostics,
+                parallel_tool_calls=parallel_tool_calls,
+                provider_request_meta=provider_request_meta,
+                provider_request_body=provider_request_body,
+                usage=usage,
+                request_kind="frontdoor_internal_request",
+                request_lane=request_lane,
+                parent_request_id=parent_request_id,
+            ),
+        )
 
     def _frontdoor_tool_state_after_tool_results(
         self,
@@ -2606,6 +2913,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             },
         )()
 
+    @staticmethod
+    def _model_response_usage(message: AIMessage | dict[str, Any]) -> dict[str, int]:
+        if isinstance(message, dict):
+            payload = dict(message or {})
+            return normalize_usage_payload(payload.get("usage"))
+        response_metadata = dict(getattr(message, "response_metadata", {}) or {})
+        return normalize_usage_payload(response_metadata.get("usage") or getattr(message, "usage", None))
+
     def _checkpoint_safe_model_response_payload(self, message: AIMessage) -> dict[str, Any]:
         response_view = self._model_response_view(message)
         return {
@@ -3251,6 +3566,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "mode": "llm",
                 "final_request_tokens": estimated_total_tokens,
                 "trigger_tokens": trigger_tokens,
+                "effective_trigger_tokens": int(preflight_snapshot.get("effective_trigger_tokens") or 0),
                 "max_context_tokens": context_window_tokens,
                 "provider_model": str(preflight_snapshot.get("provider_model") or self._frontdoor_model_display_name(model_info)),
             }
@@ -3258,6 +3574,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if bool(preflight_snapshot.get("would_exceed_context_window")):
                 raise self._frontdoor_context_window_exceeded_error(model_info=model_info)
             if bool(preflight_snapshot.get("would_trigger_token_compression")):
+                runtime_session = getattr(getattr(runtime, "context", None), "session", None)
+                if runtime_session is not None:
+                    setattr(runtime_session, "_frontdoor_pending_shrink_reason", "token_compression")
                 preflight = await self._run_frontdoor_llm_token_compression(
                     state=state_for_request,
                     runtime=runtime,
@@ -3271,6 +3590,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     **dict(preflight.diagnostics or {}),
                 }
                 preflight_shrink_reason = str(preflight.history_shrink_reason or "").strip()
+                if runtime_session is not None and preflight_shrink_reason:
+                    setattr(runtime_session, "_frontdoor_pending_shrink_reason", "")
                 if int(preflight.final_request_tokens or 0) > context_window_tokens:
                     raise self._frontdoor_context_window_exceeded_error(model_info=model_info)
             state_for_request = {
@@ -3344,6 +3665,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 if isinstance(response_view.provider_request_body, dict)
                 else {}
             ),
+            usage=self._model_response_usage(message),
         )
         message_state_update = (
             self._replace_messages_update(list(request_messages))

@@ -9,10 +9,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool
+from g3ku.providers.base import normalize_usage_payload
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.tool_watchdog import request_tool_cancellation
-from main.protocol import build_envelope
+from g3ku.runtime.web_ceo_sessions import persist_frontdoor_actual_request
+from main.protocol import build_envelope, now_iso
+from main.runtime.chat_backend import build_prompt_cache_diagnostics
 
 
 DEFAULT_INLINE_REMINDER_WINDOWS_SECONDS: tuple[float, ...] = (30.0, 60.0, 120.0, 240.0, 600.0)
@@ -425,7 +428,13 @@ class CeoToolReminderService:
         )
         if not request_messages:
             return None
-        tool_schemas = self._tool_schema_records(actual_request_record.get("tool_schemas"))
+        provider_request_body = dict(actual_request_record.get("provider_request_body") or {})
+        provider_tool_schemas = self._tool_schema_records(provider_request_body.get("tools"))
+        tool_schemas = (
+            list(provider_tool_schemas)
+            if provider_tool_schemas
+            else self._tool_schema_records(actual_request_record.get("tool_schemas"))
+        )
         model_refs = [
             str(item or "").strip()
             for item in list(actual_request_record.get("model_refs") or []) 
@@ -445,6 +454,38 @@ class CeoToolReminderService:
             model_refs=model_refs,
             parallel_tool_calls=normalized_parallel_tool_calls,
             prompt_cache_key=prompt_cache_key,
+        )
+        self._persist_frontdoor_internal_request_artifact(
+            session_key=record.session_key,
+            turn_id=record.turn_id,
+            request_messages=[*request_messages, *reminder_messages],
+            tool_schemas=list(tool_schemas or []),
+            model_refs=model_refs,
+            parallel_tool_calls=normalized_parallel_tool_calls,
+            prompt_cache_key=str(prompt_cache_key or ""),
+            prompt_cache_diagnostics=build_prompt_cache_diagnostics(
+                stable_messages=list(request_messages),
+                dynamic_appendix_messages=list(reminder_messages),
+                tool_schemas=list(tool_schemas or []),
+                provider_model=str((list(model_refs or []) or [""])[0] or "").strip(),
+                scope="ceo_inline_tool_reminder",
+                prompt_cache_key=str(prompt_cache_key or ""),
+                actual_request_messages=[*request_messages, *reminder_messages],
+                actual_tool_schemas=list(tool_schemas or []),
+            ),
+            provider_request_meta=(
+                dict(getattr(response, "provider_request_meta", {}) or {})
+                if isinstance(getattr(response, "provider_request_meta", None), dict)
+                else {}
+            ),
+            provider_request_body=(
+                dict(getattr(response, "provider_request_body", {}) or {})
+                if isinstance(getattr(response, "provider_request_body", None), dict)
+                else {}
+            ),
+            usage=normalize_usage_payload(getattr(response, "usage", None)),
+            request_lane="inline_tool_reminder",
+            parent_request_id=str(actual_request_record.get("request_id") or "").strip(),
         )
         decision_excerpt = self._content_text(getattr(response, "content", "")).strip()
         parsed_decision = self._parse_text_decision(decision_excerpt)
@@ -658,6 +699,38 @@ class CeoToolReminderService:
             model_refs=self._resolve_ceo_model_refs(),
             parallel_tool_calls=False,
         )
+        model_refs = self._resolve_ceo_model_refs()
+        self._persist_frontdoor_internal_request_artifact(
+            session_key=record.session_key,
+            turn_id=record.turn_id,
+            request_messages=list(assembly.model_messages),
+            tool_schemas=[stop_tool.to_schema()],
+            model_refs=model_refs,
+            parallel_tool_calls=False,
+            prompt_cache_key="",
+            prompt_cache_diagnostics=build_prompt_cache_diagnostics(
+                stable_messages=list(getattr(assembly, "stable_messages", None) or assembly.model_messages),
+                dynamic_appendix_messages=list(getattr(assembly, "dynamic_appendix_messages", None) or []),
+                tool_schemas=[stop_tool.to_schema()],
+                provider_model=str((list(model_refs or []) or [""])[0] or "").strip(),
+                scope="ceo_inline_tool_reminder",
+                prompt_cache_key="",
+                actual_request_messages=list(assembly.model_messages),
+                actual_tool_schemas=[stop_tool.to_schema()],
+            ),
+            provider_request_meta=(
+                dict(getattr(response, "provider_request_meta", {}) or {})
+                if isinstance(getattr(response, "provider_request_meta", None), dict)
+                else {}
+            ),
+            provider_request_body=(
+                dict(getattr(response, "provider_request_body", {}) or {})
+                if isinstance(getattr(response, "provider_request_body", None), dict)
+                else {}
+            ),
+            usage=normalize_usage_payload(getattr(response, "usage", None)),
+            request_lane="inline_tool_reminder",
+        )
         tool_calls = list(getattr(response, "tool_calls", None) or [])
         decision_excerpt = self._content_text(getattr(response, "content", "")).strip()
         for item in tool_calls:
@@ -744,6 +817,68 @@ class CeoToolReminderService:
 
             self._support = CeoFrontDoorSupport(loop=self._loop)
         return self._support._resolve_chat_backend()
+
+    def _persist_frontdoor_internal_request_artifact(
+        self,
+        *,
+        session_key: str,
+        turn_id: str,
+        request_messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]] | None,
+        model_refs: list[str],
+        parallel_tool_calls: bool | None,
+        prompt_cache_key: str,
+        prompt_cache_diagnostics: dict[str, Any],
+        provider_request_meta: dict[str, Any] | None,
+        provider_request_body: dict[str, Any] | None,
+        usage: dict[str, int] | None,
+        request_lane: str,
+        parent_request_id: str = "",
+    ) -> dict[str, Any]:
+        normalized_session_id = str(session_key or "").strip()
+        if not normalized_session_id:
+            return {}
+        return persist_frontdoor_actual_request(
+            normalized_session_id,
+            payload={
+                "type": "frontdoor_internal_request",
+                "request_kind": "frontdoor_internal_request",
+                "request_lane": str(request_lane or "").strip() or "inline_tool_reminder",
+                "session_key": normalized_session_id,
+                "turn_id": str(turn_id or "").strip(),
+                "parent_request_id": str(parent_request_id or "").strip(),
+                "created_at": now_iso(),
+                "provider_model": str((list(model_refs or []) or [""])[0] or "").strip(),
+                "model_refs": [
+                    str(item or "").strip()
+                    for item in list(model_refs or [])
+                    if str(item or "").strip()
+                ],
+                "parallel_tool_calls": parallel_tool_calls,
+                "prompt_cache_key": str(prompt_cache_key or "").strip(),
+                "prompt_cache_key_hash": str(prompt_cache_diagnostics.get("prompt_cache_key_hash") or "").strip(),
+                "actual_request_hash": str(prompt_cache_diagnostics.get("actual_request_hash") or "").strip(),
+                "actual_request_message_count": int(prompt_cache_diagnostics.get("actual_request_message_count") or 0),
+                "actual_tool_schema_hash": str(prompt_cache_diagnostics.get("actual_tool_schema_hash") or "").strip(),
+                "tool_signature_hash": str(prompt_cache_diagnostics.get("tool_signature_hash") or "").strip(),
+                "stable_prefix_hash": str(prompt_cache_diagnostics.get("stable_prefix_hash") or "").strip(),
+                "dynamic_appendix_hash": str(prompt_cache_diagnostics.get("dynamic_appendix_hash") or "").strip(),
+                "messages": [dict(item) for item in list(request_messages or []) if isinstance(item, dict)],
+                "request_messages": [dict(item) for item in list(request_messages or []) if isinstance(item, dict)],
+                "tool_schemas": [dict(item) for item in list(tool_schemas or []) if isinstance(item, dict)],
+                "provider_request_meta": (
+                    dict(provider_request_meta or {})
+                    if isinstance(provider_request_meta, dict)
+                    else {}
+                ),
+                "provider_request_body": (
+                    dict(provider_request_body or {})
+                    if isinstance(provider_request_body, dict)
+                    else {}
+                ),
+                "usage": normalize_usage_payload(usage),
+            },
+        )
 
     def _publish(self, *, session_id: str, event_type: str, data: dict[str, Any]) -> None:
         service = getattr(self._loop, "main_task_service", None)

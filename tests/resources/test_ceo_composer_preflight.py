@@ -70,10 +70,71 @@ def test_frontdoor_send_preflight_snapshot_reports_ratio_and_threshold_flags(
     assert preflight["estimated_total_tokens"] == 26000
     assert preflight["context_window_tokens"] == 32000
     assert preflight["trigger_tokens"] == int(32000 * runner._TOKEN_COMPRESSION_TRIGGER_RATIO)
+    assert preflight["effective_trigger_tokens"] == int(
+        preflight["trigger_tokens"] * runner._TOKEN_COMPRESSION_ESTIMATE_SAFETY_RATIO
+    )
     assert preflight["would_trigger_token_compression"] is True
     assert preflight["would_exceed_context_window"] is False
     assert preflight["missing_context_window"] is False
     assert preflight["provider_model"] == "openai:gpt-5.2"
+
+
+def test_frontdoor_send_preflight_snapshot_uses_safety_margin_near_trigger(
+    monkeypatch,
+) -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "ceo_primary",
+            "provider_id": "responses",
+            "provider_model": "responses:gpt-5.2",
+            "resolved_model": "gpt-5.2",
+            "context_window_tokens": 25_001,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_estimate_frontdoor_send_total_tokens",
+        lambda **_: 19_950,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_prompt_contract",
+        lambda **kwargs: SimpleNamespace(
+            request_messages=list(kwargs.get("state", {}).get("frontdoor_live_request_messages") or []),
+            prompt_cache_key="cache-key",
+            diagnostics={"family": "ok"},
+        ),
+        raising=False,
+    )
+
+    runtime = SimpleNamespace(context=SimpleNamespace(session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared"))))
+    preflight = runner._frontdoor_send_preflight_snapshot(
+        state={
+            "session_key": "web:shared",
+            "model_refs": ["ceo_primary"],
+            "messages": [{"role": "user", "content": "hello"}],
+            "frontdoor_live_request_messages": [{"role": "user", "content": "hello"}],
+            "tool_names": [],
+            "provider_tool_names": [],
+            "parallel_enabled": False,
+            "turn_overlay_text": "",
+            "dynamic_appendix_messages": [],
+        },
+        runtime=runtime,
+        langchain_tools=[],
+    )
+
+    assert preflight["trigger_tokens"] == 20_000
+    assert preflight["effective_trigger_tokens"] == int(20_000 * runner._TOKEN_COMPRESSION_ESTIMATE_SAFETY_RATIO)
+    assert preflight["estimated_total_tokens"] == 19_950
+    assert preflight["would_trigger_token_compression"] is True
 
 
 def test_ceo_composer_preflight_endpoint_returns_runner_estimate(

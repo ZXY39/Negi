@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.cancellation import ToolCancellationToken
@@ -66,6 +67,67 @@ async def test_graph_call_model_raises_when_request_already_exceeds_context_wind
 
     with pytest.raises(RuntimeError):
         await runner._graph_call_model(state, runtime=runtime)
+
+
+def test_frontdoor_send_preflight_snapshot_uses_provider_request_preview_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "responses:gpt-test",
+            "provider_id": "responses",
+            "provider_model": "responses:gpt-test",
+            "resolved_model": "gpt-test",
+            "context_window_tokens": 25_001,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_prompt_contract",
+        lambda **kwargs: SimpleNamespace(
+            request_messages=list(kwargs.get("state", {}).get("messages") or []),
+            prompt_cache_key="cache-key",
+            diagnostics={"family": "ok"},
+        ),
+        raising=False,
+    )
+
+    huge_system_prompt = "S" * 40_000
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(
+            loop=None,
+            session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")),
+            session_key="web:shared",
+            on_progress=None,
+        )
+    )
+    preflight = runner._frontdoor_send_preflight_snapshot(
+        state={
+            "session_key": "web:shared",
+            "model_refs": ["responses:gpt-test"],
+            "messages": [
+                {"role": "system", "content": huge_system_prompt},
+                {"role": "user", "content": "hello"},
+            ],
+            "tool_names": [],
+            "provider_tool_names": [],
+            "parallel_enabled": False,
+            "turn_overlay_text": "",
+            "dynamic_appendix_messages": [],
+        },
+        runtime=runtime,
+        langchain_tools=[],
+    )
+
+    assert preflight["trigger_tokens"] == 20_000
+    assert preflight["estimated_total_tokens"] > preflight["trigger_tokens"]
+    assert preflight["would_trigger_token_compression"] is True
 
 
 @pytest.mark.asyncio
@@ -291,3 +353,102 @@ async def test_graph_call_model_discards_late_compression_result_after_pause(
         await runner._graph_call_model(state, runtime=runtime)
 
     assert len(captured_calls) == 1
+    assert session._frontdoor_pending_shrink_reason == "token_compression"
+
+
+@pytest.mark.asyncio
+async def test_run_frontdoor_llm_token_compression_persists_internal_request_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    captured_artifact: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "ceo_primary",
+            "provider_model": "openai:gpt-5.2",
+            "context_window_tokens": 32000,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_estimate_frontdoor_send_total_tokens",
+        lambda **_: 18000,
+        raising=False,
+    )
+    monkeypatch.setattr(runner, "_emit_frontdoor_runtime_snapshot", lambda **_: asyncio.sleep(0))
+    monkeypatch.setattr(
+        runner,
+        "_persist_frontdoor_internal_request_artifact",
+        lambda **kwargs: captured_artifact.update(kwargs) or {"request_id": "internal-request-1"},
+        raising=False,
+    )
+
+    async def _call_model_with_tools(**kwargs):
+        _ = kwargs
+        return AIMessage(
+            content="[压缩后的较早历史摘要]",
+            response_metadata={
+                "usage": {
+                    "input_tokens": 12709,
+                    "output_tokens": 552,
+                    "cache_hit_tokens": 0,
+                },
+                "provider_request_meta": {
+                    "provider": "responses",
+                    "endpoint": "https://example.test/v1/responses",
+                },
+                "provider_request_body": {
+                    "model": "gpt-5.2",
+                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "compress"}]}],
+                },
+            },
+        )
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _frontdoor_actual_request_path="D:/tmp/frontdoor-visible-request.json",
+        _frontdoor_request_body_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "visible baseline"},
+        ],
+        _emit_state_snapshot=lambda: None,
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=None, session=session, session_key="web:shared", on_progress=None)
+    )
+
+    result = await runner._run_frontdoor_llm_token_compression(
+        state={
+            "session_key": "web:shared",
+            "model_refs": ["ceo_primary"],
+        },
+        runtime=runtime,
+        request_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "older-1"},
+            {"role": "assistant", "content": "older-2"},
+            {"role": "user", "content": "older-3"},
+            {"role": "assistant", "content": "older-4"},
+            {"role": "user", "content": "recent-1"},
+            {"role": "assistant", "content": "recent-2"},
+            {"role": "user", "content": "recent-3"},
+            {"role": "assistant", "content": "recent-4"},
+        ],
+        model_refs=["ceo_primary"],
+        tool_schemas=[],
+    )
+
+    assert result.history_shrink_reason == "token_compression"
+    assert captured_artifact["request_lane"] == "token_compression"
+    assert captured_artifact["usage"] == {
+        "input_tokens": 12709,
+        "output_tokens": 552,
+        "cache_hit_tokens": 0,
+    }
+    assert session._frontdoor_actual_request_path == "D:/tmp/frontdoor-visible-request.json"
