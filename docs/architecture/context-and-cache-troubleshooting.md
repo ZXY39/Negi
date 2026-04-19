@@ -540,12 +540,14 @@ This addendum records the April 2026 node-cache repair boundary.
 - `provider_tool_names` are only the provider-facing schema bundle used to stabilize cache prefixes.
 - Same-turn node requests now prefer an append-only scaffold:
   previous actual request body + last-round assistant/tool delta + newest overlay / tool-contract tail.
+- After node restart/resume, the first rebuilt provider request must keep using that persisted append-only scaffold even if durable `runtime_frame.messages` is shorter. `runtime_frame.messages` is the projected-history lens; `actual_request_ref.request_messages` is the authority for first-hop request reconstruction.
 - This scaffold must not weaken stage gating or hydration rules.
 
 When node cache hits are still low after schema churn stops, compare consecutive node actual-request artifacts first.
 
 - If `actual_tool_schema_hash` is stable but cache hits stay low, inspect whether `provider_request_body.input` stopped being append-only.
 - If early `function_call` / `function_call_output` records are being replaced instead of appended, treat it as a node request-scaffold regression rather than a pure tool-schema issue.
+- If `prompt_cache_key_hash` stays the same but `actual_request_message_count` drops sharply on the first node request after restart/resume, compare `runtime_frame.messages` against the latest node `actual_request_ref.request_messages` first. That pattern usually means the resumed first hop rebuilt from projected history instead of from the persisted actual-request scaffold.
 
 Steady-state validation target for this repair:
 

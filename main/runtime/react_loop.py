@@ -136,6 +136,7 @@ class ReActToolLoop:
         task,
         node,
         messages: list[dict[str, Any]],
+        request_body_seed_messages: list[dict[str, Any]] | None = None,
         tools: dict[str, Tool],
         tools_supplier=None,
         model_refs: list[str],
@@ -149,6 +150,7 @@ class ReActToolLoop:
         attempts = 0
         last_contract_violations: list[str] = []
         message_history = list(messages or [])
+        fresh_turn_request_seed_messages = self._prompt_message_records(request_body_seed_messages)
         previous_actual_request_messages: list[dict[str, Any]] = []
         pending_request_delta_messages: list[dict[str, Any]] = []
         orphan_tool_result_strikes = 0
@@ -205,6 +207,7 @@ class ReActToolLoop:
                 )
             if resumed_history is not None:
                 message_history = resumed_history
+                fresh_turn_request_seed_messages = []
                 attempts = max(0, attempts - 1)
                 continue
             stage_gate = self._execution_stage_gate(
@@ -266,6 +269,13 @@ class ReActToolLoop:
                 request_messages,
                 dynamic_contract,
             )
+            if fresh_turn_request_seed_messages:
+                request_messages = self._fresh_turn_live_request_messages_from_seed_request(
+                    seed_request_messages=fresh_turn_request_seed_messages,
+                    stable_messages=model_messages,
+                    live_request_messages=request_messages,
+                )
+                fresh_turn_request_seed_messages = []
             request_tail_messages = request_messages[len(model_messages) :]
             request_messages = self._same_turn_append_only_request_messages(
                 previous_request_messages=previous_actual_request_messages,
@@ -4343,6 +4353,67 @@ class ReActToolLoop:
     @staticmethod
     def _prompt_message_records(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         return [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+
+    @classmethod
+    def _fresh_turn_seed_normalized_value(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): cls._fresh_turn_seed_normalized_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._fresh_turn_seed_normalized_value(item) for item in value]
+        if isinstance(value, str):
+            return value.replace('\r\n', '\n').rstrip()
+        return value
+
+    @classmethod
+    def _fresh_turn_seed_records_match(
+        cls,
+        first: list[dict[str, Any]] | None,
+        second: list[dict[str, Any]] | None,
+    ) -> bool:
+        first_records = cls._prompt_message_records(first)
+        second_records = cls._prompt_message_records(second)
+        if len(first_records) != len(second_records):
+            return False
+        return all(
+            cls._fresh_turn_seed_normalized_value(left)
+            == cls._fresh_turn_seed_normalized_value(right)
+            for left, right in zip(first_records, second_records)
+        )
+
+    @classmethod
+    def _fresh_turn_live_request_messages_from_seed_request(
+        cls,
+        *,
+        seed_request_messages: list[dict[str, Any]] | None,
+        stable_messages: list[dict[str, Any]] | None,
+        live_request_messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        seed_records = cls._prompt_message_records(seed_request_messages)
+        stable_records = cls._prompt_message_records(stable_messages)
+        live_records = cls._prompt_message_records(live_request_messages)
+        stable_len = len(stable_records)
+        seed_len = len(seed_records)
+        if not seed_records or stable_len <= 0 or len(live_records) < stable_len:
+            return live_records
+        if not cls._fresh_turn_seed_records_match(live_records[:stable_len], stable_records):
+            return live_records
+        matched_prefix_len = min(stable_len, seed_len)
+        if matched_prefix_len <= 0:
+            return live_records
+        if not cls._fresh_turn_seed_records_match(
+            seed_records[:matched_prefix_len],
+            stable_records[:matched_prefix_len],
+        ):
+            return live_records
+        if stable_len < seed_len:
+            live_tail = list(live_records[stable_len:])
+            return [*seed_records, *live_tail]
+        stable_tail = list(stable_records[seed_len:])
+        live_tail = list(live_records[stable_len:])
+        return [*seed_records, *stable_tail, *live_tail]
 
     @classmethod
     def _same_turn_append_only_request_messages(
