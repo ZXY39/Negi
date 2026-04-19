@@ -4658,6 +4658,40 @@ async def test_load_tool_context_v2_returns_full_tool_body_by_default(tmp_path: 
         manager.close()
 
 
+@pytest.mark.asyncio
+async def test_message_tool_family_is_not_discovered_after_hard_delete(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'memory_runtime', 'load_skill_context', 'load_tool_context')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-message-hard-delete')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+        items = {item.tool_id: item for item in service.list_tool_resources()}
+
+        assert not (REPO_ROOT / 'tools' / 'message' / 'resource.yaml').exists()
+        assert 'messaging' not in items
+        assert 'message' not in service.list_effective_tool_names(
+            actor_role='ceo',
+            session_id='web:shared',
+        )
+    finally:
+        await service.close()
+        manager.close()
+
+
 def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)

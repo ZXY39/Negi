@@ -720,7 +720,6 @@ class MemoryAssemblyConfig(Base):
             'memory_write',
             'memory_delete',
             'memory_note',
-            'message',
             'task_runtime',
             'skill_access',
         ]

@@ -40,12 +40,6 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
         'description': 'Describe, search, and open large externalized content by reference.',
         'actions': [{'id': 'inspect', 'label': 'Inspect Content', 'risk_level': 'low', 'destructive': False, 'allowed_roles': READ_ALLOWED_ROLES}],
     },
-    'message': {
-        'tool_id': 'messaging',
-        'display_name': 'Messaging',
-        'description': 'Send outbound user-facing messages.',
-        'actions': [{'id': 'send', 'label': 'Send Message', 'risk_level': 'low', 'destructive': False, 'allowed_roles': DEFAULT_ALLOWED_ROLES}],
-    },
     'cron': {
         'tool_id': 'automation',
         'display_name': 'Automation',
