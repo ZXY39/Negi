@@ -91,6 +91,7 @@ def test_tool_manifests_match_explicit_parameter_contracts():
         'memory_write',
         'message',
         'model_config',
+        'task_append_notice_cn',
         'task_delete_cn',
         'task_fetch_cn',
         'task_failed_nodes_cn',
@@ -149,6 +150,7 @@ def test_all_manifest_parameters_have_descriptions():
 def test_task_runtime_resource_tools_are_self_describing_and_not_host_wrapped():
     expected = {
         'create_async_task_cn': ('create_async_task', 'create_async_task'),
+        'task_append_notice_cn': ('task_append_notice', 'append_notice_cn'),
         'task_delete_cn': ('task_delete', 'delete_cn'),
         'task_failed_nodes_cn': ('task_failed_nodes', 'failed_nodes_cn'),
         'task_fetch_cn': ('task_list', 'list_cn'),
@@ -173,6 +175,7 @@ def test_task_runtime_resource_tools_are_self_describing_and_not_host_wrapped():
 def test_task_runtime_resource_tools_do_not_depend_on_host_action_mapper_entries():
     hosted = {
         'create_async_task',
+        'task_append_notice',
         'task_delete',
         'task_failed_nodes',
         'task_list',
@@ -201,6 +204,7 @@ def test_selected_tool_manifests_do_not_contain_known_mojibake_tokens() -> None:
         TOOLS_ROOT / 'skill-installer' / 'resource.yaml',
         TOOLS_ROOT / 'web_fetch' / 'resource.yaml',
         TOOLS_ROOT / 'create_async_task_cn' / 'resource.yaml',
+        TOOLS_ROOT / 'task_append_notice_cn' / 'resource.yaml',
         TOOLS_ROOT / 'task_stats_cn' / 'resource.yaml',
     ]
     bad_tokens = ('銆', '锛', '€', '缁窇', '鍒涘缓寮傛', '浠诲姟缁熻')

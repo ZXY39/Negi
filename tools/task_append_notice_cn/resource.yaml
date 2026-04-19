@@ -1,0 +1,55 @@
+schema_version: 1
+kind: tool
+display_name: "追加任务通知"
+name: task_append_notice
+description: Append a notice to an existing unfinished task in the current session.
+tool_result_delivery_contract: runtime_managed
+source:
+  type: ''
+  url: ''
+  ref: ''
+current_version:
+  summary: Resource-local task runtime tool. Handler and governance live with the resource so discovery can refresh without a host restart.
+  compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
+  source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    task_ids:
+      type: array
+      items:
+        type: string
+      description: Target unfinished task ids in the current session.
+    node_ids:
+      type: array
+      items:
+        type: string
+      description: Optional live-tree node ids that resolve back to unfinished tasks in the current session.
+    message:
+      type: string
+      minLength: 1
+      description: The appended notice, requirement, constraint, or acceptance detail.
+  required: [message]
+governance:
+  family: task_runtime
+  display_name: Task Runtime
+  description: Append new requirements or acceptance details to unfinished tasks.
+  actions:
+    - id: append_notice_cn
+      label: Task Append Notice
+      risk_level: medium
+      destructive: false
+      allowed_roles:
+        - ceo
+exposure:
+  agent: true
+  main_runtime: false
+toolskill:
+  enabled: true

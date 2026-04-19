@@ -4886,6 +4886,7 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         'load_skill_context',
         'load_tool_context',
         'create_async_task_cn',
+        'task_append_notice_cn',
         'task_fetch_cn',
         'task_delete_cn',
         'task_failed_nodes_cn',
@@ -4916,6 +4917,10 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         assert items['messaging'].is_core is True
         assert items['skill_access'].is_core is True
         assert items['task_runtime'].is_core is True
+
+        task_runtime_actions = {action.action_id: action for action in items['task_runtime'].actions}
+        assert 'append_notice_cn' in task_runtime_actions
+        assert 'ceo' in set(task_runtime_actions['append_notice_cn'].allowed_roles)
 
         memory_actions = {action.action_id: action for action in items['memory'].actions}
         assert set(memory_actions) == {'write', 'delete', 'note', 'runtime'}
@@ -5113,6 +5118,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         'load_skill_context',
         'load_tool_context',
         'create_async_task_cn',
+        'task_append_notice_cn',
         'task_fetch_cn',
         'task_delete_cn',
         'task_failed_nodes_cn',
@@ -5156,8 +5162,18 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         assert 'create_async_task' in manager.tool_instances()
         after = service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
         assert 'create_async_task' in after
+        assert 'task_append_notice' in after
         assert 'memory_write' not in after
-        assert {'task_list', 'task_delete', 'task_failed_nodes', 'task_node_detail', 'task_progress', 'task_stats', 'task_summary'}.issubset(set(after))
+        assert {
+            'task_list',
+            'task_append_notice',
+            'task_delete',
+            'task_failed_nodes',
+            'task_node_detail',
+            'task_progress',
+            'task_stats',
+            'task_summary',
+        }.issubset(set(after))
     finally:
         await service.close()
         manager.close()
@@ -5176,6 +5192,7 @@ async def test_core_tool_admin_endpoints_block_disable_and_delete_but_allow_role
         'load_skill_context',
         'load_tool_context',
         'create_async_task_cn',
+        'task_append_notice_cn',
         'task_fetch_cn',
         'task_delete_cn',
         'task_failed_nodes_cn',
