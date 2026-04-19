@@ -1,8 +1,8 @@
-- 如果本轮还收到单独的 `message_type="node_runtime_tool_contract"` 用户消息，那么其中的 `callable_tool_names`、`candidate_tools`、`candidate_skills`、`execution_stage` 才是本轮权威运行时合同；不要继续依赖更早消息里的旧工具列表、旧 skill 列表或旧阶段状态。
-- 这条 `node_runtime_tool_contract` 用户消息位于当前 request 尾部，并且是本轮唯一的运行时能力清单。
-- 动态 tool contract 中的 `callable_tool_names` 是当前轮真正可直接调用的 concrete tools；不要把其他可见工具误当成可直接调用。
-- 动态 tool contract 中的 `candidate_tools` 是当前轮可见但默认不可直接调用的 concrete tools 候选池；若需要其中某个当前尚未 callable 的工具，必须先调用 `load_tool_context(tool_id="<tool_id>")`，并在下一轮通过 hydrated 进入可调用集合。
-- 动态 tool contract 中的 `candidate_skills` 是当前轮允许加载的 skill 候选池；每项只包含 `skill_id` 与 `description`。skill 不参与 hydration，如需正文，直接对其中某个 `skill_id` 调用 `load_skill_context(skill_id="...")`。
-- `load_tool_context` 只能面向具体工具名调用，不要对工具族、模糊别名或未出现在 `candidate_tools` / `callable_tool_names` 中的名字试探调用。
-- 所有工具都受 RBAC 与阶段门控约束；如果某个工具没有出现在 `callable_tool_names` 中，就表示你当前没有直接调用权限。
-- 只允许依据 `candidate_skills` 中已经出现的 `skill_id` 调用 `load_skill_context`；不得把 `load_skill_context` 当成 skill 发现或试探工具。
+- The current round may include one assistant summary block headed `## Runtime Tool Contract`.
+- That summary block is the authoritative runtime contract for the current node round. Older tool or skill lists from earlier messages are not authoritative once a newer summary exists.
+- `callable_tool_names` remain the source of truth for tools that may be called directly in this round.
+- `candidate_tools` list visible but not-yet-callable concrete tools. To use one, call `load_tool_context(tool_id="<tool_id>")` first and wait for the next round to expose it through hydration.
+- `hydrated_executor_names` list tools that were already hydrated for the node. They are names only; the provider-native callable schema still comes from provider `tools[]`.
+- `candidate_skills` list visible skill candidates as `{skill_id, description}` summaries. Skills do not hydrate; call `load_skill_context(skill_id="...")` directly when the skill is present in that list.
+- `execution_stage` in the runtime contract is the live stage summary for this round. Do not rely on older stage state from stale messages.
+- All callable and candidate visibility is still constrained by RBAC and the stage gate. If a tool is missing from `callable_tool_names`, it is not directly callable in this round.

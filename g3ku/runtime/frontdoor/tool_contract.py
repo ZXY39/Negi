@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND = 'frontdoor_runtime_tool_contract'
+FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING = '## Runtime Tool Contract'
+FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY = '_frontdoor_tool_contract_payload'
 
 
 def _normalized_name_list(items: list[Any] | None) -> list[str]:
@@ -49,6 +51,85 @@ def normalize_frontdoor_candidate_tool_items(
     fallback_names: list[str] | None = None,
 ) -> list[dict[str, str]]:
     return _normalized_candidate_tool_items(items, fallback_names=fallback_names)
+
+
+def _render_name_list(items: list[str] | None) -> str:
+    names = _normalized_name_list(items)
+    if not names:
+        return 'none'
+    return ', '.join(f'`{name}`' for name in names)
+
+
+def _render_candidate_tool_section(items: list[dict[str, str]] | None) -> list[str]:
+    normalized_items = _normalized_candidate_tool_items(items)
+    if not normalized_items:
+        return ['candidate_tools: none']
+    lines = ['candidate_tools:']
+    for item in normalized_items:
+        tool_id = str(item.get('tool_id') or '').strip()
+        description = str(item.get('description') or '').strip()
+        detail = description if description else 'No description available.'
+        lines.append(
+            f'- `{tool_id}`: {detail} Load with `load_tool_context(tool_id="{tool_id}")` before calling it.'
+        )
+    return lines
+
+
+def _render_stage_summary(stage_summary: dict[str, Any] | None) -> str:
+    payload = dict(stage_summary or {})
+    active_stage_id = str(payload.get('active_stage_id') or '').strip() or 'none'
+    transition_required = bool(payload.get('transition_required'))
+    active_stage = dict(payload.get('active_stage') or {}) if isinstance(payload.get('active_stage'), dict) else {}
+    if not active_stage:
+        return f'stage_summary: active_stage_id={active_stage_id}; transition_required={transition_required}'
+    parts = [
+        f'active_stage_id={active_stage_id}',
+        f'transition_required={transition_required}',
+    ]
+    stage_goal = str(active_stage.get('stage_goal') or '').strip()
+    if stage_goal:
+        parts.append(f'stage_goal={stage_goal}')
+    tool_round_budget = active_stage.get('tool_round_budget')
+    if tool_round_budget not in (None, ''):
+        parts.append(f'tool_round_budget={int(tool_round_budget)}')
+    stage_kind = str(active_stage.get('stage_kind') or '').strip()
+    if stage_kind:
+        parts.append(f'stage_kind={stage_kind}')
+    if 'final_stage' in active_stage:
+        parts.append(f'final_stage={bool(active_stage.get("final_stage"))}')
+    return 'stage_summary: ' + '; '.join(parts)
+
+
+def _render_exec_runtime_policy(exec_runtime_policy: dict[str, Any] | None) -> str:
+    payload = dict(exec_runtime_policy or {})
+    if not payload:
+        return 'exec_runtime_policy: none'
+    parts: list[str] = []
+    mode = str(payload.get('mode') or '').strip()
+    if mode:
+        parts.append(f'mode={mode}')
+    if 'guardrails_enabled' in payload:
+        parts.append(f'guardrails_enabled={bool(payload.get("guardrails_enabled"))}')
+    summary = str(payload.get('summary') or '').strip()
+    if summary:
+        parts.append(f'summary={summary}')
+    return 'exec_runtime_policy: ' + ('; '.join(parts) if parts else 'none')
+
+
+def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
+    candidate_tools = _normalized_candidate_tool_items(payload.get('candidate_tools'))
+    lines = [
+        FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING,
+        f'kind: {FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND}',
+        f'contract_revision: {str(payload.get("contract_revision") or "").strip() or "none"}',
+        f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
+        f'hydrated_tools: {_render_name_list(payload.get("hydrated_tool_names"))}',
+        f'candidate_skills: {_render_name_list(payload.get("candidate_skill_ids"))}',
+        *_render_candidate_tool_section(candidate_tools),
+        _render_stage_summary(payload.get('stage_summary')),
+        _render_exec_runtime_policy(payload.get('exec_runtime_policy')),
+    ]
+    return '\n'.join(lines)
 
 
 def _active_stage_prompt_view(active_stage: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -119,9 +200,11 @@ class FrontdoorToolContract:
         }
 
     def to_message(self) -> dict[str, Any]:
+        payload = self.to_message_payload()
         return {
-            'role': 'user',
-            'content': json.dumps(self.to_message_payload(), ensure_ascii=False, indent=2),
+            'role': 'assistant',
+            'content': _render_frontdoor_contract_summary(payload),
+            FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY: payload,
         }
 
 
@@ -144,6 +227,17 @@ def _frontdoor_tool_contract_payload_from_content(content: Any) -> dict[str, Any
     if str(payload.get('message_type') or '').strip() != FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND:
         return None
     return payload
+
+
+def frontdoor_tool_contract_payload_from_message(message: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(message, dict):
+        return None
+    payload = message.get(FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY)
+    if isinstance(payload, dict):
+        resolved = dict(payload)
+        if str(resolved.get('message_type') or '').strip() == FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND:
+            return resolved
+    return _frontdoor_tool_contract_payload_from_content((message or {}).get('content'))
 
 
 def build_frontdoor_tool_contract(
@@ -182,10 +276,13 @@ def build_frontdoor_tool_contract(
 
 
 def is_frontdoor_tool_contract_message(message: dict[str, Any]) -> bool:
-    if str((message or {}).get('role') or '').strip().lower() != 'user':
+    payload = frontdoor_tool_contract_payload_from_message(message)
+    if payload is not None:
+        return True
+    if str((message or {}).get('role') or '').strip().lower() != 'assistant':
         return False
-    content = (message or {}).get('content')
-    return _frontdoor_tool_contract_payload_from_content(content) is not None
+    content = str((message or {}).get('content') or '').strip()
+    return content.startswith(FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING)
 
 
 def upsert_frontdoor_tool_contract_message(

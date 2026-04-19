@@ -517,6 +517,15 @@ For CEO/frontdoor prompt-cache debugging, maintainers now need to distinguish tw
 
 The important rule is that hydration promotion and stage gating should change the tail `frontdoor_runtime_tool_contract`, but they should not churn the provider-facing `tools[]` bundle every round.
 
+## Runtime Contract Format
+
+- CEO/frontdoor no longer sends the model-facing runtime contract as raw JSON inside a user message. The live contract is now an assistant summary block headed `## Runtime Tool Contract`.
+- The provider-native callable schema still lives in provider `tools[]`. The summary block exists only to explain callable tools, hydrated tools, candidate tools, candidate skills, and stage state to the model in compact text form.
+- Same-turn provider-bound requests may still accumulate older contract snapshots so the hot request path stays append-only. Within one turn, the newest summary block is the authoritative contract.
+- Durable CEO continuity baselines still strip those contract messages before they are written back to session-owned request-body state. The next round rebuilds one fresh authoritative summary from canonical runtime state.
+- Execution and acceptance nodes now use the same summary-style contract lane instead of a raw `node_runtime_tool_contract` JSON user message.
+- Node summaries now expose `hydrated_executor_names` as names only. The detailed provider-call schema remains separate in node `provider_tool_names` and provider `tools[]`.
+
 The provider-facing bundle is also intentionally minimal:
 
 - Rich tool and skill descriptions stay in the tail runtime contract.

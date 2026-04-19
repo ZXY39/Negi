@@ -24,30 +24,25 @@ from g3ku.runtime.frontdoor.prompt_cache_contract import (
     FrontdoorPromptContract,
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, initial_persistent_state
+from g3ku.runtime.frontdoor.tool_contract import (
+    frontdoor_tool_contract_payload_from_message,
+    is_frontdoor_tool_contract_message,
+)
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from main.runtime.chat_backend import build_prompt_cache_diagnostics
 
 
 def _is_frontdoor_runtime_tool_contract_record(record: dict[str, object]) -> bool:
-    if str(record.get("role") or "").strip().lower() != "user":
-        return False
-    content = record.get("content")
-    if isinstance(content, dict):
-        payload = dict(content)
-    elif isinstance(content, str):
-        text = str(content or "").strip()
-        if not text:
-            return False
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            return False
-        if not isinstance(parsed, dict):
-            return False
-        payload = dict(parsed)
-    else:
-        return False
-    return str(payload.get("message_type") or "").strip() == "frontdoor_runtime_tool_contract"
+    return is_frontdoor_tool_contract_message(dict(record or {}))
+
+
+def _message_role_for_contract_filter(message: object) -> str:
+    raw_role = str(getattr(message, "role", "") or getattr(message, "type", "") or "").strip().lower()
+    if raw_role == "ai":
+        return "assistant"
+    if raw_role == "human":
+        return "user"
+    return raw_role
 
 
 def _canonical_frontdoor_state(**overrides) -> dict[str, object]:
@@ -1927,9 +1922,10 @@ async def test_create_agent_runner_graph_prepare_turn_persists_request_body_with
         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
     ]
     assert len(prepared["dynamic_appendix_messages"]) == 1
-    contract_payload = json.loads(str(prepared["dynamic_appendix_messages"][0]["content"] or ""))
-    assert isinstance(contract_payload, dict)
-    assert contract_payload["message_type"] == "frontdoor_runtime_tool_contract"
+    contract_message = dict(prepared["dynamic_appendix_messages"][0] or {})
+    assert is_frontdoor_tool_contract_message(contract_message)
+    assert contract_message["role"] == "assistant"
+    assert str(contract_message.get("content") or "").startswith("## Runtime Tool Contract")
 
 
 @pytest.mark.asyncio
@@ -5044,7 +5040,10 @@ async def test_create_agent_dynamic_appendix_request_preserves_live_assistant_an
         str(getattr(message, "content", "") or "")
         for message in rendered_messages
         if not _is_frontdoor_runtime_tool_contract_record(
-            {"role": "user", "content": getattr(message, "content", "")}
+            {
+                "role": _message_role_for_contract_filter(message),
+                "content": getattr(message, "content", ""),
+            }
         )
     ]
 
@@ -5108,7 +5107,10 @@ async def test_create_agent_dynamic_appendix_request_does_not_duplicate_when_sta
         str(getattr(message, "content", "") or "")
         for message in list(seen_request["messages"] or [])
         if not _is_frontdoor_runtime_tool_contract_record(
-            {"role": "user", "content": getattr(message, "content", "")}
+            {
+                "role": _message_role_for_contract_filter(message),
+                "content": getattr(message, "content", ""),
+            }
         )
     ]
     assert contents == [
@@ -5195,7 +5197,10 @@ async def test_create_agent_stable_prefix_request_coherent_after_dynamic_appendi
         str(getattr(message, "content", "") or "")
         for message in list(seen_requests[0]["messages"] or [])
         if not _is_frontdoor_runtime_tool_contract_record(
-            {"role": "user", "content": getattr(message, "content", "")}
+            {
+                "role": _message_role_for_contract_filter(message),
+                "content": getattr(message, "content", ""),
+            }
         )
     ] == [
         "start",
@@ -5206,7 +5211,10 @@ async def test_create_agent_stable_prefix_request_coherent_after_dynamic_appendi
         str(getattr(message, "content", "") or "")
         for message in list(seen_requests[1]["messages"] or [])
         if not _is_frontdoor_runtime_tool_contract_record(
-            {"role": "user", "content": getattr(message, "content", "")}
+            {
+                "role": _message_role_for_contract_filter(message),
+                "content": getattr(message, "content", ""),
+            }
         )
     ] == [
         "start",

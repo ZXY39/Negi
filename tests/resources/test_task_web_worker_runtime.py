@@ -29,6 +29,7 @@ from main.models import (
 from main.monitoring.query_service import TaskQueryService
 from main.protocol import now_iso
 from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool
+from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 from main.service.runtime_service import MainRuntimeService
@@ -3539,10 +3540,13 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_after
         messages = await service.node_runner._build_messages(task=task, node=root)
 
         assert len(messages) >= 3
-        payload = json.loads(messages[-1]["content"])
-        assert payload["message_type"] == "node_runtime_tool_contract"
+        assert messages[-1]["role"] == "assistant"
+        assert str(messages[-1]["content"] or "").startswith("## Runtime Tool Contract")
+        payload = extract_node_dynamic_contract_payload(messages)
+        assert payload is not None
         assert "filesystem_write" in payload["callable_tool_names"]
         assert "filesystem_write" not in payload["candidate_tools"]
+        assert payload["hydrated_executor_names"] == ["filesystem_write"]
     finally:
         await service.close()
 
@@ -3595,8 +3599,10 @@ async def test_execution_node_build_messages_locks_callable_tools_to_submit_next
         messages = await service.node_runner._build_messages(task=task, node=root)
 
         assert len(messages) >= 3
-        payload = json.loads(messages[-1]["content"])
-        assert payload["message_type"] == "node_runtime_tool_contract"
+        assert messages[-1]["role"] == "assistant"
+        assert str(messages[-1]["content"] or "").startswith("## Runtime Tool Contract")
+        payload = extract_node_dynamic_contract_payload(messages)
+        assert payload is not None
         assert payload["callable_tool_names"] == ["submit_next_stage"]
         assert "model_visible_tool_selection_trace" not in payload
     finally:
@@ -3660,9 +3666,12 @@ async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_afte
         messages = await service.node_runner._build_messages(task=task, node=acceptance)
 
         assert len(messages) >= 3
-        payload = json.loads(messages[-1]["content"])
-        assert payload["message_type"] == "node_runtime_tool_contract"
+        assert messages[-1]["role"] == "assistant"
+        assert str(messages[-1]["content"] or "").startswith("## Runtime Tool Contract")
+        payload = extract_node_dynamic_contract_payload(messages)
+        assert payload is not None
         assert "content_open" in payload["callable_tool_names"]
+        assert payload["hydrated_executor_names"] == ["content_open"]
     finally:
         await service.close()
 

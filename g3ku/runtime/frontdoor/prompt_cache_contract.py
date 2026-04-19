@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from g3ku.runtime.frontdoor.tool_contract import FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND
+from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
 from main.runtime.chat_backend import (
     build_prompt_cache_diagnostics,
     build_session_prompt_cache_key,
@@ -16,25 +16,7 @@ LEGACY_LONG_CONTEXT_SUMMARY_PREFIX = "[G3KU_LONG_CONTEXT_SUMMARY_V1]"
 
 
 def _is_frontdoor_runtime_tool_contract_record(record: dict[str, Any]) -> bool:
-    if str(record.get("role") or "").strip().lower() != "user":
-        return False
-    content = record.get("content")
-    payload: dict[str, Any] | None = None
-    if isinstance(content, dict):
-        payload = dict(content)
-    elif isinstance(content, str):
-        text = str(content or "").strip()
-        if not text:
-            return False
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            return False
-        if isinstance(parsed, dict):
-            payload = dict(parsed)
-    if not isinstance(payload, dict):
-        return False
-    return str(payload.get("message_type") or "").strip() == FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND
+    return is_frontdoor_tool_contract_message(record)
 
 
 def _dynamic_appendix_overlap_records(dynamic_appendix_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

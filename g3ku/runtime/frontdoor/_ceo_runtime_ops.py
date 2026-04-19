@@ -89,8 +89,8 @@ from .state_models import (
     CeoRuntimeContext,
 )
 from .tool_contract import (
-    FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND,
     build_frontdoor_tool_contract,
+    is_frontdoor_tool_contract_message,
     normalize_frontdoor_candidate_tool_items,
     upsert_frontdoor_tool_contract_message,
 )
@@ -397,27 +397,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     @staticmethod
     def _is_frontdoor_tool_contract_record(record: dict[str, Any] | None) -> bool:
-        if not isinstance(record, dict):
-            return False
-        if str(record.get("role") or "").strip().lower() != "user":
-            return False
-        content = record.get("content")
-        payload: dict[str, Any] | None = None
-        if isinstance(content, dict):
-            payload = dict(content)
-        elif isinstance(content, str):
-            text = str(content or "").strip()
-            if not text:
-                return False
-            try:
-                parsed = json.loads(text)
-            except Exception:
-                return False
-            if isinstance(parsed, dict):
-                payload = dict(parsed)
-        if not isinstance(payload, dict):
-            return False
-        return str(payload.get("message_type") or "").strip() == FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND
+        return is_frontdoor_tool_contract_message(dict(record or {}))
 
     @staticmethod
     def _is_frontdoor_memory_snapshot_record(record: dict[str, Any] | None) -> bool:

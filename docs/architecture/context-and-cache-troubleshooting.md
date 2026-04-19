@@ -618,3 +618,9 @@ The current CEO/frontdoor shrink rules are simpler than the older notes above:
 ### Obsolete Notes To Ignore
 
 Older references in historical troubleshooting notes to `semantic_context_state`, `global summary`, or `frontdoor_global_summary_*` should now be treated as obsolete. The current debugging authority is the actual provider request JSON plus the runtime-selected model's `context_window_tokens`.
+## Runtime Contract Summary Checks
+
+- `frontdoor_runtime_tool_contract` and `node_runtime_tool_contract` now normally appear as assistant summary blocks headed `## Runtime Tool Contract`, not as raw JSON message bodies.
+- Treat those summary blocks as dynamic contract tail records during cache analysis. They are still outside the stable prefix even though the body is no longer JSON.
+- Same-turn live requests may still contain multiple contract summaries because the request path stays append-only for cache preservation. The newest summary is the authoritative contract for that round.
+- Durable continuity baselines should still strip runtime-contract summaries before persistence. If a later turn replays an old summary as ordinary stable history without `token_compression` or `stage_compaction`, treat that as illegal context carryover.

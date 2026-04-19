@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract
+
 
 def _field(value, name: str):
     if isinstance(value, dict):
@@ -145,24 +147,30 @@ def test_frontdoor_prompt_cache_key_ignores_dynamic_tool_contract_changes() -> N
         }
     ]
 
+    first_contract = build_frontdoor_tool_contract(
+        callable_tool_names=["exec"],
+        candidate_tool_names=["filesystem_write"],
+        candidate_tool_items=[{"tool_id": "filesystem_write", "description": "Write file content"}],
+        hydrated_tool_names=[],
+        frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
+        candidate_skill_ids=["memory"],
+        contract_revision="frontdoor:v1",
+    ).to_message()
+    second_contract = build_frontdoor_tool_contract(
+        callable_tool_names=["exec", "filesystem_write"],
+        candidate_tool_names=[],
+        candidate_tool_items=[],
+        hydrated_tool_names=["filesystem_write"],
+        frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
+        candidate_skill_ids=["memory"],
+        contract_revision="frontdoor:v1",
+    ).to_message()
+
     first = build_frontdoor_prompt_contract(
         scope="ceo_frontdoor",
         provider_model="openai:gpt-4.1",
         stable_messages=stable_messages,
-        dynamic_appendix_messages=[
-            {
-                "role": "user",
-                "content": {
-                    "message_type": "frontdoor_runtime_tool_contract",
-                    "callable_tool_names": ["exec"],
-                    "candidate_tool_names": ["filesystem_write"],
-                    "hydrated_tool_names": [],
-                    "candidate_skill_ids": ["memory"],
-                    "stage_summary": {"active_stage_id": "stage:1", "transition_required": False},
-                    "contract_revision": "frontdoor:v1",
-                },
-            }
-        ],
+        dynamic_appendix_messages=[first_contract],
         tool_schemas=tool_schemas,
         cache_family_revision="frontdoor:v1",
     )
@@ -170,20 +178,7 @@ def test_frontdoor_prompt_cache_key_ignores_dynamic_tool_contract_changes() -> N
         scope="ceo_frontdoor",
         provider_model="openai:gpt-4.1",
         stable_messages=stable_messages,
-        dynamic_appendix_messages=[
-            {
-                "role": "user",
-                "content": {
-                    "message_type": "frontdoor_runtime_tool_contract",
-                    "callable_tool_names": ["exec", "filesystem_write"],
-                    "candidate_tool_names": [],
-                    "hydrated_tool_names": ["filesystem_write"],
-                    "candidate_skill_ids": ["memory"],
-                    "stage_summary": {"active_stage_id": "stage:1", "transition_required": False},
-                    "contract_revision": "frontdoor:v1",
-                },
-            }
-        ],
+        dynamic_appendix_messages=[second_contract],
         tool_schemas=tool_schemas,
         cache_family_revision="frontdoor:v1",
     )
@@ -241,15 +236,16 @@ def test_frontdoor_prompt_cache_key_ignores_tool_schema_changes_when_stable_pref
 def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only() -> None:
     from g3ku.runtime.frontdoor.prompt_cache_contract import build_frontdoor_prompt_contract
 
-    contract_payload = {
-        "message_type": "frontdoor_runtime_tool_contract",
-        "callable_tool_names": ["exec", "submit_next_stage"],
-        "candidate_tools": [],
-        "hydrated_tool_names": [],
-        "candidate_skill_ids": [],
-        "stage_summary": {"active_stage_id": "stage:1", "transition_required": False},
-        "contract_revision": "frontdoor:v1",
-    }
+    contract_message = build_frontdoor_tool_contract(
+        callable_tool_names=["exec", "submit_next_stage"],
+        candidate_tool_names=[],
+        candidate_tool_items=[],
+        hydrated_tool_names=[],
+        frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
+        candidate_skill_ids=[],
+        contract_revision="frontdoor:v1",
+    ).to_message()
+    contract_record = {"role": contract_message["role"], "content": contract_message["content"]}
 
     first = build_frontdoor_prompt_contract(
         scope="ceo_frontdoor",
@@ -259,7 +255,7 @@ def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only(
             {"role": "user", "content": "start"},
         ],
         dynamic_appendix_messages=[
-            {"role": "user", "content": contract_payload},
+            contract_message,
         ],
         live_request_messages=[
             {"role": "system", "content": "stable system"},
@@ -276,12 +272,12 @@ def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only(
             {"role": "user", "content": "start"},
         ],
         dynamic_appendix_messages=[
-            {"role": "user", "content": contract_payload},
+            contract_message,
         ],
         live_request_messages=[
             {"role": "system", "content": "stable system"},
             {"role": "user", "content": "start"},
-            {"role": "user", "content": contract_payload},
+            contract_record,
             {
                 "role": "assistant",
                 "content": "",
@@ -307,12 +303,12 @@ def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only(
     assert list(_field(first, "request_messages")) == [
         {"role": "system", "content": "stable system"},
         {"role": "user", "content": "start"},
-        {"role": "user", "content": contract_payload},
+        contract_record,
     ]
     assert list(_field(second, "request_messages")) == [
         {"role": "system", "content": "stable system"},
         {"role": "user", "content": "start"},
-        {"role": "user", "content": contract_payload},
+        contract_record,
         {
             "role": "assistant",
             "content": "",
@@ -330,7 +326,7 @@ def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only(
             "tool_call_id": "call-1",
             "content": '{"status":"success"}',
         },
-        {"role": "user", "content": contract_payload},
+        contract_record,
     ]
     assert list(_field(second, "request_messages"))[: len(list(_field(first, "request_messages")))] == list(
         _field(first, "request_messages")
@@ -339,6 +335,16 @@ def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only(
 
 def test_frontdoor_prompt_contract_appends_dynamic_appendix_at_tail_for_main_lane() -> None:
     from g3ku.runtime.frontdoor.prompt_cache_contract import build_frontdoor_prompt_contract
+
+    contract_message = build_frontdoor_tool_contract(
+        callable_tool_names=["submit_next_stage"],
+        candidate_tool_names=["web_fetch"],
+        candidate_tool_items=[{"tool_id": "web_fetch", "description": "HTTP fetch helper"}],
+        hydrated_tool_names=[],
+        frontdoor_stage_state={},
+        contract_revision="frontdoor:v1",
+    ).to_message()
+    contract_record = {"role": contract_message["role"], "content": contract_message["content"]}
 
     contract = build_frontdoor_prompt_contract(
         scope="ceo_frontdoor",
@@ -350,7 +356,7 @@ def test_frontdoor_prompt_contract_appends_dynamic_appendix_at_tail_for_main_lan
         ],
         dynamic_appendix_messages=[
             {"role": "assistant", "content": "## Retrieved Context\n- memory"},
-            {"role": "user", "content": '{"message_type":"frontdoor_runtime_tool_contract"}'},
+            contract_message,
         ],
         live_request_messages=[
             {"role": "system", "content": "stable system"},
@@ -371,7 +377,7 @@ def test_frontdoor_prompt_contract_appends_dynamic_appendix_at_tail_for_main_lan
         {"role": "tool", "name": "load_skill_context", "tool_call_id": "call-skill-1", "content": '{"ok": true}'},
         {"role": "assistant", "content": "old request-only appendix"},
         {"role": "assistant", "content": "## Retrieved Context\n- memory"},
-        {"role": "user", "content": '{"message_type":"frontdoor_runtime_tool_contract"}'},
+        contract_record,
     ]
     assert list(_field(contract, "stable_messages")) == [
         {"role": "system", "content": "stable system"},

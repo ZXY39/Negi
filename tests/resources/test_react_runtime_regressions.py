@@ -3309,7 +3309,7 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
         contract,
     )
 
-    assert [item["role"] for item in injected[:4]] == ["system", "user", "assistant", "user"]
+    assert [item["role"] for item in injected[:4]] == ["system", "user", "assistant", "assistant"]
     payload = extract_node_dynamic_contract_payload(injected)
     assert payload is not None
     assert payload["execution_stage"] == {
@@ -3329,6 +3329,7 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
             "description": "terminal workflow",
         }
     ]
+    assert payload["hydrated_executor_names"] == ["filesystem_write"]
     assert "model_visible_tool_selection_trace" not in payload
 
 
@@ -3957,7 +3958,8 @@ async def test_enrich_node_messages_includes_exec_runtime_policy_in_dynamic_cont
         ],
     )
 
-    dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
+    dynamic_payload = extract_node_dynamic_contract_payload(enriched)
+    assert dynamic_payload is not None
     assert dynamic_payload["exec_runtime_policy"] == {
         'mode': 'full_access',
         'guardrails_enabled': False,

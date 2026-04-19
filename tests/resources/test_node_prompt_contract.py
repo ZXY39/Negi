@@ -5,6 +5,7 @@ import json
 from main.runtime.node_prompt_contract import (
     NODE_DYNAMIC_CONTRACT_KIND,
     NodeRuntimeToolContract,
+    extract_node_dynamic_contract_payload,
     inject_node_dynamic_contract_message,
     upsert_node_dynamic_contract_message,
 )
@@ -44,13 +45,16 @@ def test_upsert_node_dynamic_contract_message_replaces_existing_contract_message
     updated = upsert_node_dynamic_contract_message(base_messages, contract)
 
     assert len(updated) == 3
-    payload = json.loads(updated[-1]["content"])
+    assert updated[-1]["role"] == "assistant"
+    assert updated[-1]["content"].startswith("## Runtime Tool Contract")
+    assert '"message_type"' not in updated[-1]["content"]
+    payload = contract.to_message_payload()
     assert payload["message_type"] == NODE_DYNAMIC_CONTRACT_KIND
     assert payload["callable_tool_names"] == ["filesystem_write"]
     assert payload["candidate_tools"] == []
     assert payload["candidate_skills"] == [{"skill_id": "memory", "description": "memory help"}]
+    assert payload["hydrated_executor_names"] == ["filesystem_write"]
     assert "visible_skills" not in payload
-    assert "hydrated_executor_names" not in payload
     assert "lightweight_tool_ids" not in payload
     assert "model_visible_tool_selection_trace" not in payload
     assert "node_id" not in payload
@@ -74,6 +78,7 @@ def test_node_runtime_contract_serializes_minimal_agent_facing_payload() -> None
     )
 
     payload = contract.to_message_payload()
+    message = contract.to_message()
 
     assert payload["candidate_tools"] == [
         {
@@ -87,12 +92,19 @@ def test_node_runtime_contract_serializes_minimal_agent_facing_payload() -> None
             "description": "terminal workflow",
         }
     ]
+    assert payload["hydrated_executor_names"] == ["filesystem_write"]
     assert "visible_skills" not in payload
-    assert "hydrated_executor_names" not in payload
     assert "lightweight_tool_ids" not in payload
     assert "model_visible_tool_selection_trace" not in payload
     assert "node_id" not in payload
     assert "node_kind" not in payload
+    assert message["role"] == "assistant"
+    assert message["content"].startswith("## Runtime Tool Contract")
+    assert '"message_type"' not in message["content"]
+    assert "callable_tools: `exec`" in message["content"]
+    assert "candidate_tools:" in message["content"]
+    assert 'load_tool_context(tool_id="filesystem_write")' in message["content"]
+    assert "hydrated_tools: `filesystem_write`" in message["content"]
 
 
 def test_inject_node_dynamic_contract_message_appends_contract_to_request_tail() -> None:
@@ -128,7 +140,10 @@ def test_inject_node_dynamic_contract_message_appends_contract_to_request_tail()
         contract,
     )
 
-    assert [item["role"] for item in injected] == ["system", "user", "assistant", "user"]
-    payload = json.loads(injected[-1]["content"])
-    assert payload["message_type"] == NODE_DYNAMIC_CONTRACT_KIND
+    assert [item["role"] for item in injected] == ["system", "user", "assistant", "assistant"]
+    assert injected[-1]["content"].startswith("## Runtime Tool Contract")
+    assert '"message_type"' not in injected[-1]["content"]
+    payload = extract_node_dynamic_contract_payload(injected)
+    assert payload is not None
     assert payload["candidate_skills"] == [{"skill_id": "tmux", "description": "terminal workflow"}]
+    assert payload["hydrated_executor_names"] == []

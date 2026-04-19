@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 NODE_DYNAMIC_CONTRACT_KIND = 'node_runtime_tool_contract'
+NODE_DYNAMIC_CONTRACT_HEADING = '## Runtime Tool Contract'
+NODE_DYNAMIC_CONTRACT_PAYLOAD_KEY = '_node_runtime_tool_contract_payload'
 
 
 def _normalized_name_list(items: list[Any] | None) -> list[str]:
@@ -102,6 +104,121 @@ def _stable_selection_trace(selection_trace: dict[str, Any] | None) -> dict[str,
     }
 
 
+def _render_name_list(items: list[str] | None) -> str:
+    names = _normalized_name_list(items)
+    if not names:
+        return 'none'
+    return ', '.join(f'`{name}`' for name in names)
+
+
+def _render_candidate_tool_section(items: list[dict[str, str]] | None) -> list[str]:
+    normalized_items = _normalized_candidate_tool_items(items)
+    if not normalized_items:
+        return ['candidate_tools: none']
+    lines = ['candidate_tools:']
+    for item in normalized_items:
+        tool_id = str(item.get('tool_id') or '').strip()
+        description = str(item.get('description') or '').strip()
+        detail = description if description else 'No description available.'
+        lines.append(
+            f'- `{tool_id}`: {detail} Load with `load_tool_context(tool_id="{tool_id}")` before calling it.'
+        )
+    return lines
+
+
+def _render_candidate_skill_section(items: list[dict[str, str]] | None) -> list[str]:
+    normalized_items = _normalized_candidate_skill_items(items)
+    if not normalized_items:
+        return ['candidate_skills: none']
+    lines = ['candidate_skills:']
+    for item in normalized_items:
+        skill_id = str(item.get('skill_id') or '').strip()
+        description = str(item.get('description') or '').strip()
+        detail = description if description else 'No description available.'
+        lines.append(
+            f'- `{skill_id}`: {detail} Load with `load_skill_context(skill_id="{skill_id}")` when needed.'
+        )
+    return lines
+
+
+def _render_stage_summary(stage_payload: dict[str, Any] | None) -> str:
+    payload = _stable_stage_payload(stage_payload)
+    active_stage = dict(payload.get('active_stage') or {}) if isinstance(payload.get('active_stage'), dict) else {}
+    if not active_stage:
+        return (
+            'stage_summary: '
+            f'has_active_stage={bool(payload.get("has_active_stage"))}; '
+            f'transition_required={bool(payload.get("transition_required"))}'
+        )
+    parts = [
+        f'has_active_stage={bool(payload.get("has_active_stage"))}',
+        f'transition_required={bool(payload.get("transition_required"))}',
+        f'stage_id={str(active_stage.get("stage_id") or "").strip() or "none"}',
+    ]
+    stage_goal = str(active_stage.get('stage_goal') or '').strip()
+    if stage_goal:
+        parts.append(f'stage_goal={stage_goal}')
+    tool_round_budget = active_stage.get('tool_round_budget')
+    if tool_round_budget not in (None, ''):
+        parts.append(f'tool_round_budget={int(tool_round_budget)}')
+    stage_kind = str(active_stage.get('stage_kind') or '').strip()
+    if stage_kind:
+        parts.append(f'stage_kind={stage_kind}')
+    if 'final_stage' in active_stage:
+        parts.append(f'final_stage={bool(active_stage.get("final_stage"))}')
+    return 'stage_summary: ' + '; '.join(parts)
+
+
+def _render_exec_runtime_policy(exec_runtime_policy: dict[str, Any] | None) -> str:
+    payload = dict(exec_runtime_policy or {})
+    if not payload:
+        return 'exec_runtime_policy: none'
+    parts: list[str] = []
+    mode = str(payload.get('mode') or '').strip()
+    if mode:
+        parts.append(f'mode={mode}')
+    if 'guardrails_enabled' in payload:
+        parts.append(f'guardrails_enabled={bool(payload.get("guardrails_enabled"))}')
+    summary = str(payload.get('summary') or '').strip()
+    if summary:
+        parts.append(f'summary={summary}')
+    return 'exec_runtime_policy: ' + ('; '.join(parts) if parts else 'none')
+
+
+def _render_node_dynamic_contract_summary(payload: dict[str, Any]) -> str:
+    lines = [
+        NODE_DYNAMIC_CONTRACT_HEADING,
+        f'kind: {NODE_DYNAMIC_CONTRACT_KIND}',
+        f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
+        f'hydrated_tools: {_render_name_list(payload.get("hydrated_executor_names"))}',
+        *_render_candidate_tool_section(payload.get('candidate_tools')),
+        *_render_candidate_skill_section(payload.get('candidate_skills')),
+        _render_stage_summary(payload.get('execution_stage')),
+        _render_exec_runtime_policy(payload.get('exec_runtime_policy')),
+    ]
+    return '\n'.join(lines)
+
+
+def _node_dynamic_contract_payload_from_message(message: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(message, dict):
+        return None
+    embedded_payload = message.get(NODE_DYNAMIC_CONTRACT_PAYLOAD_KEY)
+    if isinstance(embedded_payload, dict):
+        payload = dict(embedded_payload)
+        if str(payload.get('message_type') or '').strip() == NODE_DYNAMIC_CONTRACT_KIND:
+            return payload
+    raw_content = message.get('content')
+    if not isinstance(raw_content, str):
+        return None
+    try:
+        payload = json.loads(raw_content)
+    except Exception:
+        return None
+    if isinstance(payload, dict) and str(payload.get('message_type') or '').strip() == NODE_DYNAMIC_CONTRACT_KIND:
+        return payload
+    return None
+
+
 @dataclass(slots=True)
 class NodeRuntimeToolContract:
     node_id: str
@@ -130,30 +247,28 @@ class NodeRuntimeToolContract:
                 list(self.candidate_skill_items or []),
                 fallback_ids=list(self.candidate_skill_ids or []),
             ),
+            'hydrated_executor_names': _normalized_name_list(list(self.hydrated_executor_names or [])),
             'execution_stage': _stable_stage_payload(self.stage_payload),
         }
         if isinstance(self.exec_runtime_policy, dict):
             payload['exec_runtime_policy'] = dict(self.exec_runtime_policy)
         return payload
 
-    def to_message(self) -> dict[str, str]:
+    def to_message(self) -> dict[str, Any]:
+        payload = self.to_message_payload()
         return {
-            'role': 'user',
-            'content': json.dumps(self.to_message_payload(), ensure_ascii=False, indent=2),
+            'role': 'assistant',
+            'content': _render_node_dynamic_contract_summary(payload),
+            NODE_DYNAMIC_CONTRACT_PAYLOAD_KEY: payload,
         }
 
 
 def is_node_dynamic_contract_message(message: dict[str, Any]) -> bool:
-    if str((message or {}).get('role') or '').strip().lower() != 'user':
+    if _node_dynamic_contract_payload_from_message(message) is not None:
+        return True
+    if str((message or {}).get('role') or '').strip().lower() != 'assistant':
         return False
-    raw_content = (message or {}).get('content')
-    if not isinstance(raw_content, str):
-        return False
-    try:
-        payload = json.loads(raw_content)
-    except Exception:
-        return False
-    return isinstance(payload, dict) and str(payload.get('message_type') or '').strip() == NODE_DYNAMIC_CONTRACT_KIND
+    return str((message or {}).get('content') or '').strip().startswith(NODE_DYNAMIC_CONTRACT_HEADING)
 
 
 def upsert_node_dynamic_contract_message(
@@ -186,22 +301,15 @@ def inject_node_dynamic_contract_message(
 
 def extract_node_dynamic_contract_payload(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
     for message in list(messages or []):
-        if not is_node_dynamic_contract_message(message):
-            continue
-        raw_content = message.get('content')
-        if not isinstance(raw_content, str):
-            continue
-        try:
-            payload = json.loads(raw_content)
-        except Exception:
-            continue
-        if isinstance(payload, dict):
+        payload = _node_dynamic_contract_payload_from_message(message)
+        if payload is not None:
             return payload
     return None
 
 
 __all__ = [
     'NODE_DYNAMIC_CONTRACT_KIND',
+    'NODE_DYNAMIC_CONTRACT_HEADING',
     'NodeRuntimeToolContract',
     'extract_node_dynamic_contract_payload',
     'inject_node_dynamic_contract_message',

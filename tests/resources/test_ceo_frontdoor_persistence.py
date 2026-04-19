@@ -39,23 +39,17 @@ from g3ku.runtime.frontdoor.state_models import (
     CeoPersistentState,
     CeoRuntimeContext,
 )
+from g3ku.runtime.frontdoor.tool_contract import (
+    frontdoor_tool_contract_payload_from_message,
+    is_frontdoor_tool_contract_message,
+)
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import SessionManager
 
 
 def _frontdoor_tool_contract_payload(message: dict[str, object]) -> dict[str, object] | None:
-    if str(message.get("role") or "").strip().lower() != "user":
-        return None
-    content = message.get("content")
-    if not isinstance(content, str):
-        return None
-    try:
-        payload = json.loads(content)
-    except Exception:
-        return None
+    payload = frontdoor_tool_contract_payload_from_message(dict(message or {}))
     if not isinstance(payload, dict):
-        return None
-    if str(payload.get("message_type") or "").strip() != "frontdoor_runtime_tool_contract":
         return None
     return dict(payload)
 
@@ -848,7 +842,7 @@ async def test_ceo_frontdoor_call_model_rebuilds_request_messages_from_stable_an
     )
 
     request_messages = list(captured["messages"] or [])
-    assert any(_frontdoor_tool_contract_payload(dict(message)) for message in request_messages)
+    assert any(is_frontdoor_tool_contract_message(dict(message)) for message in request_messages)
     assert any(str(message.get("content") or "").startswith("## Retrieved Context") for message in request_messages)
     assert not any(
         "System note for this turn only:\n## Retrieved Context" in str(message.get("content") or "")

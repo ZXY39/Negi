@@ -1306,23 +1306,21 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
         item
         for item in list(result.dynamic_appendix_messages or [])
         if isinstance(item, dict)
-        and str(item.get("role") or "").strip().lower() == "user"
-        and isinstance(item.get("content"), str)
-        and str(item.get("content") or "").strip()
+        and is_frontdoor_tool_contract_message(item)
     ]
 
     assert len(contract_messages) == 1
-    payload = json.loads(contract_messages[0]["content"])
-    assert "filesystem_write" in payload["callable_tool_names"]
-    assert all(
-        str(item.get("tool_id") or "").strip() != "filesystem_write"
-        for item in list(payload.get("candidate_tools") or [])
-        if isinstance(item, dict)
-    )
-    assert payload["hydrated_tool_names"] == ["filesystem_write"]
-    assert "visible_skill_ids" not in payload
-    assert "rbac_visible_tool_names" not in payload
-    assert "rbac_visible_skill_ids" not in payload
+    contract_message = contract_messages[0]
+    contract_text = str(contract_message.get("content") or "")
+
+    assert contract_message["role"] == "assistant"
+    assert contract_text.startswith("## Runtime Tool Contract")
+    assert '"message_type"' not in contract_text
+    assert '"callable_tool_names"' not in contract_text
+    assert "`filesystem_write`" in contract_text
+    assert "callable_tools:" in contract_text
+    assert "hydrated_tools:" in contract_text
+    assert 'load_tool_context(tool_id="filesystem_write")' not in contract_text
 
 
 @pytest.mark.asyncio
@@ -1357,21 +1355,18 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_with_exec
         item
         for item in list(result.dynamic_appendix_messages or [])
         if isinstance(item, dict)
-        and str(item.get("role") or "").strip().lower() == "user"
-        and isinstance(item.get("content"), str)
-        and str(item.get("content") or "").strip()
+        and is_frontdoor_tool_contract_message(item)
     ]
 
     assert len(contract_messages) == 1
-    payload = json.loads(contract_messages[0]["content"])
-    assert payload["exec_runtime_policy"] == {
-        'mode': 'full_access',
-        'guardrails_enabled': False,
-        'summary': 'exec will execute shell commands without exec-side guardrails.',
-    }
-    assert "visible_skill_ids" not in payload
-    assert "rbac_visible_tool_names" not in payload
-    assert "rbac_visible_skill_ids" not in payload
+    contract_text = str(contract_messages[0]["content"] or "")
+
+    assert contract_messages[0]["role"] == "assistant"
+    assert contract_text.startswith("## Runtime Tool Contract")
+    assert "exec_runtime_policy:" in contract_text
+    assert "mode=full_access" in contract_text
+    assert "guardrails_enabled=False" in contract_text
+    assert "exec will execute shell commands without exec-side guardrails." in contract_text
 
 
 def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stale_message() -> None:
@@ -1413,20 +1408,17 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
     contract_messages = [
         item
         for item in records
-        if str(item.get("role") or "").strip().lower() == "user"
-        and isinstance(item.get("content"), str)
-        and str(item.get("content") or "").strip()
+        if is_frontdoor_tool_contract_message(item)
     ]
 
     assert len(contract_messages) == 1
-    payload = json.loads(contract_messages[0]["content"])
-    assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
-    assert payload["candidate_tools"] == []
-    assert payload["hydrated_tool_names"] == ["filesystem_write"]
-    assert payload["candidate_skill_ids"] == ["memory"]
-    assert "visible_skill_ids" not in payload
-    assert "rbac_visible_tool_names" not in payload
-    assert "rbac_visible_skill_ids" not in payload
+    contract_text = str(contract_messages[0]["content"] or "")
+    assert contract_messages[0]["role"] == "assistant"
+    assert contract_text.startswith("## Runtime Tool Contract")
+    assert "callable_tools: `submit_next_stage`, `filesystem_write`" in contract_text
+    assert "candidate_tools: none" in contract_text
+    assert "hydrated_tools: `filesystem_write`" in contract_text
+    assert "candidate_skills: `memory`" in contract_text
 
 
 def test_frontdoor_dynamic_appendix_records_require_canonical_tool_state_fields() -> None:
@@ -1465,7 +1457,7 @@ def test_message_builder_detects_chinese_memory_write_phrases(
     assert expected_terms.issubset(matched)
 
 
-def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_json_string() -> None:
+def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_text() -> None:
     contract = build_frontdoor_tool_contract(
         callable_tool_names=["submit_next_stage", "filesystem_write"],
         candidate_tool_names=["agent_browser"],
@@ -1497,8 +1489,14 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_json_stri
     updated = upsert_frontdoor_tool_contract_message([legacy_message], contract)
     assert len(updated) == 1
     assert is_frontdoor_tool_contract_message(updated[0])
+    assert updated[0]["role"] == "assistant"
     assert isinstance(updated[0]["content"], str)
-    payload = json.loads(updated[0]["content"])
+    assert str(updated[0]["content"] or "").startswith("## Runtime Tool Contract")
+    assert '"message_type"' not in str(updated[0]["content"] or "")
+    assert "callable_tools: `submit_next_stage`, `filesystem_write`" in str(updated[0]["content"] or "")
+    assert "candidate_tools:" in str(updated[0]["content"] or "")
+    assert 'load_tool_context(tool_id="agent_browser")' in str(updated[0]["content"] or "")
+    payload = contract.to_message_payload()
     assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
     assert payload["candidate_tools"] == [
         {

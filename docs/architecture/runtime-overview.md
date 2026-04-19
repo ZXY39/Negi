@@ -602,6 +602,13 @@ There is now a second explicit continuity contract for prompt assembly:
 - That baseline intentionally excludes `frontdoor_runtime_tool_contract` messages; dynamic tool/skill exposure must still be rebuilt as a fresh tail contract for each round.
 - Prompt assembly is allowed to reduce this baseline only at the two documented information-loss boundaries: `token_compression` and same-turn `stage_compaction`.
 - For fresh visible CEO/frontdoor turns, this session-owned request body baseline now has priority over any graph-local checkpoint-style stage replay projection. If both exist, prompt assembly must continue from the body baseline instead of rebuilding a new main prefix from stage replay.
+
+## Runtime Contract Lane
+
+- CEO/frontdoor and node runtime now both treat the model-facing runtime contract as an assistant summary block rather than a raw JSON user message.
+- The summary block is intentionally compact. It carries names-only callable and hydrated lists plus candidate summaries, while provider-native callable schemas still flow through provider `tools[]`.
+- The hot same-turn provider request may still keep earlier contract snapshots so request growth stays append-only. The newest contract summary in that request is the authoritative one for the current round.
+- Durable continuity baselines continue to strip runtime-contract messages before persistence. If a later turn appears to inherit an old contract summary as ordinary history, treat that as a contract-lane replay bug.
 - If the next baseline is shorter for any other reason, `prepare_turn` treats that as unexpected context loss and fails fast instead of silently continuing with a truncated request.
 
 Maintainers should treat the canonical context representation rules as the only allowed information-loss boundary:
