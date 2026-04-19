@@ -89,7 +89,6 @@ def test_tool_manifests_match_explicit_parameter_contracts():
         'load_tool_context',
         'memory_note',
         'memory_write',
-        'message',
         'model_config',
         'task_append_notice_cn',
         'task_delete_cn',
@@ -199,7 +198,6 @@ def test_skill_installer_method_description_matches_runtime_strategy():
 def test_selected_tool_manifests_do_not_contain_known_mojibake_tokens() -> None:
     manifest_paths = [
         TOOLS_ROOT / 'cron' / 'resource.yaml',
-        TOOLS_ROOT / 'message' / 'resource.yaml',
         TOOLS_ROOT / 'model_config' / 'resource.yaml',
         TOOLS_ROOT / 'skill-installer' / 'resource.yaml',
         TOOLS_ROOT / 'web_fetch' / 'resource.yaml',

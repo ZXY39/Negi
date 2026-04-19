@@ -243,7 +243,7 @@ def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only(
 
     contract_payload = {
         "message_type": "frontdoor_runtime_tool_contract",
-        "callable_tool_names": ["message", "submit_next_stage"],
+        "callable_tool_names": ["exec", "submit_next_stage"],
         "candidate_tools": [],
         "hydrated_tool_names": [],
         "candidate_skill_ids": [],

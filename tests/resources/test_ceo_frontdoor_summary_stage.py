@@ -13,10 +13,10 @@ async def test_frontdoor_postprocess_tool_cycle_drops_summary_fields(monkeypatch
 
     result = await runner._postprocess_completed_tool_cycle(
         state={
-            "tool_call_payloads": [{"id": "call-1", "name": "message", "arguments": {"text": "hello"}}],
+            "tool_call_payloads": [{"id": "call-1", "name": "exec", "arguments": {"command": "echo hello"}}],
             "messages": [
-                {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1", "name": "message"}]},
-                {"role": "tool", "tool_call_id": "call-1", "name": "message", "content": "sent", "status": "success"},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1", "name": "exec"}]},
+                {"role": "tool", "tool_call_id": "call-1", "name": "exec", "content": "ok", "status": "success"},
             ],
             "used_tools": [],
             "route_kind": "direct_reply",
