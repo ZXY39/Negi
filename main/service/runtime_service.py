@@ -530,27 +530,6 @@ class MainRuntimeService:
             return bool(default)
         return raw not in {'0', 'false', 'no', 'off'}
 
-    def _web_disable_message_tool_enabled(self) -> bool:
-        if self.execution_mode != 'web':
-            return False
-        # Default: enabled in web mode because the message tool is frequently miscalled in pure web UI sessions.
-        return self._bool_env('G3KU_WEB_DISABLE_MESSAGE_TOOL', default=True)
-
-    def _apply_web_startup_tool_defaults(self) -> None:
-        """Apply web-mode tool defaults that should be enforced at runtime startup/reload."""
-        if not self._web_disable_message_tool_enabled():
-            return
-        try:
-            family = self._raw_tool_family('messaging')
-        except Exception:
-            family = None
-        if family is None:
-            return
-        if not bool(getattr(family, 'enabled', True)):
-            return
-        updated = family.model_copy(update={'enabled': False})
-        self.governance_store.upsert_tool_family(updated, updated_at=now_iso())
-
     async def startup(self) -> None:
         if self._started:
             return
@@ -562,7 +541,6 @@ class MainRuntimeService:
             self.worker_heartbeat_service.start_background()
         self.resource_registry.refresh_from_current_resources()
         self.reconcile_core_tool_families()
-        self._apply_web_startup_tool_defaults()
         self.policy_engine.sync_default_role_policies()
         self._record_resource_tree_state()
         if self.memory_manager is not None and hasattr(self.memory_manager, 'sync_catalog'):
@@ -5578,9 +5556,6 @@ class MainRuntimeService:
         metadata = dict(getattr(family, 'metadata', {}) or {})
         metadata['repair_required'] = bool(getattr(family, 'callable', True)) and not bool(getattr(family, 'available', True))
         normalized_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-        if self.execution_mode == 'web' and normalized_tool_id == 'messaging':
-            metadata.setdefault('web_default_disabled', bool(self._web_disable_message_tool_enabled()))
-            metadata.setdefault('web_default_disabled_env', 'G3KU_WEB_DISABLE_MESSAGE_TOOL')
         return family.model_copy(
             update={
                 'tool_id': self._external_tool_family_id(str(getattr(family, 'tool_id', '') or '')),
@@ -5600,12 +5575,6 @@ class MainRuntimeService:
         changed = False
         for family in list(self.resource_registry.list_tool_families()):
             if str(getattr(family, 'tool_id', '') or '').strip() not in resolution.family_ids:
-                continue
-            if (
-                self._web_disable_message_tool_enabled()
-                and str(getattr(family, 'tool_id', '') or '').strip() == 'messaging'
-            ):
-                # In web mode, message can be force-disabled to prevent accidental LLM calls in the pure web UI.
                 continue
             family_changed = not bool(getattr(family, 'enabled', True))
             if not family_changed:
@@ -5731,13 +5700,12 @@ class MainRuntimeService:
         target_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
         is_core = target_tool_id in self._core_tool_resolution().family_ids
         if is_core and enabled is not None and not bool(enabled):
-            if not (self._web_disable_message_tool_enabled() and target_tool_id == 'messaging'):
-                raise ResourceMutationBlockedError(
-                    code='core_tool_disable_forbidden',
-                    message='Core tool families cannot be disabled.',
-                    resource_kind='tool_family',
-                    resource_id=target_tool_id,
-                )
+            raise ResourceMutationBlockedError(
+                code='core_tool_disable_forbidden',
+                message='Core tool families cannot be disabled.',
+                resource_kind='tool_family',
+                resource_id=target_tool_id,
+            )
         allowed_roles_by_action = dict(allowed_roles_by_action or {})
         actions = []
         for action in family.actions:

@@ -264,12 +264,6 @@ class _StandaloneResourceService:
             return bool(default)
         return raw not in {'0', 'false', 'no', 'off'}
 
-    @classmethod
-    def _web_disable_message_tool_enabled(cls) -> bool:
-        if str(os.getenv('G3KU_TASK_RUNTIME_ROLE', '') or '').strip().lower() != 'web':
-            return False
-        return cls._bool_env('G3KU_WEB_DISABLE_MESSAGE_TOOL', default=True)
-
     def _core_tool_resolution(self):
         return resolve_core_tool_targets(
             self._configured_core_tool_entries(),
@@ -285,10 +279,6 @@ class _StandaloneResourceService:
         resolution = self._core_tool_resolution()
         metadata = dict(getattr(family, 'metadata', {}) or {})
         metadata['repair_required'] = bool(getattr(family, 'callable', True)) and not bool(getattr(family, 'available', True))
-        normalized_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-        if normalized_tool_id == 'messaging':
-            metadata.setdefault('web_default_disabled', bool(self._web_disable_message_tool_enabled()))
-            metadata.setdefault('web_default_disabled_env', 'G3KU_WEB_DISABLE_MESSAGE_TOOL')
         return family.model_copy(update={'is_core': family.tool_id in resolution.family_ids, 'metadata': metadata})
 
     def list_tool_resources(self) -> list[Any]:
@@ -764,13 +754,12 @@ class _StandaloneResourceService:
         target_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
         is_core = target_tool_id in self._core_tool_resolution().family_ids
         if is_core and enabled is not None and not bool(enabled):
-            if not (self._web_disable_message_tool_enabled() and target_tool_id == 'messaging'):
-                raise _ResourceMutationBlockedError(
-                    code='core_tool_disable_forbidden',
-                    message='Core tool families cannot be disabled.',
-                    resource_kind='tool_family',
-                    resource_id=target_tool_id,
-                )
+            raise _ResourceMutationBlockedError(
+                code='core_tool_disable_forbidden',
+                message='Core tool families cannot be disabled.',
+                resource_kind='tool_family',
+                resource_id=target_tool_id,
+            )
         allowed_roles_by_action = dict(allowed_roles_by_action or {})
         actions = []
         for action in family.actions:
