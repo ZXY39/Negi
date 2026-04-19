@@ -258,6 +258,19 @@ async def test_node_detail_exposes_consumed_append_notice_messages(tmp_path: Pat
                 "compression_stage_id": "",
             }
         ]
+        assert detail.message_list == [
+            {
+                "notification_id": "notif:notice-1",
+                "epoch_id": "epoch:notice",
+                "source_node_id": "node:source",
+                "message": "改成男性角色Top20",
+                "received_at": "2026-04-19T15:26:11+08:00",
+                "consumed_at": "2026-04-19T15:26:11+08:00",
+                "status": "consumed",
+                "compression_stage_id": "",
+                "deliveries": [],
+            }
+        ]
     finally:
         await service.close()
 
@@ -1465,17 +1478,304 @@ async def test_distribution_epoch_completes_and_task_resumes_ordinary_execution(
         await service.task_actor_service.run_task(record.task_id)
 
         updated_task = service.get_task(record.task_id)
+        updated_root = service.store.get_node(record.root_node_id)
         updated_epoch = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
         runtime_meta = service.log_service.read_task_runtime_meta(record.task_id) or {}
         distribution = dict(runtime_meta.get("distribution") or {})
 
         assert updated_task is not None
+        assert updated_root is not None
+        assert updated_task.status == "in_progress"
         assert updated_task.pause_requested is False
         assert updated_task.is_paused is False
+        assert updated_root.status == "in_progress"
+        assert updated_root.failure_reason == ""
         assert updated_epoch is not None
         assert updated_epoch.state == "completed"
         assert distribution["state"] == ""
         assert distribution["frontier_node_ids"] == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_root_distribution_message_is_consumed_into_append_notice_context_at_next_safe_boundary(tmp_path: Path) -> None:
+    from main.runtime.append_notice_context import APPEND_NOTICE_TAIL_PREFIX
+
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_message_distribution",
+                        "arguments": {
+                            "children": [],
+                            "notes": "root node keeps the new requirement",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "stage_status": "active",
+                "stage_goal": "old stage",
+                "callable_tool_names": [
+                    "submit_next_stage",
+                    "submit_final_result",
+                    "spawn_child_nodes",
+                    "content_describe",
+                    "content_open",
+                    "content_search",
+                    "exec",
+                    "load_skill_context",
+                    "load_tool_context",
+                ],
+                "provider_tool_names": [
+                    "submit_next_stage",
+                    "submit_final_result",
+                    "spawn_child_nodes",
+                    "content_describe",
+                    "content_open",
+                    "content_search",
+                    "exec",
+                    "load_skill_context",
+                    "load_tool_context",
+                ],
+                "messages": [
+                    {"role": "system", "content": "system seed"},
+                    {"role": "user", "content": "historic request"},
+                ],
+            },
+        )
+        epoch = await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="改成男性角色Top20并停止女性候选收集",
+            frontier_node_ids=[record.root_node_id],
+        )
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        updated_root = service.store.get_node(record.root_node_id)
+        pending_root_notices = list((updated_root.metadata or {}).get("pending_append_notice_records") or [])
+
+        assert updated_root is not None
+        assert len(pending_root_notices) == 1
+        assert pending_root_notices[0]["notification_id"] == f"root-notice:{epoch.epoch_id}:1"
+        assert pending_root_notices[0]["epoch_id"] == epoch.epoch_id
+        assert pending_root_notices[0]["source_node_id"] == record.root_node_id
+        assert pending_root_notices[0]["message"] == "改成男性角色Top20并停止女性候选收集"
+        assert pending_root_notices[0]["created_at"]
+        assert pending_root_notices[0]["order_index"] == 1
+
+        resumed = await service.node_runner._resume_react_state(task=task, node=updated_root)
+        pending_root_notice_ids = list(resumed.get("pending_root_notice_ids") or [])
+        frame = service.log_service.read_runtime_frame(record.task_id, record.root_node_id) or {}
+
+        assert resumed["messages"][-1]["role"] == "user"
+        assert resumed["messages"][-1]["content"] == "改成男性角色Top20并停止女性候选收集"
+        assert pending_root_notice_ids == [f"root-notice:{epoch.epoch_id}:1"]
+        assert frame.get("stage_status") == ""
+        assert frame.get("stage_goal") == ""
+
+        service.node_runner._record_consumed_notice_context(
+            node_id=record.root_node_id,
+            notifications=service.node_runner._pending_root_notice_records_by_ids(
+                node_id=record.root_node_id,
+                notification_ids=pending_root_notice_ids,
+            ),
+        )
+        service.node_runner._consume_pending_root_notice_records(
+            node_id=record.root_node_id,
+            notification_ids=pending_root_notice_ids,
+        )
+
+        consumed_root = service.store.get_node(record.root_node_id)
+        prepared = service._react_loop._prepare_messages(
+            list(resumed["messages"]),
+            runtime_context={"task_id": record.task_id, "node_id": record.root_node_id},
+        )
+        prepared_contents = [str(item.get("content") or "") for item in prepared]
+        detail = service.query_service.get_node_detail(record.task_id, record.root_node_id, detail_level="full")
+
+        assert consumed_root is not None
+        assert list((consumed_root.metadata or {}).get("pending_append_notice_records") or []) == []
+        assert sum(1 for content in prepared_contents if "改成男性角色Top20并停止女性候选收集" in content) == 1
+        assert all(
+            not (content.startswith(APPEND_NOTICE_TAIL_PREFIX) and "改成男性角色Top20并停止女性候选收集" in content)
+            for content in prepared_contents
+        )
+        assert detail is not None
+        assert detail.append_notice_messages == [
+            {
+                "notification_id": f"root-notice:{epoch.epoch_id}:1",
+                "epoch_id": epoch.epoch_id,
+                "source_node_id": record.root_node_id,
+                "message": "改成男性角色Top20并停止女性候选收集",
+                "consumed_at": detail.append_notice_messages[0]["consumed_at"],
+                "compression_stage_id": "",
+            }
+        ]
+        assert detail.append_notice_messages[0]["consumed_at"]
+        assert detail.message_list == [
+            {
+                "notification_id": f"root-notice:{epoch.epoch_id}:1",
+                "epoch_id": epoch.epoch_id,
+                "source_node_id": record.root_node_id,
+                "message": "改成男性角色Top20并停止女性候选收集",
+                "received_at": pending_root_notices[0]["created_at"],
+                "consumed_at": detail.message_list[0]["consumed_at"],
+                "status": "consumed",
+                "compression_stage_id": "",
+                "deliveries": [],
+            }
+        ]
+        assert detail.message_list[0]["consumed_at"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_tree_snapshot_exposes_pending_notice_count_for_root(tmp_path: Path) -> None:
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_message_distribution",
+                        "arguments": {
+                            "children": [],
+                            "notes": "root node keeps the new requirement",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="改成男性角色Top20并停止女性候选收集",
+            frontier_node_ids=[record.root_node_id],
+        )
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        snapshot = service.query_service.get_tree_snapshot(record.task_id)
+
+        assert snapshot is not None
+        assert snapshot.nodes_by_id[record.root_node_id].pending_notice_count == 1
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_root_distribution_message_is_consumed_immediately_after_first_model_response(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "stage_status": "active",
+                "stage_goal": "old stage",
+                "callable_tool_names": [
+                    "submit_next_stage",
+                    "submit_final_result",
+                    "spawn_child_nodes",
+                    "content_describe",
+                    "content_open",
+                    "content_search",
+                    "exec",
+                    "load_skill_context",
+                    "load_tool_context",
+                ],
+                "provider_tool_names": [
+                    "submit_next_stage",
+                    "submit_final_result",
+                    "spawn_child_nodes",
+                    "content_describe",
+                    "content_open",
+                    "content_search",
+                    "exec",
+                    "load_skill_context",
+                    "load_tool_context",
+                ],
+                "messages": [
+                    {"role": "system", "content": "system seed"},
+                    {"role": "user", "content": "historic request"},
+                ],
+            },
+        )
+        service.log_service.update_node_metadata(
+            record.root_node_id,
+            lambda metadata: {
+                **metadata,
+                "pending_append_notice_records": [
+                    {
+                        "notification_id": "root-notice:epoch:test:1",
+                        "epoch_id": "epoch:test",
+                        "source_node_id": record.root_node_id,
+                        "message": "改成男性角色Top20并停止女性候选收集",
+                        "created_at": "2026-04-19T10:00:00+08:00",
+                        "order_index": 1,
+                    }
+                ],
+            },
+        )
+
+        observed_pending_notice_count = None
+
+        async def fake_react_run(**kwargs):
+            nonlocal observed_pending_notice_count
+            consume_callback = kwargs.get("runtime_context", {}).get("consume_inflight_notice_callback")
+            assert callable(consume_callback)
+            consume_callback()
+            current = service.store.get_node(record.root_node_id)
+            observed_pending_notice_count = len(list((current.metadata or {}).get("pending_append_notice_records") or []))
+            return NodeFinalResult(
+                status="success",
+                delivery_status="final",
+                summary="ordinary execution resumed",
+                answer="ordinary execution resumed",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="",
+            )
+
+        service.node_runner._react_loop.run = fake_react_run
+
+        await service.node_runner.run_node(record.task_id, record.root_node_id)
+        assert observed_pending_notice_count == 0
     finally:
         await service.close()
 

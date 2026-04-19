@@ -283,6 +283,24 @@ class ModelManager:
                     raise ValueError(f"Disabled model cannot be assigned to roles: {key}")
                 context_window_tokens = getattr(model, "context_window_tokens", None)
                 if not isinstance(context_window_tokens, int) or context_window_tokens <= 25_000:
+                    # Some older installs have chat bindings whose `.g3ku/config.json` catalog entry
+                    # lacks `contextWindowTokens`, even though the bound `llm-config` record has a
+                    # valid `parameters.context_window_tokens`. Backfill on save so role-chain
+                    # edits can proceed without forcing operators to manually sync the two stores.
+                    resolved = None
+                    try:
+                        resolved = self.facade.get_binding(self.config, key).get("context_window_tokens")
+                    except Exception:
+                        resolved = None
+                    try:
+                        resolved_int = int(resolved) if resolved not in (None, "") else None
+                    except (TypeError, ValueError):
+                        resolved_int = None
+                    if isinstance(resolved_int, int) and resolved_int > 25_000:
+                        model.context_window_tokens = resolved_int
+                        context_window_tokens = resolved_int
+
+                if not isinstance(context_window_tokens, int) or context_window_tokens <= 25_000:
                     raise ValueError(
                         f"Model {key} in scope {normalized_scope} must configure context_window_tokens > 25000"
                     )

@@ -30,7 +30,10 @@ from main.prompts import load_prompt
 from main.protocol import now_iso
 from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
+    PENDING_APPEND_NOTICE_RECORDS_KEY,
+    consume_pending_append_notice_records,
     normalize_append_notice_context,
+    normalize_pending_append_notice_records,
     record_consumed_notifications,
 )
 from main.runtime.internal_tools import (
@@ -299,12 +302,42 @@ class NodeRunner:
                     awaitable=self._context_preparer(task=task, node=node),
                 )
             tools = self._build_tools(task=task, node=node)
+            runtime_context = self._runtime_context(task=task, node=node)
             react_state = await self._await_with_runtime_marker(
                 task_id=task_id,
                 node_id=node.node_id,
                 marker='resume_react_state',
                 awaitable=self._resume_react_state(task=task, node=node),
             )
+            pending_notification_ids = [
+                str(item or '').strip()
+                for item in list(react_state.get('pending_notification_ids') or [])
+                if str(item or '').strip()
+            ]
+            pending_root_notice_ids = [
+                str(item or '').strip()
+                for item in list(react_state.get('pending_root_notice_ids') or [])
+                if str(item or '').strip()
+            ]
+            inflight_notice_consumed = False
+
+            def _consume_inflight_notices_once() -> None:
+                nonlocal inflight_notice_consumed
+                if inflight_notice_consumed:
+                    return
+                inflight_notice_consumed = True
+                self._consume_inflight_notice_ids(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    pending_notification_ids=pending_notification_ids,
+                    pending_root_notice_ids=pending_root_notice_ids,
+                )
+
+            if pending_notification_ids or pending_root_notice_ids:
+                runtime_context = {
+                    **runtime_context,
+                    'consume_inflight_notice_callback': _consume_inflight_notices_once,
+                }
             result = await self._await_with_runtime_marker(
                 task_id=task_id,
                 node_id=node.node_id,
@@ -321,32 +354,12 @@ class NodeRunner:
                     ),
                     model_refs=self._model_refs_for(node),
                     model_refs_supplier=lambda current_node=node: self._model_refs_for(current_node),
-                    runtime_context=self._runtime_context(task=task, node=node),
+                    runtime_context=runtime_context,
                     max_iterations=self._max_iterations_for(node),
                     max_parallel_tool_calls=self._max_parallel_tool_calls_for(node),
                 ),
             )
-            pending_notification_ids = [
-                str(item or '').strip()
-                for item in list(react_state.get('pending_notification_ids') or [])
-                if str(item or '').strip()
-            ]
-            if pending_notification_ids:
-                pending_notifications = self._notifications_by_ids(
-                    task_id=task.task_id,
-                    node_id=node.node_id,
-                    notification_ids=pending_notification_ids,
-                )
-                if pending_notifications:
-                    self._record_consumed_notice_context(
-                        node_id=node.node_id,
-                        notifications=pending_notifications,
-                    )
-                self._consume_node_notifications(
-                    task_id=task.task_id,
-                    node_id=node.node_id,
-                    notification_ids=pending_notification_ids,
-                )
+            _consume_inflight_notices_once()
             if self._pause_requested(task_id):
                 self._mark_finished(task_id, node.node_id, result)
                 self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
@@ -405,14 +418,21 @@ class NodeRunner:
 
     async def _resume_react_state(self, *, task, node: NodeRecord) -> dict[str, Any]:
         notifications = self._pending_node_notifications(task_id=task.task_id, node_id=node.node_id)
+        pending_root_notice_records = self._pending_root_notice_records(node=node)
         request_body_seed_messages = self._latest_actual_request_seed_messages(task=task, node=node)
-        if notifications:
+        if notifications or pending_root_notice_records:
             messages = await self._base_messages_for_reactivated_or_live_node(task=task, node=node)
-            messages = self._append_mailbox_messages(messages=messages, notifications=notifications)
+            messages = self._append_notice_messages(messages=messages, notices=notifications)
+            messages = self._append_notice_messages(messages=messages, notices=pending_root_notice_records)
             self._close_active_stage_for_message_consumption(task_id=task.task_id, node_id=node.node_id)
             return {
                 'messages': messages,
                 'pending_notification_ids': [str(item.notification_id or '').strip() for item in notifications],
+                'pending_root_notice_ids': [
+                    str(item.get('notification_id') or '').strip()
+                    for item in list(pending_root_notice_records or [])
+                    if str(item.get('notification_id') or '').strip()
+                ],
                 'request_body_seed_messages': request_body_seed_messages,
             }
         frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
@@ -515,6 +535,18 @@ class NodeRunner:
             appended.append({'role': 'user', 'content': text})
         return appended
 
+    def _append_notice_messages(self, *, messages: list[dict[str, Any]], notices: list[Any]) -> list[dict[str, Any]]:
+        appended = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+        for notice in list(notices or []):
+            if isinstance(notice, dict):
+                text = str(notice.get('message') or '').strip()
+            else:
+                text = str(getattr(notice, 'message', '') or '').strip()
+            if not text:
+                continue
+            appended.append({'role': 'user', 'content': text})
+        return appended
+
     def _consume_node_notifications(self, *, task_id: str, node_id: str, notification_ids: list[str]) -> None:
         ids = {str(item or '').strip() for item in list(notification_ids or []) if str(item or '').strip()}
         if not ids:
@@ -541,6 +573,80 @@ class NodeRunner:
                 notifications=list(notifications or []),
                 consumed_at=consumed_at,
             )
+            return metadata
+
+        self._log_service.update_node_metadata(node_id, _mutate)
+
+    def _consume_inflight_notice_ids(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        pending_notification_ids: list[str],
+        pending_root_notice_ids: list[str],
+    ) -> None:
+        if pending_notification_ids:
+            pending_notifications = self._notifications_by_ids(
+                task_id=task_id,
+                node_id=node_id,
+                notification_ids=pending_notification_ids,
+            )
+            if pending_notifications:
+                self._record_consumed_notice_context(
+                    node_id=node_id,
+                    notifications=pending_notifications,
+                )
+            self._consume_node_notifications(
+                task_id=task_id,
+                node_id=node_id,
+                notification_ids=pending_notification_ids,
+            )
+        if pending_root_notice_ids:
+            pending_root_notifications = self._pending_root_notice_records_by_ids(
+                node_id=node_id,
+                notification_ids=pending_root_notice_ids,
+            )
+            if pending_root_notifications:
+                self._record_consumed_notice_context(
+                    node_id=node_id,
+                    notifications=pending_root_notifications,
+                )
+            self._consume_pending_root_notice_records(
+                node_id=node_id,
+                notification_ids=pending_root_notice_ids,
+            )
+
+    def _pending_root_notice_records(self, *, node: NodeRecord) -> list[dict[str, Any]]:
+        metadata = dict(node.metadata or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
+        return normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
+
+    def _pending_root_notice_records_by_ids(self, *, node_id: str, notification_ids: list[str]) -> list[dict[str, Any]]:
+        ids = {str(item or '').strip() for item in list(notification_ids or []) if str(item or '').strip()}
+        if not ids:
+            return []
+        node = self._store.get_node(node_id)
+        if node is None:
+            return []
+        return [
+            dict(item)
+            for item in list(self._pending_root_notice_records(node=node) or [])
+            if str(item.get('notification_id') or '').strip() in ids
+        ]
+
+    def _consume_pending_root_notice_records(self, *, node_id: str, notification_ids: list[str]) -> None:
+        ids = [str(item or '').strip() for item in list(notification_ids or []) if str(item or '').strip()]
+        if not ids:
+            return
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            remaining = consume_pending_append_notice_records(
+                metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY),
+                notification_ids=ids,
+            )
+            if remaining:
+                metadata[PENDING_APPEND_NOTICE_RECORDS_KEY] = remaining
+            else:
+                metadata.pop(PENDING_APPEND_NOTICE_RECORDS_KEY, None)
             return metadata
 
         self._log_service.update_node_metadata(node_id, _mutate)

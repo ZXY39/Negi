@@ -1261,6 +1261,9 @@ function handleTaskEvent(payload) {
         return;
     }
     if (payload.type === "task.live.patch") {
+        const previousDistributionState = typeof activeTaskDistributionState === "function"
+            ? activeTaskDistributionState()
+            : null;
         const runtimeSummary = payload.data?.runtime_summary || {};
         const frames = Array.isArray(runtimeSummary?.frames) ? runtimeSummary.frames : [];
         const activeNodeIds = Array.isArray(runtimeSummary?.active_node_ids) ? runtimeSummary.active_node_ids : [];
@@ -1279,6 +1282,14 @@ function handleTaskEvent(payload) {
             waiting_node_count: waitingNodeIds.length,
         };
         if (String(S.treeRootNodeId || "").trim()) {
+            const nextDistributionState = typeof activeTaskDistributionState === "function"
+                ? activeTaskDistributionState()
+                : null;
+            const distributionUiChanged = String(previousDistributionState?.ui_mode || "").trim() !== String(nextDistributionState?.ui_mode || "").trim()
+                || String(previousDistributionState?.active_epoch_id || "").trim() !== String(nextDistributionState?.active_epoch_id || "").trim()
+                || String(previousDistributionState?.state || "").trim() !== String(nextDistributionState?.state || "").trim();
+            const sawDistributionFrame = frames.some((item) => String(item?.phase || "").trim() === "message_distribution");
+            const rootNodeId = String(S.treeRootNodeId || "").trim();
             const candidateNodeIds = [...new Set([...activeNodeIds, ...runnableNodeIds, ...waitingNodeIds]
                 .map((item) => String(item || "").trim())
                 .filter(Boolean))];
@@ -1286,6 +1297,10 @@ function handleTaskEvent(payload) {
                 .filter((item) => !treeSnapshotNode(item))
                 .slice(0, 3)
                 .forEach((item) => { void reconcileTaskTreeForNode(item); });
+            if (rootNodeId && (distributionUiChanged || sawDistributionFrame)) {
+                scheduleTaskTreeBranchSync(rootNodeId, { delayMs: 0 });
+                renderTree();
+            }
             if (typeof scheduleRenderedTreeNodeStatusRefresh === "function") scheduleRenderedTreeNodeStatusRefresh();
         }
         if (runtimeSummary?.governance) {
@@ -1332,6 +1347,9 @@ function handleTaskEvent(payload) {
                     if (typeof refreshRenderedTreeNodeStatus === "function") refreshRenderedTreeNodeStatus(nodeId);
                     if (previousFingerprint !== String(nextNode?.children_fingerprint || "").trim()) {
                         scheduleTaskTreeBranchSync(nodeId);
+                    }
+                    if (String(S.treeRootNodeId || "").trim() === nodeId && Number(existingTreeNode?.pending_notice_count || 0) > 0) {
+                        scheduleTaskTreeBranchSync(nodeId, { delayMs: 0 });
                     }
                 } else if (parentNodeId) {
                     scheduleTaskTreeBranchSync(parentNodeId);

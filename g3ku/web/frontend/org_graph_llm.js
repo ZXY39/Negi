@@ -2183,6 +2183,9 @@
       S.modelCatalog.roleEditing = false;
       S.modelCatalog.rolesDirty = false;
       showToast({ title: "保存成功", text: "模型链已更新", kind: "success" });
+    } catch (error) {
+      llmState().error = error?.message || "保存失败";
+      showToast({ title: "保存失败", text: llmState().error, kind: "error" });
     } finally {
       llmState().saving = false;
       renderAll();

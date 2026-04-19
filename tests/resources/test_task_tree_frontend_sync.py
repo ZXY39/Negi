@@ -2379,7 +2379,129 @@ def test_render_tree_shows_distribution_notice_and_forces_yellow_connector_mode(
     assert result["noticeText"] == "接收到新消息，分发中"
 
 
-def test_build_execution_trace_steps_inserts_notice_pseudo_stage_before_latest_real_stage() -> None:
+def test_render_tree_shows_pending_notice_banner_when_distribution_already_completed() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        class StubElement {
+          constructor(tag = "div") {
+            this.tagName = tag.toUpperCase();
+            this.children = [];
+            this.className = "";
+            this.dataset = {};
+            this.style = {};
+            this.hidden = false;
+            this.attributes = {};
+            this.parentNode = null;
+            this.textContent = "";
+            this.classList = {
+              add: (...tokens) => {
+                const set = new Set(String(this.className || "").split(/\\s+/).filter(Boolean));
+                tokens.forEach((token) => set.add(String(token || "")));
+                this.className = [...set].join(" ");
+              },
+              remove: (...tokens) => {
+                const blocked = new Set(tokens.map((token) => String(token || "")));
+                this.className = String(this.className || "")
+                  .split(/\\s+/)
+                  .filter((token) => token && !blocked.has(token))
+                  .join(" ");
+              },
+              contains: (token) => String(this.className || "").split(/\\s+/).includes(String(token || "")),
+              toggle: (token, force) => {
+                const shouldAdd = force == null ? !this.classList.contains(token) : !!force;
+                if (shouldAdd) this.classList.add(token);
+                else this.classList.remove(token);
+                return shouldAdd;
+              },
+            };
+          }
+          appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
+          setAttribute(name, value) { this.attributes[name] = String(value); }
+          querySelector() { return null; }
+          querySelectorAll() { return []; }
+          addEventListener() {}
+          closest() { return null; }
+        }
+        global.Element = StubElement;
+        global.HTMLElement = StubElement;
+        global.document = {
+          createElement: (tag) => new StubElement(tag),
+        };
+        global.S = {
+          treeRootNodeId: "root",
+          treeNodesById: {
+            root: {
+              node_id: "root",
+              title: "root",
+              status: "in_progress",
+              node_kind: "execution",
+              default_round_id: "",
+              rounds: [],
+              auxiliary_child_ids: [],
+              pending_notice_count: 1,
+            },
+          },
+          treeSelectedRoundByNodeId: {},
+          treeView: {
+            node_id: "root",
+            title: "root",
+            fullTitle: "root",
+            state: "in_progress",
+            visual_state: "in_progress",
+            display_state: "进行中",
+            rounds: [],
+            children: [],
+            selectedRoundId: "",
+          },
+          taskRuntimeSummary: { distribution: { active_epoch_id: "", state: "" } },
+          treePan: { offsetX: 0, offsetY: 0, scale: 1 },
+          selectedNodeId: "",
+        };
+        global.U = { tree: new StubElement("div") };
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        global.treeNormalizeInt = global.normalizeInt;
+        global.esc = (value) => String(value ?? "");
+        global.icons = () => {};
+        global.setTaskDetailOpen = () => {};
+        global.captureTaskDetailViewState = () => ({});
+        global.stashTaskDetailViewState = () => {};
+        global.scheduleTaskDetailSessionPersist = () => {};
+        global.findTreeNode = () => null;
+        global.resolveExecutionTreeDensity = () => ({ mode: "default", stats: { totalItems: 1, maxBreadth: 1 } });
+        global.hasManualTreeRoundSelections = () => false;
+        global.showAgent = () => Promise.resolve();
+        global.enhanceResourceSelects = () => {};
+        global.formatTokenCount = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        renderTree();
+
+        const notice = U.tree.children.find((item) => item instanceof StubElement && String(item.className || "").includes("task-tree-distribution-bubble"));
+        console.log(JSON.stringify({
+          noticeText: notice?.textContent || "",
+        }));
+        """
+    )
+
+    assert result["noticeText"] == "接收到新消息，等待节点处理"
+
+
+def test_build_execution_trace_steps_no_longer_inserts_notice_pseudo_stage() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -2418,32 +2540,77 @@ def test_build_execution_trace_steps_inserts_notice_pseudo_stage_before_latest_r
               },
             ],
           },
-          {
-            append_notice_messages: [
-              {
-                notification_id: "notif:1",
-                message: "改成男性角色Top20",
-                consumed_at: "2026-04-19T15:26:11+08:00",
-              },
-            ],
-          }
+          {}
         );
 
         console.log(JSON.stringify({
           traceKeys: steps.map((item) => item.traceKey),
           titles: steps.map((item) => item.title),
-          noticeBody: steps[1]?.bodyHtml || "",
-          noticeClass: steps[1]?.extraClass || "",
         }));
         """
     )
 
     assert result["traceKeys"][0] == "initial_prompt"
-    assert result["traceKeys"][1].startswith("notice:")
-    assert result["traceKeys"][2] == "stage:stage:1"
-    assert result["titles"][1] == "消息通知"
-    assert "已接收到消息：改成男性角色Top20" in result["noticeBody"]
-    assert result["noticeClass"] == "task-trace-step--notice"
+    assert result["traceKeys"][1] == "stage:stage:1"
+    assert "消息通知" not in result["titles"]
+
+
+def test_build_node_message_list_steps_renders_message_and_distribution_details() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {};
+        global.U = {};
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        global.treeNormalizeInt = global.normalizeInt;
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.formatCompactTime = (value) => String(value || "");
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const steps = buildNodeMessageListSteps({
+          message_list: [
+            {
+              notification_id: "notif:1",
+              message: "改成男性角色Top20",
+              received_at: "2026-04-19T20:28:17+08:00",
+              status: "pending",
+              deliveries: [
+                {
+                  target_node_id: "node:child-1",
+                  target_title: "child one",
+                  message: "改成男性角色Top20并补充证据",
+                  status: "delivered",
+                },
+              ],
+            },
+          ],
+        });
+
+        console.log(JSON.stringify({
+          traceKeys: steps.map((item) => item.traceKey),
+          titles: steps.map((item) => item.title),
+          status: steps[0]?.status || "",
+          bodyHtml: steps[0]?.bodyHtml || "",
+        }));
+        """
+    )
+
+    assert result["traceKeys"] == ["message:notif:1"]
+    assert "2026-04-19T20:28:17+08:00" in result["titles"][0]
+    assert result["status"] == "warning"
+    assert "改成男性角色Top20" in result["bodyHtml"]
+    assert "child one" in result["bodyHtml"]
+    assert "改成男性角色Top20并补充证据" in result["bodyHtml"]
 
 
 def test_task_detail_html_renders_governance_panel() -> None:

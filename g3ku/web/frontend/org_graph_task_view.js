@@ -54,6 +54,7 @@ function normalizeTaskTreeSnapshotNode(value = {}, existing = null) {
         auxiliary_child_ids: (Array.isArray(value?.auxiliary_child_ids) ? value.auxiliary_child_ids : Array.isArray(prior?.auxiliary_child_ids) ? prior.auxiliary_child_ids : [])
             .map((item) => String(item || "").trim())
             .filter(Boolean),
+        pending_notice_count: Math.max(0, treeNormalizeInt(value?.pending_notice_count ?? prior?.pending_notice_count, 0)),
     };
 }
 
@@ -1394,28 +1395,9 @@ function buildExecutionTraceSteps(trace, node) {
         open: false,
         bodyHtml: renderTraceField("内容", trace.initial_prompt, "暂无初始提示词"),
     };
-    const appendNoticeMessages = Array.isArray(node?.append_notice_messages) ? node.append_notice_messages : [];
-    const noticeTraceStep = appendNoticeMessages.length
-        ? {
-            traceKey: `notice:${appendNoticeMessages.map((item) => String(item?.notification_id || "").trim()).filter(Boolean).join("|") || "messages"}`,
-            title: "消息通知",
-            status: "info",
-            open: false,
-            extraClass: "task-trace-step--notice",
-            bodyHtml: renderTraceField(
-                "内容",
-                appendNoticeMessages
-                    .map((item) => `已接收到消息：${String(item?.message || "").trim()}`)
-                    .filter(Boolean)
-                    .join("\n"),
-                "暂无消息通知",
-            ),
-        }
-        : null;
     if (Array.isArray(trace?.stages) && trace.stages.length) {
         return [
             initialPromptStep,
-            ...(noticeTraceStep ? [noticeTraceStep] : []),
             ...trace.stages.map((stage, index) => ({
                 traceKey: `stage:${stage.stage_id || stage.stage_index || index}`,
                 title: formatExecutionStageTitle(stage),
@@ -1428,7 +1410,6 @@ function buildExecutionTraceSteps(trace, node) {
     }
     return [
         initialPromptStep,
-        ...(noticeTraceStep ? [noticeTraceStep] : []),
         ...trace.tool_steps.map((step, index) => ({
             traceKey: `tool:${step.tool_call_id || index}:${step.tool_name || "tool"}`,
             title: `Tool - ${step.tool_name || "tool"}`,
@@ -1446,6 +1427,61 @@ function buildExecutionTraceSteps(trace, node) {
             ].join(""),
         })),
     ];
+}
+
+function messageListStatusDescriptor(status) {
+    const normalized = String(status || "").trim().toLowerCase();
+    if (normalized === "pending") {
+        return { key: "warning", label: "待处理" };
+    }
+    if (normalized === "consumed") {
+        return { key: "info", label: "已并入上下文" };
+    }
+    return { key: "info", label: normalized || "已接收" };
+}
+
+function formatMessageListTitle(entry, index) {
+    const time = String(entry?.received_at || entry?.consumed_at || "").trim();
+    const formattedTime = time ? formatCompactTime(time) : `消息 ${index + 1}`;
+    const status = messageListStatusDescriptor(entry?.status);
+    return `${formattedTime} · ${status.label}`;
+}
+
+function summarizeMessageDeliveries(deliveries = []) {
+    const lines = (Array.isArray(deliveries) ? deliveries : [])
+        .map((item) => {
+            const targetTitle = String(item?.target_title || item?.target_node_id || "").trim() || "未命名节点";
+            const targetNodeId = String(item?.target_node_id || "").trim();
+            const message = String(item?.message || "").trim();
+            const status = String(item?.status || "").trim();
+            const parts = [targetTitle];
+            if (targetNodeId) parts.push(`(${targetNodeId})`);
+            if (message) parts.push(`: ${message}`);
+            if (status) parts.push(` [${status}]`);
+            return parts.join("");
+        })
+        .filter(Boolean);
+    return lines.join("\n");
+}
+
+function buildNodeMessageListSteps(node = {}) {
+    const entries = Array.isArray(node?.message_list) ? node.message_list : [];
+    return entries.map((entry, index) => {
+        const status = messageListStatusDescriptor(entry?.status);
+        return {
+            traceKey: `message:${String(entry?.notification_id || entry?.epoch_id || index).trim() || index}`,
+            title: formatMessageListTitle(entry, index),
+            status: status.key,
+            showStatus: false,
+            open: index === 0,
+            bodyHtml: [
+                renderTraceField("状态", status.label, "已接收"),
+                renderTraceField("接收时间", entry?.received_at || entry?.consumed_at, "暂无时间"),
+                renderTraceField("消息内容", entry?.message, "暂无消息内容"),
+                renderTraceField("分发情况", summarizeMessageDeliveries(entry?.deliveries), "无"),
+            ].join(""),
+        };
+    });
 }
 
 function spawnReviewRoundStatus(round = {}) {
@@ -1522,6 +1558,55 @@ function buildSpawnReviewTraceSteps(rounds = []) {
     });
 }
 
+function renderMessageList(node, { viewState = null } = {}) {
+    if (!U.adMessages) return false;
+    const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
+    const preservedScrollTop = Number(effectiveViewState?.messageScrollTop || 0);
+    const stepDescriptors = buildNodeMessageListSteps(node);
+    const steps = stepDescriptors.map((step, index) => renderTraceStep({
+        ...step,
+        open: resolveTraceStepOpenState(
+            step,
+            {
+                traceItems: Array.isArray(effectiveViewState?.messageItems) ? effectiveViewState.messageItems : [],
+            },
+            index,
+        ),
+    }));
+    let traceList = U.adMessages.querySelector(".task-trace-list");
+    if (!(traceList instanceof HTMLElement)) {
+        traceList = document.createElement("div");
+        traceList.className = "task-trace-list";
+        U.adMessages.innerHTML = "";
+        U.adMessages.appendChild(traceList);
+    }
+    const renderSignature = buildTraceRenderSignature(stepDescriptors);
+    const renderNodeId = String(node?.node_id || "").trim();
+    const shouldReplace = traceList.dataset.renderSignature !== renderSignature
+        || traceList.dataset.renderNodeId !== renderNodeId;
+    if (shouldReplace) {
+        traceList.innerHTML = steps.length
+            ? steps.join("")
+            : '<div class="empty-state task-trace-empty">当前节点暂无消息。</div>';
+        traceList.dataset.renderSignature = renderSignature;
+        traceList.dataset.renderNodeId = renderNodeId;
+    }
+    renderMessageHeading(stepDescriptors.length);
+    if (shouldReplace) {
+        const restoreScroll = () => {
+            const currentTraceList = U.adMessages?.querySelector(".task-trace-list");
+            if (!(currentTraceList instanceof HTMLElement)) return;
+            setElementScrollTop(currentTraceList, preservedScrollTop);
+        };
+        restoreScroll();
+        window.requestAnimationFrame(() => {
+            restoreScroll();
+            window.requestAnimationFrame(restoreScroll);
+        });
+    }
+    return shouldReplace;
+}
+
 function renderSpawnReviewTrace(node, { viewState = null } = {}) {
     if (!U.adSpawnReviews) return false;
     const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
@@ -1574,10 +1659,15 @@ function renderSpawnReviewTrace(node, { viewState = null } = {}) {
 
 function refreshTaskDetailScrollRegions() {
     const traceList = U.adFlow?.querySelector(".task-trace-list");
+    const messageList = U.adMessages?.querySelector(".task-trace-list");
     const spawnReviewList = U.adSpawnReviews?.querySelector(".task-trace-list");
     if (traceList instanceof HTMLElement) {
         traceList.style.height = "";
         traceList.style.maxHeight = "";
+    }
+    if (messageList instanceof HTMLElement) {
+        messageList.style.height = "";
+        messageList.style.maxHeight = "";
     }
     if (spawnReviewList instanceof HTMLElement) {
         spawnReviewList.style.height = "";
@@ -1850,18 +1940,37 @@ function buildTaskTreeRecoveryBubble(text) {
 
 function activeTaskDistributionState() {
     const distribution = S.taskRuntimeSummary?.distribution;
-    if (!distribution || typeof distribution !== "object") return null;
-    const activeEpochId = String(distribution.active_epoch_id || "").trim();
-    const state = String(distribution.state || "").trim();
-    return activeEpochId || state ? distribution : null;
+    if (distribution && typeof distribution === "object") {
+        const activeEpochId = String(distribution.active_epoch_id || "").trim();
+        const state = String(distribution.state || "").trim();
+        if (activeEpochId || state) {
+            return { ...distribution, ui_mode: "distribution" };
+        }
+    }
+    const rootNode = treeSnapshotNode(S.treeRootNodeId);
+    const pendingNoticeCount = Math.max(0, treeNormalizeInt(rootNode?.pending_notice_count, 0));
+    if (pendingNoticeCount > 0) {
+        return {
+            active_epoch_id: "",
+            state: "",
+            frontier_node_ids: [],
+            pending_notice_count: pendingNoticeCount,
+            ui_mode: "pending_notice",
+        };
+    }
+    return null;
 }
 
-function buildTaskTreeDistributionBubble(text = "接收到新消息，分发中") {
+function buildTaskTreeDistributionBubble(text = "") {
+    const distributionState = activeTaskDistributionState();
+    const fallbackText = distributionState?.ui_mode === "pending_notice"
+        ? "接收到新消息，等待节点处理"
+        : "接收到新消息，分发中";
     const bubble = document.createElement("div");
     bubble.className = "task-tree-distribution-bubble";
     bubble.setAttribute("role", "status");
     bubble.setAttribute("aria-live", "polite");
-    bubble.textContent = String(text || "").trim() || "接收到新消息，分发中";
+    bubble.textContent = String(text || "").trim() || fallbackText;
     return bubble;
 }
 
@@ -2230,8 +2339,10 @@ function showTaskNodeLoadingState(node) {
     U.adStatus.dataset.status = node?.visual_state || node?.state || node?.status || "";
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(node?.roundSummary || "");
     if (U.adFlow) U.adFlow.innerHTML = '<div class="empty-state task-trace-empty">Loading node details...</div>';
+    if (U.adMessages) U.adMessages.innerHTML = '<div class="empty-state task-trace-empty">Loading node details...</div>';
     if (U.adSpawnReviews) U.adSpawnReviews.innerHTML = '<div class="empty-state task-trace-empty">Loading node details...</div>';
     renderFlowHeading(0);
+    renderMessageHeading(0);
     renderSpawnReviewHeading(0);
     renderFinalOutput("Loading node output...");
     renderAcceptanceResult("Loading acceptance result...");
@@ -2423,6 +2534,7 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     U.adStatus.dataset.status = mergedNode.visual_state || mergedNode.state || mergedNode.status || node.visual_state || node.state || "";
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(mergedNode.roundSummary || "");
     const traceChanged = !!renderExecutionTrace(mergedNode, { viewState });
+    const messagesChanged = !!renderMessageList(mergedNode, { viewState });
     const spawnReviewChanged = !!renderSpawnReviewTrace(mergedNode, { viewState });
     const outputChanged = !!renderFinalOutput(mergedNode.executionTrace?.final_output || "");
     const acceptanceChanged = !!renderAcceptanceResult(mergedNode.executionTrace?.acceptance_result || "");
@@ -2439,7 +2551,7 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
             void loadSelectedNodeLatestContext({ force: true });
         }
     }
-    if (!hadVisibleCurrentDetail || traceChanged || spawnReviewChanged || outputChanged || acceptanceChanged) {
+    if (!hadVisibleCurrentDetail || traceChanged || messagesChanged || spawnReviewChanged || outputChanged || acceptanceChanged) {
         restoreTaskDetailViewState(viewState);
         stashTaskDetailViewState({ nodeId, viewState });
     } else {

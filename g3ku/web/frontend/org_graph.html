@@ -139,19 +139,32 @@
                                     <span id="ceo-compression-toast-text" class="ceo-compression-toast-text">上下文压缩中</span>
                                 </div>
                                 <div id="ceo-follow-up-queue" class="ceo-follow-up-queue" hidden aria-live="polite"></div>
-                                <div id="ceo-composer-outline-shell" class="ceo-composer-outline-shell">
-                                    <svg id="ceo-composer-outline-svg" class="ceo-composer-outline-svg" aria-hidden="true" focusable="false" hidden>
-                                        <path id="ceo-composer-outline-track" class="ceo-composer-outline-track"></path>
-                                        <path id="ceo-composer-outline-progress" class="ceo-composer-outline-progress"></path>
-                                    </svg>
-                                    <div class="ceo-input-row">
+                                <div class="ceo-input-row">
                                     <input id="ceo-file-input" type="file" multiple hidden>
-                                    <button id="ceo-attach-btn" class="ceo-attach-btn" type="button" aria-label="上传附件">
-                                        <i data-lucide="paperclip"></i>
-                                    </button>
+                                    <div class="ceo-input-leading-group">
+                                        <div
+                                            id="ceo-context-usage-brain"
+                                            class="ceo-context-usage-brain"
+                                            role="img"
+                                            aria-label="等待 Leader 上下文预估"
+                                            title="等待 Leader 上下文预估">
+                                            <span class="ceo-context-usage-brain-iconbox" aria-hidden="true">
+                                                <span id="ceo-context-usage-brain-base" class="ceo-context-usage-brain-layer ceo-context-usage-brain-base">
+                                                    <i data-lucide="brain"></i>
+                                                </span>
+                                                <span id="ceo-context-usage-brain-fill" class="ceo-context-usage-brain-layer ceo-context-usage-brain-fill">
+                                                    <span class="ceo-context-usage-brain-fill-inner">
+                                                        <i data-lucide="brain"></i>
+                                                    </span>
+                                                </span>
+                                            </span>
+                                        </div>
+                                        <button id="ceo-attach-btn" class="ceo-attach-btn" type="button" aria-label="上传附件">
+                                            <i data-lucide="paperclip"></i>
+                                        </button>
+                                    </div>
                                     <textarea id="ceo-input" rows="1"
                                         placeholder="输入你的任务，可保留换行；也可以上传图片或文件作为补充"></textarea>
-                                    </div>
                                 </div>
                             </div>
                             <button id="ceo-send-btn" class="btn-primary" type="button" aria-label="发送消息">
@@ -536,6 +549,11 @@
                             <div class="agent-detail-section">
                                 <h4><i data-lucide="arrow-down-to-line"></i> 输入</h4>
                                 <div class="code-block" id="ad-input">-</div>
+                            </div>
+
+                            <div class="agent-detail-section">
+                                <h4><i data-lucide="inbox"></i> 消息列表</h4>
+                                <div class="code-block" id="ad-messages">-</div>
                             </div>
 
                             <div class="agent-detail-section">

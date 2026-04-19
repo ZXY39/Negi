@@ -15,7 +15,12 @@ from main.models import (
 )
 from main.monitoring.execution_trace import build_execution_trace
 from main.token_usage import aggregate_node_token_usage
-from main.runtime.append_notice_context import APPEND_NOTICE_CONTEXT_KEY, normalize_append_notice_context
+from main.runtime.append_notice_context import (
+    APPEND_NOTICE_CONTEXT_KEY,
+    PENDING_APPEND_NOTICE_RECORDS_KEY,
+    normalize_append_notice_context,
+    normalize_pending_append_notice_records,
+)
 from main.monitoring.models import (
     LatestTaskNodeOutput,
     TaskDistributionState,
@@ -57,6 +62,155 @@ class TaskQueryService:
             unread_tasks=unread,
             text=f'Tasks: {total} total, {in_progress} in progress, {failed} failed, {unread} unread',
         )
+
+    def _node_pending_notice_count(self, *, task_id: str, node_id: str) -> int:
+        node = self._store.get_node(node_id)
+        metadata = dict(node.metadata or {}) if node is not None and isinstance(node.metadata, dict) else {}
+        pending_root_count = len(normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY)))
+        pending_child_count = sum(
+            1
+            for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
+            if str(item.status or '').strip() == 'delivered'
+        )
+        return pending_root_count + pending_child_count
+
+    def _message_distribution_deliveries(
+        self,
+        *,
+        task_id: str,
+        epoch_id: str,
+        source_node_id: str,
+        node_titles: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        normalized_epoch_id = str(epoch_id or '').strip()
+        normalized_source_node_id = str(source_node_id or '').strip()
+        if not normalized_epoch_id or not normalized_source_node_id:
+            return []
+        deliveries: list[dict[str, Any]] = []
+        for item in list(self._store.list_task_epoch_notifications(task_id, normalized_epoch_id) or []):
+            if str(item.source_node_id or '').strip() != normalized_source_node_id:
+                continue
+            target_node_id = str(item.node_id or '').strip()
+            if not target_node_id or target_node_id == normalized_source_node_id:
+                continue
+            deliveries.append(
+                {
+                    'notification_id': str(item.notification_id or '').strip(),
+                    'target_node_id': target_node_id,
+                    'target_title': str(node_titles.get(target_node_id) or target_node_id).strip(),
+                    'message': str(item.message or '').strip(),
+                    'status': str(item.status or '').strip(),
+                    'received_at': str(item.delivered_at or item.created_at or '').strip(),
+                }
+            )
+        deliveries.sort(
+            key=lambda item: (
+                str(item.get('received_at') or ''),
+                str(item.get('notification_id') or ''),
+            )
+        )
+        return deliveries
+
+    def _node_message_list(self, *, task_id: str, node_id: str, runtime_node: NodeRecord | None) -> list[dict[str, Any]]:
+        metadata = dict(runtime_node.metadata or {}) if runtime_node is not None and isinstance(runtime_node.metadata, dict) else {}
+        append_notice_context = normalize_append_notice_context(metadata.get(APPEND_NOTICE_CONTEXT_KEY))
+        pending_root_records = normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
+        pending_child_notifications = [
+            item.model_dump(mode='json')
+            for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
+            if str(item.status or '').strip() == 'delivered'
+        ]
+        node_titles = {
+            str(item.node_id or '').strip(): str(item.title or item.node_id or '').strip()
+            for item in list(self._store.list_task_nodes(task_id) or [])
+        }
+        entries_by_id: dict[str, dict[str, Any]] = {}
+
+        def _store_entry(entry: dict[str, Any], *, replace: bool = False) -> None:
+            notification_id = str(entry.get('notification_id') or '').strip()
+            if not notification_id:
+                return
+            current = entries_by_id.get(notification_id)
+            if current is None or replace:
+                entries_by_id[notification_id] = dict(entry)
+
+        for item in list(append_notice_context.get('notice_records') or []):
+            if not isinstance(item, dict) or not str(item.get('message') or '').strip():
+                continue
+            epoch_id = str(item.get('epoch_id') or '').strip()
+            source_node_id = str(item.get('source_node_id') or '').strip()
+            received_at = str(item.get('received_at') or item.get('consumed_at') or '').strip()
+            entry = {
+                'notification_id': str(item.get('notification_id') or '').strip(),
+                'epoch_id': epoch_id,
+                'source_node_id': source_node_id,
+                'message': str(item.get('message') or '').strip(),
+                'received_at': received_at,
+                'consumed_at': str(item.get('consumed_at') or '').strip(),
+                'status': 'consumed',
+                'compression_stage_id': str(item.get('compression_stage_id') or '').strip(),
+                'deliveries': self._message_distribution_deliveries(
+                    task_id=task_id,
+                    epoch_id=epoch_id,
+                    source_node_id=node_id,
+                    node_titles=node_titles,
+                ),
+            }
+            _store_entry(entry, replace=True)
+
+        for item in list(pending_root_records or []):
+            if not isinstance(item, dict) or not str(item.get('message') or '').strip():
+                continue
+            entry = {
+                'notification_id': str(item.get('notification_id') or '').strip(),
+                'epoch_id': str(item.get('epoch_id') or '').strip(),
+                'source_node_id': str(item.get('source_node_id') or '').strip(),
+                'message': str(item.get('message') or '').strip(),
+                'received_at': str(item.get('created_at') or '').strip(),
+                'consumed_at': '',
+                'status': 'pending',
+                'compression_stage_id': '',
+                'deliveries': self._message_distribution_deliveries(
+                    task_id=task_id,
+                    epoch_id=str(item.get('epoch_id') or '').strip(),
+                    source_node_id=node_id,
+                    node_titles=node_titles,
+                ),
+            }
+            _store_entry(entry)
+
+        for item in list(pending_child_notifications or []):
+            if not isinstance(item, dict) or not str(item.get('message') or '').strip():
+                continue
+            epoch_id = str(item.get('epoch_id') or '').strip()
+            source_node_id = str(item.get('source_node_id') or '').strip()
+            entry = {
+                'notification_id': str(item.get('notification_id') or '').strip(),
+                'epoch_id': epoch_id,
+                'source_node_id': source_node_id,
+                'message': str(item.get('message') or '').strip(),
+                'received_at': str(item.get('delivered_at') or item.get('created_at') or '').strip(),
+                'consumed_at': '',
+                'status': 'pending',
+                'compression_stage_id': '',
+                'deliveries': self._message_distribution_deliveries(
+                    task_id=task_id,
+                    epoch_id=epoch_id,
+                    source_node_id=node_id,
+                    node_titles=node_titles,
+                ),
+            }
+            _store_entry(entry)
+
+        entries = list(entries_by_id.values())
+        entries.sort(
+            key=lambda entry: (
+                str(entry.get('received_at') or entry.get('consumed_at') or ''),
+                str(entry.get('notification_id') or ''),
+            ),
+            reverse=True,
+        )
+        return entries
 
     def get_tasks(self, session_id: str | None, task_type: int) -> list[TaskListItem]:
         tasks = self._store.list_tasks(session_id)
@@ -283,10 +437,10 @@ class TaskQueryService:
             )
             if execution_trace:
                 execution_trace_summary = self._execution_trace_summary(execution_trace)
-        append_notice_context = normalize_append_notice_context(
-            ((runtime_node.metadata or {}) if runtime_node is not None and isinstance(runtime_node.metadata, dict) else {}).get(
-                APPEND_NOTICE_CONTEXT_KEY
-            )
+        message_list = self._node_message_list(
+            task_id=task_id,
+            node_id=node_id,
+            runtime_node=runtime_node,
         )
         append_notice_messages = [
             {
@@ -297,15 +451,10 @@ class TaskQueryService:
                 'consumed_at': str(item.get('consumed_at') or '').strip(),
                 'compression_stage_id': str(item.get('compression_stage_id') or '').strip(),
             }
-            for item in list(append_notice_context.get('notice_records') or [])
-            if isinstance(item, dict) and str(item.get('message') or '').strip()
+            for item in list(message_list or [])
+            if str(item.get('status') or '').strip() == 'consumed'
+            and str(item.get('message') or '').strip()
         ]
-        append_notice_messages.sort(
-            key=lambda item: (
-                str(item.get('consumed_at') or ''),
-                str(item.get('notification_id') or ''),
-            )
-        )
         detail = TaskNodeDetail(
             node_id=str(payload.get('node_id') or detail_record.node_id),
             task_id=str(payload.get('task_id') or detail_record.task_id),
@@ -348,6 +497,7 @@ class TaskQueryService:
             execution_trace_ref=execution_trace_ref,
             latest_spawn_round_id=str(payload.get('latest_spawn_round_id') or ''),
             append_notice_messages=append_notice_messages,
+            message_list=message_list,
             direct_child_results=[
                 dict(item)
                 for item in list(payload.get('direct_child_results') or [])
@@ -864,6 +1014,7 @@ class TaskQueryService:
             default_round_id=self._projection_default_round_id(record, snapshot_rounds),
             rounds=snapshot_rounds,
             auxiliary_child_ids=auxiliary_child_ids,
+            pending_notice_count=self._node_pending_notice_count(task_id=str(getattr(record, 'task_id', '') or '').strip(), node_id=node_id),
         )
 
     def _build_tree_snapshot(

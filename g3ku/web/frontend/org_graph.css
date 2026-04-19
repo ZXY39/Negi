@@ -3544,75 +3544,11 @@ textarea {
     flex-direction: column;
     gap: var(--space-3);
     position: relative;
-    --ceo-input-leading-width: 58px;
+    --ceo-input-leading-size: 58px;
+    --ceo-context-usage-size: 34px;
+    --ceo-input-leading-inner-gap: 10px;
+    --ceo-input-leading-width: calc(var(--ceo-context-usage-size) + var(--ceo-input-leading-size) + var(--ceo-input-leading-inner-gap));
     --ceo-input-row-gap: 12px;
-}
-
-.ceo-composer-outline-shell {
-    position: relative;
-    min-width: 0;
-    border-radius: 30px;
-    padding: 2px;
-    --ceo-composer-outline-color: #39c5bb;
-    transition: box-shadow 180ms ease;
-}
-
-.ceo-composer-outline-svg {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    overflow: visible;
-    pointer-events: none;
-    z-index: 2;
-}
-
-.ceo-composer-outline-track,
-.ceo-composer-outline-progress {
-    fill: none;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-}
-
-.ceo-composer-outline-track {
-    stroke: color-mix(in srgb, var(--ceo-composer-outline-color) 18%, transparent);
-    stroke-width: 3;
-    opacity: 0;
-    transition: opacity 180ms ease;
-}
-
-.ceo-composer-outline-progress {
-    stroke: var(--ceo-composer-outline-color);
-    stroke-width: 4;
-    opacity: 0;
-    filter: drop-shadow(0 0 12px color-mix(in srgb, var(--ceo-composer-outline-color) 32%, transparent));
-    transition:
-        stroke-dasharray 260ms cubic-bezier(0.16, 1, 0.3, 1),
-        opacity 180ms ease,
-        filter 220ms ease;
-}
-
-.ceo-composer-outline-shell.is-active .ceo-composer-outline-track,
-.ceo-composer-outline-shell.is-active .ceo-composer-outline-progress {
-    opacity: 1;
-}
-
-.ceo-composer-outline-shell:focus-within .ceo-composer-outline-track,
-.ceo-composer-outline-shell:focus-within .ceo-composer-outline-progress {
-    opacity: 0;
-}
-
-.ceo-composer-outline-shell.is-force-visible textarea:not(:focus) {
-    border-color: color-mix(in srgb, var(--ceo-composer-outline-color) 88%, var(--border-color));
-    box-shadow:
-        var(--shadow-md),
-        0 0 0 4px color-mix(in srgb, var(--ceo-composer-outline-color) 94%, transparent),
-        0 0 28px color-mix(in srgb, var(--ceo-composer-outline-color) 30%, transparent);
-}
-
-.ceo-composer-outline-shell[data-usage-state="warning"] .ceo-composer-outline-progress,
-.ceo-composer-outline-shell[data-usage-state="overflow"] .ceo-composer-outline-progress {
-    filter: drop-shadow(0 0 14px color-mix(in srgb, var(--ceo-composer-outline-color) 36%, transparent));
 }
 
 .ceo-input-row {
@@ -3624,17 +3560,28 @@ textarea {
     z-index: 1;
 }
 
+.ceo-input-leading-group {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ceo-input-leading-inner-gap);
+}
+
+.ceo-input-row > textarea {
+    width: 100%;
+    display: block;
+}
+
 .ceo-attach-btn {
-    width: var(--ceo-input-leading-width);
-    height: var(--ceo-input-leading-width);
+    width: var(--ceo-input-leading-size);
+    height: var(--ceo-input-leading-size);
     border-radius: 20px;
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
     background: color-mix(in srgb, var(--bg-app) 82%, var(--bg-panel) 18%);
     color: var(--text-primary);
+    box-shadow: var(--shadow-sm);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    box-shadow: var(--shadow-sm);
     transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
 }
 
@@ -3654,6 +3601,136 @@ textarea {
 .ceo-upload-remove:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+}
+
+.ceo-context-usage-brain {
+    position: relative;
+    flex: none;
+    display: inline-grid;
+    place-items: center;
+    width: var(--ceo-input-leading-size);
+    height: var(--ceo-input-leading-size);
+    padding: 0;
+    overflow: visible;
+    isolation: isolate;
+    cursor: default;
+    border: 0;
+    background: none;
+    box-shadow: none;
+    border-radius: 999px;
+    --ceo-context-usage-color: hsl(145 82% 58%);
+    --ceo-context-usage-glow: color-mix(in srgb, var(--ceo-context-usage-color) 30%, transparent);
+    opacity: 0;
+    pointer-events: none;
+    transition:
+        transform 220ms cubic-bezier(0.16, 1, 0.3, 1),
+        opacity 220ms ease;
+}
+
+.ceo-context-usage-brain::after {
+    content: "";
+    position: absolute;
+    inset: 2px;
+    border-radius: 999px;
+    background: radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--ceo-context-usage-color) 30%, transparent), transparent 72%);
+    opacity: 0;
+    transition: opacity 220ms ease;
+    pointer-events: none;
+}
+
+.ceo-context-usage-brain.is-active {
+    transform: translateY(0);
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.ceo-context-usage-brain.is-active::after {
+    opacity: 1;
+}
+
+.ceo-context-usage-brain.is-pending {
+    animation: ceo-context-usage-brain-pulse 1.8s ease-in-out infinite;
+}
+
+.ceo-context-usage-brain-layer {
+    position: absolute;
+    left: 0;
+    width: 100%;
+    z-index: 1;
+    display: flex;
+    justify-content: center;
+}
+
+.ceo-context-usage-brain-iconbox {
+    position: relative;
+    width: 24px;
+    height: 24px;
+}
+
+.ceo-context-usage-brain-layer > svg,
+.ceo-context-usage-brain-fill-inner > svg {
+    width: 24px;
+    height: 24px;
+    overflow: visible;
+    shape-rendering: geometricPrecision;
+}
+
+.ceo-context-usage-brain-base {
+    position: absolute;
+    top: 0;
+    align-items: flex-start;
+    width: 100%;
+    overflow: hidden;
+    color: var(--text-primary);
+    opacity: 0.92;
+}
+
+.ceo-context-usage-brain-fill {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    width: 100%;
+    height: 0%;
+    overflow: hidden;
+    opacity: 0.98;
+    transition: height 260ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ceo-context-usage-brain-fill-inner {
+    display: inline-grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    color: var(--ceo-context-usage-color);
+    transition:
+        color 220ms ease,
+        opacity 180ms ease;
+}
+
+.ceo-context-usage-brain:not(.is-active) .ceo-context-usage-brain-fill {
+    opacity: 0.56;
+}
+
+@keyframes ceo-context-usage-brain-pulse {
+    0%,
+    100% {
+        transform: translateY(0);
+        box-shadow:
+            var(--shadow-md),
+            0 0 0 1px color-mix(in srgb, var(--ceo-context-usage-color) 18%, transparent),
+            0 0 18px color-mix(in srgb, var(--ceo-context-usage-color) 14%, transparent);
+    }
+
+    50% {
+        transform: translateY(-1px);
+        box-shadow:
+            var(--shadow-md),
+            0 0 0 1px color-mix(in srgb, var(--ceo-context-usage-color) 24%, transparent),
+            0 0 24px color-mix(in srgb, var(--ceo-context-usage-color) 26%, transparent);
+    }
 }
 
 .ceo-upload-list {
@@ -3838,9 +3915,14 @@ textarea {
         animation: ceo-context-load-tag-reduced 10000ms linear forwards;
     }
 
-    .ceo-composer-outline-track,
-    .ceo-composer-outline-progress {
-        transition: none;
+    .ceo-context-usage-brain,
+    .ceo-context-usage-brain::after,
+    .ceo-context-usage-brain-fill,
+    .ceo-context-usage-brain-track,
+    .ceo-context-usage-brain-outline,
+    .ceo-context-usage-brain-detail {
+        animation: none !important;
+        transition: none !important;
     }
 }
 
@@ -4273,12 +4355,28 @@ textarea {
     }
 
     .ceo-composer {
-        --ceo-input-leading-width: 52px;
+        --ceo-input-leading-size: 52px;
+        --ceo-context-usage-size: 30px;
+        --ceo-input-leading-inner-gap: 8px;
+        --ceo-input-leading-width: calc(var(--ceo-context-usage-size) + var(--ceo-input-leading-size) + var(--ceo-input-leading-inner-gap));
         --ceo-input-row-gap: 10px;
     }
 
-    .ceo-attach-btn {
-        border-radius: 18px;
+    .ceo-context-usage-brain {
+        width: var(--ceo-input-leading-size);
+        height: var(--ceo-input-leading-size);
+    }
+
+    .ceo-context-usage-brain-iconbox,
+    .ceo-context-usage-brain-fill-inner {
+        width: 24px;
+        height: 24px;
+    }
+
+    .ceo-context-usage-brain-layer > svg,
+    .ceo-context-usage-brain-fill-inner > svg {
+        width: 24px;
+        height: 24px;
     }
 
     .ceo-upload-name,

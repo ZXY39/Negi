@@ -321,10 +321,9 @@ const U = {
     ceoUploadList: document.getElementById("ceo-upload-list"),
     ceoFollowUpQueue: document.getElementById("ceo-follow-up-queue"),
     ceoContextLoadNotice: document.getElementById("ceo-context-load-notice"),
-    ceoComposerOutlineShell: document.getElementById("ceo-composer-outline-shell"),
-    ceoComposerOutlineSvg: document.getElementById("ceo-composer-outline-svg"),
-    ceoComposerOutlineTrack: document.getElementById("ceo-composer-outline-track"),
-    ceoComposerOutlineProgress: document.getElementById("ceo-composer-outline-progress"),
+    ceoComposerUsageBrain: document.getElementById("ceo-context-usage-brain"),
+    ceoComposerUsageBrainBase: document.getElementById("ceo-context-usage-brain-base"),
+    ceoComposerUsageBrainFill: document.getElementById("ceo-context-usage-brain-fill"),
     ceoCompressionToast: document.getElementById("ceo-compression-toast"),
     ceoCompressionToastText: document.getElementById("ceo-compression-toast-text"),
     ceoSend: document.getElementById("ceo-send-btn"),
@@ -415,10 +414,12 @@ const U = {
     adStatus: document.getElementById("ad-status"),
     adRoundSummary: document.getElementById("ad-round-summary"),
     adFlow: document.getElementById("ad-input"),
+    adMessages: document.getElementById("ad-messages"),
     adSpawnReviews: document.getElementById("ad-spawn-reviews"),
     adOutput: document.getElementById("ad-output"),
     adAcceptance: document.getElementById("ad-check"),
     adFlowHeading: document.getElementById("ad-input")?.closest(".agent-detail-section")?.querySelector("h4"),
+    adMessagesHeading: document.getElementById("ad-messages")?.closest(".agent-detail-section")?.querySelector("h4"),
     adSpawnReviewsHeading: document.getElementById("ad-spawn-reviews")?.closest(".agent-detail-section")?.querySelector("h4"),
     adOutputHeading: document.getElementById("ad-output")?.closest(".agent-detail-section")?.querySelector("h4"),
     adAcceptanceHeading: document.getElementById("ad-check")?.closest(".agent-detail-section")?.querySelector("h4"),
@@ -1252,6 +1253,8 @@ function normalizeCeoComposerUsageEstimate(sessionId, payload = null) {
     };
     const contextWindowTokens = toInt(item.context_window_tokens ?? item.contextWindowTokens);
     const estimatedTotalTokens = toInt(item.estimated_total_tokens ?? item.estimatedTotalTokens);
+    const providerModel = String(item.provider_model || item.providerModel || "").trim();
+    if (contextWindowTokens <= 0 || estimatedTotalTokens <= 0 || !providerModel) return null;
     const ratio = contextWindowTokens > 0
         ? Math.max(0, estimatedTotalTokens) / contextWindowTokens
         : Math.max(0, Number(item.ratio) || 0);
@@ -1260,11 +1263,63 @@ function normalizeCeoComposerUsageEstimate(sessionId, payload = null) {
         estimated_total_tokens: estimatedTotalTokens,
         context_window_tokens: contextWindowTokens,
         ratio: Math.max(0, Number.isFinite(ratio) ? ratio : 0),
-        provider_model: String(item.provider_model || item.providerModel || "").trim(),
+        provider_model: providerModel,
         trigger_tokens: toInt(item.trigger_tokens ?? item.triggerTokens),
         would_trigger_token_compression: !!(item.would_trigger_token_compression ?? item.wouldTriggerTokenCompression),
         would_exceed_context_window: !!(item.would_exceed_context_window ?? item.wouldExceedContextWindow),
         missing_context_window: !!(item.missing_context_window ?? item.missingContextWindow),
+    };
+}
+
+function normalizeCeoRuntimeUsageDiagnostics(payload = null) {
+    const item = payload && typeof payload === "object" ? payload : {};
+    const toInt = (value) => {
+        const num = Number(value);
+        return Number.isFinite(num) && num >= 0 ? Math.floor(num) : 0;
+    };
+    const finalRequestTokens = toInt(item.final_request_tokens ?? item.finalRequestTokens);
+    const maxContextTokens = toInt(
+        item.max_context_tokens
+        ?? item.maxContextTokens
+        ?? item.context_window_tokens
+        ?? item.contextWindowTokens
+    );
+    const providerModel = String(item.provider_model || item.providerModel || "").trim();
+    if (finalRequestTokens <= 0 || maxContextTokens <= 0 || !providerModel) return null;
+    return {
+        final_request_tokens: finalRequestTokens,
+        max_context_tokens: maxContextTokens,
+        trigger_tokens: toInt(item.trigger_tokens ?? item.triggerTokens),
+        effective_trigger_tokens: toInt(item.effective_trigger_tokens ?? item.effectiveTriggerTokens),
+        provider_model: providerModel,
+        applied: !!item.applied,
+    };
+}
+
+function normalizeCeoRuntimeUsageEstimate(sessionId, inflightTurn = null) {
+    const key = String(sessionId || "").trim();
+    if (!key || !inflightTurn || typeof inflightTurn !== "object") return null;
+    const diagnostics = normalizeCeoRuntimeUsageDiagnostics(inflightTurn.frontdoor_token_preflight_diagnostics);
+    if (!diagnostics) return null;
+    const estimatedTotalTokens = Number(diagnostics.final_request_tokens || 0);
+    const contextWindowTokens = Number(diagnostics.max_context_tokens || 0);
+    if (!Number.isFinite(estimatedTotalTokens) || estimatedTotalTokens <= 0) return null;
+    if (!Number.isFinite(contextWindowTokens) || contextWindowTokens <= 0) return null;
+    const ratio = Math.max(0, estimatedTotalTokens / contextWindowTokens);
+    const effectiveTriggerTokens = Number(diagnostics.effective_trigger_tokens || 0);
+    const triggerTokens = Number(diagnostics.trigger_tokens || 0);
+    const activeTriggerTokens = effectiveTriggerTokens > 0 ? effectiveTriggerTokens : triggerTokens;
+    return {
+        session_id: key,
+        estimated_total_tokens: Math.floor(estimatedTotalTokens),
+        context_window_tokens: Math.floor(contextWindowTokens),
+        ratio,
+        provider_model: String(diagnostics.provider_model || "").trim(),
+        trigger_tokens: activeTriggerTokens > 0 ? Math.floor(activeTriggerTokens) : 0,
+        would_trigger_token_compression: activeTriggerTokens > 0 && estimatedTotalTokens >= activeTriggerTokens,
+        would_exceed_context_window: estimatedTotalTokens > contextWindowTokens,
+        missing_context_window: false,
+        source: "runtime_snapshot",
     };
 }
 
@@ -1323,25 +1378,6 @@ function buildCeoComposerPreflightEntries(sessionId = activeSessionId()) {
     if (draftText.trim() || draftUploads.length) {
         queued.push({ text: draftText, uploads: draftUploads });
     }
-    if (!queued.length && S.ceoTurnActive) {
-        const pinned = S.ceoComposerUsagePinnedEntries;
-        if (pinned && String(pinned.session_id || "").trim() === key) {
-            return (Array.isArray(pinned.entries) ? pinned.entries : []).map((entry) => ({
-                text: String(entry?.text || ""),
-                uploads: normalizeUploadList(entry?.uploads),
-            }));
-        }
-        const snapshotEntry = getCeoSessionSnapshotCache(key);
-        const inflightTurn = normalizeCeoSnapshotInflight(snapshotEntry?.inflight_turn);
-        const userMessage = inflightTurn?.user_message && typeof inflightTurn.user_message === "object"
-            ? inflightTurn.user_message
-            : null;
-        const snapshotText = String(userMessage?.content || "");
-        const snapshotUploads = normalizeUploadList(userMessage?.attachments);
-        if (snapshotText.trim() || snapshotUploads.length) {
-            return [{ text: snapshotText, uploads: snapshotUploads }];
-        }
-    }
     return queued.filter((item) => String(item.text || "").trim() || normalizeUploadList(item.uploads).length > 0);
 }
 
@@ -1369,66 +1405,34 @@ function scheduleSyncCeoComposerUsageOutline() {
 }
 
 function syncCeoComposerUsageOutline() {
-    const shell = U.ceoComposerOutlineShell;
-    const svg = U.ceoComposerOutlineSvg;
-    const track = U.ceoComposerOutlineTrack;
-    const progress = U.ceoComposerOutlineProgress;
-    if (!shell || !svg || !track || !progress) return;
+    const shell = U.ceoComposerUsageBrain;
+    const base = U.ceoComposerUsageBrainBase;
+    const fill = U.ceoComposerUsageBrainFill;
+    if (!shell || !base || !fill) return;
     const activeSession = String(activeSessionId() || "").trim();
-    const estimate = (
+    const runtimeEstimate = activeCeoRuntimeUsageEstimate(activeSession);
+    const composerEstimate = (
         S.ceoComposerUsageEstimate
         && String(S.ceoComposerUsageEstimate.session_id || "").trim() === activeSession
     ) ? S.ceoComposerUsageEstimate : null;
+    const estimate = runtimeEstimate || (!S.ceoTurnActive ? composerEstimate : null);
     const hasEstimate = !!estimate;
-    const shouldForceVisible = !!activeSession && !!S.ceoTurnActive && !hasEstimate;
-    const rect = typeof shell.getBoundingClientRect === "function"
-        ? shell.getBoundingClientRect()
-        : { width: 0, height: 0 };
-    const width = Math.max(4, Math.round(Number(rect.width) || 0));
-    const height = Math.max(4, Math.round(Number(rect.height) || 0));
-    const leadingWidth = Math.max(
-        0,
-        Math.round(Number(U.ceoAttach?.getBoundingClientRect?.().width) || 58)
-    );
-    const outlineOffsetX = Math.max(0, leadingWidth + 12);
-    const outlineX = Math.min(width - 4, outlineOffsetX + 2);
-    const outlineWidth = Math.max(4, width - outlineX - 2);
-    const outlineY = 2;
-    const outlineHeight = Math.max(4, height - 4);
-    const radius = Math.max(16, Math.min(30, Math.round(outlineHeight / 2)));
-    const path = buildCeoComposerOutlinePath(outlineX, outlineY, outlineWidth, outlineHeight, radius);
-    const visible = hasEstimate || shouldForceVisible;
-    svg.hidden = !visible || width <= 4 || height <= 4;
-    if (!svg.hidden && svg.setAttribute) {
-        svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-        svg.setAttribute("preserveAspectRatio", "none");
+    const ratio = hasEstimate ? Math.max(0, Math.min(1, Number(estimate.ratio) || 0)) : 0;
+    const visualRatio = hasEstimate && ratio > 0 ? Math.max(ratio, 0.06) : 0;
+    const hue = Math.max(0, Math.min(145, 145 - (visualRatio * 145)));
+    const fillPercent = Math.max(0, Math.min(100, visualRatio * 100));
+    const basePercent = Math.max(0, Math.min(100, 100 - fillPercent));
+    if (typeof shell.style?.setProperty === "function") {
+        shell.style.setProperty("--ceo-context-usage-color", `hsl(${hue.toFixed(1)} 82% 58%)`);
+    } else {
+        shell.style["--ceo-context-usage-color"] = `hsl(${hue.toFixed(1)} 82% 58%)`;
     }
-    if (track.setAttribute) track.setAttribute("d", path);
-    if (progress.setAttribute) progress.setAttribute("d", path);
-    let perimeter = 0;
-    try {
-        perimeter = Number(progress.getTotalLength?.() || 0);
-    } catch (_error) {
-        perimeter = 0;
-    }
-    const ratio = hasEstimate ? Math.max(0, Math.min(1, Number(estimate.ratio) || 0)) : 1;
-    const rawProgressLength = perimeter > 0 ? Math.max(0, Math.min(perimeter, perimeter * ratio)) : 0;
-    const minimumVisibleLength = (
-        hasEstimate && ratio > 0 && perimeter > 0
-    ) ? Math.min(perimeter, Math.max(20, perimeter * 0.035)) : 0;
-    const progressLength = shouldForceVisible
-        ? perimeter
-        : hasEstimate && ratio > 0
-            ? Math.max(rawProgressLength, minimumVisibleLength)
-            : rawProgressLength;
-    progress.style.strokeDasharray = perimeter > 0 ? `${progressLength} ${perimeter}` : "0 0";
-    progress.style.strokeDashoffset = "0";
-    track.style.strokeDasharray = perimeter > 0 ? `${perimeter} ${perimeter}` : "0 0";
-    shell.classList.toggle("is-active", visible && ratio > 0);
-    shell.classList.toggle("is-force-visible", shouldForceVisible);
+    base.style.height = `${basePercent}%`;
+    fill.style.height = `${fillPercent}%`;
+    shell.classList.toggle("is-active", hasEstimate);
+    shell.classList.toggle("is-pending", false);
     shell.dataset.usageState = (
-        shouldForceVisible ? "force"
-            : !hasEstimate ? ""
+        !hasEstimate ? "idle"
             : estimate.would_exceed_context_window ? "overflow"
                 : estimate.would_trigger_token_compression ? "warning"
                     : "active"
@@ -1436,6 +1440,7 @@ function syncCeoComposerUsageOutline() {
     shell.title = hasEstimate
         ? `${estimate.provider_model || "current-model"} · ${estimate.estimated_total_tokens}/${estimate.context_window_tokens} TOKEN`
         : "";
+    if (shell.setAttribute) shell.setAttribute("aria-label", shell.title || "");
 }
 
 async function refreshCeoComposerUsageEstimate() {
@@ -1444,16 +1449,17 @@ async function refreshCeoComposerUsageEstimate() {
         clearCeoComposerUsageEstimate();
         return null;
     }
+    const runtimeEstimate = activeCeoRuntimeUsageEstimate(sessionId);
+    if (runtimeEstimate) {
+        clearCeoComposerUsageEstimate();
+        return runtimeEstimate;
+    }
+    if (S.ceoTurnActive) {
+        clearCeoComposerUsageEstimate();
+        return null;
+    }
     const entries = buildCeoComposerPreflightEntries(sessionId);
     if (!entries.length) {
-        const currentEstimate = (
-            S.ceoComposerUsageEstimate
-            && String(S.ceoComposerUsageEstimate.session_id || "").trim() === sessionId
-        ) ? S.ceoComposerUsageEstimate : null;
-        if (S.ceoTurnActive && currentEstimate) {
-            syncCeoComposerUsageOutline();
-            return currentEstimate;
-        }
         clearCeoComposerUsageEstimate();
         return null;
     }
@@ -1849,10 +1855,21 @@ function normalizeCeoSnapshotInflight(snapshot = null) {
     const canonicalContext = normalizeCeoSnapshotCanonicalContext(snapshot?.canonical_context);
     const compression = normalizeCeoSnapshotCompression(snapshot?.compression);
     const errorMessage = String(snapshot?.last_error?.message || "").trim();
+    const runtimeUsageDiagnostics = normalizeCeoRuntimeUsageDiagnostics(snapshot?.frontdoor_token_preflight_diagnostics);
+    const actualRequestMessageCount = Number(snapshot?.actual_request_message_count ?? snapshot?.actualRequestMessageCount);
     if (canonicalContext) next.canonical_context = canonicalContext;
     if (compression) next.compression = compression;
     if (errorMessage) next.last_error = { message: errorMessage };
-    if (!ceoInflightTurnHasVisibleAssistantState(next) && !next.user_message && !next.compression) return null;
+    if (runtimeUsageDiagnostics) next.frontdoor_token_preflight_diagnostics = runtimeUsageDiagnostics;
+    if (Number.isFinite(actualRequestMessageCount) && actualRequestMessageCount > 0) {
+        next.actual_request_message_count = Math.floor(actualRequestMessageCount);
+    }
+    if (
+        !ceoInflightTurnHasVisibleAssistantState(next)
+        && !next.user_message
+        && !next.compression
+        && !next.frontdoor_token_preflight_diagnostics
+    ) return null;
     return next;
 }
 
@@ -1965,6 +1982,22 @@ function hasActiveCeoComposerUsageEstimate(sessionId = activeSessionId()) {
     );
 }
 
+function ceoRunningInflightTurnForSession(sessionId = activeSessionId()) {
+    const key = String(sessionId || "").trim();
+    if (!key) return null;
+    const cacheEntry = getCeoSessionSnapshotCache(key);
+    const inflightTurn = normalizeCeoSnapshotInflight(cacheEntry?.inflight_turn);
+    const status = String(inflightTurn?.status || "").trim().toLowerCase();
+    if (status && !["running", "in_progress", "active"].includes(status)) return null;
+    return inflightTurn || null;
+}
+
+function activeCeoRuntimeUsageEstimate(sessionId = activeSessionId()) {
+    const key = String(sessionId || "").trim();
+    if (!key) return null;
+    return normalizeCeoRuntimeUsageEstimate(key, ceoRunningInflightTurnForSession(key));
+}
+
 function setCeoSessionSnapshotCache(sessionId, entry = {}) {
     const key = String(sessionId || entry?.session_id || "").trim();
     if (!key) return null;
@@ -1987,7 +2020,10 @@ function setCeoSessionSnapshotCache(sessionId, entry = {}) {
     });
     schedulePersistCeoSessionSnapshotCache();
     syncCeoCompressionToast();
-    if (!hasActiveCeoComposerUsageEstimate(key)) scheduleCeoComposerUsageRefresh();
+    syncCeoComposerUsageOutline();
+    if (!ceoRunningInflightTurnForSession(key) && !hasActiveCeoComposerUsageEstimate(key)) {
+        scheduleCeoComposerUsageRefresh();
+    }
     return cloneCeoSessionSnapshotCacheEntry(normalized);
 }
 
@@ -2015,6 +2051,7 @@ function clearCeoSessionSnapshotCache(sessionId) {
     S.ceoSnapshotCache = pruneCeoSessionSnapshotCache(next);
     schedulePersistCeoSessionSnapshotCache();
     syncCeoCompressionToast();
+    syncCeoComposerUsageOutline();
     if (!hasActiveCeoComposerUsageEstimate(key)) scheduleCeoComposerUsageRefresh();
     return true;
 }
@@ -2121,14 +2158,17 @@ function normalizeTaskDetailViewState(value) {
         }))
         : []);
     const traceItems = normalizeTraceItems(value.traceItems);
+    const messageItems = normalizeTraceItems(value.messageItems);
     const spawnReviewItems = normalizeTraceItems(value.spawnReviewItems);
     return {
         detailScrollTop: normalizeScrollTop(value.detailScrollTop),
         traceScrollTop: normalizeScrollTop(value.traceScrollTop),
+        messageScrollTop: normalizeScrollTop(value.messageScrollTop),
         spawnReviewScrollTop: normalizeScrollTop(value.spawnReviewScrollTop),
         artifactListScrollTop: normalizeScrollTop(value.artifactListScrollTop),
         artifactContentScrollTop: normalizeScrollTop(value.artifactContentScrollTop),
         traceItems,
+        messageItems,
         spawnReviewItems,
     };
 }
@@ -2255,14 +2295,17 @@ function captureTraceSectionViewState(host) {
 
 function captureTaskDetailViewState() {
     const traceState = captureTraceSectionViewState(U.adFlow);
+    const messageState = captureTraceSectionViewState(U.adMessages);
     const spawnReviewState = captureTraceSectionViewState(U.adSpawnReviews);
     return {
         detailScrollTop: U.detail instanceof HTMLElement ? U.detail.scrollTop : 0,
         traceScrollTop: traceState.scrollTop,
+        messageScrollTop: messageState.scrollTop,
         spawnReviewScrollTop: spawnReviewState.scrollTop,
         artifactListScrollTop: U.artifactList instanceof HTMLElement ? U.artifactList.scrollTop : 0,
         artifactContentScrollTop: U.artifactContent instanceof HTMLElement ? U.artifactContent.scrollTop : 0,
         traceItems: traceState.items,
+        messageItems: messageState.items,
         spawnReviewItems: spawnReviewState.items,
     };
 }
@@ -2310,6 +2353,8 @@ function restoreTaskDetailViewState(
         detail = true,
         trace = true,
         traceItems = true,
+        messages = true,
+        messageItems = true,
         spawnReviews = true,
         spawnReviewItems = true,
         artifactList = true,
@@ -2318,19 +2363,23 @@ function restoreTaskDetailViewState(
 ) {
     if (!state || typeof state !== "object") return;
     const getTraceList = () => U.adFlow?.querySelector(".task-trace-list");
+    const getMessageList = () => U.adMessages?.querySelector(".task-trace-list");
     const getSpawnReviewList = () => U.adSpawnReviews?.querySelector(".task-trace-list");
     const getArtifactList = () => U.artifactList;
     const getArtifactContent = () => U.artifactContent;
     const applyScrollPositions = () => {
         const traceList = getTraceList();
+        const messageList = getMessageList();
         const spawnReviewList = getSpawnReviewList();
         if (detail) setElementScrollTop(U.detail, state.detailScrollTop);
         if (trace) setElementScrollTop(traceList, state.traceScrollTop);
+        if (messages) setElementScrollTop(messageList, state.messageScrollTop);
         if (spawnReviews) setElementScrollTop(spawnReviewList, state.spawnReviewScrollTop);
         if (artifactList) setElementScrollTop(getArtifactList(), state.artifactListScrollTop);
         if (artifactContent) setElementScrollTop(getArtifactContent(), state.artifactContentScrollTop);
     };
     if (trace && traceItems) applyTaskTraceItemViewState(getTraceList(), state.traceItems);
+    if (messages && messageItems) applyTaskTraceItemViewState(getMessageList(), state.messageItems);
     if (spawnReviews && spawnReviewItems) applyTaskTraceItemViewState(getSpawnReviewList(), state.spawnReviewItems);
     applyScrollPositions();
     window.requestAnimationFrame(() => {
@@ -2350,6 +2399,11 @@ function renderTaskSectionHeading(heading, { icon, label, count = 0 } = {}) {
 
 function renderFlowHeading(count = 0) {
     renderTaskSectionHeading(U.adFlowHeading, { icon: "workflow", label: "执行流程", count });
+    icons();
+}
+
+function renderMessageHeading(count = 0) {
+    renderTaskSectionHeading(U.adMessagesHeading, { icon: "inbox", label: "消息列表", count });
     icons();
 }
 
@@ -5202,6 +5256,7 @@ function resourceDeleteErrorText(error) {
 
 function configureTaskDetailSections() {
     renderFlowHeading(0);
+    renderMessageHeading(0);
     renderSpawnReviewHeading(0);
     renderArtifactHeading(0);
     if (U.taskGovernanceToggle && U.taskGovernanceToggle.dataset.bound !== "true") {
@@ -5217,6 +5272,10 @@ function configureTaskDetailSections() {
     if (U.adFlow) {
         U.adFlow.classList.remove("code-block");
         U.adFlow.classList.add("task-trace-host");
+    }
+    if (U.adMessages) {
+        U.adMessages.classList.remove("code-block");
+        U.adMessages.classList.add("task-trace-host");
     }
     if (U.adSpawnReviews) {
         U.adSpawnReviews.classList.remove("code-block");

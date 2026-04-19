@@ -159,11 +159,12 @@ The backend contract behind that UI behavior is:
 ### Task Message Distribution UI Contract
 
 - When the current task enters message distribution mode (`runtime_summary.distribution.active_epoch_id/state` is present), the task-tree view now surfaces a task-local sticky notice above the tree with text `接收到新消息，分发中`.
+- The same sticky notice now has a pending-notice fallback after the compact distribution window closes: if the root node snapshot still reports unconsumed appended messages, the tree keeps a yellow notice in place with text equivalent to `接收到新消息，等待节点处理` until the node consumes them.
 - During the same distribution window, the execution-tree wrapper switches into a dedicated distribution visual mode and forces all connector lines into the same yellow family, regardless of the individual node success/running/failed color mapping.
-- This is intentionally task-scoped UI state, not a global shell toast. It should follow the currently opened task detail view and disappear when `runtime_summary.distribution` clears.
-- Node detail now receives durable `append_notice_messages` from the backend query contract. The frontend must not reconstruct these from raw mailbox tables or by parsing prompt tail blocks.
-- In the execution-trace panel, those messages render as a pseudo stage named `消息通知`. It is displayed alongside real stages, but it is not an execution stage in runtime state and it must not participate in stage progress or round-budget calculations.
-- The pseudo stage uses the normal trace-step shell plus a dedicated yellow visual treatment. Maintainers should treat it as a presentation-only layer built from backend-provided notice history rather than as a new stage kind.
+- This is intentionally task-scoped UI state, not a global shell toast. It should follow the currently opened task detail view and disappear only after both distribution state and root pending-notice state clear.
+- Node detail now receives a backend-owned message list contract instead of rendering appended messages as a pseudo execution stage. The frontend must not reconstruct these entries from raw mailbox tables or by parsing prompt tail blocks.
+- That same rule applies to root-node appended messages: the backend may expose them through the node detail message list even when the root has no `task_node_notifications` row, because root delivery uses node-local pending notice metadata rather than mailbox storage.
+- In the node detail drawer, the message list appears as its own section before `派生记录`. Each entry shows received time plus pending/consumed state, expands to the full message body, and includes the per-node distribution result (the child messages sent during that epoch/source turn, or `无` when no child delivery happened).
 
 ### Task Depth Default Contract
 
@@ -294,15 +295,18 @@ The CEO composer now has a dedicated frontdoor-compression UI path that is separ
 - The canonical message is `上下文大小超出当前模型<展示名>，请更改模型链配置后继续`.
 - `<展示名>` is expected to come from the runtime-selected model's `provider_model`, with model `key` only as fallback.
 
-### Composer Context Usage Outline
+### Composer Context Usage Meter
 
-- The Leader composer now has a second live-only context-size signal: a blue SVG outline around the input row.
-- That outline is backend-driven rather than a frontend-only guess. The browser debounces composer edits and calls `POST /api/ceo/sessions/{session_id}/composer-preflight`.
-- The request payload should represent the next outbound user batch for that session: existing queued follow-ups plus the current unsent draft/attachments, in FIFO order.
-- The backend estimate path is expected to reuse the same frontdoor turn-preparation and provider-bound token-estimation logic that real send uses before `token_compression` is attempted.
-- The response should include the current model-facing estimate and threshold fields, including `estimated_total_tokens`, `context_window_tokens`, `ratio`, `provider_model`, `trigger_tokens`, `would_trigger_token_compression`, and `would_exceed_context_window`.
-- The outline itself is live-only UI state. It must animate with the current ratio, clamp visual progress when the raw ratio exceeds `1.0`, and never create transcript messages, assistant bubbles, or persisted snapshot entries.
-- If the outline appears inconsistent with real send-time compression/error behavior, debug the backend preflight endpoint first. The maintenance contract is that the outline and send-time threshold checks share the same estimation logic and current model `context_window_tokens`.
+- The Leader composer now has a second live-only context-size signal: a brain-shaped usage meter beside the attachment button, not a border around the textarea.
+- That meter is backend-driven rather than a frontend-only guess, but it now has two distinct authority lanes that maintainers must keep separate.
+- For idle/non-running sessions, the browser may debounce composer edits and call `POST /api/ceo/sessions/{session_id}/composer-preflight`.
+- That preflight request payload should represent the next outbound user batch for that session: existing queued follow-ups plus the current unsent draft/attachments, in FIFO order.
+- The preflight response should include the current model-facing estimate and threshold fields, including `estimated_total_tokens`, `context_window_tokens`, `ratio`, `provider_model`, `trigger_tokens`, `would_trigger_token_compression`, and `would_exceed_context_window`.
+- For running sessions, the browser must stop treating composer-preflight as authoritative. The only valid source is the current inflight turn snapshot from `snapshot.ceo` / `ceo.turn.patch`, specifically the latest `frontdoor_token_preflight_diagnostics.final_request_tokens`, `frontdoor_token_preflight_diagnostics.max_context_tokens`, and `frontdoor_token_preflight_diagnostics.provider_model`.
+- This means the visible meter during a running turn is no longer "draft if sent now"; it is "the actual next provider-bound request the runtime is about to send."
+- When the current inflight snapshot does not yet carry an exact runtime request estimate, the meter must stay visually empty. Frontend code must not show `pending`, must not reuse the previous composer estimate, and must not infer a replacement value from the draft textarea, pinned sent entries, or `inflight_turn.user_message`.
+- The brain meter itself is live-only UI state. It must animate with the current ratio, clamp visual fill when the raw ratio exceeds `1.0`, and never create transcript messages, assistant bubbles, or persisted snapshot entries.
+- If the meter appears inconsistent with real send-time compression/error behavior, first check whether the browser is in the idle preflight lane or the running snapshot lane, then debug the corresponding backend source. Treat any browser-only fallback estimate during a running turn as a contract bug.
 
 ## Tool Admin RBAC Contract
 

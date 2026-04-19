@@ -21,35 +21,42 @@ class GlobalScheduler:
         self._running: dict[str, asyncio.Task[None]] = {}
         self._queued: deque[str] = deque()
         self._queued_set: set[str] = set()
+        self._requeue_after_running: set[str] = set()
         self._waiters: dict[str, list[asyncio.Future[None]]] = {}
         self._pump_task: asyncio.Task[None] | None = None
         self._closed = False
 
     def snapshot(self) -> dict[str, Any]:
+        queued_task_ids = list(self._queued)
+        deferred_requeues = sorted(task_id for task_id in self._requeue_after_running if task_id not in self._queued_set)
         return {
             'max_concurrent_tasks': None if self._max_concurrent_tasks is None else int(self._max_concurrent_tasks),
             'per_task_limit': int(self._per_task_limit),
             'running_task_ids': sorted(self._running.keys()),
-            'queued_task_ids': list(self._queued),
+            'queued_task_ids': queued_task_ids + deferred_requeues,
         }
 
     def active_task_count(self) -> int:
         return len(self._running)
 
     def queued_task_count(self) -> int:
-        return len(self._queued_set)
+        return len(self._queued_set) + len(self._requeue_after_running)
 
     def is_active(self, task_id: str) -> bool:
         return str(task_id or '').strip() in self._running
 
     def is_queued(self, task_id: str) -> bool:
-        return str(task_id or '').strip() in self._queued_set
+        normalized_task_id = str(task_id or '').strip()
+        return normalized_task_id in self._queued_set or normalized_task_id in self._requeue_after_running
 
     async def enqueue_task(self, task_id: str) -> None:
         normalized_task_id = str(task_id or '').strip()
         if not normalized_task_id or self._closed:
             return
-        if normalized_task_id in self._running or normalized_task_id in self._queued_set:
+        if normalized_task_id in self._queued_set:
+            return
+        if normalized_task_id in self._running:
+            self._requeue_after_running.add(normalized_task_id)
             return
         self._queued.append(normalized_task_id)
         self._queued_set.add(normalized_task_id)
@@ -60,6 +67,7 @@ class GlobalScheduler:
         normalized_task_id = str(task_id or '').strip()
         if not normalized_task_id:
             return
+        self._requeue_after_running.discard(normalized_task_id)
         if normalized_task_id in self._queued_set:
             self._queued = deque(item for item in self._queued if item != normalized_task_id)
             self._queued_set.discard(normalized_task_id)
@@ -74,29 +82,30 @@ class GlobalScheduler:
         normalized_task_id = str(task_id or '').strip()
         if not normalized_task_id:
             return
-        current = self._running.get(normalized_task_id)
-        if current is not None:
+        while True:
+            current = self._running.get(normalized_task_id)
+            if current is not None:
+                try:
+                    await asyncio.shield(current)
+                except asyncio.CancelledError:
+                    if current.done():
+                        continue
+                    raise
+                continue
+            if normalized_task_id not in self._queued_set and normalized_task_id not in self._requeue_after_running:
+                return
+            loop = asyncio.get_running_loop()
+            waiter: asyncio.Future[None] = loop.create_future()
+            self._waiters.setdefault(normalized_task_id, []).append(waiter)
             try:
-                await asyncio.shield(current)
-            except asyncio.CancelledError:
-                if current.done():
-                    return
-                raise
-            return
-        if normalized_task_id not in self._queued_set:
-            return
-        loop = asyncio.get_running_loop()
-        waiter: asyncio.Future[None] = loop.create_future()
-        self._waiters.setdefault(normalized_task_id, []).append(waiter)
-        try:
-            await waiter
-        finally:
-            if waiter.cancelled():
-                waiters = [item for item in self._waiters.get(normalized_task_id, []) if item is not waiter]
-                if waiters:
-                    self._waiters[normalized_task_id] = waiters
-                else:
-                    self._waiters.pop(normalized_task_id, None)
+                await waiter
+            finally:
+                if waiter.cancelled():
+                    waiters = [item for item in self._waiters.get(normalized_task_id, []) if item is not waiter]
+                    if waiters:
+                        self._waiters[normalized_task_id] = waiters
+                    else:
+                        self._waiters.pop(normalized_task_id, None)
 
     async def close(self) -> None:
         self._closed = True
@@ -108,6 +117,7 @@ class GlobalScheduler:
         self._running.clear()
         self._queued.clear()
         self._queued_set.clear()
+        self._requeue_after_running.clear()
         for task in running:
             if not task.done():
                 task.cancel()
@@ -149,6 +159,14 @@ class GlobalScheduler:
         current = self._running.get(task_id)
         if current is done_task:
             self._running.pop(task_id, None)
+        if (
+            not self._closed
+            and task_id in self._requeue_after_running
+            and task_id not in self._queued_set
+        ):
+            self._requeue_after_running.discard(task_id)
+            self._queued.append(task_id)
+            self._queued_set.add(task_id)
         self._resolve_waiters(task_id)
         if self._closed:
             return

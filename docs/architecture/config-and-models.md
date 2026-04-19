@@ -254,6 +254,7 @@ Frontdoor request-size control now comes from the selected chat model's `context
 
 - Model create/update now requires `context_window_tokens > 25000`.
 - Role-chain batch save fails if any referenced model is missing a valid `context_window_tokens`.
+  - The save path will now opportunistically backfill missing `models.catalog[].contextWindowTokens` from the bound `llm-config` record's `parameters.context_window_tokens` when possible (this mainly matters for older installs that upgraded after `context_window_tokens` became mandatory).
 - Old stored models may still exist without that field, but if one is actually selected at runtime the turn now fails fast instead of sending with an implicit unlimited window.
 
 ### What To Check When It Breaks

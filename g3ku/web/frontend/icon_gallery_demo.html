@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>G3KU Icon Gallery Demo</title>
+    <link rel="stylesheet" href="vendor/fonts/google-fonts.css">
+    <script src="vendor/lucide.min.js"></script>
+    <style>
+        :root {
+            color-scheme: dark;
+            --bg: #071014;
+            --panel: rgba(10, 18, 25, 0.9);
+            --panel-strong: rgba(12, 22, 30, 0.98);
+            --panel-soft: rgba(15, 28, 38, 0.82);
+            --border: rgba(122, 163, 184, 0.18);
+            --border-strong: rgba(57, 197, 187, 0.38);
+            --text: #eef7fa;
+            --text-secondary: #8ca8b6;
+            --brand: #39c5bb;
+            --brand-soft: rgba(57, 197, 187, 0.14);
+            --shadow: 0 18px 52px rgba(0, 0, 0, 0.32);
+            --radius-xl: 24px;
+            --radius-lg: 18px;
+            --radius-md: 14px;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: "Inter", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+            background:
+                radial-gradient(circle at top, rgba(57, 197, 187, 0.13), transparent 30%),
+                linear-gradient(180deg, #081116 0%, #060c10 100%);
+            color: var(--text);
+        }
+
+        .shell {
+            max-width: 1440px;
+            margin: 0 auto;
+            padding: 32px 24px 56px;
+        }
+
+        .hero {
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            display: grid;
+            gap: 20px;
+            padding: 24px;
+            margin-bottom: 28px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-xl);
+            background:
+                linear-gradient(180deg, rgba(7, 16, 20, 0.95), rgba(7, 16, 20, 0.88)),
+                var(--panel);
+            backdrop-filter: blur(18px);
+            box-shadow: var(--shadow);
+        }
+
+        .hero-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 20px;
+        }
+
+        .hero-copy h1 {
+            margin: 0 0 10px;
+            font-size: clamp(28px, 4vw, 42px);
+            line-height: 1.04;
+            letter-spacing: -0.03em;
+        }
+
+        .hero-copy p {
+            margin: 0;
+            max-width: 860px;
+            color: var(--text-secondary);
+            font-size: 15px;
+            line-height: 1.65;
+        }
+
+        .hero-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 14px;
+            border: 1px solid var(--border-strong);
+            border-radius: 999px;
+            background: var(--brand-soft);
+            color: #c5faf6;
+            font-size: 13px;
+            white-space: nowrap;
+        }
+
+        .toolbar {
+            display: grid;
+            gap: 16px;
+        }
+
+        .search-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 14px;
+            align-items: center;
+        }
+
+        .search {
+            width: 100%;
+            border: 1px solid rgba(136, 165, 183, 0.24);
+            border-radius: 16px;
+            background: rgba(10, 20, 28, 0.9);
+            color: var(--text);
+            padding: 14px 16px;
+            font-size: 15px;
+            outline: none;
+            transition: border-color 180ms ease, box-shadow 180ms ease;
+        }
+
+        .search:focus {
+            border-color: var(--border-strong);
+            box-shadow: 0 0 0 4px rgba(57, 197, 187, 0.12);
+        }
+
+        .meta {
+            color: var(--text-secondary);
+            font-size: 14px;
+            white-space: nowrap;
+        }
+
+        .chip-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .chip {
+            appearance: none;
+            border: 1px solid rgba(136, 165, 183, 0.22);
+            border-radius: 999px;
+            background: rgba(11, 21, 28, 0.92);
+            color: var(--text-secondary);
+            padding: 10px 14px;
+            font-size: 13px;
+            cursor: pointer;
+            transition:
+                border-color 180ms ease,
+                color 180ms ease,
+                background-color 180ms ease,
+                transform 180ms ease;
+        }
+
+        .chip:hover {
+            transform: translateY(-1px);
+            color: var(--text);
+            border-color: rgba(57, 197, 187, 0.35);
+        }
+
+        .chip.active {
+            color: #d8fffb;
+            border-color: var(--border-strong);
+            background: rgba(57, 197, 187, 0.16);
+        }
+
+        .hint {
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+            gap: 14px;
+        }
+
+        .card {
+            position: relative;
+            display: grid;
+            gap: 12px;
+            place-items: center;
+            min-height: 136px;
+            padding: 16px 12px 14px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            background:
+                linear-gradient(180deg, rgba(13, 21, 28, 0.98), rgba(10, 16, 22, 0.95));
+            cursor: pointer;
+            transition:
+                transform 180ms ease,
+                border-color 180ms ease,
+                box-shadow 220ms ease,
+                background-color 220ms ease;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(57, 197, 187, 0.36);
+            box-shadow:
+                0 10px 24px rgba(0, 0, 0, 0.28),
+                0 0 0 1px rgba(57, 197, 187, 0.08);
+        }
+
+        .card.is-candidate {
+            border-color: rgba(57, 197, 187, 0.34);
+            background:
+                linear-gradient(180deg, rgba(18, 34, 40, 0.98), rgba(11, 18, 24, 0.95));
+            box-shadow: 0 0 0 1px rgba(57, 197, 187, 0.08);
+        }
+
+        .icon-wrap {
+            display: grid;
+            place-items: center;
+            width: 56px;
+            height: 56px;
+            border-radius: 18px;
+            background: rgba(57, 197, 187, 0.08);
+            color: var(--text);
+        }
+
+        .card i,
+        .card svg {
+            width: 28px;
+            height: 28px;
+        }
+
+        .label {
+            font-size: 12px;
+            line-height: 1.35;
+            color: var(--text-secondary);
+            text-align: center;
+            word-break: break-word;
+        }
+
+        .candidate-badge {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            padding: 4px 8px;
+            border-radius: 999px;
+            background: rgba(57, 197, 187, 0.14);
+            color: #c4fffa;
+            font-size: 11px;
+        }
+
+        .toast {
+            position: fixed;
+            right: 24px;
+            bottom: 24px;
+            z-index: 50;
+            min-width: 220px;
+            max-width: min(420px, calc(100vw - 32px));
+            padding: 14px 16px;
+            border-radius: 16px;
+            border: 1px solid var(--border-strong);
+            background: rgba(8, 17, 23, 0.96);
+            color: var(--text);
+            box-shadow: var(--shadow);
+            opacity: 0;
+            pointer-events: none;
+            transform: translateY(8px);
+            transition: opacity 180ms ease, transform 180ms ease;
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        @media (max-width: 720px) {
+            .shell {
+                padding: 20px 16px 40px;
+            }
+
+            .hero {
+                padding: 18px;
+            }
+
+            .hero-top,
+            .search-row {
+                grid-template-columns: 1fr;
+            }
+
+            .meta {
+                white-space: normal;
+            }
+
+            .grid {
+                grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+                gap: 12px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <section class="hero">
+            <div class="hero-top">
+                <div class="hero-copy">
+                    <h1>Lucide 全量图标浏览</h1>
+                    <p>
+                        这个页面会把当前 G3KU 前端可直接使用的 Lucide 图标全部列出来。你可以搜索、点候选标签筛选，
+                        也可以直接点击任意图标卡片复制名字，然后告诉我你想替换成哪一个。
+                    </p>
+                </div>
+                <div class="hero-badge">
+                    <i data-lucide="sparkles"></i>
+                    <span id="icon-total-badge">加载中…</span>
+                </div>
+            </div>
+
+            <div class="toolbar">
+                <div class="search-row">
+                    <input id="icon-search" class="search" type="search" placeholder="搜索图标名，比如 brain / sparkles / bot / badge-help">
+                    <div id="icon-meta" class="meta">正在读取图标库…</div>
+                </div>
+
+                <div id="candidate-row" class="chip-row"></div>
+                <div class="hint">候选标签是我先帮你挑的“更适合上下文/思考/状态”的方向；点卡片即可复制图标名。</div>
+            </div>
+        </section>
+
+        <section id="icon-grid" class="grid" aria-live="polite"></section>
+    </div>
+
+    <div id="copy-toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script>
+        (() => {
+            const candidateIcons = [
+                "brain",
+                "bot",
+                "cpu",
+                "sparkles",
+                "badge-help",
+                "scan-search",
+                "lightbulb",
+                "orbit",
+                "radar",
+                "binary",
+                "activity",
+                "search-check"
+            ];
+
+            const searchInput = document.getElementById("icon-search");
+            const iconGrid = document.getElementById("icon-grid");
+            const iconMeta = document.getElementById("icon-meta");
+            const iconTotalBadge = document.getElementById("icon-total-badge");
+            const candidateRow = document.getElementById("candidate-row");
+            const copyToast = document.getElementById("copy-toast");
+
+            const allIcons = Object.keys((window.lucide && window.lucide.icons) || {})
+                .map((name) => String(name || "").trim())
+                .filter(Boolean)
+                .sort((left, right) => left.localeCompare(right));
+
+            let activeFilter = "";
+
+            function showToast(text) {
+                copyToast.textContent = text;
+                copyToast.classList.add("show");
+                window.clearTimeout(showToast._timer);
+                showToast._timer = window.setTimeout(() => {
+                    copyToast.classList.remove("show");
+                }, 1800);
+            }
+
+            async function copyText(text) {
+                try {
+                    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+                        await navigator.clipboard.writeText(text);
+                        showToast(`已复制图标名：${text}`);
+                        return;
+                    }
+                } catch (_error) {}
+                const helper = document.createElement("textarea");
+                helper.value = text;
+                helper.setAttribute("readonly", "readonly");
+                helper.style.position = "absolute";
+                helper.style.left = "-9999px";
+                document.body.appendChild(helper);
+                helper.select();
+                document.execCommand("copy");
+                document.body.removeChild(helper);
+                showToast(`已复制图标名：${text}`);
+            }
+
+            function createCandidateChips() {
+                const allChip = document.createElement("button");
+                allChip.type = "button";
+                allChip.className = "chip active";
+                allChip.textContent = "全部图标";
+                allChip.dataset.filter = "";
+                candidateRow.appendChild(allChip);
+
+                candidateIcons.forEach((name) => {
+                    const button = document.createElement("button");
+                    button.type = "button";
+                    button.className = "chip";
+                    button.textContent = name;
+                    button.dataset.filter = name;
+                    candidateRow.appendChild(button);
+                });
+
+                candidateRow.addEventListener("click", (event) => {
+                    const button = event.target.closest(".chip");
+                    if (!button) return;
+                    activeFilter = String(button.dataset.filter || "").trim().toLowerCase();
+                    [...candidateRow.querySelectorAll(".chip")].forEach((chip) => {
+                        chip.classList.toggle("active", chip === button);
+                    });
+                    render();
+                });
+            }
+
+            function filteredIcons() {
+                const search = String(searchInput.value || "").trim().toLowerCase();
+                return allIcons.filter((name) => {
+                    const normalized = name.toLowerCase();
+                    if (activeFilter && normalized !== activeFilter) return false;
+                    if (!search) return true;
+                    return normalized.includes(search);
+                });
+            }
+
+            function render() {
+                const items = filteredIcons();
+                iconGrid.innerHTML = "";
+                const fragment = document.createDocumentFragment();
+
+                items.forEach((name) => {
+                    const card = document.createElement("button");
+                    card.type = "button";
+                    card.className = "card";
+                    card.title = `点击复制：${name}`;
+                    card.dataset.icon = name;
+                    if (candidateIcons.includes(name)) {
+                        card.classList.add("is-candidate");
+                    }
+
+                    card.innerHTML = `
+                        ${candidateIcons.includes(name) ? '<span class="candidate-badge">候选</span>' : ""}
+                        <div class="icon-wrap"><i data-lucide="${name}"></i></div>
+                        <div class="label">${name}</div>
+                    `;
+                    fragment.appendChild(card);
+                });
+
+                iconGrid.appendChild(fragment);
+                if (window.lucide && typeof window.lucide.createIcons === "function") {
+                    window.lucide.createIcons();
+                }
+
+                const suffix = activeFilter ? ` · 当前候选：${activeFilter}` : "";
+                iconMeta.textContent = `共 ${allIcons.length} 个图标，当前展示 ${items.length} 个${suffix}`;
+                iconTotalBadge.textContent = `${allIcons.length} 个 Lucide 图标`;
+            }
+
+            iconGrid.addEventListener("click", (event) => {
+                const card = event.target.closest(".card");
+                if (!card) return;
+                const name = String(card.dataset.icon || "").trim();
+                if (!name) return;
+                void copyText(name);
+            });
+
+            searchInput.addEventListener("input", () => render());
+
+            createCandidateChips();
+            render();
+        })();
+    </script>
+</body>
+</html>

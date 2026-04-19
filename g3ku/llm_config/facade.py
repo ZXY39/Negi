@@ -136,7 +136,10 @@ class LLMConfigFacade:
         draft = ProviderConfigDraft.model_validate(payload)
         validation = self.config_service.validate_draft(draft)
         if not validation.valid or validation.normalized_preview is None:
-            raise ValueError("Draft validation failed")
+            detail = "; ".join(
+                f"{err.field}: {err.message or err.code or 'invalid'}" for err in (validation.errors or [])
+            ).strip()
+            raise ValueError(f"Draft validation failed: {detail}" if detail else "Draft validation failed")
         probe = self.config_service.probe_draft(draft)
         if not probe.success:
             raise ValueError(probe.message)
@@ -153,7 +156,10 @@ class LLMConfigFacade:
         merged = self._merge_draft(current, payload, replace_parameters=True)
         validation = self.config_service.validate_draft(merged)
         if not validation.valid or validation.normalized_preview is None:
-            raise ValueError("Draft validation failed")
+            detail = "; ".join(
+                f"{err.field}: {err.message or err.code or 'invalid'}" for err in (validation.errors or [])
+            ).strip()
+            raise ValueError(f"Draft validation failed: {detail}" if detail else "Draft validation failed")
         probe = self.config_service.probe_draft(merged)
         if not probe.success:
             raise ValueError(probe.message)
@@ -263,7 +269,10 @@ class LLMConfigFacade:
 
         validation = self.config_service.validate_draft(merged)
         if not validation.valid or validation.normalized_preview is None:
-            raise ValueError("Draft validation failed")
+            detail = "; ".join(
+                f"{err.field}: {err.message or err.code or 'invalid'}" for err in (validation.errors or [])
+            ).strip()
+            raise ValueError(f"Draft validation failed: {detail}" if detail else "Draft validation failed")
         probe = self.config_service.probe_draft(merged)
         if not probe.success:
             raise ValueError(probe.message)

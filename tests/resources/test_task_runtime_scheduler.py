@@ -27,6 +27,26 @@ class _FakeRunner:
         self.finished.append(normalized_task_id)
 
 
+class _ReenqueueRunner:
+    def __init__(self) -> None:
+        self.scheduler: GlobalScheduler | None = None
+        self.started: list[str] = []
+        self.finished: list[str] = []
+        self.first_run_entered = asyncio.Event()
+        self.allow_first_run_finish = asyncio.Event()
+
+    async def run_task(self, task_id: str) -> None:
+        normalized_task_id = str(task_id or "").strip()
+        self.started.append(normalized_task_id)
+        if len(self.started) == 1:
+            self.first_run_entered.set()
+            assert self.scheduler is not None
+            await self.scheduler.enqueue_task(normalized_task_id)
+            await asyncio.sleep(0)
+            await self.allow_first_run_finish.wait()
+        self.finished.append(normalized_task_id)
+
+
 @pytest.mark.asyncio
 async def test_global_scheduler_limits_concurrency_and_releases_queued_tasks_in_order() -> None:
     runner = _FakeRunner()
@@ -83,4 +103,32 @@ async def test_global_scheduler_cancel_removes_queued_task_before_it_runs() -> N
     finally:
         runner.gate('task:one').set()
         runner.gate('task:two').set()
+        await scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_global_scheduler_requeues_same_task_when_enqueue_happens_during_active_run() -> None:
+    runner = _ReenqueueRunner()
+    scheduler = GlobalScheduler(runner=runner, max_concurrent_tasks=1, per_task_limit=1)
+    runner.scheduler = scheduler
+    try:
+        await scheduler.enqueue_task("task:one")
+
+        await asyncio.wait_for(runner.first_run_entered.wait(), timeout=1.0)
+        await asyncio.sleep(0.05)
+        assert runner.started == ["task:one"]
+        assert scheduler.is_queued("task:one") is True
+
+        runner.allow_first_run_finish.set()
+
+        for _ in range(100):
+            if runner.started == ["task:one", "task:one"]:
+                break
+            await asyncio.sleep(0.01)
+
+        assert runner.started == ["task:one", "task:one"]
+        await scheduler.wait("task:one")
+        assert runner.finished == ["task:one", "task:one"]
+    finally:
+        runner.allow_first_run_finish.set()
         await scheduler.close()

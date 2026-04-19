@@ -420,6 +420,7 @@ class ReActToolLoop:
             provider_retry_count = 0
             empty_response_retry_count = 0
             restart_with_refreshed_runtime = False
+            inflight_notice_callback_triggered = False
             try:
                 while True:
                     self._check_pause_or_cancel(task.task_id)
@@ -457,6 +458,10 @@ class ReActToolLoop:
                                 marker='model.chat.await_response',
                                 awaitable=chat_coro,
                             )
+                        consume_inflight_notice_callback = runtime_context.get('consume_inflight_notice_callback')
+                        if callable(consume_inflight_notice_callback) and not inflight_notice_callback_triggered:
+                            consume_inflight_notice_callback()
+                            inflight_notice_callback_triggered = True
                         self._set_model_await_marker(
                             task_id=task.task_id,
                             node_id=node.node_id,

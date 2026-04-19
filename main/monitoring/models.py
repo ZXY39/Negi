@@ -30,6 +30,7 @@ class TaskTreeSnapshotNode(Model):
     default_round_id: str = ''
     rounds: list[TaskTreeSnapshotRound] = Field(default_factory=list)
     auxiliary_child_ids: list[str] = Field(default_factory=list)
+    pending_notice_count: int = 0
 
 
 class TaskTreeSnapshot(Model):
@@ -181,6 +182,7 @@ class TaskNodeDetail(Model):
     execution_trace_ref: str = ''
     latest_spawn_round_id: str = ''
     append_notice_messages: list[dict[str, Any]] = Field(default_factory=list)
+    message_list: list[dict[str, Any]] = Field(default_factory=list)
     direct_child_results: list[dict[str, Any]] = Field(default_factory=list)
     spawn_review_rounds: list[dict[str, Any]] = Field(default_factory=list)
     artifacts_preview: list[dict[str, Any]] = Field(default_factory=list)

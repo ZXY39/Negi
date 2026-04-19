@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 APPEND_NOTICE_CONTEXT_KEY = 'append_notice_context'
+PENDING_APPEND_NOTICE_RECORDS_KEY = 'pending_append_notice_records'
 APPEND_NOTICE_TAIL_PREFIX = '[G3KU_APPEND_NOTICE_TAIL_V1]'
 
 
@@ -24,6 +25,7 @@ def normalize_append_notice_context(payload: Any) -> dict[str, Any]:
                 'epoch_id': str(item.get('epoch_id') or '').strip(),
                 'source_node_id': str(item.get('source_node_id') or '').strip(),
                 'message': str(item.get('message') or '').strip(),
+                'received_at': str(item.get('received_at') or '').strip(),
                 'consumed_at': str(item.get('consumed_at') or '').strip(),
                 'compression_stage_id': str(item.get('compression_stage_id') or '').strip(),
             }
@@ -57,6 +59,92 @@ def normalize_append_notice_context(payload: Any) -> dict[str, Any]:
     }
 
 
+def normalize_pending_append_notice_records(payload: Any) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen_notice_ids: set[str] = set()
+    for item in list(payload or []):
+        if not isinstance(item, dict):
+            continue
+        notification_id = str(item.get('notification_id') or '').strip()
+        if not notification_id or notification_id in seen_notice_ids:
+            continue
+        seen_notice_ids.add(notification_id)
+        records.append(
+            {
+                'notification_id': notification_id,
+                'epoch_id': str(item.get('epoch_id') or '').strip(),
+                'source_node_id': str(item.get('source_node_id') or '').strip(),
+                'message': str(item.get('message') or '').strip(),
+                'created_at': str(item.get('created_at') or '').strip(),
+                'order_index': max(0, int(item.get('order_index') or 0)),
+            }
+        )
+    records.sort(
+        key=lambda item: (
+            str(item.get('created_at') or ''),
+            int(item.get('order_index') or 0),
+            str(item.get('notification_id') or ''),
+        )
+    )
+    return records
+
+
+def record_pending_append_notice_records(
+    payload: Any,
+    *,
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized = normalize_pending_append_notice_records(payload)
+    existing_ids = {
+        str(item.get('notification_id') or '').strip()
+        for item in list(normalized or [])
+    }
+    for item in list(records or []):
+        if not isinstance(item, dict):
+            continue
+        notification_id = str(item.get('notification_id') or '').strip()
+        if not notification_id or notification_id in existing_ids:
+            continue
+        existing_ids.add(notification_id)
+        normalized.append(
+            {
+                'notification_id': notification_id,
+                'epoch_id': str(item.get('epoch_id') or '').strip(),
+                'source_node_id': str(item.get('source_node_id') or '').strip(),
+                'message': str(item.get('message') or '').strip(),
+                'created_at': str(item.get('created_at') or '').strip(),
+                'order_index': max(0, int(item.get('order_index') or 0)),
+            }
+        )
+    normalized.sort(
+        key=lambda item: (
+            str(item.get('created_at') or ''),
+            int(item.get('order_index') or 0),
+            str(item.get('notification_id') or ''),
+        )
+    )
+    return normalized
+
+
+def consume_pending_append_notice_records(
+    payload: Any,
+    *,
+    notification_ids: list[str],
+) -> list[dict[str, Any]]:
+    consumed_ids = {
+        str(item or '').strip()
+        for item in list(notification_ids or [])
+        if str(item or '').strip()
+    }
+    if not consumed_ids:
+        return normalize_pending_append_notice_records(payload)
+    return [
+        dict(item)
+        for item in list(normalize_pending_append_notice_records(payload) or [])
+        if str(item.get('notification_id') or '').strip() not in consumed_ids
+    ]
+
+
 def record_consumed_notifications(
     context: Any,
     *,
@@ -78,6 +166,13 @@ def record_consumed_notifications(
                 'epoch_id': str(item.get('epoch_id') or '').strip(),
                 'source_node_id': str(item.get('source_node_id') or '').strip(),
                 'message': str(item.get('message') or '').strip(),
+                'received_at': str(
+                    item.get('received_at')
+                    or item.get('delivered_at')
+                    or item.get('created_at')
+                    or consumed_at
+                    or ''
+                ).strip(),
                 'consumed_at': str(item.get('consumed_at') or consumed_at or '').strip(),
                 'compression_stage_id': '',
             }
@@ -187,9 +282,13 @@ def build_append_notice_tail_messages(
 
 __all__ = [
     'APPEND_NOTICE_CONTEXT_KEY',
+    'PENDING_APPEND_NOTICE_RECORDS_KEY',
     'APPEND_NOTICE_TAIL_PREFIX',
     'build_append_notice_tail_messages',
+    'consume_pending_append_notice_records',
     'normalize_append_notice_context',
+    'normalize_pending_append_notice_records',
+    'record_pending_append_notice_records',
     'record_consumed_notifications',
     'roll_append_notice_context_for_compression_stage',
 ]

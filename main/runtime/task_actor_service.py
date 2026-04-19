@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from main.errors import TaskPausedError, describe_exception
 from main.models import NodeFinalResult, normalize_final_acceptance_metadata
 from main.protocol import now_iso
+from main.runtime.append_notice_context import (
+    PENDING_APPEND_NOTICE_RECORDS_KEY,
+    normalize_pending_append_notice_records,
+    record_pending_append_notice_records,
+)
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 
 _DEFAULT_NODE_DISPATCH_LIMITS = {
@@ -347,6 +352,7 @@ class TaskActorService:
             return
         if self._stall_notifier is not None and hasattr(self._stall_notifier, 'start_task'):
             self._stall_notifier.start_task(task_id)
+        control_only_return = False
         result = NodeFinalResult(
             status='failed',
             delivery_status='blocked',
@@ -375,6 +381,7 @@ class TaskActorService:
                 if str(distribution.get('state') or '').strip() in {'pause_requested', 'paused', 'distributing'}:
                     distribution_result = await self._run_distribution_epoch(task_id)
                     if distribution_result is not None:
+                        control_only_return = True
                         return
                 result = await dispatcher.execute_node(task_id, root_node.node_id)
                 if result.status == 'success':
@@ -412,7 +419,12 @@ class TaskActorService:
             self._dispatchers.pop(task_id, None)
             latest = self._store.get_task(task_id)
             root = self._store.get_node(latest.root_node_id) if latest is not None else None
-            if latest is not None and not latest.is_paused and result.status in {'success', 'failed'}:
+            if (
+                latest is not None
+                and not latest.is_paused
+                and not control_only_return
+                and result.status in {'success', 'failed'}
+            ):
                 if root is not None and root.status == 'in_progress':
                     self._log_service.update_node_status(
                         task_id,
@@ -473,6 +485,53 @@ class TaskActorService:
     def _distribution_runtime_state(self, task_id: str) -> dict[str, object]:
         runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
         return dict(runtime_meta.get('distribution') or {})
+
+    @staticmethod
+    def _root_distribution_notice_records(*, epoch, created_at: str) -> list[dict[str, object]]:
+        payload = dict(epoch.payload or {})
+        queued_root_messages = [
+            str(item or '').strip()
+            for item in list(payload.get('queued_root_messages') or [])
+            if str(item or '').strip()
+        ]
+        if not queued_root_messages:
+            queued_root_messages = [str(epoch.root_message or '').strip()]
+        root_node_id = str(epoch.root_node_id or '').strip()
+        epoch_id = str(epoch.epoch_id or '').strip()
+        records: list[dict[str, object]] = []
+        for index, message in enumerate(queued_root_messages, start=1):
+            if not message:
+                continue
+            records.append(
+                {
+                    'notification_id': f'root-notice:{epoch_id}:{index}',
+                    'epoch_id': epoch_id,
+                    'source_node_id': root_node_id,
+                    'message': message,
+                    'created_at': str(created_at or '').strip(),
+                    'order_index': index,
+                }
+            )
+        return records
+
+    def _queue_root_distribution_notices(self, *, epoch, created_at: str) -> None:
+        root_node_id = str(epoch.root_node_id or '').strip()
+        if not root_node_id:
+            return
+        notice_records = self._root_distribution_notice_records(epoch=epoch, created_at=created_at)
+        if not notice_records:
+            return
+
+        def _mutate(metadata: dict[str, object]) -> dict[str, object]:
+            current = normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
+            updated = record_pending_append_notice_records(current, records=notice_records)
+            if updated:
+                metadata[PENDING_APPEND_NOTICE_RECORDS_KEY] = updated
+            else:
+                metadata.pop(PENDING_APPEND_NOTICE_RECORDS_KEY, None)
+            return metadata
+
+        self._log_service.update_node_metadata(root_node_id, _mutate)
 
     async def _run_distribution_epoch(self, task_id: str) -> bool | None:
         task = self._store.get_task(task_id)
@@ -558,15 +617,17 @@ class TaskActorService:
                 },
             )
             return await self._run_distribution_epoch(task_id)
-        self._store.upsert_task_message_distribution_epoch(
+        completed_at = now_iso()
+        completed_epoch = self._store.upsert_task_message_distribution_epoch(
             refreshed_epoch.model_copy(
                 update={
                     'state': 'completed',
-                    'completed_at': now_iso(),
+                    'completed_at': completed_at,
                     'payload': payload,
                 }
             )
         )
+        self._queue_root_distribution_notices(epoch=completed_epoch, created_at=completed_at)
         self.clear_pause(task_id)
         self._log_service.update_task_runtime_meta(
             task_id,
