@@ -316,11 +316,12 @@ The backend responsibilities are now:
 - derive runtime visibility for surfaced tools from that persisted RBAC state,
 - and keep internal non-Tool-Admin tools outside the Tool Admin contract.
 
-Web-only maintenance note:
+Web/channel delivery maintenance note:
 
-- When `G3KU_TASK_RUNTIME_ROLE=web`, the runtime auto-disables the `messaging` tool family (executor: `message`) on startup by default to prevent accidental external-channel sends in the pure browser chat UI.
-- This default is controlled by `G3KU_WEB_DISABLE_MESSAGE_TOOL` (unset means enabled; set to `0/false/no/off` to keep `messaging` enabled).
-- Tool Admin surfaces this as the `messaging` tool family being disabled in the catalog.
+- Tool Admin no longer surfaces a `messaging` tool family, and the web runtime no longer applies any `G3KU_WEB_DISABLE_MESSAGE_TOOL` compatibility rule.
+- Pure browser CEO chat replies are delivered through the websocket session/runtime path, not through a surfaced `message` tool.
+- China-channel replies continue to flow through `SessionRuntimeBridge` and `ChinaBridgeTransport`, which emit final `deliver_message` frames without depending on the removed model tool.
+- If an operator reports that `messaging` still appears in Tool Admin, debug resource discovery or stale frontend state first; the intended contract is absence, not "present but disabled".
 
 Exec runtime mode is now part of the same admin contract for `exec_runtime`:
 

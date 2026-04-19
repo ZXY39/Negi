@@ -486,18 +486,21 @@ This changes how maintainers should reason about surfaced tools such as `exec`, 
 - Resource refresh must preserve that metadata override; otherwise Tool Admin would show one mode while runtime execution silently falls back to another.
 - `load_tool_context("exec")` / `load_tool_context("exec_runtime")`, node dynamic contracts, and frontdoor dynamic contracts should all agree on the same `exec_runtime_policy` payload. If they disagree, debug the persisted tool family record first, then the contract-injection path.
 
-### Web Default: Disable `messaging` / `message`
+### Hard Removal Of `message` / `messaging`
 
-In the pure web UI path, the model should not need the external-channel messaging tool because replies are delivered through the websocket session timeline.
+The surfaced `message` executor and its Tool Admin family `messaging` are now removed from the resource/tool contract entirely.
 
-To reduce accidental `message` executor calls (Tool Admin family `messaging`) in the CEO/frontdoor web chat, the web runtime applies a startup default:
+- Resource discovery should no longer find `tools/message/resource.yaml`.
+- Tool Admin should no longer list a `messaging` family.
+- CEO/frontdoor fixed builtin exposure and the default `frontdoor_interrupt_tool_names` no longer include `message`.
+- Web runtime no longer has a special-case startup auto-disable path or any `G3KU_WEB_DISABLE_MESSAGE_TOOL` override.
+- If maintainers still see `messaging` in Tool Admin, or `message` in provider-facing web tool schemas, treat that as a contract regression rather than as a disabled-by-default state.
 
-- When `G3KU_TASK_RUNTIME_ROLE=web`, the runtime auto-disables the surfaced `messaging` tool family on startup by default.
-- This is controlled by env var `G3KU_WEB_DISABLE_MESSAGE_TOOL`:
-  - empty/unset means enabled (default on; the tool is disabled),
-  - `0/false/no/off` disables the default (the tool stays enabled).
-- Tool Admin will show `messaging` as disabled when the default is applied.
-- To re-enable external-channel sending from the web runtime, set `G3KU_WEB_DISABLE_MESSAGE_TOOL=0` and restart the web process.
+The removal only applies to the surfaced model/tool contract.
+
+- Browser/web replies still travel through the websocket session path (`ceo.reply.final`, inflight snapshots, and related runtime events).
+- China/channel replies still travel through `SessionRuntimeBridge` plus `ChinaBridgeTransport` deliver frames.
+- Do not debug channel reply delivery as if it depended on a surfaced `message` tool family; that communication path is transport-owned, not Tool-Admin-owned.
 
 Internal fixed tools that are not surfaced in Tool Admin remain outside this contract.
 

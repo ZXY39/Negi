@@ -562,11 +562,20 @@ def test_admin_tool_policy_endpoint_accepts_actions_mapping():
         async def startup(self) -> None:
             return None
 
-        def update_tool_policy(self, tool_id: str, *, session_id: str, enabled=None, allowed_roles_by_action=None):
+        def update_tool_policy(
+            self,
+            tool_id: str,
+            *,
+            session_id: str,
+            enabled=None,
+            allowed_roles_by_action=None,
+            execution_mode=None,
+        ):
             captured['tool_id'] = tool_id
             captured['session_id'] = session_id
             captured['enabled'] = enabled
             captured['allowed_roles_by_action'] = allowed_roles_by_action
+            captured['execution_mode'] = execution_mode
             return family.model_copy(
                 update={
                     'enabled': bool(enabled),
@@ -591,6 +600,7 @@ def test_admin_tool_policy_endpoint_accepts_actions_mapping():
         'session_id': 'web:shared',
         'enabled': True,
         'allowed_roles_by_action': {'write': ['ceo', 'inspection']},
+        'execution_mode': None,
     }
     assert response.json()['item']['actions'][0]['allowed_roles'] == ['ceo', 'inspection']
 
