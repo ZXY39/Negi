@@ -103,6 +103,18 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - If the current visible turn finishes before another `call_model` round happens, the backend immediately starts the next fresh user turn from the queued follow-ups after the current turn closes.
 - Each queued item still remains its own user message in transcript persistence; batching only changes which next LLM request sees that group first.
 
+### 2.5. Image Upload Gating
+
+- Web CEO uploads still persist attachment metadata plus the text note that exposes the local file path to the agent.
+- The websocket/input layer no longer unconditionally turns uploaded images into provider-visible `image_url` blocks.
+- CEO/frontdoor now decides per turn whether uploaded images should expand into multimodal request content. The decision key is the selected model binding's `image_multimodal_enabled` flag.
+- If `image_multimodal_enabled=false`, uploads stay on the text downgrade path and the model only sees ordinary text plus the attachment note.
+- If `image_multimodal_enabled=true`, only the live request of the current visible turn may contain provider-visible image input. Durable transcript/baseline lanes still strip those image blocks back out.
+- Web CEO upload protection now has two layers:
+  - `/api/ceo/uploads` rejects any single image larger than `5 MiB`
+  - the runtime rechecks image size again before expanding the upload into a provider request, so bypassing the upload endpoint does not bypass the limit
+- Composer/preflight estimation must use the same expansion rule as the real send. If the current model binding would not expand images, the meter/preflight must estimate the downgraded text-only request instead of pretending an image will be sent.
+
 ### 3. Context Loader Notices
 
 - Successful CEO/frontdoor `load_tool_context` and `load_skill_context` calls are no longer shown as ordinary `Interaction Flow` steps under the assistant bubble.

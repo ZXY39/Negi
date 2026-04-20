@@ -28,6 +28,7 @@ from g3ku.runtime.frontdoor.tool_contract import (
     frontdoor_tool_contract_payload_from_message,
     is_frontdoor_tool_contract_message,
 )
+from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from main.runtime.chat_backend import build_prompt_cache_diagnostics
 
@@ -43,6 +44,33 @@ def _message_role_for_contract_filter(message: object) -> str:
     if raw_role == "human":
         return "user"
     return raw_role
+
+
+def _web_ceo_uploaded_image_note(*, text: str, image_path: Path) -> str:
+    note = "\n".join(
+        [
+            "Uploaded attachments:",
+            f"- image: {image_path.name} (local path: {image_path})",
+            "You may inspect the local file paths above when helpful.",
+        ]
+    )
+    text_value = str(text or "").strip()
+    return f"{text_value}\n\n{note}" if text_value else note
+
+
+def _web_ceo_upload_metadata(image_path: Path) -> dict[str, object]:
+    return {
+        "web_ceo_raw_text": "Please inspect this image",
+        "web_ceo_uploads": [
+            {
+                "path": str(image_path),
+                "name": image_path.name,
+                "mime_type": "image/png",
+                "kind": "image",
+                "size": image_path.stat().st_size,
+            }
+        ],
+    }
 
 
 def _canonical_frontdoor_state(**overrides) -> dict[str, object]:
@@ -1568,16 +1596,11 @@ async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_int
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
     assert len(contract_messages) == 1
-    payload = json.loads(str(contract_messages[0]["content"] or ""))
-    assert payload["candidate_tools"] == [
-        {
-            "tool_id": "agent_browser",
-            "description": "Browser automation via semantic shortlist.",
-        }
-    ]
-    assert "visible_skill_ids" not in payload
-    assert "rbac_visible_tool_names" not in payload
-    assert "rbac_visible_skill_ids" not in payload
+    contract_text = str(contract_messages[0]["content"] or "")
+    assert "callable_tools: `load_tool_context`, `filesystem_write`" in contract_text
+    assert "hydrated_tools: `filesystem_write`" in contract_text
+    assert "candidate_tools:" in contract_text
+    assert "`agent_browser`: Browser automation via semantic shortlist." in contract_text
 
 
 def test_frontdoor_stage_state_after_tool_cycle_ignores_raw_result_when_writing_round_tools() -> None:
@@ -2155,12 +2178,9 @@ async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_con
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
     assert len(contract_messages) == 1
-    contract_payload = json.loads(str(contract_messages[0]["content"] or ""))
-    assert contract_payload["callable_tool_names"] == [
-        "submit_next_stage",
-        "load_tool_context",
-        "filesystem_write",
-    ]
+    contract_text = str(contract_messages[0]["content"] or "")
+    assert "callable_tools: `submit_next_stage`, `load_tool_context`, `filesystem_write`" in contract_text
+    assert "hydrated_tools: `filesystem_write`" in contract_text
 
 
 def test_runtime_agent_session_inflight_snapshot_keeps_frontdoor_hydrated_tool_names() -> None:
@@ -3506,6 +3526,387 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
     assert observed["request_messages"][: len(previous_request_messages)] == previous_request_messages
     assert observed["tool_schemas"]
     assert captured_model_messages[: len(previous_request_messages)] == previous_request_messages
+
+
+@pytest.mark.asyncio
+async def test_prepare_turn_promotes_uploaded_image_only_into_live_request_when_binding_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = "web:shared"
+    runtime_session = SimpleNamespace(session_key=session_key, messages=[])
+    loop = SimpleNamespace(
+        sessions=SimpleNamespace(get_or_create=lambda key: runtime_session),
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=None,
+        temp_dir="",
+        app_config=SimpleNamespace(
+            get_managed_model=lambda key: SimpleNamespace(image_multimodal_enabled=(key == "ceo_primary"))
+        ),
+    )
+    runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(prompt_cache_contract, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+
+    image_path = tmp_path / "demo.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nsmall")
+    merged_text = _web_ceo_uploaded_image_note(text="Please inspect this image", image_path=image_path)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["submit_next_stage"]}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            tool_names=["submit_next_stage"],
+            model_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": merged_text},
+            ],
+            stable_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": merged_text},
+            ],
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["submit_next_stage"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["ceo_primary"])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "ceo_primary",
+            "provider_id": "responses",
+            "provider_model": "responses:gpt-test",
+            "resolved_model": "gpt-test",
+            "context_window_tokens": 128000,
+        },
+        raising=False,
+    )
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key=session_key),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=[],
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_stage_state={},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
+        _semantic_context_state={"summary_text": "", "needs_refresh": False},
+        _frontdoor_hydrated_tool_names=[],
+        _frontdoor_selection_debug={},
+    )
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(loop=loop, session=session, session_key=session_key, on_progress=None)
+    )
+
+    prepared = await runner._graph_prepare_turn(
+        initial_persistent_state(
+            user_input={
+                "content": merged_text,
+                "metadata": _web_ceo_upload_metadata(image_path),
+            }
+        ),
+        runtime=runtime,
+    )
+    preflight = runner._frontdoor_send_preflight_snapshot(
+        state=prepared,
+        runtime=runtime,
+        langchain_tools=[],
+    )
+
+    assert prepared["frontdoor_request_body_messages"][-1]["content"] == merged_text
+    assert isinstance(prepared["frontdoor_live_request_messages"][-1]["content"], list)
+    assert any(
+        block.get("type") == "image_url"
+        for block in list(prepared["frontdoor_live_request_messages"][-1]["content"] or [])
+        if isinstance(block, dict)
+    )
+    assert "input_image" in json.dumps(preflight["provider_request_body"], ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_prepare_turn_keeps_uploaded_image_as_text_only_when_binding_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = "web:shared"
+    runtime_session = SimpleNamespace(session_key=session_key, messages=[])
+    loop = SimpleNamespace(
+        sessions=SimpleNamespace(get_or_create=lambda key: runtime_session),
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=None,
+        temp_dir="",
+        app_config=SimpleNamespace(get_managed_model=lambda key: SimpleNamespace(image_multimodal_enabled=False)),
+    )
+    runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(prompt_cache_contract, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+
+    image_path = tmp_path / "demo.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nsmall")
+    merged_text = _web_ceo_uploaded_image_note(text="Please inspect this image", image_path=image_path)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["submit_next_stage"]}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            tool_names=["submit_next_stage"],
+            model_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": merged_text},
+            ],
+            stable_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": merged_text},
+            ],
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["submit_next_stage"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["ceo_primary"])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "ceo_primary",
+            "provider_id": "responses",
+            "provider_model": "responses:gpt-test",
+            "resolved_model": "gpt-test",
+            "context_window_tokens": 128000,
+        },
+        raising=False,
+    )
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key=session_key),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=[],
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_stage_state={},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
+        _semantic_context_state={"summary_text": "", "needs_refresh": False},
+        _frontdoor_hydrated_tool_names=[],
+        _frontdoor_selection_debug={},
+    )
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(loop=loop, session=session, session_key=session_key, on_progress=None)
+    )
+
+    prepared = await runner._graph_prepare_turn(
+        initial_persistent_state(
+            user_input={
+                "content": merged_text,
+                "metadata": _web_ceo_upload_metadata(image_path),
+            }
+        ),
+        runtime=runtime,
+    )
+    preflight = runner._frontdoor_send_preflight_snapshot(
+        state=prepared,
+        runtime=runtime,
+        langchain_tools=[],
+    )
+
+    assert prepared["frontdoor_request_body_messages"][-1]["content"] == merged_text
+    assert prepared["frontdoor_live_request_messages"][-1]["content"] == merged_text
+    assert "input_image" not in json.dumps(preflight["provider_request_body"], ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_prepare_turn_rejects_oversized_uploaded_image_when_binding_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = "web:shared"
+    runtime_session = SimpleNamespace(session_key=session_key, messages=[])
+    loop = SimpleNamespace(
+        sessions=SimpleNamespace(get_or_create=lambda key: runtime_session),
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=None,
+        temp_dir="",
+        app_config=SimpleNamespace(
+            get_managed_model=lambda key: SimpleNamespace(image_multimodal_enabled=(key == "ceo_primary"))
+        ),
+    )
+    runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(prompt_cache_contract, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+
+    image_path = tmp_path / "huge.png"
+    image_path.write_bytes(b"0" * (web_ceo_sessions.WEB_CEO_IMAGE_UPLOAD_MAX_BYTES + 1))
+    merged_text = _web_ceo_uploaded_image_note(text="Please inspect this image", image_path=image_path)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["submit_next_stage"]}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            tool_names=["submit_next_stage"],
+            model_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": merged_text},
+            ],
+            stable_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": merged_text},
+            ],
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["submit_next_stage"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["ceo_primary"])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key=session_key),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=[],
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_stage_state={},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
+        _semantic_context_state={"summary_text": "", "needs_refresh": False},
+        _frontdoor_hydrated_tool_names=[],
+        _frontdoor_selection_debug={},
+    )
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(loop=loop, session=session, session_key=session_key, on_progress=None)
+    )
+
+    with pytest.raises(ceo_runtime_ops.FrontdoorCompressionRuntimeError, match="5 MiB"):
+        await runner._graph_prepare_turn(
+            initial_persistent_state(
+                user_input={
+                    "content": merged_text,
+                    "metadata": _web_ceo_upload_metadata(image_path),
+                }
+            ),
+            runtime=runtime,
+        )
+
+
+def test_persist_frontdoor_actual_request_keeps_multimodal_artifact_but_strips_durable_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = ceo_runner.CeoFrontDoorRunner(loop=SimpleNamespace())
+    captured: dict[str, object] = {}
+
+    def _fake_persist(session_id: str, *, payload: dict[str, object]):
+        captured["session_id"] = session_id
+        captured["payload"] = payload
+        return {
+            "path": "D:/tmp/frontdoor-request.json",
+            "actual_request_hash": "request-hash",
+            "actual_request_message_count": 2,
+            "actual_tool_schema_hash": "tool-hash",
+        }
+
+    monkeypatch.setattr(ceo_runtime_ops, "persist_frontdoor_actual_request", _fake_persist)
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _frontdoor_actual_request_history=[],
+    )
+    runtime = SimpleNamespace(context=SimpleNamespace(session=session, session_key="web:shared"))
+    request_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Please inspect this image"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            ],
+        },
+    ]
+
+    result = runner._persist_frontdoor_actual_request(
+        state={"session_key": "web:shared", "frontdoor_actual_request_history": []},
+        runtime=runtime,
+        request_messages=request_messages,
+        tool_schemas=[],
+        prompt_cache_key="cache-key",
+        prompt_cache_diagnostics={},
+        parallel_tool_calls=None,
+    )
+
+    payload = dict(captured["payload"] or {})
+    assert payload["request_messages"][1]["content"][1]["type"] == "image_url"
+    assert result["frontdoor_request_body_messages"][1]["content"] == "Please inspect this image"
+    assert session._frontdoor_request_body_messages[1]["content"] == "Please inspect this image"
 
 
 @pytest.mark.asyncio

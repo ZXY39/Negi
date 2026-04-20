@@ -22,6 +22,7 @@ WEB_CEO_INFLIGHT_ROOT = Path(".g3ku") / "web-ceo-inflight"
 WEB_CEO_PAUSED_ROOT = Path(".g3ku") / "web-ceo-paused"
 WEB_CEO_CONTINUITY_ROOT = Path(".g3ku") / "web-ceo-continuity"
 WEB_CEO_REQUEST_ROOT = Path(".g3ku") / "web-ceo-requests"
+WEB_CEO_IMAGE_UPLOAD_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_TASK_MAX_DEPTH = 1
 DEFAULT_TASK_HARD_MAX_DEPTH = 4
 SESSION_TASK_DEFAULTS_SCOPE_KEY = "task_defaults_scope"
@@ -950,6 +951,37 @@ def _normalized_message_records(values: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in list(values or []) if isinstance(item, dict)]
 
 
+def strip_multimodal_blocks_from_message_records(values: Any) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for raw in list(values or []):
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        content = item.get("content")
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            has_multimodal_block = False
+            for block in content:
+                if isinstance(block, str):
+                    text = block.strip()
+                    if text:
+                        text_parts.append(text)
+                    continue
+                if not isinstance(block, dict):
+                    continue
+                block_type = str(block.get("type") or "").strip().lower()
+                if block_type in {"image_url", "input_image", "file", "input_file"}:
+                    has_multimodal_block = True
+                    continue
+                text_value = block.get("text", block.get("content", ""))
+                if isinstance(text_value, str) and text_value.strip():
+                    text_parts.append(text_value.strip())
+            if has_multimodal_block:
+                item["content"] = "\n".join(text_parts).strip()
+        normalized.append(item)
+    return normalized
+
+
 def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict) or not payload:
         return None
@@ -961,7 +993,9 @@ def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | 
     if shrink_reason not in _CONTINUITY_ALLOWED_SHRINK_REASONS:
         shrink_reason = ""
     normalized = {
-        "frontdoor_request_body_messages": _normalized_message_records(payload.get("frontdoor_request_body_messages")),
+        "frontdoor_request_body_messages": strip_multimodal_blocks_from_message_records(
+            payload.get("frontdoor_request_body_messages")
+        ),
         "frontdoor_history_shrink_reason": shrink_reason,
         "frontdoor_token_preflight_diagnostics": dict(payload.get("frontdoor_token_preflight_diagnostics") or {}),
         "frontdoor_actual_request_path": str(payload.get("frontdoor_actual_request_path") or "").strip(),

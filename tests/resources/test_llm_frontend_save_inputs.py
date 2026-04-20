@@ -49,6 +49,7 @@ def test_handle_create_save_uses_current_dom_json_and_model_key() -> None:
           "llm-binding-retry-count": { value: "0" },
           "llm-binding-single-api-key-max-concurrency": { value: "" },
           "llm-binding-context-window-tokens": { value: "30001" },
+          "llm-binding-image-multimodal-enabled": { checked: true },
           "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
           "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
           "llm-editor-backdrop": { addEventListener: () => {} },
@@ -97,6 +98,8 @@ def test_handle_create_save_uses_current_dom_json_and_model_key() -> None:
               retryCount: 0,
               singleApiKeyMaxConcurrency: "",
               contextWindowTokens: "",
+              imageMultimodalEnabled: false,
+              initialImageMultimodalEnabled: false,
               validation: null,
               probe: null,
               memory: {
@@ -166,6 +169,9 @@ def test_handle_create_save_uses_current_dom_json_and_model_key() -> None:
     assert result["createPayload"]["draft"]["default_model"] == "live-model"
     assert result["createPayload"]["draft"]["parameters"]["temperature"] == 0.2
     assert result["createPayload"]["draft"]["parameters"]["context_window_tokens"] == 30001
+    assert result["createPayload"]["binding"]["image_multimodal_enabled"] is True
+    assert "image_multimodal_enabled" not in result["createPayload"]["draft"]["parameters"]
+    assert "imageMultimodalEnabled" not in result["createPayload"]["draft"]["parameters"]
 
 
 def test_handle_detail_save_uses_current_dom_json_text() -> None:
@@ -193,6 +199,7 @@ def test_handle_detail_save_uses_current_dom_json_text() -> None:
           "llm-binding-retry-count": { value: "0" },
           "llm-binding-single-api-key-max-concurrency": { value: "" },
           "llm-binding-context-window-tokens": { value: "35001" },
+          "llm-binding-image-multimodal-enabled": { checked: false },
           "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
           "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
           "llm-editor-backdrop": { addEventListener: () => {} },
@@ -223,6 +230,7 @@ def test_handle_detail_save_uses_current_dom_json_text() -> None:
               retry_count: 0,
               single_api_key_max_concurrency: null,
               context_window_tokens: 32000,
+              image_multimodal_enabled: false,
             }],
             bindingMap: {
               demo_key: {
@@ -234,6 +242,7 @@ def test_handle_detail_save_uses_current_dom_json_text() -> None:
                 retry_count: 0,
                 single_api_key_max_concurrency: null,
                 context_window_tokens: 32000,
+                image_multimodal_enabled: false,
               },
             },
             routes: { ceo: [], execution: [], inspection: [], memory: [] },
@@ -270,6 +279,8 @@ def test_handle_detail_save_uses_current_dom_json_text() -> None:
               retryCount: 0,
               singleApiKeyMaxConcurrency: "",
               contextWindowTokens: "32000",
+              imageMultimodalEnabled: false,
+              initialImageMultimodalEnabled: false,
               validation: null,
               probe: null,
               memory: {
@@ -344,6 +355,167 @@ def test_handle_detail_save_uses_current_dom_json_text() -> None:
     assert result["updateConfigPayload"]["parameters"]["temperature"] == 0.4
     assert result["updateConfigPayload"]["parameters"]["context_window_tokens"] == 35001
     assert result["updateBindingPayload"] is None
+
+
+def test_handle_detail_save_updates_binding_image_multimodal_flag_without_polluting_json_draft() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+
+        global.window = global;
+        global.window.addEventListener = () => {};
+        const initialJson = JSON.stringify({
+          provider_id: "demo-provider",
+          capability: "chat",
+          auth_mode: "api_key",
+          api_key: "detail-key",
+          default_model: "detail-model",
+          parameters: { context_window_tokens: 32000, temperature: 0.2 },
+          extra_headers: {},
+          extra_options: {},
+        });
+        const elements = {
+          "llm-json-editor": { value: initialJson },
+          "llm-binding-retry-on": { value: "network,429,5xx" },
+          "llm-binding-retry-count": { value: "0" },
+          "llm-binding-single-api-key-max-concurrency": { value: "" },
+          "llm-binding-context-window-tokens": { value: "32000" },
+          "llm-binding-image-multimodal-enabled": { checked: true },
+          "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
+          "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
+          "llm-editor-backdrop": { addEventListener: () => {} },
+          "llm-memory-settings-btn": { addEventListener: () => {} },
+          "llm-config-create-btn": { addEventListener: () => {} },
+          "model-roles-cancel-btn": {},
+        };
+        global.document = {
+          getElementById: (id) => elements[id] || null,
+          querySelector: () => ({}),
+          addEventListener: () => {},
+        };
+        global.S = {
+          modelCatalog: { roleEditing: false },
+          llmCenter: {
+            loading: false,
+            saving: false,
+            error: "",
+            templates: [{ provider_id: "demo-provider", display_name: "Demo", capability: "chat" }],
+            templateMap: { "demo-provider": { provider_id: "demo-provider", display_name: "Demo", capability: "chat" } },
+            templateDetailMap: {},
+            bindings: [{
+              key: "demo_key",
+              capability: "chat",
+              config_id: "cfg-1",
+              llm_config_id: "cfg-1",
+              retry_on: ["network", "429", "5xx"],
+              retry_count: 0,
+              single_api_key_max_concurrency: null,
+              context_window_tokens: 32000,
+              image_multimodal_enabled: false,
+            }],
+            bindingMap: {
+              demo_key: {
+                key: "demo_key",
+                capability: "chat",
+                config_id: "cfg-1",
+                llm_config_id: "cfg-1",
+                retry_on: ["network", "429", "5xx"],
+                retry_count: 0,
+                single_api_key_max_concurrency: null,
+                context_window_tokens: 32000,
+                image_multimodal_enabled: false,
+              },
+            },
+            routes: { ceo: [], execution: [], inspection: [], memory: [] },
+            roleIterations: { ceo: null, execution: null, inspection: null },
+            roleConcurrency: { ceo: null, execution: null, inspection: null },
+            editor: {
+              open: true,
+              mode: "detail",
+              bindingKey: "demo_key",
+              configId: "cfg-1",
+              modelKey: "demo_key",
+              providerId: "demo-provider",
+              jsonText: initialJson,
+              initialJsonText: initialJson,
+              retryOn: ["network", "429", "5xx"],
+              retryCount: 0,
+              singleApiKeyMaxConcurrency: "",
+              contextWindowTokens: "32000",
+              imageMultimodalEnabled: false,
+              initialImageMultimodalEnabled: false,
+              validation: null,
+              probe: null,
+              memory: {
+                loading: false,
+                error: "",
+                embedding: {},
+                rerank: {},
+              },
+            },
+            eventsBound: false,
+          },
+        };
+        global.U = {};
+        let updateConfigPayload = null;
+        let updateBindingPayload = null;
+        global.ApiClient = {
+          validateLlmDraft: async () => ({ valid: true }),
+          probeLlmDraft: async () => ({ success: true, message: "ok" }),
+          updateLlmConfig: async (_configId, payload) => {
+            updateConfigPayload = payload;
+            return { item: payload, runtimeRefresh: null };
+          },
+          updateLlmBinding: async (_modelKey, payload) => {
+            updateBindingPayload = payload;
+            return { item: payload, runtimeRefresh: null };
+          },
+          getLlmTemplates: async () => [],
+          listLlmBindings: async () => ({
+            items: [],
+            routes: { ceo: [], execution: [], inspection: [], memory: [] },
+            roleIterations: { ceo: null, execution: null, inspection: null },
+            roleConcurrency: { ceo: null, execution: null, inspection: null },
+          }),
+        };
+        global.showToast = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.MODEL_SCOPES = [];
+        global.EMPTY_MODEL_ROLES = () => ({ ceo: [], execution: [], inspection: [], memory: [] });
+        global.DEFAULT_ROLE_ITERATIONS = () => ({ ceo: null, execution: null, inspection: null });
+        global.DEFAULT_ROLE_CONCURRENCY = () => ({ ceo: null, execution: null, inspection: null });
+        global.DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "" });
+        global.normalizeAllModelRoles = (value) => value;
+        global.normalizeRoleIterations = (value) => value;
+        global.normalizeRoleConcurrency = (value) => value;
+        global.cloneModelRoles = (value) => value;
+        global.cloneRoleIterations = (value) => value;
+        global.cloneRoleConcurrency = (value) => value;
+        global.syncModelRoleDraftState = () => {};
+        global.hint = () => {};
+        global.setDrawerOpen = () => {};
+        global.icons = () => {};
+        global.enhanceResourceSelects = () => {};
+        let code = fs.readFileSync("g3ku/web/frontend/org_graph_llm.js", "utf8");
+        code = code.replace(
+          "window.__llmTestHooks = {",
+          "window.__llmTestHooks = {\\n    handleDetailSave,"
+        );
+        vm.runInThisContext(code);
+
+        (async () => {
+          await window.__llmTestHooks.handleDetailSave();
+          console.log(JSON.stringify({ updateConfigPayload, updateBindingPayload }));
+        })().catch((error) => {
+          console.log(JSON.stringify({ error: error.message || String(error), updateConfigPayload, updateBindingPayload }));
+          process.exit(1);
+        });
+        """
+    )
+
+    assert result["updateConfigPayload"] is None
+    assert result["updateBindingPayload"]["image_multimodal_enabled"] is True
 
 
 def test_handle_detail_save_persists_context_window_tokens_when_only_input_changes() -> None:

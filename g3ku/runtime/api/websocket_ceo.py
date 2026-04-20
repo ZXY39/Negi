@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import mimetypes
 import shutil
 import uuid
@@ -30,6 +29,7 @@ from g3ku.runtime.web_ceo_sessions import (
     resolve_execution_snapshot,
     resolve_active_ceo_session_id,
     transcript_messages,
+    WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
     upload_dir_for_session,
     workspace_path,
 )
@@ -205,6 +205,27 @@ def _serialize_upload_descriptor(path: Path, *, name: str, mime_type: str) -> di
     }
 
 
+def _image_upload_too_large_error(*, name: str, size: int) -> HTTPException:
+    return HTTPException(
+        status_code=413,
+        detail={
+            'code': 'image_upload_too_large',
+            'name': str(name or '').strip() or 'image',
+            'size_bytes': int(size or 0),
+            'limit_bytes': WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
+            'message': f'Image upload exceeds the 5 MiB limit: {name}',
+        },
+    )
+
+
+def _validate_uploaded_descriptor_limits(item: dict[str, Any]) -> None:
+    if str(item.get('kind') or '').strip().lower() != 'image':
+        return
+    size = int(item.get('size') or 0)
+    if size > WEB_CEO_IMAGE_UPLOAD_MAX_BYTES:
+        raise _image_upload_too_large_error(name=str(item.get('name') or 'image'), size=size)
+
+
 async def _maybe_await(value: Any) -> Any:
     if isawaitable(value):
         return await value
@@ -217,11 +238,17 @@ async def _store_uploaded_file(session_id: str, upload: UploadFile) -> dict[str,
     target_path = target_dir / f"{uuid.uuid4().hex[:12]}_{original_name}"
     with target_path.open('wb') as handle:
         shutil.copyfileobj(upload.file, handle)
-    return _serialize_upload_descriptor(
+    item = _serialize_upload_descriptor(
         target_path,
         name=original_name,
         mime_type=_guess_upload_mime_type(original_name, getattr(upload, 'content_type', None)),
     )
+    try:
+        _validate_uploaded_descriptor_limits(item)
+    except HTTPException:
+        target_path.unlink(missing_ok=True)
+        raise
+    return item
 
 
 def _resolve_uploaded_file(session_id: str, raw_path: str) -> Path:
@@ -275,11 +302,6 @@ def _uploaded_files_note(uploads: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _image_path_to_data_url(path: Path, mime_type: str) -> str:
-    encoded = base64.b64encode(path.read_bytes()).decode('ascii')
-    return f"data:{mime_type};base64,{encoded}"
-
-
 def _build_user_message(text: str, uploads: list[dict[str, Any]]) -> str | UserInputMessage:
     if not uploads:
         return text
@@ -287,21 +309,8 @@ def _build_user_message(text: str, uploads: list[dict[str, Any]]) -> str | UserI
     text_value = str(text or '')
     note = _uploaded_files_note(uploads)
     merged_text = f"{text_value}\n\n{note}" if (note and text_value) else (note or text_value)
-    content: list[dict[str, Any]] = []
-    if merged_text:
-        content.append({'type': 'text', 'text': merged_text})
-    for item in uploads:
-        if str(item.get('kind') or '') != 'image':
-            continue
-        content.append(
-            {
-                'type': 'image_url',
-                'image_url': {'url': _image_path_to_data_url(Path(str(item['path'])), str(item['mime_type']))},
-            }
-        )
-
     return UserInputMessage(
-        content=content or [{'type': 'text', 'text': note or text_value}],
+        content=merged_text or note or text_value,
         attachments=[str(item['path']) for item in uploads],
         metadata={'web_ceo_uploads': uploads, 'web_ceo_raw_text': text_value},
     )

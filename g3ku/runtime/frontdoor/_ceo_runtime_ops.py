@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import inspect
 import json
@@ -72,7 +73,12 @@ from main.runtime.tool_call_repair import (
     extract_tool_calls_from_xml_pseudo_content,
     recover_tool_calls_from_json_payload,
 )
-from g3ku.runtime.web_ceo_sessions import frontdoor_stage_archive_task_id, persist_frontdoor_actual_request
+from g3ku.runtime.web_ceo_sessions import (
+    WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
+    frontdoor_stage_archive_task_id,
+    persist_frontdoor_actual_request,
+    strip_multimodal_blocks_from_message_records,
+)
 
 from ._ceo_support import CeoFrontDoorSupport
 from .canonical_context import (
@@ -452,6 +458,169 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> list[dict[str, Any]]:
         body_messages, _contract_messages = cls._split_request_body_and_tool_contract_messages(request_messages)
         return [dict(item) for item in list(body_messages or []) if isinstance(item, dict)]
+
+    @classmethod
+    def _durable_frontdoor_request_body_messages(
+        cls,
+        request_messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        return strip_multimodal_blocks_from_message_records(
+            cls._request_body_messages_without_tool_contracts(request_messages)
+        )
+
+    def _ceo_image_multimodal_enabled_for_model_refs(self, model_refs: list[str] | None) -> bool:
+        app_config = getattr(self._loop, "app_config", None)
+        getter = getattr(app_config, "get_managed_model", None)
+        if not callable(getter):
+            return False
+        for ref in list(model_refs or []):
+            key = str(ref or "").strip()
+            if not key:
+                continue
+            try:
+                model = getter(key)
+            except Exception:
+                model = None
+            if model is None:
+                continue
+            return bool(getattr(model, "image_multimodal_enabled", False))
+        return False
+
+    @staticmethod
+    def _web_ceo_uploaded_files_note(uploads: list[dict[str, Any]]) -> str:
+        if not uploads:
+            return ""
+        lines = ["Uploaded attachments:"]
+        for item in uploads:
+            kind = str(item.get("kind") or "").strip().lower()
+            name = str(item.get("name") or item.get("path") or "").strip()
+            path = str(item.get("path") or "").strip()
+            if kind == "image":
+                lines.append(f"- image: {name} (local path: {path})")
+            else:
+                lines.append(f"- file: {name} (local path: {path})")
+        lines.append("You may inspect the local file paths above when helpful.")
+        return "\n".join(lines)
+
+    @classmethod
+    def _web_ceo_user_text_with_upload_note(
+        cls,
+        *,
+        text: str,
+        uploads: list[dict[str, Any]],
+    ) -> str:
+        text_value = str(text or "").strip()
+        note = cls._web_ceo_uploaded_files_note(uploads)
+        if text_value and note:
+            return f"{text_value}\n\n{note}"
+        return note or text_value
+
+    @staticmethod
+    def _web_ceo_image_data_url(path: Path, mime_type: str) -> str:
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
+
+    @staticmethod
+    def _frontdoor_image_upload_too_large_error(*, name: str, size_bytes: int) -> FrontdoorCompressionRuntimeError:
+        return FrontdoorCompressionRuntimeError(
+            code="web_ceo_image_too_large",
+            message=(
+                f"Image attachment {str(name or '').strip() or 'image'} exceeds the 5 MiB limit "
+                f"({int(size_bytes or 0)} bytes)."
+            ),
+            recoverable=True,
+        )
+
+    def _expand_web_ceo_uploads_for_current_request_content(
+        self,
+        *,
+        content: Any,
+        metadata: dict[str, Any] | None,
+        model_refs: list[str] | None,
+    ) -> Any:
+        payload = dict(metadata or {})
+        uploads = [
+            dict(item)
+            for item in list(payload.get("web_ceo_uploads") or [])
+            if isinstance(item, dict)
+        ]
+        if not uploads:
+            return content
+
+        raw_text = payload.get("web_ceo_raw_text")
+        text_value = str(raw_text) if isinstance(raw_text, str) else self._content_text(content)
+        merged_text = self._web_ceo_user_text_with_upload_note(text=text_value, uploads=uploads)
+        if not self._ceo_image_multimodal_enabled_for_model_refs(model_refs):
+            return merged_text
+
+        content_blocks: list[dict[str, Any]] = []
+        if merged_text:
+            content_blocks.append({"type": "text", "text": merged_text})
+        for item in uploads:
+            if str(item.get("kind") or "").strip().lower() != "image":
+                continue
+            path = Path(str(item.get("path") or "")).expanduser()
+            if not path.exists() or not path.is_file():
+                raise FrontdoorCompressionRuntimeError(
+                    code="web_ceo_image_missing",
+                    message=f"Uploaded image is missing: {str(item.get('name') or path)}",
+                    recoverable=True,
+                )
+            size_bytes = int(item.get("size") or 0) or int(path.stat().st_size or 0)
+            if size_bytes > WEB_CEO_IMAGE_UPLOAD_MAX_BYTES:
+                raise self._frontdoor_image_upload_too_large_error(
+                    name=str(item.get("name") or path.name),
+                    size_bytes=size_bytes,
+                )
+            mime_type = str(item.get("mime_type") or item.get("mimeType") or "image/png").strip() or "image/png"
+            content_blocks.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": self._web_ceo_image_data_url(path, mime_type)},
+                }
+            )
+        if len(content_blocks) == 1 and content_blocks[0].get("type") == "text":
+            return merged_text
+        return content_blocks or merged_text
+
+    @staticmethod
+    def _message_content_has_multimodal_blocks(value: Any) -> bool:
+        if not isinstance(value, list):
+            return False
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type in {"image_url", "input_image", "file", "input_file"}:
+                return True
+        return False
+
+    def _prefer_live_user_payload_over_text_history(
+        self,
+        *,
+        messages: list[dict[str, Any]] | None,
+        live_user_content: Any,
+    ) -> list[dict[str, Any]]:
+        records = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+        if not records or not self._message_content_has_multimodal_blocks(live_user_content):
+            return records
+        last = dict(records[-1])
+        if str(last.get("role") or "").strip().lower() != "user":
+            return records
+        if self._message_content_has_multimodal_blocks(last.get("content")):
+            return records
+        stripped_live_records = strip_multimodal_blocks_from_message_records(
+            [{"role": "user", "content": live_user_content}]
+        )
+        stripped_live_content = (
+            stripped_live_records[0].get("content", "")
+            if stripped_live_records
+            else live_user_content
+        )
+        if self._content_text(last.get("content")).strip() != self._content_text(stripped_live_content).strip():
+            return records
+        records[-1] = {**last, "content": live_user_content}
+        return records
 
     @classmethod
     def _rewrite_frontdoor_request_messages_with_compacted_history(
@@ -2028,11 +2197,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ).strip()
                 if actual_tool_schema_hash:
                     setattr(target_session, "_frontdoor_actual_tool_schema_hash", actual_tool_schema_hash)
-            request_body_messages = [
-                dict(item)
-                for item in list(state.get("frontdoor_request_body_messages") or [])
-                if isinstance(item, dict)
-            ]
+            request_body_messages = strip_multimodal_blocks_from_message_records(
+                [
+                    dict(item)
+                    for item in list(state.get("frontdoor_request_body_messages") or [])
+                    if isinstance(item, dict)
+                ]
+            )
             if not request_body_messages:
                 raw_messages = [
                     dict(item)
@@ -2040,9 +2211,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     if isinstance(item, dict)
                 ]
                 if raw_messages:
-                    request_body_messages, _contract_messages = self._split_request_body_and_tool_contract_messages(
-                        raw_messages
-                    )
+                    request_body_messages = self._durable_frontdoor_request_body_messages(raw_messages)
             if has_authoritative_actual_request and (
                 "frontdoor_request_body_messages" in state or request_body_messages
             ):
@@ -2227,7 +2396,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         if observed_input_truth:
             record["observed_input_truth"] = copy.deepcopy(observed_input_truth)
-        authoritative_request_body_messages = self._request_body_messages_without_tool_contracts(request_messages)
+        authoritative_request_body_messages = self._durable_frontdoor_request_body_messages(request_messages)
         existing_history = [
             dict(item)
             for item in list(
@@ -3587,12 +3756,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         internal_seed_messages, internal_event_bundle_text, internal_event_message_metadata = (
             self._internal_prompt_seed_messages(metadata=metadata)
         )
+        model_refs = self._resolve_ceo_model_refs()
         current_turn_user_content = (
             ""
             if cron_internal
             else internal_event_bundle_text
             if heartbeat_internal and internal_event_bundle_text
-            else self._model_content(user_content)
+            else self._expand_web_ceo_uploads_for_current_request_content(
+                content=self._model_content(user_content),
+                metadata=metadata,
+                model_refs=model_refs,
+            )
         )
         if session_request_body_messages:
             request_body_seed_messages = list(session_request_body_messages)
@@ -3677,13 +3851,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         frontdoor_selection_debug["callable_tool_names"] = list(callable_tool_names)
         messages: list[dict[str, Any]] = list(assembly.model_messages or [])
+        messages = self._prefer_live_user_payload_over_text_history(
+            messages=messages,
+            live_user_content=current_turn_user_content,
+        )
         has_current_turn_user_content = bool(self._content_text(current_turn_user_content).strip())
         if has_current_turn_user_content and (
             not messages or str(messages[-1].get("role") or "").strip().lower() != "user"
         ):
             messages.append({"role": "user", "content": current_turn_user_content})
 
-        model_refs = self._resolve_ceo_model_refs()
         provider_model = str(model_refs[0] if model_refs else "").strip()
         provider_tool_seed_names = (
             list(tool_names)
@@ -3802,7 +3979,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if prompt_scope == "ceo_frontdoor":
             request_body_messages, tool_contract_messages = self._split_request_body_and_tool_contract_messages(messages)
             if request_body_messages:
-                persisted_messages = list(request_body_messages)
+                persisted_messages = self._durable_frontdoor_request_body_messages(request_body_messages)
             if tool_contract_messages:
                 persisted_dynamic_appendix_messages = list(tool_contract_messages)
             else:
@@ -3927,8 +4104,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             request_body_messages = self._request_body_messages_without_tool_contracts(request_body_messages)
         follow_up_messages: list[dict[str, Any]] = []
         follow_up_texts: list[str] = []
+        model_refs = list(state.get("model_refs") or self._resolve_ceo_model_refs() or [])
         for item in queued_inputs:
-            follow_up_messages.append({"role": "user", "content": self._model_content(getattr(item, "content", ""))})
+            expanded_content = self._expand_web_ceo_uploads_for_current_request_content(
+                content=self._model_content(getattr(item, "content", "")),
+                metadata=dict(getattr(item, "metadata", {}) or {}),
+                model_refs=model_refs,
+            )
+            follow_up_messages.append({"role": "user", "content": expanded_content})
             follow_up_text = self._content_text(getattr(item, "content", ""))
             if follow_up_text.strip():
                 follow_up_texts.append(follow_up_text)
@@ -3943,8 +4126,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if str(part or "").strip()
         ).strip()
         update = {
-            "messages": list(updated_request_body_messages),
-            "frontdoor_request_body_messages": list(updated_request_body_messages),
+            "messages": self._durable_frontdoor_request_body_messages(updated_request_body_messages),
+            "frontdoor_live_request_messages": list(updated_request_body_messages),
+            "frontdoor_request_body_messages": self._durable_frontdoor_request_body_messages(updated_request_body_messages),
         }
         if merged_query_text:
             update["query_text"] = merged_query_text
@@ -4615,7 +4799,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             messages = list(getattr(self, "_state_message_records")(messages))
         messages.append(assistant_message)
         messages.extend(tool_messages)
-        authoritative_request_body_messages = self._request_body_messages_without_tool_contracts(messages)
+        authoritative_request_body_messages = self._durable_frontdoor_request_body_messages(messages)
 
         used_tools = list(state.get("used_tools") or [])
         used_tools.extend(
@@ -4652,6 +4836,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         ]
         result = {
             "messages": messages,
+            "frontdoor_live_request_messages": list(messages),
             "frontdoor_request_body_messages": authoritative_request_body_messages,
             "used_tools": used_tools,
             "route_kind": route_kind,
@@ -4721,11 +4906,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         request_body_messages, _tool_contract_messages = self._split_request_body_and_tool_contract_messages(messages)
         if request_body_messages:
             messages = list(request_body_messages)
-        authoritative_request_body_messages = [
-            dict(item)
-            for item in list(state.get("frontdoor_request_body_messages") or request_body_messages or messages)
-            if isinstance(item, dict)
-        ]
+        authoritative_request_body_messages = strip_multimodal_blocks_from_message_records(
+            [
+                dict(item)
+                for item in list(state.get("frontdoor_request_body_messages") or request_body_messages or messages)
+                if isinstance(item, dict)
+            ]
+        )
         frontdoor_history_shrink_reason = str(state.get("frontdoor_history_shrink_reason") or "").strip()
         finalized_stage_state = self._frontdoor_stage_state_snapshot(state)
         should_append_visible_output = bool(output) and not bool(state.get("heartbeat_internal")) and not bool(

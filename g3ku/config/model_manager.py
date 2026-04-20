@@ -138,6 +138,7 @@ class ModelManager:
         single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None,
         description: str = "",
         context_window_tokens: int,
+        image_multimodal_enabled: bool = False,
     ) -> dict[str, Any]:
         clean_key = str(key or "").strip()
         if not clean_key:
@@ -164,6 +165,7 @@ class ModelManager:
                 "retry_on": list(retry_on or ["network", "429", "5xx"]),
                 "retry_count": 0 if retry_count is None else int(retry_count),
                 "single_api_key_max_concurrency": normalize_single_api_key_max_concurrency(single_api_key_max_concurrency),
+                "image_multimodal_enabled": bool(image_multimodal_enabled),
             },
         )
         for scope in scopes or []:
@@ -188,6 +190,7 @@ class ModelManager:
         single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency | object = _UNSET,
         description: str | None | object = _UNSET,
         context_window_tokens: int | None | object = _UNSET,
+        image_multimodal_enabled: bool | object = _UNSET,
     ) -> dict[str, Any]:
         item = self._require_model(key)
         patch: dict[str, Any] = {}
@@ -227,6 +230,8 @@ class ModelManager:
             item.single_api_key_max_concurrency = normalize_single_api_key_max_concurrency(single_api_key_max_concurrency)
         if description is not _UNSET:
             item.description = str(description).strip()
+        if image_multimodal_enabled is not _UNSET:
+            item.image_multimodal_enabled = bool(image_multimodal_enabled)
         self._revalidate()
         self.save()
         return self.get_model(key)

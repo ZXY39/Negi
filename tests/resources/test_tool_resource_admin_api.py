@@ -2819,6 +2819,7 @@ def test_models_endpoint_returns_role_iterations(tmp_path: Path, monkeypatch):
     assert payload['role_iterations'] == {'ceo': 40, 'execution': 16, 'inspection': 16, 'memory': None}
     assert payload['role_concurrency'] == {'ceo': None, 'execution': None, 'inspection': None, 'memory': 1}
     assert payload['items'][0]['context_window_tokens'] == 128000
+    assert payload['items'][0]['image_multimodal_enabled'] is False
 
 
 def test_model_retry_count_update_persists_and_refreshes_runtime(tmp_path: Path, monkeypatch):
@@ -2899,6 +2900,55 @@ def test_model_context_window_update_persists_and_reads_back(tmp_path: Path, mon
 
     saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
     assert saved['models']['catalog'][0]['contextWindowTokens'] == 196000
+
+
+def test_model_image_multimodal_update_persists_and_reads_back(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    captured: dict[str, object] = {}
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        captured['force'] = force
+        captured['reason'] = reason
+        return True
+
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+    monkeypatch.setattr(
+        model_manager.ModelManager.load().facade.config_service,
+        'probe_draft',
+        lambda draft: SimpleNamespace(success=True, status=ProbeStatus.SUCCESS, message='ok'),
+    )
+
+    original_load = model_manager.ModelManager.load
+
+    def _patched_load():
+        manager = original_load()
+        monkeypatch.setattr(
+            manager.facade.config_service,
+            'probe_draft',
+            lambda draft: SimpleNamespace(success=True, status=ProbeStatus.SUCCESS, message='ok'),
+        )
+        return manager
+
+    monkeypatch.setattr(model_manager.ModelManager, 'load', staticmethod(_patched_load))
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put('/api/models/m', json={'imageMultimodalEnabled': True})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['ok'] is True
+    assert payload['item']['image_multimodal_enabled'] is True
+    assert captured == {'force': True, 'reason': 'admin_model_update'}
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['models']['catalog'][0]['imageMultimodalEnabled'] is True
 
 
 def test_model_update_returns_503_when_worker_runtime_refresh_ack_fails(tmp_path: Path, monkeypatch):
@@ -3082,6 +3132,37 @@ def test_llm_binding_retry_count_update_persists_without_provider_probe(tmp_path
 
     saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
     assert saved['models']['catalog'][0]['retryCount'] == 4
+
+
+def test_llm_binding_image_multimodal_update_persists_without_provider_probe(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    captured: dict[str, object] = {}
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+        captured['force'] = force
+        captured['reason'] = reason
+        return True
+
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put('/api/llm/bindings/m', json={'image_multimodal_enabled': True})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['ok'] is True
+    assert payload['item']['image_multimodal_enabled'] is True
+    assert captured == {'force': True, 'reason': 'admin_llm_binding_update'}
+
+    saved = json.loads((workspace / '.g3ku' / 'config.json').read_text(encoding='utf-8'))
+    assert saved['models']['catalog'][0]['imageMultimodalEnabled'] is True
 
 
 def test_llm_binding_update_returns_async_runtime_refresh_status_after_save(tmp_path: Path, monkeypatch):

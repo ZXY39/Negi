@@ -1312,11 +1312,15 @@ class RuntimeAgentSession:
         ]
         if repair_required_skill_items:
             snapshot["repair_required_skill_items"] = repair_required_skill_items
-        frontdoor_request_body_messages = [
-            dict(item)
-            for item in list(getattr(self, "_frontdoor_request_body_messages", []) or [])
-            if isinstance(item, dict)
-        ]
+        from g3ku.runtime.web_ceo_sessions import strip_multimodal_blocks_from_message_records
+
+        frontdoor_request_body_messages = strip_multimodal_blocks_from_message_records(
+            [
+                dict(item)
+                for item in list(getattr(self, "_frontdoor_request_body_messages", []) or [])
+                if isinstance(item, dict)
+            ]
+        )
         if frontdoor_request_body_messages:
             snapshot["frontdoor_request_body_messages"] = frontdoor_request_body_messages
         frontdoor_history_shrink_reason = str(

@@ -165,6 +165,53 @@ def test_model_manager_update_model_persists_context_window_tokens(
     assert saved["models"]["catalog"][0]["contextWindowTokens"] == 196000
 
 
+def test_model_manager_defaults_image_multimodal_enabled_to_false_for_legacy_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    manager = ModelManager.load()
+
+    assert manager.config.get_managed_model("m").image_multimodal_enabled is False
+    assert manager.get_model("m")["image_multimodal_enabled"] is False
+
+
+def test_model_manager_update_model_persists_image_multimodal_enabled_without_touching_provider_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    manager = ModelManager.load()
+    monkeypatch.setattr(
+        manager.facade.config_service,
+        "probe_draft",
+        lambda draft: SimpleNamespace(success=True, status=ProbeStatus.SUCCESS, message="ok"),
+    )
+
+    updated = manager.update_model(key="m", image_multimodal_enabled=True)
+
+    assert updated["image_multimodal_enabled"] is True
+    assert ModelManager.load().get_model("m")["image_multimodal_enabled"] is True
+
+    saved = json.loads((workspace / ".g3ku" / "config.json").read_text(encoding="utf-8"))
+    assert saved["models"]["catalog"][0]["imageMultimodalEnabled"] is True
+
+    record_dir = workspace / ".g3ku" / "llm-config" / "records"
+    record_files = list(record_dir.glob("*.json"))
+    assert record_files
+    record_payload = json.loads(record_files[0].read_text(encoding="utf-8"))
+    assert "image_multimodal_enabled" not in record_payload
+    assert "imageMultimodalEnabled" not in record_payload
+
+
 def test_model_manager_backfills_context_window_tokens_from_llm_config_record_when_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
