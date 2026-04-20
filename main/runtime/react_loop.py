@@ -119,7 +119,7 @@ class RepeatedActionCircuitBreaker:
 class ReActToolLoop:
     _CONTROL_TOOL_NAMES = {'stop_tool_execution'}
     _ORDERED_CONTROL_TOOL_NAMES = ('stop_tool_execution',)
-    _EXCLUSIVE_TOOL_TURN_NAMES = {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}
+    _EXCLUSIVE_TOOL_TURN_NAMES = {FINAL_RESULT_TOOL_NAME}
     _BUDGET_BYPASS_TOOL_NAMES = set(DEFAULT_NON_BUDGET_STAGE_TOOLS) - {'wait_tool_execution'}
 
     def __init__(
@@ -2092,6 +2092,8 @@ class ReActToolLoop:
         if not bool(stage_gate.get('has_active_stage')) or bool(stage_gate.get('transition_required')):
             return False
         names = [str(item.get('name') or '').strip() for item in list(response_tool_calls or []) if str(item.get('name') or '').strip()]
+        if any(name == STAGE_TOOL_NAME for name in names):
+            return False
         return any(name != STAGE_TOOL_NAME for name in names)
 
     @staticmethod
@@ -2165,7 +2167,109 @@ class ReActToolLoop:
             list(runtime_context.get('candidate_skill_ids') or current_frame.get('candidate_skill_ids') or [])
         )
 
-        async def _run_call(index: int, call: Any) -> dict[str, Any]:
+        def _call_runtime_context(call: Any, *, stage_turn_granted: bool | None = None) -> dict[str, Any]:
+            granted = bool(runtime_context.get('stage_turn_granted')) if stage_turn_granted is None else bool(stage_turn_granted)
+            return {
+                **runtime_context,
+                'current_tool_call_id': call.id,
+                'tool_contract_enforced': True,
+                'candidate_tool_names': list(candidate_tool_names),
+                'candidate_skill_ids': list(candidate_skill_ids),
+                'allowed_content_refs': allowed_content_refs,
+                'enforce_content_ref_allowlist': str(runtime_context.get('node_kind') or '').strip().lower() == 'acceptance',
+                'prior_overflow_signatures': sorted(prior_overflow_signatures or set()),
+                'stage_turn_granted': granted,
+            }
+
+        def _blocked_call_result(index: int, call: Any, *, error_content: str) -> dict[str, Any]:
+            content = str(error_content or 'Error: tool call blocked').strip() or 'Error: tool call blocked'
+            self._update_tool_live_state(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                tool_call_id=call.id,
+                status='error',
+                started_at='',
+                finished_at='',
+                elapsed_seconds=None,
+                result_content=content,
+                ephemeral=False,
+            )
+            return {
+                'index': index,
+                'raw_result': None,
+                'live_state': {
+                    'tool_call_id': str(call.id or ''),
+                    'tool_name': str(call.name or 'tool'),
+                    'status': 'error',
+                    'started_at': '',
+                    'finished_at': '',
+                    'elapsed_seconds': None,
+                    'ephemeral': False,
+                },
+                'tool_message': {
+                    'role': 'tool',
+                    'tool_call_id': call.id,
+                    'name': call.name,
+                    'content': content,
+                    'started_at': '',
+                    'finished_at': '',
+                    'elapsed_seconds': None,
+                    'ephemeral': False,
+                },
+            }
+
+        def _record_mixed_stage_round(ordinary_calls: list[Any]) -> dict[str, Any] | None:
+            if not ordinary_calls:
+                return None
+            store = getattr(self._log_service, '_store', None)
+            get_node = getattr(store, 'get_node', None)
+            latest_node = get_node(node.node_id) if callable(get_node) else None
+            created_at = ''
+            if latest_node is not None:
+                outputs = list(getattr(latest_node, 'output', []) or [])
+                if outputs:
+                    created_at = str(outputs[-1].created_at or '').strip()
+            round_payload = self._log_service.record_execution_stage_round(
+                task.task_id,
+                node.node_id,
+                tool_calls=[
+                    {
+                        'id': str(call.id or '').strip(),
+                        'name': str(call.name or '').strip(),
+                        'arguments': self._normalize_tool_call_arguments(getattr(call, 'arguments', {})),
+                    }
+                    for call in list(ordinary_calls or [])
+                ],
+                created_at=created_at or now_iso(),
+            )
+            if round_payload is None:
+                return None
+            self._log_service.update_frame(
+                task.task_id,
+                node.node_id,
+                lambda frame: {
+                    **frame,
+                    'active_round_id': str(round_payload.get('round_id') or ''),
+                    'active_round_tool_call_ids': [
+                        str(call.id or '').strip()
+                        for call in ordinary_calls
+                        if str(call.id or '').strip()
+                    ],
+                    'active_round_started_at': str(round_payload.get('created_at') or now_iso()),
+                    **self._execution_stage_frame_payload(
+                        node_kind=node.node_kind,
+                        stage_gate=self._execution_stage_gate(
+                            task_id=task.task_id,
+                            node_id=node.node_id,
+                            node_kind=node.node_kind,
+                        ),
+                    ),
+                },
+                publish_snapshot=True,
+            )
+            return round_payload
+
+        async def _run_call(index: int, call: Any, *, stage_turn_granted: bool | None = None) -> dict[str, Any]:
             async with semaphore:
                 self._check_pause_or_cancel(task.task_id)
                 started_at = now_iso()
@@ -2193,16 +2297,10 @@ class ReActToolLoop:
                         tools=tools,
                         tool_name=call.name,
                         arguments=self._normalize_tool_call_arguments(getattr(call, 'arguments', {})),
-                        runtime_context={
-                            **runtime_context,
-                            'current_tool_call_id': call.id,
-                            'tool_contract_enforced': True,
-                            'candidate_tool_names': list(candidate_tool_names),
-                            'candidate_skill_ids': list(candidate_skill_ids),
-                            'allowed_content_refs': allowed_content_refs,
-                            'enforce_content_ref_allowlist': str(runtime_context.get('node_kind') or '').strip().lower() == 'acceptance',
-                            'prior_overflow_signatures': sorted(prior_overflow_signatures or set()),
-                        },
+                        runtime_context=_call_runtime_context(
+                            call,
+                            stage_turn_granted=stage_turn_granted,
+                        ),
                     )
                     promoter = getattr(self, '_tool_context_hydration_promoter', None)
                     hydration_payload = self._tool_context_hydration_payload(raw_result)
@@ -2285,8 +2383,48 @@ class ReActToolLoop:
                     },
                 }
 
-        gathered = await asyncio.gather(*[_run_call(index, call) for index, call in enumerate(response_tool_calls)])
-        return [item for item in sorted(gathered, key=lambda value: int(value['index']))]
+        indexed_calls = list(enumerate(list(response_tool_calls or [])))
+        stage_items = [
+            (index, call)
+            for index, call in indexed_calls
+            if str(getattr(call, 'name', '') or '').strip() == STAGE_TOOL_NAME
+        ]
+        ordinary_items = [
+            (index, call)
+            for index, call in indexed_calls
+            if str(getattr(call, 'name', '') or '').strip() != STAGE_TOOL_NAME
+        ]
+        ordered_results: dict[int, dict[str, Any]] = {}
+        stage_failed = False
+        for index, call in stage_items:
+            result = await _run_call(index, call, stage_turn_granted=False)
+            ordered_results[index] = result
+            if str(dict(result.get('live_state') or {}).get('status') or '').strip().lower() == 'error':
+                stage_failed = True
+        if ordinary_items:
+            if stage_items and stage_failed:
+                blocked_error = (
+                    f'Error: {STAGE_TOOL_NAME} failed earlier in this turn; '
+                    'retry other tools after a successful stage transition'
+                )
+                for index, call in ordinary_items:
+                    ordered_results[index] = _blocked_call_result(index, call, error_content=blocked_error)
+            else:
+                if stage_items:
+                    _record_mixed_stage_round([call for _, call in ordinary_items])
+                ordinary_results = await asyncio.gather(
+                    *[
+                        _run_call(
+                            index,
+                            call,
+                            stage_turn_granted=True if stage_items else None,
+                        )
+                        for index, call in ordinary_items
+                    ]
+                )
+                for (index, _call), result in zip(ordinary_items, ordinary_results, strict=False):
+                    ordered_results[index] = result
+        return [ordered_results[index] for index, _call in indexed_calls if index in ordered_results]
 
     @classmethod
     def _should_bypass_execution_budget(cls, *, call: Any) -> bool:
@@ -2540,8 +2678,6 @@ class ReActToolLoop:
         normalized_tool_name = str(tool_name or '').strip()
         if normalized_tool_name in self._CONTROL_TOOL_NAMES or normalized_tool_name == STAGE_TOOL_NAME:
             return ''
-        if bool(runtime_context.get('stage_turn_granted')):
-            return ''
         stage_gate = self._execution_stage_gate(
             task_id=str(runtime_context.get('task_id') or ''),
             node_id=str(runtime_context.get('node_id') or ''),
@@ -2555,6 +2691,8 @@ class ReActToolLoop:
             and bool((active_stage or {}).get('final_stage'))
         ):
             return 'final stage forbids spawn_child_nodes; finish synthesis with existing evidence or submit the final result'
+        if bool(runtime_context.get('stage_turn_granted')):
+            return ''
         if normalized_tool_name == _STAGE_SPAWN_TOOL_NAME and bool(stage_gate.get('transition_required')):
             return f'current stage budget is exhausted; call {STAGE_TOOL_NAME} before using other tools'
         return stage_gate_error_for_tool(

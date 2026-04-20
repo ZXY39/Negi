@@ -98,7 +98,7 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
     assert payload["kind"] == "frontdoor_tool_approval"
     assert payload["tool_calls"] == [{"id": "call-1", "name": "load_tool_context"}]
     assert payload["compression_state"] == {"status": "running", "text": "compressing", "source": "user"}
-    assert payload["semantic_context_state"] == {"summary_text": "summary", "needs_refresh": False}
+    assert "semantic_context_state" not in payload
     assert payload["hydrated_tool_names"] == ["filesystem_write"]
     assert payload["tool_call_payloads"] == [
         {
@@ -295,7 +295,7 @@ async def test_graph_execute_tools_blocks_ordinary_tool_without_active_stage(
 
 
 @pytest.mark.asyncio
-async def test_graph_execute_tools_rejects_submit_next_stage_mixed_with_other_tools(
+async def test_graph_execute_tools_allows_submit_next_stage_mixed_with_other_tools(
     monkeypatch,
 ) -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
@@ -305,11 +305,12 @@ async def test_graph_execute_tools_rejects_submit_next_stage_mixed_with_other_to
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
 
     async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool, arguments, runtime_context, on_progress, tool_call_id
+        _ = tool, runtime_context, on_progress, tool_call_id
         executed.append(tool_name)
+        raw_result = await tool.execute(**arguments)
         return (
-            {"ok": True},
-            json.dumps({"ok": True}),
+            raw_result,
+            json.dumps(raw_result, ensure_ascii=False),
             "success",
             "2026-04-15T00:00:00+08:00",
             "2026-04-15T00:00:01+08:00",
@@ -360,14 +361,13 @@ async def test_graph_execute_tools_rejects_submit_next_stage_mixed_with_other_to
         for message in list(result["messages"])
         if str(message.get("role") or "").strip().lower() == "tool"
     ]
-    assert executed == []
-    assert result["frontdoor_stage_state"] == {
-        "active_stage_id": "",
-        "transition_required": False,
-        "stages": [],
-    }
+    assert executed == [ceo_runtime_ops.STAGE_TOOL_NAME, "echo_tool"]
+    assert result["frontdoor_stage_state"]["active_stage_id"] == "frontdoor-stage-1"
+    assert result["frontdoor_stage_state"]["transition_required"] is False
+    assert len(result["frontdoor_stage_state"]["stages"]) == 1
+    assert result["frontdoor_stage_state"]["stages"][0]["tool_rounds_used"] == 1
+    assert len(result["frontdoor_stage_state"]["stages"][0]["rounds"]) == 1
+    assert result["frontdoor_stage_state"]["stages"][0]["rounds"][0]["tool_names"] == ["echo_tool"]
     assert len(tool_messages) == 2
-    assert all(
-        "submit_next_stage must be called alone before using other tools" in str(message.get("content") or "")
-        for message in tool_messages
-    )
+    assert tool_messages[0]["name"] == ceo_runtime_ops.STAGE_TOOL_NAME
+    assert tool_messages[1]["name"] == "echo_tool"

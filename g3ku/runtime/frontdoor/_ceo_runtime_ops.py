@@ -3224,23 +3224,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
 
     @staticmethod
-    def _frontdoor_mixed_stage_tool_batch_error(tool_call_payloads: list[dict[str, Any]]) -> str:
-        has_stage_tool = any(
-            str(payload.get("name") or "").strip() == STAGE_TOOL_NAME
-            for payload in list(tool_call_payloads or [])
-            if isinstance(payload, dict)
-        )
-        has_non_stage_tool = any(
-            str(payload.get("name") or "").strip()
-            and str(payload.get("name") or "").strip() != STAGE_TOOL_NAME
-            for payload in list(tool_call_payloads or [])
-            if isinstance(payload, dict)
-        )
-        if has_stage_tool and has_non_stage_tool:
-            return f"{STAGE_TOOL_NAME} must be called alone before using other tools"
-        return ""
-
-    @staticmethod
     def _model_response_view(message: AIMessage | dict[str, Any]) -> Any:
         if isinstance(message, dict):
             payload = dict(message or {})
@@ -4524,11 +4507,40 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ),
             }
 
-        mixed_batch_error = self._frontdoor_mixed_stage_tool_batch_error(tool_call_payloads)
-        if mixed_batch_error:
-            tool_results = [await _error_result(payload, mixed_batch_error) for payload in tool_call_payloads]
-        else:
-            tool_results = await asyncio.gather(*[_run_single(payload) for payload in tool_call_payloads])
+        indexed_payloads = [
+            (index, dict(payload))
+            for index, payload in enumerate(list(tool_call_payloads or []))
+            if isinstance(payload, dict)
+        ]
+        stage_items = [
+            (index, payload)
+            for index, payload in indexed_payloads
+            if str(payload.get("name") or "").strip() == STAGE_TOOL_NAME
+        ]
+        ordinary_items = [
+            (index, payload)
+            for index, payload in indexed_payloads
+            if str(payload.get("name") or "").strip() != STAGE_TOOL_NAME
+        ]
+        ordered_results: dict[int, dict[str, Any]] = {}
+        stage_failed = False
+        for index, payload in stage_items:
+            result = await _run_single(payload)
+            ordered_results[index] = result
+            if str(result.get("status") or "").strip().lower() == "error":
+                stage_failed = True
+        if ordinary_items:
+            if stage_items and stage_failed:
+                for index, payload in ordinary_items:
+                    ordered_results[index] = await _error_result(
+                        payload,
+                        f"{STAGE_TOOL_NAME} failed earlier in this batch; retry other tools after a successful stage transition",
+                    )
+            else:
+                ordinary_results = await asyncio.gather(*[_run_single(payload) for _, payload in ordinary_items])
+                for (index, _payload), result in zip(ordinary_items, ordinary_results, strict=False):
+                    ordered_results[index] = result
+        tool_results = [ordered_results[index] for index, _payload in indexed_payloads if index in ordered_results]
         updated_tool_contract_state = self._frontdoor_tool_state_after_tool_results(
             state=dict(state or {}),
             tool_results=tool_results,

@@ -2558,6 +2558,113 @@ async def test_submit_next_stage_does_not_trip_repeated_action_breaker(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_submit_next_stage_can_share_turn_with_ordinary_tools_and_counts_new_stage_budget(tmp_path: Path):
+    class _Backend:
+        def __init__(self) -> None:
+            self._turn = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self._turn += 1
+            if self._turn == 1:
+                return LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCallRequest(
+                            id="call:stage",
+                            name="submit_next_stage",
+                            arguments={
+                                "stage_goal": "第一阶段；优先派生：无；自行完成：运行 exec",
+                                "tool_round_budget": 1,
+                            },
+                        ),
+                        ToolCallRequest(
+                            id="call:exec",
+                            name="exec",
+                            arguments={"command": "echo hi"},
+                        ),
+                    ],
+                    finish_reason="tool_calls",
+                    usage={"input_tokens": 10, "output_tokens": 5, "cache_hit_tokens": 0},
+                )
+            if self._turn == 2:
+                return LLMResponse(
+                    content="",
+                    tool_calls=[
+                        _final_result_call(
+                            status="success",
+                            delivery_status="final",
+                            summary="done",
+                            answer="done",
+                            evidence=[],
+                            remaining_work=[],
+                            blocking_reason="",
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                    usage={"input_tokens": 10, "output_tokens": 5, "cache_hit_tokens": 0},
+                )
+            raise AssertionError(f"unexpected extra turn: {self._turn}")
+
+    service = MainRuntimeService(
+        chat_backend=_Backend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+
+    def _build_tools(task, node):
+        async def _submit_stage(stage_goal, tool_round_budget, completed_stage_summary="", key_refs=None, final=False):
+            return await service.node_runner._submit_next_stage(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                stage_goal=stage_goal,
+                tool_round_budget=tool_round_budget,
+                completed_stage_summary=completed_stage_summary,
+                key_refs=list(key_refs or []),
+                final=final,
+            )
+
+        return {
+            "submit_next_stage": SubmitNextStageTool(_submit_stage),
+            "submit_final_result": SubmitFinalResultTool(service.node_runner._submit_final_result, node_kind=node.node_kind),
+            "exec": _StaticTool(
+                "exec",
+                json.dumps(
+                    {
+                        "status": "success",
+                        "exit_code": 0,
+                        "head_preview": "mixed batch exec result",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        }
+
+    service.node_runner._build_tools = _build_tools
+    try:
+        record = await service.create_task("mixed stage batch execution", session_id="web:shared")
+        await service.wait_for_task(record.task_id)
+
+        task = service.store.get_task(record.task_id)
+        assert task is not None
+        assert task.status == "success"
+
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level="full")
+        assert detail is not None
+        stages = detail["item"]["execution_trace"]["stages"]
+        assert len(stages) == 1
+        assert stages[0]["tool_round_budget"] == 1
+        assert stages[0]["tool_rounds_used"] == 1
+        assert len(stages[0]["rounds"]) == 1
+        assert [item["tool_name"] for item in stages[0]["rounds"][0]["tools"]] == ["exec"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_repeated_exec_call_is_soft_rejected_without_engine_failure(tmp_path: Path):
     class _Backend:
         def __init__(self) -> None:

@@ -202,8 +202,8 @@ Maintenance note for `task_append_notice` and task message distribution:
 - `g3ku/runtime/frontdoor/message_builder.py` 继续按本轮会话状态动态注入 retrieved context、memory hint、全局语义摘要，以及当前轮运行时工具合同所需的数据。
 - CEO/frontdoor 的生产执行面现在是显式 `StateGraph`，入口到收尾固定经过 `prepare_turn -> call_model -> normalize_model_output -> review_tool_calls -> execute_tools -> finalize`。
 - `call_model` 和 `execute_tools` 现在共用同一份 frontdoor runtime tool bundle。像 `submit_next_stage` 这类运行时注入的 stage protocol tool，必须同时对模型“可见”并且在 `execute_tools` 里可真实执行；维护时不要再在执行环节单独从 `state.tool_names` 重建第二套工具表。
-- `execute_tools` 现在会在真正执行前落实 stage gate：普通工具在无活动阶段或阶段预算耗尽时会直接得到 gate error；如果同一批 tool calls 里把 `submit_next_stage` 和其他普通工具混在一起，整个批次会被拒绝，要求模型先单独完成阶段切换。
-- 成功的 `submit_next_stage` 会在同一轮 `execute_tools` 完成后立刻写回 `frontdoor_stage_state`；下一次 `call_model` 看到的已经是 promotion 后、阶段已推进后的 runtime state，而不是等额外的后处理链再补写。
+- `execute_tools` 现在会在真正执行前落实 stage gate：普通工具在无活动阶段或阶段预算耗尽时会直接得到 gate error；但如果同一批 tool calls 里同时出现 `submit_next_stage` 和普通工具，runtime 会先顺序执行 `submit_next_stage`，再把同批普通工具当作“新阶段内的第一批工具调用”执行。若阶段切换失败，同批剩余普通工具会收到 batch-local 的阶段切换失败错误，而不是悄悄回落到旧阶段继续跑。
+- 成功的 `submit_next_stage` 会在同一轮 `execute_tools` 内立刻写回 `frontdoor_stage_state`；对 mixed batch 来说，这表示同批后续普通工具看到的已经是 promotion 后的新阶段，而下一次 `call_model` 看到的也同样是已推进后的 runtime state，而不是等额外的后处理链再补写。
 - CEO websocket now attaches the current visible turn's authoritative final `canonical_context` directly to `ceo.reply.final`; maintainers should not assume the frontend must wait for a later `state_snapshot` to reconstruct the closing stage view.
 - 新的前门暴露边界要分两层理解：只要当前没有“有效阶段”（`active_stage_id` 为空，或当前阶段已 `transition_required=true`），agent-facing `frontdoor_runtime_tool_contract.callable_tool_names` 会收紧到只剩 `submit_next_stage`；候选 tool/skill 列表仍继续显示，供模型先看能力边界、再开阶段。
 - 但 provider-facing `tools` schemas 现在不再随着 `transition_required=true` 收紧到只剩 `submit_next_stage`。前门会继续向 provider 发送稳定的 runtime-visible tool bundle，以减少阶段切换回合对 prompt cache 前缀命中的破坏。
@@ -228,7 +228,7 @@ Maintenance note for `task_append_notice` and task message distribution:
 - 同一用户 turn 内，`load_tool_context` 成功后，下一轮真正发给模型的函数工具列表会并入对应 hydrated tool。
 - frontdoor approval interrupt、session inflight snapshot、paused execution context 也会携带这份 hydrated state，避免“暂停前已经 load 成功，恢复后又退回 candidate-only”。
 - 同一套 inflight snapshot / paused execution context 现在也会带上 `frontdoor_selection_debug`。排查“rewrite 后 query 不对”“向量召回打到了哪些 tool/skill”“为什么某个工具没进 candidate”时，优先查看这份 snapshot，而不是只看最终 assistant 文本。
-- approval interrupt 负载现在还会一起携带 `frontdoor_stage_state`、`compression_state`、`semantic_context_state`、`hydrated_tool_names`、`tool_call_payloads` 和 `frontdoor_selection_debug`；恢复时这些字段会直接回灌 session/runtime state，而不是再由 middleware 临时重建。
+- approval interrupt 负载现在还会一起携带 `frontdoor_stage_state`、`compression_state`、`hydrated_tool_names`、`tool_call_payloads` 和 `frontdoor_selection_debug`；恢复时这些字段会直接回灌 session/runtime state，而不是再由 middleware 临时重建。
 
 阶段预算上还有一个容易被误判的点：
 
@@ -253,10 +253,11 @@ Additional maintenance note for fixed-builtin resource executors:
 - 节点与 CEO/frontdoor 都只允许 concrete tool names 进入 hydration LRU；family id 不能进入 promoted callable 集合。
 - execution / acceptance 节点现在也采用与 CEO/frontdoor 对齐的“有效阶段”合同：只要 `has_active_stage=false`，或当前阶段已经 `transition_required=true`，当前轮真正暴露给模型的 callable tool schemas 就只剩 `submit_next_stage`。
 - 这条节点规则只收紧当前轮 callable，不收紧 candidate。`candidate_tool_names` / `candidate_skill_ids` 继续表达候选集合；维护时如果看到节点动态合同里 callable 只剩 `submit_next_stage`，不要据此误判 selector、hydration 或语义召回已经丢失。
+- execution / acceptance 节点现在也采用与 CEO/frontdoor 对齐的 mixed-batch 语义：如果同一轮模型回复里同时给出 `submit_next_stage` 和普通工具，runtime 会先推进阶段，再把同批普通工具登记为新阶段的第一轮，并按该新阶段的预算规则更新 `tool_rounds_used` / `transition_required`。
 - 节点侧的完整 callable pool 现在只通过本地 `model_visible_tool_selection_trace.full_callable_tool_names` 保留下来，并随 runtime frame 与 `runtime-frame-messages:{node_id}` artifact 一起落盘；它不再属于 agent-facing `node_runtime_tool_contract`。排障时应先看这份 trace，再决定是阶段锁定还是工具选择真的出错。
 - restore / recovery 只认 canonical frame / session state 中的 callable/candidate/hydrated/skill 字段；缺失时直接报“运行时工具合同损坏/缺失”，不再回退 bootstrap 文本、旧 transcript 或旧动态消息。
 - 排查“首轮明明选中了某个 skill，`submit_next_stage` 之后再 `load_skill_context` 却报 not candidate”时，先看节点 runtime frame 是否仍保留该 skill 的 `candidate_skill_ids` / `candidate_skill_items`。如果 frame 还在而当轮 dynamic contract 已空，优先判断为 contract 重建链路或阶段压缩边界问题，而不是 selector 没命中。
-- 对 CEO/frontdoor，`frontdoor_stage_state`、`compression_state`、`semantic_context_state` 属于受保护运行时状态。工具合同刷新不能覆盖、清空或重置这三份状态。
+- 对 CEO/frontdoor，`frontdoor_stage_state` 与 `compression_state` 属于受保护运行时状态。工具合同刷新不能覆盖、清空或重置这两份状态；旧快照里如果还残留 `semantic_context_state`，应视为兼容遗留数据而不是 live contract。
 - `exec` 的执行模式现在也是受保护的 runtime-owned state：`ExecTool` 会在每次调用时重新读取当前 `exec_runtime` family metadata，而不是只在工具实例初始化时拍死一份本地配置。因此 Tool Admin 修改 mode 后，后续新的 `exec` 调用会立即生效，不需要项目重启，也不依赖重建现有 tool 实例。
 
 ### CEO Frontdoor Round Tool Ownership
@@ -286,7 +287,7 @@ If a maintainer sees a CEO stage trace where a later `exec` appears inside an ea
 
 维护上一个容易误判的点是：动态 skill/tool 提示块里虽然会出现“如何读取 skill 正文”或“如何读取 tool 契约”的说明，但这些说明不能覆盖 `ceo_frontdoor.md` 里的 stage-first 协议。当前前门的权威顺序是：
 
-1. 先看静态协议是否要求“无活动阶段时必须先 `submit_next_stage`”
+1. 先看静态协议是否要求“无活动阶段时必须先进入 `submit_next_stage` 所声明的新阶段”；这既可以是单独一轮 `submit_next_stage`，也可以是一个以 `submit_next_stage` 起手、随后紧跟普通工具的 mixed batch
 2. 只有在活动阶段已经存在后，动态 skill/tool 暴露里的 `load_skill_context` / `load_tool_context` 提示才真正进入可执行顺序
 
 如果维护者在排查“为什么模型先调用了 `load_skill_context` 却撞上 no active stage”这类问题，不要只盯动态 skill 列表或 candidate tool 列表；要先检查 `ceo_frontdoor.md` 的稳定协议与 `stage_messages.py` 的当前状态 overlay 是否一致，再检查 `prompt_builder.py` / `message_builder.py` 是否把动态提示写成了会与主协议竞争的动作指令。

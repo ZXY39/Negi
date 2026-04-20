@@ -244,10 +244,11 @@ Maintenance note for hydration LRU:
 - CEO/frontdoor 现在也不再从 trailing `ToolMessage` / `result_text` 反推 hydration；tool promotion 的权威来源是执行循环里的 `raw_result.ok / raw_result.hydration_targets`。
 - 对生产前门来说，这个“执行循环”现在就是显式 frontdoor `StateGraph` 的 `execute_tools` 节点，而不是 `create_agent` middleware 的后处理链。维护者应把 `_graph_execute_tools()` 视为唯一 promotion 入口。
 - `_graph_execute_tools()` 现在还必须复用与模型暴露阶段相同的 runtime-visible tool bundle，其中包含运行时注入的 `submit_next_stage`。如果维护者再次在执行环节只按 `state.tool_names` 重建工具映射，就会重新制造“模型能看到 `submit_next_stage`，但执行时报 `tool not available`”的分裂。
-- CEO/frontdoor 的 stage gate 现在由 `execute_tools` 真正执行，而不是只靠 prompt 约束。普通工具在无活动阶段或预算耗尽时会直接收到 gate error；`submit_next_stage` 与普通工具混在同一批 tool calls 里时，整批会被拒绝，要求模型先单独完成阶段切换。
+- CEO/frontdoor 的 stage gate 现在由 `execute_tools` 真正执行，而不是只靠 prompt 约束。普通工具在无活动阶段或预算耗尽时会直接收到 gate error；如果同一批 tool calls 同时包含 `submit_next_stage` 和普通工具，runtime 会先执行 `submit_next_stage`，再把同批普通工具当作新阶段的第一批调用处理，并在该新阶段上记账预算。
 - CEO/frontdoor 现在还多了一层更前置的 contract 收紧：当当前没有“有效阶段”时，agent-facing `frontdoor_runtime_tool_contract.callable_tool_names` 会收紧到只剩 `submit_next_stage`。这条规则同样适用于阶段预算已耗尽、必须换阶段的时刻。
 - 但这条前门规则不再等价于“provider-facing callable tool schemas 也只剩 `submit_next_stage`”。为了保持 prompt cache 前缀稳定，provider body 里的 `tools` 继续使用稳定的 runtime-visible tool bundle；真正的阶段控制回到动态合同和 `execute_tools` stage gate。
 - execution / acceptance 节点现在也采用同样的 contract 收紧，而且没有类似 `cron_internal` 的例外：只要没有有效阶段，当前轮模型可见的 callable tool 列表就只剩 `submit_next_stage`。
+- 但这不意味着 execution / acceptance 节点必须把 `submit_next_stage` 单独拆成一轮。若同一批 tool calls 里同时出现 `submit_next_stage` 和普通工具，执行循环会先推进阶段，再让这些普通工具作为新阶段首轮执行；若阶段切换失败，同批剩余普通工具会被批内阻断，而不会回退到旧阶段继续执行。
 - 当前保留的特例是 `cron_internal`：为了继续支持 cron 自移除，这类内部轮次不会被收紧到只剩 `submit_next_stage`。
 - `submit_next_stage` 的阶段预算现在在 execution / acceptance / CEO-frontdoor 三条路径上统一为 `1-10`；运行时仍允许在预算未耗尽前提前切到下一阶段，因此预算应理解为“本阶段声明的上限窗口”，而不是“必须烧满的最小轮数”。
 - 这不影响 candidate 语义。`candidate_tool_names` / `candidate_skill_ids` 仍继续表达“RBAC 可见 ∩ 语义召回命中”的候选集合，只是这些候选在无有效阶段时不会同时出现在 agent-facing callable contract 里。
