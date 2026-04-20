@@ -3,7 +3,6 @@
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
-from g3ku.cron.conditions import cron_schedule_requires_stop_condition
 from g3ku.cron.service import CronService
 from g3ku.cron.timezones import validate_timezone_name
 from g3ku.cron.types import CronSchedule
@@ -30,8 +29,8 @@ class CronTool(Tool):
     def description(self) -> str:
         return (
             "Schedule reminders and recurring tasks. Actions: add, list, remove. "
-            "Recurring jobs must include stop_condition written as "
-            "'此任务的具体退出条件+或用户要求取消'."
+            "Reminder messages must be written as internal instructions to your future self. "
+            "Recurring reminders stop after `max_runs` successful deliveries; omitted counts default to one-shot."
         )
 
     @property
@@ -44,12 +43,24 @@ class CronTool(Tool):
                     "enum": ["add", "list", "remove"],
                     "description": "Action to perform",
                 },
-                "message": {"type": "string", "description": "Reminder message (for add)"},
+                "message": {
+                    "type": "string",
+                    "description": (
+                        "Internal reminder content for your future self. "
+                        "Describe the action to take, not the final user-facing reply."
+                    ),
+                },
+                "max_runs": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum number of successful reminder deliveries. "
+                        "If omitted, the reminder defaults to one-shot. `at` reminders always use 1."
+                    ),
+                },
                 "stop_condition": {
                     "type": "string",
                     "description": (
-                        "Required for recurring jobs. Write the specific exit condition and include "
-                        "'或用户要求取消'."
+                        "Deprecated compatibility field. Reminder stopping is controlled by `max_runs`."
                     ),
                 },
                 "every_seconds": {
@@ -78,6 +89,7 @@ class CronTool(Tool):
         action: str,
         message: str = "",
         stop_condition: str | None = None,
+        max_runs: int | None = None,
         every_seconds: int | None = None,
         cron_expr: str | None = None,
         tz: str | None = None,
@@ -98,6 +110,7 @@ class CronTool(Tool):
             return self._add_job(
                 message,
                 stop_condition,
+                max_runs,
                 every_seconds,
                 cron_expr,
                 tz,
@@ -114,6 +127,7 @@ class CronTool(Tool):
         self,
         message: str,
         stop_condition: str | None,
+        max_runs: int | None,
         every_seconds: int | None,
         cron_expr: str | None,
         tz: str | None,
@@ -149,11 +163,6 @@ class CronTool(Tool):
         else:
             return "Error: either every_seconds, cron_expr, or at is required"
 
-        if cron_schedule_requires_stop_condition(schedule) and not str(stop_condition or "").strip():
-            return (
-                "Error: stop_condition is required for recurring jobs and must describe "
-                "the specific exit condition plus '或用户要求取消'"
-            )
         try:
             job = self._cron.add_job(
                 name=message[:30],
@@ -164,6 +173,7 @@ class CronTool(Tool):
                 to=self._chat_id,
                 session_key=str((runtime_context or {}).get("session_key") or "").strip() or None,
                 stop_condition=stop_condition,
+                max_runs=max_runs,
                 delete_after_run=delete_after,
             )
         except ValueError as exc:

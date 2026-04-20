@@ -181,6 +181,9 @@ Maintenance note for `task_append_notice` and task message distribution:
 - Heartbeat may still enter repair rounds to produce that visible reply, but it no longer creates replacement tasks and no longer retries failed or unpassed tasks in place.
 - If repair rounds still only produce empty output or `HEARTBEAT_OK`, the service emits a fixed fallback error; any further work must come from a later explicit user/frontdoor decision, typically through `create_async_task`.
 - If the task panel says success but the CEO session never receives a final reply, treat that as a heartbeat repair/fallback bug first, not as an ordinary UI rendering issue.
+- Task-terminal callbacks now also preserve a separate root-execution-output lane for final-acceptance failures. Maintainers should not overload `terminal_output` with the root deliverable:
+  - `terminal_output` still follows the real terminal node and therefore remains the acceptance-node output when `terminal_node_reason=acceptance_failed`.
+  - `root_output` / `root_output_ref` now carries the root-node final deliverable so heartbeat can show the main agent the full execution result even when the task is business-unpassed.
 
 当前 frontdoor 的上下文组织需要按“双层模型”理解：
 
@@ -553,12 +556,22 @@ Heartbeat and cron turns now share the same strict internal-turn contract.
 
 - They still execute through `RuntimeAgentSession.prompt(...)` with their own internal source metadata.
 - Heartbeat / cron turns still clear live-only frontdoor debug surfaces such as `frontdoor_selection_debug` and per-round actual-request pointers, but they no longer blindly zero the session-owned request-body / stage / compression continuity state before prompt assembly.
-- Heartbeat / cron now use the same `ceo_frontdoor` continuation path as ordinary visible turns. The request starts from the session-owned `frontdoor_request_body_messages` / actual-request scaffold, then appends hidden internal prompt messages for the rule text and event bundle.
-- The hidden rule/event messages are durable prompt history, not live-only lane text. They should be persisted with `prompt_visible=true`, `ui_visible=false`, and an `internal_prompt_kind` such as `heartbeat_rule`, `heartbeat_event_bundle`, `cron_rule`, or `cron_event_bundle`.
+- Heartbeat / cron now use the same `ceo_frontdoor` continuation path as ordinary visible turns. The request starts from the session-owned `frontdoor_request_body_messages` / actual-request scaffold, then appends hidden internal prompt messages for the rule text and event payload.
+- The hidden internal prompt messages are durable prompt history, not live-only lane text. They should be persisted with `prompt_visible=true`, `ui_visible=false`, and an `internal_prompt_kind` such as `heartbeat_rule`, `heartbeat_event_bundle`, `cron_rule`, or `cron_event_bundle`.
+- Heartbeat still carries its event payload as a hidden `user` event-bundle message because that lane still models a session-owned follow-up event.
+- Cron no longer injects its reminder payload as a hidden `user` message. It now appends a second hidden `system` block that describes a structured reminder delivery event for the future agent.
 - Visible heartbeat / cron assistant replies and tool traces remain ordinary durable turn output. They should stay `prompt_visible=true`, `ui_visible=true`, and continue to inherit the same continuity, token-preflight, token-compression, and pause contracts as visible user turns.
 - Service-layer code must not auto-retry tasks or synthesize fallback assistant replies on behalf of the model.
 - An internal turn that ends with `HEARTBEAT_OK` is still the one live-only ACK exception: the ACK event may surface in UI, but it must not create a new visible assistant transcript entry.
 - Maintainers should distinguish hidden internal prompt messages (`ui_visible=false`) from live-only ACK behavior. Hidden prompt messages are durable and prompt-visible; the ACK is not.
+
+Cron also has a new service-enforced repetition contract:
+
+- Cron payload now carries `max_runs`.
+- Cron state now carries `delivered_runs` plus optional `last_delivered_at_ms` for observability.
+- Reminder completion is counted by the scheduler after the cron internal prompt is durably accepted, not by the model's own natural-language reasoning.
+- Once the counter reaches `max_runs`, the cron service deletes the job immediately instead of asking the model to infer whether the reminder should stop.
+- The old stop-condition-based cron schema is intentionally not migrated. If the runtime loads an older cron store version, it clears that store and starts from an empty cron set.
 
 ## Repeated Tool Call Guard Notes
 

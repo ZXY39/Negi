@@ -911,12 +911,20 @@ class RuntimeAgentSession:
                 from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
 
                 cron_system_message = CeoFrontDoorSupport._cron_internal_system_message(prompt_metadata)
+                cron_event_message = CeoFrontDoorSupport._cron_internal_event_message(
+                    prompt_metadata,
+                    reminder_text=str(self._history_text(user_input.content) or "").strip(),
+                )
                 rule_text = (
                     str(cron_system_message.get("content") or "").strip()
                     if isinstance(cron_system_message, dict)
                     else ""
                 )
-                event_text = str(self._history_text(user_input.content) or "").strip()
+                event_text = (
+                    str(cron_event_message.get("content") or "").strip()
+                    if isinstance(cron_event_message, dict)
+                    else ""
+                )
                 if rule_text:
                     persisted_session.add_message(
                         "system",
@@ -932,7 +940,7 @@ class RuntimeAgentSession:
                     )
                 if event_text:
                     persisted_session.add_message(
-                        "user",
+                        "system",
                         event_text,
                         metadata={
                             **base_metadata,
@@ -1981,10 +1989,12 @@ class RuntimeAgentSession:
                         user_inputs=self._current_user_batch_inputs(user_input),
                     )
                 else:
-                    await self._persist_internal_prompt_messages(
+                    persisted_internal_prompt = await self._persist_internal_prompt_messages(
                         user_input=user_input,
                         internal_source=internal_source,
                     )
+                    if internal_source == "cron" and persisted_internal_prompt is None:
+                        raise RuntimeError("cron internal prompt persistence failed")
 
             await self._emit("agent_start", session_key=self._state.session_key, trigger="prompt")
             await self._emit("turn_start", session_key=self._state.session_key)

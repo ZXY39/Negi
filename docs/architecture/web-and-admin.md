@@ -251,7 +251,9 @@ Node detail and latest-context views now expose two different debugging surfaces
   - same family key + different actual request usually means append-only growth, overlay differences, or tool-schema drift inside the same family;
   - different family key means the stable caller-side family boundary moved.
 - `latest-context` now prefers that dedicated node actual-request artifact and only falls back to `messages_ref` for legacy nodes that predate the split.
-- For node troubleshooting, prefer `latest-context` or `actual_request_ref` when you need the exact provider-facing request, and treat the legacy projected input as a separate, compatibility-oriented lens.
+- The node-detail `完整上下文` disclosure is intentionally on-demand. Frontend code should fetch `/latest-context` only when the operator explicitly expands that section; ordinary node-detail auto-refresh or patch reconciliation must not silently reload it in the background.
+- The `/latest-context` payload still carries `ref`, `actual_request_ref`, and hash/count diagnostics for forensics, but its `content` field is now a human-facing rendering of the latest received context body rather than the entire artifact JSON. Backend formatting should prefer `request_messages`, then adapter-final `provider_request_body.input`, and only fall back to legacy projected `messages_ref` content when no dedicated actual-request body exists.
+- For node troubleshooting, prefer `latest-context` or `actual_request_ref` when you need the latest provider-bound/request-facing context body, and treat the legacy projected input as a separate, compatibility-oriented lens.
 
 CEO/frontdoor now follows a parallel debugging pattern, but with session-scoped files instead of task artifacts.
 

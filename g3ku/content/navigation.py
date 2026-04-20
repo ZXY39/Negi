@@ -636,8 +636,22 @@ class ContentNavigationService:
         around_line: int | None = None,
         window: int | None = None,
     ) -> dict[str, Any]:
+        has_range_selector = start_line is not None or end_line is not None
+        has_around_selector = around_line is not None or window is not None
+        if has_range_selector and has_around_selector:
+            raise ValueError("choose either start_line/end_line or around_line/window, not both")
+        if start_line is not None and int(start_line) < 1:
+            raise ValueError("start_line must be >= 1")
+        if end_line is not None and int(end_line) < 1:
+            raise ValueError("end_line must be >= 1")
+        if around_line is not None and int(around_line) < 1:
+            raise ValueError("around_line must be >= 1")
+        if window is not None and int(window) < 1:
+            raise ValueError("window must be >= 1")
+        if window is not None and around_line is None:
+            raise ValueError("window requires around_line")
         if around_line is not None:
-            span = max(1, min(int(window or DEFAULT_OPEN_LINES), MAX_OPEN_LINES))
+            span = min(int(window or DEFAULT_OPEN_LINES), MAX_OPEN_LINES)
             half = max(1, span // 2)
             start_line = max(1, int(around_line) - half)
             end_line = max(start_line, int(around_line) + half)

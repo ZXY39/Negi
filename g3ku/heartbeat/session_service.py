@@ -685,6 +685,8 @@ class WebSessionHeartbeatService:
             terminal_output_ref = str(payload.get("terminal_output_ref") or "").strip()
             terminal_check_result = str(payload.get("terminal_check_result") or "").strip()
             terminal_failure_reason = str(payload.get("terminal_failure_reason") or "").strip()
+            root_output = str(payload.get("root_output") or "").strip()
+            root_output_ref = str(payload.get("root_output_ref") or "").strip()
             if terminal_node_id:
                 lines.append(f"  Result node: {terminal_node_kind} {terminal_node_id}")
             if terminal_reason:
@@ -696,6 +698,13 @@ class WebSessionHeartbeatService:
                     lines.append(f"  Result output: {terminal_output}")
             if terminal_output_ref:
                 lines.append(f"  Result output ref: {terminal_output_ref}")
+            if root_output and root_output != terminal_output:
+                if len(root_output) > _TASK_TERMINAL_OUTPUT_INLINE_LIMIT:
+                    lines.append(f"  Execution output excerpt: {root_output[:_TASK_TERMINAL_OUTPUT_INLINE_LIMIT].rstrip()}...")
+                else:
+                    lines.append(f"  Execution output: {root_output}")
+            if root_output_ref and root_output_ref != terminal_output_ref:
+                lines.append(f"  Execution output ref: {root_output_ref}")
             if terminal_check_result:
                 lines.append(f"  Result check: {terminal_check_result}")
             if terminal_failure_reason and terminal_failure_reason != summary:

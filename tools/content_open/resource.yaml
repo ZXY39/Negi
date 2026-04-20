@@ -32,15 +32,19 @@ parameters:
       description: Content view mode. canonical resolves wrapped refs before reading.
     start_line:
       type: integer
+      minimum: 1
       description: Optional start line.
     end_line:
       type: integer
+      minimum: 1
       description: Optional end line.
     around_line:
       type: integer
+      minimum: 1
       description: Optional center line.
     window:
       type: integer
+      minimum: 1
       description: Optional window size when around_line is set.
   required: []
 governance:

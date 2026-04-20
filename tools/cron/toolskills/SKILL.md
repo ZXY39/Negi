@@ -1,65 +1,63 @@
 # cron
 
-使用 `cron` 安排提醒或周期任务。
+使用 `cron` 安排未来要提醒 agent 自己去做的事。
 
 创建于会话中的 cron 任务会优先回到原聊天线程；如果原线程后来被删除，结果会回落到独立线程 `cron:<job_id>`。自动调度只由 Web 主进程负责；CLI 可以创建、查看、移除和手动执行任务，但需要 Web 运行时在线时才会自动触发。
 
-## 硬约束
+## 当前合同
 
-- `cron(action="add")` 创建循环任务时，必须同时提供 `stop_condition`。
-- `stop_condition` 必须写成：`此任务的具体退出条件 + 或用户要求取消`。
-- `message` 只写用户可见的提醒或任务内容，不要把退出条件写进 `message`。
-- 一次性 `at` 任务可以不写 `stop_condition`。
-- 定时任务触发后，运行时会先检查是否满足 `stop_condition` 或用户是否已明确要求取消；满足则会立即自取消。
+- `message` 必须写成给未来自己的提醒动作，不要写成面向用户的成品回复。
+- `cron` 是提醒机制，不是自然语言停止条件引擎。
+- 重复提醒靠 `max_runs` 控制；每次成功送达给 agent 后计 1 次，到达上限会自动删除。
+- 如果没有明确写提醒次数，系统默认按一次性提醒处理，即 `max_runs=1`。
+- `at` 一次性提醒总是按 `max_runs=1` 处理。
+- `stop_condition` 仅保留为兼容参数，不再参与运行时停止判定。
 
-## 三种模式
+## 写法要求
 
-1. 提醒：消息直接发送给用户。
-2. 任务：消息是任务描述，系统定时执行并发送结果。
-3. 一次性：指定时间执行一次后自动删除。
+推荐写法：
+
+- `message="向用户汇报当前时间"`
+- `message="检查任务 task:xxx 的最新进展并汇报"`
+- `message="提醒用户会议即将开始"`
+
+不要这样写：
+
+- `message="当前最新时间：请查看本条消息的发送时间。"`
+- `message="提醒你该开会了"`
+- `message="完成 3 次后自动停止"`
 
 ## 示例
 
-固定提醒：
+重复提醒 3 次：
 
 ```python
 cron(
     action="add",
-    message="提醒我起来活动一下",
-    every_seconds=1200,
-    stop_condition="今天下班后或用户要求取消",
+    message="向用户汇报当前时间",
+    every_seconds=300,
+    max_runs=3,
 )
 ```
 
-周期任务：
+工作日提醒 5 次：
 
 ```python
 cron(
     action="add",
-    message="检查 HKUDS/g3ku GitHub stars 并汇报",
-    every_seconds=600,
-    stop_condition="仓库 stars 达到目标后或用户要求取消",
-)
-```
-
-带时区的 cron：
-
-```python
-cron(
-    action="add",
-    message="工作日早上站会提醒",
+    message="提醒用户准备参加站会",
     cron_expr="0 9 * * 1-5",
     tz="America/Vancouver",
-    stop_condition="本周项目冲刺结束后或用户要求取消",
+    max_runs=5,
 )
 ```
 
-一次性任务：
+一次性提醒：
 
 ```python
 cron(
     action="add",
-    message="提醒我参加会议",
+    message="提醒用户会议即将开始",
     at="<ISO datetime>",
 )
 ```
@@ -84,5 +82,5 @@ cron(action="remove", job_id="abc123")
 
 ## 恢复语义
 
-- Web 运行时重启后，错过的单次任务会补执行一次。
-- 周期任务如果在停机期间错过执行，恢复后只补最近一次，不会把所有漏掉的周期全部回放。
+- Web 运行时重启后，错过的单次提醒会补执行一次。
+- 周期提醒如果在停机期间错过执行，恢复后只补最近一次，不会把所有漏掉的周期全部回放。

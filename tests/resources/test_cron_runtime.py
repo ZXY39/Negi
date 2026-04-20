@@ -96,10 +96,11 @@ def _make_job(
     *,
     job_id: str = "job-1",
     message: str = "hello",
-    stop_condition: str | None = "任务完成后或用户要求取消",
     channel: str | None = "web",
     to: str | None = "shared",
     session_key: str | None = None,
+    max_runs: int = 1,
+    delivered_runs: int = 0,
 ) -> CronJob:
     return CronJob(
         id=job_id,
@@ -108,17 +109,20 @@ def _make_job(
         payload=CronPayload(
             kind="agent_turn",
             message=message,
-            stop_condition=stop_condition,
+            max_runs=max_runs,
             deliver=True,
             channel=channel,
             to=to,
             session_key=session_key,
         ),
-        state=CronJobState(next_run_at_ms=int(time.time() * 1000) + 60000),
+        state=CronJobState(
+            next_run_at_ms=int(time.time() * 1000) + 60000,
+            delivered_runs=delivered_runs,
+        ),
     )
 
 
-def test_cron_service_loads_legacy_jobs_without_session_key(tmp_path: Path) -> None:
+def test_cron_service_clears_legacy_store_versions(tmp_path: Path) -> None:
     store_path = tmp_path / "jobs.json"
     store_path.write_text(
         json.dumps(
@@ -152,10 +156,11 @@ def test_cron_service_loads_legacy_jobs_without_session_key(tmp_path: Path) -> N
     service = CronService(store_path)
 
     jobs = service.list_jobs(include_disabled=True)
+    raw = json.loads(store_path.read_text(encoding="utf-8"))
 
-    assert len(jobs) == 1
-    assert jobs[0].payload.session_key is None
-    assert jobs[0].payload.stop_condition is None
+    assert jobs == []
+    assert raw["version"] == 2
+    assert raw["jobs"] == []
 
 
 def test_cron_service_persists_session_key(tmp_path: Path) -> None:
@@ -170,22 +175,57 @@ def test_cron_service_persists_session_key(tmp_path: Path) -> None:
         channel="web",
         to="shared",
         session_key="web:demo",
-        stop_condition="发布完成后",
+        max_runs=3,
     )
 
     raw = json.loads(store_path.read_text(encoding="utf-8"))
 
     assert job.payload.session_key == "web:demo"
-    assert job.payload.stop_condition == "发布完成后或用户要求取消"
+    assert job.payload.max_runs == 3
+    assert job.state.delivered_runs == 0
     assert raw["jobs"][0]["payload"]["sessionKey"] == "web:demo"
-    assert raw["jobs"][0]["payload"]["stopCondition"] == "发布完成后或用户要求取消"
+    assert raw["jobs"][0]["payload"]["maxRuns"] == 3
+    assert raw["jobs"][0]["state"]["deliveredRuns"] == 0
 
 
-def test_cron_service_requires_stop_condition_for_recurring_jobs(tmp_path: Path) -> None:
+def test_cron_service_defaults_recurring_jobs_to_one_shot_when_max_runs_is_omitted(tmp_path: Path) -> None:
     store_path = tmp_path / "jobs.json"
     service = CronService(store_path)
 
-    with pytest.raises(ValueError, match="stop_condition is required"):
+    job = service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="every", every_ms=60000),
+        message="hello",
+        deliver=True,
+        channel="web",
+        to="shared",
+    )
+
+    assert job.payload.max_runs == 1
+
+
+def test_cron_service_forces_at_jobs_to_one_shot_even_when_max_runs_is_higher(tmp_path: Path) -> None:
+    store_path = tmp_path / "jobs.json"
+    service = CronService(store_path)
+
+    job = service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="at", at_ms=int(time.time() * 1000) + 60000),
+        message="hello",
+        deliver=True,
+        channel="web",
+        to="shared",
+        max_runs=5,
+    )
+
+    assert job.payload.max_runs == 1
+
+
+def test_cron_service_rejects_non_positive_max_runs(tmp_path: Path) -> None:
+    store_path = tmp_path / "jobs.json"
+    service = CronService(store_path)
+
+    with pytest.raises(ValueError, match="max_runs must be a positive integer"):
         service.add_job(
             name="demo",
             schedule=CronSchedule(kind="every", every_ms=60000),
@@ -193,6 +233,7 @@ def test_cron_service_requires_stop_condition_for_recurring_jobs(tmp_path: Path)
             deliver=True,
             channel="web",
             to="shared",
+            max_runs=0,
         )
 
 
@@ -213,11 +254,12 @@ async def test_cron_tool_accepts_asia_shanghai_without_zoneinfo_tzdata(monkeypat
         message="hello",
         cron_expr="0 10 * * *",
         tz="Asia/Shanghai",
-        stop_condition="任务完成后或用户要求取消",
+        max_runs=2,
     )
 
     assert result == "Created job 'job' (id: job-1)"
     assert service.add_calls[-1]["schedule"].tz == "Asia/Shanghai"
+    assert service.add_calls[-1]["max_runs"] == 2
 
 
 def test_resolve_timezone_reports_missing_tzdata_helpfully(monkeypatch) -> None:
@@ -244,7 +286,6 @@ async def test_cron_tool_limits_cron_internal_runs_to_self_removal() -> None:
     add_result = await tool.execute(
         action="add",
         message="hello",
-        stop_condition="任务完成后或用户要求取消",
         every_seconds=60,
         __g3ku_runtime={"cron_internal": True, "cron_job_id": "job-1"},
     )
@@ -289,8 +330,12 @@ async def test_dispatch_cron_job_resumes_original_session_when_it_exists(tmp_pat
     assert message.metadata == {
         "cron_internal": True,
         "cron_job_id": "job-1",
-        "cron_stop_condition": "任务完成后或用户要求取消",
-        "cron_stop_condition_explicit": True,
+        "cron_max_runs": 1,
+        "cron_delivery_index": 1,
+        "cron_delivered_runs": 0,
+        "cron_reminder_text": "hello",
+        "cron_scheduled_run_at_ms": job.state.next_run_at_ms,
+        "cron_last_delivered_at_ms": None,
     }
     assert bridge.calls[0]["session_key"] == "web:demo"
     assert bridge.calls[0]["channel"] == "web"
@@ -306,9 +351,10 @@ async def test_dispatch_cron_job_falls_back_to_cron_thread_when_session_missing(
     job = _make_job(
         job_id="job-42",
         session_key="web:missing",
-        stop_condition=None,
         channel=None,
         to=None,
+        max_runs=3,
+        delivered_runs=1,
     )
 
     result = await dispatch_cron_job(
@@ -325,8 +371,12 @@ async def test_dispatch_cron_job_falls_back_to_cron_thread_when_session_missing(
     assert message.metadata == {
         "cron_internal": True,
         "cron_job_id": "job-42",
-        "cron_stop_condition": "用户要求取消",
-        "cron_stop_condition_explicit": False,
+        "cron_max_runs": 3,
+        "cron_delivery_index": 2,
+        "cron_delivered_runs": 1,
+        "cron_reminder_text": "hello",
+        "cron_scheduled_run_at_ms": job.state.next_run_at_ms,
+        "cron_last_delivered_at_ms": None,
     }
     assert bridge.calls[0]["session_key"] == "cron:job-42"
     assert bridge.calls[0]["channel"] == "cli"
@@ -342,7 +392,7 @@ async def test_cron_service_start_catches_up_overdue_at_job_once(tmp_path: Path)
     store_path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "jobs": [
                     {
                         "id": "job-at",
@@ -375,9 +425,7 @@ async def test_cron_service_start_catches_up_overdue_at_job_once(tmp_path: Path)
 
     jobs = service.list_jobs(include_disabled=True)
     assert fired == ["job-at"]
-    assert jobs[0].enabled is False
-    assert jobs[0].state.last_status == "ok"
-    assert jobs[0].state.next_run_at_ms is None
+    assert jobs == []
 
 
 @pytest.mark.asyncio
@@ -387,7 +435,7 @@ async def test_cron_service_start_catches_up_only_latest_recurring_run(tmp_path:
     store_path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "jobs": [
                     {
                         "id": "job-every",
@@ -420,9 +468,67 @@ async def test_cron_service_start_catches_up_only_latest_recurring_run(tmp_path:
 
     jobs = service.list_jobs(include_disabled=True)
     assert fired == ["job-every"]
-    assert jobs[0].enabled is True
-    assert jobs[0].state.last_status == "ok"
-    assert (jobs[0].state.next_run_at_ms or 0) > int(time.time() * 1000)
+    assert jobs == []
+
+
+@pytest.mark.asyncio
+async def test_cron_service_counts_successful_deliveries_and_deletes_at_max_runs(tmp_path: Path) -> None:
+    store_path = tmp_path / "jobs.json"
+    delivered: list[str] = []
+
+    async def _on_job(job: CronJob) -> str | None:
+        delivered.append(job.id)
+        return "ok"
+
+    service = CronService(store_path, on_job=_on_job)
+    job = service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="hello",
+        deliver=True,
+        channel="web",
+        to="shared",
+        max_runs=3,
+    )
+
+    await service._execute_job(job)
+    assert job.state.delivered_runs == 1
+    assert service.list_jobs(include_disabled=True)[0].id == job.id
+
+    await service._execute_job(job)
+    assert job.state.delivered_runs == 2
+    assert service.list_jobs(include_disabled=True)[0].id == job.id
+
+    await service._execute_job(job)
+
+    assert delivered == [job.id, job.id, job.id]
+    assert service.list_jobs(include_disabled=True) == []
+
+
+@pytest.mark.asyncio
+async def test_cron_service_does_not_increment_failed_deliveries(tmp_path: Path) -> None:
+    store_path = tmp_path / "jobs.json"
+
+    async def _on_job(job: CronJob) -> str | None:
+        _ = job
+        raise RuntimeError("delivery failed")
+
+    service = CronService(store_path, on_job=_on_job)
+    job = service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="hello",
+        deliver=True,
+        channel="web",
+        to="shared",
+        max_runs=2,
+    )
+
+    await service._execute_job(job)
+
+    assert job.state.delivered_runs == 0
+    assert job.state.last_status == "error"
+    assert service.list_jobs(include_disabled=True)[0].id == job.id
 
 
 @pytest.mark.asyncio

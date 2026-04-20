@@ -1747,12 +1747,98 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
     assert len(contract_messages) == 1
-    contract_payload = json.loads(str(contract_messages[0]["content"] or ""))
-    assert contract_payload["callable_tool_names"] == ["submit_next_stage"]
-    assert contract_payload["candidate_tools"] == []
-    assert "visible_skill_ids" not in contract_payload
-    assert "rbac_visible_tool_names" not in contract_payload
-    assert "rbac_visible_skill_ids" not in contract_payload
+    contract_text = str(contract_messages[0]["content"] or "")
+    assert "callable_tools: `submit_next_stage`" in contract_text
+    assert "candidate_tools: none" in contract_text
+    assert "visible_skill_ids" not in contract_text
+    assert "rbac_visible_tool_names" not in contract_text
+    assert "rbac_visible_skill_ids" not in contract_text
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_graph_prepare_turn_keeps_cron_internal_event_out_of_user_messages() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            sessions=SimpleNamespace(get_or_create=lambda session_key: SimpleNamespace(session_key=session_key)),
+            main_task_service=None,
+            tools=SimpleNamespace(get=lambda *_: None, tool_names=[]),
+            provider_name="openai",
+            model="gpt-test",
+        )
+    )
+    captured: dict[str, object] = {}
+
+    async def _resolve_for_actor(**kwargs):
+        _ = kwargs
+        return {
+            "skills": [],
+            "tool_families": [],
+            "tool_names": ["cron"],
+        }
+
+    async def _build_for_ceo(**kwargs):
+        captured["request_body_seed_messages"] = list(kwargs.get("request_body_seed_messages") or [])
+        captured["user_content"] = kwargs.get("user_content")
+        stable_messages = list(kwargs.get("request_body_seed_messages") or [])
+        return SimpleNamespace(
+            model_messages=list(stable_messages),
+            stable_messages=list(stable_messages),
+            dynamic_appendix_messages=[],
+            tool_names=["cron"],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["cron"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    runner._resolver = SimpleNamespace(resolve_for_actor=_resolve_for_actor)
+    runner._builder = SimpleNamespace(build_for_ceo=_build_for_ceo)
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    runner._selected_tool_schemas = lambda tool_names: [{"name": name, "parameters": {"type": "object"}} for name in list(tool_names or [])]
+
+    prepared = await runner._graph_prepare_turn(
+        state=initial_persistent_state(
+            user_input={
+                "content": "Report the current time to the user.",
+                "metadata": {
+                    "cron_internal": True,
+                    "cron_job_id": "job-77",
+                    "cron_max_runs": 3,
+                    "cron_delivery_index": 2,
+                    "cron_delivered_runs": 1,
+                    "cron_reminder_text": "Report the current time to the user.",
+                },
+            }
+        ),
+        runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
+    )
+
+    assert captured["user_content"] == ""
+    seed_messages = [dict(item) for item in list(captured["request_body_seed_messages"] or [])]
+    assert [message["role"] for message in seed_messages] == ["system", "system"]
+    assert str(seed_messages[0]["content"]).startswith("You are handling a cron-internal structured reminder turn.")
+    assert str(seed_messages[1]["content"]).startswith("[CRON INTERNAL EVENT]")
+    assert not any(
+        str(item.get("role") or "").strip().lower() == "user"
+        and str(item.get("content") or "").strip() == "Report the current time to the user."
+        for item in list(prepared["frontdoor_request_body_messages"] or [])
+        if isinstance(item, dict)
+    )
 
 
 @pytest.mark.asyncio
@@ -1833,18 +1919,13 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_candidate_tools_visi
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
     assert len(contract_messages) == 1
-    contract_payload = json.loads(str(contract_messages[0]["content"] or ""))
-    assert contract_payload["callable_tool_names"] == ["submit_next_stage"]
-    assert contract_payload["candidate_tools"] == [
-        {
-            "tool_id": "filesystem_write",
-            "description": "Write file content to disk.",
-        }
-    ]
-    assert contract_payload["candidate_skill_ids"] == ["memory"]
-    assert "visible_skill_ids" not in contract_payload
-    assert "rbac_visible_tool_names" not in contract_payload
-    assert "rbac_visible_skill_ids" not in contract_payload
+    contract_text = str(contract_messages[0]["content"] or "")
+    assert "callable_tools: `submit_next_stage`" in contract_text
+    assert "- `filesystem_write`: Write file content to disk." in contract_text
+    assert "candidate_skills: `memory`" in contract_text
+    assert "visible_skill_ids" not in contract_text
+    assert "rbac_visible_tool_names" not in contract_text
+    assert "rbac_visible_skill_ids" not in contract_text
 
 
 @pytest.mark.asyncio

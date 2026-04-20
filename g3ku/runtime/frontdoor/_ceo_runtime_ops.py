@@ -1639,11 +1639,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         ),
                     }
                 )
-            event_metadata = _hidden_internal_prompt_message_metadata(
-                source=source,
-                internal_prompt_kind="cron_event_bundle",
-                extra={"cron_job_id": cron_job_id},
+            cron_event_message = CeoFrontDoorSupport._cron_internal_event_message(
+                metadata,
+                reminder_text=str(metadata.get("cron_reminder_text") or "").strip(),
             )
+            if isinstance(cron_event_message, dict) and str(cron_event_message.get("content") or "").strip():
+                seed_messages.append(
+                    {
+                        "role": "system",
+                        "content": str(cron_event_message.get("content") or "").strip(),
+                        "metadata": _hidden_internal_prompt_message_metadata(
+                            source=source,
+                            internal_prompt_kind="cron_event_bundle",
+                            extra={"cron_job_id": cron_job_id},
+                        ),
+                    }
+                )
         return seed_messages, event_bundle_text, event_metadata
 
     @classmethod
@@ -3577,7 +3588,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             self._internal_prompt_seed_messages(metadata=metadata)
         )
         current_turn_user_content = (
-            internal_event_bundle_text
+            ""
+            if cron_internal
+            else internal_event_bundle_text
             if heartbeat_internal and internal_event_bundle_text
             else self._model_content(user_content)
         )
@@ -3664,7 +3677,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         frontdoor_selection_debug["callable_tool_names"] = list(callable_tool_names)
         messages: list[dict[str, Any]] = list(assembly.model_messages or [])
-        if not messages or str(messages[-1].get("role") or "").strip().lower() != "user":
+        has_current_turn_user_content = bool(self._content_text(current_turn_user_content).strip())
+        if has_current_turn_user_content and (
+            not messages or str(messages[-1].get("role") or "").strip().lower() != "user"
+        ):
             messages.append({"role": "user", "content": current_turn_user_content})
 
         model_refs = self._resolve_ceo_model_refs()

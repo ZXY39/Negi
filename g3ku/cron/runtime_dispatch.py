@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from g3ku.core.messages import UserInputMessage
-from g3ku.cron.conditions import effective_cron_stop_condition
 from g3ku.cron.types import CronJob
 
 
@@ -37,16 +36,19 @@ async def dispatch_cron_job(
     channel = str(getattr(payload, "channel", "") or "").strip() or "cli"
     chat_id = str(getattr(payload, "to", "") or "").strip() or "direct"
     session_key = resolve_cron_session_key(job, session_manager=session_manager)
-    stop_condition, explicit_stop_condition = effective_cron_stop_condition(
-        getattr(payload, "stop_condition", None)
-    )
+    delivered_runs = max(0, int(getattr(getattr(job, "state", None), "delivered_runs", 0) or 0))
+    max_runs = max(1, int(getattr(payload, "max_runs", 1) or 1))
     user_message = UserInputMessage(
         content=str(getattr(payload, "message", "") or ""),
         metadata={
             "cron_internal": True,
             "cron_job_id": str(getattr(job, "id", "") or "").strip(),
-            "cron_stop_condition": stop_condition,
-            "cron_stop_condition_explicit": explicit_stop_condition,
+            "cron_max_runs": max_runs,
+            "cron_delivery_index": delivered_runs + 1,
+            "cron_delivered_runs": delivered_runs,
+            "cron_reminder_text": str(getattr(payload, "message", "") or ""),
+            "cron_scheduled_run_at_ms": getattr(getattr(job, "state", None), "next_run_at_ms", None),
+            "cron_last_delivered_at_ms": getattr(getattr(job, "state", None), "last_delivered_at_ms", None),
         },
     )
     result = await runtime_bridge.prompt(

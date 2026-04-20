@@ -138,6 +138,8 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
     terminal_output_ref = _non_empty_text(event.get("terminal_output_ref"))
     terminal_check_result = _non_empty_text(event.get("terminal_check_result"))
     terminal_failure_reason = _non_empty_text(event.get("terminal_failure_reason"))
+    root_output = _non_empty_text(event.get("root_output"))
+    root_output_ref = _non_empty_text(event.get("root_output_ref"))
     _append_retrieval_parts(
         retrieval_parts,
         "task_terminal",
@@ -151,6 +153,7 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
         terminal_output[:output_inline_limit] if terminal_output else "",
         terminal_check_result,
         terminal_failure_reason,
+        root_output[:output_inline_limit] if root_output and root_output != terminal_output else "",
     )
     lines = [
         f"- Task {title} ({task_id}) completed",
@@ -169,6 +172,14 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
             lines.append(f"  Result output: {terminal_output}")
     if terminal_output_ref:
         lines.append(f"  Result output ref: {terminal_output_ref}")
+    if root_output and root_output != terminal_output:
+        if len(root_output) > output_inline_limit:
+            excerpt = root_output[:output_inline_limit].rstrip()
+            lines.append(f"  Execution output excerpt: {excerpt}...")
+        else:
+            lines.append(f"  Execution output: {root_output}")
+    if root_output_ref and root_output_ref != terminal_output_ref:
+        lines.append(f"  Execution output ref: {root_output_ref}")
     if terminal_check_result:
         lines.append(f"  Result check: {terminal_check_result}")
     if terminal_failure_reason and terminal_failure_reason != summary:

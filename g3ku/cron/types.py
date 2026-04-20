@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
+CRON_STORE_VERSION = 2
+
+
 @dataclass
 class CronSchedule:
     """Schedule definition for a cron job."""
@@ -24,6 +27,7 @@ class CronPayload:
     kind: Literal["system_event", "agent_turn"] = "agent_turn"
     message: str = ""
     stop_condition: str | None = None
+    max_runs: int = 1
     # Deliver response to channel
     deliver: bool = False
     channel: str | None = None  # e.g. "whatsapp"
@@ -37,6 +41,8 @@ class CronJobState:
     """Runtime state of a job."""
     next_run_at_ms: int | None = None
     last_run_at_ms: int | None = None
+    delivered_runs: int = 0
+    last_delivered_at_ms: int | None = None
     last_status: Literal["ok", "error", "skipped"] | None = None
     last_error: str | None = None
 
@@ -58,5 +64,5 @@ class CronJob:
 @dataclass
 class CronStore:
     """Persistent store for cron jobs."""
-    version: int = 1
+    version: int = CRON_STORE_VERSION
     jobs: list[CronJob] = field(default_factory=list)

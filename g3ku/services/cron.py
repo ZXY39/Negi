@@ -10,12 +10,18 @@ from typing import Any, Callable, Coroutine
 
 from loguru import logger
 
-from g3ku.cron.conditions import (
-    cron_schedule_requires_stop_condition,
-    normalize_cron_stop_condition,
-)
 from g3ku.cron.timezones import resolve_timezone, validate_timezone_name
-from g3ku.cron.types import CronJob, CronJobState, CronPayload, CronSchedule, CronStore
+from g3ku.cron.types import (
+    CRON_STORE_VERSION,
+    CronJob,
+    CronJobState,
+    CronPayload,
+    CronSchedule,
+    CronStore,
+)
+
+
+_FAILED_AT_RETRY_DELAY_MS = 60_000
 
 
 def _now_ms() -> int:
@@ -61,6 +67,17 @@ def _validate_schedule_for_add(schedule: CronSchedule) -> None:
             raise ValueError(str(exc)) from None
 
 
+def _normalize_max_runs(*, schedule: CronSchedule, max_runs: int | None) -> int:
+    if schedule.kind == "at":
+        return 1
+    if max_runs is None:
+        return 1
+    normalized = int(max_runs)
+    if normalized <= 0:
+        raise ValueError("max_runs must be a positive integer")
+    return normalized
+
+
 class CronService:
     """Service for managing and executing scheduled jobs."""
 
@@ -89,6 +106,16 @@ class CronService:
         if self.store_path.exists():
             try:
                 data = json.loads(self.store_path.read_text(encoding="utf-8"))
+                version = int(data.get("version", 0) or 0)
+                if version < CRON_STORE_VERSION:
+                    logger.warning(
+                        "Cron: dropping incompatible legacy store version {} at {}",
+                        version,
+                        self.store_path,
+                    )
+                    self._store = CronStore()
+                    self._save_store()
+                    return self._store
                 jobs = []
                 for j in data.get("jobs", []):
                     jobs.append(CronJob(
@@ -106,6 +133,7 @@ class CronService:
                             kind=j["payload"].get("kind", "agent_turn"),
                             message=j["payload"].get("message", ""),
                             stop_condition=j["payload"].get("stopCondition"),
+                            max_runs=max(1, int(j["payload"].get("maxRuns", 1) or 1)),
                             deliver=j["payload"].get("deliver", False),
                             channel=j["payload"].get("channel"),
                             to=j["payload"].get("to"),
@@ -114,6 +142,8 @@ class CronService:
                         state=CronJobState(
                             next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
                             last_run_at_ms=j.get("state", {}).get("lastRunAtMs"),
+                            delivered_runs=max(0, int(j.get("state", {}).get("deliveredRuns", 0) or 0)),
+                            last_delivered_at_ms=j.get("state", {}).get("lastDeliveredAtMs"),
                             last_status=j.get("state", {}).get("lastStatus"),
                             last_error=j.get("state", {}).get("lastError"),
                         ),
@@ -121,7 +151,7 @@ class CronService:
                         updated_at_ms=j.get("updatedAtMs", 0),
                         delete_after_run=j.get("deleteAfterRun", False),
                     ))
-                self._store = CronStore(jobs=jobs)
+                self._store = CronStore(version=CRON_STORE_VERSION, jobs=jobs)
                 self._last_mtime_ns = self.store_path.stat().st_mtime_ns
             except Exception as e:
                 logger.warning("Failed to load cron store: {}", e)
@@ -158,6 +188,7 @@ class CronService:
                         "kind": j.payload.kind,
                         "message": j.payload.message,
                         "stopCondition": j.payload.stop_condition,
+                        "maxRuns": j.payload.max_runs,
                         "deliver": j.payload.deliver,
                         "channel": j.payload.channel,
                         "to": j.payload.to,
@@ -166,6 +197,8 @@ class CronService:
                     "state": {
                         "nextRunAtMs": j.state.next_run_at_ms,
                         "lastRunAtMs": j.state.last_run_at_ms,
+                        "deliveredRuns": j.state.delivered_runs,
+                        "lastDeliveredAtMs": j.state.last_delivered_at_ms,
                         "lastStatus": j.state.last_status,
                         "lastError": j.state.last_error,
                     },
@@ -206,6 +239,11 @@ class CronService:
             return
         now = _now_ms()
         for job in self._store.jobs:
+            max_runs = max(1, int(getattr(job.payload, "max_runs", 1) or 1))
+            if int(job.state.delivered_runs or 0) >= max_runs:
+                job.enabled = False
+                job.state.next_run_at_ms = None
+                continue
             if not job.enabled:
                 job.state.next_run_at_ms = None
                 continue
@@ -273,12 +311,16 @@ class CronService:
         """Execute a single job."""
         start_ms = _now_ms()
         logger.info("Cron: executing job '{}' ({})", job.name, job.id)
+        delivered = False
 
         try:
             if not callable(self.on_job):
                 raise RuntimeError("cron job handler is not configured")
             await self.on_job(job)
 
+            delivered = True
+            job.state.delivered_runs = max(0, int(job.state.delivered_runs or 0)) + 1
+            job.state.last_delivered_at_ms = start_ms
             job.state.last_status = "ok"
             job.state.last_error = None
             logger.info("Cron: job '{}' completed", job.name)
@@ -291,16 +333,41 @@ class CronService:
         job.state.last_run_at_ms = start_ms
         job.updated_at_ms = _now_ms()
 
-        # Handle one-shot jobs
-        if job.schedule.kind == "at":
-            if job.delete_after_run:
-                self._store.jobs = [j for j in self._store.jobs if j.id != job.id]
-            else:
+        max_runs = max(1, int(getattr(job.payload, "max_runs", 1) or 1))
+        terminal_delivery = delivered and int(job.state.delivered_runs or 0) >= max_runs
+
+        if terminal_delivery:
+            if not self._delete_job_in_memory(job.id):
                 job.enabled = False
                 job.state.next_run_at_ms = None
+                job.state.last_status = "error"
+                job.state.last_error = (
+                    f"terminal cron delivery reached max_runs={max_runs} but in-memory removal failed"
+                )
+                logger.error(
+                    "Cron: failed to remove terminal job '{}' ({}); disabled instead",
+                    job.name,
+                    job.id,
+                )
         else:
-            # Compute next run
-            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+            job.state.next_run_at_ms = self._next_run_after_execution(job, delivered=delivered)
+
+    def _next_run_after_execution(self, job: CronJob, *, delivered: bool) -> int | None:
+        now = _now_ms()
+        if delivered:
+            if job.schedule.kind == "at":
+                return None
+            return _compute_next_run(job.schedule, now)
+        if job.schedule.kind == "at":
+            return now + _FAILED_AT_RETRY_DELAY_MS
+        return _compute_next_run(job.schedule, now)
+
+    def _delete_job_in_memory(self, job_id: str) -> bool:
+        if not self._store:
+            return False
+        before = len(self._store.jobs)
+        self._store.jobs = [j for j in self._store.jobs if j.id != job_id]
+        return len(self._store.jobs) < before
 
     # ========== Public API ==========
 
@@ -320,18 +387,15 @@ class CronService:
         to: str | None = None,
         session_key: str | None = None,
         stop_condition: str | None = None,
+        max_runs: int | None = None,
         delete_after_run: bool = False,
     ) -> CronJob:
         """Add a new job."""
         store = self._load_store()
         _validate_schedule_for_add(schedule)
         now = _now_ms()
-        normalized_stop_condition: str | None = None
-        raw_stop_condition = str(stop_condition or "").strip()
-        if cron_schedule_requires_stop_condition(schedule):
-            normalized_stop_condition = normalize_cron_stop_condition(raw_stop_condition)
-        elif raw_stop_condition:
-            normalized_stop_condition = normalize_cron_stop_condition(raw_stop_condition)
+        _ = stop_condition
+        effective_max_runs = _normalize_max_runs(schedule=schedule, max_runs=max_runs)
 
         job = CronJob(
             id=str(uuid.uuid4())[:8],
@@ -341,13 +405,17 @@ class CronService:
             payload=CronPayload(
                 kind="agent_turn",
                 message=message,
-                stop_condition=normalized_stop_condition,
+                stop_condition=None,
+                max_runs=effective_max_runs,
                 deliver=deliver,
                 channel=channel,
                 to=to,
                 session_key=str(session_key or "").strip() or None,
             ),
-            state=CronJobState(next_run_at_ms=_compute_next_run(schedule, now)),
+            state=CronJobState(
+                next_run_at_ms=_compute_next_run(schedule, now),
+                delivered_runs=0,
+            ),
             created_at_ms=now,
             updated_at_ms=now,
             delete_after_run=delete_after_run,

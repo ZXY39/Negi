@@ -2547,8 +2547,6 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
         if (nodeChanged) {
             U.nodeContextDisclosure.open = false;
             renderNodeContextPlaceholder();
-        } else if (forceRefresh && U.nodeContextDisclosure.open) {
-            void loadSelectedNodeLatestContext({ force: true });
         }
     }
     if (!hadVisibleCurrentDetail || traceChanged || messagesChanged || spawnReviewChanged || outputChanged || acceptanceChanged) {

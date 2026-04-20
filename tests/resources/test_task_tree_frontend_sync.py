@@ -1766,6 +1766,10 @@ def test_load_selected_node_latest_context_preserves_detail_and_context_scroll()
         };
         global.showToast = () => {};
         global.isAbortLike = () => false;
+        global.readableText = (value, options = {}) => {
+          const text = String(value ?? "");
+          return text || String(options.emptyText || "");
+        };
         global.captureTaskDetailViewState = () => ({
           detailScrollTop: detail.scrollTop,
           traceScrollTop: 0,
@@ -1797,6 +1801,116 @@ def test_load_selected_node_latest_context_preserves_detail_and_context_scroll()
     assert result["artifactContentScrollTop"] == 92
     assert result["contentLoaded"] is True
     assert result["payloadLength"] > 0
+
+
+def test_show_agent_does_not_auto_refresh_latest_context_when_disclosure_is_open() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        let latestContextLoads = 0;
+        global.S = {
+          currentTaskId: "task:test",
+          selectedNodeId: "node:1",
+          currentNodeDetail: {
+            node_id: "node:1",
+            execution_trace_summary: { stages: [] },
+          },
+          taskDetailRenderToken: 0,
+          taskNodeDetails: {
+            "node:1": {
+              node_id: "node:1",
+              updated_at: "2026-04-20T00:00:00Z",
+              detail_level: "full",
+              execution_trace_summary: { stages: [] },
+            },
+          },
+          taskNodeDetailRequests: {},
+          taskNodeLatestContexts: {},
+          taskNodeLatestContextRequests: {},
+        };
+        global.U = {
+          detail: { style: { display: "flex" } },
+          nodeEmpty: { style: {} },
+          adRole: { hidden: false },
+          adRoundSummary: { textContent: "" },
+          adStatus: { textContent: "", dataset: {} },
+          adFlow: { innerHTML: "" },
+          adMessages: { innerHTML: "" },
+          adSpawnReviews: { innerHTML: "" },
+          feedTitle: { textContent: "", title: "" },
+          nodeContextDisclosure: { open: true },
+          artifactContent: { textContent: "" },
+        };
+        global.ApiClient = {
+          getTaskNodeDetail: async () => ({
+            node_id: "node:1",
+            updated_at: "2026-04-20T00:00:01Z",
+            detail_level: "full",
+            execution_trace_summary: { stages: [] },
+          }),
+          getTaskNodeLatestContext: async () => {
+            latestContextLoads += 1;
+            return { content: "fresh context" };
+          },
+        };
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.setTaskSelectionEmptyVisible = () => {};
+        global.renderFlowHeading = () => {};
+        global.renderMessageHeading = () => {};
+        global.renderSpawnReviewHeading = () => {};
+        global.renderExecutionTrace = () => false;
+        global.renderMessageList = () => false;
+        global.renderSpawnReviewTrace = () => false;
+        global.renderFinalOutput = () => false;
+        global.renderAcceptanceResult = () => false;
+        global.formatNodeDetailHeading = () => "Node Details";
+        global.setTaskDetailOpen = () => {};
+        global.icons = () => {};
+        global.refreshTaskDetailScrollRegions = () => {};
+        global.captureTaskDetailViewState = () => null;
+        global.consumePendingTaskDetailRestore = () => null;
+        global.getStoredTaskDetailViewState = () => null;
+        global.restoreTaskDetailViewState = () => {};
+        global.stashTaskDetailViewState = () => {};
+        global.syncArtifactsForSelectedNode = () => {};
+        global.liveFramesByNodeId = () => new Map();
+        global.buildNodeExecutionTrace = () => ({ final_output: "", acceptance_result: "" });
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+        global.renderExecutionTrace = () => false;
+        global.renderMessageList = () => false;
+        global.renderSpawnReviewTrace = () => false;
+        global.renderFinalOutput = () => false;
+        global.renderAcceptanceResult = () => false;
+        global.formatNodeDetailHeading = () => "Node Details";
+        global.setTaskDetailOpen = () => {};
+        global.icons = () => {};
+        global.restoreTaskDetailViewState = () => {};
+        global.stashTaskDetailViewState = () => {};
+        global.syncArtifactsForSelectedNode = () => {};
+
+        showAgent(
+          {
+            node_id: "node:1",
+            status: "in_progress",
+            visual_state: "in_progress",
+            roundSummary: "",
+          },
+          { forceRefresh: true }
+        ).then(() => {
+          console.log(JSON.stringify({
+            latestContextLoads,
+            disclosureOpen: Boolean(global.U.nodeContextDisclosure.open),
+          }));
+        });
+        """
+    )
+
+    assert result["latestContextLoads"] == 0
+    assert result["disclosureOpen"] is True
 
 
 def test_render_artifacts_uses_status_icons_instead_of_plain_change_text() -> None:

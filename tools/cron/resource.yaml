@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: cron
-description: "Schedule reminders and recurring tasks. Actions: `add`, `list`, `remove`. Recurring tasks must provide `stop_condition` as the concrete exit condition or user-cancel rule."
+description: "Schedule internal reminders for future agent turns. Actions: `add`, `list`, `remove`. Repeating reminders stop after `max_runs` successful deliveries and default to one-shot when omitted."
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -30,10 +30,13 @@ parameters:
       description: Action to execute.
     message:
       type: string
-      description: Reminder or task content. Write only user-visible text.
+      description: Internal reminder content for the future agent. Describe the action to take, not the final user-facing reply.
+    max_runs:
+      type: integer
+      description: Maximum successful reminder deliveries before automatic deletion. Omitted values default to one-shot; `at` reminders always use 1.
     stop_condition:
       type: string
-      description: Required for recurring tasks. Describe the concrete exit condition or how user cancellation should stop the loop.
+      description: Deprecated compatibility field. Reminder stopping is controlled by `max_runs`.
     every_seconds:
       type: integer
       description: Interval in seconds for recurring tasks.

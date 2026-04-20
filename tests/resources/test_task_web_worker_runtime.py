@@ -5071,9 +5071,9 @@ def test_latest_context_prefers_dedicated_actual_request_ref_over_messages_ref(t
     assert latest_context["messages_ref"] == messages_ref
     assert detail_payload["item"]["actual_request_ref"] == actual_request_ref
 
-    actual_request_payload = json.loads(latest_context["content"])
-    assert actual_request_payload["request_messages"] == request_messages
-    assert actual_request_payload["provider_request_body"]["input"] == request_messages
+    rendered_messages = json.loads(latest_context["content"])
+    assert rendered_messages == request_messages
+    assert '"provider_request_body"' not in latest_context["content"]
 
     service.log_service.remove_frame(record.task_id, root.node_id, publish_snapshot=False)
 

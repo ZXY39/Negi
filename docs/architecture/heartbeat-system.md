@@ -19,9 +19,12 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 
 - Heartbeat and cron are no longer assembled through a separate short `ceo_heartbeat` request lane on the main CEO path.
 - Each internal activation now resumes from the same session-owned `frontdoor_request_body_messages` / actual-request scaffold used by the next visible CEO turn.
-- The runtime appends two hidden durable messages before the model call:
+- Heartbeat still appends two hidden durable messages before the model call:
   - a `system` rule message
   - a `user` event-bundle message
+- Cron now appends two hidden durable `system` messages:
+  - a cron rule message
+  - a structured cron event block
 - Those internal prompt messages must be persisted with `prompt_visible=true`, `ui_visible=false`, and an `internal_prompt_kind` that distinguishes heartbeat vs cron rule/event records.
 - Because the request is append-only against the previous authoritative scaffold, heartbeat/cron now share the same prompt-cache family, token-preflight, token-compression, and continuity rules as ordinary CEO/frontdoor turns.
 - Silent `HEARTBEAT_OK` remains the only live-only exception. If an internal turn produces a real assistant reply, that reply is durable transcript history and should remain visible to later prompt assembly.
@@ -33,11 +36,29 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 - Heartbeat/cron assistant replies, tool calls, tool results, and stage/compression traces remain ordinary visible turn output unless the turn ends with the silent `HEARTBEAT_OK` ACK path.
 - Manual pause during a running heartbeat/cron turn still goes through the ordinary `client.pause_turn` path. The backend should treat that internal turn as the current active turn rather than as a side lane.
 
+## Cron Reminder Contract
+
+- Cron is now a structured reminder mechanism for the future agent, not a natural-language stop-condition engine.
+- Cron `message` should be understood as the reminder instruction for the future agent, not as a ready-to-send user reply.
+- Repetition is enforced by service-side counters:
+  - `payload.max_runs`
+  - `state.delivered_runs`
+- A cron reminder only counts as delivered after the internal prompt is durably accepted by the runtime/session path.
+- When `delivered_runs >= max_runs`, the cron service removes the job immediately and does not schedule another wakeup.
+- If an old cron store uses the previous schema version, the runtime now drops those jobs instead of attempting migration; maintainers should treat this as an intentional semantic reset.
+
 ## Task Terminal Repair Contract
 
 - Task-terminal heartbeat only repairs or produces the session reply for an existing terminal event.
 - It no longer auto-runs `continue_task`, no longer creates replacement tasks, and no longer retries failed tasks in place.
 - If a task still needs more work after terminalization, that must come from a later explicit frontdoor/user decision, typically via `create_async_task`.
+- The task-terminal event payload now has two result lanes that maintainers should keep separate:
+  - `terminal_*` still describes the true terminal node for the task-terminal event. When final acceptance fails, this remains the acceptance node result.
+  - `root_output` / `root_output_ref` carries the root execution deliverable separately so heartbeat can still show the main agent the full root-node final output even while the terminal node is `acceptance`.
+- Heartbeat task-terminal prompt assembly should therefore render both pieces when final acceptance fails:
+  - the acceptance-node result (`Result output`, `Result check`, `Result failure reason`)
+  - the root execution deliverable (`Execution output`, `Execution output ref`)
+- Compact task-memory / task-ledger summaries may continue to store only preview-sized excerpts. The full root execution output requirement applies to the heartbeat event bundle that the main agent reads, not to every later summary surface.
 
 ## What Heartbeat Does Not Own
 

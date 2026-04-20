@@ -1673,7 +1673,16 @@ async def test_runtime_agent_session_persists_hidden_cron_prompt_messages_and_vi
     await session.prompt(
         UserInputMessage(
             content="Please query task 27255d28379d and report progress.",
-            metadata={"cron_internal": True, "cron_job_id": "job-77"},
+            metadata={
+                "cron_internal": True,
+                "cron_job_id": "job-77",
+                "cron_max_runs": 3,
+                "cron_delivery_index": 2,
+                "cron_delivered_runs": 1,
+                "cron_reminder_text": "Please query task 27255d28379d and report progress.",
+                "cron_scheduled_run_at_ms": 1_777_000_000_000,
+                "cron_last_delivered_at_ms": 1_776_999_000_000,
+            },
         )
     )
 
@@ -1684,14 +1693,14 @@ async def test_runtime_agent_session_persists_hidden_cron_prompt_messages_and_vi
     assert inflight["execution_trace_summary"] == {}
 
     persisted = loop.sessions.get_or_create("web:shared")
-    assert [message["role"] for message in persisted.messages] == ["system", "user", "assistant"]
-    assert persisted.messages[0]["content"].startswith("You are handling a cron-internal recurring job turn.")
+    assert [message["role"] for message in persisted.messages] == ["system", "system", "assistant"]
+    assert persisted.messages[0]["content"].startswith("You are handling a cron-internal structured reminder turn.")
     assert persisted.messages[0]["metadata"]["source"] == "cron"
     assert persisted.messages[0]["metadata"]["cron_job_id"] == "job-77"
     assert persisted.messages[0]["metadata"]["prompt_visible"] is True
     assert persisted.messages[0]["metadata"]["ui_visible"] is False
     assert persisted.messages[0]["metadata"]["internal_prompt_kind"] == "cron_rule"
-    assert persisted.messages[1]["content"] == "Please query task 27255d28379d and report progress."
+    assert persisted.messages[1]["content"].startswith("[CRON INTERNAL EVENT]")
     assert persisted.messages[1]["metadata"]["source"] == "cron"
     assert persisted.messages[1]["metadata"]["cron_job_id"] == "job-77"
     assert persisted.messages[1]["metadata"]["prompt_visible"] is True
@@ -1719,7 +1728,7 @@ async def test_runtime_agent_session_persists_hidden_cron_prompt_messages_and_vi
     ]
     assert [message["role"] for message in web_ceo_sessions.prompt_history_messages(persisted)] == [
         "system",
-        "user",
+        "system",
         "assistant",
     ]
 

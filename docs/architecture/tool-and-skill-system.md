@@ -127,6 +127,8 @@ Maintenance note for node distribution mode:
 - `path` 参数本身不接受 `artifact:`；如果把 `artifact:` 塞进 `path`，底层仍会返回 path-mode 错误
 - `content_search` 与 `content_open` 在同时收到 `ref` 和 `path` 时，会分别尝试两个目标并返回组合结果；某一侧失败不会覆盖另一侧成功结果
 - `content_open` 的 `start_line` / `end_line` 与 `around_line` / `window` 仍是同一目标上的两种选段方式；维护时不要假设组合模式会自动消除这组参数歧义
+- `content_open` 现在会把这两组选段方式当成互斥选择器：混传 `start_line` / `end_line` 与 `around_line` / `window` 时，runtime 应直接报参数错误，而不是静默偏向其中一组
+- 这些行号/窗口参数都是 1-based；非正数 `start_line`、`end_line`、`around_line`、`window` 无效，且单独传 `window` 而不传 `around_line` 也应视为参数错误
 
 legacy `content(action=...)` 仍然存在兼容包装，但它与 split tools 最终走的是同一底层 content service；不要假设 split tools 会比 legacy wrapper “更宽松”。
 
@@ -258,6 +260,12 @@ Maintenance note for hydration LRU:
 - execution / acceptance 节点现在也采用同样的 contract 收紧，而且没有类似 `cron_internal` 的例外：只要没有有效阶段，当前轮模型可见的 callable tool 列表就只剩 `submit_next_stage`。
 - 但这不意味着 execution / acceptance 节点必须把 `submit_next_stage` 单独拆成一轮。若同一批 tool calls 里同时出现 `submit_next_stage` 和普通工具，执行循环会先推进阶段，再让这些普通工具作为新阶段首轮执行；若阶段切换失败，同批剩余普通工具会被批内阻断，而不会回退到旧阶段继续执行。
 - 当前保留的特例是 `cron_internal`：为了继续支持 cron 自移除，这类内部轮次不会被收紧到只剩 `submit_next_stage`。
+- 但 `cron_internal` 的维护语义已经改变：这个 lane 仍只暴露 cron 自身，不再把 reminder 正文伪装成 `user` 事件消息，也不再依赖自然语言 `stop_condition` 让模型决定何时停止。
+- 当前 cron 工具合同应该理解为“结构化提醒”而不是“自然语言循环任务”：
+  - `message` = 给未来 agent 的提醒动作
+  - `max_runs` = 成功送达上限；省略时默认为 1
+  - `stop_condition` = 兼容字段，不再参与 runtime 停止判断
+- 因为停止逻辑已经转到 cron service 的计数器上，维护者排查“为什么没有自动停止”时应先看 cron store 里的 `payload.max_runs` / `state.delivered_runs`，而不是先看模型回复里有没有提到“已发送 N 次”。
 - `submit_next_stage` 的阶段预算现在在 execution / acceptance / CEO-frontdoor 三条路径上统一为 `1-10`；运行时仍允许在预算未耗尽前提前切到下一阶段，因此预算应理解为“本阶段声明的上限窗口”，而不是“必须烧满的最小轮数”。
 - 这不影响 candidate 语义。`candidate_tool_names` / `candidate_skill_ids` 仍继续表达“RBAC 可见 ∩ 语义召回命中”的候选集合，只是这些候选在无有效阶段时不会同时出现在 agent-facing callable contract 里。
 - 维护时要区分两份前门工具集合：`tool_names` 继续保存阶段内可恢复的完整 callable pool，而“这一刻 agent-facing 合同里暴露给模型的 callable tools”要通过前门 callable-tool helper 结合 `frontdoor_stage_state` 再算一次。不要把前者直接当作当前轮的模型可见函数列表，也不要把 agent-facing callable 收紧误解成 provider body 里的 `tools` 已同步收紧。

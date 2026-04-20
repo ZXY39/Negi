@@ -130,22 +130,43 @@ class CeoFrontDoorSupport:
         if not bool(metadata.get("cron_internal")):
             return None
         job_id = str(metadata.get("cron_job_id") or "").strip()
-        stop_condition = str(metadata.get("cron_stop_condition") or "user asked to stop").strip() or "user asked to stop"
-        explicit = bool(metadata.get("cron_stop_condition_explicit"))
+        max_runs = max(1, int(metadata.get("cron_max_runs", 1) or 1))
+        delivery_index = max(1, int(metadata.get("cron_delivery_index", 1) or 1))
         lines = [
-            "You are handling a cron-internal recurring job turn.",
+            "You are handling a cron-internal structured reminder turn.",
             f"Current cron job id: {job_id or '(missing)'}",
-            f"Exit condition: {stop_condition}",
+            f"Reminder delivery: {delivery_index}/{max_runs}",
             "Required behavior:",
-            "- First inspect the current conversation context and the user's prior requests.",
-            "- If the exit condition is already satisfied, or the user has clearly asked to stop/cancel this recurring task, immediately call the cron tool once with action='remove' and the current job_id.",
-            "- After removing the current job, return one short plain-text confirmation only.",
-            "- If the exit condition is not satisfied, do not call any tool and return plain text only.",
-            "- Never create, update, list, or remove any other cron job.",
+            "- Treat the cron reminder as an internal instruction to your future self, not as a new user message.",
+            "- Do not reinterpret this reminder as a natural-language stop condition or cancellation request.",
+            "- Delivery counting and automatic stop are enforced by the scheduler, not by your own natural-language reasoning.",
+            "- During cron-internal reminder turns, do not create, update, list, or remove cron jobs yourself.",
         ]
-        if not explicit:
-            lines.append("- This is a legacy cron job with no stored explicit exit condition; only 'user asked to stop' can end it.")
         return {"role": "system", "content": "\n".join(lines)}
+
+    @staticmethod
+    def _cron_internal_event_message(
+        metadata: dict[str, Any],
+        *,
+        reminder_text: str,
+    ) -> dict[str, str] | None:
+        if not bool(metadata.get("cron_internal")):
+            return None
+        payload = {
+            "message_type": "cron_internal_event",
+            "cron_job_id": str(metadata.get("cron_job_id") or "").strip(),
+            "delivery_index": max(1, int(metadata.get("cron_delivery_index", 1) or 1)),
+            "max_runs": max(1, int(metadata.get("cron_max_runs", 1) or 1)),
+            "delivered_runs_before_this_turn": max(0, int(metadata.get("cron_delivered_runs", 0) or 0)),
+            "scheduled_run_at_ms": metadata.get("cron_scheduled_run_at_ms"),
+            "last_delivered_at_ms": metadata.get("cron_last_delivered_at_ms"),
+            "reminder_text": str(reminder_text or metadata.get("cron_reminder_text") or "").strip(),
+            "semantic_role": "internal_self_reminder",
+        }
+        return {
+            "role": "system",
+            "content": "[CRON INTERNAL EVENT]\n" + json.dumps(payload, ensure_ascii=False, indent=2),
+        }
 
     @staticmethod
     def _session_task_defaults(session_record: Any) -> dict[str, Any]:

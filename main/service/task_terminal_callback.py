@@ -90,6 +90,8 @@ def _task_terminal_delivery_payload(
     terminal_output_ref = ''
     terminal_check_result = ''
     terminal_failure_reason = ''
+    root_output = ''
+    root_output_ref = ''
 
     detail_item = None
     if task_id and terminal_node_id and callable(node_detail_getter):
@@ -99,6 +101,15 @@ def _task_terminal_delivery_payload(
             detail_payload = None
         if isinstance(detail_payload, dict) and isinstance(detail_payload.get('item'), dict):
             detail_item = dict(detail_payload.get('item') or {})
+
+    root_detail_item = None
+    if task_id and root_node_id and callable(node_detail_getter):
+        try:
+            root_detail_payload = node_detail_getter(task_id, root_node_id)
+        except Exception:
+            root_detail_payload = None
+        if isinstance(root_detail_payload, dict) and isinstance(root_detail_payload.get('item'), dict):
+            root_detail_item = dict(root_detail_payload.get('item') or {})
 
     if isinstance(detail_item, dict):
         terminal_output = _normalize_task_terminal_text(
@@ -115,6 +126,19 @@ def _task_terminal_delivery_payload(
         terminal_check_result = _normalize_task_terminal_text(detail_item.get('check_result'))
         terminal_failure_reason = _normalize_task_terminal_text(detail_item.get('failure_reason'))
 
+    if isinstance(root_detail_item, dict):
+        root_output = _normalize_task_terminal_text(
+            root_detail_item.get('final_output')
+            or root_detail_item.get('output')
+            or root_detail_item.get('check_result')
+            or root_detail_item.get('failure_reason')
+        )
+        root_output_ref = _normalize_task_terminal_text(
+            root_detail_item.get('final_output_ref')
+            or root_detail_item.get('output_ref')
+            or root_detail_item.get('check_result_ref')
+        )
+
     if not terminal_output:
         if acceptance_failed:
             terminal_output = _normalize_task_terminal_text(getattr(task, 'failure_reason', ''))
@@ -124,6 +148,13 @@ def _task_terminal_delivery_payload(
         terminal_output_ref = _normalize_task_terminal_text(getattr(task, 'final_output_ref', ''))
     if not terminal_failure_reason:
         terminal_failure_reason = _normalize_task_terminal_text(getattr(task, 'failure_reason', ''))
+    if not root_output:
+        root_output = _normalize_task_terminal_text(
+            (metadata or {}).get('final_execution_output')
+            or getattr(task, 'final_output', '')
+        )
+    if not root_output_ref:
+        root_output_ref = _normalize_task_terminal_text(getattr(task, 'final_output_ref', ''))
 
     return {
         'root_node_id': root_node_id,
@@ -135,6 +166,8 @@ def _task_terminal_delivery_payload(
         'terminal_output_ref': terminal_output_ref,
         'terminal_check_result': terminal_check_result,
         'terminal_failure_reason': terminal_failure_reason,
+        'root_output': root_output,
+        'root_output_ref': root_output_ref,
     }
 
 
@@ -214,4 +247,6 @@ def normalize_task_terminal_payload(payload: dict[str, Any] | None) -> dict[str,
         'terminal_output_ref': _normalize_task_terminal_text(source.get('terminal_output_ref') or source.get('terminalOutputRef')),
         'terminal_check_result': _normalize_task_terminal_text(source.get('terminal_check_result') or source.get('terminalCheckResult')),
         'terminal_failure_reason': _normalize_task_terminal_text(source.get('terminal_failure_reason') or source.get('terminalFailureReason')),
+        'root_output': _normalize_task_terminal_text(source.get('root_output') or source.get('rootOutput')),
+        'root_output_ref': _normalize_task_terminal_text(source.get('root_output_ref') or source.get('rootOutputRef')),
     }

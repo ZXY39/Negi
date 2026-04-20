@@ -63,15 +63,19 @@ parameters:
       description: Context lines after each hit when action=search.
     start_line:
       type: integer
+      minimum: 1
       description: Start line for action=open.
     end_line:
       type: integer
+      minimum: 1
       description: End line for action=open.
     around_line:
       type: integer
+      minimum: 1
       description: Center line for action=open.
     window:
       type: integer
+      minimum: 1
       description: Window size for action=open when around_line is provided.
     lines:
       type: integer

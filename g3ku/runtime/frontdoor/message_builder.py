@@ -1585,7 +1585,8 @@ class CeoMessageBuilder:
         if memory_snapshot_message is not None:
             stable_messages.append(memory_snapshot_message)
         stable_messages.extend(history_messages)
-        if not current_user_in_history:
+        has_user_content = bool(self._content_text(user_content).strip())
+        if not current_user_in_history and has_user_content:
             stable_messages.append({"role": "user", "content": user_content})
         dynamic_appendix_messages = [
             {"role": "assistant", "content": part}
@@ -1634,7 +1635,8 @@ class CeoMessageBuilder:
             user_metadata=user_metadata,
         )
         live_messages = list(stable_messages)
-        if not current_user_in_history:
+        has_user_content = bool(self._content_text(user_content).strip())
+        if not current_user_in_history and has_user_content:
             live_messages.append({"role": "user", "content": user_content})
         dynamic_appendix_messages = [
             {"role": "assistant", "content": part}
@@ -1725,7 +1727,8 @@ class CeoMessageBuilder:
         )
 
         live_messages = list(stable_messages)
-        if not current_user_in_history:
+        has_user_content = bool(self._content_text(context_sources['user_content']).strip())
+        if not current_user_in_history and has_user_content:
             live_messages.append({"role": "user", "content": context_sources['user_content']})
         model_messages = [*live_messages, *list(dynamic_appendix_messages)]
         ephemeral_tail = self._prompt_message_records(ephemeral_tail_messages)
@@ -1740,7 +1743,7 @@ class CeoMessageBuilder:
         ]
         history_zone_source = list(raw_history_messages)
         pre_request_messages = list(stable_messages)
-        if not current_user_in_history:
+        if not current_user_in_history and has_user_content:
             pre_request_messages.append({"role": "user", "content": str(context_sources["user_content"] or "")})
         pre_request_prompt_tokens = estimate_message_tokens(pre_request_messages)
         history_zone_tokens = estimate_message_tokens(history_zone_source)

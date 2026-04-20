@@ -711,11 +711,16 @@ def cron_list(
 @cron_app.command("add")
 def cron_add(
     name: str = typer.Option(..., "--name", "-n", help="Job name"),
-    message: str = typer.Option(..., "--message", "-m", help="Message for agent"),
+    message: str = typer.Option(..., "--message", "-m", help="Internal reminder for the future agent"),
     stop_condition: str | None = typer.Option(
         None,
         "--stop-condition",
-        help="Required for recurring jobs: describe the specific exit condition; it will be normalized to include '或用户要求取消'.",
+        help="Deprecated compatibility field. Reminder stopping is controlled by --max-runs.",
+    ),
+    max_runs: int | None = typer.Option(
+        None,
+        "--max-runs",
+        help="Maximum successful reminder deliveries before auto-delete. Omit to default to one-shot.",
     ),
     every: int = typer.Option(None, "--every", "-e", help="Run every N seconds"),
     cron_expr: str = typer.Option(None, "--cron", "-c", help="Cron expression (e.g. '0 9 * * *')"),
@@ -756,6 +761,7 @@ def cron_add(
             schedule=schedule,
             message=message,
             stop_condition=stop_condition,
+            max_runs=max_runs,
             deliver=deliver,
             to=to,
             channel=channel,

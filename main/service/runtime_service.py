@@ -3646,6 +3646,44 @@ class MainRuntimeService:
         return cls._repair_legacy_display_text(value)
 
     @staticmethod
+    def _node_latest_context_display_payload(value: Any) -> Any | None:
+        if isinstance(value, list):
+            return value
+        if not isinstance(value, dict):
+            return None
+        request_messages = value.get('request_messages')
+        provider_request_body = value.get('provider_request_body')
+        provider_input = provider_request_body.get('input') if isinstance(provider_request_body, dict) else None
+        model_messages = value.get('model_messages')
+        for candidate in (request_messages, provider_input, model_messages):
+            if isinstance(candidate, list) and candidate:
+                return candidate
+            if isinstance(candidate, (dict, str)) and candidate:
+                return candidate
+        if isinstance(request_messages, list):
+            return request_messages
+        if isinstance(provider_input, list):
+            return provider_input
+        if isinstance(model_messages, list):
+            return model_messages
+        return None
+
+    @classmethod
+    def _render_node_latest_context_content(cls, raw_content: Any) -> str:
+        text = str(raw_content or '')
+        if not text.strip():
+            return ''
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return str(cls._repair_legacy_display_text(text))
+        display_payload = cls._node_latest_context_display_payload(parsed)
+        rendered_payload = cls._repair_legacy_display_payload(display_payload if display_payload is not None else parsed)
+        if isinstance(rendered_payload, str):
+            return str(rendered_payload)
+        return json.dumps(rendered_payload, ensure_ascii=False, indent=2, default=str)
+
+    @staticmethod
     def _normalize_optional_parallel_limit(value: Any) -> int | None:
         if value is None:
             return None
@@ -5981,7 +6019,8 @@ class MainRuntimeService:
             metadata = dict(node.metadata or {})
             ref = str(metadata.get('latest_runtime_messages_ref') or '').strip()
         resolver = getattr(self.log_service, 'resolve_content_ref', None)
-        content = str(resolver(ref) or '') if callable(resolver) and ref else ''
+        raw_content = str(resolver(ref) or '') if callable(resolver) and ref else ''
+        content = self._render_node_latest_context_content(raw_content)
         return {
             'ok': True,
             'task_id': normalized_task_id,
