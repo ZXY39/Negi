@@ -274,20 +274,16 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 - 每次怀疑缓存异常时，先检查 artifact 时间线是否完整
 - 如果 artifact 不全，先修 artifact，再改上下文策略
 
-## 3.10 heartbeat 内部短 prompt 不能按 visible-turn shrink 误判
+## 3.10 heartbeat / cron 现在按普通 continuation shrink 规则排查
 
-heartbeat 使用的是专门的内部 prompt lane，它的稳定前缀和 request 形态本来就可能远短于当前 visible turn 的 session-owned baseline。
+Heartbeat / cron no longer use a separate short `ceo_heartbeat` lane on the main CEO/frontdoor path. They now append hidden internal prompt messages onto the same session-owned `frontdoor_request_body_messages` / actual-request scaffold used by ordinary turns.
 
-已踩坑：
+This changes the troubleshooting rule:
 
-- 把 heartbeat lane 的短 prompt 直接拿去和 visible-turn baseline 比长度
-- 命中 `frontdoor context shrank without an allowed reason`
-- 实际上不是上下文丢失，而是 lane 切换造成的预期缩短
-
-维护要点：
-
-- `heartbeat_internal` 的 `ceo_heartbeat` prompt lane 不能直接套用 visible-turn shrink guard
-- 排查 heartbeat 报 shrink 时，先确认它是不是在比较两个不同 lane 的 prompt 形态
+- Do not explain heartbeat shrink/caching differences as "it is a different prompt lane now." That older explanation is obsolete on the main CEO path.
+- If heartbeat/cron request shape becomes shorter, it must still be explained by the same allowed shrink reasons as ordinary turns, mainly `token_compression` or `stage_compaction`.
+- The hidden heartbeat/cron rule and event-bundle messages are durable prompt history. They should appear in actual-request artifacts, completed continuity sidecars, and prompt assembly even though UI transcript surfaces hide them with `ui_visible=false`.
+- When debugging cache misses, compare the previous actual request with the new heartbeat/cron request as an append-only continuation. A large prefix break now usually means baseline restoration, tool-schema seeding, or compression changed, not that runtime intentionally switched to a separate heartbeat lane.
 
 ## 4. 排查流程
 

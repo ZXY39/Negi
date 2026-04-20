@@ -255,6 +255,7 @@ class _FakeHeartbeatSession:
     ) -> None:
         self.state = SimpleNamespace(status="idle", is_running=False)
         self.prompts: list[UserInputMessage] = []
+        self.persist_transcript_flags: list[bool] = []
         self._listeners = set()
         self._outputs = [str(item or "") for item in list(outputs or [output])]
         self.turn_id = "turn-heartbeat-default"
@@ -275,7 +276,7 @@ class _FakeHeartbeatSession:
                 await result
 
     async def prompt(self, user_message, persist_transcript: bool = False) -> SimpleNamespace:
-        _ = persist_transcript
+        self.persist_transcript_flags.append(bool(persist_transcript))
         self.prompts.append(user_message)
         output = self._outputs.pop(0) if self._outputs else ""
         heartbeat_reason = str((getattr(user_message, "metadata", None) or {}).get("heartbeat_reason") or "").strip()
@@ -347,6 +348,71 @@ class _FakeHeartbeatFinalSession(_FakeHeartbeatSession):
     def clear_preserved_inflight_turn(self) -> None:
         self.clear_calls += 1
         self._preserved_snapshot = None
+
+
+class _PersistingHeartbeatSession(_FakeHeartbeatSession):
+    def __init__(
+        self,
+        *,
+        session_manager: SessionManager,
+        session_id: str,
+        output: str = "Background install finished successfully.",
+    ) -> None:
+        super().__init__(output=output)
+        self._session_manager = session_manager
+        self._session_id = session_id
+
+    async def prompt(self, user_message, persist_transcript: bool = False) -> SimpleNamespace:
+        result = await super().prompt(user_message, persist_transcript=persist_transcript)
+        if persist_transcript:
+            persisted = self._session_manager.get_or_create(self._session_id)
+            metadata = dict(getattr(user_message, "metadata", None) or {})
+            turn_id = self.turn_id
+            base_metadata = {
+                "_transcript_turn_id": turn_id,
+                "_transcript_state": "completed",
+            }
+            stable_rules_text = str(metadata.get("heartbeat_stable_rules_text") or "").strip()
+            event_bundle_text = str(metadata.get("heartbeat_event_bundle_text") or user_message.content or "").strip()
+            if stable_rules_text:
+                persisted.add_message(
+                    "system",
+                    stable_rules_text,
+                    metadata={
+                        **base_metadata,
+                        "source": "heartbeat",
+                        "prompt_visible": True,
+                        "ui_visible": False,
+                        "internal_prompt_kind": "heartbeat_rule",
+                    },
+                )
+            if event_bundle_text:
+                persisted.add_message(
+                    "user",
+                    event_bundle_text,
+                    metadata={
+                        **base_metadata,
+                        "source": "heartbeat",
+                        "heartbeat_internal": True,
+                        "prompt_visible": True,
+                        "ui_visible": False,
+                        "internal_prompt_kind": "heartbeat_event_bundle",
+                    },
+                )
+            output_text = str(getattr(result, "output", "") or "").strip()
+            if output_text and output_text != HEARTBEAT_OK:
+                persisted.add_message(
+                    "assistant",
+                    output_text,
+                    turn_id=turn_id,
+                    metadata={
+                        "source": "heartbeat",
+                        "prompt_visible": True,
+                        "ui_visible": True,
+                    },
+                )
+            self._session_manager.save(persisted)
+        return result
 
 
 class _HeartbeatRecorder:
@@ -1484,7 +1550,7 @@ async def test_turn_start_clears_stale_frontdoor_stage_and_compression_before_fi
 
 
 @pytest.mark.asyncio
-async def test_runtime_agent_session_hides_cron_internal_prompt_but_persists_reply(
+async def test_runtime_agent_session_persists_hidden_cron_prompt_messages_and_visible_reply(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1547,24 +1613,53 @@ async def test_runtime_agent_session_hides_cron_internal_prompt_but_persists_rep
     assert inflight["source"] == "cron"
     assert "user_message" not in inflight
     assert inflight["execution_trace_summary"] == {}
-    assert [item["tool_name"] for item in inflight["tool_events"]] == ["cron"]
-    assert [item["status"] for item in inflight["tool_events"]] == ["running"]
 
     persisted = loop.sessions.get_or_create("web:shared")
-    assert [message["role"] for message in persisted.messages] == ["assistant"]
-    assert persisted.messages[0]["content"] == "Scheduled progress update."
-    assert persisted.messages[0]["metadata"] == {
-        "source": "cron",
-        "cron_job_id": "job-77",
-        "history_visible": False,
-    }
+    assert [message["role"] for message in persisted.messages] == ["system", "user", "assistant"]
+    assert persisted.messages[0]["content"].startswith("You are handling a cron-internal recurring job turn.")
+    assert persisted.messages[0]["metadata"]["source"] == "cron"
+    assert persisted.messages[0]["metadata"]["cron_job_id"] == "job-77"
+    assert persisted.messages[0]["metadata"]["prompt_visible"] is True
+    assert persisted.messages[0]["metadata"]["ui_visible"] is False
+    assert persisted.messages[0]["metadata"]["internal_prompt_kind"] == "cron_rule"
+    assert persisted.messages[1]["content"] == "Please query task 27255d28379d and report progress."
+    assert persisted.messages[1]["metadata"]["source"] == "cron"
+    assert persisted.messages[1]["metadata"]["cron_job_id"] == "job-77"
+    assert persisted.messages[1]["metadata"]["prompt_visible"] is True
+    assert persisted.messages[1]["metadata"]["ui_visible"] is False
+    assert persisted.messages[1]["metadata"]["internal_prompt_kind"] == "cron_event_bundle"
+    assert persisted.messages[2]["content"] == "Scheduled progress update."
+    assert str(persisted.messages[2]["turn_id"]).strip()
+    assert persisted.messages[2]["metadata"]["source"] == "cron"
+    assert persisted.messages[2]["metadata"]["cron_job_id"] == "job-77"
+    assert persisted.messages[2]["metadata"]["prompt_visible"] is True
+    assert persisted.messages[2]["metadata"]["ui_visible"] is True
+    assert web_ceo_sessions.transcript_messages(persisted) == [
+        {
+            "role": "assistant",
+            "content": "Scheduled progress update.",
+            "timestamp": persisted.messages[2]["timestamp"],
+            "turn_id": persisted.messages[2]["turn_id"],
+            "metadata": {
+                "source": "cron",
+                "cron_job_id": "job-77",
+                "prompt_visible": True,
+                "ui_visible": True,
+            },
+        }
+    ]
+    assert [message["role"] for message in web_ceo_sessions.prompt_history_messages(persisted)] == [
+        "system",
+        "user",
+        "assistant",
+    ]
 
     message_end = next(event for event in events if event.type == "message_end")
     assert message_end.payload["source"] == "cron"
     assert message_end.payload["heartbeat_internal"] is False
 
 @pytest.mark.asyncio
-async def test_runtime_agent_session_history_visibility_hides_internal_heartbeat_reply(
+async def test_runtime_agent_session_persists_hidden_heartbeat_prompt_messages_and_visible_reply(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1603,28 +1698,67 @@ async def test_runtime_agent_session_history_visibility_hides_internal_heartbeat
     )
     session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
 
+    heartbeat_rules_text = (
+        "This is a background heartbeat. Do not explain internal mechanics.\n"
+        "If no user-facing update is needed, reply with exactly HEARTBEAT_OK."
+    )
+    heartbeat_event_bundle = "[SESSION EVENTS]\n## EVENT BUNDLE\n- Task demo completed"
+
     await session.prompt(
         UserInputMessage(
-            content="heartbeat",
-            metadata={"heartbeat_internal": True, "heartbeat_reason": "tool_background"},
+            content=heartbeat_event_bundle,
+            metadata={
+                "heartbeat_internal": True,
+                "heartbeat_reason": "tool_background",
+                "heartbeat_stable_rules_text": heartbeat_rules_text,
+                "heartbeat_event_bundle_text": heartbeat_event_bundle,
+            },
         )
     )
 
     persisted = loop.sessions.get_or_create("web:shared")
-    assert [message["role"] for message in persisted.messages] == ["assistant"]
-    assert persisted.messages[0]["content"] == "Background task completed."
-    assert persisted.messages[0]["metadata"] == {
-        "source": "heartbeat",
-        "history_visible": False,
-        "task_ids": ["task:demo-heartbeat"],
-    }
-    assert web_ceo_sessions.transcript_messages(persisted) == []
+    assert [message["role"] for message in persisted.messages] == ["system", "user", "assistant"]
+    assert persisted.messages[0]["content"] == heartbeat_rules_text
+    assert persisted.messages[0]["metadata"]["source"] == "heartbeat"
+    assert persisted.messages[0]["metadata"]["prompt_visible"] is True
+    assert persisted.messages[0]["metadata"]["ui_visible"] is False
+    assert persisted.messages[0]["metadata"]["internal_prompt_kind"] == "heartbeat_rule"
+    assert persisted.messages[1]["content"] == heartbeat_event_bundle
+    assert persisted.messages[1]["metadata"]["source"] == "heartbeat"
+    assert persisted.messages[1]["metadata"]["prompt_visible"] is True
+    assert persisted.messages[1]["metadata"]["ui_visible"] is False
+    assert persisted.messages[1]["metadata"]["internal_prompt_kind"] == "heartbeat_event_bundle"
+    assert persisted.messages[2]["content"] == "Background task completed."
+    assert str(persisted.messages[2]["turn_id"]).strip()
+    assert persisted.messages[2]["metadata"]["source"] == "heartbeat"
+    assert persisted.messages[2]["metadata"]["prompt_visible"] is True
+    assert persisted.messages[2]["metadata"]["ui_visible"] is True
+    assert persisted.messages[2]["metadata"]["task_ids"] == ["task:demo-heartbeat"]
+    assert web_ceo_sessions.transcript_messages(persisted) == [
+        {
+            "role": "assistant",
+            "content": "Background task completed.",
+            "timestamp": persisted.messages[2]["timestamp"],
+            "turn_id": persisted.messages[2]["turn_id"],
+            "metadata": {
+                "source": "heartbeat",
+                "prompt_visible": True,
+                "ui_visible": True,
+                "task_ids": ["task:demo-heartbeat"],
+            },
+        }
+    ]
+    assert [message["role"] for message in web_ceo_sessions.prompt_history_messages(persisted)] == [
+        "system",
+        "user",
+        "assistant",
+    ]
     assert persisted.metadata["last_task_memory"] == {
         "version": web_ceo_sessions.TASK_MEMORY_VERSION,
         "task_ids": ["task:demo-heartbeat"],
         "source": "heartbeat",
         "reason": "",
-        "updated_at": persisted.messages[0]["timestamp"],
+        "updated_at": persisted.messages[2]["timestamp"],
         "task_results": [],
     }
 
@@ -4993,9 +5127,12 @@ async def test_ceo_websocket_queues_running_turn_follow_up_and_chains_next_turn(
     )
 
 
-def test_ceo_websocket_filters_heartbeat_internal_message_end() -> None:
+def test_ceo_websocket_filters_only_silent_internal_ack_message_end() -> None:
     assert websocket_ceo._should_forward_message_end(
         {"role": "assistant", "text": "normal reply", "heartbeat_internal": False}
+    ) is True
+    assert websocket_ceo._should_forward_message_end(
+        {"role": "assistant", "text": "visible heartbeat reply", "heartbeat_internal": True, "source": "heartbeat"}
     ) is True
     assert websocket_ceo._should_forward_message_end(
         {"role": "assistant", "text": HEARTBEAT_OK, "heartbeat_internal": True}
@@ -5467,6 +5604,7 @@ async def test_web_session_heartbeat_repairs_unpassed_task_terminal_when_model_r
     next_delay = await service._run_session(session_id)
 
     assert next_delay is None
+    assert len(task_service.registry.published) == 1
     published_session, envelope = task_service.registry.published[0]
     assert published_session == session_id
     assert envelope["type"] == "ceo.reply.final"
@@ -5647,7 +5785,7 @@ async def test_web_session_heartbeat_prompt_includes_terminal_root_output_and_me
 
 
 @pytest.mark.asyncio
-async def test_ceo_frontdoor_prepare_turn_uses_separate_prompt_lane_for_heartbeat_internal(
+async def test_ceo_frontdoor_prepare_turn_continues_full_context_and_appends_hidden_heartbeat_messages(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -5672,36 +5810,54 @@ async def test_ceo_frontdoor_prepare_turn_uses_separate_prompt_lane_for_heartbea
     )
     runner = CeoFrontDoorRunner(loop=loop)
     captured: dict[str, object] = {}
+    heartbeat_rules_text = "heartbeat stable system"
+    heartbeat_event_bundle = "heartbeat request bundle"
+    existing_baseline = [
+        {"role": "system", "content": "frontdoor fallback"},
+        {"role": "user", "content": "prior visible request"},
+        {"role": "assistant", "content": "prior visible answer"},
+    ]
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
         return {"skills": [], "tool_families": [], "tool_names": ["exec"]}
 
     async def _build_for_ceo(**kwargs):
-        _ = kwargs
+        captured["builder_kwargs"] = kwargs
+        seed_messages = list(kwargs.get("request_body_seed_messages") or [])
+        user_content = kwargs.get("user_content")
         return SimpleNamespace(
             tool_names=["exec"],
-            model_messages=[
-                {"role": "system", "content": "frontdoor fallback"},
-                {"role": "user", "content": "fallback heartbeat user"},
-            ],
+            model_messages=[*seed_messages, {"role": "user", "content": user_content}],
+            stable_messages=[*seed_messages, {"role": "user", "content": user_content}],
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["exec"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
         )
 
     def _fake_build_frontdoor_prompt_contract(**kwargs):
-        captured.update(kwargs)
+        captured["contract_kwargs"] = kwargs
         return FrontdoorPromptContract(
-            request_messages=[
-                {"role": "system", "content": "heartbeat stable system"},
-                {"role": "user", "content": "heartbeat request bundle"},
-            ],
-            prompt_cache_key="heartbeat-cache-key",
-            diagnostics={"stable_prompt_signature": "heartbeat-sig"},
+            request_messages=list(kwargs.get("stable_messages") or []),
+            prompt_cache_key="frontdoor-cache-key",
+            diagnostics={"stable_prompt_signature": "frontdoor-sig"},
             stable_prefix_hash="stable-hash",
             dynamic_appendix_hash="dynamic-hash",
-            stable_messages=[{"role": "system", "content": "heartbeat stable system"}],
-            dynamic_appendix_messages=[{"role": "user", "content": "heartbeat event bundle"}],
-            diagnostic_dynamic_messages=[{"role": "assistant", "content": "heartbeat overlay"}],
-            cache_family_revision="ceo_heartbeat:stable-prefix:v1",
+            stable_messages=list(kwargs.get("stable_messages") or []),
+            dynamic_appendix_messages=list(kwargs.get("dynamic_appendix_messages") or []),
+            diagnostic_dynamic_messages=[],
+            cache_family_revision="frontdoor:v1",
         )
 
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
@@ -5717,6 +5873,14 @@ async def test_ceo_frontdoor_prepare_turn_uses_separate_prompt_lane_for_heartbea
         _chat_id="shared",
         _active_cancel_token=None,
         inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=list(existing_baseline),
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_stage_state={},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={},
+        _semantic_context_state={},
+        _frontdoor_hydrated_tool_names=[],
+        _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
         context=ceo_runtime_ops.CeoRuntimeContext(
@@ -5730,10 +5894,11 @@ async def test_ceo_frontdoor_prepare_turn_uses_separate_prompt_lane_for_heartbea
     state_update = await runner._graph_prepare_turn(
         {
             "user_input": {
-                "content": "heartbeat request bundle",
+                "content": heartbeat_event_bundle,
                 "metadata": {
                     "heartbeat_internal": True,
-                    "heartbeat_prompt_lane": "ceo_heartbeat",
+                    "heartbeat_stable_rules_text": heartbeat_rules_text,
+                    "heartbeat_event_bundle_text": heartbeat_event_bundle,
                     "heartbeat_retrieval_query": "tool_background skill-installer task:demo-1",
                 },
             }
@@ -5741,20 +5906,53 @@ async def test_ceo_frontdoor_prepare_turn_uses_separate_prompt_lane_for_heartbea
         runtime=runtime,
     )
 
-    assert captured["scope"] == "ceo_heartbeat"
-    assert captured["stable_messages"] == [{"role": "system", "content": "frontdoor fallback"}]
-    assert captured["live_request_messages"] == [
-        {"role": "system", "content": "frontdoor fallback"},
-        {"role": "user", "content": "fallback heartbeat user"},
+    builder_seed = list(captured["builder_kwargs"]["request_body_seed_messages"])
+    assert [message["role"] for message in builder_seed] == ["system", "user", "assistant", "system"]
+    assert builder_seed[:3] == existing_baseline
+    assert builder_seed[3]["content"] == heartbeat_rules_text
+    assert builder_seed[3]["metadata"] == {
+        "source": "heartbeat",
+        "prompt_visible": True,
+        "ui_visible": False,
+        "internal_prompt_kind": "heartbeat_rule",
+    }
+    assert captured["builder_kwargs"]["user_content"] == heartbeat_event_bundle
+    assert captured["contract_kwargs"]["scope"] == "ceo_frontdoor"
+    assert captured["contract_kwargs"]["stable_messages"] == [
+        *builder_seed,
+        {
+            "role": "user",
+            "content": heartbeat_event_bundle,
+        },
     ]
-    assert state_update["messages"] == [
-        {"role": "system", "content": "heartbeat stable system"},
+    assert state_update["frontdoor_request_body_messages"] == [
+        *existing_baseline,
+        {
+            "role": "system",
+            "content": heartbeat_rules_text,
+            "metadata": {
+                "source": "heartbeat",
+                "prompt_visible": True,
+                "ui_visible": False,
+                "internal_prompt_kind": "heartbeat_rule",
+            },
+        },
+        {
+            "role": "user",
+            "content": heartbeat_event_bundle,
+            "metadata": {
+                "source": "heartbeat",
+                "prompt_visible": True,
+                "ui_visible": False,
+                "internal_prompt_kind": "heartbeat_event_bundle",
+            },
+        },
     ]
-    assert state_update["stable_messages"] == [{"role": "system", "content": "heartbeat stable system"}]
-    assert state_update["dynamic_appendix_messages"] == [{"role": "user", "content": "heartbeat event bundle"}]
-    assert state_update["cache_family_revision"] == "ceo_heartbeat:stable-prefix:v1"
-    assert state_update["prompt_cache_key"] == "heartbeat-cache-key"
-    assert state_update["prompt_cache_diagnostics"] == {"stable_prompt_signature": "heartbeat-sig"}
+    assert state_update["messages"] == state_update["frontdoor_request_body_messages"]
+    assert state_update["dynamic_appendix_messages"] == []
+    assert state_update["cache_family_revision"] == "frontdoor:v1"
+    assert state_update["prompt_cache_key"] == "frontdoor-cache-key"
+    assert state_update["prompt_cache_diagnostics"] == {"stable_prompt_signature": "frontdoor-sig"}
 
 
 @pytest.mark.asyncio
@@ -5933,6 +6131,95 @@ async def test_web_session_heartbeat_calls_reply_notifier_for_final_output(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_web_session_heartbeat_uses_persisted_transcript_turn_without_duplicate_visible_reply(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-persisted-runtime-turn"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _PersistingHeartbeatSession(
+        session_manager=session_manager,
+        session_id=session_id,
+        output="Background install finished successfully.",
+    )
+    task_service = _TaskService()
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    accepted = service.enqueue_task_terminal_payload(
+        {
+            "task_id": "task:demo-persisted-heartbeat",
+            "session_id": session_id,
+            "title": "demo persisted heartbeat",
+            "status": "success",
+            "brief_text": "task finished successfully",
+            "finished_at": "2026-03-27T09:34:32+08:00",
+            "dedupe_key": "task-terminal:task:demo-persisted-heartbeat:success:2026-03-27T09:34:32+08:00",
+        }
+    )
+    assert accepted is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    assert live_session.persist_transcript_flags == [True]
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    assert [message["role"] for message in reloaded.messages] == ["system", "user", "assistant"]
+    assert reloaded.messages[0]["metadata"]["internal_prompt_kind"] == "heartbeat_rule"
+    assert reloaded.messages[0]["metadata"]["ui_visible"] is False
+    assert reloaded.messages[1]["metadata"]["internal_prompt_kind"] == "heartbeat_event_bundle"
+    assert reloaded.messages[1]["metadata"]["ui_visible"] is False
+    assert reloaded.messages[2]["content"] == "Background install finished successfully."
+    assert reloaded.messages[2]["turn_id"] == live_session.turn_id
+    assert reloaded.messages[2]["metadata"] == {
+        "source": "heartbeat",
+        "prompt_visible": True,
+        "ui_visible": True,
+        "reason": "task_terminal",
+        "task_ids": ["task:demo-persisted-heartbeat"],
+        "task_results": [{"task_id": "task:demo-persisted-heartbeat"}],
+    }
+    assert task_service.registry.published == []
+
+
+def test_web_session_heartbeat_user_input_carries_full_event_bundle_text_for_continuation(tmp_path: Path) -> None:
+    session_manager = SessionManager(tmp_path)
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=SimpleNamespace(get_or_create=lambda **kwargs: None),
+        main_task_service=_TaskService(),
+        session_manager=session_manager,
+    )
+    events = [
+        SimpleNamespace(
+            reason="task_terminal",
+            payload={
+                "task_id": "task:demo-terminal",
+                "session_id": "web:shared",
+                "title": "demo terminal task",
+                "status": "success",
+                "brief_text": "task finished successfully",
+            },
+        )
+    ]
+
+    user_input = service._build_heartbeat_user_input(
+        events,
+        heartbeat_reason="task_terminal",
+        normalized_metadata={},
+    )
+
+    assert "[SESSION EVENTS]" in str(user_input.content)
+    assert user_input.metadata["heartbeat_event_bundle_text"] == str(user_input.content)
+    assert str(user_input.metadata["heartbeat_stable_rules_text"]).strip()
+
+
+@pytest.mark.asyncio
 async def test_web_session_heartbeat_second_visible_reply_is_not_appended_after_normal_assistant_reply(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-no-second-visible-reply"
     session_manager = SessionManager(tmp_path)
@@ -5979,12 +6266,14 @@ async def test_web_session_heartbeat_second_visible_reply_is_not_appended_after_
             "role": "assistant",
             "content": "Background install finished successfully.",
             "timestamp": reloaded.messages[2]["timestamp"],
-            "metadata": {
-                "source": "heartbeat",
-                "reason": "task_terminal",
-                "task_ids": ["task:demo-hidden-persist"],
-                "task_results": [{"task_id": "task:demo-hidden-persist"}],
-            },
+                "metadata": {
+                    "source": "heartbeat",
+                    "prompt_visible": True,
+                    "ui_visible": True,
+                    "reason": "task_terminal",
+                    "task_ids": ["task:demo-hidden-persist"],
+                    "task_results": [{"task_id": "task:demo-hidden-persist"}],
+                },
             "turn_id": "turn-heartbeat-default",
         },
     ]
@@ -6107,6 +6396,56 @@ def test_websocket_build_ceo_snapshot_keeps_archived_paused_assistant_status_for
             "turn_id": "paused-turn-1",
             "status": "paused",
             "execution_trace_summary": summary,
+        }
+    ]
+
+
+def test_websocket_build_ceo_snapshot_hides_internal_prompt_messages_but_keeps_visible_reply() -> None:
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [
+            {
+                "role": "system",
+                "content": "Hidden heartbeat rules",
+                "timestamp": "2026-03-27T09:00:00+08:00",
+                "metadata": {
+                    "source": "heartbeat",
+                    "prompt_visible": True,
+                    "ui_visible": False,
+                    "internal_prompt_kind": "heartbeat_rule",
+                },
+            },
+            {
+                "role": "user",
+                "content": "Hidden heartbeat event bundle",
+                "timestamp": "2026-03-27T09:00:05+08:00",
+                "metadata": {
+                    "source": "heartbeat",
+                    "heartbeat_internal": True,
+                    "prompt_visible": True,
+                    "ui_visible": False,
+                    "internal_prompt_kind": "heartbeat_event_bundle",
+                },
+            },
+            {
+                "role": "assistant",
+                "content": "Visible heartbeat summary",
+                "timestamp": "2026-03-27T09:00:10+08:00",
+                "turn_id": "turn-heartbeat-visible",
+                "metadata": {
+                    "source": "heartbeat",
+                    "prompt_visible": True,
+                    "ui_visible": True,
+                },
+            },
+        ]
+    )
+
+    assert snapshot == [
+        {
+            "role": "assistant",
+            "content": "Visible heartbeat summary",
+            "turn_id": "turn-heartbeat-visible",
+            "timestamp": "2026-03-27T09:00:10+08:00",
         }
     ]
 

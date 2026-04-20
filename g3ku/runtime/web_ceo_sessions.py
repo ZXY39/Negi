@@ -287,14 +287,28 @@ def is_internal_ceo_user_message(message: Any) -> bool:
     return bool(metadata.get('heartbeat_internal')) or bool(metadata.get('cron_internal'))
 
 
-def is_history_visible_message(message: Any) -> bool:
+def is_prompt_visible_message(message: Any) -> bool:
+    role = message_role(message)
+    if role not in {'system', 'user', 'assistant', 'tool'}:
+        return False
+    metadata = message_metadata(message)
+    return metadata.get('prompt_visible') is not False
+
+
+def is_ui_visible_message(message: Any) -> bool:
     role = message_role(message)
     if role not in {'user', 'assistant', 'tool'}:
         return False
     metadata = message_metadata(message)
+    if metadata.get('ui_visible') is False:
+        return False
     if metadata.get('history_visible') is False:
         return False
     return not is_internal_ceo_user_message(message)
+
+
+def is_history_visible_message(message: Any) -> bool:
+    return is_ui_visible_message(message)
 
 
 def build_last_task_memory(session: Any) -> dict[str, Any]:
@@ -584,8 +598,16 @@ def transcript_messages(session: Any) -> list[dict[str, Any]]:
         for item in list(getattr(session, 'messages', []) or [])
         if (
             message_role(item) in {'user', 'assistant'}
-            and is_history_visible_message(item)
+            and is_ui_visible_message(item)
         )
+    ]
+
+
+def prompt_history_messages(session: Any) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in list(getattr(session, 'messages', []) or [])
+        if is_prompt_visible_message(item)
     ]
 
 

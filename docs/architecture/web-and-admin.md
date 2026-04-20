@@ -228,15 +228,15 @@ If an operator reports “the channel conversation was deleted but old context c
 
 ### Heartbeat/Cron Visibility Versus Prompt Inheritance
 
-- Browser-side CEO timeline rendering and inflight bubbles are allowed to show heartbeat / cron 的原始处理流程。
-- This is sourced from session/inflight snapshots, not from the next real user turn's near-field prompt history.
-- Maintainers should not assume "frontend can see it" means "the next prompt inherits it verbatim".
+- Browser-side CEO timeline rendering and inflight bubbles are allowed to show heartbeat / cron work as ordinary active turns.
+- The same heartbeat / cron round is also durable prompt history now, but visibility is split in two: prompt inheritance uses `prompt_visible`, while browser transcript/snapshot rendering uses `ui_visible`.
+- Maintainers should not assume "frontend cannot see the hidden rule/event bundle" means "the model cannot see it later". The hidden rule/event messages are intentionally persisted for later prompt reuse while remaining absent from UI transcript surfaces.
 
 The current rule is:
 
-- UI may show heartbeat / cron stage openings, tool calls, execution trace, and compression state directly.
-- The next real user turn still filters internal-only history from its local raw history injection.
-- To avoid forgetting that work, later user turns now rely on the authoritative continuity baseline, visible history, and explicit stage/archive state rather than any semantic-summary lane.
+- UI may show heartbeat / cron stage openings, tool calls, execution trace, compression state, and visible assistant replies directly.
+- The hidden heartbeat / cron rule and event-bundle messages must stay out of transcript lists, session preview text, session message counts, and `snapshot.ceo.messages` by way of `ui_visible=false`.
+- Later turns inherit heartbeat / cron work from the authoritative continuity baseline plus prompt-visible history, not from a separate semantic-summary-only recovery lane.
 
 ## Actual Request Debugging Contract
 
@@ -380,6 +380,7 @@ The browser now handles a dedicated live-only ACK event for silent internal turn
 
 - `ceo.internal.ack` is emitted when a heartbeat or cron turn explicitly ends with `HEARTBEAT_OK`.
 - This event is not a normal assistant reply and must not reuse `ceo.reply.final` persistence or rendering rules.
+- Any non-silent heartbeat/cron assistant reply now uses the ordinary `message_end -> ceo.reply.final` path. The backend should no longer blanket-filter heartbeat assistant finals from websocket delivery just because the source is internal.
 - The frontend should render it as a distinct non-conversational bubble so operators can see that the internal turn was received and intentionally stayed silent.
 - That ACK bubble is intentionally ephemeral: it should not be appended to the CEO session snapshot `messages` list and should disappear on full refresh.
 - `ceo.turn.discard` still exists only to close a specific visible pending turn by `turn_id`.

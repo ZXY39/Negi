@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -879,9 +880,9 @@ class WebSessionHeartbeatService:
         reason: str,
         task_results: list[dict[str, str]] | None = None,
         turn_id: str = "",
-    ) -> None:
+    ) -> bool:
         if not self._session_exists(session_id):
-            return
+            return False
         session = self._session_manager.get_or_create(session_id)
         normalized_task_ids: list[str] = []
         for task_id in list(task_ids or []) + _extract_task_ids_from_text(text):
@@ -897,17 +898,64 @@ class WebSessionHeartbeatService:
             task_results=normalized_results,
             updated_at=now_iso(),
         )
-        metadata_payload: dict[str, Any] = {"source": "heartbeat", "reason": reason}
+        metadata_payload: dict[str, Any] = {
+            "source": "heartbeat",
+            "prompt_visible": True,
+            "ui_visible": True,
+            "reason": reason,
+        }
         if normalized_task_ids:
             metadata_payload["task_ids"] = list(normalized_task_ids)
         if normalized_results:
             metadata_payload["task_results"] = [dict(item) for item in normalized_results]
-        assistant_payload: dict[str, Any] = {"metadata": metadata_payload}
         normalized_turn_id = str(turn_id or "").strip()
+        existing_index: int | None = None
         if normalized_turn_id:
-            assistant_payload["turn_id"] = normalized_turn_id
-        session.add_message("assistant", str(text or "").strip(), **assistant_payload)
+            for index in range(len(list(session.messages or [])) - 1, -1, -1):
+                current = session.messages[index]
+                if not isinstance(current, dict):
+                    continue
+                if str(current.get("role") or "").strip().lower() != "assistant":
+                    continue
+                current_turn_id = str(
+                    current.get("turn_id")
+                    or (
+                        current.get("metadata", {}).get("_transcript_turn_id")
+                        if isinstance(current.get("metadata"), dict)
+                        else ""
+                    )
+                    or ""
+                ).strip()
+                if current_turn_id != normalized_turn_id:
+                    continue
+                existing_index = index
+                break
+        if existing_index is None:
+            assistant_payload: dict[str, Any] = {"metadata": metadata_payload}
+            if normalized_turn_id:
+                assistant_payload["turn_id"] = normalized_turn_id
+            session.add_message("assistant", str(text or "").strip(), **assistant_payload)
+            reply_already_persisted = False
+        else:
+            existing = dict(session.messages[existing_index] or {})
+            existing["content"] = str(text or "").strip()
+            if normalized_turn_id:
+                existing["turn_id"] = normalized_turn_id
+            merged_metadata = (
+                dict(existing.get("metadata") or {})
+                if isinstance(existing.get("metadata"), dict)
+                else {}
+            )
+            merged_metadata.update(metadata_payload)
+            existing["metadata"] = merged_metadata
+            if not str(existing.get("timestamp") or "").strip():
+                existing["timestamp"] = now_iso()
+            session.messages[existing_index] = existing
+            if hasattr(session, "updated_at"):
+                session.updated_at = datetime.now()
+            reply_already_persisted = True
         self._session_manager.save(session)
+        return reply_already_persisted
 
     def _build_heartbeat_user_input(
         self,
@@ -939,13 +987,16 @@ class WebSessionHeartbeatService:
             "heartbeat_retrieval_query": heartbeat_lane.retrieval_query,
             "heartbeat_stable_rules_text": stable_rules_text,
             "heartbeat_task_ledger_summary": task_ledger_summary,
+            "heartbeat_event_bundle_text": str(
+                (heartbeat_lane.request_messages[-1] if heartbeat_lane.request_messages else {}).get("content") or ""
+            ),
             "history_visibility": "internal_event",
         }
         if repair_attempt > 0:
             metadata["heartbeat_repair_attempt"] = int(repair_attempt)
             metadata["heartbeat_invalid_output"] = self._task_terminal_invalid_output_label(invalid_output)
         return UserInputMessage(
-            content=str((heartbeat_lane.request_messages[-1] if heartbeat_lane.request_messages else {}).get("content") or ""),
+            content=str(metadata.get("heartbeat_event_bundle_text") or ""),
             metadata=metadata,
         )
 
@@ -1024,7 +1075,7 @@ class WebSessionHeartbeatService:
                 self._publish_ceo(key, "ceo.agent.tool", serialized)
 
         async def _run_prompt_attempt(prompt_input: UserInputMessage) -> Any:
-            prompt_task = asyncio.create_task(session.prompt(prompt_input, persist_transcript=False))
+            prompt_task = asyncio.create_task(session.prompt(prompt_input, persist_transcript=True))
             self._prompt_tasks[key] = prompt_task
             register_task = getattr(self._agent, "_register_active_task", None)
             if callable(register_task):
@@ -1135,7 +1186,7 @@ class WebSessionHeartbeatService:
             if preserved_turn_id:
                 discard_payload["turn_id"] = preserved_turn_id
             self._publish_ceo(key, "ceo.turn.discard", discard_payload)
-        self._persist_assistant_reply(
+        reply_already_persisted = self._persist_assistant_reply(
             key,
             text=output,
             task_ids=task_ids,
@@ -1143,11 +1194,12 @@ class WebSessionHeartbeatService:
             task_results=task_results,
             turn_id=heartbeat_turn_id,
         )
-        self._publish_ceo(
-            key,
-            "ceo.reply.final",
-            {"text": output, "source": "heartbeat", "turn_id": heartbeat_turn_id},
-        )
+        if not reply_already_persisted:
+            self._publish_ceo(
+                key,
+                "ceo.reply.final",
+                {"text": output, "source": "heartbeat", "turn_id": heartbeat_turn_id},
+            )
         await self._notify_reply(key, output)
         event_ids = {event.event_id for event in events}
         popped = self._events.pop_many(key, event_ids=event_ids)

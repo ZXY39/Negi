@@ -182,6 +182,25 @@ class _CeoStructuredTool(StructuredTool):
         return args, kwargs
 
 
+def _hidden_internal_prompt_message_metadata(
+    *,
+    source: str,
+    internal_prompt_kind: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "source": str(source or "").strip().lower(),
+        "prompt_visible": True,
+        "ui_visible": False,
+        "internal_prompt_kind": str(internal_prompt_kind or "").strip(),
+    }
+    for key, value in dict(extra or {}).items():
+        if value in (None, "", [], {}):
+            continue
+        payload[str(key)] = value
+    return payload
+
+
 def _positive_int(value: Any, default: int) -> int:
     try:
         normalized = int(value)
@@ -1533,6 +1552,99 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 continue
             normalized.append(dict(item))
         return normalized
+
+    @staticmethod
+    def _upsert_message_metadata(message: dict[str, Any], metadata: dict[str, Any] | None) -> dict[str, Any]:
+        record = dict(message or {})
+        payload = dict(record.get("metadata") or {}) if isinstance(record.get("metadata"), dict) else {}
+        for key, value in dict(metadata or {}).items():
+            if value in (None, "", [], {}):
+                continue
+            payload[str(key)] = value
+        if payload:
+            record["metadata"] = payload
+        return record
+
+    @classmethod
+    def _tag_last_matching_user_message(
+        cls,
+        messages: list[dict[str, Any]] | None,
+        *,
+        content_text: str,
+        metadata: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        tagged = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+        needle = str(content_text or "").strip()
+        if not tagged or not needle or not metadata:
+            return tagged
+        for index in range(len(tagged) - 1, -1, -1):
+            message = dict(tagged[index] or {})
+            if str(message.get("role") or "").strip().lower() != "user":
+                continue
+            if str(message.get("content") or "").strip() != needle:
+                continue
+            tagged[index] = cls._upsert_message_metadata(message, metadata)
+            break
+        return tagged
+
+    @classmethod
+    def _internal_prompt_seed_messages(
+        cls,
+        *,
+        metadata: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], str, dict[str, Any] | None]:
+        heartbeat_internal = bool(metadata.get("heartbeat_internal"))
+        cron_internal = bool(metadata.get("cron_internal"))
+        source = "cron" if cron_internal else "heartbeat" if heartbeat_internal else ""
+        if not source:
+            return [], "", None
+        seed_messages: list[dict[str, Any]] = []
+        event_bundle_text = ""
+        event_metadata: dict[str, Any] | None = None
+        if heartbeat_internal:
+            stable_rules_text = str(metadata.get("heartbeat_stable_rules_text") or "").strip()
+            if stable_rules_text:
+                seed_messages.append(
+                    {
+                        "role": "system",
+                        "content": stable_rules_text,
+                        "metadata": _hidden_internal_prompt_message_metadata(
+                            source=source,
+                            internal_prompt_kind="heartbeat_rule",
+                        ),
+                    }
+                )
+            event_bundle_text = str(
+                metadata.get("heartbeat_event_bundle_text")
+                or metadata.get("heartbeat_task_ledger_summary")
+                or ""
+            ).strip()
+            if event_bundle_text:
+                event_metadata = _hidden_internal_prompt_message_metadata(
+                    source=source,
+                    internal_prompt_kind="heartbeat_event_bundle",
+                )
+        elif cron_internal:
+            cron_job_id = str(metadata.get("cron_job_id") or "").strip()
+            cron_system_message = CeoFrontDoorSupport._cron_internal_system_message(metadata)
+            if isinstance(cron_system_message, dict) and str(cron_system_message.get("content") or "").strip():
+                seed_messages.append(
+                    {
+                        "role": "system",
+                        "content": str(cron_system_message.get("content") or "").strip(),
+                        "metadata": _hidden_internal_prompt_message_metadata(
+                            source=source,
+                            internal_prompt_kind="cron_rule",
+                            extra={"cron_job_id": cron_job_id},
+                        ),
+                    }
+                )
+            event_metadata = _hidden_internal_prompt_message_metadata(
+                source=source,
+                internal_prompt_kind="cron_event_bundle",
+                extra={"cron_job_id": cron_job_id},
+            )
+        return seed_messages, event_bundle_text, event_metadata
 
     @classmethod
     def _heartbeat_stable_prefix_messages(
@@ -3460,14 +3572,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 current_compression_state = paused_compression_state
         checkpoint_messages = list(state.get("messages") or [])
         request_body_seed_messages: list[dict[str, Any]] = []
+        internal_seed_messages, internal_event_bundle_text, internal_event_message_metadata = (
+            self._internal_prompt_seed_messages(metadata=metadata)
+        )
+        current_turn_user_content = (
+            internal_event_bundle_text
+            if heartbeat_internal and internal_event_bundle_text
+            else self._model_content(user_content)
+        )
         if session_request_body_messages:
-            if not heartbeat_internal and not cron_internal:
-                request_body_seed_messages = list(session_request_body_messages)
-                checkpoint_messages = []
-                builder_user_metadata["_frontdoor_history_seed"] = "session_window"
-            elif not checkpoint_messages:
-                checkpoint_messages = list(session_request_body_messages)
-                builder_user_metadata["_frontdoor_history_seed"] = "session_window"
+            request_body_seed_messages = list(session_request_body_messages)
+            checkpoint_messages = []
+            builder_user_metadata["_frontdoor_history_seed"] = "session_window"
+        if internal_seed_messages:
+            request_body_seed_messages = [*list(request_body_seed_messages), *list(internal_seed_messages)]
         seeded_hydrated_tool_names = (
             list(getattr(session, "_frontdoor_hydrated_tool_names", []) or [])
             or list(state.get("hydrated_tool_names") or [])
@@ -3490,7 +3608,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             persisted_session=runtime_session,
             checkpoint_messages=checkpoint_messages,
             request_body_seed_messages=request_body_seed_messages,
-            user_content=self._model_content(user_content),
+            user_content=current_turn_user_content,
             user_metadata=builder_user_metadata,
             frontdoor_stage_state=current_frontdoor_stage_state,
             frontdoor_canonical_context=current_frontdoor_canonical_context,
@@ -3544,13 +3662,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             tool_names=tool_names,
         )
         frontdoor_selection_debug["callable_tool_names"] = list(callable_tool_names)
-        cron_system_message = self._cron_internal_system_message(metadata)
         messages: list[dict[str, Any]] = list(assembly.model_messages or [])
-        if cron_system_message is not None:
-            insert_at = 1 if messages and str(messages[0].get("role") or "").strip().lower() == "system" else 0
-            messages = [*messages[:insert_at], cron_system_message, *messages[insert_at:]]
         if not messages or str(messages[-1].get("role") or "").strip().lower() != "user":
-            messages.append({"role": "user", "content": self._model_content(user_content)})
+            messages.append({"role": "user", "content": current_turn_user_content})
 
         model_refs = self._resolve_ceo_model_refs()
         provider_model = str(model_refs[0] if model_refs else "").strip()
@@ -3599,96 +3713,71 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ),
         )
         prompt_scope = "ceo_frontdoor"
-        if heartbeat_internal:
-            live_request_messages = self._prompt_message_records(messages)
-            stable_messages = self._heartbeat_stable_prefix_messages(
-                assembly=assembly,
-                metadata=metadata,
-                live_request_messages=live_request_messages,
-            )
-            if str(metadata.get("heartbeat_stable_rules_text") or "").strip():
-                dynamic_appendix_messages = [
-                    {"role": "user", "content": self._model_content(user_content)}
-                ]
-                live_request_messages = [*list(stable_messages), *list(dynamic_appendix_messages)]
-            else:
-                dynamic_appendix_messages = self._prompt_message_records(
-                    getattr(assembly, "dynamic_appendix_messages", None)
-                )
-            prompt_scope = str(metadata.get("heartbeat_prompt_lane") or "ceo_heartbeat").strip() or "ceo_heartbeat"
-            contract = build_frontdoor_prompt_contract(
-                scope=prompt_scope,
-                provider_model=provider_model,
-                stable_messages=stable_messages,
-                dynamic_appendix_messages=dynamic_appendix_messages,
-                live_request_messages=live_request_messages,
-                tool_schemas=tool_schemas,
-                cache_family_revision=cache_family_revision,
-                session_key=str(getattr(session.state, "session_key", "") or ""),
-                overlay_text=turn_overlay_text,
-                overlay_section_count=int(getattr(assembly, "trace", {}).get("turn_overlay_section_count", 0) or 0),
-            )
-            messages = list(contract.request_messages)
-            stable_messages = list(contract.stable_messages)
-            dynamic_appendix_messages = list(contract.dynamic_appendix_messages)
-            cache_family_revision = str(contract.cache_family_revision or "").strip()
-            prompt_cache_key = contract.prompt_cache_key
-            prompt_cache_diagnostics = dict(contract.diagnostics)
-        else:
-            live_request_messages = self._prompt_message_records(messages)
-            if session_request_body_messages:
-                continuity_bridge = {"pending": False, "enabled": False}
-                consume_continuity_bridge = getattr(session, "_consume_completed_continuity_bridge", None)
-                if callable(consume_continuity_bridge):
-                    continuity_bridge = dict(
-                        consume_continuity_bridge(
-                            current_visible_tool_ids=rbac_visible_tool_names,
-                            current_visible_skill_ids=rbac_visible_skill_ids,
-                        )
-                        or {}
+        live_request_messages = self._prompt_message_records(messages)
+        if session_request_body_messages:
+            continuity_bridge = {"pending": False, "enabled": False}
+            consume_continuity_bridge = getattr(session, "_consume_completed_continuity_bridge", None)
+            if callable(consume_continuity_bridge):
+                continuity_bridge = dict(
+                    consume_continuity_bridge(
+                        current_visible_tool_ids=rbac_visible_tool_names,
+                        current_visible_skill_ids=rbac_visible_skill_ids,
                     )
-                live_request_messages = self._fresh_turn_live_request_messages_from_previous_actual_request(
-                    session=session,
-                    stable_messages=stable_messages,
-                    live_request_messages=live_request_messages,
+                    or {}
                 )
-                if bool(continuity_bridge.get("enabled")):
-                    cache_family_revision = str(
-                        continuity_bridge.get("exposure_revision") or cache_family_revision or ""
-                    ).strip()
-                seeded_provider_tool_names: list[str] | None = None
-                if not (bool(continuity_bridge.get("pending")) and not bool(continuity_bridge.get("enabled"))):
-                    tool_schemas, seeded_provider_tool_names = (
-                        self._fresh_turn_tool_schema_seed_from_previous_actual_request(
-                            session=session,
-                            tool_schemas=tool_schemas,
-                            expected_schema_names=list(
-                                continuity_bridge.get("provider_tool_schema_names") or []
-                            )
-                            if bool(continuity_bridge.get("enabled"))
-                            else None,
-                        )
-                    )
-                if seeded_provider_tool_names:
-                    runtime_visible_tool_names = list(seeded_provider_tool_names)
-            contract = build_frontdoor_prompt_contract(
-                scope=prompt_scope,
-                provider_model=provider_model,
+            live_request_messages = self._fresh_turn_live_request_messages_from_previous_actual_request(
+                session=session,
                 stable_messages=stable_messages,
-                dynamic_appendix_messages=dynamic_appendix_messages,
                 live_request_messages=live_request_messages,
-                tool_schemas=tool_schemas,
-                cache_family_revision=cache_family_revision,
-                session_key=str(getattr(session.state, "session_key", "") or ""),
-                overlay_text=turn_overlay_text,
-                overlay_section_count=int(getattr(assembly, "trace", {}).get("turn_overlay_section_count", 0) or 0),
             )
-            messages = list(contract.request_messages)
-            stable_messages = list(contract.stable_messages)
-            dynamic_appendix_messages = list(contract.dynamic_appendix_messages)
-            cache_family_revision = str(contract.cache_family_revision or "").strip()
-            prompt_cache_key = contract.prompt_cache_key
-            prompt_cache_diagnostics = dict(contract.diagnostics)
+            if bool(continuity_bridge.get("enabled")):
+                cache_family_revision = str(
+                    continuity_bridge.get("exposure_revision") or cache_family_revision or ""
+                ).strip()
+            seeded_provider_tool_names: list[str] | None = None
+            if not (bool(continuity_bridge.get("pending")) and not bool(continuity_bridge.get("enabled"))):
+                tool_schemas, seeded_provider_tool_names = (
+                    self._fresh_turn_tool_schema_seed_from_previous_actual_request(
+                        session=session,
+                        tool_schemas=tool_schemas,
+                        expected_schema_names=list(
+                            continuity_bridge.get("provider_tool_schema_names") or []
+                        )
+                        if bool(continuity_bridge.get("enabled"))
+                        else None,
+                    )
+                )
+            if seeded_provider_tool_names:
+                runtime_visible_tool_names = list(seeded_provider_tool_names)
+        contract = build_frontdoor_prompt_contract(
+            scope=prompt_scope,
+            provider_model=provider_model,
+            stable_messages=stable_messages,
+            dynamic_appendix_messages=dynamic_appendix_messages,
+            live_request_messages=live_request_messages,
+            tool_schemas=tool_schemas,
+            cache_family_revision=cache_family_revision,
+            session_key=str(getattr(session.state, "session_key", "") or ""),
+            overlay_text=turn_overlay_text,
+            overlay_section_count=int(getattr(assembly, "trace", {}).get("turn_overlay_section_count", 0) or 0),
+        )
+        messages = list(contract.request_messages)
+        stable_messages = list(contract.stable_messages)
+        dynamic_appendix_messages = list(contract.dynamic_appendix_messages)
+        cache_family_revision = str(contract.cache_family_revision or "").strip()
+        prompt_cache_key = contract.prompt_cache_key
+        prompt_cache_diagnostics = dict(contract.diagnostics)
+        if internal_event_message_metadata and current_turn_user_content:
+            messages = self._tag_last_matching_user_message(
+                messages,
+                content_text=str(current_turn_user_content or ""),
+                metadata=internal_event_message_metadata,
+            )
+            stable_messages = self._tag_last_matching_user_message(
+                stable_messages,
+                content_text=str(current_turn_user_content or ""),
+                metadata=internal_event_message_metadata,
+            )
         persisted_messages = list(stable_messages)
         persisted_dynamic_appendix_messages = list(dynamic_appendix_messages)
         if prompt_scope == "ceo_frontdoor":
@@ -3699,20 +3788,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 persisted_dynamic_appendix_messages = list(tool_contract_messages)
             else:
                 persisted_dynamic_appendix_messages = []
-        if cron_system_message is not None:
-            insert_at = 1 if persisted_messages and str(persisted_messages[0].get("role") or "").strip().lower() == "system" else 0
-            persisted_messages = [
-                *persisted_messages[:insert_at],
-                cron_system_message,
-                *persisted_messages[insert_at:],
-            ]
         shrink_reason = str(
             getattr(assembly, "trace", {}).get("frontdoor_history_shrink_reason")
             or state.get("frontdoor_history_shrink_reason")
             or session_shrink_reason
             or ""
         ).strip()
-        if session_request_body_messages and not heartbeat_internal:
+        if session_request_body_messages:
             # Compare shrink on the same provider-facing shape. Session continuity
             # baselines may still carry runtime-only tool metadata such as status
             # or timing fields, but those fields are stripped when the next visible

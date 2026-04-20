@@ -422,6 +422,25 @@ class RuntimeAgentSession:
         return payload
 
     @staticmethod
+    def _internal_prompt_message_metadata(
+        *,
+        source: str,
+        internal_prompt_kind: str,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "source": str(source or "").strip().lower(),
+            "prompt_visible": True,
+            "ui_visible": False,
+            "internal_prompt_kind": str(internal_prompt_kind or "").strip(),
+        }
+        for key, value in dict(extra or {}).items():
+            if value in (None, "", [], {}):
+                continue
+            payload[str(key)] = value
+        return payload
+
+    @staticmethod
     def _new_turn_id() -> str:
         return uuid.uuid4().hex[:16]
 
@@ -832,6 +851,99 @@ class RuntimeAgentSession:
             self._loop.sessions.save(persisted_session)
         except Exception:
             logger.debug("Pending transcript persistence skipped for {}", self._state.session_key)
+        return persisted_session
+
+    async def _persist_internal_prompt_messages(
+        self,
+        *,
+        user_input: UserInputMessage,
+        internal_source: str,
+    ) -> Any | None:
+        normalized_source = str(internal_source or "").strip().lower()
+        if normalized_source not in {"heartbeat", "cron"}:
+            return None
+        persisted_session = None
+        try:
+            persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+            turn_id = self._ensure_user_turn_id(user_input)
+            base_metadata = self._build_turn_metadata(
+                {},
+                turn_id=turn_id,
+                transcript_state=_TRANSCRIPT_STATE_COMPLETED,
+            )
+            prompt_metadata = dict(user_input.metadata or {})
+            if normalized_source == "heartbeat":
+                rule_text = str(prompt_metadata.get("heartbeat_stable_rules_text") or "").strip()
+                event_text = str(
+                    prompt_metadata.get("heartbeat_event_bundle_text")
+                    or self._history_text(user_input.content)
+                    or ""
+                ).strip()
+                if rule_text:
+                    persisted_session.add_message(
+                        "system",
+                        rule_text,
+                        metadata={
+                            **base_metadata,
+                            **self._internal_prompt_message_metadata(
+                                source=normalized_source,
+                                internal_prompt_kind="heartbeat_rule",
+                            ),
+                        },
+                    )
+                if event_text:
+                    persisted_session.add_message(
+                        "user",
+                        event_text,
+                        metadata={
+                            **base_metadata,
+                            **self._internal_prompt_message_metadata(
+                                source=normalized_source,
+                                internal_prompt_kind="heartbeat_event_bundle",
+                                extra={"heartbeat_internal": True},
+                            ),
+                        },
+                    )
+            elif normalized_source == "cron":
+                cron_job_id = str(prompt_metadata.get("cron_job_id") or "").strip()
+                from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
+
+                cron_system_message = CeoFrontDoorSupport._cron_internal_system_message(prompt_metadata)
+                rule_text = (
+                    str(cron_system_message.get("content") or "").strip()
+                    if isinstance(cron_system_message, dict)
+                    else ""
+                )
+                event_text = str(self._history_text(user_input.content) or "").strip()
+                if rule_text:
+                    persisted_session.add_message(
+                        "system",
+                        rule_text,
+                        metadata={
+                            **base_metadata,
+                            **self._internal_prompt_message_metadata(
+                                source=normalized_source,
+                                internal_prompt_kind="cron_rule",
+                                extra={"cron_job_id": cron_job_id},
+                            ),
+                        },
+                    )
+                if event_text:
+                    persisted_session.add_message(
+                        "user",
+                        event_text,
+                        metadata={
+                            **base_metadata,
+                            **self._internal_prompt_message_metadata(
+                                source=normalized_source,
+                                internal_prompt_kind="cron_event_bundle",
+                                extra={"cron_internal": True, "cron_job_id": cron_job_id},
+                            ),
+                        },
+                    )
+            self._loop.sessions.save(persisted_session)
+        except Exception:
+            logger.debug("Internal prompt transcript persistence skipped for {}", self._state.session_key)
         return persisted_session
 
     @staticmethod
@@ -1394,10 +1506,12 @@ class RuntimeAgentSession:
             metadata_payload = dict(assistant_metadata or {})
             if internal_source is not None:
                 metadata_payload.setdefault("source", internal_source)
-                metadata_payload["history_visible"] = False
             verified_task_ids = self._normalize_verified_task_ids(self._last_verified_task_ids)
             if verified_task_ids:
                 metadata_payload["task_ids"] = verified_task_ids
+            turn_id = self._current_turn_id(user_input)
+            if turn_id:
+                assistant_payload["turn_id"] = turn_id
             if metadata_payload:
                 assistant_payload["metadata"] = metadata_payload
             persisted_session.add_message("assistant", assistant_text, **assistant_payload)
@@ -1829,10 +1943,16 @@ class RuntimeAgentSession:
             self._state.pending_tool_calls.clear()
             self._state.pending_interrupts = []
             self._last_verified_task_ids = []
-            if persist_transcript and internal_source is None:
-                await self._persist_pending_user_messages(
-                    user_inputs=self._current_user_batch_inputs(user_input),
-                )
+            if persist_transcript:
+                if internal_source is None:
+                    await self._persist_pending_user_messages(
+                        user_inputs=self._current_user_batch_inputs(user_input),
+                    )
+                else:
+                    await self._persist_internal_prompt_messages(
+                        user_input=user_input,
+                        internal_source=internal_source,
+                    )
 
             await self._emit("agent_start", session_key=self._state.session_key, trigger="prompt")
             await self._emit("turn_start", session_key=self._state.session_key)
@@ -1991,13 +2111,19 @@ class RuntimeAgentSession:
             if getattr(self._loop, "prompt_trace", False):
                 logger.info(render_output_trace(output))
             persisted_session = None
-            if persist_transcript:
+            should_persist_transcript_reply = persist_transcript and not (
+                internal_source is not None and str(output or "").strip() in {"", "HEARTBEAT_OK"}
+            )
+            if should_persist_transcript_reply:
                 assistant_metadata = None
-                if cron_internal:
+                if internal_source is not None:
                     assistant_metadata = {
-                        "source": "cron",
-                        "cron_job_id": str((user_input.metadata or {}).get("cron_job_id") or "").strip(),
+                        "source": internal_source,
+                        "prompt_visible": True,
+                        "ui_visible": True,
                     }
+                    if cron_internal:
+                        assistant_metadata["cron_job_id"] = str((user_input.metadata or {}).get("cron_job_id") or "").strip()
                 persisted_session = await self._persist_turn_transcript(
                     user_input=user_input,
                     user_text=user_text,

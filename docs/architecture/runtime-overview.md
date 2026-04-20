@@ -548,10 +548,12 @@ Heartbeat and cron turns now share the same strict internal-turn contract.
 
 - They still execute through `RuntimeAgentSession.prompt(...)` with their own internal source metadata.
 - Heartbeat / cron turns still clear live-only frontdoor debug surfaces such as `frontdoor_selection_debug` and per-round actual-request pointers, but they no longer blindly zero the session-owned request-body / stage / compression continuity state before prompt assembly.
-- When an internal turn starts with no graph-local request body, CEO/frontdoor may seed prompt assembly from the session-owned `frontdoor_request_body_messages` baseline plus the saved stage/compression snapshots. However, `heartbeat_internal` using the dedicated `ceo_heartbeat` prompt lane is allowed to rebuild a much shorter internal prompt body than the visible-turn baseline; maintainers must not treat that lane-local shortening as a visible-turn context-loss regression.
+- Heartbeat / cron now use the same `ceo_frontdoor` continuation path as ordinary visible turns. The request starts from the session-owned `frontdoor_request_body_messages` / actual-request scaffold, then appends hidden internal prompt messages for the rule text and event bundle.
+- The hidden rule/event messages are durable prompt history, not live-only lane text. They should be persisted with `prompt_visible=true`, `ui_visible=false`, and an `internal_prompt_kind` such as `heartbeat_rule`, `heartbeat_event_bundle`, `cron_rule`, or `cron_event_bundle`.
+- Visible heartbeat / cron assistant replies and tool traces remain ordinary durable turn output. They should stay `prompt_visible=true`, `ui_visible=true`, and continue to inherit the same continuity, token-preflight, token-compression, and pause contracts as visible user turns.
 - Service-layer code must not auto-retry tasks or synthesize fallback assistant replies on behalf of the model.
-- An internal turn that ends with `HEARTBEAT_OK` may surface a live-only UI ACK event, but it does not become transcript history.
-- Maintainers should distinguish live UI state such as inflight snapshots and internal ACK bubbles from durable assistant transcript messages.
+- An internal turn that ends with `HEARTBEAT_OK` is still the one live-only ACK exception: the ACK event may surface in UI, but it must not create a new visible assistant transcript entry.
+- Maintainers should distinguish hidden internal prompt messages (`ui_visible=false`) from live-only ACK behavior. Hidden prompt messages are durable and prompt-visible; the ACK is not.
 
 ## Repeated Tool Call Guard Notes
 

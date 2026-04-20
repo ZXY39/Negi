@@ -479,12 +479,14 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
     for raw in list(messages or []):
         if not isinstance(raw, dict):
             continue
+        metadata = raw.get('metadata') if isinstance(raw.get('metadata'), dict) else {}
+        if metadata.get('ui_visible') is False:
+            continue
         if is_internal_ceo_user_message(raw):
             continue
         role = str(raw.get('role') or '').strip().lower()
         if role not in {'user', 'assistant', 'system'}:
             continue
-        metadata = raw.get('metadata') if isinstance(raw.get('metadata'), dict) else {}
         content = _history_text(raw.get('content'))
         if role == 'user':
             raw_text = metadata.get('web_ceo_raw_text')
@@ -617,11 +619,11 @@ def _should_forward_message_end(payload: dict[str, Any] | None) -> bool:
     data = payload if isinstance(payload, dict) else {}
     if str(data.get("role") or "").strip().lower() != "assistant":
         return False
-    if bool(data.get("heartbeat_internal")):
-        return False
     text = str(data.get("text") or "").strip()
     if not text:
         return False
+    if bool(data.get("heartbeat_internal")) and text != _HEARTBEAT_OK:
+        return True
     if text == _HEARTBEAT_OK:
         return str(data.get("source") or "").strip().lower() == "cron"
     return True

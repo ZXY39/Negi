@@ -1067,12 +1067,13 @@ async def test_prepare_turn_allows_shorter_context_with_pending_token_compressio
 
 
 @pytest.mark.asyncio
-async def test_prepare_turn_allows_heartbeat_lane_to_use_shorter_internal_prompt_without_shrink_error(
+async def test_prepare_turn_heartbeat_continues_previous_request_body_and_appends_hidden_messages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_key = "web:shared"
     loop = _loop_with_session(session_key)
     runner = CeoFrontDoorRunner(loop=loop)
+    captured: dict[str, object] = {}
 
     monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
     monkeypatch.setattr(prompt_cache_contract, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
@@ -1082,19 +1083,14 @@ async def test_prepare_turn_allows_heartbeat_lane_to_use_shorter_internal_prompt
         return {"skills": [], "tool_families": [], "tool_names": ["submit_next_stage"]}
 
     async def _build_for_ceo(**kwargs):
-        _ = kwargs
+        captured["builder_kwargs"] = kwargs
+        seed_messages = list(kwargs.get("request_body_seed_messages") or [])
+        user_content = kwargs.get("user_content")
         return SimpleNamespace(
             tool_names=["submit_next_stage"],
-            model_messages=[
-                {"role": "system", "content": "HEARTBEAT STABLE RULES"},
-                {"role": "user", "content": "## EVENT BUNDLE\n- task completed"},
-            ],
-            stable_messages=[
-                {"role": "system", "content": "HEARTBEAT STABLE RULES"},
-            ],
-            dynamic_appendix_messages=[
-                {"role": "user", "content": "## EVENT BUNDLE\n- task completed"},
-            ],
+            model_messages=[*seed_messages, {"role": "user", "content": user_content}],
+            stable_messages=[*seed_messages, {"role": "user", "content": user_content}],
+            dynamic_appendix_messages=[],
             candidate_tool_names=[],
             candidate_tool_items=[],
             trace={
@@ -1114,6 +1110,11 @@ async def test_prepare_turn_allows_heartbeat_lane_to_use_shorter_internal_prompt
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
 
+    existing_baseline = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+    ]
     session = SimpleNamespace(
         state=SimpleNamespace(session_key=session_key),
         _memory_channel="web",
@@ -1122,12 +1123,7 @@ async def test_prepare_turn_allows_heartbeat_lane_to_use_shorter_internal_prompt
         _chat_id="shared",
         _active_cancel_token=None,
         inflight_turn_snapshot=lambda: None,
-        _frontdoor_request_body_messages=[
-            {"role": "system", "content": "SYSTEM"},
-            {"role": "user", "content": "u1"},
-            {"role": "assistant", "content": "a1"},
-            {"role": "tool", "name": "exec", "tool_call_id": "call-1", "content": '{"status":"success"}'},
-        ],
+        _frontdoor_request_body_messages=list(existing_baseline),
         _frontdoor_history_shrink_reason="",
         _frontdoor_stage_state={},
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
@@ -1147,8 +1143,8 @@ async def test_prepare_turn_allows_heartbeat_lane_to_use_shorter_internal_prompt
                 "metadata": {
                     "heartbeat_internal": True,
                     "heartbeat_reason": "task_terminal",
-                    "heartbeat_prompt_lane": "ceo_heartbeat",
                     "heartbeat_stable_rules_text": "HEARTBEAT STABLE RULES",
+                    "heartbeat_event_bundle_text": "## EVENT BUNDLE\n- task completed",
                 },
             }
         ),
@@ -1156,6 +1152,24 @@ async def test_prepare_turn_allows_heartbeat_lane_to_use_shorter_internal_prompt
     )
 
     assert prepared["heartbeat_internal"] is True
-    assert prepared["messages"] == [
-        {"role": "system", "content": "HEARTBEAT STABLE RULES"},
+    builder_seed = list(captured["builder_kwargs"]["request_body_seed_messages"])
+    assert [message["role"] for message in builder_seed] == ["system", "user", "assistant", "system"]
+    assert builder_seed[:3] == existing_baseline
+    assert builder_seed[3] == {
+        "role": "system",
+        "content": "HEARTBEAT STABLE RULES",
+        "metadata": {
+            "source": "heartbeat",
+            "prompt_visible": True,
+            "ui_visible": False,
+            "internal_prompt_kind": "heartbeat_rule",
+        },
+    }
+    assert [(item["role"], item["content"]) for item in prepared["messages"]] == [
+        ("system", "SYSTEM"),
+        ("user", "u1"),
+        ("assistant", "a1"),
+        ("system", "HEARTBEAT STABLE RULES"),
+        ("user", "## EVENT BUNDLE\n- task completed"),
     ]
+    assert prepared["frontdoor_request_body_messages"] == prepared["messages"]

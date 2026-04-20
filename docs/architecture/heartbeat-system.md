@@ -15,6 +15,24 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 - The repair/fallback path for task-terminal cases that are not allowed to stay silent.
 - The maintenance boundary between live UI state and durable transcript history for internal turns.
 
+## Continuation Contract
+
+- Heartbeat and cron are no longer assembled through a separate short `ceo_heartbeat` request lane on the main CEO path.
+- Each internal activation now resumes from the same session-owned `frontdoor_request_body_messages` / actual-request scaffold used by the next visible CEO turn.
+- The runtime appends two hidden durable messages before the model call:
+  - a `system` rule message
+  - a `user` event-bundle message
+- Those internal prompt messages must be persisted with `prompt_visible=true`, `ui_visible=false`, and an `internal_prompt_kind` that distinguishes heartbeat vs cron rule/event records.
+- Because the request is append-only against the previous authoritative scaffold, heartbeat/cron now share the same prompt-cache family, token-preflight, token-compression, and continuity rules as ordinary CEO/frontdoor turns.
+- Silent `HEARTBEAT_OK` remains the only live-only exception. If an internal turn produces a real assistant reply, that reply is durable transcript history and should remain visible to later prompt assembly.
+
+## Persistence And UI Boundary
+
+- Hidden heartbeat/cron rule + event-bundle messages are durable prompt history. They should participate in later prompt assembly, request artifacts, completed continuity sidecars, and compression just like any other prompt-visible message.
+- Frontend transcript views, session preview text, session message counts, and `snapshot.ceo.messages` must hide those internal prompt messages by filtering `ui_visible=false`, not by assuming every internal turn is transcript-hidden.
+- Heartbeat/cron assistant replies, tool calls, tool results, and stage/compression traces remain ordinary visible turn output unless the turn ends with the silent `HEARTBEAT_OK` ACK path.
+- Manual pause during a running heartbeat/cron turn still goes through the ordinary `client.pause_turn` path. The backend should treat that internal turn as the current active turn rather than as a side lane.
+
 ## Task Terminal Repair Contract
 
 - Task-terminal heartbeat only repairs or produces the session reply for an existing terminal event.

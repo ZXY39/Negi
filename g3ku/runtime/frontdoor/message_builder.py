@@ -34,10 +34,12 @@ from g3ku.runtime.frontdoor.raw_stage_renderer import retained_raw_stage_message
 from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
 from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract, upsert_frontdoor_tool_contract_message
 from g3ku.runtime.web_ceo_sessions import (
+    is_prompt_visible_message,
     is_history_visible_message,
     message_metadata,
     message_role,
     normalize_task_memory,
+    prompt_history_messages,
     transcript_messages,
 )
 
@@ -496,15 +498,15 @@ class CeoMessageBuilder:
             return []
         return [
             self._history_message(message)
-            for message in transcript_messages(persisted_session)
+            for message in prompt_history_messages(persisted_session)
         ]
 
     def _checkpoint_history(self, checkpoint_messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         history = [
             self._history_message(message)
             for message in list(checkpoint_messages or [])
-            if message_role(message) in {'user', 'assistant', 'tool'}
-            and is_history_visible_message(message)
+            if message_role(message) in {'system', 'user', 'assistant', 'tool'}
+            and is_prompt_visible_message(message)
         ]
         while history:
             first = history[0]
