@@ -1,6 +1,6 @@
 (() => {
   const DEFAULT_RETRY_ON = ["network", "429", "5xx"];
-  const SCOPE_LABELS = { ceo: "Leader", execution: "Execution", inspection: "Inspection", memory: "Memory" };
+  const SCOPE_LABELS = { ceo: "主Agent", execution: "执行Agent", inspection: "检验Agent", memory: "记忆Agent" };
 
   function emptyMemorySection(label, capability) {
     return {
@@ -1090,7 +1090,7 @@
         <article class="model-detail-card model-config-shell llm-memory-shell">
           <div class="detail-modal-header model-config-header">
             <div class="detail-modal-title">
-              <h2>记忆模型设置</h2>
+              <h2>RAG模型设置</h2>
               <p class="subtitle">编辑 Memory Runtime 当前使用的 Embedding 与 Rerank JSON，保存时会自动测试连通性并刷新运行时。</p>
             </div>
             <div class="detail-modal-actions">
@@ -1197,7 +1197,7 @@
         <article class="model-detail-card model-config-shell llm-memory-shell">
           <div class="detail-modal-header model-config-header">
             <div class="detail-modal-title">
-              <h2>记忆模型设置</h2>
+              <h2>RAG模型设置</h2>
               <p class="subtitle">编辑 Memory Runtime 当前使用的 Embedding 与 Rerank JSON，保存时会自动测试连通性并刷新运行时。</p>
             </div>
             <div class="detail-modal-actions">

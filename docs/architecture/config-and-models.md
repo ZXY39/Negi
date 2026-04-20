@@ -109,13 +109,14 @@
 
 - 配置刷新仍然不会把一个“已经发出去的单次 provider 请求”中途热切换到新模型。
 - 但对于已经进入 provider-failure retry 或 empty-response retry 的当前轮次，CEO/frontdoor 与节点运行时现在都会在下一次重试前检查 runtime revision。
+- Memory queue 内部的 memory agent 现在也遵循同样的 revision 边界，但它看的不是 CEO/node 的 provider retry，而是 memory 自己的修复边界：`assess -> apply` 交接点，以及同一批次里的 validation/repair 重试点。
 - 如果 revision 已变化，旧模型链的重试会失效，当前轮会用新的 model refs 重新开始，而不是继续无限重试旧链。
 
 维护上要把这理解成“重试边界上的重建”，而不是“请求中途热切模型”。如果用户反馈“改完模型链后旧重试还在跑”，重点检查：
 
 1. 对应进程是否真的执行到了 runtime refresh
 2. 当前问题是否发生在 retry 边界，而不是单次 still-in-flight 的 provider request 内
-3. 当前运行路径是 CEO/frontdoor 还是 main runtime worker/node
+3. 当前运行路径是 CEO/frontdoor、main runtime worker/node，还是 memory queue 内部 worker
 
 ## 5. 模型系统不是只靠 `config.json`
 
@@ -283,6 +284,7 @@ There is now also a project-config side contract that maintainers must keep stra
 - `agents.roleConcurrency.memory` is fixed to `1`; it is persisted for config/UI symmetry but is not an operator-tunable parallelism knob.
 - `models.roles.memory` may be empty, but when it is non-empty every referenced binding must have `capability=chat`. The admin route now rejects embedding/rerank or other non-chat bindings for the memory role instead of letting the queue fail later at runtime.
 - Unlike `ceo`, `execution`, and `inspection`, the `memory` role is allowed to be empty. That does not fail config load; instead it blocks the memory queue head at runtime until the role is configured.
+- If the queue head is already inside `processing` when an operator changes `models.roles.memory`, the already dispatched provider call is not hot-swapped. But before the next internal memory repair attempt, the runtime now re-reads the latest revision and re-resolves the memory model chain, so post-refresh repair rounds do not stay pinned to the old route forever.
 
 Maintainers should no longer read `tools/memory_runtime/resource.yaml` as "structured memory database tuning only". It now mixes two boundaries:
 

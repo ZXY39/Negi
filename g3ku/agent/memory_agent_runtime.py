@@ -2678,6 +2678,7 @@ class MemoryManager:
         *,
         batch: MemoryBatch,
         runtime_config: Any,
+        runtime_revision: int,
         model_chain: list[str],
     ) -> dict[str, Any]:
         before_text = self.snapshot_text()
@@ -2685,12 +2686,15 @@ class MemoryManager:
         request_artifacts: list[dict[str, Any]] = []
         queue_request_ids = [item.request_id for item in batch.items if str(item.request_id or "").strip()]
 
+        current_runtime_config = runtime_config
+        current_runtime_revision = int(runtime_revision or 0)
+        current_model_chain = list(model_chain or [])
         processing_batch = batch
         if batch.op == "assess":
             assess_result = await self._run_memory_assessor_batch(
                 batch=batch,
-                runtime_config=runtime_config,
-                model_chain=model_chain,
+                runtime_config=current_runtime_config,
+                model_chain=current_model_chain,
                 queue_request_ids=queue_request_ids,
             )
             self._merge_usage(total_usage, assess_result["usage"])
@@ -2703,6 +2707,7 @@ class MemoryManager:
                     "assessed_text": None,
                     "discard_reason": str(assess_result.get("discard_reason") or "").strip(),
                     "error": str(assess_result.get("error") or "").strip(),
+                    "model_chain": list(current_model_chain),
                     "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                     "request_artifact_paths": self._request_artifact_paths(request_artifacts),
                 }
@@ -2714,6 +2719,7 @@ class MemoryManager:
                     "attempt_count": 1,
                     "assessed_text": None,
                     "discard_reason": "assessed_null",
+                    "model_chain": list(current_model_chain),
                     "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                     "request_artifact_paths": self._request_artifact_paths(request_artifacts),
                 }
@@ -2731,18 +2737,29 @@ class MemoryManager:
                     )
                 ],
             )
+            current_runtime_config, current_runtime_revision, current_model_chain = self._reload_runtime_config_for_memory_retry(
+                runtime_config=current_runtime_config,
+                runtime_revision=current_runtime_revision,
+                model_chain=current_model_chain,
+            )
 
         total_attempts = 3
         last_error = "memory agent did not stage a batch"
         for attempt_index in range(total_attempts):
+            if attempt_index > 0:
+                current_runtime_config, current_runtime_revision, current_model_chain = self._reload_runtime_config_for_memory_retry(
+                    runtime_config=current_runtime_config,
+                    runtime_revision=current_runtime_revision,
+                    model_chain=current_model_chain,
+                )
             repair_reason = last_error if attempt_index > 0 else ""
             attempt = await self._run_memory_agent_attempt(
                 batch=processing_batch,
-                runtime_config=runtime_config,
+                runtime_config=current_runtime_config,
                 before_text=before_text,
                 repair_reason=repair_reason,
                 queue_request_ids=queue_request_ids,
-                model_chain=model_chain,
+                model_chain=current_model_chain,
             )
             self._merge_usage(total_usage, attempt.usage)
             request_artifacts.extend(list(attempt.request_artifacts or []))
@@ -2757,6 +2774,7 @@ class MemoryManager:
                     "usage": total_usage,
                     "attempt_count": attempt_index + 1,
                     "assessed_text": None if batch.op != "assess" else processing_batch.items[0].payload_text,
+                    "model_chain": list(current_model_chain),
                     "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                     "request_artifact_paths": self._request_artifact_paths(request_artifacts),
                 }
@@ -2770,6 +2788,7 @@ class MemoryManager:
             "assessed_text": None if batch.op != "assess" else processing_batch.items[0].payload_text,
             "discard_reason": "rejected",
             "error": last_error,
+            "model_chain": list(current_model_chain),
             "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
             "request_artifact_paths": self._request_artifact_paths(request_artifacts),
         }
@@ -2845,6 +2864,7 @@ class MemoryManager:
                 result = await self._run_memory_agent_batch(
                     batch=batch,
                     runtime_config=runtime_config,
+                    runtime_revision=int(_revision or 0),
                     model_chain=model_chain,
                 )
             except Exception as exc:
@@ -2853,6 +2873,7 @@ class MemoryManager:
 
             self._drop_request_ids({item.request_id for item in batch.items})
             discard_reason = str(result.get("discard_reason") or "").strip()
+            effective_model_chain = list(result.get("model_chain") or model_chain)
             if discard_reason:
                 processed_at = self._now_iso()
                 self._append_terminal_history(
@@ -2862,7 +2883,7 @@ class MemoryManager:
                     processed_at=processed_at,
                     discard_reason=discard_reason,
                     usage=result.get("usage"),
-                    model_chain=model_chain,
+                    model_chain=effective_model_chain,
                     attempt_count=int(result.get("attempt_count", 0) or 0),
                     provider_request_ids=list(result.get("provider_request_ids") or []),
                     request_artifact_paths=list(result.get("request_artifact_paths") or []),
@@ -2881,7 +2902,7 @@ class MemoryManager:
                         "output_tokens": int((result.get("usage") or {}).get("output_tokens", 0) or 0),
                         "cache_read_tokens": int((result.get("usage") or {}).get("cache_read_tokens", 0) or 0),
                     },
-                    "model_chain": list(model_chain),
+                    "model_chain": list(effective_model_chain),
                     "provider_request_ids": list(result.get("provider_request_ids") or []),
                     "request_artifact_paths": list(result.get("request_artifact_paths") or []),
                     "processed_at": processed_at,
@@ -2895,7 +2916,7 @@ class MemoryManager:
                 op="write" if batch.op == "assess" else batch.op,
                 processed_at=processed_at,
                 usage=result.get("usage"),
-                model_chain=model_chain,
+                model_chain=effective_model_chain,
                 attempt_count=int(result["attempt_count"]),
                 validated=result["validated"],
                 provider_request_ids=list(result.get("provider_request_ids") or []),
@@ -2909,10 +2930,27 @@ class MemoryManager:
                 "request_ids": [item.request_id for item in batch.items],
                 "attempt_count": int(result["attempt_count"]),
                 "usage": dict(processed_payload["usage"]),
-                "model_chain": list(model_chain),
+                "model_chain": list(effective_model_chain),
                 "provider_request_ids": list(processed_payload["provider_request_ids"]),
                 "request_artifact_paths": list(processed_payload["request_artifact_paths"]),
                 "processed_at": processed_at,
             }
         finally:
             _release_file_lock(worker_lease)
+
+    def _reload_runtime_config_for_memory_retry(
+        self,
+        *,
+        runtime_config: Any,
+        runtime_revision: int,
+        model_chain: list[str],
+    ) -> tuple[Any, int, list[str]]:
+        try:
+            refreshed_config, refreshed_revision, _changed = get_runtime_config(force=False)
+        except Exception:
+            return runtime_config, int(runtime_revision or 0), list(model_chain or [])
+        normalized_revision = int(refreshed_revision or 0)
+        if normalized_revision == int(runtime_revision or 0):
+            return runtime_config, int(runtime_revision or 0), list(model_chain or [])
+        refreshed_chain = self._memory_model_chain(refreshed_config)
+        return refreshed_config, normalized_revision, list(refreshed_chain)

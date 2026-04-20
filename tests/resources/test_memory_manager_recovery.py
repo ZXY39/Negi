@@ -209,6 +209,122 @@ async def test_v2_run_due_batch_once_applies_write_batch_with_memory_apply_batch
 
 
 @pytest.mark.asyncio
+async def test_memory_runtime_reloads_model_chain_between_repair_attempts_after_runtime_refresh(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+
+    def _app_config_for_memory_chain(chain: list[str]) -> object:
+        return SimpleNamespace(
+            get_role_model_keys=lambda role: list(chain) if str(role) == "memory" else ["memory-old"],
+            get_role_max_iterations=lambda role: 6 if str(role) == "memory" else 1,
+        )
+
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="Prefer concise answers",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="write_1",
+            )
+        )
+
+        runtime_states = iter(
+            [
+                (_app_config_for_memory_chain(["memory-old"]), 1, False),
+                (_app_config_for_memory_chain(["memory-new"]), 2, True),
+            ]
+        )
+        seen_model_chains: list[list[str]] = []
+
+        def _get_runtime_config(force: bool = False):
+            _ = force
+            try:
+                return next(runtime_states)
+            except StopIteration:
+                return (_app_config_for_memory_chain(["memory-new"]), 2, False)
+
+        def _build_chat_model(config, **kwargs):
+            _ = kwargs
+            model_chain = list(config.get_role_model_keys("memory"))
+            seen_model_chains.append(model_chain)
+            if model_chain == ["memory-old"]:
+                return _FakeToolCallingModel(
+                    [
+                        _fake_response(
+                            tool_calls=[
+                                {
+                                    "id": "call-old-1",
+                                    "name": "memory_apply_batch",
+                                    "args": {
+                                        "rewrites": [
+                                            {
+                                                "id": "MissingMemoryId",
+                                                "content": "Prefer concise answers",
+                                            }
+                                        ]
+                                    },
+                                }
+                            ],
+                            usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
+                        ),
+                        _fake_response(
+                            content="retry",
+                            usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0},
+                        ),
+                    ]
+                )
+            if model_chain == ["memory-new"]:
+                return _FakeToolCallingModel(
+                    [
+                        _fake_response(
+                            tool_calls=[
+                                {
+                                    "id": "call-new-1",
+                                    "name": "memory_apply_batch",
+                                    "args": {
+                                        "adds": [
+                                            {
+                                                "content": "Prefer concise answers",
+                                                "decision_source": "user",
+                                            }
+                                        ]
+                                    },
+                                }
+                            ],
+                            usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
+                        ),
+                        _fake_response(
+                            content="done",
+                            usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0},
+                        ),
+                    ]
+                )
+            raise AssertionError(f"unexpected memory model chain: {model_chain}")
+
+        monkeypatch.setattr(module, "get_runtime_config", _get_runtime_config, raising=False)
+        monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/18", raising=False)
+        monkeypatch.setattr(module, "build_chat_model", _build_chat_model, raising=False)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        processed = _read_jsonl(tmp_path / "memory" / "ops.jsonl")
+
+        assert report["ok"] is True
+        assert report["status"] == "applied"
+        assert report["attempt_count"] == 2
+        assert "Prefer concise answers" in manager.snapshot_text()
+        assert len(processed) == 1
+        assert processed[0]["model_chain"] == ["memory-new"]
+        assert seen_model_chains == [["memory-old"], ["memory-new"]]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_v2_run_due_batch_once_rewrite_preserves_id_and_source_but_refreshes_date(
     tmp_path: Path,
     monkeypatch,

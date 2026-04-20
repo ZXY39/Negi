@@ -26,7 +26,10 @@ The browser shell now has a top-level `记忆管理` page. This is intentionally
   - terminal processed batches, newest-first, including both applied and discarded outcomes
 - Queue cards default to collapsed and show runtime-owned state such as `pending` / `processing`, enqueue time, and the latest engineering error when present.
 - Processed cards default to collapsed and show batch-owned metadata such as processed time, terminal status, op type, token usage, model chain, attempts, discard reason when present, and note refs.
-- Queue / processed expanded bodies treat `ref:note_xxxx` as a read-only preview trigger. Clicking a note ref opens a frontend-owned drawer/modal that only fetches and displays the note body; it must not expose edit or save controls.
+- Memory list cards are intentionally compact. Clicking a queue or processed card opens a frontend-owned read-only detail modal for the full payload instead of expanding the entire text inline inside the list.
+- The detail modal keeps long payloads inside scrollable text regions so one large row does not push the rest of the list off-screen.
+- Queue / processed detail text still treats `ref:note_xxxx` as a read-only preview trigger. Clicking a note ref opens a second frontend-owned drawer/modal that only fetches and displays the note body; it must not expose edit or save controls.
+- Page-level memory errors and queue-head blocked notices now use the shared app toast style instead of persistent inline banners under the memory page header.
 - The page is read-only in v1. There are no browser buttons for retry, delete, edit, or force-flush.
 
 ### Backend Responsibilities

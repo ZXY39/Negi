@@ -44,7 +44,7 @@ def test_memory_page_renders_note_ref_trigger() -> None:
     assert "renderMemoryNoteRefList(noteRefs)" in app_js
     assert 'U.memoryQueueList?.addEventListener("click"' in app_js
     assert 'U.memoryProcessedList?.addEventListener("click"' in app_js
-    assert "openMemoryNotePreview(trigger.dataset.memoryNoteRef || \"\")" in app_js
+    assert "openMemoryNotePreview(noteTrigger.dataset.memoryNoteRef || \"\")" in app_js
 
 
 def test_memory_page_keeps_note_preview_read_only() -> None:
@@ -65,6 +65,27 @@ def test_memory_page_keeps_note_preview_read_only() -> None:
     assert "saveMemoryNote" not in app_js
     assert "updateMemoryNote" not in app_js
     assert "ApiClient.getMemoryNote(noteRef)" in app_js
+
+
+def test_memory_page_full_detail_preview_is_read_only_and_has_scrollable_long_text_regions() -> None:
+    app_js = _source("g3ku/web/frontend/org_graph_app.js")
+    css = _source("g3ku/web/frontend/org_graph.css")
+    preview_fragment = _fragment(
+        app_js,
+        "function ensureMemoryDetailPreviewUi()",
+        "function setMemoryCardExpanded(",
+    )
+
+    assert "只读记忆详情" in preview_fragment
+    assert 'class="memory-detail-preview-shell"' in preview_fragment
+    assert 'memory-detail-preview-text-block' in preview_fragment
+    assert 'data-memory-detail-close' in preview_fragment
+    assert "<textarea" not in preview_fragment
+    assert "contenteditable" not in preview_fragment
+    assert "saveMemoryDetail" not in app_js
+    assert "updateMemoryDetail" not in app_js
+    assert ".memory-detail-preview-text-block" in css
+    assert "overflow-y: auto;" in css
 
 
 def test_memory_page_note_preview_admin_api_and_client_contract(monkeypatch: pytest.MonkeyPatch) -> None:

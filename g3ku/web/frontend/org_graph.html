@@ -56,7 +56,7 @@
 
             <button class="nav-item active" data-view="ceo" type="button">
                 <i data-lucide="message-square"></i>
-                <span>Leader 会话</span>
+                <span>会话列表</span>
             </button>
             <button class="nav-item" data-view="tasks" type="button">
                 <i data-lucide="briefcase"></i>
@@ -97,10 +97,10 @@
         <main class="main-content">
             <section id="view-ceo" class="view-section active">
                 <div id="ceo-shell" class="ceo-shell">
-                    <aside id="ceo-session-panel" class="ceo-session-panel" aria-label="Leader session list">
+                    <aside id="ceo-session-panel" class="ceo-session-panel" aria-label="会话列表">
                         <div class="ceo-session-panel-header">
                             <div class="ceo-session-panel-controls">
-                                <button id="ceo-session-panel-toggle" class="icon-btn ceo-session-panel-toggle" type="button" aria-expanded="false" aria-label="Expand session list">
+                                <button id="ceo-session-panel-toggle" class="icon-btn ceo-session-panel-toggle" type="button" aria-expanded="false" aria-label="展开会话列表">
                                     <i data-lucide="chevrons-right"></i>
                                 </button>
                                 <button id="ceo-new-session-btn" class="toolbar-btn ceo-new-session-btn" type="button" aria-label="新建会话">
@@ -108,14 +108,14 @@
                                 </button>
                             </div>
                             <div class="ceo-session-toolbar-row">
-                                <div id="ceo-session-tabs" class="ceo-session-tabs" role="tablist" aria-label="Leader session views">
+                                <div id="ceo-session-tabs" class="ceo-session-tabs" role="tablist" aria-label="会话视图">
                                     <button id="ceo-session-tab-local" class="ceo-session-tab" type="button" aria-pressed="true">本地</button>
                                     <button id="ceo-session-tab-channel" class="ceo-session-tab" type="button" aria-pressed="false">渠道</button>
                                 </div>
                                 <button id="ceo-session-bulk-toggle" class="toolbar-btn ghost ceo-session-bulk-toggle" type="button" aria-pressed="false" hidden>多选</button>
                             </div>
                         </div>
-                        <div id="ceo-session-bulk-actions" class="ceo-session-bulk-actions" role="group" aria-label="Leader session bulk actions" hidden>
+                        <div id="ceo-session-bulk-actions" class="ceo-session-bulk-actions" role="group" aria-label="会话批量操作" hidden>
                             <button id="ceo-session-bulk-select-all" class="toolbar-btn ghost" type="button">全选</button>
                             <button id="ceo-session-bulk-delete" class="toolbar-btn danger" type="button">删除</button>
                         </div>
@@ -387,8 +387,6 @@
                 </header>
 
                 <div class="memory-layout">
-                    <div id="memory-page-error-banner" class="memory-banner" role="status" aria-live="polite" hidden></div>
-                    <div id="memory-queue-blocked-banner" class="memory-banner warning" role="status" aria-live="polite" hidden>队首阻塞整个队列</div>
                     <div id="memory-admin-actions" hidden aria-hidden="true"></div>
                     <section class="resource-detail-panel memory-column">
                         <div class="panel-header">
@@ -427,7 +425,7 @@
                     </div>
                     <div class="resource-header-actions model-page-actions">
                         <button id="model-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
-                        <button id="llm-memory-settings-btn" class="toolbar-btn ghost" type="button">记忆模型设置</button>
+                        <button id="llm-memory-settings-btn" class="toolbar-btn ghost" type="button">RAG模型设置</button>
                         <button id="llm-config-create-btn" class="toolbar-btn ghost" type="button">新建配置</button>
                         <button id="model-roles-save-btn" class="toolbar-btn success" type="button">编辑模型链</button>
                         <button id="model-roles-cancel-btn" class="toolbar-btn ghost" type="button" hidden>取消</button>

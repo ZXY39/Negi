@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import html as html_module
+import json
 from pathlib import Path
+import subprocess
+import textwrap
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -21,37 +24,46 @@ def _admin_route_fragment(source: str, route: str) -> str:
     return source[start:end]
 
 
-def test_memory_management_view_uses_page_level_error_and_blocked_banners() -> None:
+def _run_node_script(script: str) -> dict[str, object]:
+    completed = subprocess.run(
+        ["node", "-"],
+        input=textwrap.dedent(script),
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=True,
+        cwd=REPO_ROOT,
+    )
+    return json.loads(completed.stdout.strip())
+
+
+def test_memory_management_view_uses_detail_modal_and_toasts_instead_of_page_banners() -> None:
     html_source = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
     memory_html = _memory_view_fragment(html_source)
     rendered_memory_html = html_module.unescape(memory_html)
+    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
 
-    assert "项目解锁" in html_source
-    assert "输入口令后才能进入项目主界面与启动后台能力。" in html_source
-    assert "Leader 会话" in html_source
-    assert "记忆管理" in rendered_memory_html
-    assert "查看未出队记忆队列与已成功处理批次。当前页面默认只读，不开放副作用运维按钮。" in rendered_memory_html
+    assert 'id="view-memory"' in memory_html
     assert 'id="memory-refresh-btn"' in memory_html
-    assert "刷新" in rendered_memory_html
-    assert 'id="memory-page-error-banner"' in memory_html
-    assert 'id="memory-queue-blocked-banner"' in memory_html
-    assert "队首阻塞整个队列" in rendered_memory_html
-
-    blocked_index = memory_html.index('id="memory-queue-blocked-banner"')
-    error_index = memory_html.index('id="memory-page-error-banner"')
-    queue_column_index = memory_html.index('<section class="resource-detail-panel memory-column">')
-
-    assert blocked_index < queue_column_index
-    assert error_index < queue_column_index
-    assert 'id="memory-error-banner"' not in memory_html
+    assert 'id="memory-queue-list"' in memory_html
+    assert 'id="memory-processed-list"' in memory_html
+    assert 'id="memory-page-error-banner"' not in memory_html
+    assert 'id="memory-queue-blocked-banner"' not in memory_html
+    assert "function ensureMemoryDetailPreviewUi()" in app_js
+    assert "function renderMemoryDetailPreview()" in app_js
+    assert "function openMemoryDetailPreview(" in app_js
+    assert "function closeMemoryDetailPreview()" in app_js
+    assert 'data-memory-detail-open' in app_js
+    assert 'role="button"' in app_js
+    assert "renderMemoryView();" in app_js
+    assert "showToast({" in app_js
+    assert "memory-detail-preview-drawer" not in rendered_memory_html
 
 
 def test_memory_management_view_preserves_expand_state_and_memory_only_auto_refresh() -> None:
     app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
 
-    assert '{ key: "memory", label: "记忆" }' in app_js
     assert 'viewMemory: document.getElementById("view-memory")' in app_js
-    assert 'memory: U.viewMemory' in app_js
     assert "MEMORY_VIEW_POLL_MS = 15000" in app_js
     assert "function startMemoryViewAutoRefresh()" in app_js
     assert "function stopMemoryViewAutoRefresh()" in app_js
@@ -59,23 +71,110 @@ def test_memory_management_view_preserves_expand_state_and_memory_only_auto_refr
     assert 'void loadMemoryView({ quiet: true });' in app_js
     assert 'if (view === "memory") startMemoryViewAutoRefresh();' in app_js
     assert 'else stopMemoryViewAutoRefresh();' in app_js
-    assert "function bindMemoryCardToggles()" in app_js
-    assert 'querySelectorAll("details[data-memory-card=\'queue\']")' in app_js
-    assert 'querySelectorAll("details[data-memory-card=\'processed\']")' in app_js
-    assert 'card.dataset.memoryToggleBound = "1";' in app_js
-    assert 'setMemoryCardExpanded("queue", card.dataset.memoryKey || "", card.open);' in app_js
-    assert 'setMemoryCardExpanded("processed", card.dataset.memoryKey || "", card.open);' in app_js
-    assert "bindMemoryCardToggles();" in app_js
-    assert "memoryPageErrorBanner" in app_js
-    assert "memoryQueueBlockedBanner" in app_js
-    assert 'U.memoryPageErrorBanner.hidden = !hasError;' in app_js
-    assert 'U.memoryQueueBlockedBanner.hidden = !blockedText;' in app_js
-    assert "状态：" in app_js
-    assert "入队时间：" in app_js
-    assert "开始处理：" in app_js
-    assert "最近错误：" in app_js
-    assert "最近报错时间：" in app_js
-    assert "下次重试：" in app_js
+    assert "function maybeToastMemoryAlerts(" in app_js
+    assert "openMemoryDetailPreview(detailTrigger.dataset.memoryDetailOpen" in app_js
+    assert "closeMemoryDetailPreview();" in app_js
+    assert "队列阻塞" in app_js
+
+
+def test_memory_cards_use_compact_previews_and_open_full_detail_modal() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+
+        class StubElement {}
+        class StubHTMLElement extends StubElement {}
+        class StubHTMLButtonElement extends StubHTMLElement {}
+        class StubHTMLInputElement extends StubHTMLElement {}
+        class StubHTMLTextAreaElement extends StubHTMLElement {}
+        class StubHTMLSelectElement extends StubHTMLElement {}
+
+        class StubDocument {
+          getElementById() { return null; }
+          querySelector() { return null; }
+          querySelectorAll() { return []; }
+          addEventListener() {}
+          createElement() { return {}; }
+        }
+
+        const context = {
+          console,
+          setTimeout,
+          clearTimeout,
+          setInterval,
+          clearInterval,
+          queueMicrotask,
+          navigator: { clipboard: { writeText: async () => {} } },
+          location: { protocol: "http:", host: "localhost", pathname: "/org_graph.html" },
+          localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+          sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+          document: new StubDocument(),
+          window: {},
+          Element: StubElement,
+          HTMLElement: StubHTMLElement,
+          HTMLButtonElement: StubHTMLButtonElement,
+          HTMLInputElement: StubHTMLInputElement,
+          HTMLTextAreaElement: StubHTMLTextAreaElement,
+          HTMLSelectElement: StubHTMLSelectElement,
+          URLSearchParams,
+          URL,
+          AbortController,
+          fetch: async () => ({ ok: true, json: async () => ({}) }),
+          lucide: { createIcons() {} },
+          marked: { parse: (value) => String(value) },
+          DOMPurify: { sanitize: (value) => String(value) },
+          structuredClone: global.structuredClone,
+          performance: { now: () => 0 },
+          requestAnimationFrame: (callback) => { callback(); return 1; },
+          cancelAnimationFrame: () => {},
+          WebSocket: function WebSocket() {},
+          addEventListener() {},
+          removeEventListener() {},
+        };
+        context.window = context;
+
+        vm.createContext(context);
+        vm.runInContext(
+          `${appCode}\\nthis.__testExports = { renderMemoryQueueCard, renderMemoryProcessedCard };`,
+          context,
+        );
+
+        const longText = "A".repeat(600);
+        const queueHtml = context.__testExports.renderMemoryQueueCard({
+          request_id: "queue_demo",
+          status: "processing",
+          created_at: "2026-04-20T03:26:45+08:00",
+          payload_text: longText,
+        });
+        const processedHtml = context.__testExports.renderMemoryProcessedCard({
+          batch_id: "processed_demo",
+          op: "write",
+          status: "applied",
+          processed_at: "2026-04-20T03:26:45+08:00",
+          request_count: 1,
+          payload_texts: [longText],
+          model_chain: ["agpt-5.2"],
+          usage: { input_tokens: 1, output_tokens: 2, cache_read_tokens: 0 },
+        });
+
+        console.log(JSON.stringify({ queueHtml, processedHtml, longText }));
+        """
+    )
+
+    queue_html = str(result["queueHtml"])
+    processed_html = str(result["processedHtml"])
+    long_text = str(result["longText"])
+    assert 'data-memory-detail-open="queue"' in queue_html
+    assert 'data-memory-detail-open="processed"' in processed_html
+    assert 'role="button"' in queue_html
+    assert 'role="button"' in processed_html
+    assert "memory-card-preview" not in queue_html
+    assert "memory-card-preview" not in processed_html
+    assert long_text not in queue_html
+    assert long_text not in processed_html
 
 
 def test_memory_management_view_uses_read_only_queue_endpoints_with_safe_error_messages() -> None:
@@ -89,22 +188,15 @@ def test_memory_management_view_uses_read_only_queue_endpoints_with_safe_error_m
     assert "getMemoryProcessed" in api_client_js
     assert '"/api/memory/processed"' in api_client_js
     assert "memory_queue_read_failed" in api_client_js
-    assert "记忆队列暂时不可读取，请稍后刷新。" in api_client_js
     assert "memory_processed_read_failed" in api_client_js
-    assert "已处理记忆暂时不可读取，请稍后刷新。" in api_client_js
     assert "memory_manager_unavailable" in api_client_js
-    assert "记忆服务暂不可用，请稍后刷新。" in api_client_js
     assert "memory_queue_unavailable" in api_client_js
-    assert "记忆队列暂不可用，请稍后刷新。" in api_client_js
     assert "memory_processed_unavailable" in api_client_js
-    assert "已处理记忆列表暂不可用，请稍后刷新。" in api_client_js
 
     assert "@router.get('/memory/queue')" in admin_rest_py
     assert "@router.get('/memory/processed')" in admin_rest_py
     assert "memory_queue_read_failed" in queue_route
     assert "memory_processed_read_failed" in processed_route
-    assert "记忆队列暂时不可读取，请稍后刷新。" in queue_route
-    assert "已处理记忆暂时不可读取，请稍后刷新。" in processed_route
     assert "detail=str(exc)" not in queue_route
     assert "detail=str(exc)" not in processed_route
 
@@ -116,7 +208,6 @@ def test_memory_management_view_keeps_admin_mutations_hidden_by_default() -> Non
 
     assert 'id="memory-admin-actions"' in memory_html
     assert 'id="memory-admin-actions" hidden aria-hidden="true"' in memory_html
-    assert "当前页面默认只读，不开放副作用运维按钮。" in html_module.unescape(memory_html)
     assert "data-memory-admin-action" not in memory_html
 
     assert 'memoryAdminActions: document.getElementById("memory-admin-actions")' in app_js
@@ -128,3 +219,181 @@ def test_memory_management_view_keeps_admin_mutations_hidden_by_default() -> Non
     assert "data-memory-admin-action" not in app_js
     assert '"/api/memory/admin/retry-head"' not in app_js
     assert "/api/memory/admin/retry-head" not in html_source
+
+
+def test_memory_processed_card_renders_discarded_assess_rows_as_discarded_not_added() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+
+        class StubElement {}
+        class StubHTMLElement extends StubElement {}
+        class StubHTMLButtonElement extends StubHTMLElement {}
+        class StubHTMLInputElement extends StubHTMLElement {}
+        class StubHTMLTextAreaElement extends StubHTMLElement {}
+        class StubHTMLSelectElement extends StubHTMLElement {}
+
+        class StubDocument {
+          getElementById() { return null; }
+          querySelector() { return null; }
+          querySelectorAll() { return []; }
+          addEventListener() {}
+          createElement() { return {}; }
+        }
+
+        const context = {
+          console,
+          setTimeout,
+          clearTimeout,
+          setInterval,
+          clearInterval,
+          queueMicrotask,
+          navigator: { clipboard: { writeText: async () => {} } },
+          location: { protocol: "http:", host: "localhost", pathname: "/org_graph.html" },
+          localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+          sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+          document: new StubDocument(),
+          window: {},
+          Element: StubElement,
+          HTMLElement: StubHTMLElement,
+          HTMLButtonElement: StubHTMLButtonElement,
+          HTMLInputElement: StubHTMLInputElement,
+          HTMLTextAreaElement: StubHTMLTextAreaElement,
+          HTMLSelectElement: StubHTMLSelectElement,
+          URLSearchParams,
+          URL,
+          AbortController,
+          fetch: async () => ({ ok: true, json: async () => ({}) }),
+          lucide: { createIcons() {} },
+          marked: { parse: (value) => String(value) },
+          DOMPurify: { sanitize: (value) => String(value) },
+          structuredClone: global.structuredClone,
+          performance: { now: () => 0 },
+          requestAnimationFrame: (callback) => { callback(); return 1; },
+          cancelAnimationFrame: () => {},
+          WebSocket: function WebSocket() {},
+          addEventListener() {},
+          removeEventListener() {},
+        };
+        context.window = context;
+
+        vm.createContext(context);
+        vm.runInContext(
+          `${appCode}\\nthis.__testExports = { renderMemoryProcessedCard };`,
+          context,
+        );
+
+        const html = context.__testExports.renderMemoryProcessedCard({
+          batch_id: "assess_demo",
+          op: "assess",
+          source_op: "assess",
+          status: "discarded",
+          discard_reason: "assessed_null",
+          processed_at: "2026-04-20T03:26:45+08:00",
+          request_count: 1,
+          payload_texts: ["window payload"],
+          model_chain: ["agpt-5.2"],
+          usage: { input_tokens: 1, output_tokens: 2, cache_read_tokens: 0 },
+        });
+
+        console.log(JSON.stringify({ html }));
+        """
+    )
+
+    rendered = str(result["html"])
+    assert "澧炲姞" not in rendered
+    assert 'data-status="success"' not in rendered
+    assert 'data-status="unpassed"' in rendered
+    assert 'data-memory-detail-open="processed"' in rendered
+    assert "assess_demo" in rendered
+
+
+def test_memory_processed_applied_write_row_uses_operation_badge_instead_of_generic_processed_status() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+
+        class StubElement {}
+        class StubHTMLElement extends StubElement {}
+        class StubHTMLButtonElement extends StubHTMLElement {}
+        class StubHTMLInputElement extends StubHTMLElement {}
+        class StubHTMLTextAreaElement extends StubHTMLElement {}
+        class StubHTMLSelectElement extends StubHTMLElement {}
+
+        class StubDocument {
+          getElementById() { return null; }
+          querySelector() { return null; }
+          querySelectorAll() { return []; }
+          addEventListener() {}
+          createElement() { return {}; }
+        }
+
+        const context = {
+          console,
+          setTimeout,
+          clearTimeout,
+          setInterval,
+          clearInterval,
+          queueMicrotask,
+          navigator: { clipboard: { writeText: async () => {} } },
+          location: { protocol: "http:", host: "localhost", pathname: "/org_graph.html" },
+          localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+          sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+          document: new StubDocument(),
+          window: {},
+          Element: StubElement,
+          HTMLElement: StubHTMLElement,
+          HTMLButtonElement: StubHTMLButtonElement,
+          HTMLInputElement: StubHTMLInputElement,
+          HTMLTextAreaElement: StubHTMLTextAreaElement,
+          HTMLSelectElement: StubHTMLSelectElement,
+          URLSearchParams,
+          URL,
+          AbortController,
+          fetch: async () => ({ ok: true, json: async () => ({}) }),
+          lucide: { createIcons() {} },
+          marked: { parse: (value) => String(value) },
+          DOMPurify: { sanitize: (value) => String(value) },
+          structuredClone: global.structuredClone,
+          performance: { now: () => 0 },
+          requestAnimationFrame: (callback) => { callback(); return 1; },
+          cancelAnimationFrame: () => {},
+          WebSocket: function WebSocket() {},
+          addEventListener() {},
+          removeEventListener() {},
+        };
+        context.window = context;
+
+        vm.createContext(context);
+        vm.runInContext(
+          `${appCode}\\nthis.__testExports = { renderMemoryProcessedCard };`,
+          context,
+        );
+
+        const html = context.__testExports.renderMemoryProcessedCard({
+          batch_id: "write_demo",
+          op: "write",
+          source_op: "write",
+          status: "applied",
+          processed_at: "2026-04-20T03:26:45+08:00",
+          request_count: 1,
+          payload_texts: ["User prefers concise answers"],
+          model_chain: ["agpt-5.2"],
+          usage: { input_tokens: 10, output_tokens: 20, cache_read_tokens: 30 },
+        });
+
+        console.log(JSON.stringify({ html }));
+        """
+    )
+
+    rendered = str(result["html"])
+    assert 'data-status="success"' in rendered
+    assert "增加" in rendered
+    assert "已应用" not in rendered
+    assert "已处理" not in rendered

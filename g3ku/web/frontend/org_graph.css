@@ -6187,6 +6187,33 @@ textarea {
     align-items: center;
 }
 
+.model-role-limit-fixed-track {
+    grid-column: 2 / 4;
+    display: flex;
+    align-items: center;
+    min-height: 34px;
+    padding: 3px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+    background: color-mix(in srgb, var(--bg-panel) 50%, var(--bg-app) 50%);
+}
+
+.model-role-limit-fixed-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 26px;
+    padding: 4px 12px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    background: var(--bg-panel);
+    border-radius: 6px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    white-space: nowrap;
+}
+
 .llm-segmented-option {
     position: relative;
     cursor: pointer;
@@ -7694,8 +7721,9 @@ textarea {
 .memory-list {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
+    gap: var(--space-4);
     padding: var(--space-4);
+    padding-bottom: calc(var(--space-5) + 8px);
     overflow-y: auto;
     min-height: 0;
     flex: 1 1 auto;
@@ -7722,6 +7750,21 @@ textarea {
     overflow: hidden;
 }
 
+.memory-card.memory-card-compact {
+    display: block;
+    padding: 0;
+    cursor: pointer;
+    transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.memory-card.memory-card-compact:hover,
+.memory-card.memory-card-compact:focus-visible {
+    border-color: color-mix(in srgb, var(--brand-primary) 34%, var(--border-color));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 12%, transparent);
+    transform: translateY(-1px);
+    outline: none;
+}
+
 .memory-card summary {
     list-style: none;
     cursor: pointer;
@@ -7738,10 +7781,14 @@ textarea {
     gap: var(--space-2);
 }
 
+.memory-card-compact .memory-card-summary {
+    padding: var(--space-4);
+}
+
 .memory-card-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
     gap: var(--space-3);
 }
 
@@ -7750,14 +7797,42 @@ textarea {
     flex-wrap: wrap;
     gap: var(--space-2);
     align-items: center;
+    min-width: 0;
 }
 
 .memory-card-meta {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: max-content;
     gap: var(--space-2);
+    justify-content: end;
+    align-items: center;
     color: var(--text-secondary);
     font-size: 0.84rem;
+    white-space: nowrap;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+
+.memory-card-meta::-webkit-scrollbar {
+    display: none;
+}
+
+.memory-card-meta-item {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    white-space: nowrap;
+}
+
+.memory-card-meta-label {
+    color: var(--text-secondary);
+}
+
+.memory-card-meta-value {
+    color: var(--text-primary);
+    font-weight: 600;
 }
 
 .memory-card-error {
@@ -7770,6 +7845,39 @@ textarea {
     gap: var(--space-3);
     padding: 0 var(--space-4) var(--space-4);
     border-top: 1px solid var(--border-color);
+}
+
+.memory-card-actions {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.memory-card-preview {
+    display: grid;
+    gap: 8px;
+    padding: 12px 14px;
+    border-radius: 16px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 74%, transparent);
+}
+
+.memory-card-preview-label {
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.memory-card-preview-text {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--text-primary);
+    font-size: 0.86rem;
+    line-height: 1.55;
 }
 
 .memory-card-field-grid {
@@ -7809,6 +7917,81 @@ textarea {
 .memory-card-inline-rich {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+}
+
+.memory-detail-preview-drawer {
+    width: min(920px, calc(100vw - 32px));
+    max-height: min(84vh, calc(100dvh - 32px));
+    z-index: 97;
+}
+
+.memory-detail-preview-head {
+    display: grid;
+    gap: 6px;
+}
+
+.memory-detail-preview-shell {
+    display: grid;
+    gap: 16px;
+    min-height: 0;
+}
+
+.memory-detail-preview-meta {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.memory-detail-preview-field {
+    display: grid;
+    gap: 4px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 74%, transparent);
+}
+
+.memory-detail-preview-field-label {
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.memory-detail-preview-field-value {
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.memory-detail-preview-text-section {
+    display: grid;
+    gap: 8px;
+}
+
+.memory-detail-preview-text-title {
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-weight: 700;
+}
+
+.memory-detail-preview-text-block {
+    margin: 0;
+    padding: 16px 18px;
+    border-radius: 18px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 78%, transparent);
+    color: var(--text-primary);
+    font-size: 0.88rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: min(34vh, 360px);
+    overflow-y: auto;
+    scrollbar-gutter: stable;
 }
 
 .memory-note-ref-list {
@@ -7858,7 +8041,22 @@ textarea {
         grid-template-columns: 1fr;
     }
 
+    .memory-card-head {
+        grid-template-columns: 1fr;
+        align-items: flex-start;
+    }
+
     .memory-card-field-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .memory-card-meta {
+        grid-auto-flow: row;
+        grid-auto-columns: auto;
+        justify-content: start;
+    }
+
+    .memory-detail-preview-meta {
         grid-template-columns: 1fr;
     }
 }
