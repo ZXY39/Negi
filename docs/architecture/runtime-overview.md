@@ -251,6 +251,7 @@ Additional maintenance note for fixed-builtin resource executors:
 - CEO/frontdoor and node execution now treat semantic top-k as an extension-tool budget. Resource-backed fixed builtin executors are filtered out before semantic narrowing so they do not consume dense/rerank shortlist capacity.
 - The same class of executors also stays out of hydration LRU. `load_tool_context` may still surface their contract/help payload, but a successful loader result should not promote an already fixed-callable executor into hydrated state.
 - In practice this means "resource-backed fixed builtin" is now a third debugging category between "pure internal builtin" and "ordinary extension executor": it is resource-backed for catalog/help/RBAC purposes, but it does not spend semantic top-k or hydration-LRU budget.
+- `content_describe` / `content_open` / `content_search` no longer belong to that category. Fresh turns should surface them as ordinary candidates, and successful `load_tool_context(tool_id="content_*")` calls should promote them through the normal hydration path on later turns.
 
 - 节点与 CEO/frontdoor 的 `candidate_tool_names` / `candidate_skill_ids` 现在都表示“`RBAC 可见 ∩ 语义召回命中` 的当前候选集合”；语义召回不可用时，候选集合退化为 `RBAC 可见集合`，而不是报错中断。
 - `load_tool_context` / `load_skill_context` 的准入只认当前 canonical candidate 集合；不再允许“RBAC 可见但不在 candidate 中”的旁路加载。
@@ -395,6 +396,7 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - `task_runtime_messages` / `runtime-frame-messages:{node_id}` artifact 不再只是当前 messages 列表；它现在还会在同一个 artifact 里累计 `callable_tool_snapshots`。
 - 每条快照代表一次 `before_model` 轮次下，本地运行时真正记录的 callable/candidate 截面，包括 `callable_tool_names`、`candidate_tool_names`、`candidate_tool_items`、`candidate_skill_ids`、`candidate_skill_items`、`model_visible_tool_names`、`hydrated_executor_names` 和选择 trace。
 - 对 execution / acceptance 节点，如果当轮没有有效阶段，那么这些快照里的 `callable_tool_names` 与 `model_visible_tool_names` 都应只剩 `submit_next_stage`；候选集合仍保留在 `candidate_tool_names`，完整 callable pool 则留在选择 trace 里。
+- 对 execution / acceptance 节点与 CEO/frontdoor 都一样：`content_describe` / `content_open` / `content_search` 现在应默认出现在 candidate 侧，而不是 fresh-turn callable 侧；只有 hydration 成功后的后续快照才应把它们写进 `callable_tool_names` / `hydrated_executor_names`。
 - 因此当维护者排查“为什么这一轮模型明明 load 过工具却没法调用”时，先看这个 artifact 里的最近一条快照，再去看 transcript 或 stage trace；它比只看最终 messages 更能说明当轮可调用集到底是什么。
 - 执行节点与检验节点现在都应理解为“两层消息结构”：稳定 bootstrap user JSON 负责任务定义，只保留稳定节点上下文；`execution_stage` 不再写在 bootstrap 里。单独的动态 `node_runtime_tool_contract` user 消息负责当前轮的 callable/candidate tool/skill 合同，并且固定追加在当前 request 尾部。
 - 节点的 turn overlay / repair overlay 现在也必须遵守同一条 append-only 边界：它们只能作为新的 request-tail 消息追加，不能再把文本回写进任何已有的 bootstrap user 消息或持久化历史消息。排查缓存命中下降时，优先确认 stable prefix 是否仍保持逐轮不变。

@@ -19,6 +19,10 @@ from g3ku.runtime.frontdoor.inline_tool_reminder import build_timeout_stop_error
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
+from g3ku.runtime.tool_error_guidance import (
+    append_parameter_error_guidance,
+    is_parameter_like_tool_exception,
+)
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 from g3ku.runtime.web_ceo_sessions import SESSION_TASK_DEFAULTS_SCOPE_SESSION, ceo_session_task_defaults_scope
 from main.protocol import now_iso
@@ -563,10 +567,16 @@ class CeoFrontDoorSupport:
         try:
             errors = tool.validate_params(normalized_arguments)
         except Exception as exc:
-            error_text = f"Error validating {tool_name}: {exc}"
+            error_text = append_parameter_error_guidance(
+                f"Error validating {tool_name}: {exc}",
+                tool_name=tool_name,
+            )
             return error_text, error_text, "error", "", "", None
         if errors:
-            error_text = f"Error: {'; '.join(errors)}"
+            error_text = append_parameter_error_guidance(
+                f"Error: {'; '.join(errors)}",
+                tool_name=tool_name,
+            )
             return error_text, error_text, "error", "", "", None
 
         started_at = now_iso()
@@ -645,10 +655,16 @@ class CeoFrontDoorSupport:
         except Exception as exc:
             finished_at = now_iso()
             elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
-            error_text = self._inline_timeout_stop_error_text(
+            timeout_stop_error = self._inline_timeout_stop_error_text(
                 tool_name=tool_name,
                 execution_id=inline_execution_id,
-            ) or f"Error executing {tool_name}: {exc}"
+            )
+            error_text = timeout_stop_error or f"Error executing {tool_name}: {exc}"
+            if not timeout_stop_error and is_parameter_like_tool_exception(exc):
+                error_text = append_parameter_error_guidance(
+                    error_text,
+                    tool_name=tool_name,
+                )
             await self._emit_progress(
                 on_progress,
                 error_text,

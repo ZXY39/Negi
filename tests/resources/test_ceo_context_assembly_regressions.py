@@ -1173,10 +1173,18 @@ async def test_message_builder_promotes_hydrated_tools_into_callable_list() -> N
             exposure={
                 "skills": [],
                 "tool_families": [
+                    _tool_resource_record("content_open", "Open content by ref or path."),
+                    _tool_resource_record("content_search", "Search content by ref or path."),
                     _tool_resource_record("filesystem_write", "Write a file with full content."),
                     _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
                 ],
-                "tool_names": ["load_tool_context", "filesystem_write", "agent_browser"],
+                "tool_names": [
+                    "load_tool_context",
+                    "content_open",
+                    "content_search",
+                    "filesystem_write",
+                    "agent_browser",
+                ],
             },
             persisted_session=None,
             hydrated_tool_names=["filesystem_write"],
@@ -1185,7 +1193,47 @@ async def test_message_builder_promotes_hydrated_tools_into_callable_list() -> N
         message_builder_module.semantic_catalog_rankings = original
 
     assert result.tool_names == ["load_tool_context", "filesystem_write"]
-    assert result.candidate_tool_names == ["agent_browser"]
+    assert "content_open" in result.candidate_tool_names
+    assert "content_search" in result.candidate_tool_names
+    assert "agent_browser" in result.candidate_tool_names
+
+
+@pytest.mark.asyncio
+async def test_message_builder_promotes_hydrated_content_tools_back_into_callable_list() -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    async def _semantic_rankings(**kwargs):
+        _ = kwargs
+        return {"mode": "unavailable", "available": False, "trace": {}}
+
+    original = message_builder_module.semantic_catalog_rankings
+    message_builder_module.semantic_catalog_rankings = _semantic_rankings
+    try:
+        result = await builder.build_for_ceo(
+            session=_session(),
+            query_text="inspect the uploaded artifact",
+            exposure={
+                "skills": [],
+                "tool_families": [
+                    _tool_resource_record("content_open", "Open content by ref or path."),
+                    _tool_resource_record("content_search", "Search content by ref or path."),
+                ],
+                "tool_names": [
+                    "load_tool_context",
+                    "content_open",
+                    "content_search",
+                ],
+            },
+            persisted_session=None,
+            hydrated_tool_names=["content_open"],
+        )
+    finally:
+        message_builder_module.semantic_catalog_rankings = original
+
+    assert result.tool_names == ["load_tool_context", "content_open"]
+    assert result.candidate_tool_names == ["content_search"]
 
 
 @pytest.mark.asyncio

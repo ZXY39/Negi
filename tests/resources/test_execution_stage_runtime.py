@@ -27,6 +27,10 @@ from main.service.runtime_service import MainRuntimeService
 
 runtime_service_module = importlib.import_module("main.service.runtime_service")
 
+_PARAMETER_GUIDANCE_TEMPLATE = (
+    '请先调用 load_tool_context(tool_id="{tool_name}") 查看该工具的详细说明、参数契约和示例后，再重新使用该工具。'
+)
+
 
 @pytest.fixture(autouse=True)
 def _default_node_send_preflight_context_window(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -84,6 +88,49 @@ class _StaticTool(Tool):
     async def execute(self, **kwargs):
         _ = kwargs
         return self._result
+
+
+class _ErrorTool(Tool):
+    def __init__(self, *, name: str, exc: Exception) -> None:
+        self._name = name
+        self._exc = exc
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return f'{self._name} tool'
+
+    @property
+    def parameters(self) -> dict:
+        return {'type': 'object', 'properties': {'value': {'type': 'string'}}, 'required': ['value']}
+
+    async def execute(self, **kwargs):
+        _ = kwargs
+        raise self._exc
+
+
+class _BrokenValidationTool(Tool):
+    @property
+    def name(self) -> str:
+        return 'broken_validation_tool'
+
+    @property
+    def description(self) -> str:
+        return 'broken validation tool'
+
+    @property
+    def parameters(self) -> dict:
+        return {'type': 'object', 'properties': {'value': {'type': 'string'}}, 'required': ['value']}
+
+    async def execute(self, **kwargs):
+        raise AssertionError('execute should not be reached when validation crashes')
+
+    def validate_params(self, params: dict[str, object]) -> list[str]:
+        _ = params
+        raise TypeError("unhashable type: 'list'")
 
 
 class _ToolResourceManager:
@@ -306,6 +353,75 @@ async def test_execution_stage_blocks_other_tools_before_stage_and_after_budget(
         assert exhausted_ordinary.startswith('Error: current stage budget is exhausted')
         assert exhausted_spawn.startswith('Error: current stage budget is exhausted')
         assert not final_result.startswith('Error:')
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_stage_runtime_appends_loader_guidance_for_parameter_like_execute_errors(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='验证参数错误文案',
+            tool_round_budget=STAGE_TOOL_ROUND_BUDGET_MIN,
+        )
+        runtime_context = {
+            'task_id': record.task_id,
+            'node_id': record.root_node_id,
+            'node_kind': 'execution',
+            'actor_role': 'execution',
+        }
+
+        invalid_parameter_result = await service._react_loop._execute_tool(
+            tools={'value_error_tool': _ErrorTool(name='value_error_tool', exc=ValueError('value must be an absolute path'))},
+            tool_name='value_error_tool',
+            arguments={},
+            runtime_context=runtime_context,
+        )
+        validation_exception_result = await service._react_loop._execute_tool(
+            tools={'broken_validation_tool': _BrokenValidationTool()},
+            tool_name='broken_validation_tool',
+            arguments={'value': 'demo'},
+            runtime_context=runtime_context,
+        )
+        value_error_result = await service._react_loop._execute_tool(
+            tools={'value_error_tool': _ErrorTool(name='value_error_tool', exc=ValueError('value must be an absolute path'))},
+            tool_name='value_error_tool',
+            arguments={'value': 'demo'},
+            runtime_context=runtime_context,
+        )
+        type_error_result = await service._react_loop._execute_tool(
+            tools={'type_error_tool': _ErrorTool(name='type_error_tool', exc=TypeError('value must be a string scalar'))},
+            tool_name='type_error_tool',
+            arguments={'value': 'demo'},
+            runtime_context=runtime_context,
+        )
+        with pytest.raises(RuntimeError, match='runtime execution failed'):
+            await service._react_loop._execute_tool(
+                tools={'runtime_error_tool': _ErrorTool(name='runtime_error_tool', exc=RuntimeError('runtime execution failed'))},
+                tool_name='runtime_error_tool',
+                arguments={'value': 'demo'},
+                runtime_context=runtime_context,
+            )
+
+        assert 'Error: missing required value' in invalid_parameter_result
+        assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name='value_error_tool') in invalid_parameter_result
+        assert "Error validating broken_validation_tool: unhashable type: 'list'" in validation_exception_result
+        assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name='broken_validation_tool') in validation_exception_result
+        assert 'Error executing value_error_tool: value must be an absolute path' in value_error_result
+        assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name='value_error_tool') in value_error_result
+        assert 'Error executing type_error_tool: value must be a string scalar' in type_error_result
+        assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name='type_error_tool') in type_error_result
     finally:
         await service.close()
 

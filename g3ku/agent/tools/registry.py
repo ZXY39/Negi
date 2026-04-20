@@ -15,6 +15,10 @@ from g3ku.json_schema_utils import (
     build_args_schema_model,
     normalize_runtime_tool_arguments_dict,
 )
+from g3ku.runtime.tool_error_guidance import (
+    append_parameter_error_guidance,
+    is_parameter_like_tool_exception,
+)
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_detached_watchdog,
     actor_role_allows_watchdog,
@@ -93,10 +97,16 @@ class ToolRegistry:
                 errors = tool.validate_params(normalized)
             except Exception as exc:
                 await self._emit_progress(f"[tool:{name}] 参数校验异常: {exc}")
-                return f"Error validating tool '{name}': {str(exc)}" + _hint
+                return append_parameter_error_guidance(
+                    f"Error validating tool '{name}': {str(exc)}",
+                    tool_name=name,
+                ) + _hint
             if errors:
                 await self._emit_progress(f"[tool:{name}] 参数校验失败: {'; '.join(errors)}")
-                return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint
+                return append_parameter_error_guidance(
+                    f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors),
+                    tool_name=name,
+                ) + _hint
 
             runtime_context = self._runtime_context.get() or {}
             callback = runtime_context.get("on_progress")
@@ -153,7 +163,10 @@ class ToolRegistry:
                     )
                 except Exception:
                     pass
-            return f"Error executing {name}: {str(e)}" + _hint
+            error_text = f"Error executing {name}: {str(e)}"
+            if is_parameter_like_tool_exception(e):
+                error_text = append_parameter_error_guidance(error_text, tool_name=name)
+            return error_text + _hint
 
     def to_langchain_tools(self) -> list[BaseTool]:
         """Convert registered tools to official BaseTool instances."""

@@ -14,6 +14,10 @@ from typing import Any
 from g3ku.agent.tools.base import Tool
 from g3ku.content import content_summary_and_ref, parse_content_envelope
 from g3ku.providers.base import ToolCallRequest
+from g3ku.runtime.tool_error_guidance import (
+    append_parameter_error_guidance,
+    is_parameter_like_tool_exception,
+)
 from g3ku.runtime.stage_prompt_compaction import (
     STAGE_COMPACT_PREFIX as _STAGE_COMPACT_PREFIX,
     STAGE_EXTERNALIZED_PREFIX as _STAGE_EXTERNALIZED_PREFIX,
@@ -2592,29 +2596,46 @@ class ReActToolLoop:
         }
         if search_signature and search_signature in prior_overflow_signatures:
             return 'Error: previous search overflowed; refine query before retrying'
-        errors = tool.validate_params(arguments)
+        try:
+            errors = tool.validate_params(arguments)
+        except Exception as exc:
+            return append_parameter_error_guidance(
+                f'Error validating {tool_name}: {exc}',
+                tool_name=tool_name,
+            )
         if errors:
-            return 'Error: ' + '; '.join(errors)
+            return append_parameter_error_guidance(
+                'Error: ' + '; '.join(errors),
+                tool_name=tool_name,
+            )
         execute_kwargs = self._normalize_tool_call_arguments(arguments)
         runtime_param_name = self._runtime_context_parameter_name(tool)
         if runtime_param_name is not None:
             execute_kwargs[runtime_param_name] = runtime_context
-        if not actor_role_allows_watchdog(runtime_context):
-            return await tool.execute(**execute_kwargs)
-        outcome = await run_tool_with_watchdog(
-            tool.execute(**execute_kwargs),
-            tool_name=tool_name,
-            arguments=arguments,
-            runtime_context=runtime_context,
-            snapshot_supplier=self._snapshot_supplier(runtime_context),
-            manager=(
-                getattr(self, '_tool_execution_manager', None)
-                if actor_role_allows_detached_watchdog(runtime_context)
-                else None
-            ),
-            on_poll=lambda _poll: self._on_tool_watchdog_poll(runtime_context),
-        )
-        return outcome.value
+        try:
+            if not actor_role_allows_watchdog(runtime_context):
+                return await tool.execute(**execute_kwargs)
+            outcome = await run_tool_with_watchdog(
+                tool.execute(**execute_kwargs),
+                tool_name=tool_name,
+                arguments=arguments,
+                runtime_context=runtime_context,
+                snapshot_supplier=self._snapshot_supplier(runtime_context),
+                manager=(
+                    getattr(self, '_tool_execution_manager', None)
+                    if actor_role_allows_detached_watchdog(runtime_context)
+                    else None
+                ),
+                on_poll=lambda _poll: self._on_tool_watchdog_poll(runtime_context),
+            )
+            return outcome.value
+        except Exception as exc:
+            if is_parameter_like_tool_exception(exc):
+                return append_parameter_error_guidance(
+                    f'Error executing {tool_name}: {exc}',
+                    tool_name=tool_name,
+                )
+            raise
 
     def _render_tool_message_content(
         self,

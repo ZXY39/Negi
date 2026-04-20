@@ -1744,12 +1744,12 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
 
     promoted_frame = log_service.read_runtime_frame('task-hydration-lru', 'node-hydration-lru')
     assert promoted_frame['hydrated_executor_names'] == [
-        'filesystem_write',
+        'content_open',
         'agent_browser',
         'web_fetch',
     ]
     assert promoted_frame['hydrated_executor_state'] == [
-        'filesystem_write',
+        'content_open',
         'agent_browser',
         'web_fetch',
     ]
@@ -1764,14 +1764,14 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
 
     promoted_frame = log_service.read_runtime_frame('task-hydration-lru', 'node-hydration-lru')
     assert promoted_frame['hydrated_executor_names'] == [
-        'filesystem_write',
         'agent_browser',
         'web_fetch',
+        'content_open',
     ]
     assert promoted_frame['hydrated_executor_state'] == [
-        'filesystem_write',
         'agent_browser',
         'web_fetch',
+        'content_open',
     ]
 
 
@@ -2087,7 +2087,8 @@ def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> N
     assert 'filesystem' not in first_selection['tool_names']
     assert 'content' not in first_selection['tool_names']
     assert 'filesystem_write' not in first_selection['tool_names']
-    assert 'content_describe' in first_selection['tool_names']
+    assert 'content_describe' not in first_selection['tool_names']
+    assert 'content_describe' in first_selection['candidate_tool_names']
 
     log_service.upsert_frame(
         'task-split-preference',
@@ -2115,8 +2116,8 @@ def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> N
     assert 'content' not in hydrated_selection['tool_names']
     assert 'filesystem_write' in hydrated_selection['tool_names']
     assert 'content_describe' in hydrated_selection['tool_names']
-    assert hydrated_selection['hydrated_executor_names'] == ['filesystem_write']
-    assert hydrated_selection['trace']['promoted_hydrated_executor_names'] == ['filesystem_write']
+    assert hydrated_selection['hydrated_executor_names'] == ['filesystem_write', 'content_describe']
+    assert hydrated_selection['trace']['promoted_hydrated_executor_names'] == ['filesystem_write', 'content_describe']
 
 
 def test_execution_selector_preserves_concrete_hydrated_tool_names_without_family_rewrite() -> None:

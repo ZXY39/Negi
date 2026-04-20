@@ -286,6 +286,39 @@ class _BrokenValidationTool(Tool):
         raise TypeError("unhashable type: 'list'")
 
 
+_PARAMETER_GUIDANCE_TEMPLATE = (
+    '请先调用 load_tool_context(tool_id="{tool_name}") 查看该工具的详细说明、参数契约和示例后，再重新使用该工具。'
+)
+
+
+class _ExecuteErrorTool(Tool):
+    def __init__(self, *, name: str, exc: Exception) -> None:
+        self._name = name
+        self._exc = exc
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return f"{self._name} tool"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "value": {"type": "string"},
+            },
+            "required": ["value"],
+        }
+
+    async def execute(self, **kwargs):
+        _ = kwargs
+        raise self._exc
+
+
 def test_memory_assembly_config_no_longer_exposes_frontdoor_global_summary_settings() -> None:
     cfg = MemoryAssemblyConfig()
 
@@ -1150,6 +1183,7 @@ async def test_create_agent_langchain_tool_degrades_validation_exception_to_tool
     assert result["status"] == "error"
     assert "Error validating broken_validation_tool" in result["result_text"]
     assert "unhashable type: 'list'" in result["result_text"]
+    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="broken_validation_tool") in result["result_text"]
     assert [item[1] for item in progress_calls] == ["tool_error"]
 
 
@@ -5785,6 +5819,56 @@ async def test_create_agent_frontdoor_execute_tool_call_omits_unset_optional_nes
     assert payload["decision_source"] == "user"
     assert payload["payload_text"] == "remember this preference"
     assert payload["trigger_source"] == "memory_write_tool"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_frontdoor_execute_tool_call_appends_loader_guidance_for_parameter_like_execute_errors() -> None:
+    class _RuntimeToolStack:
+        def push_runtime_context(self, _context):
+            return "token"
+
+        def pop_runtime_context(self, _token):
+            return None
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            tools=_RuntimeToolStack(),
+            resource_manager=None,
+            inline_tool_execution_registry=None,
+        )
+    )
+
+    value_error_text, value_error_status, _started_at, _finished_at, _elapsed_seconds = await runner._execute_tool_call(
+        tool=_ExecuteErrorTool(name="value_error_tool", exc=ValueError("value must be an absolute path")),
+        tool_name="value_error_tool",
+        arguments={"value": "demo"},
+        runtime_context={},
+        on_progress=None,
+    )
+    type_error_text, type_error_status, _started_at, _finished_at, _elapsed_seconds = await runner._execute_tool_call(
+        tool=_ExecuteErrorTool(name="type_error_tool", exc=TypeError("value must be a string scalar")),
+        tool_name="type_error_tool",
+        arguments={"value": "demo"},
+        runtime_context={},
+        on_progress=None,
+    )
+    runtime_error_text, runtime_error_status, _started_at, _finished_at, _elapsed_seconds = await runner._execute_tool_call(
+        tool=_ExecuteErrorTool(name="runtime_error_tool", exc=RuntimeError("runtime execution failed")),
+        tool_name="runtime_error_tool",
+        arguments={"value": "demo"},
+        runtime_context={},
+        on_progress=None,
+    )
+
+    assert value_error_status == "error"
+    assert "Error executing value_error_tool: value must be an absolute path" in value_error_text
+    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="value_error_tool") in value_error_text
+    assert type_error_status == "error"
+    assert "Error executing type_error_tool: value must be a string scalar" in type_error_text
+    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="type_error_tool") in type_error_text
+    assert runtime_error_status == "error"
+    assert "Error executing runtime_error_tool: runtime execution failed" in runtime_error_text
+    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="runtime_error_tool") not in runtime_error_text
 
 
 @pytest.mark.asyncio
