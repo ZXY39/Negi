@@ -303,6 +303,7 @@ class ManagedModelConfig(Base):
     single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None
     description: str = ""
     context_window_tokens: int | None = None
+    image_multimodal_enabled: bool = False
 
     @field_validator("key")
     @classmethod

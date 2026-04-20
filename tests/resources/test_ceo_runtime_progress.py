@@ -2361,6 +2361,52 @@ def test_web_ceo_continuity_snapshot_round_trip_and_clear(tmp_path: Path, monkey
     assert web_ceo_sessions.read_completed_continuity_snapshot("web:shared") is None
 
 
+def test_web_ceo_continuity_snapshot_strips_multimodal_blocks_from_frontdoor_request_body_messages(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    request_path = tmp_path / "request.json"
+    request_path.write_text("{}", encoding="utf-8")
+
+    web_ceo_sessions.write_completed_continuity_snapshot(
+        "web:shared",
+        {
+            "frontdoor_request_body_messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Please inspect this image"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                    ],
+                },
+            ],
+            "frontdoor_history_shrink_reason": "",
+            "frontdoor_actual_request_path": str(request_path),
+            "frontdoor_actual_request_history": [{"path": str(request_path), "turn_id": "turn-1"}],
+            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "compression_state": {},
+            "semantic_context_state": {},
+            "hydrated_tool_names": [],
+            "capability_snapshot_exposure_revision": "exp:demo",
+            "visible_tool_ids": ["exec"],
+            "visible_skill_ids": [],
+            "provider_tool_schema_names": ["exec"],
+            "source_reason": "finalize",
+        },
+    )
+
+    restored = web_ceo_sessions.read_completed_continuity_snapshot("web:shared")
+
+    assert isinstance(restored, dict)
+    assert restored["frontdoor_request_body_messages"] == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "Please inspect this image"},
+    ]
+
+
 def test_completed_continuity_snapshot_round_trips_token_preflight_diagnostics(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
     request_path = tmp_path / "request.json"
@@ -2479,6 +2525,38 @@ def test_runtime_agent_session_restores_completed_continuity_snapshot_from_disk(
     assert session._compression_state == {"status": "ready", "text": "ok", "source": "semantic"}
     assert session._semantic_context_state == {"summary_text": "summary", "needs_refresh": False}
     assert session._frontdoor_hydrated_tool_names == ["web_fetch"]
+
+
+def test_runtime_agent_session_execution_context_snapshot_strips_multimodal_frontdoor_baseline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="gpt-test", reasoning_effort=None, sessions=SessionManager(tmp_path)),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._frontdoor_request_body_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Please inspect this image"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            ],
+        },
+    ]
+
+    snapshot = session._build_execution_context_snapshot()
+
+    assert snapshot["frontdoor_request_body_messages"] == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "Please inspect this image"},
+    ]
 
 
 def test_ceo_session_pending_interrupts_fall_back_to_paused_disk_state(tmp_path: Path, monkeypatch) -> None:
@@ -5227,6 +5305,34 @@ def test_ceo_websocket_filters_only_silent_internal_ack_message_end() -> None:
     assert websocket_ceo._is_internal_ack_message_end(
         {"role": "assistant", "text": HEARTBEAT_OK, "source": "heartbeat", "heartbeat_reason": "tool_background"}
     ) is True
+
+
+def test_ceo_upload_endpoint_rejects_oversized_image(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(websocket_ceo, "workspace_path", lambda: tmp_path)
+
+    app = FastAPI()
+    app.include_router(websocket_ceo.router, prefix="/api")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/ceo/uploads?session_id=web:shared",
+        files=[
+            (
+                "files",
+                (
+                    "huge.png",
+                    b"0" * (web_ceo_sessions.WEB_CEO_IMAGE_UPLOAD_MAX_BYTES + 1),
+                    "image/png",
+                ),
+            )
+        ],
+    )
+
+    assert response.status_code == 413
+    detail = response.json()["detail"]
+    assert detail["code"] == "image_upload_too_large"
+    assert detail["limit_bytes"] == web_ceo_sessions.WEB_CEO_IMAGE_UPLOAD_MAX_BYTES
 
 
 def test_ceo_tool_event_serializers_preserve_source() -> None:

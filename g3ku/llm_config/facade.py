@@ -230,6 +230,7 @@ class LLMConfigFacade:
                 retry_count=binding.retry_count,
                 single_api_key_max_concurrency=binding.single_api_key_max_concurrency,
                 context_window_tokens=self._binding_context_window_tokens(record),
+                image_multimodal_enabled=bool(getattr(binding, "image_multimodal_enabled", False)),
             )
         )
         return self.get_binding(config, binding.key)
@@ -256,6 +257,11 @@ class LLMConfigFacade:
             if raw_limit is None and "singleApiKeyMaxConcurrency" in draft_payload:
                 raw_limit = draft_payload.get("singleApiKeyMaxConcurrency")
             binding.single_api_key_max_concurrency = normalize_single_api_key_max_concurrency(raw_limit)
+        if "image_multimodal_enabled" in draft_payload or "imageMultimodalEnabled" in draft_payload:
+            raw_enabled = draft_payload.get("image_multimodal_enabled")
+            if raw_enabled is None and "imageMultimodalEnabled" in draft_payload:
+                raw_enabled = draft_payload.get("imageMultimodalEnabled")
+            binding.image_multimodal_enabled = bool(raw_enabled)
         current = self._hydrate_record_secrets(self.repository.get(binding.llm_config_id))
         binding.context_window_tokens = self._binding_context_window_tokens(current)
         merged = self._merge_draft(current, draft_payload, replace_parameters=False)
@@ -411,6 +417,7 @@ class LLMConfigFacade:
             "single_api_key_max_concurrency": getattr(binding, "single_api_key_max_concurrency", None),
             "description": binding.description,
             "context_window_tokens": record.parameters.get("context_window_tokens"),
+            "image_multimodal_enabled": bool(getattr(binding, "image_multimodal_enabled", False)),
             "capability": record.capability.value,
             "auth_mode": record.auth_mode.value,
             "config_id": record.config_id,

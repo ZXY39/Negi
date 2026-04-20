@@ -33,6 +33,8 @@
       singleApiKeyMaxConcurrency: "",
       contextWindowTokens: "",
       initialContextWindowTokens: "",
+      imageMultimodalEnabled: false,
+      initialImageMultimodalEnabled: false,
       validation: null,
       probe: null,
       memory: {
@@ -647,6 +649,8 @@
       retryCount: 0,
       contextWindowTokens: "",
       initialContextWindowTokens: "",
+      imageMultimodalEnabled: false,
+      initialImageMultimodalEnabled: false,
     };
     renderAll();
   }
@@ -675,6 +679,8 @@
       ),
       contextWindowTokens: trim(binding.context_window_tokens),
       initialContextWindowTokens: trim(binding.context_window_tokens),
+      imageMultimodalEnabled: Boolean(binding.image_multimodal_enabled),
+      initialImageMultimodalEnabled: Boolean(binding.image_multimodal_enabled),
     };
     renderAll();
   }
@@ -789,6 +795,7 @@
     const retryCountInput = document.getElementById("llm-binding-retry-count");
     const singleApiKeyMaxConcurrencyInput = document.getElementById("llm-binding-single-api-key-max-concurrency");
     const contextWindowTokensInput = document.getElementById("llm-binding-context-window-tokens");
+    const imageMultimodalEnabledInput = document.getElementById("llm-binding-image-multimodal-enabled");
     if (modelKeyInput) editor.modelKey = trim(modelKeyInput.value || editor.modelKey);
     if (providerSelect) editor.providerId = trim(providerSelect.value || editor.providerId);
     if (jsonEditor) editor.jsonText = String(jsonEditor.value || editor.jsonText || "");
@@ -801,6 +808,7 @@
       editor.singleApiKeyMaxConcurrency = trim(singleApiKeyMaxConcurrencyInput.value || "");
     }
     if (contextWindowTokensInput) editor.contextWindowTokens = trim(contextWindowTokensInput.value || "");
+    if (imageMultimodalEnabledInput) editor.imageMultimodalEnabled = Boolean(imageMultimodalEnabledInput.checked);
     return editor;
   }
 
@@ -944,6 +952,7 @@
       retryCount,
       singleApiKeyMaxConcurrency,
       contextWindowTokens,
+      imageMultimodalEnabled: Boolean(editor?.imageMultimodalEnabled),
       draft,
     };
   }
@@ -968,6 +977,10 @@
       <label class="resource-field">
         <span class="resource-field-label">最大上下文TOKEN *</span>
         <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
+      </label>
+      <label class="resource-field llm-checkbox-field">
+        <span class="resource-field-label">Image Multimodal</span>
+        <input id="llm-binding-image-multimodal-enabled" type="checkbox"${editor.imageMultimodalEnabled ? " checked" : ""}>
       </label>`;
   }
 
@@ -1001,6 +1014,7 @@
       retryCount,
       singleApiKeyMaxConcurrency,
       contextWindowTokens,
+      imageMultimodalEnabled: Boolean(editor?.imageMultimodalEnabled),
       draft,
     };
   }
@@ -1028,6 +1042,10 @@
       <label class="resource-field">
         <span class="resource-field-label">最大上下文TOKEN *</span>
         <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
+      </label>
+      <label class="resource-field llm-checkbox-field">
+        <span class="resource-field-label">Image Multimodal</span>
+        <input id="llm-binding-image-multimodal-enabled" type="checkbox"${editor.imageMultimodalEnabled ? " checked" : ""}>
       </label>`;
   }
 
@@ -1571,6 +1589,7 @@
             retry_on: [...bindingDraft.retryOn],
             retry_count: bindingDraft.retryCount,
             single_api_key_max_concurrency: bindingDraft.singleApiKeyMaxConcurrency,
+            image_multimodal_enabled: bindingDraft.imageMultimodalEnabled,
           },
           draft,
       });
@@ -1631,6 +1650,9 @@
     if (bindingDraft.retryCount !== Number.parseInt(String(binding.retry_count ?? 0), 10)) bindingPatch.retry_count = bindingDraft.retryCount;
     if (!singleApiKeyMaxConcurrencyEquals(bindingDraft.singleApiKeyMaxConcurrency, binding.single_api_key_max_concurrency ?? binding.singleApiKeyMaxConcurrency ?? null)) {
       bindingPatch.single_api_key_max_concurrency = bindingDraft.singleApiKeyMaxConcurrency;
+    }
+    if (bindingDraft.imageMultimodalEnabled !== Boolean(binding.image_multimodal_enabled)) {
+      bindingPatch.image_multimodal_enabled = bindingDraft.imageMultimodalEnabled;
     }
     state.saving = true;
     renderAll();

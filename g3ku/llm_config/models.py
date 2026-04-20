@@ -210,6 +210,7 @@ class ModelBindingDraft(StrictModel):
     retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
     retry_count: int = Field(default=0, ge=0)
     single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None
+    image_multimodal_enabled: bool = False
 
     @field_validator("single_api_key_max_concurrency", mode="before")
     @classmethod
