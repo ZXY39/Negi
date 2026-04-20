@@ -467,6 +467,94 @@ async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrich
 
 
 @pytest.mark.asyncio
+async def test_enrich_node_messages_moves_repair_required_tools_and_skills_into_dedicated_lists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = SimpleNamespace(
+        task_id="task-repair-contract",
+        session_id="web:shared",
+        metadata={"core_requirement": "repair broken resources"},
+    )
+    node = SimpleNamespace(
+        task_id="task-repair-contract",
+        node_id="node-repair-contract",
+        node_kind="execution",
+        prompt="repair broken resources",
+        goal="repair broken resources",
+    )
+    service = _build_selector_test_service(
+        task=task,
+        visible_skills=[
+            SimpleNamespace(
+                skill_id='broken_skill',
+                display_name='broken_skill',
+                description='Broken workflow',
+                available=False,
+                enabled=True,
+                allowed_roles=['execution', 'inspection'],
+                metadata={'warnings': ['missing required bins']},
+            ),
+        ],
+        visible_tool_families=[
+            SimpleNamespace(
+                **{
+                    **_tool_family('agent_browser', 'agent_browser').__dict__,
+                    'available': False,
+                    'metadata': {'warnings': ['missing required paths']},
+                }
+            ),
+        ],
+        visible_tool_names=[],
+        tool_instances={},
+    )
+
+    async def _fake_build_node_context_selection(**kwargs):
+        _ = kwargs
+        return NodeContextSelectionResult(
+            mode="dense_rerank",
+            selected_skill_ids=["broken_skill"],
+            selected_tool_names=[],
+            candidate_skill_ids=["broken_skill"],
+            candidate_tool_names=["agent_browser"],
+            trace={"mode": "dense_rerank"},
+        )
+
+    monkeypatch.setattr(
+        runtime_service_module,
+        "build_node_context_selection",
+        _fake_build_node_context_selection,
+    )
+
+    enriched = await service._enrich_node_messages(
+        task=task,
+        node=node,
+        messages=[
+            {"role": "system", "content": "base prompt"},
+            {"role": "user", "content": '{"prompt":"repair broken resources"}'},
+        ],
+    )
+
+    contract_payload = extract_node_dynamic_contract_payload(enriched)
+    assert contract_payload is not None
+    assert contract_payload["candidate_tools"] == []
+    assert contract_payload["candidate_skills"] == []
+    assert contract_payload["repair_required_tools"] == [
+        {
+            "tool_id": "agent_browser",
+            "description": "",
+            "reason": "missing required paths",
+        }
+    ]
+    assert contract_payload["repair_required_skills"] == [
+        {
+            "skill_id": "broken_skill",
+            "description": "Broken workflow",
+            "reason": "missing required bins",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_tool_provider_uses_full_visible_tool_fallback_when_selector_returns_visible_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

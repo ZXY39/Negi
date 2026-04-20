@@ -69,6 +69,46 @@ def _normalized_candidate_skill_items(
     return ordered
 
 
+def _normalized_repair_required_tool_items(items: list[Any] | None) -> list[dict[str, str]]:
+    ordered: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in list(items or []):
+        if not isinstance(item, dict):
+            continue
+        tool_id = str(item.get('tool_id') or '').strip()
+        if not tool_id or tool_id in seen:
+            continue
+        seen.add(tool_id)
+        ordered.append(
+            {
+                'tool_id': tool_id,
+                'description': str(item.get('description') or '').strip(),
+                'reason': str(item.get('reason') or '').strip(),
+            }
+        )
+    return ordered
+
+
+def _normalized_repair_required_skill_items(items: list[Any] | None) -> list[dict[str, str]]:
+    ordered: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in list(items or []):
+        if not isinstance(item, dict):
+            continue
+        skill_id = str(item.get('skill_id') or '').strip()
+        if not skill_id or skill_id in seen:
+            continue
+        seen.add(skill_id)
+        ordered.append(
+            {
+                'skill_id': skill_id,
+                'description': str(item.get('description') or '').strip(),
+                'reason': str(item.get('reason') or '').strip(),
+            }
+        )
+    return ordered
+
+
 def _active_stage_prompt_view(active_stage: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(active_stage, dict):
         return None
@@ -141,6 +181,50 @@ def _render_candidate_skill_section(items: list[dict[str, str]] | None) -> list[
     return lines
 
 
+def _render_repair_required_tool_section(items: list[dict[str, str]] | None) -> list[str]:
+    normalized_items = _normalized_repair_required_tool_items(items)
+    if not normalized_items:
+        return []
+    lines = [
+        'repair_required_tools:',
+        '- These tools must be repaired before use.',
+        '- Use `load_tool_context(tool_id="<tool_id>")` first.',
+        '- Use `exec`, `filesystem_write`, `filesystem_edit`, `filesystem_copy`, `filesystem_move`, or `filesystem_propose_patch` to repair them.',
+        '- Reference skill: `repair-tool`.',
+    ]
+    for item in normalized_items:
+        tool_id = str(item.get('tool_id') or '').strip()
+        description = str(item.get('description') or '').strip()
+        reason = str(item.get('reason') or '').strip()
+        detail = description if description else 'No description available.'
+        if reason:
+            detail = f'{detail} Reason: {reason}'
+        lines.append(f'- `{tool_id}`: {detail}')
+    return lines
+
+
+def _render_repair_required_skill_section(items: list[dict[str, str]] | None) -> list[str]:
+    normalized_items = _normalized_repair_required_skill_items(items)
+    if not normalized_items:
+        return []
+    lines = [
+        'repair_required_skills:',
+        '- These skills must be repaired before viewing their body.',
+        '- Do not call `load_skill_context` until repaired.',
+        '- Use `exec`, `filesystem_write`, `filesystem_edit`, `filesystem_copy`, `filesystem_move`, or `filesystem_propose_patch` to repair them.',
+        '- Reference skill: `writing-skills`.',
+    ]
+    for item in normalized_items:
+        skill_id = str(item.get('skill_id') or '').strip()
+        description = str(item.get('description') or '').strip()
+        reason = str(item.get('reason') or '').strip()
+        detail = description if description else 'No description available.'
+        if reason:
+            detail = f'{detail} Reason: {reason}'
+        lines.append(f'- `{skill_id}`: {detail}')
+    return lines
+
+
 def _render_stage_summary(stage_payload: dict[str, Any] | None) -> str:
     payload = _stable_stage_payload(stage_payload)
     active_stage = dict(payload.get('active_stage') or {}) if isinstance(payload.get('active_stage'), dict) else {}
@@ -193,6 +277,8 @@ def _render_node_dynamic_contract_summary(payload: dict[str, Any]) -> str:
         f'hydrated_tools: {_render_name_list(payload.get("hydrated_executor_names"))}',
         *_render_candidate_tool_section(payload.get('candidate_tools')),
         *_render_candidate_skill_section(payload.get('candidate_skills')),
+        *_render_repair_required_tool_section(payload.get('repair_required_tools')),
+        *_render_repair_required_skill_section(payload.get('repair_required_skills')),
         _render_stage_summary(payload.get('execution_stage')),
         _render_exec_runtime_policy(payload.get('exec_runtime_policy')),
     ]
@@ -233,6 +319,8 @@ class NodeRuntimeToolContract:
     selection_trace: dict[str, Any]
     candidate_tool_items: list[dict[str, str]] | None = None
     candidate_skill_items: list[dict[str, str]] | None = None
+    repair_required_tool_items: list[dict[str, str]] | None = None
+    repair_required_skill_items: list[dict[str, str]] | None = None
     exec_runtime_policy: dict[str, Any] | None = None
 
     def to_message_payload(self) -> dict[str, Any]:
@@ -250,6 +338,12 @@ class NodeRuntimeToolContract:
             'hydrated_executor_names': _normalized_name_list(list(self.hydrated_executor_names or [])),
             'execution_stage': _stable_stage_payload(self.stage_payload),
         }
+        repair_required_tools = _normalized_repair_required_tool_items(self.repair_required_tool_items)
+        if repair_required_tools:
+            payload['repair_required_tools'] = repair_required_tools
+        repair_required_skills = _normalized_repair_required_skill_items(self.repair_required_skill_items)
+        if repair_required_skills:
+            payload['repair_required_skills'] = repair_required_skills
         if isinstance(self.exec_runtime_policy, dict):
             payload['exec_runtime_policy'] = dict(self.exec_runtime_policy)
         return payload

@@ -168,6 +168,10 @@ Maintenance note for the memory tool family:
 - 如果语义召回不可用，候选集合直接退化为 `RBAC 可见集合`，而不是停止运行。
 - 对 agent 来说，candidate 仍然是“可见但默认不可直接调用”的资源；candidate 不会自动进入 callable tool 集合。
 - `load_tool_context` / `load_skill_context` 现在也只允许命中当前 canonical candidate 集合，不再允许“RBAC 可见但不在 candidate 中”的旁路加载。
+- 但“普通 candidate”不再覆盖 repair-required 资源：
+  - repair-required tools 会从 agent-facing `candidate_tools` / `callable_tools` / `hydrated_tools` 中剥离，单独进入 `repair_required_tools`
+  - repair-required skills 会从 agent-facing `candidate_skills` 中剥离，单独进入 `repair_required_skills`
+  - 这两个 repair 列表只影响 agent-facing runtime contract；它们不等于 provider-facing `tools[]` 变化
 - 对 CEO/frontdoor，`candidate_tool_names` / `candidate_skill_ids` 属于 internal canonical state；真正暴露给模型的当前轮显示合同只保留一份 `frontdoor_runtime_tool_contract`。
 - 这还意味着 frontdoor 的旧轮 candidate/tool/skill catalog 不应进入 durable history。后续轮次只能继承真实工具调用轨迹与上下文，而不是再次看到上一轮的候选列表。
 - 对执行/验收节点，skill 候选不再只依赖当前轮的 `node_runtime_tool_contract` user 消息存活；canonical `candidate_skill_ids` 继续落在 runtime frame，`candidate_skill_items` 也会随 frame 一起持久化，供阶段切换、prompt compaction 之后的下一轮 contract 刷新从 frame 恢复。
@@ -209,6 +213,10 @@ Maintenance note for the memory tool family:
 - 需要显式 `load_skill_context(skill_id="...")`
 - skill 加载通常是“当前轮立即消费正文”
 - 不走 hydration 状态机
+- repair-required skill 现在还有一个更强的门控：
+  - 它仍可作为“待修复资源”出现在 agent-facing `repair_required_skills` 中
+  - 但在修复完成前，`load_skill_context(...)` / `load_skill_context_v2(...)` 不再返回正文，而是直接返回 repair-required 错误与修复指引
+  - 维护者如果看到模型“知道这个 skill 存在却无法 load”，应先检查 skill 资源本身的 `available` / warnings / errors，而不是先怀疑 selector 没选中
 
 ### 3.4 hydrated tools
 
@@ -522,6 +530,10 @@ The important rule is that hydration promotion and stage gating should change th
 
 - CEO/frontdoor no longer sends the model-facing runtime contract as raw JSON inside a user message. The live contract is now an assistant summary block headed `## Runtime Tool Contract`.
 - The provider-native callable schema still lives in provider `tools[]`. The summary block exists only to explain callable tools, hydrated tools, candidate tools, candidate skills, and stage state to the model in compact text form.
+- The summary block may now also carry dedicated repair lanes:
+  - `repair_required_tools`
+  - `repair_required_skills`
+- These lanes are agent-facing only. They exist so the model can see “repair before use/view” resources without misreading them as ordinary callable/candidate capabilities.
 - Same-turn provider-bound requests may still accumulate older contract snapshots so the hot request path stays append-only. Within one turn, the newest summary block is the authoritative contract.
 - Durable CEO continuity baselines still strip those contract messages before they are written back to session-owned request-body state. The next round rebuilds one fresh authoritative summary from canonical runtime state.
 - Execution and acceptance nodes now use the same summary-style contract lane instead of a raw `node_runtime_tool_contract` JSON user message.
@@ -531,6 +543,7 @@ The provider-facing bundle is also intentionally minimal:
 
 - Rich tool and skill descriptions stay in the tail runtime contract.
 - Provider `tools[]` should keep only the smallest callable schema required for function calling.
+- Repair-required tool/skill exposure must not be implemented by churning provider `tools[]`. Maintainers should treat repair-required lists as runtime-summary-only guidance; provider bundle stability still wins for cache continuity.
 - Provider-facing schemas are now sanitized before transport: descriptive text and unsupported JSON Schema combinators such as `anyOf`, `oneOf`, and `allOf` are stripped or flattened into a simpler supported shape.
 - Runtime-side tool validation remains the authority for argument correctness. Do not assume a provider-facing schema still preserves every branch of the richer internal contract.
 - If cache misses correlate with a large `actual_tool_schema_hash` delta, first check whether provider schemas accidentally regressed from this minimal/stable form.

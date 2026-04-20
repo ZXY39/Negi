@@ -77,6 +77,8 @@ class RuntimeAgentSession:
         self._compression_state: dict[str, Any] = {}
         self._semantic_context_state: dict[str, Any] = {}
         self._frontdoor_hydrated_tool_names: list[str] = []
+        self._frontdoor_repair_required_tool_items: list[dict[str, Any]] = []
+        self._frontdoor_repair_required_skill_items: list[dict[str, Any]] = []
         self._frontdoor_selection_debug: dict[str, Any] = {}
         self._frontdoor_request_body_messages: list[dict[str, Any]] = []
         self._frontdoor_history_shrink_reason: str = ""
@@ -1288,6 +1290,20 @@ class RuntimeAgentSession:
         ]
         if hydrated_tool_names:
             snapshot["hydrated_tool_names"] = hydrated_tool_names
+        repair_required_tool_items = [
+            dict(item)
+            for item in list(getattr(self, "_frontdoor_repair_required_tool_items", []) or [])
+            if isinstance(item, dict)
+        ]
+        if repair_required_tool_items:
+            snapshot["repair_required_tool_items"] = repair_required_tool_items
+        repair_required_skill_items = [
+            dict(item)
+            for item in list(getattr(self, "_frontdoor_repair_required_skill_items", []) or [])
+            if isinstance(item, dict)
+        ]
+        if repair_required_skill_items:
+            snapshot["repair_required_skill_items"] = repair_required_skill_items
         frontdoor_request_body_messages = [
             dict(item)
             for item in list(getattr(self, "_frontdoor_request_body_messages", []) or [])
@@ -1337,6 +1353,8 @@ class RuntimeAgentSession:
             and "frontdoor_stage_state" not in snapshot
             and "frontdoor_canonical_context" not in snapshot
             and "hydrated_tool_names" not in snapshot
+            and "repair_required_tool_items" not in snapshot
+            and "repair_required_skill_items" not in snapshot
             and "frontdoor_request_body_messages" not in snapshot
             and "frontdoor_history_shrink_reason" not in snapshot
             and "frontdoor_token_preflight_diagnostics" not in snapshot
@@ -1820,11 +1838,15 @@ class RuntimeAgentSession:
         frontdoor_canonical_context = interrupt_values.get("frontdoor_canonical_context")
         compression_state = interrupt_values.get("compression_state")
         hydrated_tool_names = interrupt_values.get("hydrated_tool_names")
+        repair_required_tool_items = interrupt_values.get("repair_required_tool_items")
+        repair_required_skill_items = interrupt_values.get("repair_required_skill_items")
         frontdoor_selection_debug = interrupt_values.get("frontdoor_selection_debug")
         preserved_frontdoor_stage_state = getattr(self, "_frontdoor_stage_state", None)
         preserved_frontdoor_canonical_context = getattr(self, "_frontdoor_canonical_context", None)
         preserved_compression_state = getattr(self, "_compression_state", None)
         preserved_hydrated_tool_names = getattr(self, "_frontdoor_hydrated_tool_names", None)
+        preserved_repair_required_tool_items = getattr(self, "_frontdoor_repair_required_tool_items", None)
+        preserved_repair_required_skill_items = getattr(self, "_frontdoor_repair_required_skill_items", None)
         preserved_frontdoor_selection_debug = getattr(self, "_frontdoor_selection_debug", None)
         self._frontdoor_stage_state = (
             dict(frontdoor_stage_state)
@@ -1852,6 +1874,16 @@ class RuntimeAgentSession:
             str(item or "").strip()
             for item in list(hydrated_tool_names or preserved_hydrated_tool_names or [])
             if str(item or "").strip()
+        ]
+        self._frontdoor_repair_required_tool_items = [
+            dict(item)
+            for item in list(repair_required_tool_items or preserved_repair_required_tool_items or [])
+            if isinstance(item, dict)
+        ]
+        self._frontdoor_repair_required_skill_items = [
+            dict(item)
+            for item in list(repair_required_skill_items or preserved_repair_required_skill_items or [])
+            if isinstance(item, dict)
         ]
         self._frontdoor_selection_debug = (
             dict(frontdoor_selection_debug)

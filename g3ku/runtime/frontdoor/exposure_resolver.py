@@ -25,7 +25,11 @@ class CeoExposureResolver:
             }
         await service.startup()
         visible_families = service.list_visible_tool_families(actor_role=actor_role, session_id=session_id)
-        visible_skills = service.list_visible_skill_resources(actor_role=actor_role, session_id=session_id)
+        skill_supplier = getattr(service, 'list_contract_visible_skill_resources', None)
+        if callable(skill_supplier):
+            visible_skills = skill_supplier(actor_role=actor_role, session_id=session_id)
+        else:
+            visible_skills = service.list_visible_skill_resources(actor_role=actor_role, session_id=session_id)
         allowed_tool_names = {
             executor_name
             for family in visible_families

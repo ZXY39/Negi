@@ -1330,10 +1330,106 @@ class CeoMessageBuilder:
             for name in list(tool_trace.get('candidate_tool_names') or [])
             if str(name or '').strip()
         ]
-        candidate_tool_items = self._candidate_tool_prompt_items(
-            selected_tool_names=list(candidate_tool_names),
-            visible_families=visible_families,
-        )
+        main_service = getattr(self._loop, 'main_task_service', None)
+        if callable(getattr(main_service, '_split_repair_required_tool_prompt_items', None)):
+            candidate_tool_names, candidate_tool_items, repair_required_tool_items = getattr(
+                main_service,
+                '_split_repair_required_tool_prompt_items',
+            )(
+                candidate_tool_names=list(candidate_tool_names),
+                visible_tool_families=visible_families,
+                preferred_items=None,
+            )
+        else:
+            candidate_tool_items = self._candidate_tool_prompt_items(
+                selected_tool_names=list(candidate_tool_names),
+                visible_families=visible_families,
+            )
+            repair_required_tool_items = []
+        if callable(getattr(main_service, '_all_repair_required_tool_prompt_items', None)):
+            repair_required_tool_items = getattr(main_service, '_merge_repair_prompt_items')(
+                repair_required_tool_items,
+                getattr(main_service, '_all_repair_required_tool_prompt_items')(
+                    visible_tool_families=visible_families,
+                ),
+                key='tool_id',
+            )
+        repair_required_tool_ids = {
+            str(item.get('tool_id') or '').strip()
+            for item in list(repair_required_tool_items or [])
+            if str(item.get('tool_id') or '').strip()
+        }
+        candidate_tool_names = [
+            name
+            for name in list(candidate_tool_names or [])
+            if name not in repair_required_tool_ids
+        ]
+        candidate_tool_items = [
+            dict(item)
+            for item in list(candidate_tool_items or [])
+            if str(item.get('tool_id') or '').strip() not in repair_required_tool_ids
+        ]
+        candidate_skill_ids = [
+            self._skill_id(item)
+            for item in list(selected_skills or [])
+            if self._skill_id(item)
+        ]
+        if callable(getattr(main_service, '_split_repair_required_skill_prompt_items', None)):
+            candidate_skill_ids, candidate_skill_items, repair_required_skill_items = getattr(
+                main_service,
+                '_split_repair_required_skill_prompt_items',
+            )(
+                candidate_skill_ids=list(candidate_skill_ids),
+                visible_skills=visible_skills,
+                preferred_items=None,
+            )
+            selected_skills = [
+                item
+                for item in list(selected_skills or [])
+                if self._skill_id(item) in set(candidate_skill_ids)
+            ]
+            selected_skill_id_set = set(candidate_skill_ids)
+            skill_trace = [
+                item
+                for item in list(skill_trace or [])
+                if str((item or {}).get('skill_id') or '').strip() in selected_skill_id_set
+            ]
+        else:
+            candidate_skill_items = []
+            repair_required_skill_items = []
+        if callable(getattr(main_service, '_all_repair_required_skill_prompt_items', None)):
+            repair_required_skill_items = getattr(main_service, '_merge_repair_prompt_items')(
+                repair_required_skill_items,
+                getattr(main_service, '_all_repair_required_skill_prompt_items')(
+                    visible_skills=visible_skills,
+                ),
+                key='skill_id',
+            )
+        repair_required_skill_ids = {
+            str(item.get('skill_id') or '').strip()
+            for item in list(repair_required_skill_items or [])
+            if str(item.get('skill_id') or '').strip()
+        }
+        candidate_skill_ids = [
+            skill_id
+            for skill_id in list(candidate_skill_ids or [])
+            if skill_id not in repair_required_skill_ids
+        ]
+        candidate_skill_items = [
+            dict(item)
+            for item in list(candidate_skill_items or [])
+            if str(item.get('skill_id') or '').strip() not in repair_required_skill_ids
+        ]
+        selected_skills = [
+            item
+            for item in list(selected_skills or [])
+            if self._skill_id(item) not in repair_required_skill_ids
+        ]
+        skill_trace = [
+            item
+            for item in list(skill_trace or [])
+            if str((item or {}).get('skill_id') or '').strip() not in repair_required_skill_ids
+        ]
         retrieved_bundle = RetrievedContextBundle(query=query_text)
         retrieval_scope = {
             'mode': 'disabled',
@@ -1357,6 +1453,9 @@ class CeoMessageBuilder:
             'external_trace': external_trace,
             'selected_tool_names': candidate_tool_names,
             'selected_tool_items': candidate_tool_items,
+            'candidate_skill_items': candidate_skill_items,
+            'repair_required_tool_items': repair_required_tool_items,
+            'repair_required_skill_items': repair_required_skill_items,
             'callable_tool_names': callable_tool_names,
             'hydrated_tool_names': [
                 name
@@ -1599,6 +1698,9 @@ class CeoMessageBuilder:
                 for item in list(context_sources['selected_skills'] or [])
                 if self._skill_id(item)
             ],
+            candidate_skill_items=list(context_sources.get('candidate_skill_items') or []),
+            repair_required_tool_items=list(context_sources.get('repair_required_tool_items') or []),
+            repair_required_skill_items=list(context_sources.get('repair_required_skill_items') or []),
             rbac_visible_tool_names=list(context_sources['capability_snapshot'].visible_tool_ids),
             rbac_visible_skill_ids=list(context_sources['capability_snapshot'].visible_skill_ids),
             contract_revision=(
@@ -1736,6 +1838,8 @@ class CeoMessageBuilder:
             tool_names=list(context_sources['callable_tool_names']),
             candidate_tool_names=list(context_sources['selected_tool_names']),
             candidate_tool_items=list(context_sources.get('selected_tool_items') or []),
+            repair_required_tool_items=list(context_sources.get('repair_required_tool_items') or []),
+            repair_required_skill_items=list(context_sources.get('repair_required_skill_items') or []),
             trace=trace,
             turn_overlay_text=turn_overlay_text,
             cache_family_revision=(
@@ -1890,6 +1994,9 @@ class CeoMessageBuilder:
                 for item in list(context_sources['selected_skills'] or [])
                 if self._skill_id(item)
             ],
+            candidate_skill_items=list(context_sources.get('candidate_skill_items') or []),
+            repair_required_tool_items=list(context_sources.get('repair_required_tool_items') or []),
+            repair_required_skill_items=list(context_sources.get('repair_required_skill_items') or []),
             rbac_visible_tool_names=list(context_sources['capability_snapshot'].visible_tool_ids),
             rbac_visible_skill_ids=list(context_sources['capability_snapshot'].visible_skill_ids),
             contract_revision=(
@@ -2010,6 +2117,8 @@ class CeoMessageBuilder:
             tool_names=list(context_sources['callable_tool_names']),
             candidate_tool_names=list(context_sources['selected_tool_names']),
             candidate_tool_items=list(context_sources.get('selected_tool_items') or []),
+            repair_required_tool_items=list(context_sources.get('repair_required_tool_items') or []),
+            repair_required_skill_items=list(context_sources.get('repair_required_skill_items') or []),
             trace=trace,
             turn_overlay_text=turn_overlay_text,
             cache_family_revision=(

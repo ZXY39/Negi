@@ -1937,6 +1937,24 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "_frontdoor_selection_debug",
             self._frontdoor_selection_debug_snapshot(state),
         )
+        setattr(
+            target_session,
+            "_frontdoor_repair_required_tool_items",
+            [
+                dict(item)
+                for item in list(state.get("repair_required_tool_items") or [])
+                if isinstance(item, dict)
+            ],
+        )
+        setattr(
+            target_session,
+            "_frontdoor_repair_required_skill_items",
+            [
+                dict(item)
+                for item in list(state.get("repair_required_skill_items") or [])
+                if isinstance(item, dict)
+            ],
+        )
         if isinstance(state, dict):
             if "frontdoor_token_preflight_diagnostics" in state:
                 setattr(
@@ -3685,6 +3703,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 frontdoor_stage_state=dict(current_frontdoor_stage_state or {}),
                 visible_skill_ids=list(selected_skill_ids),
                 candidate_skill_ids=list(selected_skill_ids),
+                repair_required_tool_items=list(getattr(assembly, "repair_required_tool_items", []) or []),
+                repair_required_skill_items=list(getattr(assembly, "repair_required_skill_items", []) or []),
                 rbac_visible_tool_names=list(rbac_visible_tool_names),
                 rbac_visible_skill_ids=list(rbac_visible_skill_ids),
                 contract_revision=cache_family_revision,
@@ -3811,6 +3831,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "provider_tool_names": list(runtime_visible_tool_names),
             "candidate_tool_names": list(candidate_tool_names),
             "candidate_tool_items": list(candidate_tool_items),
+            "repair_required_tool_items": [
+                dict(item)
+                for item in list(getattr(assembly, "repair_required_tool_items", []) or [])
+                if isinstance(item, dict)
+            ],
+            "repair_required_skill_items": [
+                dict(item)
+                for item in list(getattr(assembly, "repair_required_skill_items", []) or [])
+                if isinstance(item, dict)
+            ],
             "hydrated_tool_names": list(hydrated_tool_names),
             "visible_skill_ids": list(selected_skill_ids),
             "candidate_skill_ids": list(selected_skill_ids),
@@ -4636,6 +4666,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             str(item or "").strip()
             for item in list(state.get("rbac_visible_skill_ids") or [])
             if str(item or "").strip()
+        ]
+        result["repair_required_tool_items"] = [
+            dict(item)
+            for item in list(state.get("repair_required_tool_items") or [])
+            if isinstance(item, dict)
+        ]
+        result["repair_required_skill_items"] = [
+            dict(item)
+            for item in list(state.get("repair_required_skill_items") or [])
+            if isinstance(item, dict)
         ]
         result.update(
             self._refresh_frontdoor_dynamic_contract_state(

@@ -22,6 +22,8 @@ class ContextAssemblyResult:
     tool_names: list[str]
     candidate_tool_names: list[str]
     candidate_tool_items: list[dict[str, Any]]
+    repair_required_tool_items: list[dict[str, Any]]
+    repair_required_skill_items: list[dict[str, Any]]
     trace: dict[str, Any]
     turn_overlay_text: str
     cache_family_revision: str
@@ -35,6 +37,8 @@ class ContextAssemblyResult:
         tool_names: list[str] | None = None,
         candidate_tool_names: list[str] | None = None,
         candidate_tool_items: list[dict[str, Any]] | None = None,
+        repair_required_tool_items: list[dict[str, Any]] | None = None,
+        repair_required_skill_items: list[dict[str, Any]] | None = None,
         trace: dict[str, Any] | None = None,
         turn_overlay_text: str | None = None,
         cache_family_revision: str | None = None,
@@ -61,6 +65,8 @@ class ContextAssemblyResult:
         self.tool_names = list(tool_names or [])
         self.candidate_tool_names = list(candidate_tool_names or [])
         self.candidate_tool_items = [dict(item) for item in list(candidate_tool_items or []) if isinstance(item, dict)]
+        self.repair_required_tool_items = [dict(item) for item in list(repair_required_tool_items or []) if isinstance(item, dict)]
+        self.repair_required_skill_items = [dict(item) for item in list(repair_required_skill_items or []) if isinstance(item, dict)]
         self.trace = dict(trace or {})
         self.turn_overlay_text = str(turn_overlay_text or "").strip()
         self.cache_family_revision = str(cache_family_revision or "").strip()

@@ -1511,6 +1511,64 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
     assert "rbac_visible_skill_ids" not in payload
 
 
+def test_frontdoor_tool_contract_renders_repair_required_sections_separately() -> None:
+    contract = build_frontdoor_tool_contract(
+        callable_tool_names=["submit_next_stage", "exec"],
+        candidate_tool_names=[],
+        candidate_tool_items=[],
+        repair_required_tool_items=[
+            {
+                "tool_id": "agent_browser",
+                "description": "Browser automation",
+                "reason": "missing required paths",
+            }
+        ],
+        hydrated_tool_names=[],
+        frontdoor_stage_state={
+            "active_stage_id": "stage:1",
+            "transition_required": False,
+            "stages": [{"stage_id": "stage:1", "status": "active", "stage_goal": "repair"}],
+        },
+        visible_skill_ids=[],
+        candidate_skill_ids=[],
+        candidate_skill_items=[],
+        repair_required_skill_items=[
+            {
+                "skill_id": "writing-skills",
+                "description": "Skill maintenance workflow",
+                "reason": "missing required bins",
+            }
+        ],
+        rbac_visible_tool_names=["submit_next_stage", "exec", "agent_browser"],
+        rbac_visible_skill_ids=["writing-skills"],
+        contract_revision="frontdoor:v1",
+    )
+
+    updated = upsert_frontdoor_tool_contract_message([], contract)
+    payload = contract.to_message_payload()
+
+    assert payload["candidate_tools"] == []
+    assert payload["candidate_skill_ids"] == []
+    assert payload["repair_required_tools"] == [
+        {
+            "tool_id": "agent_browser",
+            "description": "Browser automation",
+            "reason": "missing required paths",
+        }
+    ]
+    assert payload["repair_required_skills"] == [
+        {
+            "skill_id": "writing-skills",
+            "description": "Skill maintenance workflow",
+            "reason": "missing required bins",
+        }
+    ]
+    assert "repair_required_tools:" in str(updated[0]["content"] or "")
+    assert "repair_required_skills:" in str(updated[0]["content"] or "")
+    assert "Reference skill: `repair-tool`." in str(updated[0]["content"] or "")
+    assert "Reference skill: `writing-skills`." in str(updated[0]["content"] or "")
+
+
 @pytest.mark.asyncio
 async def test_message_builder_keeps_capability_snapshot_stable_when_semantic_skill_selection_changes(
     monkeypatch: pytest.MonkeyPatch,

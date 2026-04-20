@@ -206,6 +206,10 @@ Maintenance note for `task_append_notice` and task message distribution:
 - 成功的 `submit_next_stage` 会在同一轮 `execute_tools` 内立刻写回 `frontdoor_stage_state`；对 mixed batch 来说，这表示同批后续普通工具看到的已经是 promotion 后的新阶段，而下一次 `call_model` 看到的也同样是已推进后的 runtime state，而不是等额外的后处理链再补写。
 - CEO websocket now attaches the current visible turn's authoritative final `canonical_context` directly to `ceo.reply.final`; maintainers should not assume the frontend must wait for a later `state_snapshot` to reconstruct the closing stage view.
 - 新的前门暴露边界要分两层理解：只要当前没有“有效阶段”（`active_stage_id` 为空，或当前阶段已 `transition_required=true`），agent-facing `frontdoor_runtime_tool_contract.callable_tool_names` 会收紧到只剩 `submit_next_stage`；候选 tool/skill 列表仍继续显示，供模型先看能力边界、再开阶段。
+- agent-facing runtime contract 现在还会把 repair-required 资源单独列出：
+  - `repair_required_tools` 表示这些工具在修复前不能当成普通 callable/candidate 能力使用
+  - `repair_required_skills` 表示这些 skill 在修复前不能通过 `load_skill_context` 查看正文
+  - 这两个列表服务于模型决策边界，不代表 provider-facing `tools[]` 发生变化
 - 但 provider-facing `tools` schemas 现在不再随着 `transition_required=true` 收紧到只剩 `submit_next_stage`。前门会继续向 provider 发送稳定的 runtime-visible tool bundle，以减少阶段切换回合对 prompt cache 前缀命中的破坏。
 - 当前唯一保留的例外是 `cron_internal`。这类内部轮次仍保留自己的 callable tool 集合，以便按既有协议继续调用 `cron(action="remove")` 完成自移除；维护时不要把这个 internal lane 与普通 CEO user turn 混为一谈。
 - 维护上不要把这个规则误读成“前门内部状态已经只剩 `submit_next_stage`”。`tool_names` 仍保存阶段内可恢复的完整工具池，供同一 turn 成功开阶段后的下一次 model call 立即恢复完整 callable 列表；agent-facing 决策边界由前门的 callable-tool helper 与动态合同消息表达，而 provider-facing schema 稳定性由 runtime-visible tool bundle 保证。
@@ -611,6 +615,10 @@ There is now a second explicit continuity contract for prompt assembly:
 
 - CEO/frontdoor and node runtime now both treat the model-facing runtime contract as an assistant summary block rather than a raw JSON user message.
 - The summary block is intentionally compact. It carries names-only callable and hydrated lists plus candidate summaries, while provider-native callable schemas still flow through provider `tools[]`.
+- The same summary block now also has a dedicated repair-required lane. Maintainers should therefore distinguish three agent-facing categories:
+  - ordinary callable/hydrated tools
+  - ordinary candidate tools/skills
+  - repair-required tools/skills that must be fixed before use or body load
 - The hot same-turn provider request may still keep earlier contract snapshots so request growth stays append-only. The newest contract summary in that request is the authoritative one for the current round.
 - Durable continuity baselines continue to strip runtime-contract messages before persistence. If a later turn appears to inherit an old contract summary as ordinary history, treat that as a contract-lane replay bug.
 - If the next baseline is shorter for any other reason, `prepare_turn` treats that as unexpected context loss and fails fast instead of silently continuing with a truncated request.

@@ -104,6 +104,78 @@ def test_ceo_snapshot_ignores_legacy_tool_events_without_canonical_context() -> 
     assert snapshot == []
 
 
+def test_ceo_frontdoor_refresh_dynamic_contract_state_keeps_repair_required_lists() -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._selected_tool_schemas = lambda tool_names: [
+        {"name": name, "description": "", "parameters": {"type": "object"}}
+        for name in list(tool_names or [])
+    ]
+
+    refreshed = runner._refresh_frontdoor_dynamic_contract_state(
+        state={
+            "session_key": "web:shared",
+            "messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "repair this"},
+            ],
+            "stable_messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "repair this"},
+            ],
+            "dynamic_appendix_messages": [],
+            "tool_names": ["submit_next_stage", "exec"],
+            "provider_tool_names": ["submit_next_stage", "exec"],
+            "candidate_tool_names": [],
+            "candidate_tool_items": [],
+            "hydrated_tool_names": [],
+            "visible_skill_ids": [],
+            "candidate_skill_ids": [],
+            "rbac_visible_tool_names": ["submit_next_stage", "exec", "agent_browser"],
+            "rbac_visible_skill_ids": ["writing-skills"],
+            "repair_required_tool_items": [
+                {
+                    "tool_id": "agent_browser",
+                    "description": "Browser automation",
+                    "reason": "missing required paths",
+                }
+            ],
+            "repair_required_skill_items": [
+                {
+                    "skill_id": "writing-skills",
+                    "description": "Skill maintenance workflow",
+                    "reason": "missing required bins",
+                }
+            ],
+            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "model_refs": ["openai:gpt-4.1"],
+            "cache_family_revision": "frontdoor:v1",
+            "turn_overlay_text": "",
+        }
+    )
+
+    contract_messages = [dict(message) for message in list(refreshed["dynamic_appendix_messages"] or [])]
+    assert len(contract_messages) == 1
+    assert is_frontdoor_tool_contract_message(contract_messages[0])
+    assert "repair_required_tools:" in str(contract_messages[0]["content"] or "")
+    assert "repair_required_skills:" in str(contract_messages[0]["content"] or "")
+    assert "agent_browser" in str(contract_messages[0]["content"] or "")
+    assert "writing-skills" in str(contract_messages[0]["content"] or "")
+    assert refreshed["repair_required_tool_items"] == [
+        {
+            "tool_id": "agent_browser",
+            "description": "Browser automation",
+            "reason": "missing required paths",
+        }
+    ]
+    assert refreshed["repair_required_skill_items"] == [
+        {
+            "skill_id": "writing-skills",
+            "description": "Skill maintenance workflow",
+            "reason": "missing required bins",
+        }
+    ]
+
+
 def test_execution_snapshot_history_uses_canonical_context_without_legacy_tool_events() -> None:
     runtime_session = SimpleNamespace(
         inflight_turn_snapshot=lambda: {

@@ -327,6 +327,8 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             frontdoor_stage_state=dict(state.get("frontdoor_stage_state") or {}),
             visible_skill_ids=list(state.get("visible_skill_ids") or []),
             candidate_skill_ids=list(state.get("candidate_skill_ids") or []),
+            repair_required_tool_items=list(state.get("repair_required_tool_items") or []),
+            repair_required_skill_items=list(state.get("repair_required_skill_items") or []),
             rbac_visible_tool_names=list(state.get("rbac_visible_tool_names") or []),
             rbac_visible_skill_ids=list(state.get("rbac_visible_skill_ids") or []),
             contract_revision=self._prompt_cache_family_revision(state),

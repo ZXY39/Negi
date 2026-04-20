@@ -2217,6 +2217,61 @@ def test_runtime_agent_session_persists_paused_request_body_baseline(
     assert persisted["frontdoor_history_shrink_reason"] == "stage_compaction"
 
 
+def test_runtime_agent_session_persists_paused_repair_required_lists(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from g3ku.runtime import web_ceo_sessions
+
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._frontdoor_repair_required_tool_items = [
+        {
+            "tool_id": "agent_browser",
+            "description": "Browser automation",
+            "reason": "missing required paths",
+        }
+    ]
+    session._frontdoor_repair_required_skill_items = [
+        {
+            "skill_id": "writing-skills",
+            "description": "Skill maintenance workflow",
+            "reason": "missing required bins",
+        }
+    ]
+
+    paused_snapshot = session._build_execution_context_snapshot(
+        allow_manual_pause=True,
+        status_override="paused",
+    )
+    session._set_paused_execution_context(paused_snapshot)
+
+    persisted = web_ceo_sessions.read_paused_execution_context("web:shared")
+
+    assert isinstance(persisted, dict)
+    assert persisted["repair_required_tool_items"] == session._frontdoor_repair_required_tool_items
+    assert persisted["repair_required_skill_items"] == session._frontdoor_repair_required_skill_items
+
+    restored = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    restored_snapshot = restored.paused_execution_context_snapshot()
+
+    assert isinstance(restored_snapshot, dict)
+    assert restored_snapshot["repair_required_tool_items"] == session._frontdoor_repair_required_tool_items
+    assert restored_snapshot["repair_required_skill_items"] == session._frontdoor_repair_required_skill_items
+
+
 @pytest.mark.asyncio
 async def test_graph_finalize_turn_appends_direct_reply_after_runtime_context_assistant() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))

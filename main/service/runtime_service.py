@@ -3805,6 +3805,37 @@ class MainRuntimeService:
         visible_ids = set(list_effective_skill_ids(subject=self._subject(actor_role=actor_role, session_id=session_id), available_skill_ids=[item.skill_id for item in self.resource_registry.list_skill_resources()], policy_engine=self.policy_engine))
         return [item for item in self.resource_registry.list_skill_resources() if item.skill_id in visible_ids]
 
+    def list_contract_visible_skill_resources(self, *, actor_role: str, session_id: str):
+        resource_registry = getattr(self, 'resource_registry', None)
+        policy_engine = getattr(self, 'policy_engine', None)
+        if resource_registry is None or policy_engine is None:
+            return list(self.list_visible_skill_resources(actor_role=actor_role, session_id=session_id) or [])
+        subject = self._subject(actor_role=actor_role, session_id=session_id)
+        items = []
+        find_role_policy = getattr(policy_engine, '_find_role_policy', None)
+        for record in list(resource_registry.list_skill_resources() or []):
+            skill_id = str(getattr(record, 'skill_id', '') or '').strip()
+            if not skill_id or not bool(getattr(record, 'enabled', True)):
+                continue
+            allowed_roles = {
+                str(role or '').strip()
+                for role in list(getattr(record, 'allowed_roles', []) or [])
+                if str(role or '').strip()
+            }
+            if str(actor_role or '').strip() not in allowed_roles:
+                continue
+            if callable(find_role_policy):
+                policy = find_role_policy(
+                    subject=subject,
+                    resource_kind='skill',
+                    resource_id=skill_id,
+                    action_id='load',
+                )
+                if policy is not None and str(getattr(policy, 'effect', '') or '').strip().lower() != 'allow':
+                    continue
+            items.append(record)
+        return items
+
     def list_visible_tool_families(self, *, actor_role: str, session_id: str):
         visible_names = set(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id))
         subject = self._subject(actor_role=actor_role, session_id=session_id)
@@ -4698,7 +4729,7 @@ class MainRuntimeService:
         query = str(search_query or '').strip()
         if not query:
             return {'ok': False, 'error': 'search_query_required'}
-        visible = list(self.list_visible_skill_resources(actor_role=actor_role, session_id=session_id) or [])
+        visible = list(self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_id) or [])
         scored: list[tuple[float, str, Any, list[str]]] = []
         for record in visible:
             skill_id = str(getattr(record, 'skill_id', '') or '').strip()
@@ -4834,10 +4865,15 @@ class MainRuntimeService:
                     limit=limit,
                 )
             return {'ok': False, 'error': 'skill_id_or_search_query_required'}
-        visible = {item.skill_id: item for item in self.list_visible_skill_resources(actor_role=actor_role, session_id=session_id)}
+        visible = {
+            item.skill_id: item
+            for item in self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_id)
+        }
         record = visible.get(skill_name)
         if record is None:
             return {'ok': False, 'error': f'Skill not visible: {skill_id}'}
+        if self._skill_record_is_repair_required(record):
+            return self._repair_required_skill_payload(record)
         path = Path(record.skill_doc_path) if record.skill_doc_path else None
         content = path.read_text(encoding='utf-8') if path and path.exists() else ''
         return {
@@ -4866,10 +4902,15 @@ class MainRuntimeService:
                     limit=limit,
                 )
             return {'ok': False, 'error': 'skill_id_or_search_query_required'}
-        visible = {item.skill_id: item for item in self.list_visible_skill_resources(actor_role=actor_role, session_id=session_id)}
+        visible = {
+            item.skill_id: item
+            for item in self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_id)
+        }
         record = visible.get(skill_name)
         if record is None:
             return {'ok': False, 'error': f'Skill not visible: {skill_id}'}
+        if self._skill_record_is_repair_required(record):
+            return self._repair_required_skill_payload(record)
         path = Path(record.skill_doc_path) if record.skill_doc_path else None
         content = path.read_text(encoding='utf-8') if path and path.exists() else ''
         payload = layered_body_payload(
@@ -6207,6 +6248,64 @@ class MainRuntimeService:
         return getattr(record, key, None)
 
     @staticmethod
+    def _normalized_reason_values(items: list[Any] | None) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for item in list(items or []):
+            normalized = str(item or '').strip()
+            if not normalized:
+                continue
+            marker = normalized.lower()
+            if marker in seen:
+                continue
+            seen.add(marker)
+            ordered.append(normalized)
+        return ordered
+
+    @classmethod
+    def _repair_reason_summary(cls, *, reasons: list[Any] | None, fallback: str) -> str:
+        normalized = cls._normalized_reason_values(reasons)
+        if normalized:
+            return normalized[0]
+        return str(fallback or '').strip()
+
+    @classmethod
+    def _skill_record_is_repair_required(cls, record: Any) -> bool:
+        available = cls._skill_record_value(record, 'available')
+        if available is None:
+            return False
+        return not bool(available)
+
+    @classmethod
+    def _skill_repair_reason(cls, record: Any) -> str:
+        metadata = cls._skill_record_value(record, 'metadata')
+        metadata = dict(metadata or {}) if isinstance(metadata, dict) else {}
+        reasons = [
+            *list(metadata.get('errors') or []),
+            *list(metadata.get('warnings') or []),
+        ]
+        return cls._repair_reason_summary(
+            reasons=reasons,
+            fallback='Repair is required before this skill can be viewed.',
+        )
+
+    def _repair_required_skill_payload(self, record: Any) -> dict[str, Any]:
+        skill_id = str(self._skill_record_value(record, 'skill_id') or '').strip()
+        return {
+            'ok': False,
+            'error': 'skill_repair_required',
+            'skill_id': skill_id,
+            'message': f'Skill "{skill_id}" requires repair before its body can be loaded.',
+            'reference_skill': 'writing-skills',
+            'warnings': list((dict(self._skill_record_value(record, 'metadata') or {}) if isinstance(self._skill_record_value(record, 'metadata'), dict) else {}).get('warnings') or []),
+            'errors': list((dict(self._skill_record_value(record, 'metadata') or {}) if isinstance(self._skill_record_value(record, 'metadata'), dict) else {}).get('errors') or []),
+            'next_actions': [
+                'Use `exec` and `filesystem_*` tools to repair the skill files or dependencies.',
+                'Reference skill `writing-skills` before retrying `load_skill_context`.',
+            ],
+        }
+
+    @staticmethod
     def _node_message_payload(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
         for message in list(messages or []):
             if str(message.get('role') or '').strip().lower() != 'user':
@@ -6334,13 +6433,15 @@ class MainRuntimeService:
             candidate_tool_names=candidate_tool_names,
             trace={'mode': 'persisted_frame_restore'},
         )
+        session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        actor_role = self._actor_role_for_node(node)
         return {
-            'session_key': str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared',
-            'actor_role': self._actor_role_for_node(node),
-            'visible_skills': [],
+            'session_key': session_key,
+            'actor_role': actor_role,
+            'visible_skills': list(self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_key) or []),
             'candidate_tool_items': candidate_tool_items,
             'candidate_skill_items': candidate_skill_items,
-            'visible_tool_families': [],
+            'visible_tool_families': list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_key) or []),
             'visible_tool_names': visible_tool_names,
             'prompt': str(payload.get('prompt') or getattr(node, 'prompt', '') or '').strip(),
             'goal': str(payload.get('goal') or getattr(node, 'goal', '') or '').strip(),
@@ -6351,7 +6452,7 @@ class MainRuntimeService:
     def _node_context_selection_inputs(self, *, task, node: NodeRecord) -> dict[str, Any]:
         session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         actor_role = self._actor_role_for_node(node)
-        visible_skills = list(self.list_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
+        visible_skills = list(self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
         visible_tool_families = list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_key) or [])
         visible_tool_names = list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_key) or [])
         task_metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}
@@ -6493,6 +6594,217 @@ class MainRuntimeService:
                 }
             )
         return items
+
+    @staticmethod
+    def _tool_family_by_executor_name(visible_tool_families: list[Any]) -> dict[str, Any]:
+        family_by_executor: dict[str, Any] = {}
+        for family in list(visible_tool_families or []):
+            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+            executor_names: list[str] = []
+            for action in list(getattr(family, 'actions', []) or []):
+                for raw_name in list(getattr(action, 'executor_names', []) or []):
+                    executor_name = str(raw_name or '').strip()
+                    if executor_name and executor_name not in executor_names:
+                        executor_names.append(executor_name)
+            if not executor_names and tool_id:
+                executor_names.append(tool_id)
+            for executor_name in executor_names:
+                family_by_executor.setdefault(executor_name, family)
+        return family_by_executor
+
+    def _repair_required_tool_reason(
+        self,
+        *,
+        tool_id: str,
+        visible_tool_families: list[Any],
+    ) -> str:
+        try:
+            toolskill_payload = dict(self.get_tool_toolskill(tool_id) or {})
+        except Exception:
+            toolskill_payload = {}
+        reasons = [
+            *list(toolskill_payload.get('errors') or []),
+            *list(toolskill_payload.get('warnings') or []),
+        ]
+        family_by_executor = self._tool_family_by_executor_name(visible_tool_families)
+        family = family_by_executor.get(tool_id)
+        if family is None:
+            family = next(
+                (
+                    item
+                    for item in list(visible_tool_families or [])
+                    if str(getattr(item, 'tool_id', '') or '').strip() == tool_id
+                ),
+                None,
+            )
+        metadata = dict(getattr(family, 'metadata', {}) or {}) if family is not None else {}
+        reasons.extend(list(metadata.get('errors') or []))
+        reasons.extend(list(metadata.get('warnings') or []))
+        return self._repair_reason_summary(
+            reasons=reasons,
+            fallback='Repair is required before this tool can be used.',
+        )
+
+    def _split_repair_required_tool_prompt_items(
+        self,
+        *,
+        candidate_tool_names: list[str],
+        visible_tool_families: list[Any],
+        preferred_items: list[Any] | None = None,
+    ) -> tuple[list[str], list[dict[str, str]], list[dict[str, str]]]:
+        candidate_tool_items = self._candidate_tool_prompt_items(
+            candidate_tool_names=candidate_tool_names,
+            visible_tool_families=visible_tool_families,
+            preferred_items=preferred_items,
+        )
+        family_by_executor = self._tool_family_by_executor_name(visible_tool_families)
+        repair_required_items: list[dict[str, str]] = []
+        remaining_names: list[str] = []
+        remaining_items: list[dict[str, str]] = []
+        for item in list(candidate_tool_items or []):
+            tool_id = str(item.get('tool_id') or '').strip()
+            if not tool_id:
+                continue
+            try:
+                toolskill_payload = dict(self.get_tool_toolskill(tool_id) or {})
+            except Exception:
+                toolskill_payload = {}
+            family = family_by_executor.get(tool_id)
+            repair_required = bool(toolskill_payload.get('repair_required'))
+            if not repair_required and family is not None:
+                repair_required = bool(getattr(family, 'callable', True)) and not bool(getattr(family, 'available', True))
+            if repair_required:
+                repair_required_items.append(
+                    {
+                        'tool_id': tool_id,
+                        'description': str(item.get('description') or '').strip(),
+                        'reason': self._repair_required_tool_reason(
+                            tool_id=tool_id,
+                            visible_tool_families=visible_tool_families,
+                        ),
+                    }
+                )
+                continue
+            remaining_names.append(tool_id)
+            remaining_items.append(dict(item))
+        return remaining_names, remaining_items, repair_required_items
+
+    def _split_repair_required_skill_prompt_items(
+        self,
+        *,
+        candidate_skill_ids: list[str],
+        visible_skills: list[Any],
+        preferred_items: list[Any] | None = None,
+    ) -> tuple[list[str], list[dict[str, str]], list[dict[str, str]]]:
+        candidate_skill_items = self._candidate_skill_prompt_items(
+            candidate_skill_ids=candidate_skill_ids,
+            visible_skills=visible_skills,
+            preferred_items=preferred_items,
+        )
+        visible_by_skill_id = {
+            str(self._skill_record_value(record, 'skill_id') or '').strip(): record
+            for record in list(visible_skills or [])
+            if str(self._skill_record_value(record, 'skill_id') or '').strip()
+        }
+        repair_required_items: list[dict[str, str]] = []
+        remaining_ids: list[str] = []
+        remaining_items: list[dict[str, str]] = []
+        for item in list(candidate_skill_items or []):
+            skill_id = str(item.get('skill_id') or '').strip()
+            if not skill_id:
+                continue
+            record = visible_by_skill_id.get(skill_id)
+            if record is not None and self._skill_record_is_repair_required(record):
+                repair_required_items.append(
+                    {
+                        'skill_id': skill_id,
+                        'description': str(item.get('description') or '').strip(),
+                        'reason': self._skill_repair_reason(record),
+                    }
+                )
+                continue
+            remaining_ids.append(skill_id)
+            remaining_items.append(dict(item))
+        return remaining_ids, remaining_items, repair_required_items
+
+    def _all_repair_required_tool_prompt_items(
+        self,
+        *,
+        visible_tool_families: list[Any],
+    ) -> list[dict[str, str]]:
+        items: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for family in list(visible_tool_families or []):
+            if not bool(getattr(family, 'callable', True)) or bool(getattr(family, 'available', True)):
+                continue
+            executor_names: list[str] = []
+            for action in list(getattr(family, 'actions', []) or []):
+                for raw_name in list(getattr(action, 'executor_names', []) or []):
+                    executor_name = str(raw_name or '').strip()
+                    if executor_name and executor_name not in executor_names:
+                        executor_names.append(executor_name)
+            if not executor_names:
+                normalized_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+                if normalized_tool_id:
+                    executor_names.append(normalized_tool_id)
+            for tool_id in executor_names:
+                if tool_id in seen:
+                    continue
+                seen.add(tool_id)
+                description = str(getattr(family, 'description', '') or '').strip()
+                items.append(
+                    {
+                        'tool_id': tool_id,
+                        'description': description,
+                        'reason': self._repair_required_tool_reason(
+                            tool_id=tool_id,
+                            visible_tool_families=visible_tool_families,
+                        ),
+                    }
+                )
+        return items
+
+    def _all_repair_required_skill_prompt_items(
+        self,
+        *,
+        visible_skills: list[Any],
+    ) -> list[dict[str, str]]:
+        items: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for record in list(visible_skills or []):
+            if not self._skill_record_is_repair_required(record):
+                continue
+            skill_id = str(self._skill_record_value(record, 'skill_id') or '').strip()
+            if not skill_id or skill_id in seen:
+                continue
+            seen.add(skill_id)
+            items.append(
+                {
+                    'skill_id': skill_id,
+                    'description': str(self._skill_record_value(record, 'description') or '').strip(),
+                    'reason': self._skill_repair_reason(record),
+                }
+            )
+        return items
+
+    @staticmethod
+    def _merge_repair_prompt_items(
+        existing: list[dict[str, str]] | None,
+        incoming: list[dict[str, str]] | None,
+        *,
+        key: str,
+    ) -> list[dict[str, str]]:
+        ordered: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in [*list(existing or []), *list(incoming or [])]:
+            if not isinstance(item, dict):
+                continue
+            item_key = str(item.get(key) or '').strip()
+            if not item_key or item_key in seen:
+                continue
+            seen.add(item_key)
+            ordered.append(dict(item))
+        return ordered
 
     def _candidate_tool_prompt_items(
         self,
@@ -6662,19 +6974,68 @@ class MainRuntimeService:
             selection=selection,
             visible_tool_names=list(inputs.get('visible_tool_names') or []),
         )
-        candidate_tool_items = self._candidate_tool_prompt_items(
+        raw_candidate_tool_names = self._normalized_tool_name_list(
+            list(getattr(selection, 'candidate_tool_names', []) or [])
+        )
+        if raw_candidate_tool_names:
+            family_by_executor = self._tool_family_by_executor_name(list(inputs.get('visible_tool_families') or []))
+            callable_name_set = set(callable_tool_names)
+            for tool_name in raw_candidate_tool_names:
+                family = family_by_executor.get(tool_name)
+                if family is None:
+                    continue
+                if not bool(getattr(family, 'callable', True)) or bool(getattr(family, 'available', True)):
+                    continue
+                if tool_name in callable_name_set or tool_name in candidate_tool_names:
+                    continue
+                candidate_tool_names.append(tool_name)
+        candidate_tool_names, candidate_tool_items, repair_required_tool_items = self._split_repair_required_tool_prompt_items(
             candidate_tool_names=list(candidate_tool_names),
             visible_tool_families=list(inputs.get('visible_tool_families') or []),
             preferred_items=list(inputs.get('candidate_tool_items') or []),
         )
+        repair_required_tool_items = self._merge_repair_prompt_items(
+            repair_required_tool_items,
+            self._all_repair_required_tool_prompt_items(
+                visible_tool_families=list(inputs.get('visible_tool_families') or []),
+            ),
+            key='tool_id',
+        )
+        repair_required_tool_ids = {
+            str(item.get('tool_id') or '').strip()
+            for item in list(repair_required_tool_items or [])
+            if str(item.get('tool_id') or '').strip()
+        }
+        candidate_tool_names = [name for name in list(candidate_tool_names or []) if name not in repair_required_tool_ids]
+        candidate_tool_items = [
+            dict(item)
+            for item in list(candidate_tool_items or [])
+            if str(item.get('tool_id') or '').strip() not in repair_required_tool_ids
+        ]
         candidate_skill_ids = list(
             getattr(selection, 'candidate_skill_ids', []) or getattr(selection, 'selected_skill_ids', []) or []
         )
-        candidate_skill_items = self._candidate_skill_prompt_items(
+        candidate_skill_ids, candidate_skill_items, repair_required_skill_items = self._split_repair_required_skill_prompt_items(
             candidate_skill_ids=candidate_skill_ids,
             visible_skills=visible_skills,
             preferred_items=list(inputs.get('candidate_skill_items') or []),
         )
+        repair_required_skill_items = self._merge_repair_prompt_items(
+            repair_required_skill_items,
+            self._all_repair_required_skill_prompt_items(visible_skills=visible_skills),
+            key='skill_id',
+        )
+        repair_required_skill_ids = {
+            str(item.get('skill_id') or '').strip()
+            for item in list(repair_required_skill_items or [])
+            if str(item.get('skill_id') or '').strip()
+        }
+        candidate_skill_ids = [skill_id for skill_id in list(candidate_skill_ids or []) if skill_id not in repair_required_skill_ids]
+        candidate_skill_items = [
+            dict(item)
+            for item in list(candidate_skill_items or [])
+            if str(item.get('skill_id') or '').strip() not in repair_required_skill_ids
+        ]
         enriched = inject_node_dynamic_contract_message(
             list(messages or []),
             NodeRuntimeToolContract(
@@ -6686,6 +7047,8 @@ class MainRuntimeService:
                 visible_skills=[],
                 candidate_skill_ids=candidate_skill_ids,
                 candidate_skill_items=candidate_skill_items,
+                repair_required_tool_items=repair_required_tool_items,
+                repair_required_skill_items=repair_required_skill_items,
                 stage_payload=stage_payload,
                 hydrated_executor_names=self._node_hydrated_executor_names(
                     task_id=str(getattr(task, 'task_id', '') or '').strip(),

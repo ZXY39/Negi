@@ -1283,6 +1283,75 @@ async def test_runtime_agent_session_resume_frontdoor_interrupt_clears_pending_i
 
 
 @pytest.mark.asyncio
+async def test_runtime_agent_session_resume_frontdoor_interrupt_keeps_repair_required_lists_available_to_runner(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+    captured: dict[str, object] = {}
+
+    class _Runner:
+        async def resume_turn(self, *, session, resume_value, on_progress):
+            _ = resume_value, on_progress
+            paused_snapshot = session.paused_execution_context_snapshot()
+            captured["paused_snapshot"] = copy.deepcopy(paused_snapshot)
+            return "approved reply"
+
+    loop = SimpleNamespace(
+        multi_agent_runner=_Runner(),
+        model="gpt-test",
+        reasoning_effort=None,
+    )
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+    session.state.pending_interrupts = [{"id": "interrupt-1", "value": {"kind": "frontdoor_tool_approval"}}]
+    session.state.paused = True
+    session.state.status = "paused"
+    session._set_paused_execution_context(
+        {
+            "status": "paused",
+            "interrupts": [{"id": "interrupt-1", "value": {"kind": "frontdoor_tool_approval"}}],
+            "repair_required_tool_items": [
+                {
+                    "tool_id": "agent_browser",
+                    "description": "Browser automation",
+                    "reason": "missing required paths",
+                }
+            ],
+            "repair_required_skill_items": [
+                {
+                    "skill_id": "writing-skills",
+                    "description": "Skill maintenance workflow",
+                    "reason": "missing required bins",
+                }
+            ],
+        }
+    )
+
+    result = await session.resume_frontdoor_interrupt(resume_value={"approved": True})
+
+    assert result.output == "approved reply"
+    paused_snapshot = dict(captured["paused_snapshot"] or {})
+    assert paused_snapshot["repair_required_tool_items"] == [
+        {
+            "tool_id": "agent_browser",
+            "description": "Browser automation",
+            "reason": "missing required paths",
+        }
+    ]
+    assert paused_snapshot["repair_required_skill_items"] == [
+        {
+            "skill_id": "writing-skills",
+            "description": "Skill maintenance workflow",
+            "reason": "missing required bins",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_runtime_agent_session_resume_frontdoor_interrupt_reenters_paused_state_on_interrupt(
     tmp_path,
     monkeypatch,

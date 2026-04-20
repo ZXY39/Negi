@@ -187,6 +187,71 @@ def test_frontdoor_prompt_cache_key_ignores_dynamic_tool_contract_changes() -> N
     assert _field(first, "request_messages") != _field(second, "request_messages")
 
 
+def test_frontdoor_prompt_cache_key_ignores_repair_required_contract_changes() -> None:
+    from g3ku.runtime.frontdoor.prompt_cache_contract import build_frontdoor_prompt_contract
+
+    stable_messages = [
+        {"role": "system", "content": "stable system"},
+        {"role": "user", "content": "stable bootstrap"},
+    ]
+    tool_schemas = [
+        {
+            "name": "exec",
+            "description": "",
+            "parameters": {"type": "object"},
+        }
+    ]
+
+    first_contract = build_frontdoor_tool_contract(
+        callable_tool_names=["exec"],
+        candidate_tool_names=[],
+        candidate_tool_items=[],
+        repair_required_tool_items=[
+            {"tool_id": "agent_browser", "description": "Browser automation", "reason": "missing required paths"}
+        ],
+        hydrated_tool_names=[],
+        frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
+        candidate_skill_ids=[],
+        repair_required_skill_items=[],
+        contract_revision="frontdoor:v1",
+    ).to_message()
+    second_contract = build_frontdoor_tool_contract(
+        callable_tool_names=["exec"],
+        candidate_tool_names=[],
+        candidate_tool_items=[],
+        repair_required_tool_items=[
+            {"tool_id": "agent_browser", "description": "Browser automation", "reason": "missing required paths"}
+        ],
+        hydrated_tool_names=[],
+        frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
+        candidate_skill_ids=[],
+        repair_required_skill_items=[
+            {"skill_id": "writing-skills", "description": "Skill maintenance workflow", "reason": "missing required bins"}
+        ],
+        contract_revision="frontdoor:v1",
+    ).to_message()
+
+    first = build_frontdoor_prompt_contract(
+        scope="ceo_frontdoor",
+        provider_model="openai:gpt-4.1",
+        stable_messages=stable_messages,
+        dynamic_appendix_messages=[first_contract],
+        tool_schemas=tool_schemas,
+        cache_family_revision="frontdoor:v1",
+    )
+    second = build_frontdoor_prompt_contract(
+        scope="ceo_frontdoor",
+        provider_model="openai:gpt-4.1",
+        stable_messages=stable_messages,
+        dynamic_appendix_messages=[second_contract],
+        tool_schemas=tool_schemas,
+        cache_family_revision="frontdoor:v1",
+    )
+
+    assert _field(first, "prompt_cache_key") == _field(second, "prompt_cache_key")
+    assert _field(first, "request_messages") != _field(second, "request_messages")
+
+
 def test_frontdoor_prompt_cache_key_ignores_tool_schema_changes_when_stable_prefix_matches() -> None:
     from g3ku.runtime.frontdoor.prompt_cache_contract import build_frontdoor_prompt_contract
 

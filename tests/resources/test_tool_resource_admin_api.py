@@ -4622,6 +4622,67 @@ async def test_load_skill_context_v2_returns_full_skill_body_by_default(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_load_skill_context_v2_rejects_repair_required_skill(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    root = workspace / 'skills' / 'broken_skill'
+    root.mkdir(parents=True, exist_ok=True)
+    (root / 'resource.yaml').write_text(
+        """schema_version: 1
+kind: skill
+name: broken_skill
+description: Broken skill for repair-required gate tests.
+trigger:
+  keywords: []
+  always: false
+requires:
+  tools: []
+  bins:
+    - definitely_missing_bin_for_repair_gate
+  env: []
+content:
+  main: SKILL.md
+exposure:
+  agent: true
+  main_runtime: true
+""",
+        encoding='utf-8',
+    )
+    (root / 'SKILL.md').write_text('# Broken Skill\n\nThis body should stay hidden until repaired.\n', encoding='utf-8')
+    _copy_repo_tools(workspace, 'load_skill_context')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-repair-required-skill-gate')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+
+        payload = service.load_skill_context_v2(
+            actor_role='ceo',
+            session_id='web:shared',
+            skill_id='broken_skill',
+        )
+        assert payload['ok'] is False
+        assert payload['error'] == 'skill_repair_required'
+        assert payload['skill_id'] == 'broken_skill'
+        assert payload['reference_skill'] == 'writing-skills'
+        assert 'repair' in str(payload['message'] or '').lower()
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_load_tool_context_v2_returns_full_tool_body_by_default(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)

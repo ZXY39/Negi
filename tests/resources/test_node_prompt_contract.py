@@ -107,6 +107,62 @@ def test_node_runtime_contract_serializes_minimal_agent_facing_payload() -> None
     assert "hydrated_tools: `filesystem_write`" in message["content"]
 
 
+def test_node_runtime_contract_renders_repair_required_sections_separately() -> None:
+    contract = NodeRuntimeToolContract(
+        node_id="node:test",
+        node_kind="execution",
+        callable_tool_names=["exec"],
+        candidate_tool_names=[],
+        candidate_tool_items=[],
+        visible_skills=[],
+        candidate_skill_ids=[],
+        candidate_skill_items=[],
+        repair_required_tool_items=[
+            {
+                "tool_id": "agent_browser",
+                "description": "Browser automation",
+                "reason": "missing required paths",
+            }
+        ],
+        repair_required_skill_items=[
+            {
+                "skill_id": "writing-skills",
+                "description": "Skill maintenance workflow",
+                "reason": "missing required bins",
+            }
+        ],
+        stage_payload={},
+        hydrated_executor_names=[],
+        lightweight_tool_ids=[],
+        selection_trace={"mode": "execution_tool_selection"},
+    )
+
+    payload = contract.to_message_payload()
+    message = contract.to_message()
+
+    assert payload["candidate_tools"] == []
+    assert payload["candidate_skills"] == []
+    assert payload["repair_required_tools"] == [
+        {
+            "tool_id": "agent_browser",
+            "description": "Browser automation",
+            "reason": "missing required paths",
+        }
+    ]
+    assert payload["repair_required_skills"] == [
+        {
+            "skill_id": "writing-skills",
+            "description": "Skill maintenance workflow",
+            "reason": "missing required bins",
+        }
+    ]
+    assert "repair_required_tools:" in message["content"]
+    assert "repair_required_skills:" in message["content"]
+    assert 'Use `load_tool_context(tool_id="<tool_id>")` first.' in message["content"]
+    assert "Reference skill: `repair-tool`." in message["content"]
+    assert "Reference skill: `writing-skills`." in message["content"]
+
+
 def test_inject_node_dynamic_contract_message_appends_contract_to_request_tail() -> None:
     contract = NodeRuntimeToolContract(
         node_id="node-1",
