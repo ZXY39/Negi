@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import inspect
 import json
 import os
@@ -4260,11 +4261,12 @@ class MainRuntimeService:
             node_kind=normalized_node_kind,
             callable_tool_names=full_callable_tool_names,
         )
+        requested_commit_reason = str(runtime_payload.get('provider_tool_exposure_commit_reason') or '').strip()
         log_service = getattr(self, 'log_service', None)
         read_runtime_frame = getattr(log_service, 'read_runtime_frame', None)
         prior_selected_tool_names: list[str] = []
         prior_provider_tool_names: list[str] = []
-        prior_provider_tool_bundle_seeded = False
+        prior_pending_provider_tool_names: list[str] = []
         if callable(read_runtime_frame):
             prior_frame = read_runtime_frame(str(task_id or '').strip(), str(node_id or '').strip())
             if isinstance(prior_frame, dict):
@@ -4282,8 +4284,11 @@ class MainRuntimeService:
                     )
                     if str(item or '').strip()
                 ]
-                prior_trace = dict(prior_frame.get('model_visible_tool_selection_trace') or {})
-                prior_provider_tool_bundle_seeded = bool(prior_trace.get('provider_tool_bundle_seeded'))
+                prior_pending_provider_tool_names = [
+                    str(item or '').strip()
+                    for item in list(prior_frame.get('pending_provider_tool_names') or [])
+                    if str(item or '').strip()
+                ]
         selected_tool_names: list[str] = []
         for name in prior_selected_tool_names:
             if name in model_visible_callable_tool_names and name not in selected_tool_names:
@@ -4291,16 +4296,15 @@ class MainRuntimeService:
         for name in model_visible_callable_tool_names:
             if name not in selected_tool_names:
                 selected_tool_names.append(name)
-        provider_tool_names = list(full_callable_tool_names or selected_tool_names)
-        provider_tool_bundle_seeded = False
-        if (
-            prior_provider_tool_names
-            and set(prior_provider_tool_names).issubset(set(provider_tool_names))
-            and prior_provider_tool_names != provider_tool_names
-            and not prior_provider_tool_bundle_seeded
-        ):
-            provider_tool_names = list(prior_provider_tool_names)
-            provider_tool_bundle_seeded = True
+        desired_provider_tool_names = list(full_callable_tool_names or selected_tool_names)
+        exposure = self._resolve_provider_tool_exposure(
+            active_provider_tool_names=prior_provider_tool_names,
+            pending_provider_tool_names=prior_pending_provider_tool_names,
+            desired_provider_tool_names=desired_provider_tool_names,
+            commit_reason=requested_commit_reason,
+        )
+        provider_tool_names = list(exposure.get('provider_tool_names') or [])
+        provider_tool_bundle_seeded = bool(exposure.get('provider_tool_bundle_seeded'))
         final_schema_chars = sum(
             len(json.dumps(visible_tools[name].to_model_schema(), ensure_ascii=False, sort_keys=True))
             for name in selected_tool_names
@@ -4317,6 +4321,10 @@ class MainRuntimeService:
             'candidate_tool_names': candidate_tool_names,
             'lightweight_tool_ids': list(selection.lightweight_tool_ids or []),
             'hydrated_executor_names': list(promoted_only_hydrated_executor_names),
+            'pending_provider_tool_names': list(exposure.get('pending_provider_tool_names') or []),
+            'provider_tool_exposure_pending': bool(exposure.get('provider_tool_exposure_pending')),
+            'provider_tool_exposure_revision': str(exposure.get('provider_tool_exposure_revision') or ''),
+            'provider_tool_exposure_commit_reason': str(exposure.get('provider_tool_exposure_commit_reason') or ''),
             'schema_chars': int(final_schema_chars),
             'trace': {
                 'mode': 'execution_tool_selection',
@@ -4333,8 +4341,13 @@ class MainRuntimeService:
                 'requested_promoted_hydrated_executor_names': list(hydrated_executor_names),
                 'promoted_hydrated_executor_names': list(promoted_only_hydrated_executor_names),
                 'candidate_tool_names': list(candidate_tool_names),
+                'desired_provider_tool_names': list(exposure.get('desired_provider_tool_names') or []),
                 'prior_provider_tool_names': list(prior_provider_tool_names),
                 'provider_tool_names': list(provider_tool_names),
+                'pending_provider_tool_names': list(exposure.get('pending_provider_tool_names') or []),
+                'provider_tool_exposure_pending': bool(exposure.get('provider_tool_exposure_pending')),
+                'provider_tool_exposure_revision': str(exposure.get('provider_tool_exposure_revision') or ''),
+                'provider_tool_exposure_commit_reason': str(exposure.get('provider_tool_exposure_commit_reason') or ''),
                 'provider_tool_bundle_seeded': bool(provider_tool_bundle_seeded),
                 'base_schema_chars': int(selection.schema_chars),
                 'top_k': int((selection.trace or {}).get('top_k', 0) or 0),
@@ -4447,6 +4460,70 @@ class MainRuntimeService:
     @staticmethod
     def _fixed_builtin_tool_name_set_for_actor_role(actor_role: str) -> set[str]:
         return fixed_builtin_tool_name_set_for_actor_role(actor_role)
+
+    @staticmethod
+    def _provider_tool_exposure_revision(tool_names: list[str] | None) -> str:
+        normalized = [
+            str(item or '').strip()
+            for item in list(tool_names or [])
+            if str(item or '').strip()
+        ]
+        if not normalized:
+            return ''
+        payload = json.dumps(normalized, ensure_ascii=False, separators=(',', ':'))
+        return f"pte:{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
+    @classmethod
+    def _resolve_provider_tool_exposure(
+        cls,
+        *,
+        active_provider_tool_names: list[str] | None,
+        pending_provider_tool_names: list[str] | None,
+        desired_provider_tool_names: list[str] | None,
+        commit_reason: str = '',
+    ) -> dict[str, Any]:
+        active = [
+            str(item or '').strip()
+            for item in list(active_provider_tool_names or [])
+            if str(item or '').strip()
+        ]
+        pending = [
+            str(item or '').strip()
+            for item in list(pending_provider_tool_names or [])
+            if str(item or '').strip()
+        ]
+        desired = [
+            str(item or '').strip()
+            for item in list(desired_provider_tool_names or [])
+            if str(item or '').strip()
+        ]
+        normalized_commit_reason = (
+            'token_compression'
+            if str(commit_reason or '').strip() == 'token_compression'
+            else ''
+        )
+        if not active:
+            active = list(desired)
+            pending = []
+            normalized_commit_reason = ''
+        elif normalized_commit_reason == 'token_compression':
+            active = list(desired)
+            pending = []
+        elif desired != active:
+            pending = list(desired)
+            normalized_commit_reason = ''
+        else:
+            pending = []
+            normalized_commit_reason = ''
+        return {
+            'provider_tool_names': list(active),
+            'pending_provider_tool_names': list(pending),
+            'provider_tool_exposure_pending': bool(pending),
+            'provider_tool_exposure_revision': cls._provider_tool_exposure_revision(active),
+            'provider_tool_exposure_commit_reason': normalized_commit_reason,
+            'provider_tool_bundle_seeded': bool(desired != active),
+            'desired_provider_tool_names': list(desired),
+        }
 
     def _tool_context_hydration_targets(
         self,

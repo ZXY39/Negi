@@ -213,9 +213,10 @@ Maintenance note for `task_append_notice` and task message distribution:
   - `repair_required_tools` 表示这些工具在修复前不能当成普通 callable/candidate 能力使用
   - `repair_required_skills` 表示这些 skill 在修复前不能通过 `load_skill_context` 查看正文
   - 这两个列表服务于模型决策边界，不代表 provider-facing `tools[]` 发生变化
-- 但 provider-facing `tools` schemas 现在不再随着 `transition_required=true` 收紧到只剩 `submit_next_stage`。前门会继续向 provider 发送稳定的 runtime-visible tool bundle，以减少阶段切换回合对 prompt cache 前缀命中的破坏。
+- 但 provider-facing `tools` schemas 现在不再随着 `transition_required=true` 收紧到只剩 `submit_next_stage`。前门会继续向 provider 发送稳定的 active `provider_tool_names` bundle，以减少阶段切换回合对 prompt cache 前缀命中的破坏。
+- 这条稳定性规则现在还有一个显式提交边界：RBAC、hydration、阶段状态变化会先让当前轮的 desired tool 集发生变化，但最新 provider-facing `tools[]` 只会先写入 `pending_provider_tool_names`；只有当前轮真实进入 `token_compression` 时，pending 集才允许提交成新的 active `provider_tool_names`。
 - 当前唯一保留的例外是 `cron_internal`。这类内部轮次仍保留自己的 callable tool 集合，以便按既有协议继续调用 `cron(action="remove")` 完成自移除；维护时不要把这个 internal lane 与普通 CEO user turn 混为一谈。
-- 维护上不要把这个规则误读成“前门内部状态已经只剩 `submit_next_stage`”。`tool_names` 仍保存阶段内可恢复的完整工具池，供同一 turn 成功开阶段后的下一次 model call 立即恢复完整 callable 列表；agent-facing 决策边界由前门的 callable-tool helper 与动态合同消息表达，而 provider-facing schema 稳定性由 runtime-visible tool bundle 保证。
+- 维护上不要把这个规则误读成“前门内部状态已经只剩 `submit_next_stage`”。`tool_names` 仍保存阶段内可恢复的完整工具池，供同一 turn 成功开阶段后的下一次 model call 立即恢复完整 callable 列表；agent-facing 决策边界由前门的 callable-tool helper 与动态合同消息表达，而 provider-facing schema 稳定性由 active/pending provider-tool exposure 状态保证。
 - `g3ku/runtime/frontdoor/_ceo_create_agent_impl.py` 仍是 runner 入口，但它不再把 `create_agent + middleware` 当作前门主执行链；维护时应把 `_graph_*` 节点看成唯一权威路径。
 - frontdoor 与节点动态合同现在还会携带 `exec_runtime_policy`。这让 prompt 中不再需要把 exec 的“只读/受监管”规则写死为静态事实；维护者应优先把当前 exec 模式视为 runtime contract 的一部分，而不是 prompt 文案的一部分。
 - CEO/frontdoor 的稳定 system prompt 现在只保留最小的 capability exposure revision 锚点，不再把可见 tool/skill 名单整块写进稳定前缀。
@@ -429,7 +430,9 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - Each saved frontdoor request artifact now also carries normalized `usage`, `frontdoor_history_shrink_reason`, and `frontdoor_token_preflight_diagnostics`. Maintainers should use those fields to compare "what preflight thought would be sent" against "what the provider actually billed," rather than reconstructing that relation from transcript timing alone.
 - To preserve prefix reuse inside one visible CEO turn, same-turn request growth now follows: previous request body -> newly appended assistant/tool transcript -> newest contract snapshot. This means the actual request may contain multiple contract snapshots during one turn, but the durable post-turn transcript must still strip them back out.
 - `frontdoor_canonical_context` remains durable single-writer state. Turn finalization may merge completed-stage data into it, but session sync and request assembly must not write a visible projection back into the durable chain.
-- Provider-facing `tools[]` now have a separate stability rule from agent-facing callable tools: keep a stable superset aligned to exposure-visible concrete tools, keep the schema minimal, and let stage gating or hydration promotion change only the tail runtime contract unless the exposure set itself truly changes.
+- Provider-facing `tools[]` now have a separate stability rule from agent-facing callable tools: keep a stable active `provider_tool_names` anchor aligned to the last committed exposure set, keep the schema minimal, and let stage gating or hydration promotion change only the tail runtime contract unless a later `token_compression` commits a new exposure set.
+- In practice this means maintainers now need to track three tool-surface states: desired provider tool names, active `provider_tool_names`, and `pending_provider_tool_names`. Desired may change as soon as RBAC/hydration/stage state changes, but ordinary turns, fresh-turn continuity, pause/resume recovery, and `stage_compaction` must keep sending the active provider bundle.
+- The paired diagnostics fields `provider_tool_exposure_revision` and `provider_tool_exposure_commit_reason` exist to explain these transitions in artifacts. `provider_tool_exposure_commit_reason` must be empty or `token_compression`; any other value means provider schema commit semantics drifted.
 - `RuntimeAgentSession._frontdoor_request_body_messages` is now the session-owned request-body baseline for CEO/frontdoor continuity. It stores the rebuilt provider request body with dynamic contract messages stripped out, so the next round can append one fresh authoritative tail contract instead of replaying old catalogs as history.
 - Web CEO image uploads add one more boundary to that baseline contract: provider-visible image blocks are allowed only in the live request of the current turn when the selected model binding enables image multimodal input.
 - The durable baseline must stay text-and-attachment only. `frontdoor_request_body_messages`, inflight/paused snapshots, and completed continuity sidecars must strip `image_url` / `input_image` blocks back to their text projection before persistence.
@@ -438,6 +441,7 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - That seed is no longer fed back into frontdoor prompt assembly as an ordinary checkpoint history candidate. Visible-turn continuation now treats it as an authoritative request-body prefix, so the next turn appends new user/runtime-tail content directly instead of asking the history selector whether the seed is "semantically complete".
 - The paired `frontdoor_history_shrink_reason` field is now part of the runtime contract between prompt assembly and session persistence. Only `token_compression` and `stage_compaction` are valid reasons for a shorter next-round baseline.
 - In practice, this means a visible CEO/frontdoor turn is now expected to keep growing or stay flat across turns unless the runtime explicitly records one of those two shrink reasons. A shorter baseline without an allowed reason should be treated as a runtime bug, not as normal prompt trimming.
+- Do not conflate those two shrink reasons with provider schema commits: `frontdoor_history_shrink_reason=stage_compaction` may shorten the baseline, but it must not rotate provider-facing `tools[]`. Provider schema rotation is only allowed when the same send also records `provider_tool_exposure_commit_reason=token_compression`.
 - The authoritative request-body baseline must also survive turn finalization. When a visible CEO turn finishes with a direct assistant reply, that final assistant message is now appended onto `frontdoor_request_body_messages` before session sync, so the next visible turn does not fall back to a shorter transcript/canonical replay view.
 - This visible-output append-back rule is not limited to `direct_reply`. If a visible CEO turn finishes with a user-visible `final_output` after ordinary tools such as `message`, that final assistant text must still be appended onto `frontdoor_request_body_messages`; otherwise the next fresh visible turn reopens from a stripped tool-only baseline and loses the last visible answer from continuity.
 - The same baseline must also cross the restorable snapshot boundary. `inflight_turn_snapshot` / `paused execution context` now need to carry `frontdoor_request_body_messages` together with `frontdoor_history_shrink_reason`; otherwise a recreated `RuntimeAgentSession` would silently fall back to transcript/history replay and shorten the next visible turn outside the allowed shrink paths.
@@ -710,6 +714,12 @@ Execution and acceptance nodes now keep two separate views of tool visibility:
 
 - `tool_names`: the authoritative per-round callable tool set used by runtime contract enforcement.
 - `provider_tool_names`: the provider-facing schema bundle used when constructing the actual model request.
+- `pending_provider_tool_names`: the latest desired provider bundle that is waiting for a `token_compression` commit boundary.
+
+Artifacts for node sends now also record:
+
+- `provider_tool_exposure_revision`: a short hash of the active provider bundle that reached the provider.
+- `provider_tool_exposure_commit_reason`: empty string for ordinary reuse, or `token_compression` when the current send is the commit boundary.
 
 This separation exists to improve prompt-cache stability without weakening stage gates or tool hydration rules.
 
@@ -726,6 +736,7 @@ Maintainers should treat this as a request-construction scaffold only.
 - It does not replace the node's durable/compacted `message_history`.
 - It does not redefine which tools are callable.
 - It exists purely so the provider sees append-only growth instead of an early-prefix rewrite whenever stage compaction trims the active window.
+- It also means `provider_tool_bundle_seeded` is now only a compatibility/diagnostic hint. The actual behavior is driven by the active/pending exposure state plus the token-compression commit gate.
 
 ## Frontdoor Context Compression (Current Contract)
 
@@ -740,10 +751,16 @@ Anything else that shortens the next-round request baseline should be treated as
 
 - `token_compression` is an inline same-turn LLM rewrite that runs immediately before the provider send.
 - It keeps the stable system prefix, the latest runtime tool-contract tail, and the most recent body-history tail, then rewrites only the older body-history zone into one `G3KU_TOKEN_COMPACT_V2` marker block.
+- For both CEO/frontdoor and node runtime, this is now the only allowed boundary that may promote `pending_provider_tool_names` into the active provider-facing `tools[]` bundle for the same send.
 - The trigger threshold is tied to the runtime-selected model's `context_window_tokens`, not to a separate semantic-summary config.
 - If estimated request size is `<= 80%` of the selected model window, frontdoor sends directly.
 - If estimated request size is between `80%` and `100%`, frontdoor attempts one inline compression.
 - If estimated request size is already `> 100%`, frontdoor fails before compression because even the compression attempt would not fit safely in the current model window.
+
+### `stage_compaction`
+
+- `stage_compaction` may shorten the active history window or stage workset, and it is still a legitimate shrink reason for the next-round baseline.
+- It is not a provider schema commit boundary. If `provider_tool_names` change on a send whose shrink reason is `stage_compaction`, treat that as a bug in the exposure-gating path.
 
 ### Removed Semantic Summary Path
 

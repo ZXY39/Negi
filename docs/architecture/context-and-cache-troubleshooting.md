@@ -221,9 +221,10 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 
 维护要点：
 
-- 对普通 fresh-turn 第一跳，如果当前 visible tool set 只是上一轮的超集，可以临时沿用上一轮 tool schema 集
-- 这是“第一跳 cache-stability 规则”，不是永久替代当前 RBAC 可见集
-- 如果当前 visible tool set 真变小了，不能继续重放旧 schema
+- 对普通 fresh turn 第一跳，provider-facing `tools[]` 现在必须继续使用上一轮已经提交过的 active schema anchor；“当前 visible tool set 是上一轮超集”不再是自动扩张 schema 的合法理由。
+- 当前轮若因 RBAC、hydration、阶段状态变化而得到新的 desired provider tool 集，只能先记到 `pending_provider_tool_names`，等待后续某次真实 `token_compression` 再提交。
+- `stage_compaction`、fresh-turn continuity、pause/resume、completed continuity restore 都不能让 provider schema 自动扩张或切换。
+- 如果没有 `provider_tool_exposure_commit_reason=token_compression`，却观察到 provider-visible `tool_schemas` 变化，应直接按 runtime bug 排查。
 
 ## 3.7 manual pause 之后的新 turn，与“暂停回复”不是一回事
 
@@ -585,10 +586,14 @@ This addendum records the April 2026 node-cache repair boundary.
 - Node runtime now distinguishes `tool_names` from `provider_tool_names`.
 - `tool_names` remain the authoritative callable contract for the current round.
 - `provider_tool_names` are only the provider-facing schema bundle used to stabilize cache prefixes.
+- `pending_provider_tool_names` store the latest desired provider bundle that has not yet crossed a commit boundary.
+- `provider_tool_exposure_revision` identifies which active provider bundle actually reached the provider on that send.
+- `provider_tool_exposure_commit_reason` must be empty or `token_compression`.
 - Same-turn node requests now prefer an append-only scaffold:
   previous actual request body + last-round assistant/tool delta + newest overlay / tool-contract tail.
 - After node restart/resume, the first rebuilt provider request must keep using that persisted append-only scaffold even if durable `runtime_frame.messages` is shorter. `runtime_frame.messages` is the projected-history lens; `actual_request_ref.request_messages` is the authority for first-hop request reconstruction.
 - This scaffold must not weaken stage gating or hydration rules.
+- RBAC withdrawal still takes effect immediately at execution time even if the active provider schema has not yet converged. Schema lag until `token_compression` is expected; side effects after revoke are not.
 
 When node cache hits are still low after schema churn stops, compare consecutive node actual-request artifacts first.
 
@@ -607,6 +612,8 @@ The current CEO/frontdoor shrink rules are simpler than the older notes above:
 
 - Only `token_compression` and `stage_compaction` are valid shrink reasons.
 - `token_compression` is an inline LLM rewrite that runs only when the estimated provider-bound request is above `80%` of the selected model's `context_window_tokens` and still within that window.
+- `token_compression` is also the only allowed commit boundary for syncing latest RBAC/hydration-driven provider-facing `tools[]`.
+- `stage_compaction` may shrink context, but it must leave active `provider_tool_names` unchanged even if `pending_provider_tool_names` already differs.
 - If the estimate is already above the selected model window, frontdoor must fail before send instead of attempting any semantic/global-summary fallback.
 - If inline compression runs and the recomputed request is still above the selected model window, frontdoor fails with the same context-window error.
 - Manual pause during compression discards any late compression result; the next visible turn re-runs prepare -> estimate -> optional compression -> send from the current authoritative baseline.

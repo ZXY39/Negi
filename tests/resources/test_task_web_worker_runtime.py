@@ -5845,7 +5845,7 @@ async def test_run_node_after_restart_reuses_persisted_actual_request_prefix_for
 
 
 @pytest.mark.asyncio
-async def test_model_visible_tool_selection_trace_reuses_prior_provider_tool_bundle(
+async def test_model_visible_tool_selection_keeps_prior_provider_tool_bundle_until_token_compression(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -5938,10 +5938,60 @@ async def test_model_visible_tool_selection_trace_reuses_prior_provider_tool_bun
             "content_open",
         ]
         assert selection["trace"]["provider_tool_bundle_seeded"] is True
+        assert selection["trace"]["pending_provider_tool_names"] == [
+            "submit_next_stage",
+            "content_open",
+            "web_fetch",
+        ]
+        assert selection["trace"]["provider_tool_exposure_commit_reason"] == ""
         assert selection["trace"]["prior_provider_tool_names"] == [
             "submit_next_stage",
             "content_open",
         ]
+
+        repeated_selection = service._select_model_visible_tool_schema_payload(
+            task_id=record.task_id,
+            node_id=root.node_id,
+            node_kind=root.node_kind,
+            visible_tools=visible_tools,
+            runtime_context={},
+        )
+
+        assert repeated_selection["provider_tool_names"] == [
+            "submit_next_stage",
+            "content_open",
+        ]
+        assert repeated_selection["trace"]["provider_tool_exposure_commit_reason"] == ""
+
+        stage_compaction_selection = service._select_model_visible_tool_schema_payload(
+            task_id=record.task_id,
+            node_id=root.node_id,
+            node_kind=root.node_kind,
+            visible_tools=visible_tools,
+            runtime_context={"provider_tool_exposure_commit_reason": "stage_compaction"},
+        )
+
+        assert stage_compaction_selection["provider_tool_names"] == [
+            "submit_next_stage",
+            "content_open",
+        ]
+        assert stage_compaction_selection["trace"]["provider_tool_exposure_commit_reason"] == ""
+
+        token_compaction_selection = service._select_model_visible_tool_schema_payload(
+            task_id=record.task_id,
+            node_id=root.node_id,
+            node_kind=root.node_kind,
+            visible_tools=visible_tools,
+            runtime_context={"provider_tool_exposure_commit_reason": "token_compression"},
+        )
+
+        assert token_compaction_selection["provider_tool_names"] == [
+            "submit_next_stage",
+            "content_open",
+            "web_fetch",
+        ]
+        assert token_compaction_selection["trace"]["pending_provider_tool_names"] == []
+        assert token_compaction_selection["trace"]["provider_tool_exposure_commit_reason"] == "token_compression"
     finally:
         await service.close()
 
@@ -6079,6 +6129,8 @@ def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_a
             "web_fetch",
         ],
         provider_tool_bundle_seeded=True,
+        provider_tool_exposure_revision="pte:tool-revision",
+        provider_tool_exposure_commit_reason="token_compression",
     )
 
     events = service.store.list_task_events(task_id=record.task_id, limit=20)
@@ -6088,12 +6140,16 @@ def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_a
     assert model_call["callable_tool_names"] == ["submit_next_stage"]
     assert model_call["provider_tool_names"] == ["submit_next_stage", "web_fetch"]
     assert model_call["provider_tool_bundle_seeded"] is True
+    assert model_call["provider_tool_exposure_revision"] == "pte:tool-revision"
+    assert model_call["provider_tool_exposure_commit_reason"] == "token_compression"
     assert actual_request_ref.startswith("artifact:")
 
     actual_request_payload = json.loads(service.log_service.resolve_content_ref(actual_request_ref))
     assert actual_request_payload["callable_tool_names"] == ["submit_next_stage"]
     assert actual_request_payload["provider_tool_names"] == ["submit_next_stage", "web_fetch"]
     assert actual_request_payload["provider_tool_bundle_seeded"] is True
+    assert actual_request_payload["provider_tool_exposure_revision"] == "pte:tool-revision"
+    assert actual_request_payload["provider_tool_exposure_commit_reason"] == "token_compression"
 
 
 def test_live_tree_payload_keeps_acceptance_node_kind(tmp_path: Path):

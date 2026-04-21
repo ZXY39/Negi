@@ -30,7 +30,7 @@ from g3ku.runtime.frontdoor.tool_contract import (
 )
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.session_agent import RuntimeAgentSession
-from main.runtime.chat_backend import build_prompt_cache_diagnostics
+from main.runtime.chat_backend import build_actual_request_diagnostics, build_prompt_cache_diagnostics
 
 
 def _is_frontdoor_runtime_tool_contract_record(record: dict[str, object]) -> bool:
@@ -3001,7 +3001,7 @@ def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix_
     ]
 
 
-def test_fresh_turn_tool_schema_seed_reuses_previous_actual_request_schemas_when_current_is_superset(
+def test_fresh_turn_tool_schema_seed_does_not_expand_previous_actual_request_schemas_when_current_is_superset(
     tmp_path: Path,
 ) -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
@@ -3046,14 +3046,100 @@ def test_fresh_turn_tool_schema_seed_reuses_previous_actual_request_schemas_when
         ],
     )
 
-    assert seeded_names == ["exec", "submit_next_stage"]
+    assert seeded_names is None
     assert seeded_schemas == [
         {"type": "function", "function": {"name": "exec", "description": "", "parameters": {"type": "object"}}},
+        {
+            "type": "function",
+            "function": {"name": "web_fetch", "description": "", "parameters": {"type": "object"}},
+        },
         {
             "type": "function",
             "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
         },
     ]
+
+
+def test_frontdoor_provider_tool_exposure_only_commits_on_token_compression() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    frozen = runner._resolve_frontdoor_provider_tool_exposure(
+        active_provider_tool_names=["exec", "submit_next_stage"],
+        pending_provider_tool_names=[],
+        desired_provider_tool_names=["exec", "web_fetch", "submit_next_stage"],
+        commit_reason="",
+    )
+
+    assert frozen["provider_tool_names"] == ["exec", "submit_next_stage"]
+    assert frozen["pending_provider_tool_names"] == ["exec", "web_fetch", "submit_next_stage"]
+    assert frozen["provider_tool_exposure_pending"] is True
+    assert frozen["provider_tool_exposure_commit_reason"] == ""
+
+    stage_compaction = runner._resolve_frontdoor_provider_tool_exposure(
+        active_provider_tool_names=["exec", "submit_next_stage"],
+        pending_provider_tool_names=["exec", "web_fetch", "submit_next_stage"],
+        desired_provider_tool_names=["exec", "web_fetch", "submit_next_stage"],
+        commit_reason="stage_compaction",
+    )
+
+    assert stage_compaction["provider_tool_names"] == ["exec", "submit_next_stage"]
+    assert stage_compaction["pending_provider_tool_names"] == ["exec", "web_fetch", "submit_next_stage"]
+    assert stage_compaction["provider_tool_exposure_pending"] is True
+    assert stage_compaction["provider_tool_exposure_commit_reason"] == ""
+
+    token_compaction = runner._resolve_frontdoor_provider_tool_exposure(
+        active_provider_tool_names=["exec", "submit_next_stage"],
+        pending_provider_tool_names=["exec", "web_fetch", "submit_next_stage"],
+        desired_provider_tool_names=["exec", "web_fetch", "submit_next_stage"],
+        commit_reason="token_compression",
+    )
+
+    assert token_compaction["provider_tool_names"] == ["exec", "web_fetch", "submit_next_stage"]
+    assert token_compaction["pending_provider_tool_names"] == []
+    assert token_compaction["provider_tool_exposure_pending"] is False
+    assert token_compaction["provider_tool_exposure_commit_reason"] == "token_compression"
+
+
+def test_build_frontdoor_request_artifact_payload_includes_provider_tool_exposure_fields() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    payload = runner._build_frontdoor_request_artifact_payload(
+        state={
+            "model_refs": ["gpt-5.2"],
+            "frontdoor_history_shrink_reason": "token_compression",
+            "frontdoor_token_preflight_diagnostics": {"provider_model": "gpt-5.2"},
+            "provider_tool_exposure_revision": "pte:frontdoor-revision",
+            "provider_tool_exposure_commit_reason": "token_compression",
+        },
+        session_key="web:shared",
+        turn_id="turn-1",
+        request_messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "user"},
+        ],
+        tool_schemas=[
+            {"type": "function", "function": {"name": "exec", "parameters": {"type": "object"}}},
+        ],
+        prompt_cache_key="cache-key",
+        prompt_cache_diagnostics=build_actual_request_diagnostics(
+            request_messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "user"},
+            ],
+            tool_schemas=[
+                {"type": "function", "function": {"name": "exec", "parameters": {"type": "object"}}},
+            ],
+        ),
+        parallel_tool_calls=False,
+        provider_request_meta={"provider": "responses"},
+        provider_request_body={"model": "gpt-5.2"},
+        usage={"input_tokens": 10, "output_tokens": 5},
+        request_kind="frontdoor_actual_request",
+        request_lane="visible_frontdoor",
+    )
+
+    assert payload["provider_tool_exposure_revision"] == "pte:frontdoor-revision"
+    assert payload["provider_tool_exposure_commit_reason"] == "token_compression"
 
 
 def test_runtime_agent_session_completed_continuity_bridge_requires_exact_visible_sets() -> None:

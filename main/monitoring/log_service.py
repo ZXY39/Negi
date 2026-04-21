@@ -950,6 +950,8 @@ class TaskLogService:
         callable_tool_names: list[str] | None = None,
         provider_tool_names: list[str] | None = None,
         provider_tool_bundle_seeded: bool = False,
+        provider_tool_exposure_revision: str = '',
+        provider_tool_exposure_commit_reason: str = '',
         provider_request_meta: dict[str, Any] | None = None,
         provider_request_body: dict[str, Any] | None = None,
     ) -> NodeRecord | None:
@@ -984,6 +986,8 @@ class TaskLogService:
                 callable_tool_names=callable_tool_names,
                 provider_tool_names=provider_tool_names,
                 provider_tool_bundle_seeded=provider_tool_bundle_seeded,
+                provider_tool_exposure_revision=provider_tool_exposure_revision,
+                provider_tool_exposure_commit_reason=provider_tool_exposure_commit_reason,
                 provider_request_meta=provider_request_meta,
                 provider_request_body=provider_request_body,
             )
@@ -1120,6 +1124,8 @@ class TaskLogService:
                         callable_tool_names=callable_tool_names,
                         provider_tool_names=provider_tool_names,
                         provider_tool_bundle_seeded=provider_tool_bundle_seeded,
+                        provider_tool_exposure_revision=provider_tool_exposure_revision,
+                        provider_tool_exposure_commit_reason=provider_tool_exposure_commit_reason,
                         observed_input_truth=observed_input_truth,
                     )
                     self._event_writer.append_task_model_call(
@@ -1564,6 +1570,8 @@ class TaskLogService:
         callable_tool_names: list[str] | None = None,
         provider_tool_names: list[str] | None = None,
         provider_tool_bundle_seeded: bool = False,
+        provider_tool_exposure_revision: str = '',
+        provider_tool_exposure_commit_reason: str = '',
         provider_request_meta: dict[str, Any] | None = None,
         provider_request_body: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
@@ -1644,6 +1652,8 @@ class TaskLogService:
             'callable_tool_names': normalized_callable_tool_names,
             'provider_tool_names': normalized_provider_tool_names,
             'provider_tool_bundle_seeded': bool(provider_tool_bundle_seeded),
+            'provider_tool_exposure_revision': str(provider_tool_exposure_revision or '').strip(),
+            'provider_tool_exposure_commit_reason': str(provider_tool_exposure_commit_reason or '').strip(),
             'provider_request_meta': normalized_provider_request_meta,
             'provider_request_body': normalized_provider_request_body,
         }
@@ -1687,6 +1697,8 @@ class TaskLogService:
         callable_tool_names: list[str] | None = None,
         provider_tool_names: list[str] | None = None,
         provider_tool_bundle_seeded: bool = False,
+        provider_tool_exposure_revision: str = '',
+        provider_tool_exposure_commit_reason: str = '',
         actual_request_ref: str = '',
         observed_input_truth: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -1732,6 +1744,8 @@ class TaskLogService:
                 provider_tool_names or callable_tool_names or []
             ),
             'provider_tool_bundle_seeded': bool(provider_tool_bundle_seeded),
+            'provider_tool_exposure_revision': str(provider_tool_exposure_revision or '').strip(),
+            'provider_tool_exposure_commit_reason': str(provider_tool_exposure_commit_reason or '').strip(),
             'tool_signature_hash': str(actual_request_diagnostics.get('actual_tool_schema_hash') or ''),
             **actual_request_diagnostics,
             'observed_input_truth': (
