@@ -2599,6 +2599,61 @@ def test_ceo_session_pending_interrupts_fall_back_to_paused_disk_state(tmp_path:
     ]
 
 
+def test_ceo_session_pending_batch_interrupts_fall_back_to_paused_disk_state(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    monkeypatch.setattr(ceo_sessions, "workspace_path", lambda: tmp_path)
+    web_ceo_sessions.write_paused_execution_context(
+        "web:shared",
+        {
+            "status": "paused",
+            "interrupts": [
+                {
+                    "id": "interrupt-disk-1",
+                    "value": {
+                        "kind": "frontdoor_tool_approval_batch",
+                        "batch_id": "batch:123",
+                        "review_items": [
+                            {"tool_call_id": "call-1", "name": "exec", "risk_level": "high", "arguments": {"command": "echo hi"}}
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    session_manager = SessionManager(tmp_path)
+    session_manager.save(session_manager.get_or_create("web:shared"))
+    live_session = SimpleNamespace(
+        state=SimpleNamespace(status="paused", is_running=False, pending_interrupts=[]),
+    )
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix="/api")
+
+    monkeypatch.setattr(ceo_sessions, "get_agent", lambda: SimpleNamespace(sessions=session_manager))
+    monkeypatch.setattr(
+        ceo_sessions,
+        "get_runtime_manager",
+        lambda _agent: SimpleNamespace(get=lambda _session_id: live_session),
+    )
+
+    client = TestClient(app)
+    response = client.get("/api/ceo/sessions/web:shared/pending-interrupts")
+
+    assert response.status_code == 200
+    assert response.json()["items"] == [
+        {
+            "id": "interrupt-disk-1",
+            "value": {
+                "kind": "frontdoor_tool_approval_batch",
+                "batch_id": "batch:123",
+                "review_items": [
+                    {"tool_call_id": "call-1", "name": "exec", "risk_level": "high", "arguments": {"command": "echo hi"}}
+                ],
+            },
+        }
+    ]
+
+
 def test_ceo_session_resume_interrupt_recreates_runtime_from_persisted_pause(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
     monkeypatch.setattr(ceo_sessions, "workspace_path", lambda: tmp_path)

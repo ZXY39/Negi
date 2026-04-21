@@ -3453,7 +3453,57 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         *,
         decision: Any,
         original_payloads: list[dict[str, Any]],
+        approval_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        normalized_request = dict(approval_request or {})
+        if str(normalized_request.get("kind") or "").strip() == "frontdoor_tool_approval_batch":
+            if not isinstance(decision, dict):
+                raise ValueError("batch review resume payload must be an object")
+            if str(decision.get("type") or "").strip() != "submit_batch_review":
+                raise ValueError("unsupported approval resume type")
+            if str(decision.get("batch_id") or "").strip() != str(normalized_request.get("batch_id") or "").strip():
+                raise ValueError("approval batch mismatch")
+            review_items = [
+                dict(item)
+                for item in list(normalized_request.get("review_items") or [])
+                if isinstance(item, dict)
+            ]
+            decisions = [
+                dict(item)
+                for item in list(decision.get("decisions") or [])
+                if isinstance(item, dict)
+            ]
+            expected_ids = [
+                str(item.get("tool_call_id") or "").strip()
+                for item in review_items
+                if str(item.get("tool_call_id") or "").strip()
+            ]
+            decision_map = {
+                str(item.get("tool_call_id") or "").strip(): dict(item)
+                for item in decisions
+                if str(item.get("tool_call_id") or "").strip()
+            }
+            if sorted(decision_map.keys()) != sorted(expected_ids):
+                raise ValueError("batch review decisions must cover every review item exactly once")
+            normalized_decisions: list[dict[str, Any]] = []
+            for tool_call_id in expected_ids:
+                raw_decision = str(decision_map[tool_call_id].get("decision") or "").strip().lower()
+                if raw_decision not in {"approve", "reject"}:
+                    raise ValueError(f"unsupported batch review decision for {tool_call_id}")
+                normalized_item = {
+                    "tool_call_id": tool_call_id,
+                    "decision": raw_decision,
+                }
+                note = str(decision_map[tool_call_id].get("note") or "").strip()
+                if raw_decision == "reject" and note:
+                    normalized_item["note"] = note
+                normalized_decisions.append(normalized_item)
+            return {
+                "approved": True,
+                "tool_call_payloads": list(original_payloads),
+                "batch_review_decisions": normalized_decisions,
+                "batch_id": str(normalized_request.get("batch_id") or "").strip(),
+            }
         if decision is True:
             return {"approved": True, "tool_call_payloads": list(original_payloads)}
         if decision is False or decision in (None, ""):
@@ -4909,6 +4959,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         normalized = self._normalize_approval_resume_value(
             decision=decision,
             original_payloads=list(state.get("tool_call_payloads") or []),
+            approval_request=approval_request,
         )
         if not normalized["approved"]:
             return {
@@ -4923,6 +4974,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "approval_request": None,
             "approval_status": "approved",
             "tool_call_payloads": list(normalized["tool_call_payloads"]),
+            "approval_batch_id": str(normalized.get("batch_id") or ""),
             "next_step": "execute_tools",
         }
 

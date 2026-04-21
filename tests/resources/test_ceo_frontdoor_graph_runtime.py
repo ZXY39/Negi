@@ -137,6 +137,58 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
     assert payload["frontdoor_stage_state"]["stages"][0]["tool_round_budget"] == 2
 
 
+def test_graph_review_tool_calls_rejects_partial_batch_submit(monkeypatch) -> None:
+    def _fake_interrupt(_payload):
+        return {
+            "type": "submit_batch_review",
+            "batch_id": "batch:123",
+            "decisions": [
+                {"tool_call_id": "call-1", "decision": "approve"},
+            ],
+        }
+
+    monkeypatch.setattr(ceo_runtime_ops, "interrupt", _fake_interrupt)
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    runtime = SimpleNamespace(context=SimpleNamespace(session=None))
+
+    with pytest.raises(ValueError, match="cover every review item exactly once"):
+        runner._graph_review_tool_calls(
+            {
+                "approval_request": {
+                    "kind": "frontdoor_tool_approval_batch",
+                    "batch_id": "batch:123",
+                    "mode": "regulatory_review",
+                    "submission_mode": "batch_submit_only",
+                    "tool_calls": [
+                        {"id": "call-1", "name": "exec", "arguments": {"command": "echo hi"}},
+                        {"id": "call-2", "name": "filesystem_edit", "arguments": {"path": "/tmp/a"}},
+                    ],
+                    "review_items": [
+                        {
+                            "tool_call_id": "call-1",
+                            "name": "exec",
+                            "risk_level": "high",
+                            "arguments": {"command": "echo hi"},
+                        },
+                        {
+                            "tool_call_id": "call-2",
+                            "name": "filesystem_edit",
+                            "risk_level": "high",
+                            "arguments": {"path": "/tmp/a"},
+                        },
+                    ],
+                    "pass_through_tool_call_ids": [],
+                },
+                "tool_call_payloads": [
+                    {"id": "call-1", "name": "exec", "arguments": {"command": "echo hi"}},
+                    {"id": "call-2", "name": "filesystem_edit", "arguments": {"path": "/tmp/a"}},
+                ],
+            },
+            runtime=runtime,
+        )
+
+
 def test_frontdoor_tool_state_after_tool_results_skips_fixed_builtin_hydration_targets() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
