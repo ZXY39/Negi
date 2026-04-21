@@ -4675,8 +4675,31 @@ textarea {
     gap: var(--space-4);
 }
 
+.llm-form-grid.llm-form-grid--binding-header {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .llm-form-grid.single {
     grid-template-columns: minmax(0, 1fr);
+}
+
+.llm-image-toggle-field {
+    min-width: 0;
+}
+
+.llm-image-toggle-control {
+    width: 100%;
+    min-height: 44px;
+    justify-content: center;
+    gap: 0;
+    padding: 10px 14px;
+    border-radius: 14px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface-inner);
+}
+
+.llm-image-toggle-control .communication-toggle-track {
+    margin-inline: auto;
 }
 
 .llm-memory-grid {
@@ -6185,13 +6208,16 @@ textarea {
     padding: 3px;
     gap: 2px;
     align-items: center;
+    min-width: 148px;
 }
 
 .model-role-limit-fixed-track {
-    grid-column: 2 / 4;
-    display: flex;
+    grid-column: 2 / 3;
+    display: inline-flex;
     align-items: center;
+    justify-content: center;
     min-height: 34px;
+    min-width: 148px;
     padding: 3px;
     border-radius: 8px;
     border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);

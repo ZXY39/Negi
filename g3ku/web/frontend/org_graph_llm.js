@@ -957,6 +957,18 @@
     };
   }
 
+  function renderImageMultimodalField() {
+    const editor = llmState().editor || emptyEditorState();
+    return `
+      <div class="resource-field llm-image-toggle-field">
+        <span class="resource-field-label">是否为图像多模态</span>
+        <label class="communication-toggle llm-image-toggle-control" aria-label="是否为图像多模态">
+          <input id="llm-binding-image-multimodal-enabled" type="checkbox"${editor.imageMultimodalEnabled ? " checked" : ""}>
+          <span class="communication-toggle-track" aria-hidden="true"></span>
+        </label>
+      </div>`;
+  }
+
   function renderBindingPolicyFields() {
     const editor = llmState().editor || emptyEditorState();
     return `
@@ -973,14 +985,11 @@
           <span class="resource-field-label">单 API key 最大并发数</span>
           <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="number" min="1" step="1" inputmode="numeric" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制">
         </label>
+        ${editor.mode === "create" ? "" : renderImageMultimodalField()}
       </div>
       <label class="resource-field">
         <span class="resource-field-label">最大上下文TOKEN *</span>
         <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
-      </label>
-      <label class="resource-field llm-checkbox-field">
-        <span class="resource-field-label">Image Multimodal</span>
-        <input id="llm-binding-image-multimodal-enabled" type="checkbox"${editor.imageMultimodalEnabled ? " checked" : ""}>
       </label>`;
   }
 
@@ -1038,14 +1047,11 @@
             <button type="button" class="toolbar-btn ghost small" data-llm-action="test-max-concurrency">测试最大并发数</button>
           </div>
         </label>
+        ${editor.mode === "create" ? "" : renderImageMultimodalField()}
       </div>
       <label class="resource-field">
         <span class="resource-field-label">最大上下文TOKEN *</span>
         <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
-      </label>
-      <label class="resource-field llm-checkbox-field">
-        <span class="resource-field-label">Image Multimodal</span>
-        <input id="llm-binding-image-multimodal-enabled" type="checkbox"${editor.imageMultimodalEnabled ? " checked" : ""}>
       </label>`;
   }
 
@@ -1077,7 +1083,7 @@
           </div>
           <div class="detail-modal-body model-config-body">
             <div class="llm-section">
-              <div class="llm-form-grid">
+              <div class="llm-form-grid llm-form-grid--binding-header">
                 <label class="resource-field">
                   <span class="resource-field-label">模型 Key *</span>
                   <input id="llm-model-key-input" class="resource-search" type="text" value="${escv(state.editor.modelKey)}" placeholder="例如：ceo_primary">
@@ -1086,6 +1092,7 @@
                   <span class="resource-field-label">供应商</span>
                   <select id="llm-provider-select" class="resource-search resource-select" data-resource-select-label="LLM provider">${state.templates.map((item) => `<option value="${escv(item.provider_id)}"${trim(item.provider_id) === trim(state.editor.providerId) ? " selected" : ""}>${escv(item.display_name || item.provider_id)}</option>`).join("")}</select>
                 </label>
+                ${renderImageMultimodalField()}
               </div>
               ${renderBindingPolicyFields()}
               <label class="resource-field">
@@ -1185,7 +1192,7 @@
           </div>
           <div class="detail-modal-body model-config-body">
             <div class="llm-section">
-              <div class="llm-form-grid">
+              <div class="llm-form-grid llm-form-grid--binding-header">
                 <label class="resource-field">
                   <span class="resource-field-label">模型 Key *</span>
                   <input id="llm-model-key-input" class="resource-search" type="text" value="${escv(state.editor.modelKey)}" placeholder="例如：ceo_primary">
@@ -1194,6 +1201,7 @@
                   <span class="resource-field-label">供应商</span>
                   <select id="llm-provider-select" class="resource-search resource-select" data-resource-select-label="LLM provider">${state.templates.map((item) => `<option value="${escv(item.provider_id)}"${trim(item.provider_id) === trim(state.editor.providerId) ? " selected" : ""}>${escv(item.display_name || item.provider_id)}</option>`).join("")}</select>
                 </label>
+                ${renderImageMultimodalField()}
               </div>
               ${renderBindingPolicyFields()}
               <label class="resource-field">
