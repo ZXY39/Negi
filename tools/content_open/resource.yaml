@@ -2,7 +2,7 @@
 kind: tool
 name: content_open
 display_name: Content Open
-description: Open one excerpt from a content ref or absolute file path. When both `ref` and `path` are provided, attempt both targets and return per-target results.
+description: Open one excerpt from a content ref or absolute file path. When both `ref` and `path` are provided, attempt both targets and return per-target results. Image targets keep the same tool surface and, on multimodal routes, prepare direct visual content for the next request only.
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:

@@ -949,6 +949,71 @@ async def test_content_open_split_tool_returns_ref_success_and_path_error_when_b
         store.close()
 
 
+@pytest.mark.asyncio
+async def test_content_open_image_path_requires_multimodal_model(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    shutil.copytree(REPO_ROOT / 'tools' / 'content_open', workspace / 'tools' / 'content_open')
+
+    image_path = workspace / 'demo.png'
+    image_path.write_bytes(b'\x89PNG\r\n\x1a\nsmall')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content_open')
+        assert tool is not None
+
+        payload = json.loads(
+            await tool.execute(
+                path=str(image_path),
+                __g3ku_runtime={'image_multimodal_enabled': False, 'provider_model': 'gpt-test'},
+            )
+        )
+
+        assert payload['ok'] is False
+        assert payload['error'] == '非多模态模型无法打开图片'
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_content_open_image_path_returns_runtime_managed_image_payload(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    shutil.copytree(REPO_ROOT / 'tools' / 'content_open', workspace / 'tools' / 'content_open')
+
+    image_path = workspace / 'demo.png'
+    image_path.write_bytes(b'\x89PNG\r\n\x1a\nsmall')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content_open')
+        assert tool is not None
+
+        payload = json.loads(
+            await tool.execute(
+                path=str(image_path),
+                __g3ku_runtime={'image_multimodal_enabled': True, 'provider_model': 'gpt-test'},
+            )
+        )
+
+        assert payload['ok'] is True
+        assert payload['operation'] == 'open'
+        assert payload['content_kind'] == 'image'
+        assert payload['multimodal_open_pending'] is True
+        assert payload['requested_path'] == str(image_path)
+        assert payload['runtime_image_target']['path'] == str(image_path)
+        assert 'content_open' in str(payload['summary'])
+    finally:
+        manager.close()
+
+
 def test_content_open_split_tool_schema_only_exposes_line_range_selector(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)

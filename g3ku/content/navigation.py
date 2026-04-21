@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import re
 from pathlib import Path
 from typing import Any
@@ -660,6 +661,109 @@ class ContentNavigationService:
         if (finish - start + 1) > MAX_OPEN_LINES:
             finish = start + MAX_OPEN_LINES - 1
         return self._excerpt(ref=ref, path=path, start_line=start, end_line=finish, view=view)
+
+    @staticmethod
+    def is_image_mime_type(mime_type: str | None) -> bool:
+        return str(mime_type or "").strip().lower().startswith("image/")
+
+    @staticmethod
+    def _guess_path_mime_type(path: Path) -> str:
+        guessed, _ = mimetypes.guess_type(str(path))
+        return str(guessed or "application/octet-stream").strip() or "application/octet-stream"
+
+    def open_target_descriptor(
+        self,
+        *,
+        ref: str | None = None,
+        path: str | None = None,
+        view: str = "canonical",
+        _requested_ref: str = "",
+        _wrapper_ref: str = "",
+        _wrapper_depth: int = 0,
+        _visited_refs: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        resolved_view = self._normalize_view(view)
+        if path:
+            file_path = self._resolve_workspace_path(path)
+            mime_type = self._guess_path_mime_type(file_path)
+            try:
+                ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
+            except ValueError:
+                ref_path = str(file_path)
+            path_ref = f"path:{ref_path}"
+            return {
+                "path": str(file_path),
+                "requested_ref": _requested_ref or path_ref,
+                "resolved_ref": path_ref,
+                "wrapper_ref": _wrapper_ref,
+                "wrapper_depth": _wrapper_depth,
+                "display_name": file_path.name,
+                "mime_type": mime_type,
+                "source_kind": "file_path",
+            }
+
+        normalized_ref = self._normalize_ref(ref)
+        if normalized_ref.startswith("path:"):
+            file_path = self._resolve_ref_workspace_path(normalized_ref[5:])
+            mime_type = self._guess_path_mime_type(file_path)
+            try:
+                ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
+            except ValueError:
+                ref_path = str(file_path)
+            path_ref = f"path:{ref_path}"
+            return {
+                "path": str(file_path),
+                "requested_ref": _requested_ref or normalized_ref,
+                "resolved_ref": path_ref,
+                "wrapper_ref": _wrapper_ref,
+                "wrapper_depth": _wrapper_depth,
+                "display_name": file_path.name,
+                "mime_type": mime_type,
+                "source_kind": "file_path",
+            }
+        if not normalized_ref.startswith("artifact:"):
+            raise ValueError(f"unsupported content ref: {normalized_ref or '<empty>'}")
+        if normalized_ref in _visited_refs:
+            raise ValueError("content ref cycle detected")
+        if _wrapper_depth > _MAX_WRAPPER_DEPTH:
+            raise ValueError(f"content ref wrapper depth exceeded: {_MAX_WRAPPER_DEPTH}")
+        artifact_id = normalized_ref.split(":", 1)[1]
+        artifact = self._lookup_artifact(artifact_id)
+        if artifact is None or not getattr(artifact, "path", None):
+            raise FileNotFoundError(f"artifact not found: {artifact_id}")
+        artifact_path = Path(str(artifact.path))
+        mime_type = str(getattr(artifact, "mime_type", "") or "").strip() or self._guess_path_mime_type(artifact_path)
+        requested_ref = _requested_ref or normalized_ref
+        if resolved_view == "canonical" and not self.is_image_mime_type(mime_type):
+            text = artifact_path.read_text(encoding="utf-8") if artifact_path.exists() else ""
+            next_ref = self._next_wrapper_ref_from_value(text)
+            if next_ref:
+                if next_ref == normalized_ref:
+                    raise ValueError("content ref cycle detected")
+                return self.open_target_descriptor(
+                    ref=next_ref,
+                    view=resolved_view,
+                    _requested_ref=requested_ref,
+                    _wrapper_ref=_wrapper_ref or normalized_ref,
+                    _wrapper_depth=_wrapper_depth + 1,
+                    _visited_refs=(*_visited_refs, normalized_ref),
+                )
+        return {
+            "path": str(artifact_path),
+            "requested_ref": requested_ref,
+            "resolved_ref": normalized_ref,
+            "wrapper_ref": _wrapper_ref,
+            "wrapper_depth": _wrapper_depth,
+            "display_name": str(getattr(artifact, "title", "") or artifact_path.name),
+            "mime_type": mime_type,
+            "source_kind": str(getattr(artifact, "kind", "") or "artifact"),
+        }
+
+    def is_image_target_payload(self, payload: dict[str, Any] | None) -> bool:
+        data = dict(payload or {})
+        handle = data.get("handle") if isinstance(data.get("handle"), dict) else {}
+        mime_type = str(handle.get("mime_type") or data.get("mime_type") or "").strip()
+        return self.is_image_mime_type(mime_type)
 
     def read(
         self,

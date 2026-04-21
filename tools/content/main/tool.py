@@ -60,6 +60,66 @@ class ContentTool:
             ensure_ascii=False,
         )
 
+    @staticmethod
+    def _runtime_image_multimodal_enabled(runtime: dict[str, Any] | None) -> bool:
+        payload = runtime if isinstance(runtime, dict) else {}
+        return bool(payload.get('image_multimodal_enabled'))
+
+    @staticmethod
+    def _image_open_rejected_payload() -> dict[str, Any]:
+        return {'ok': False, 'error': '非多模态模型无法打开图片'}
+
+    @staticmethod
+    def _image_open_success_payload(*, descriptor: dict[str, Any], target: str) -> dict[str, Any]:
+        path = str(descriptor.get('path') or '').strip()
+        requested_ref = str(descriptor.get('requested_ref') or '').strip()
+        resolved_ref = str(descriptor.get('resolved_ref') or '').strip()
+        wrapper_ref = str(descriptor.get('wrapper_ref') or '').strip()
+        wrapper_depth = int(descriptor.get('wrapper_depth') or 0)
+        mime_type = str(descriptor.get('mime_type') or 'image/png').strip() or 'image/png'
+        display_name = str(descriptor.get('display_name') or Path(path).name or path).strip() or path or 'image'
+        payload: dict[str, Any] = {
+            'ok': True,
+            'operation': 'open',
+            'target': target,
+            'content_kind': 'image',
+            'mime_type': mime_type,
+            'requested_path': path,
+            'requested_ref': requested_ref,
+            'resolved_ref': resolved_ref,
+            'wrapper_ref': wrapper_ref,
+            'wrapper_depth': wrapper_depth,
+            'summary': f'Image {display_name} was opened via content_open and will be attached to the next multimodal request.',
+            'multimodal_open_pending': True,
+            'runtime_image_target': {
+                'path': path,
+                'mime_type': mime_type,
+                'source_ref': resolved_ref,
+                'display_name': display_name,
+            },
+        }
+        return payload
+
+    def _open_image_target_payload(
+        self,
+        *,
+        target: str,
+        runtime: dict[str, Any] | None,
+        ref: str | None = None,
+        path: str | None = None,
+        view: str | None = None,
+    ) -> dict[str, Any] | None:
+        descriptor = self._content_store.open_target_descriptor(
+            ref=ref,
+            path=path,
+            view=str(view or 'canonical'),
+        )
+        if not self._content_store.is_image_mime_type(descriptor.get('mime_type')):
+            return None
+        if not self._runtime_image_multimodal_enabled(runtime):
+            return self._image_open_rejected_payload()
+        return self._image_open_success_payload(descriptor=descriptor, target=target)
+
     def _execute_operation(
         self,
         *,
@@ -125,7 +185,53 @@ class ContentTool:
         lines: int | None = None,
     ) -> dict[str, Any]:
         try:
-            if target == "ref":
+            if operation == 'open':
+                image_payload = self._open_image_target_payload(
+                    target=target,
+                    runtime=runtime,
+                    ref=ref,
+                    path=path,
+                    view=view,
+                )
+                if image_payload is not None:
+                    payload = image_payload
+                elif target == "ref":
+                    blocked = self._guard_ref_access(runtime=runtime, ref=ref)
+                    if blocked is not None:
+                        payload = json.loads(blocked)
+                    else:
+                        payload = self._execute_operation(
+                            operation=operation,
+                            ref=ref,
+                            query=query,
+                            view=view,
+                            limit=limit,
+                            before=before,
+                            after=after,
+                            start_line=start_line,
+                            end_line=end_line,
+                            around_line=around_line,
+                            window=window,
+                            lines=lines,
+                        )
+                elif target == "path":
+                    payload = self._execute_operation(
+                        operation=operation,
+                        path=path,
+                        query=query,
+                        view=view,
+                        limit=limit,
+                        before=before,
+                        after=after,
+                        start_line=start_line,
+                        end_line=end_line,
+                        around_line=around_line,
+                        window=window,
+                        lines=lines,
+                    )
+                else:
+                    raise ValueError(f"unsupported content target: {target}")
+            elif target == "ref":
                 blocked = self._guard_ref_access(runtime=runtime, ref=ref)
                 if blocked is not None:
                     payload = json.loads(blocked)
@@ -265,6 +371,46 @@ class ContentTool:
                         path=normalized_path,
                         ref_result=ref_result,
                         path_result=path_result,
+                    ),
+                    ensure_ascii=False,
+                )
+            if operation == 'open' and normalized_path:
+                return json.dumps(
+                    self._attempt_single_target_operation(
+                        operation=operation,
+                        target='path',
+                        runtime=runtime,
+                        path=normalized_path,
+                        query=query,
+                        view=view,
+                        limit=limit,
+                        before=before,
+                        after=after,
+                        start_line=start_line,
+                        end_line=end_line,
+                        around_line=around_line,
+                        window=window,
+                        lines=lines,
+                    ),
+                    ensure_ascii=False,
+                )
+            if operation == 'open' and normalized_ref:
+                return json.dumps(
+                    self._attempt_single_target_operation(
+                        operation=operation,
+                        target='ref',
+                        runtime=runtime,
+                        ref=normalized_ref,
+                        query=query,
+                        view=view,
+                        limit=limit,
+                        before=before,
+                        after=after,
+                        start_line=start_line,
+                        end_line=end_line,
+                        around_line=around_line,
+                        window=window,
+                        lines=lines,
                     ),
                     ensure_ascii=False,
                 )
