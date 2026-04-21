@@ -268,6 +268,7 @@ Maintenance note for parameter-error guidance:
 - CEO/frontdoor 的 stage gate 现在由 `execute_tools` 真正执行，而不是只靠 prompt 约束。普通工具在无活动阶段或预算耗尽时会直接收到 gate error；如果同一批 tool calls 同时包含 `submit_next_stage` 和普通工具，runtime 会先执行 `submit_next_stage`，再把同批普通工具当作新阶段的第一批调用处理，并在该新阶段上记账预算。
 - CEO/frontdoor 现在还多了一层更前置的 contract 收紧：当当前没有“有效阶段”时，agent-facing `frontdoor_runtime_tool_contract.callable_tool_names` 会收紧到只剩 `submit_next_stage`。这条规则同样适用于阶段预算已耗尽、必须换阶段的时刻。
 - 但这条前门规则不再等价于“provider-facing callable tool schemas 也只剩 `submit_next_stage`”。为了保持 prompt cache 前缀稳定，provider body 里的 `tools` 继续使用稳定的 runtime-visible tool bundle；真正的阶段控制回到动态合同和 `execute_tools` stage gate。
+- 这里的“稳定”现在有正式状态机：desired provider tool 集可以随 RBAC/hydration/阶段变化而变化，但 active `provider_tool_names` 只会在 `token_compression` 时从 `pending_provider_tool_names` 提交；普通轮次、fresh-turn continuity、pause/resume 和 `stage_compaction` 都不能直接切 provider-facing `tools[]`。
 - execution / acceptance 节点现在也采用同样的 contract 收紧，而且没有类似 `cron_internal` 的例外：只要没有有效阶段，当前轮模型可见的 callable tool 列表就只剩 `submit_next_stage`。
 - 但这不意味着 execution / acceptance 节点必须把 `submit_next_stage` 单独拆成一轮。若同一批 tool calls 里同时出现 `submit_next_stage` 和普通工具，执行循环会先推进阶段，再让这些普通工具作为新阶段首轮执行；若阶段切换失败，同批剩余普通工具会被批内阻断，而不会回退到旧阶段继续执行。
 - 当前保留的特例是 `cron_internal`：为了继续支持 cron 自移除，这类内部轮次不会被收紧到只剩 `submit_next_stage`。
@@ -545,6 +546,12 @@ For CEO/frontdoor prompt-cache debugging, maintainers now need to distinguish tw
 
 The important rule is that hydration promotion and stage gating should change the tail `frontdoor_runtime_tool_contract`, but they should not churn the provider-facing `tools[]` bundle every round.
 
+When debugging provider-tool drift, use this decision rule:
+
+- If callable/candidate/hydrated sets changed but no `token_compression` happened, provider-facing `tools[]` should still be the previous active bundle.
+- If `token_compression` happened, the same send may commit `pending_provider_tool_names` and emit a new `provider_tool_exposure_revision`.
+- If RBAC removed a tool, execution must reject it immediately even if the provider-facing schema has not yet converged.
+
 ## Runtime Contract Format
 
 - CEO/frontdoor no longer sends the model-facing runtime contract as raw JSON inside a user message. The live contract is now an assistant summary block headed `## Runtime Tool Contract`.
@@ -563,6 +570,7 @@ The provider-facing bundle is also intentionally minimal:
 - Rich tool and skill descriptions stay in the tail runtime contract.
 - Provider `tools[]` should keep only the smallest callable schema required for function calling.
 - Repair-required tool/skill exposure must not be implemented by churning provider `tools[]`. Maintainers should treat repair-required lists as runtime-summary-only guidance; provider bundle stability still wins for cache continuity.
+- `stage_compaction` must not be used as a shortcut to publish a new provider bundle. If artifacts show a new `actual_tool_schema_hash` together with `history_shrink_reason=stage_compaction` and no `provider_tool_exposure_commit_reason=token_compression`, treat that as exposure-gating regression.
 - Provider-facing schemas are now sanitized before transport: descriptive text and unsupported JSON Schema combinators such as `anyOf`, `oneOf`, and `allOf` are stripped or flattened into a simpler supported shape.
 - Runtime-side tool validation remains the authority for argument correctness. Do not assume a provider-facing schema still preserves every branch of the richer internal contract.
 - If cache misses correlate with a large `actual_tool_schema_hash` delta, first check whether provider schemas accidentally regressed from this minimal/stable form.

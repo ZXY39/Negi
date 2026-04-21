@@ -5463,6 +5463,142 @@ async def test_node_send_preflight_triggers_compression_at_effective_threshold(
 
 
 @pytest.mark.asyncio
+async def test_node_send_preflight_token_compression_commits_pending_provider_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main.runtime.react_loop as react_loop_module
+    from main.runtime.chat_backend import SendModelContextWindowInfo
+
+    calls: list[dict[str, object]] = []
+    observed_frame: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        react_loop_module,
+        "get_runtime_config",
+        lambda **_: (SimpleNamespace(), 0, False),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        react_loop_module.runtime_chat_backend,
+        "resolve_send_model_context_window_info",
+        lambda **_: SendModelContextWindowInfo(
+            model_key="fake",
+            provider_id="test",
+            provider_model="test:fake",
+            resolved_model="fake",
+            context_window_tokens=32000,
+            resolution_error="",
+        ),
+        raising=False,
+    )
+
+    def _estimate(**kwargs) -> int:
+        request_messages = list(kwargs.get("request_messages") or [])
+        rendered = "\n".join(
+            str(item.get("content") or "") for item in request_messages if isinstance(item, dict)
+        )
+        return 18000 if "[G3KU_TOKEN_COMPACT_V2]" in rendered else 24320
+
+    monkeypatch.setattr(
+        react_loop_module.runtime_send_token_preflight,
+        "estimate_runtime_provider_request_preview_tokens",
+        _estimate,
+        raising=False,
+    )
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            observed_frame.update(
+                log_service.read_runtime_frame(
+                    "task-preflight-provider-sync",
+                    "node-preflight-provider-sync",
+                )
+            )
+            calls.append(dict(kwargs))
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "done",
+                            "answer": "done",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 3},
+            )
+
+    log_service = _FakeLogService()
+    log_service.upsert_frame(
+        "task-preflight-provider-sync",
+        {
+            "node_id": "node-preflight-provider-sync",
+            "model_visible_tool_names": ["submit_final_result", "web_fetch"],
+            "provider_tool_names": ["submit_final_result"],
+        },
+    )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=2)
+
+    def _selector(**kwargs):
+        commit_reason = str(dict(kwargs.get("runtime_context") or {}).get("provider_tool_exposure_commit_reason") or "")
+        provider_tool_names = ["submit_final_result", "web_fetch"] if commit_reason == "token_compression" else ["submit_final_result"]
+        pending_names = [] if commit_reason == "token_compression" else ["submit_final_result", "web_fetch"]
+        return {
+            "tool_names": ["submit_final_result", "web_fetch"],
+            "provider_tool_names": provider_tool_names,
+            "pending_provider_tool_names": pending_names,
+            "provider_tool_exposure_pending": bool(pending_names),
+            "provider_tool_exposure_commit_reason": "token_compression" if commit_reason == "token_compression" else "",
+            "provider_tool_exposure_revision": "pte:committed" if commit_reason == "token_compression" else "pte:active",
+            "trace": {
+                "full_callable_tool_names": ["submit_final_result", "web_fetch"],
+                "provider_tool_names": provider_tool_names,
+                "pending_provider_tool_names": pending_names,
+                "provider_tool_exposure_commit_reason": "token_compression" if commit_reason == "token_compression" else "",
+            },
+        }
+
+    loop._model_visible_tool_schema_selector = _selector
+
+    class _SchemaTool(_LargeModelSchemaTool):
+        def to_model_schema(self):
+            return {"type": "function", "function": {"name": self.name, "parameters": {"type": "object"}}}
+
+    result = await loop.run(
+        task=SimpleNamespace(task_id="task-preflight-provider-sync"),
+        node=SimpleNamespace(node_id="node-preflight-provider-sync", depth=0, node_kind="execution"),
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-preflight-provider-sync","goal":"demo"}'},
+        ],
+        tools={
+            "submit_final_result": _submit_final_result_tool(),
+            "web_fetch": _SchemaTool(name="web_fetch"),
+        },
+        model_refs=["fake"],
+        runtime_context={"task_id": "task-preflight-provider-sync", "node_id": "node-preflight-provider-sync"},
+        max_iterations=2,
+    )
+
+    assert result.status == "success"
+    assert len(calls) == 1
+    emitted_tools = list(calls[0].get("tools") or [])
+    emitted_tool_names = [item["function"]["name"] for item in emitted_tools]
+    assert "web_fetch" in emitted_tool_names
+    assert observed_frame.get("provider_tool_names") == ["submit_final_result", "web_fetch"]
+    assert observed_frame.get("provider_tool_exposure_commit_reason") == "token_compression"
+
+
+@pytest.mark.asyncio
 async def test_node_send_preflight_fails_when_post_compression_overflows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

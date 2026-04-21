@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import hashlib
 import inspect
 import json
 import re
@@ -1412,6 +1413,70 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         return max(0, current_estimate_tokens - previous_estimate_tokens), True
 
+    @staticmethod
+    def _provider_tool_exposure_revision(tool_names: list[str] | None) -> str:
+        normalized = [
+            str(item or "").strip()
+            for item in list(tool_names or [])
+            if str(item or "").strip()
+        ]
+        if not normalized:
+            return ""
+        payload = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+        return f"pte:{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
+    @classmethod
+    def _resolve_frontdoor_provider_tool_exposure(
+        cls,
+        *,
+        active_provider_tool_names: list[str] | None,
+        pending_provider_tool_names: list[str] | None,
+        desired_provider_tool_names: list[str] | None,
+        commit_reason: str = "",
+    ) -> dict[str, Any]:
+        active = [
+            str(item or "").strip()
+            for item in list(active_provider_tool_names or [])
+            if str(item or "").strip()
+        ]
+        pending = [
+            str(item or "").strip()
+            for item in list(pending_provider_tool_names or [])
+            if str(item or "").strip()
+        ]
+        desired = [
+            str(item or "").strip()
+            for item in list(desired_provider_tool_names or [])
+            if str(item or "").strip()
+        ]
+        normalized_commit_reason = (
+            "token_compression"
+            if str(commit_reason or "").strip() == "token_compression"
+            else ""
+        )
+        if not active:
+            active = list(desired)
+            pending = []
+            normalized_commit_reason = ""
+        elif normalized_commit_reason == "token_compression":
+            active = list(desired)
+            pending = []
+        elif desired != active:
+            pending = list(desired)
+            normalized_commit_reason = ""
+        else:
+            pending = []
+            normalized_commit_reason = ""
+        return {
+            "provider_tool_names": list(active),
+            "pending_provider_tool_names": list(pending),
+            "provider_tool_exposure_pending": bool(pending),
+            "provider_tool_exposure_revision": cls._provider_tool_exposure_revision(active),
+            "provider_tool_exposure_commit_reason": normalized_commit_reason,
+            "provider_tool_bundle_seeded": bool(desired != active),
+            "desired_provider_tool_names": list(desired),
+        }
+
     @classmethod
     def _fresh_turn_seed_normalized_value(cls, value: Any) -> Any:
         if isinstance(value, dict):
@@ -1501,7 +1566,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if previous_names != normalized_expected_names:
                 return current_tool_schemas, None
             return previous_tool_schemas, list(previous_names)
-        if set(previous_names).issubset(set(current_names)):
+        if previous_names == current_names:
             return previous_tool_schemas, list(previous_names)
         return current_tool_schemas, None
 
@@ -2430,6 +2495,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "frontdoor_actual_request_hash": str(record.get("actual_request_hash") or "").strip(),
             "frontdoor_actual_request_message_count": int(record.get("actual_request_message_count") or 0),
             "frontdoor_actual_tool_schema_hash": str(record.get("actual_tool_schema_hash") or "").strip(),
+            "provider_tool_exposure_revision": str(record.get("provider_tool_exposure_revision") or "").strip(),
+            "provider_tool_exposure_commit_reason": str(
+                record.get("provider_tool_exposure_commit_reason") or ""
+            ).strip(),
             "frontdoor_token_preflight_diagnostics": copy.deepcopy(frontdoor_token_preflight_diagnostics),
         }
 
@@ -2533,6 +2602,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "actual_request_message_count": int(diagnostics.get("actual_request_message_count") or 0),
             "actual_tool_schema_hash": str(diagnostics.get("actual_tool_schema_hash") or "").strip(),
             "tool_signature_hash": str(diagnostics.get("tool_signature_hash") or "").strip(),
+            "provider_tool_exposure_revision": str(
+                state.get("provider_tool_exposure_revision") or ""
+            ).strip(),
+            "provider_tool_exposure_commit_reason": str(
+                state.get("provider_tool_exposure_commit_reason") or ""
+            ).strip(),
             "stable_prefix_hash": str(diagnostics.get("stable_prefix_hash") or "").strip(),
             "dynamic_appendix_hash": str(diagnostics.get("dynamic_appendix_hash") or "").strip(),
             "observed_input_truth": copy.deepcopy(observed_input_truth),
@@ -3879,6 +3954,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             },
             tool_names=provider_tool_seed_names,
         )
+        desired_provider_tool_names = list(runtime_visible_tool_names)
+        provider_tool_exposure = self._resolve_frontdoor_provider_tool_exposure(
+            active_provider_tool_names=self._normalized_tool_name_state_list(
+                state.get("provider_tool_names")
+            ),
+            pending_provider_tool_names=self._normalized_tool_name_state_list(
+                state.get("pending_provider_tool_names")
+            ),
+            desired_provider_tool_names=desired_provider_tool_names,
+            commit_reason="",
+        )
+        runtime_visible_tool_names = list(provider_tool_exposure.get("provider_tool_names") or [])
         tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
         stable_messages = self._prompt_message_records(getattr(assembly, "stable_messages", None)) or list(messages)
         dynamic_appendix_messages = self._prompt_message_records(
@@ -3936,11 +4023,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     self._fresh_turn_tool_schema_seed_from_previous_actual_request(
                         session=session,
                         tool_schemas=tool_schemas,
-                        expected_schema_names=list(
-                            continuity_bridge.get("provider_tool_schema_names") or []
-                        )
-                        if bool(continuity_bridge.get("enabled"))
-                        else None,
+                        expected_schema_names=(
+                            list(continuity_bridge.get("provider_tool_schema_names") or [])
+                            if bool(continuity_bridge.get("enabled"))
+                            else list(runtime_visible_tool_names)
+                        ),
                     )
                 )
             if seeded_provider_tool_names:
@@ -4022,6 +4109,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "frontdoor_selection_debug": frontdoor_selection_debug,
             "tool_names": list(tool_names),
             "provider_tool_names": list(runtime_visible_tool_names),
+            "pending_provider_tool_names": list(
+                provider_tool_exposure.get("pending_provider_tool_names") or []
+            ),
+            "provider_tool_exposure_pending": bool(
+                provider_tool_exposure.get("provider_tool_exposure_pending")
+            ),
+            "provider_tool_exposure_revision": str(
+                provider_tool_exposure.get("provider_tool_exposure_revision") or ""
+            ),
+            "provider_tool_exposure_commit_reason": str(
+                provider_tool_exposure.get("provider_tool_exposure_commit_reason") or ""
+            ),
             "candidate_tool_names": list(candidate_tool_names),
             "candidate_tool_items": list(candidate_tool_items),
             "repair_required_tool_items": [
@@ -4272,6 +4371,96 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     **dict(preflight.diagnostics or {}),
                 }
                 preflight_shrink_reason = str(preflight.history_shrink_reason or "").strip()
+                if (
+                    preflight_shrink_reason == "token_compression"
+                    and list(state_for_request.get("pending_provider_tool_names") or [])
+                ):
+                    committed_exposure = self._resolve_frontdoor_provider_tool_exposure(
+                        active_provider_tool_names=self._normalized_tool_name_state_list(
+                            state_for_request.get("provider_tool_names")
+                        ),
+                        pending_provider_tool_names=self._normalized_tool_name_state_list(
+                            state_for_request.get("pending_provider_tool_names")
+                        ),
+                        desired_provider_tool_names=self._normalized_tool_name_state_list(
+                            state_for_request.get("pending_provider_tool_names")
+                        ),
+                        commit_reason="token_compression",
+                    )
+                    committed_provider_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
+                        state_for_request,
+                        tool_names=list(committed_exposure.get("provider_tool_names") or []),
+                    )
+                    committed_tool_schemas = self._selected_tool_schemas(
+                        list(committed_provider_tool_names)
+                    )
+                    committed_state = {
+                        **dict(state_for_request or {}),
+                        "provider_tool_names": list(committed_provider_tool_names),
+                        "pending_provider_tool_names": list(
+                            committed_exposure.get("pending_provider_tool_names") or []
+                        ),
+                        "provider_tool_exposure_pending": bool(
+                            committed_exposure.get("provider_tool_exposure_pending")
+                        ),
+                        "provider_tool_exposure_revision": str(
+                            committed_exposure.get("provider_tool_exposure_revision") or ""
+                        ),
+                        "provider_tool_exposure_commit_reason": str(
+                            committed_exposure.get("provider_tool_exposure_commit_reason") or ""
+                        ),
+                        "frontdoor_live_request_messages": list(request_messages),
+                    }
+                    committed_contract = self._frontdoor_prompt_contract(
+                        state=committed_state,
+                        provider_model=str((list(committed_state.get("model_refs") or []) or [""])[0] or "").strip(),
+                        tool_schemas=committed_tool_schemas,
+                        overlay_text=str(committed_state.get("turn_overlay_text") or "").strip(),
+                        session_key=str(committed_state.get("session_key") or "").strip(),
+                        overlay_section_count=len(list(committed_state.get("dynamic_appendix_messages") or [])),
+                    )
+                    committed_request_messages = list(committed_contract.request_messages)
+                    committed_prompt_cache_key = str(committed_contract.prompt_cache_key or prompt_cache_key)
+                    committed_prompt_cache_diagnostics = dict(
+                        committed_contract.diagnostics or prompt_cache_diagnostics
+                    )
+                    committed_provider_request_body = self._build_frontdoor_provider_request_body_preview(
+                        request_messages=committed_request_messages,
+                        tool_schemas=committed_tool_schemas,
+                        model_info=model_info,
+                        prompt_cache_key=committed_prompt_cache_key,
+                        parallel_tool_calls=(
+                            bool(state_for_request.get("parallel_enabled")) if list(langchain_tools or []) else None
+                        ),
+                    )
+                    committed_total_tokens = self._estimate_frontdoor_send_total_tokens(
+                        provider_request_body=committed_provider_request_body,
+                        request_messages=committed_request_messages,
+                        tool_schemas=committed_tool_schemas,
+                    )
+                    if int(committed_total_tokens or 0) <= context_window_tokens:
+                        request_messages = list(committed_request_messages)
+                        prompt_cache_key = committed_prompt_cache_key
+                        prompt_cache_diagnostics = committed_prompt_cache_diagnostics
+                        actual_tool_schemas = list(committed_tool_schemas)
+                        state_for_request = committed_state
+                        post_compaction_snapshot = build_runtime_send_token_preflight_snapshot(
+                            context_window_tokens=context_window_tokens,
+                            estimated_total_tokens=int(committed_total_tokens or 0),
+                        )
+                        preflight_diagnostics = {
+                            **dict(preflight_diagnostics or {}),
+                            "estimated_total_tokens": int(committed_total_tokens or 0),
+                            "preview_estimate_tokens": int(committed_total_tokens or 0),
+                            "final_estimate_tokens": int(committed_total_tokens or 0),
+                            "final_request_tokens": int(committed_total_tokens or 0),
+                            "ratio": float(post_compaction_snapshot.ratio or 0.0),
+                            "would_exceed_context_window": bool(post_compaction_snapshot.would_exceed_context_window),
+                            "would_trigger_token_compression": bool(
+                                post_compaction_snapshot.would_trigger_token_compression
+                            ),
+                            "provider_tool_exposure_commit_reason": "token_compression",
+                        }
                 if runtime_session is not None and preflight_shrink_reason:
                     setattr(runtime_session, "_frontdoor_pending_shrink_reason", "")
                 if int(preflight.final_request_tokens or 0) > context_window_tokens:
@@ -4360,6 +4549,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             **message_state_update,
             "frontdoor_live_request_messages": [],
             "model_refs": list(state_for_request.get("model_refs") or []),
+            "provider_tool_names": list(state_for_request.get("provider_tool_names") or []),
+            "pending_provider_tool_names": list(
+                state_for_request.get("pending_provider_tool_names") or []
+            ),
+            "provider_tool_exposure_pending": bool(
+                state_for_request.get("provider_tool_exposure_pending")
+            ),
+            "provider_tool_exposure_revision": str(
+                state_for_request.get("provider_tool_exposure_revision") or ""
+            ),
+            "provider_tool_exposure_commit_reason": str(
+                state_for_request.get("provider_tool_exposure_commit_reason") or ""
+            ),
             "prompt_cache_key": prompt_cache_key,
             "prompt_cache_diagnostics": prompt_cache_diagnostics,
             "frontdoor_token_preflight_diagnostics": dict(

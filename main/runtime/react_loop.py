@@ -332,6 +332,81 @@ class ReActToolLoop:
                 tool_choice=current_tool_choice,
                 parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
             )
+            if str(history_shrink_reason or '').strip() == 'token_compression':
+                committed_model_visible_tools, committed_tool_schema_selection = self._model_visible_tools_for_iteration(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    node_kind=node.node_kind,
+                    visible_tools=current_tools,
+                    stage_gate=stage_gate,
+                    runtime_context={
+                        **dict(runtime_context or {}),
+                        'provider_tool_exposure_commit_reason': 'token_compression',
+                    },
+                )
+                committed_provider_tool_names = self._normalized_name_list(
+                    list(
+                        committed_tool_schema_selection.get('provider_tool_names')
+                        or list(committed_model_visible_tools.keys())
+                    )
+                )
+                if committed_provider_tool_names != provider_tool_names:
+                    committed_tool_schemas = [
+                        current_tools[name].to_model_schema()
+                        for name in committed_provider_tool_names
+                        if name in current_tools
+                    ]
+                    committed_prompt_cache_key = self._execution_prompt_cache_key(
+                        model_messages=model_messages,
+                        tool_schemas=committed_tool_schemas,
+                        model_refs=current_model_refs,
+                    )
+                    committed_estimate_payload = self._estimate_node_send_preflight_tokens(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        config=None,
+                        model_refs=current_model_refs,
+                        provider_model=str(token_preflight_diagnostics.get('provider_model') or ''),
+                        request_messages=request_messages,
+                        tool_schemas=committed_tool_schemas,
+                        prompt_cache_key=str(committed_prompt_cache_key or '').strip(),
+                        tool_choice=current_tool_choice,
+                        parallel_tool_calls=(self._parallel_tool_calls_enabled if committed_tool_schemas else None),
+                        allow_usage_ground_truth=False,
+                    )
+                    committed_final_tokens = int(committed_estimate_payload.get('final_estimate_tokens') or 0)
+                    context_window_tokens = int(token_preflight_diagnostics.get('context_window_tokens') or 0)
+                    if context_window_tokens <= 0 or committed_final_tokens <= context_window_tokens:
+                        model_visible_tools = committed_model_visible_tools
+                        tool_schema_selection = committed_tool_schema_selection
+                        provider_tool_names = committed_provider_tool_names
+                        tool_schemas = committed_tool_schemas
+                        turn_prompt_cache_key = committed_prompt_cache_key
+                        token_preflight_diagnostics = {
+                            **dict(token_preflight_diagnostics or {}),
+                            'estimated_total_tokens': committed_final_tokens,
+                            'preview_estimate_tokens': int(
+                                committed_estimate_payload.get('preview_estimate_tokens') or 0
+                            ),
+                            'usage_based_estimate_tokens': int(
+                                committed_estimate_payload.get('usage_based_estimate_tokens') or 0
+                            ),
+                            'delta_estimate_tokens': int(
+                                committed_estimate_payload.get('delta_estimate_tokens') or 0
+                            ),
+                            'effective_input_tokens': int(
+                                committed_estimate_payload.get('effective_input_tokens') or 0
+                            ),
+                            'estimate_source': str(
+                                committed_estimate_payload.get('estimate_source') or 'preview_estimate'
+                            ),
+                            'comparable_to_previous_request': bool(
+                                committed_estimate_payload.get('comparable_to_previous_request')
+                            ),
+                            'final_estimate_tokens': committed_final_tokens,
+                            'final_request_tokens': committed_final_tokens,
+                            'provider_tool_exposure_commit_reason': 'token_compression',
+                        }
             actual_request_diagnostics = build_actual_request_diagnostics(
                 request_messages=request_messages,
                 tool_schemas=tool_schemas,
@@ -382,6 +457,18 @@ class ReActToolLoop:
                     'hydrated_executor_names': list(tool_schema_selection.get('hydrated_executor_names') or []),
                     'model_visible_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
                     'provider_tool_names': list(provider_tool_names),
+                    'pending_provider_tool_names': list(
+                        tool_schema_selection.get('pending_provider_tool_names') or []
+                    ),
+                    'provider_tool_exposure_pending': bool(
+                        tool_schema_selection.get('provider_tool_exposure_pending')
+                    ),
+                    'provider_tool_exposure_revision': str(
+                        tool_schema_selection.get('provider_tool_exposure_revision') or ''
+                    ),
+                    'provider_tool_exposure_commit_reason': str(
+                        tool_schema_selection.get('provider_tool_exposure_commit_reason') or ''
+                    ),
                     'model_visible_tool_selection_trace': dict(tool_schema_selection.get('trace') or {}),
                     'exec_runtime_policy': (
                         dict(dynamic_contract_payload.get('exec_runtime_policy') or {})
@@ -627,6 +714,12 @@ class ReActToolLoop:
                 provider_tool_names=list(provider_tool_names),
                 provider_tool_bundle_seeded=bool(
                     dict(tool_schema_selection.get('trace') or {}).get('provider_tool_bundle_seeded')
+                ),
+                provider_tool_exposure_revision=str(
+                    tool_schema_selection.get('provider_tool_exposure_revision') or ''
+                ),
+                provider_tool_exposure_commit_reason=str(
+                    tool_schema_selection.get('provider_tool_exposure_commit_reason') or ''
                 ),
                 provider_request_meta=getattr(response, 'provider_request_meta', None),
                 provider_request_body=getattr(response, 'provider_request_body', None),
@@ -1768,6 +1861,10 @@ class ReActToolLoop:
         selection_payload: dict[str, Any] = {
             'tool_names': list(selected_tools.keys()),
             'provider_tool_names': list(selected_tools.keys()),
+            'pending_provider_tool_names': [],
+            'provider_tool_exposure_pending': False,
+            'provider_tool_exposure_revision': '',
+            'provider_tool_exposure_commit_reason': '',
             'lightweight_tool_ids': [],
             'hydrated_executor_names': [],
             'trace': {},
@@ -1825,6 +1922,29 @@ class ReActToolLoop:
                     for item in list(raw_selection.get('candidate_tool_names') or [])
                     if str(item or '').strip()
                 ]
+                selection_payload['pending_provider_tool_names'] = [
+                    str(item or '').strip()
+                    for item in list(
+                        raw_selection.get('pending_provider_tool_names')
+                        or (dict(raw_selection.get('trace') or {})).get('pending_provider_tool_names')
+                        or []
+                    )
+                    if str(item or '').strip()
+                ]
+                selection_payload['provider_tool_exposure_pending'] = bool(
+                    raw_selection.get('provider_tool_exposure_pending')
+                    or (dict(raw_selection.get('trace') or {})).get('provider_tool_exposure_pending')
+                )
+                selection_payload['provider_tool_exposure_revision'] = str(
+                    raw_selection.get('provider_tool_exposure_revision')
+                    or (dict(raw_selection.get('trace') or {})).get('provider_tool_exposure_revision')
+                    or ''
+                ).strip()
+                selection_payload['provider_tool_exposure_commit_reason'] = str(
+                    raw_selection.get('provider_tool_exposure_commit_reason')
+                    or (dict(raw_selection.get('trace') or {})).get('provider_tool_exposure_commit_reason')
+                    or ''
+                ).strip()
                 selection_payload['trace'] = dict(raw_selection.get('trace') or {})
         selection_trace = dict(selection_payload.get('trace') or {})
         traced_full_callable_tool_names = self._normalized_name_list(
@@ -1864,6 +1984,12 @@ class ReActToolLoop:
             **selection_trace,
             'full_callable_tool_names': list(full_callable_tool_names),
             'provider_tool_names': list(provider_tool_names),
+            'pending_provider_tool_names': list(selection_payload.get('pending_provider_tool_names') or []),
+            'provider_tool_exposure_pending': bool(selection_payload.get('provider_tool_exposure_pending')),
+            'provider_tool_exposure_revision': str(selection_payload.get('provider_tool_exposure_revision') or ''),
+            'provider_tool_exposure_commit_reason': str(
+                selection_payload.get('provider_tool_exposure_commit_reason') or ''
+            ),
             'stage_locked_to_submit_next_stage': (
                 list(model_visible_callable_tool_names) == [STAGE_TOOL_NAME]
                 and list(full_callable_tool_names) != [STAGE_TOOL_NAME]

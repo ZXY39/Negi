@@ -44,6 +44,10 @@ class CeoPersistentState(TypedDict, total=False):
 
     tool_names: list[str]
     provider_tool_names: list[str]
+    pending_provider_tool_names: list[str]
+    provider_tool_exposure_pending: bool
+    provider_tool_exposure_revision: str
+    provider_tool_exposure_commit_reason: str
 
     candidate_tool_names: list[str]
 
@@ -196,6 +200,10 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
 
         "tool_names": [],
         "provider_tool_names": [],
+        "pending_provider_tool_names": [],
+        "provider_tool_exposure_pending": False,
+        "provider_tool_exposure_revision": "",
+        "provider_tool_exposure_commit_reason": "",
 
         "candidate_tool_names": [],
 
