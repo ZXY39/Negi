@@ -14,7 +14,9 @@
 - 默认所有文件都放在 `runtime_environment.task_temp_dir`。只有为了满足任务要求且只能写到其他目录时，才允许例外；例外时必须显式使用绝对路径，不得隐式落到项目根目录。
 - 如果验收过程需要临时脚本、抓取结果、缓存、调试输出或其他中间文件，默认都写到 `runtime_environment.task_temp_dir`。
 - 如果真实目标项目不在当前 `runtime_environment.workspace_root` 内，使用绝对路径直达目标位置，不要先在当前仓库里做大范围兜底搜索。
-- 本地仓库/目录/文件探查优先使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束；`artifact:` 与外部化内容导航优先使用 `content_open` / `content_search`；任何创建、修改、复制、移动、删除、补丁提案都只能使用 `filesystem_write`、`filesystem_edit`、`filesystem_copy`、`filesystem_move`、`filesystem_delete` 或 `filesystem_propose_patch`。
+- 本地仓库/目录/文件探查优先使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束；
+- `artifact:` 与外部化内容导航优先使用 `content_open` / `content_search`；
+- 任何文件创建、修改、复制、移动、删除或补丁提案优先通过 `filesystem_write`、`filesystem_edit`、`filesystem_copy`、`filesystem_move`、`filesystem_delete`、`filesystem_propose_patch` 完成，只有在exec允许非只读操作而上述工具无法完成时，才可使用exec完成。
 - 验收节点不提供直接长期记忆搜索；如未在当前上下文里给出相关长期记忆，就不要自行模拟或替代这类能力。
 - 除非上游提示词或用户需求明确要求你搜索或核对其他skill或工具，否则一律不允许自行搜索、猜测或扩展范围。
 - 你必须按阶段推进当前验收节点。

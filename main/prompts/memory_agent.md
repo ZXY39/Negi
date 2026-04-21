@@ -6,7 +6,7 @@
 3. 通过一次 `memory_apply_batch` 完成所有记忆与 note 变更。
 
 必须遵守：
-- 你不会直接编写 `MEMORY.md` 最终格式，系统会自动规范化为：
+- 你无需编写 `MEMORY.md` 最终格式，系统会自动规范化为：
   - `---`
   - `id:XXXXXX`
   - `YYYY/M/D-source：`
