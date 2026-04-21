@@ -3969,6 +3969,126 @@ async def test_follow_up_uploaded_image_stays_multimodal_without_local_path_when
     assert update["query_text"] == "Original request\n\nPlease inspect this image"
 
 
+def test_frontdoor_send_preflight_snapshot_adds_content_open_image_overlay_only_to_live_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = SimpleNamespace(
+        app_config=SimpleNamespace(
+            get_managed_model=lambda key: SimpleNamespace(image_multimodal_enabled=(key == "ceo_primary"))
+        ),
+    )
+    runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
+
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_prompt_contract",
+        lambda **kwargs: SimpleNamespace(
+            request_messages=list(kwargs["state"].get("messages") or []),
+            prompt_cache_key="cache-key",
+            diagnostics={},
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "ceo_primary",
+            "provider_id": "responses",
+            "provider_model": "responses:gpt-test",
+            "resolved_model": "gpt-test",
+            "context_window_tokens": 128000,
+        },
+        raising=False,
+    )
+
+    image_path = tmp_path / "opened.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nsmall")
+    state = {
+        "messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "Please inspect the reopened image"},
+        ],
+        "model_refs": ["ceo_primary"],
+        "pending_content_open_image_payloads": [
+            {
+                "ok": True,
+                "operation": "open",
+                "content_kind": "image",
+                "mime_type": "image/png",
+                "summary": "图片已通过 content_open 打开，视觉内容将在下一轮请求中附带。",
+                "multimodal_open_pending": True,
+                "runtime_image_target": {"path": str(image_path), "mime_type": "image/png", "source_ref": ""},
+            }
+        ],
+    }
+
+    snapshot = runner._frontdoor_send_preflight_snapshot(
+        state=state,
+        runtime=SimpleNamespace(context=SimpleNamespace(session=None, session_key="web:shared")),
+        langchain_tools=[],
+    )
+
+    live_blocks = [
+        block
+        for block in list(snapshot["request_messages"][-1]["content"] or [])
+        if isinstance(block, dict)
+    ]
+    assert live_blocks[0] == {"type": "text", "text": "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"}
+    assert any(block.get("type") == "image_url" for block in live_blocks)
+    assert snapshot["durable_request_messages"][-1]["content"] == "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"
+
+
+def test_frontdoor_send_preflight_snapshot_rejects_content_open_image_overlay_without_multimodal_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = SimpleNamespace(
+        app_config=SimpleNamespace(
+            get_managed_model=lambda key: SimpleNamespace(image_multimodal_enabled=False)
+        ),
+    )
+    runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
+
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_prompt_contract",
+        lambda **kwargs: SimpleNamespace(
+            request_messages=list(kwargs["state"].get("messages") or []),
+            prompt_cache_key="cache-key",
+            diagnostics={},
+        ),
+    )
+
+    image_path = tmp_path / "opened.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nsmall")
+    state = {
+        "messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "Please inspect the reopened image"},
+        ],
+        "model_refs": ["ceo_primary"],
+        "pending_content_open_image_payloads": [
+            {
+                "ok": True,
+                "operation": "open",
+                "content_kind": "image",
+                "mime_type": "image/png",
+                "summary": "图片已通过 content_open 打开，视觉内容将在下一轮请求中附带。",
+                "multimodal_open_pending": True,
+                "runtime_image_target": {"path": str(image_path), "mime_type": "image/png", "source_ref": ""},
+            }
+        ],
+    }
+
+    with pytest.raises(ceo_runtime_ops.FrontdoorCompressionRuntimeError, match="非多模态模型无法打开图片"):
+        runner._frontdoor_send_preflight_snapshot(
+            state=state,
+            runtime=SimpleNamespace(context=SimpleNamespace(session=None, session_key="web:shared")),
+            langchain_tools=[],
+        )
+
+
 @pytest.mark.asyncio
 async def test_prepare_turn_rejects_oversized_uploaded_image_when_binding_enabled(
     tmp_path: Path,

@@ -420,6 +420,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     _ALLOWED_FRONTDOOR_SHRINK_REASONS = frozenset({"", "token_compression", "stage_compaction"})
     _TOKEN_COMPRESSION_TRIGGER_RATIO = 0.80
     _TOKEN_COMPRESSION_ESTIMATE_SAFETY_RATIO = 0.95
+    _CONTENT_OPEN_IMAGE_CONTEXT_TEXT = "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"
 
     @staticmethod
     def _is_frontdoor_tool_contract_record(record: dict[str, Any] | None) -> bool:
@@ -642,6 +643,110 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if item_type in {"image_url", "input_image", "file", "input_file"}:
                 return True
         return False
+
+    @staticmethod
+    def _content_open_image_overlay_payload(raw_result: Any) -> dict[str, Any] | None:
+        payload = raw_result if isinstance(raw_result, dict) else None
+        if payload is None and isinstance(raw_result, str):
+            text = str(raw_result or "").strip()
+            if text.startswith("{"):
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    payload = parsed
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("ok") is not True:
+            return None
+        if str(payload.get("content_kind") or "").strip().lower() != "image":
+            return None
+        if payload.get("multimodal_open_pending") is not True:
+            return None
+        target = payload.get("runtime_image_target")
+        return dict(payload) if isinstance(target, dict) and str(target.get("path") or "").strip() else None
+
+    def _content_open_image_payloads_from_tool_results(
+        self,
+        tool_results: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+        for item in list(tool_results or []):
+            if not isinstance(item, dict):
+                continue
+            payload = self._content_open_image_overlay_payload(item.get("raw_result"))
+            if not payload:
+                continue
+            target = dict(payload.get("runtime_image_target") or {})
+            path = str(target.get("path") or "").strip()
+            if not path or path in seen_paths:
+                continue
+            seen_paths.add(path)
+            payloads.append(payload)
+        return payloads
+
+    def _content_open_image_overlay_message_blocks(
+        self,
+        payloads: list[dict[str, Any]] | None,
+        *,
+        model_refs: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        if not self._ceo_image_multimodal_enabled_for_model_refs(model_refs):
+            raise FrontdoorCompressionRuntimeError(
+                code="content_open_image_requires_multimodal",
+                message="非多模态模型无法打开图片",
+                recoverable=True,
+            )
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": self._CONTENT_OPEN_IMAGE_CONTEXT_TEXT}]
+        seen_paths: set[str] = set()
+        for raw in list(payloads or []):
+            payload = self._content_open_image_overlay_payload(raw)
+            if not payload:
+                continue
+            target = dict(payload.get("runtime_image_target") or {})
+            path = Path(str(target.get("path") or "")).expanduser()
+            path_key = str(path).strip()
+            if not path_key or path_key in seen_paths:
+                continue
+            if not path.exists() or not path.is_file():
+                raise FrontdoorCompressionRuntimeError(
+                    code="content_open_image_missing",
+                    message=f"Opened image is missing: {path_key or 'image'}",
+                    recoverable=True,
+                )
+            seen_paths.add(path_key)
+            mime_type = str(target.get("mime_type") or payload.get("mime_type") or "image/png").strip() or "image/png"
+            size_bytes = int(path.stat().st_size or 0)
+            if size_bytes > WEB_CEO_IMAGE_UPLOAD_MAX_BYTES:
+                raise self._frontdoor_image_upload_too_large_error(
+                    name=str(target.get("display_name") or path.name),
+                    size_bytes=size_bytes,
+                )
+            blocks.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": self._web_ceo_image_data_url(path, mime_type)},
+                }
+            )
+        return blocks if len(blocks) > 1 else []
+
+    def _append_content_open_image_overlay_to_live_request_messages(
+        self,
+        *,
+        request_messages: list[dict[str, Any]] | None,
+        payloads: list[dict[str, Any]] | None,
+        model_refs: list[str] | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        records = [dict(item) for item in list(request_messages or []) if isinstance(item, dict)]
+        blocks = self._content_open_image_overlay_message_blocks(payloads, model_refs=model_refs)
+        if not blocks:
+            durable = strip_multimodal_blocks_from_message_records(records)
+            return records, durable
+        live_records = self._replace_last_user_message_content(messages=records, content=blocks)
+        durable_records = strip_multimodal_blocks_from_message_records(live_records)
+        return live_records, durable_records
 
     def _prefer_live_user_payload_over_text_history(
         self,
@@ -940,6 +1045,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> dict[str, Any]:
         state_for_request = dict(state or {})
         request_messages = list(state_for_request.get("messages") or [])
+        durable_request_messages = [dict(item) for item in list(request_messages or []) if isinstance(item, dict)]
         prompt_cache_key = str(state_for_request.get("prompt_cache_key") or "")
         prompt_cache_diagnostics = dict(state_for_request.get("prompt_cache_diagnostics") or {})
         actual_tool_schemas: list[dict[str, Any]] = []
@@ -974,6 +1080,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             request_messages,
             overlay_text=str(state_for_request.get("repair_overlay_text") or "").strip(),
         )
+        durable_request_messages = [dict(item) for item in list(request_messages or []) if isinstance(item, dict)]
+        pending_content_open_image_payloads = [
+            dict(item)
+            for item in list(state_for_request.get("pending_content_open_image_payloads") or [])
+            if isinstance(item, dict)
+        ]
+        if pending_content_open_image_payloads:
+            request_messages, durable_request_messages = self._append_content_open_image_overlay_to_live_request_messages(
+                request_messages=request_messages,
+                payloads=pending_content_open_image_payloads,
+                model_refs=list(state_for_request.get("model_refs") or []),
+            )
         model_info = self._resolve_frontdoor_send_model_context_window(
             model_refs=list(state_for_request.get("model_refs") or []),
         )
@@ -1047,6 +1165,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         return {
             "request_messages": list(request_messages),
+            "durable_request_messages": list(durable_request_messages),
             "tool_schemas": list(actual_tool_schemas),
             "provider_request_body": provider_request_body,
             "prompt_cache_key": prompt_cache_key,
@@ -4341,6 +4460,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 langchain_tools=langchain_tools,
             )
             request_messages = list(preflight_snapshot.get("request_messages") or [])
+            durable_request_messages = list(preflight_snapshot.get("durable_request_messages") or request_messages)
             prompt_cache_key = str(preflight_snapshot.get("prompt_cache_key") or "")
             prompt_cache_diagnostics = dict(preflight_snapshot.get("prompt_cache_diagnostics") or {})
             actual_tool_schemas = list(preflight_snapshot.get("tool_schemas") or [])
@@ -4388,6 +4508,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     tool_schemas=actual_tool_schemas,
                 )
                 request_messages = list(preflight.request_messages)
+                durable_request_messages = strip_multimodal_blocks_from_message_records(request_messages)
                 post_compaction_tokens = int(preflight.final_request_tokens or 0)
                 post_compaction_snapshot = build_runtime_send_token_preflight_snapshot(
                     context_window_tokens=context_window_tokens,
@@ -4617,15 +4738,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             usage=self._model_response_usage(message),
         )
         message_state_update = (
-            self._replace_messages_update(list(request_messages))
+            self._replace_messages_update(list(durable_request_messages))
             if callable(getattr(self, "_replace_messages_update", None))
-            else {"messages": list(request_messages)}
+            else {"messages": list(durable_request_messages)}
         )
         return {
             "iteration": iteration,
             "repair_overlay_text": None,
             **message_state_update,
             "frontdoor_live_request_messages": [],
+            "pending_content_open_image_payloads": [],
             "model_refs": list(state_for_request.get("model_refs") or []),
             "provider_tool_names": list(state_for_request.get("provider_tool_names") or []),
             "pending_provider_tool_names": list(
@@ -5051,6 +5173,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 for (index, _payload), result in zip(ordinary_items, ordinary_results, strict=False):
                     ordered_results[index] = result
         tool_results = [ordered_results[index] for index, _payload in indexed_payloads if index in ordered_results]
+        pending_content_open_image_payloads = [
+            dict(item)
+            for item in list(state.get("pending_content_open_image_payloads") or [])
+            if isinstance(item, dict)
+        ]
+        pending_content_open_image_payloads.extend(self._content_open_image_payloads_from_tool_results(tool_results))
         updated_tool_contract_state = self._frontdoor_tool_state_after_tool_results(
             state=dict(state or {}),
             tool_results=tool_results,
@@ -5125,6 +5253,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "verified_task_ids": list(verified_task_ids),
             "synthetic_tool_calls_used": False,
             "frontdoor_stage_state": frontdoor_stage_state,
+            "pending_content_open_image_payloads": pending_content_open_image_payloads,
             "next_step": "call_model",
         }
         result.update(updated_tool_contract_state)
