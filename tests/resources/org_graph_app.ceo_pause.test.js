@@ -545,6 +545,133 @@ test("anonymous user inflight turn does not reuse preserved user stage trace", (
     assert.equal(anonymousTurns[0]?.lastExecutionTraceSummary || null, null);
 });
 
+test("render snapshot dedupes already-persisted user messages before restoring consumed follow-up", () => {
+    const context = loadApp();
+    const { renderCeoSnapshot, S, setAddMsg } = context;
+    const userBubbles = [];
+
+    setAddMsg((text, role) => {
+        if (role === "user") userBubbles.push(String(text || ""));
+    });
+
+    renderCeoSnapshot(
+        [
+            { role: "user", content: "Original request", turn_id: "turn-live" },
+            {
+                role: "assistant",
+                content: "处理中...",
+                turn_id: "turn-live:followup:archive",
+                canonical_context: {
+                    stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo", rounds: [] }],
+                },
+            },
+        ],
+        {
+            source: "user",
+            turn_id: "turn-live",
+            status: "running",
+            assistant_text: "Still working",
+            user_messages: [
+                { role: "user", content: "Original request", turn_id: "turn-live" },
+                { role: "user", content: "Queued follow-up", turn_id: "turn-follow-up" },
+            ],
+        },
+        { sessionId: "web:test" },
+    );
+
+    assert.deepEqual(userBubbles, ["Original request", "Queued follow-up"]);
+    assert.equal(S.ceoPendingTurns.length, 1);
+    assert.equal(S.ceoPendingTurns[0].turnId, "turn-live");
+});
+
+test("render snapshot separates text bubble from file attachments and keeps file clickable", () => {
+    const { renderCeoSnapshot, U } = loadApp();
+
+    renderCeoSnapshot(
+        [
+            {
+                role: "user",
+                content: "Who is this?",
+                attachments: [
+                    {
+                        path: "D:/NewProjects/G3KU/.g3ku/web-ceo-uploads/web_test/report.pdf",
+                        name: "report.pdf",
+                        kind: "file",
+                        size: 51200,
+                    },
+                ],
+            },
+        ],
+        null,
+        { sessionId: "web:test" },
+    );
+
+    const markup = String(U.ceoFeed.appended[0]?.innerHTML || "");
+    assert.match(markup, /Who is this\?/);
+    assert.match(markup, /chat-attachment-stack/);
+    assert.match(markup, /chat-attachment-file/);
+    assert.match(markup, /chat-attachment-link/);
+    assert.match(markup, /target="_blank"/);
+    assert.match(markup, /\/api\/ceo\/uploads\/file\?/);
+});
+
+test("render snapshot with attachment-only user message does not recreate a text bubble", () => {
+    const { renderCeoSnapshot, U } = loadApp();
+
+    renderCeoSnapshot(
+        [
+            {
+                role: "user",
+                content: "",
+                attachments: [
+                    {
+                        path: "D:/NewProjects/G3KU/.g3ku/web-ceo-uploads/web_test/report.pdf",
+                        name: "report.pdf",
+                        kind: "file",
+                        size: 51200,
+                    },
+                ],
+            },
+        ],
+        null,
+        { sessionId: "web:test" },
+    );
+
+    const markup = String(U.ceoFeed.appended[0]?.innerHTML || "");
+    assert.doesNotMatch(markup, /Uploaded attachments:/);
+    assert.doesNotMatch(markup, /class="msg-content"/);
+    assert.match(markup, /chat-attachment-file/);
+});
+
+test("render snapshot shows image attachments as thumbnail bubbles", () => {
+    const { renderCeoSnapshot, U } = loadApp();
+
+    renderCeoSnapshot(
+        [
+            {
+                role: "user",
+                content: "",
+                attachments: [
+                    {
+                        path: "D:/NewProjects/G3KU/.g3ku/web-ceo-uploads/web_test/photo.png",
+                        name: "photo.png",
+                        mime_type: "image/png",
+                        kind: "image",
+                        size: 4096,
+                    },
+                ],
+            },
+        ],
+        null,
+        { sessionId: "web:test" },
+    );
+
+    const markup = String(U.ceoFeed.appended[0]?.innerHTML || "");
+    assert.match(markup, /chat-attachment-image/);
+    assert.match(markup, /<img /);
+    assert.match(markup, /photo\.png/);
+});
+
 test("queued follow-ups drain as one batch request and render multiple user bubbles", () => {
     const context = loadApp();
     const { maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, S } = context;
@@ -601,6 +728,7 @@ test("running-turn follow-up stays in the queue and does not render a user bubbl
         U,
         WebSocket,
         sendCeoMessage,
+        patchCeoInflightTurn,
         setAddMsg,
         setSetCeoSessionSnapshotCache,
         setPatchCeoSessionSnapshotCache,
@@ -692,6 +820,20 @@ test("running-turn follow-up stays in the queue and does not render a user bubbl
     assert.match(String(S.ceoQueuedFollowUps["web:test"][0].runtime_sent_at || ""), /\d{4}-\d{2}-\d{2}T/);
     assert.deepEqual(userBubbles, []);
     assert.equal(U.ceoInput.value, "");
+
+    patchCeoInflightTurn({
+        source: "user",
+        turn_id: "turn-live",
+        status: "running",
+        assistant_text: "Still working",
+        user_messages: [
+            { role: "user", content: "Original request" },
+            { role: "user", content: "Queued follow-up" },
+        ],
+    }, { sessionId: "web:test", cacheField: "inflight_turn" });
+
+    assert.deepEqual(userBubbles, ["Queued follow-up"]);
+    assert.equal(S.ceoQueuedFollowUps["web:test"]?.length || 0, 0);
 });
 
 test("finalize reorders same-turn follow-up bubbles before the assistant reply", () => {

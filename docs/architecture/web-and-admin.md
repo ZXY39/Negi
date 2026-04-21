@@ -108,6 +108,7 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - If `ceo.reply.final.user_messages` includes a runtime-sent follow-up, the browser must rebuild the final visible order as `current turn user batch -> final assistant reply` and clear the matched queue entry.
 - If a runtime-sent follow-up does not appear in the just-finished turn's `user_messages`, the browser should keep it in the queue lane until a later fresh user turn or transcript snapshot represents it authoritatively.
 - `snapshot.ceo.messages` must also avoid replaying running-turn `pending` user transcript rows as ordinary history bubbles. During a live running turn, authoritative current-turn user placement comes from `inflight_turn.user_messages`, not from flat transcript replay.
+- When a running follow-up is actually consumed into the next model send of the same visible conversation lane, the runtime now also archives the pre-follow-up assistant execution bubble into visible UI history before the consumed user bubble is restored. That archive is UI-visible but prompt-hidden, so refresh/reconnect can preserve the same visual ordering without polluting later prompt history.
 
 ### 2.5. Image Upload Gating
 
@@ -122,6 +123,21 @@ This is intentional. The composer button no longer means "pause whenever a turn 
   - `/api/ceo/uploads` rejects any single image larger than `5 MiB`
   - the runtime rechecks image size again before expanding the upload into a provider request, so bypassing the upload endpoint does not bypass the limit
 - Composer/preflight estimation must use the same expansion rule as the real send. If the current model binding would not expand images, the meter/preflight must estimate the downgraded text-only request instead of pretending an image will be sent.
+
+### 2.6. Attachment Bubble Rendering Contract
+
+- Browser-side CEO message rendering must treat uploaded attachments as structured UI, not as plain transcript text.
+- When a user message contains both text and attachments, the frontend should render:
+  - the user text as the normal user text bubble
+  - the attachments as separate attachment bubbles stacked directly below that text bubble in the same message lane
+- When a user message contains attachments but no user-visible text, the frontend must render only the attachment bubbles. It must not synthesize a summary bubble such as `已附加附件`, and it must not surface the backend/internal `Uploaded attachments: ... local path ...` note as chat content after refresh or reconnect.
+- The backend snapshot contract behind that rule is:
+  - transcript/runtime messages may still carry the internal upload note in `content` for model/debugging purposes
+  - `snapshot.ceo.messages[].content` must prefer `metadata.web_ceo_raw_text` whenever `metadata.web_ceo_uploads` is present, even when that raw text is the empty string
+  - the authoritative user-facing attachment lane comes from `attachments`, not from reparsing the internal note text
+- Non-image attachments should render as clickable file bubbles rather than inline text. Clicking them should open a new browser tab against the backend-owned read-only file route `GET /api/ceo/uploads/file`, not against a raw local filesystem path.
+- Image attachments should render as thumbnail bubbles, not as ordinary file pills. The same thumbnail should also be the click target that opens the underlying file in a new tab.
+- If refresh/reconnect shows the internal upload note instead of attachment bubbles, debug the snapshot builder in `g3ku/runtime/api/websocket_ceo.py` before debugging CSS or DOM layout.
 
 ### 3. Context Loader Notices
 

@@ -26,6 +26,7 @@ node_modules/
 __pycache__/
 poetry.lock
 .pytest_cache/
+.superpowers
 botpy.log
 tests/
 !tests/

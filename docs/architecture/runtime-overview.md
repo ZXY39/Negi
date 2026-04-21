@@ -122,6 +122,7 @@
 - 维护上要把 `user_messages` 看成“当前可见 turn 的权威用户批次”，而不是 transcript 的替代品。它的职责是让 websocket/final-reply 层在 running follow-up 与 chained fresh turn 之间保住 UI 顺序
 - `ceo.reply.final.user_messages` 现在沿用这份当前 turn 用户批次快照。如果这份数组里已经包含 runtime-sent follow-up，说明这些补充属于同一个 assistant 最终回复；如果没有，说明它们仍在等待后续 fresh turn 或 transcript 快照来落位
 - 反过来说，普通 transcript 里的 `pending` user rows 现在不能在 running turn 的 `snapshot.ceo.messages` 里直接回放成历史气泡。维护上应把这些 `pending` 行视为 durability/continuity 记录，而不是当前可见排序的权威来源；running turn 的可见用户顺序必须以 `inflight_turn.user_messages` 和后续 `ceo.reply.final.user_messages` 为准
+- 当 follow-up 被真正并入同一可见会话 lane 的下一次 `call_model` 发送前，session 现在还会先把“补充消息到来前的当前 assistant 执行气泡”归档成一条 UI 可见、prompt 不可见的 assistant 历史记录。这个归档的职责纯粹是保证刷新/重连后的可见顺序稳定，不是新的 prompt 历史边界
 
 如果这里被改回“pause 后仍把新输入合并回原 user message”，典型回归就是：
 

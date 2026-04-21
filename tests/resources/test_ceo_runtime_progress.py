@@ -4143,6 +4143,48 @@ async def test_runtime_agent_session_persists_pending_user_turn_before_cancellat
 
 
 @pytest.mark.asyncio
+async def test_runtime_agent_session_archives_running_assistant_before_consumed_follow_up(
+    tmp_path: Path,
+) -> None:
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=None,
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        create_session_cancellation_token=lambda _session_key: None,
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=lambda _session_key: 0,
+        _use_rag_memory=lambda: False,
+    )
+    session_id = "web:ceo-follow-up-archive"
+    session = RuntimeAgentSession(loop, session_key=session_id, channel="web", chat_id="ceo-follow-up-archive")
+
+    original = UserInputMessage(content="Original request")
+    session._configure_user_batch([original], batch_id="batch-original")
+    session._last_prompt = original
+    session._state.latest_message = "Inspecting repo"
+    session._state.is_running = True
+    await session._persist_pending_user_messages(user_inputs=[original])
+
+    await session.queue_follow_up_batch([UserInputMessage(content="Queued follow-up")], persist_transcript=True)
+    drained = await session.take_follow_up_batch_for_call_model()
+
+    assert [websocket_ceo._history_text(item.content) for item in drained] == ["Queued follow-up"]
+
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    assert [message["role"] for message in reloaded.messages] == ["user", "assistant", "user"]
+    assert reloaded.messages[1]["content"] == "Inspecting repo"
+    assert reloaded.messages[1]["metadata"]["source"] == "follow_up_archive"
+    assert reloaded.messages[1]["metadata"]["prompt_visible"] is False
+    assert reloaded.messages[1]["metadata"]["ui_visible"] is True
+    assert reloaded.messages[2]["content"] == "Queued follow-up"
+    assert reloaded.messages[2]["metadata"]["_transcript_state"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
     tmp_path: Path,
     monkeypatch,
@@ -5529,6 +5571,94 @@ def test_ceo_snapshot_filters_internal_cron_user_message() -> None:
         "visible answer",
         "scheduled update",
     ]
+
+
+def test_ceo_snapshot_uses_raw_upload_text_even_when_empty_for_attachment_only_message() -> None:
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [
+            {
+                "role": "user",
+                "content": "\n".join(
+                    [
+                        "Uploaded attachments:",
+                        "- file: report.pdf (local path: D:/NewProjects/G3KU/.g3ku/web-ceo-uploads/web_test/report.pdf)",
+                        "You may inspect the local file paths above when helpful.",
+                    ]
+                ),
+                "metadata": {
+                    "web_ceo_raw_text": "",
+                    "web_ceo_uploads": [
+                        {
+                            "path": "D:/NewProjects/G3KU/.g3ku/web-ceo-uploads/web_test/report.pdf",
+                            "name": "report.pdf",
+                            "mime_type": "application/pdf",
+                            "kind": "file",
+                            "size": 51200,
+                        }
+                    ],
+                },
+            }
+        ]
+    )
+
+    assert len(snapshot) == 1
+    assert snapshot[0]["role"] == "user"
+    assert snapshot[0]["content"] == ""
+    assert snapshot[0]["attachments"][0]["name"] == "report.pdf"
+
+
+def test_ceo_uploaded_file_endpoint_serves_file_inline(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    session_id = "web:test"
+    upload_dir = web_ceo_sessions.upload_dir_for_session(session_id)
+    file_path = upload_dir / "report.txt"
+    file_path.write_text("hello attachment", encoding="utf-8")
+
+    app = FastAPI()
+    app.include_router(websocket_ceo.router, prefix="/api")
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/ceo/uploads/file",
+        params={
+            "session_id": session_id,
+            "path": str(file_path),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.text == "hello attachment"
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.headers["content-disposition"].startswith("inline;")
+
+
+def test_ceo_uploaded_file_endpoint_serves_unicode_filename_inline(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    session_id = "web:test-unicode"
+    upload_dir = web_ceo_sessions.upload_dir_for_session(session_id)
+    file_path = upload_dir / "QQ图片20210228225059.jpg"
+    payload = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
+    file_path.write_bytes(payload)
+
+    app = FastAPI()
+    app.include_router(websocket_ceo.router, prefix="/api")
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/ceo/uploads/file",
+        params={
+            "session_id": session_id,
+            "path": str(file_path),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.content == payload
+    assert response.headers["content-type"].startswith("image/jpeg")
+    assert response.headers["content-disposition"].startswith("inline;")
+    assert "filename*=" in response.headers["content-disposition"]
 
 
 @pytest.mark.asyncio

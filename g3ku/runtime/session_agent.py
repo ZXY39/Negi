@@ -723,6 +723,99 @@ class RuntimeAgentSession:
         if hasattr(persisted_session, "updated_at"):
             persisted_session.updated_at = datetime.now()
 
+    async def _archive_inflight_assistant_for_follow_up_ui_history(
+        self,
+        *,
+        pending_follow_up_turn_ids: set[str] | None = None,
+    ) -> Any | None:
+        snapshot = self._current_inflight_turn_snapshot()
+        if not isinstance(snapshot, dict) or not snapshot:
+            return None
+        source = str(snapshot.get("source") or "").strip().lower()
+        if source in {"heartbeat", "cron", "approval"}:
+            return None
+        canonical_context = (
+            copy.deepcopy(snapshot.get("canonical_context"))
+            if isinstance(snapshot.get("canonical_context"), dict)
+            else {}
+        )
+        compression = (
+            copy.deepcopy(snapshot.get("compression"))
+            if isinstance(snapshot.get("compression"), dict)
+            else {}
+        )
+        assistant_text = str(snapshot.get("assistant_text") or "").strip()
+        if not assistant_text and not canonical_context and not compression:
+            return None
+        archived_text = assistant_text or "处理中..."
+        archived_from_turn_id = str(snapshot.get("turn_id") or "").strip()
+        metadata = {
+            "source": "follow_up_archive",
+            "prompt_visible": False,
+            "ui_visible": True,
+            "history_visible": True,
+            "archived_follow_up_turn": True,
+        }
+        if archived_from_turn_id:
+            metadata["archived_from_turn_id"] = archived_from_turn_id
+        archived_task_ids = self._task_ids_from_canonical_context(canonical_context)
+        if archived_task_ids:
+            metadata["task_ids"] = archived_task_ids
+        try:
+            persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+            last_message = (
+                persisted_session.messages[-1]
+                if getattr(persisted_session, "messages", None)
+                else None
+            )
+            if isinstance(last_message, dict):
+                last_metadata = dict(last_message.get("metadata") or {})
+                if (
+                    str(last_message.get("role") or "").strip().lower() == "assistant"
+                    and str(last_metadata.get("source") or "").strip().lower() == "follow_up_archive"
+                    and str(last_metadata.get("archived_from_turn_id") or "").strip() == archived_from_turn_id
+                    and str(last_message.get("content") or "") == archived_text
+                ):
+                    return persisted_session
+            archive_turn_id = (
+                f"{archived_from_turn_id}:followup:{self._new_turn_id()}"
+                if archived_from_turn_id
+                else f"followup:{self._new_turn_id()}"
+            )
+            assistant_payload: dict[str, Any] = {
+                "turn_id": archive_turn_id,
+                "metadata": metadata,
+            }
+            if canonical_context:
+                assistant_payload["canonical_context"] = canonical_context
+            if compression:
+                assistant_payload["compression"] = compression
+            persisted_session.add_message("assistant", archived_text, **assistant_payload)
+            if isinstance(getattr(persisted_session, "messages", None), list) and persisted_session.messages:
+                archived_message = persisted_session.messages.pop()
+                insert_index = len(persisted_session.messages)
+                target_turn_ids = {
+                    str(item or "").strip()
+                    for item in list(pending_follow_up_turn_ids or set())
+                    if str(item or "").strip()
+                }
+                if target_turn_ids:
+                    for index, raw in enumerate(list(persisted_session.messages or [])):
+                        if not isinstance(raw, dict):
+                            continue
+                        if str(raw.get("role") or "").strip().lower() != "user":
+                            continue
+                        if self._message_turn_id(raw) not in target_turn_ids:
+                            continue
+                        insert_index = index
+                        break
+                persisted_session.messages.insert(insert_index, archived_message)
+            self._loop.sessions.save(persisted_session)
+            return persisted_session
+        except Exception:
+            logger.debug("Skipped follow-up archive persistence for {}", self._state.session_key)
+        return None
+
     async def _archive_paused_execution_context_for_ui_history(self) -> None:
         snapshot = self.paused_execution_context_snapshot()
         if not isinstance(snapshot, dict) or not snapshot:
@@ -2379,9 +2472,17 @@ class RuntimeAgentSession:
             for item in list(self._state.queued_follow_up_messages or [])
             if isinstance(item, UserInputMessage)
         ]
+        follow_up_turn_ids = {
+            self._user_input_turn_id(item)
+            for item in queued_inputs
+            if self._user_input_turn_id(item)
+        }
         self._state.queued_follow_up_messages.clear()
         if not queued_inputs:
             return []
+        await self._archive_inflight_assistant_for_follow_up_ui_history(
+            pending_follow_up_turn_ids=follow_up_turn_ids,
+        )
         drained_inputs = self._assign_transcript_batch_without_activating(queued_inputs)
         existing_inputs = [
             item

@@ -1686,8 +1686,17 @@ textarea {
     border-color: color-mix(in srgb, var(--brand-primary) 20%, transparent);
 }
 
-.message .msg-content .chat-attachment-list {
-    margin-top: 12px;
+.message-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    width: min(100%, 760px);
+}
+
+.message.user .message-stack {
+    align-items: flex-end;
+    margin-inline-start: auto;
 }
 
 .ceo-turn-content {
@@ -2480,15 +2489,13 @@ textarea {
     color: var(--text-muted);
 }
 
-.ceo-upload-chip-list,
-.chat-attachment-list {
+.ceo-upload-chip-list {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
 }
 
-.ceo-upload-chip,
-.chat-attachment-pill {
+.ceo-upload-chip {
     min-width: 0;
     display: inline-flex;
     align-items: center;
@@ -2525,6 +2532,89 @@ textarea {
     flex-shrink: 0;
     font-size: 0.76rem;
     color: var(--text-muted);
+}
+
+.chat-attachment-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    width: min(100%, 760px);
+}
+
+.message.user .chat-attachment-stack {
+    align-items: flex-end;
+}
+
+.chat-attachment-link {
+    min-width: 0;
+    max-width: min(100%, 320px);
+    text-decoration: none;
+    color: inherit;
+    box-shadow: var(--shadow-sm);
+    transition:
+        transform 180ms ease,
+        box-shadow 180ms ease,
+        border-color 180ms ease;
+}
+
+.chat-attachment-link:hover,
+.chat-attachment-link:focus-visible {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+}
+
+.chat-attachment-link:focus-visible {
+    outline: 0;
+    box-shadow:
+        var(--shadow-md),
+        0 0 0 4px color-mix(in srgb, var(--brand-primary) 18%, transparent);
+}
+
+.chat-attachment-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 18px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 84%, var(--bg-panel) 16%);
+    color: var(--text-secondary);
+}
+
+.message.user .chat-attachment-file {
+    border-color: color-mix(in srgb, var(--brand-primary) 20%, transparent);
+    background: color-mix(in srgb, var(--bg-msg-user) 92%, var(--bg-panel) 8%);
+}
+
+.chat-attachment-image {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: 22px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-panel) 90%, var(--bg-app) 10%);
+}
+
+.message.user .chat-attachment-image {
+    border-color: color-mix(in srgb, var(--brand-primary) 22%, transparent);
+}
+
+.chat-attachment-thumb {
+    display: block;
+    width: min(100%, 280px);
+    max-width: 280px;
+    max-height: 280px;
+    object-fit: cover;
+    background: color-mix(in srgb, var(--bg-app) 82%, black 18%);
+}
+
+.chat-attachment-image-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px 12px;
+    min-width: 0;
 }
 
 .ceo-upload-remove {

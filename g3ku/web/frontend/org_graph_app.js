@@ -2184,6 +2184,29 @@ function dedupeInflightUserMessageAgainstMessages(messages = [], inflightTurn = 
     const normalizedInflight = normalizeCeoSnapshotInflight(inflightTurn);
     if (!normalizedInflight?.user_message && !(normalizedInflight?.user_messages || []).length) return normalizedInflight;
     const normalizedMessages = trimCeoSessionSnapshotMessages(messages);
+    const inflightUserMessages = normalizeCeoSnapshotUserMessages(
+        normalizedInflight?.user_messages,
+        normalizedInflight?.user_message
+    );
+    const remainingUserMessages = inflightUserMessages.filter((message) => !ceoSnapshotHasEquivalentUserMessage(normalizedMessages, message));
+    if (inflightUserMessages.length) {
+        const deduped = { ...normalizedInflight };
+        if (remainingUserMessages.length) {
+            deduped.user_messages = remainingUserMessages;
+            const lastUserMessage = remainingUserMessages[remainingUserMessages.length - 1];
+            if (lastUserMessage) {
+                deduped.user_message = { content: String(lastUserMessage.content || "") };
+                const attachments = cloneCeoSnapshotAttachments(lastUserMessage.attachments);
+                if (attachments.length) deduped.user_message.attachments = attachments;
+            } else {
+                delete deduped.user_message;
+            }
+            return deduped;
+        }
+        delete deduped.user_message;
+        delete deduped.user_messages;
+        return ceoNeedsAssistantTurn(deduped) ? deduped : null;
+    }
     const inflightTurnId = normalizeCeoTurnId(normalizedInflight.turn_id || "");
     if (inflightTurnId) {
         const alreadyTracked = normalizedMessages.some((item) => (
@@ -2209,6 +2232,29 @@ function dedupeInflightUserMessageAgainstMessages(messages = [], inflightTurn = 
     delete deduped.user_message;
     delete deduped.user_messages;
     return ceoNeedsAssistantTurn(deduped) ? deduped : null;
+}
+
+function promoteRepresentedRuntimeSentCeoFollowUps(sessionId = activeSessionId(), representedMessages = [], { scrollMode = "preserve" } = {}) {
+    const key = String(sessionId || "").trim();
+    if (!key) return [];
+    const normalizedRepresented = normalizeCeoSnapshotUserMessages(representedMessages);
+    if (!normalizedRepresented.length) return [];
+    const current = getCeoQueuedFollowUps(key);
+    const promoted = current.filter((item) => (
+        String(item?.runtime_sent_at || "").trim()
+        && normalizedRepresented.some((message) => ceoSnapshotMessageMatchesQueuedFollowUp(message, item))
+    ));
+    if (!promoted.length) return [];
+    promoted.forEach((item) => {
+        addCeoUserMessage(item.text, {
+            attachments: item.uploads,
+            scrollMode,
+            sessionId: key,
+        });
+    });
+    const promotedIds = new Set(promoted.map((item) => String(item?.id || "").trim()).filter(Boolean));
+    setCeoQueuedFollowUps(key, current.filter((item) => !promotedIds.has(String(item?.id || "").trim())));
+    return promoted;
 }
 
 function renderCeoSessionLoadingState(sessionId, session = null) {
@@ -3208,6 +3254,57 @@ function renderChatAttachments(items = []) {
     `;
 }
 
+function ceoAttachmentHref(item = {}, sessionId = activeSessionId()) {
+    const explicitUrl = String(item?.url || "").trim();
+    if (explicitUrl) return explicitUrl;
+    const path = String(item?.path || "").trim();
+    if (!path) return "";
+    const params = new URLSearchParams({
+        session_id: String(sessionId || activeSessionId() || "").trim(),
+        path,
+    });
+    return `/api/ceo/uploads/file?${params.toString()}`;
+}
+
+function renderStructuredChatAttachmentCard(item = {}, { sessionId = activeSessionId() } = {}) {
+    const href = ceoAttachmentHref(item, sessionId);
+    const safeHref = esc(href || "#");
+    const label = esc(String(item.name || item.path || "attachment"));
+    const size = esc(formatFileSize(item.size));
+    if (String(item.kind || "").trim() === "image") {
+        return `
+            <a class="chat-attachment-link chat-attachment-image" role="listitem" href="${safeHref}" target="_blank" rel="noreferrer noopener">
+                <img class="chat-attachment-thumb" src="${safeHref}" alt="${label}" loading="lazy">
+                <span class="chat-attachment-image-meta">
+                    <span class="chat-attachment-name">${label}</span>
+                    <span class="chat-attachment-size">${size}</span>
+                </span>
+            </a>
+        `;
+    }
+    return `
+        <a class="chat-attachment-link chat-attachment-file" role="listitem" href="${safeHref}" target="_blank" rel="noreferrer noopener">
+            <span class="chat-attachment-kind">文件</span>
+            <span class="chat-attachment-name">${label}</span>
+            <span class="chat-attachment-size">${size}</span>
+        </a>
+    `;
+}
+
+function renderStructuredChatAttachments(items = [], { sessionId = activeSessionId() } = {}) {
+    const uploads = normalizeUploadList(items);
+    if (!uploads.length) return "";
+    return `
+        <div class="chat-attachment-stack" role="list">
+            ${uploads.map((item) => renderStructuredChatAttachmentCard(item, { sessionId })).join("")}
+        </div>
+    `;
+}
+
+function addCeoUserMessage(text = "", { attachments = [], scrollMode = "preserve", sessionId = activeSessionId() } = {}) {
+    addMsg(String(text || ""), "user", { attachments, scrollMode, sessionId });
+}
+
 function syncCeoInputHeight() {
     if (!U.ceoInput) return;
     U.ceoInput.style.height = "auto";
@@ -3457,9 +3554,10 @@ function sendImmediateCeoMessage({ text = "", uploads = [], scrollMode = "bottom
             size: item.size,
         })),
     }));
-    addMsg(hasRenderableText(normalizedText) ? normalizedText : summarizeUploads(normalizedUploads), "user", {
+    addCeoUserMessage(normalizedText, {
         attachments: normalizedUploads,
         scrollMode,
+        sessionId: activeSessionId(),
     });
     const turn = createPendingCeoTurn("user", { scrollMode });
     if (turn) S.ceoPendingTurns.push(turn);
@@ -3512,9 +3610,10 @@ function sendImmediateCeoMessageBatch(entries = [], { scrollMode = "bottom" } = 
         })),
     }));
     normalizedEntries.forEach((entry) => {
-        addMsg(hasRenderableText(entry.text) ? entry.text : summarizeUploads(entry.uploads), "user", {
+        addCeoUserMessage(entry.text, {
             attachments: entry.uploads,
             scrollMode,
+            sessionId: activeSessionId(),
         });
     });
     const turn = createPendingCeoTurn("user", { scrollMode });
@@ -3657,14 +3756,21 @@ function mutateCeoFeed(mutator, { scrollMode = "preserve" } = {}) {
     return result;
 }
 
-function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve" } = {}) {
+function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve", sessionId = activeSessionId() } = {}) {
     mutateCeoFeed(() => {
         const el = document.createElement("div");
         el.className = `message ${role}`;
         const contentClass = markdown ? "msg-content markdown-content" : "msg-content";
         const content = markdown ? renderMarkdown(text) : esc(text);
-        const attachmentMarkup = renderChatAttachments(attachments);
-        el.innerHTML = `<div class="${contentClass}">${content}${attachmentMarkup}</div>`;
+        const attachmentMarkup = renderStructuredChatAttachments(attachments, { sessionId });
+        if (role === "user" && attachmentMarkup) {
+            const textBubble = hasRenderableText(text)
+                ? `<div class="${contentClass}">${content}</div>`
+                : "";
+            el.innerHTML = `<div class="message-stack">${textBubble}${attachmentMarkup}</div>`;
+        } else {
+            el.innerHTML = `<div class="${contentClass}">${content}${attachmentMarkup}</div>`;
+        }
         U.ceoFeed.appendChild(el);
         icons();
         return el;
@@ -3931,6 +4037,13 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
             : snapshot
         );
         setCeoSessionSnapshotCache(targetSessionId, { [cacheField]: inflightTurn });
+        if (cacheField === "inflight_turn") {
+            promoteRepresentedRuntimeSentCeoFollowUps(
+                targetSessionId,
+                normalizeCeoSnapshotUserMessages(inflightTurn?.user_messages, inflightTurn?.user_message),
+                { scrollMode: "preserve" }
+            );
+        }
     }
     return true;
 }
@@ -3944,8 +4057,11 @@ function restoreCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = 
     if (userMessages.length && !isHeartbeat) {
         userMessages.forEach((userMessage) => {
             const attachments = normalizeUploadList(userMessage.attachments);
-            const text = hasRenderableText(userMessage.content) ? String(userMessage.content || "") : summarizeUploads(attachments);
-            addMsg(text, "user", { attachments, scrollMode: "preserve" });
+            addCeoUserMessage(String(userMessage.content || ""), {
+                attachments,
+                scrollMode: "preserve",
+                sessionId,
+            });
         });
     } else {
         const userMessage = snapshot.user_message && typeof snapshot.user_message === "object" ? snapshot.user_message : null;
@@ -3964,8 +4080,11 @@ function restoreCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = 
             return;
         }
         const attachments = normalizeUploadList(userMessage.attachments);
-        const text = hasRenderableText(userMessage.content) ? String(userMessage.content || "") : summarizeUploads(attachments);
-        addMsg(text, "user", { attachments, scrollMode: "preserve" });
+        addCeoUserMessage(String(userMessage.content || ""), {
+            attachments,
+            scrollMode: "preserve",
+            sessionId,
+        });
     }
     patchCeoInflightTurn(snapshot, { sessionId, cacheField });
     const status = String(snapshot.status || "").trim().toLowerCase();
@@ -4026,9 +4145,10 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
             const attachments = normalizeUploadList(item?.attachments);
             if (role === "user") {
                 if (!content.trim() && !attachments.length) return;
-                addMsg(hasRenderableText(content) ? content : summarizeUploads(attachments), "user", {
+                addCeoUserMessage(content, {
                     attachments,
                     scrollMode: "preserve",
+                    sessionId: targetSessionId,
                 });
                 return;
             }
@@ -8213,6 +8333,17 @@ function memoryProcessedBadgeStatus(item) {
 }
 
 function memoryProcessedOpLabel(item) {
+    const opLabels = [item?.source_op, item?.op]
+        .map((value) => String(value || "").trim().toLowerCase())
+        .map((value) => {
+            if (value === "write") return "增加";
+            if (value === "delete") return "删除";
+            return "";
+        })
+        .filter(Boolean);
+    const uniqueLabels = [...new Set(opLabels)];
+    if (uniqueLabels.length) return uniqueLabels.join(" / ");
+    return memoryProcessedStatusLabel(item);
     const normalizedStatus = String(item?.status || "").trim().toLowerCase();
     const normalizedOp = String(item?.op || "").trim().toLowerCase();
     const normalizedSourceOp = String(item?.source_op || "").trim().toLowerCase();
@@ -8409,7 +8540,7 @@ function ensureMemoryDetailPreviewUi() {
         </div>
         <div class="detail-modal-body">
             <div class="memory-detail-preview-shell">
-                <div id="memory-detail-preview-meta" class="memory-detail-preview-meta"></div>
+                <div id="memory-detail-preview-meta" class="memory-detail-preview-groups"></div>
                 <section class="memory-detail-preview-text-section">
                     <div id="memory-detail-preview-primary-title" class="memory-detail-preview-text-title">正文内容</div>
                     <div id="memory-detail-preview-primary" class="memory-detail-preview-text-block memory-card-body-text-rich"></div>
@@ -8452,13 +8583,48 @@ function renderMemoryDetailPreview() {
     if (U.memoryDetailTitle) U.memoryDetailTitle.textContent = String(preview.title || "").trim() || "只读记忆详情";
     if (U.memoryDetailSubtitle) U.memoryDetailSubtitle.textContent = String(preview.subtitle || "").trim() || "完整内容仅供查看，不支持编辑或保存。";
     if (U.memoryDetailMeta) {
-        const fields = Array.isArray(preview.fields) ? preview.fields : [];
-        U.memoryDetailMeta.innerHTML = fields.map((item) => `
-            <div class="memory-detail-preview-field">
-                <div class="memory-detail-preview-field-label">${esc(String(item?.label || "").trim() || "-")}</div>
-                <div class="memory-detail-preview-field-value">${esc(String(item?.value || "").trim() || "-")}</div>
-            </div>
-        `).join("");
+        const explicitGroups = Array.isArray(preview.groups) ? preview.groups : [];
+        const fallbackFields = Array.isArray(preview.fields) ? preview.fields : [];
+        const normalizedGroups = explicitGroups.length
+            ? explicitGroups
+            : (preview.kind === "processed"
+                ? [
+                    { title: "基础信息", items: fallbackFields.slice(0, 4) },
+                    { title: "模型与用量", items: fallbackFields.slice(4) },
+                ]
+                : [
+                    { title: "基础信息", items: fallbackFields.slice(0, 4) },
+                    { title: "运行信息", items: fallbackFields.slice(4) },
+                ]);
+        const groups = explicitGroups.length
+            ? explicitGroups
+            : (preview.kind === "processed"
+                ? [
+                    { title: "鍩虹淇℃伅", items: fallbackFields.slice(0, 4) },
+                    { title: "妯″瀷涓庣敤閲?", items: fallbackFields.slice(4) },
+                ]
+                : [
+                    { title: "鍩虹淇℃伅", items: fallbackFields.slice(0, 4) },
+                    { title: "杩愯淇℃伅", items: fallbackFields.slice(4) },
+                ]);
+        U.memoryDetailMeta.innerHTML = normalizedGroups.map((group) => {
+            const items = Array.isArray(group?.items) ? group.items : [];
+            return `
+                <section class="memory-detail-preview-group">
+                    <div class="memory-detail-preview-group-head">
+                        <div class="memory-detail-preview-group-title">${esc(String(group?.title || "").trim() || "-")}</div>
+                    </div>
+                    <div class="memory-detail-preview-group-body">
+                        ${items.map((item) => `
+                            <div class="memory-detail-preview-field">
+                                <div class="memory-detail-preview-field-label">${esc(String(item?.label || "").trim() || "-")}</div>
+                                <div class="memory-detail-preview-field-value">${esc(String(item?.value || "").trim() || "-")}</div>
+                            </div>
+                        `).join("")}
+                    </div>
+                </section>
+            `;
+        }).join("");
     }
     if (U.memoryDetailPrimaryTitle) {
         U.memoryDetailPrimaryTitle.textContent = preview.kind === "processed" ? "原始请求内容" : "请求正文";
@@ -8588,7 +8754,7 @@ function renderMemoryProcessedCard(item) {
     const payloadTexts = Array.isArray(item?.payload_texts) ? item.payload_texts : [];
     const noteRefs = Array.isArray(item?.note_refs_written) ? item.note_refs_written : [];
     const modelChain = Array.isArray(item?.model_chain) ? item.model_chain : [];
-    const statusLabel = memoryProcessedStatusLabel(item);
+    const statusLabel = memoryProcessedOpLabel(item);
     const badgeStatus = memoryProcessedBadgeStatus(item);
     const opLabel = memoryProcessedOpLabel(item);
     const discardReason = String(item?.discard_reason || "").trim();
@@ -8681,7 +8847,7 @@ function renderMemoryProcessedCard(item) {
     const payloadTexts = Array.isArray(item?.payload_texts) ? item.payload_texts : [];
     const noteRefs = Array.isArray(item?.note_refs_written) ? item.note_refs_written : [];
     const modelChain = Array.isArray(item?.model_chain) ? item.model_chain : [];
-    const statusLabel = memoryProcessedStatusLabel(item);
+    const statusLabel = memoryProcessedOpLabel(item);
     const badgeStatus = memoryProcessedBadgeStatus(item);
     const opLabel = memoryProcessedOpLabel(item);
     const discardReason = String(item?.discard_reason || "").trim();
@@ -8965,7 +9131,7 @@ function renderMemoryProcessedCard(item) {
     const batchId = String(item?.batch_id || "").trim();
     const usage = item?.usage && typeof item.usage === "object" ? item.usage : {};
     const payloadTexts = Array.isArray(item?.payload_texts) ? item.payload_texts : [];
-    const statusLabel = memoryProcessedStatusLabel(item);
+    const statusLabel = memoryProcessedOpLabel(item);
     const badgeStatus = memoryProcessedBadgeStatus(item);
     const opLabel = memoryProcessedOpLabel(item);
     const processedAt = formatCompactTime(item?.processed_at) || String(item?.processed_at || "");
@@ -9191,6 +9357,50 @@ async function loadMemoryView({ force = false, quiet = false } = {}) {
         renderMemoryView();
         maybeToastMemoryAlerts({ quiet });
     }
+}
+
+function renderMemoryQueueCard(item) {
+    const requestId = String(item?.request_id || "").trim();
+    const statusText = memoryStatusLabel(item?.status);
+    const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "");
+    return `
+        <article class="memory-card memory-card-compact" data-memory-card="queue" data-memory-detail-open="queue" data-memory-detail-key="${esc(requestId)}" role="button" tabindex="0" aria-label="鎵撳紑闃熷垪璇锋眰璇︽儏">
+            <div class="memory-card-summary">
+                <div class="memory-card-minimal-row">
+                    <div class="memory-card-minimal-status">
+                        <span class="status-badge" data-status="${esc(String(item?.status || "pending"))}">${esc(statusText)}</span>
+                    </div>
+                    <div class="memory-card-minimal-trailing">
+                        <span class="memory-card-time">${esc(createdAt || "-")}</span>
+                        <span class="memory-card-arrow" aria-hidden="true">›</span>
+                    </div>
+                </div>
+            </div>
+        </article>
+    `;
+}
+
+function renderMemoryProcessedCard(item) {
+    const batchId = String(item?.batch_id || "").trim();
+    const normalizedStatus = String(item?.status || "").trim().toLowerCase();
+    const badgeStatus = normalizedStatus === "discarded" ? "unpassed" : "success";
+    const statusLabel = memoryProcessedOpLabel(item);
+    const processedAt = formatCompactTime(item?.processed_at) || String(item?.processed_at || "");
+    return `
+        <article class="memory-card memory-card-compact" data-memory-card="processed" data-memory-detail-open="processed" data-memory-detail-key="${esc(batchId)}" role="button" tabindex="0" aria-label="鎵撳紑宸插鐞嗘壒娆¤鎯?">
+            <div class="memory-card-summary">
+                <div class="memory-card-minimal-row">
+                    <div class="memory-card-minimal-status">
+                        <span class="status-badge" data-status="${badgeStatus}">${esc(statusLabel)}</span>
+                    </div>
+                    <div class="memory-card-minimal-trailing">
+                        <span class="memory-card-time">${esc(processedAt || "-")}</span>
+                        <span class="memory-card-arrow" aria-hidden="true">›</span>
+                    </div>
+                </div>
+            </div>
+        </article>
+    `;
 }
 
 function clearCommunicationSelection() {

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.events import AgentEvent
@@ -416,6 +417,21 @@ async def upload_ceo_files(
     return {'ok': True, 'session_id': session_id, 'items': items}
 
 
+@router.get('/ceo/uploads/file')
+async def get_ceo_uploaded_file(
+    session_id: str = Query('web:shared'),
+    path: str = Query(...),
+):
+    candidate = _resolve_uploaded_file(session_id, path)
+    name = safe_filename(candidate.name) or candidate.name or 'attachment'
+    return FileResponse(
+        str(candidate),
+        media_type=_guess_upload_mime_type(name),
+        filename=name,
+        content_disposition_type='inline',
+    )
+
+
 def _coerce_event_data(payload: dict[str, Any]) -> dict[str, Any]:
     data = payload.get('data')
     return data if isinstance(data, dict) else {}
@@ -515,8 +531,8 @@ def _build_ceo_snapshot(
         content = _history_text(raw.get('content'))
         if role == 'user':
             raw_text = metadata.get('web_ceo_raw_text')
-            if isinstance(raw_text, str) and raw_text.strip():
-                content = raw_text.strip()
+            if isinstance(raw_text, str) and isinstance(metadata.get('web_ceo_uploads'), list):
+                content = raw_text
         attachments = _normalize_snapshot_attachments(raw) if role == 'user' else []
         canonical_context = (
             dict(raw.get('canonical_context'))

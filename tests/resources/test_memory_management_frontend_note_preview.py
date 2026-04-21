@@ -67,7 +67,7 @@ def test_memory_page_keeps_note_preview_read_only() -> None:
     assert "ApiClient.getMemoryNote(noteRef)" in app_js
 
 
-def test_memory_page_full_detail_preview_is_read_only_and_has_scrollable_long_text_regions() -> None:
+def test_memory_page_full_detail_preview_uses_centered_grouped_modal_and_scrollable_text_regions() -> None:
     app_js = _source("g3ku/web/frontend/org_graph_app.js")
     css = _source("g3ku/web/frontend/org_graph.css")
     preview_fragment = _fragment(
@@ -78,14 +78,34 @@ def test_memory_page_full_detail_preview_is_read_only_and_has_scrollable_long_te
 
     assert "只读记忆详情" in preview_fragment
     assert 'class="memory-detail-preview-shell"' in preview_fragment
+    assert 'memory-detail-preview-group' in preview_fragment
+    assert 'memory-detail-preview-group-body' in preview_fragment
     assert 'memory-detail-preview-text-block' in preview_fragment
     assert 'data-memory-detail-close' in preview_fragment
     assert "<textarea" not in preview_fragment
     assert "contenteditable" not in preview_fragment
     assert "saveMemoryDetail" not in app_js
     assert "updateMemoryDetail" not in app_js
+    assert ".memory-detail-preview-drawer" in css
+    assert "left: 50%;" in css
+    assert "transform: translate(-50%, calc(-50% + 8px));" in css
+    assert ".memory-detail-preview-group" in css
+    assert ".memory-detail-preview-group-body" in css
     assert ".memory-detail-preview-text-block" in css
     assert "overflow-y: auto;" in css
+    assert "linear-gradient" not in _fragment(
+        css,
+        ".memory-layout {",
+        ".resource-section {",
+    )
+
+
+def test_memory_page_detail_group_titles_use_utf8_chinese_labels() -> None:
+    app_js = _source("g3ku/web/frontend/org_graph_app.js")
+
+    assert "基础信息" in app_js
+    assert "模型与用量" in app_js
+    assert "运行信息" in app_js
 
 
 def test_memory_page_note_preview_admin_api_and_client_contract(monkeypatch: pytest.MonkeyPatch) -> None:
