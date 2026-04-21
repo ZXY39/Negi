@@ -132,6 +132,10 @@ Maintenance note for split content navigation executors:
 - `content_open` 的 agent-facing tool contract 现在只暴露 `start_line` / `end_line` 这一组行范围参数，用来降低模型把两套选段方式混传的概率
 - 底层 content navigation service 与 legacy `content(action=open)` 仍保留 `around_line` / `window` 支持；如果在维护时看到这组参数继续出现在 REST / service / legacy wrapper 层，不要误判为 split `content_open` callable contract 回退
 - `content_open` 暴露给 agent 的行号参数仍是 1-based；非正数 `start_line`、`end_line` 无效
+- `content_open` 现在还有一个图片 reopen 契约：当 `path` / `ref` 指向图片时，成功结果不会把图片字节直接塞回普通工具文本，而是返回结构化 payload（如 `content_kind=image`、`multimodal_open_pending=true`、`runtime_image_target`），交给运行时决定是否把视觉内容附带到下一次模型请求
+- 这条图片 reopen 契约仍然沿用同一个 `content_open` 工具；不要把它理解成独立的新图片工具。CEO/frontdoor 与 execution / acceptance 节点看到的是同一套 tool result 语义
+- 图片 reopen 是否允许，取决于当前运行时/模型绑定是否启用了 `image_multimodal_enabled`，而不是底层 provider 理论上能不能收图。未启用时，`content_open` 应直接返回 `非多模态模型无法打开图片`
+- 历史上下文里保留的图片 `path` / `ref` 只是 reopen 入口，不等于模型已经再次看到了图片像素。后续轮次若要重新直接查看图片内容，仍需再次调用 `content_open`
 
 legacy `content(action=...)` 仍然存在兼容包装，但它与 split tools 最终走的是同一底层 content service；不要假设 split tools 会比 legacy wrapper “更宽松”。
 

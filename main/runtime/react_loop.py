@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import inspect
 import json
@@ -93,6 +94,7 @@ _DEFAULT_MODEL_RESPONSE_TIMEOUT_SECONDS = 120.0
 _NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS = 25000
 _NODE_TOKEN_COMPACT_MARKER = "[G3KU_TOKEN_COMPACT_V2]"
 _NODE_TOKEN_COMPACTION_RECENT_TAIL_COUNT = 12
+_CONTENT_OPEN_IMAGE_CONTEXT_TEXT = "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"
 _RESULT_REQUIRED_KEYS = (
     'status',
     'delivery_status',
@@ -169,6 +171,8 @@ class ReActToolLoop:
         fresh_turn_request_seed_messages = self._prompt_message_records(request_body_seed_messages)
         previous_actual_request_messages: list[dict[str, Any]] = []
         pending_request_delta_messages: list[dict[str, Any]] = []
+        pending_content_open_image_payloads: list[dict[str, Any]] = []
+        current_model_refs: list[str] = []
         orphan_tool_result_strikes = 0
         repair_overlay_text: str | None = None
         invalid_final_submission_count = 0
@@ -307,6 +311,17 @@ class ReActToolLoop:
             )
             if not current_model_refs:
                 raise RuntimeError('no model refs configured for node runtime')
+            image_multimodal_enabled = self._image_multimodal_enabled_for_model_refs(current_model_refs)
+            if pending_content_open_image_payloads:
+                request_messages = self._append_content_open_image_overlay_to_request_messages(
+                    request_messages,
+                    payloads=pending_content_open_image_payloads,
+                    runtime_context={
+                        **dict(runtime_context or {}),
+                        'image_multimodal_enabled': image_multimodal_enabled,
+                    },
+                )
+                pending_content_open_image_payloads = []
             turn_prompt_cache_key = self._execution_prompt_cache_key(
                 model_messages=model_messages,
                 tool_schemas=tool_schemas,
@@ -1014,6 +1029,7 @@ class ReActToolLoop:
                     dict(assistant_message),
                     *[dict(item) for item in list(tool_messages or []) if isinstance(item, dict)],
                 ]
+                pending_content_open_image_payloads.extend(self._content_open_image_payloads_from_results(results))
                 message_history.extend(tool_messages)
                 prepared_history = self._prepare_messages(message_history, runtime_context=runtime_context)
                 self._log_service.update_node_input(
@@ -2300,6 +2316,7 @@ class ReActToolLoop:
 
         def _call_runtime_context(call: Any, *, stage_turn_granted: bool | None = None) -> dict[str, Any]:
             granted = bool(runtime_context.get('stage_turn_granted')) if stage_turn_granted is None else bool(stage_turn_granted)
+            image_multimodal_enabled = self._image_multimodal_enabled_for_model_refs(current_model_refs)
             return {
                 **runtime_context,
                 'current_tool_call_id': call.id,
@@ -2310,6 +2327,7 @@ class ReActToolLoop:
                 'enforce_content_ref_allowlist': str(runtime_context.get('node_kind') or '').strip().lower() == 'acceptance',
                 'prior_overflow_signatures': sorted(prior_overflow_signatures or set()),
                 'stage_turn_granted': granted,
+                'image_multimodal_enabled': image_multimodal_enabled,
             }
 
         def _blocked_call_result(index: int, call: Any, *, error_content: str) -> dict[str, Any]:
@@ -4981,6 +4999,148 @@ class ReActToolLoop:
             return json.dumps(result, ensure_ascii=False)
         except TypeError:
             return str(result)
+
+    @staticmethod
+    def _runtime_image_multimodal_enabled(runtime_context: dict[str, Any] | None) -> bool:
+        payload = runtime_context if isinstance(runtime_context, dict) else {}
+        return bool(payload.get('image_multimodal_enabled'))
+
+    @staticmethod
+    def _image_multimodal_enabled_for_model_refs(model_refs: list[str] | None) -> bool:
+        try:
+            config, _revision, _changed = get_runtime_config(force=False)
+        except Exception:
+            config = None
+        getter = getattr(config, 'get_managed_model', None)
+        if not callable(getter):
+            return False
+        for ref in list(model_refs or []):
+            key = str(ref or '').strip()
+            if not key:
+                continue
+            try:
+                model = getter(key)
+            except Exception:
+                model = None
+            if model is None:
+                continue
+            return bool(getattr(model, 'image_multimodal_enabled', False))
+        return False
+
+    @staticmethod
+    def _tool_result_content_open_image_payload(raw_result: Any) -> dict[str, Any] | None:
+        payload = raw_result if isinstance(raw_result, dict) else None
+        if payload is None and isinstance(raw_result, str):
+            text = str(raw_result or '').strip()
+            if text.startswith('{'):
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    payload = parsed
+        if not isinstance(payload, dict):
+            return None
+        if payload.get('ok') is not True:
+            return None
+        if str(payload.get('content_kind') or '').strip().lower() != 'image':
+            return None
+        if payload.get('multimodal_open_pending') is not True:
+            return None
+        target = payload.get('runtime_image_target')
+        return dict(payload) if isinstance(target, dict) and str(target.get('path') or '').strip() else None
+
+    @staticmethod
+    def _content_open_image_data_url(*, path: str, mime_type: str) -> str:
+        encoded = base64.b64encode(Path(str(path or '')).expanduser().read_bytes()).decode('ascii')
+        normalized_mime = str(mime_type or 'image/png').strip() or 'image/png'
+        return f'data:{normalized_mime};base64,{encoded}'
+
+    def _content_open_image_overlay_message_blocks(
+        self,
+        payloads: list[dict[str, Any]] | None,
+        *,
+        runtime_context: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        if not self._runtime_image_multimodal_enabled(runtime_context):
+            return []
+        blocks: list[dict[str, Any]] = [{'type': 'text', 'text': _CONTENT_OPEN_IMAGE_CONTEXT_TEXT}]
+        seen: set[str] = set()
+        for raw in list(payloads or []):
+            payload = self._tool_result_content_open_image_payload(raw)
+            if not payload:
+                continue
+            target = dict(payload.get('runtime_image_target') or {})
+            path = str(target.get('path') or '').strip()
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            mime_type = str(target.get('mime_type') or payload.get('mime_type') or 'image/png').strip() or 'image/png'
+            blocks.append(
+                {
+                    'type': 'image_url',
+                    'image_url': {'url': self._content_open_image_data_url(path=path, mime_type=mime_type)},
+                }
+            )
+        return blocks if len(blocks) > 1 else []
+
+    def _append_content_open_image_overlay_to_request_messages(
+        self,
+        request_messages: list[dict[str, Any]],
+        *,
+        payloads: list[dict[str, Any]] | None,
+        runtime_context: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        blocks = self._content_open_image_overlay_message_blocks(payloads, runtime_context=runtime_context)
+        if not blocks:
+            return [dict(item) for item in list(request_messages or []) if isinstance(item, dict)]
+        return [
+            *[dict(item) for item in list(request_messages[:-1] or []) if isinstance(item, dict)],
+            {
+                **dict(request_messages[-1] or {}),
+                'content': blocks,
+            },
+        ] if request_messages else [{'role': 'user', 'content': blocks}]
+
+    def _content_open_image_payloads_from_results(self, results: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+        for item in list(results or []):
+            if not isinstance(item, dict):
+                continue
+            payload = self._tool_result_content_open_image_payload(item.get('raw_result'))
+            if not payload:
+                continue
+            target = dict(payload.get('runtime_image_target') or {})
+            path = str(target.get('path') or '').strip()
+            if not path or path in seen_paths:
+                continue
+            seen_paths.add(path)
+            payloads.append(payload)
+        return payloads
+
+    @staticmethod
+    def _strip_content_open_image_overlay_from_message_records(values: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for raw in list(values or []):
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            content = item.get('content')
+            if isinstance(content, list):
+                text_parts: list[str] = []
+                for block in content:
+                    if isinstance(block, dict) and str(block.get('type') or '').strip().lower() in {'image_url', 'input_image'}:
+                        continue
+                    if isinstance(block, dict):
+                        text_value = block.get('text', block.get('content', ''))
+                        if isinstance(text_value, str) and text_value.strip():
+                            text_parts.append(text_value.strip())
+                    elif isinstance(block, str) and block.strip():
+                        text_parts.append(block.strip())
+                item['content'] = '\n'.join(text_parts).strip()
+            normalized.append(item)
+        return normalized
 
     def _set_model_await_marker(self, *, task_id: str, node_id: str, marker: str, started_at: str = '') -> None:
         normalized_marker = str(marker or '').strip()

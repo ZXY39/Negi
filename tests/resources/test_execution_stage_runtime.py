@@ -133,6 +133,17 @@ class _BrokenValidationTool(Tool):
         raise TypeError("unhashable type: 'list'")
 
 
+def _react_loop_for_content_open_image_overlay() -> object:
+    log_service = SimpleNamespace(
+        update_frame=lambda *args, **kwargs: None,
+        update_node_input=lambda *args, **kwargs: None,
+    )
+    return runtime_service_module.ReActToolLoop(
+        chat_backend=_DummyChatBackend(),
+        log_service=log_service,
+    )
+
+
 class _ToolResourceManager:
     def __init__(self, tools: dict[str, Tool]) -> None:
         self._tools = dict(tools)
@@ -3141,6 +3152,50 @@ async def test_current_task_progress_after_spawn_fails_after_three_ignored_repai
             assert round_tools == ['spawn_child_nodes']
     finally:
         await service.close()
+
+
+def test_node_runtime_builds_content_open_image_overlay_message_blocks(tmp_path: Path):
+    loop = _react_loop_for_content_open_image_overlay()
+    image_path = tmp_path / 'demo.png'
+    image_path.write_bytes(b'\x89PNG\r\n\x1a\nsmall')
+
+    payload = {
+        'ok': True,
+        'operation': 'open',
+        'content_kind': 'image',
+        'mime_type': 'image/png',
+        'summary': '图片已通过 content_open 打开，视觉内容将在下一轮请求中附带。',
+        'multimodal_open_pending': True,
+        'runtime_image_target': {
+            'path': str(image_path),
+            'mime_type': 'image/png',
+            'source_ref': '',
+        },
+    }
+
+    blocks = loop._content_open_image_overlay_message_blocks([payload], runtime_context={'image_multimodal_enabled': True})
+
+    assert blocks[0] == {'type': 'text', 'text': '图片已通过 content_open 打开，视觉内容已附带在本轮上下文中'}
+    assert blocks[1]['type'] == 'image_url'
+    assert str(blocks[1]['image_url']['url']).startswith('data:image/png;base64,')
+
+
+def test_node_runtime_strip_content_open_image_overlay_from_durable_messages() -> None:
+    loop = _react_loop_for_content_open_image_overlay()
+
+    stripped = loop._strip_content_open_image_overlay_from_message_records(
+        [
+            {
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': '图片已通过 content_open 打开，视觉内容已附带在本轮上下文中'},
+                    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AAAA'}},
+                ],
+            }
+        ]
+    )
+
+    assert stripped == [{'role': 'user', 'content': '图片已通过 content_open 打开，视觉内容已附带在本轮上下文中'}]
 
 
 @pytest.mark.asyncio
