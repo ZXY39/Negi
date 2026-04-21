@@ -118,6 +118,10 @@
 - 因此普通用户下一轮 frontdoor/history compaction 现在应继续依赖可见 transcript 加 completed continuity sidecar 恢复出的 baseline / stage / compression / semantic 状态；session 列表的 `preview_text` / `message_count` 这类 operator summary 也应继续过滤掉这条 hidden paused assistant
 - 如果用户在运行中连续补充多条消息，运行时会把它们作为“同一轮 LLM 调用前的一批独立 user message”一起持久化并一起注入模型，而不是拼接成一条 `补充要求` 文本
 - Web CEO websocket 现在会在当前可见 turn 仍在运行时立刻把这批 follow-up 交给 session 侧后端队列；如果当前 turn 在进入下一次 `call_model` 之前就结束，websocket 会直接从这批 follow-up 接续启动下一轮 fresh user turn，而不是把它们留到前端再重发
+- `RuntimeAgentSession` 的 inflight snapshot 现在还会带当前可见 turn 的 `user_messages` 批次视图；兼容字段 `user_message` 仍然保留，但它只再代表这批用户输入里的最后一条
+- 维护上要把 `user_messages` 看成“当前可见 turn 的权威用户批次”，而不是 transcript 的替代品。它的职责是让 websocket/final-reply 层在 running follow-up 与 chained fresh turn 之间保住 UI 顺序
+- `ceo.reply.final.user_messages` 现在沿用这份当前 turn 用户批次快照。如果这份数组里已经包含 runtime-sent follow-up，说明这些补充属于同一个 assistant 最终回复；如果没有，说明它们仍在等待后续 fresh turn 或 transcript 快照来落位
+- 反过来说，普通 transcript 里的 `pending` user rows 现在不能在 running turn 的 `snapshot.ceo.messages` 里直接回放成历史气泡。维护上应把这些 `pending` 行视为 durability/continuity 记录，而不是当前可见排序的权威来源；running turn 的可见用户顺序必须以 `inflight_turn.user_messages` 和后续 `ceo.reply.final.user_messages` 为准
 
 如果这里被改回“pause 后仍把新输入合并回原 user message”，典型回归就是：
 

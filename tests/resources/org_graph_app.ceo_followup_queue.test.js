@@ -170,6 +170,12 @@ function loadApp() {
         };`,
         context
     );
+    vm.runInContext(
+        `
+        addMsg = () => {};
+    `,
+        context
+    );
     context.__testExports.S.ceoWs = socket;
     context.__testExports.S.activeSessionId = "web:test";
     return {
@@ -247,5 +253,7 @@ test("sending while a turn is active queues follow-up and sends it to the runtim
     assert.equal(Array.isArray(socket.sent[0]?.messages), true);
     assert.equal(socket.sent[0].messages.length, 1);
     assert.equal(S.ceoQueuedFollowUps["web:test"][0].text, "前10个");
+    assert.equal(U.ceoFollowUpQueue.hidden, false);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /前10个/);
     assert.equal((__context.__showToastCalls || []).length, 0);
 });

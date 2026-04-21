@@ -483,7 +483,21 @@ def _normalize_snapshot_attachments(message: dict[str, Any]) -> list[dict[str, A
     return items
 
 
-def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def _snapshot_message_transcript_state(message: dict[str, Any] | None) -> str:
+    if not isinstance(message, dict):
+        return ""
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    return str(metadata.get("_transcript_state") or "").strip().lower()
+
+
+def _build_ceo_snapshot(
+    messages: list[dict[str, Any]] | None,
+    *,
+    inflight_turn: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    inflight_payload = inflight_turn if isinstance(inflight_turn, dict) else {}
+    inflight_status = str(inflight_payload.get("status") or "").strip().lower()
+    hide_pending_users = inflight_status in {"running", "in_progress", "active"}
     items: list[dict[str, Any]] = []
     for raw in list(messages or []):
         if not isinstance(raw, dict):
@@ -495,6 +509,8 @@ def _build_ceo_snapshot(messages: list[dict[str, Any]] | None) -> list[dict[str,
             continue
         role = str(raw.get('role') or '').strip().lower()
         if role not in {'user', 'assistant', 'system'}:
+            continue
+        if hide_pending_users and role == "user" and _snapshot_message_transcript_state(raw) == "pending":
             continue
         content = _history_text(raw.get('content'))
         if role == 'user':
@@ -781,7 +797,11 @@ async def ceo_websocket(websocket: WebSocket):
         memory_channel=(str(memory_scope.get('channel') or 'web') if not is_channel_session else None),
         memory_chat_id=(str(memory_scope.get('chat_id') or 'shared') if not is_channel_session else None),
     )
-    persisted_messages = _build_ceo_snapshot(getattr(persisted_session, 'messages', []))
+    turn_payload = _build_live_turn_payload(session, session_id, persisted_session)
+    persisted_messages = _build_ceo_snapshot(
+        getattr(persisted_session, 'messages', []),
+        inflight_turn=turn_payload.get("inflight_turn") if isinstance(turn_payload, dict) else None,
+    )
     current_turn_task: asyncio.Task[Any] | None = None
     closed = asyncio.Event()
 
@@ -935,6 +955,12 @@ async def ceo_websocket(websocket: WebSocket):
             text = str(payload.get('text') or '').strip()
             source = str(payload.get('source') or 'user').strip().lower() or 'user'
             turn_id = str(payload.get('turn_id') or '').strip()
+            snapshot = _build_inflight_turn_snapshot(session, session_id)
+            user_messages = [
+                dict(item)
+                for item in list((snapshot or {}).get('user_messages') or [])
+                if isinstance(item, dict)
+            ]
             persisted = transcript_store.get_or_create(session_id)
             canonical_context = _resolve_final_canonical_context(
                 payload=payload,
@@ -942,13 +968,6 @@ async def ceo_websocket(websocket: WebSocket):
                 persisted_session=persisted,
             )
             if not turn_id:
-                snapshot = None
-                inflight_supplier = getattr(session, 'inflight_turn_snapshot', None)
-                if callable(inflight_supplier):
-                    try:
-                        snapshot = inflight_supplier()
-                    except Exception:
-                        snapshot = None
                 if isinstance(snapshot, dict):
                     turn_id = str(snapshot.get('turn_id') or '').strip()
             if _is_internal_ack_message_end(payload):
@@ -972,6 +991,7 @@ async def ceo_websocket(websocket: WebSocket):
                     'text': text,
                     'source': source,
                     'turn_id': turn_id,
+                    **({'user_messages': user_messages} if user_messages else {}),
                     **({'canonical_context': canonical_context} if canonical_context else {}),
                 },
             )
@@ -997,7 +1017,6 @@ async def ceo_websocket(websocket: WebSocket):
     global_sender_task = asyncio.create_task(sender(global_queue))
     stream_task = asyncio.create_task(sender(stream_queue))
     try:
-        turn_payload = _build_live_turn_payload(session, session_id, persisted_session)
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='hello', data={'session_id': session_id}))
         await _safe_send(
             build_envelope(

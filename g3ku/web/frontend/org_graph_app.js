@@ -1689,20 +1689,40 @@ function markCeoQueuedFollowUpsRuntimeSent(sessionId, entryIds = []) {
 function pruneRuntimeSentCeoFollowUps(sessionId = activeSessionId()) {
     const key = String(sessionId || "").trim();
     if (!key) return [];
-    const retained = getCeoQueuedFollowUps(key).filter((item) => !String(item?.runtime_sent_at || "").trim());
+    return getCeoQueuedFollowUps(key);
+}
+
+function ceoSnapshotMessageMatchesQueuedFollowUp(message = null, followUp = null) {
+    const normalizedMessage = normalizeCeoSnapshotMessage(message);
+    if (!normalizedMessage || normalizedMessage.role !== "user") return false;
+    const normalizedFollowUp = normalizeCeoQueuedFollowUpEntry(followUp);
+    if (!normalizedFollowUp) return false;
+    const sameAttachments = JSON.stringify(normalizeUploadList(normalizedMessage.attachments)) === JSON.stringify(normalizedFollowUp.uploads);
+    return String(normalizedMessage.content || "") === String(normalizedFollowUp.text || "") && sameAttachments;
+}
+
+function consumeRepresentedRuntimeSentCeoFollowUps(sessionId = activeSessionId(), representedMessages = []) {
+    const key = String(sessionId || "").trim();
+    if (!key) return [];
+    const normalizedMessages = normalizeCeoSnapshotUserMessages(representedMessages);
+    if (!normalizedMessages.length) return getCeoQueuedFollowUps(key);
+    const retained = getCeoQueuedFollowUps(key).filter((item) => {
+        if (!String(item?.runtime_sent_at || "").trim()) return true;
+        return !normalizedMessages.some((message) => ceoSnapshotMessageMatchesQueuedFollowUp(message, item));
+    });
     return setCeoQueuedFollowUps(key, retained);
 }
 
 function sendActiveCeoFollowUpsToRuntime(sessionId = activeSessionId()) {
     const key = String(sessionId || "").trim();
-    if (!key) return false;
+    if (!key) return null;
     const queued = getCeoQueuedFollowUps(key).filter((item) => !String(item?.runtime_sent_at || "").trim());
-    if (!queued.length) return false;
+    if (!queued.length) return null;
     const wsOpenState = Number(WebSocket?.OPEN ?? 1);
     if (!S.ceoWs || S.ceoWs.readyState !== wsOpenState) {
         addMsg("Connection is not ready yet. Please try again in a moment.", "system");
         initCeoWs();
-        return false;
+        return null;
     }
     S.ceoWs.send(JSON.stringify({
         type: "client.user_message",
@@ -1718,8 +1738,9 @@ function sendActiveCeoFollowUpsToRuntime(sessionId = activeSessionId()) {
             })),
         })),
     }));
-    markCeoQueuedFollowUpsRuntimeSent(key, queued.map((item) => String(item?.id || "").trim()));
-    return true;
+    const queuedIds = queued.map((item) => String(item?.id || "").trim());
+    markCeoQueuedFollowUpsRuntimeSent(key, queuedIds);
+    return getCeoQueuedFollowUps(key).filter((item) => queuedIds.includes(String(item?.id || "").trim()));
 }
 
 function shiftCeoQueuedFollowUp(sessionId) {
@@ -1854,6 +1875,19 @@ function normalizeCeoSnapshotMessage(message = {}) {
     return next;
 }
 
+function normalizeCeoSnapshotUserMessages(messages = [], fallbackMessage = null) {
+    const normalized = (Array.isArray(messages) ? messages : [])
+        .map((item) => normalizeCeoSnapshotMessage(item))
+        .filter((item) => String(item?.role || "").trim().toLowerCase() === "user");
+    if (normalized.length) return normalized;
+    if (!fallbackMessage || typeof fallbackMessage !== "object") return [];
+    const fallback = normalizeCeoSnapshotMessage({
+        role: "user",
+        ...fallbackMessage,
+    });
+    return fallback ? [fallback] : [];
+}
+
 function normalizeCeoSnapshotInflight(snapshot = null) {
     if (!snapshot || typeof snapshot !== "object") return null;
     const next = {};
@@ -1866,11 +1900,13 @@ function normalizeCeoSnapshotInflight(snapshot = null) {
     if (status) next.status = status;
     if (assistantText.trim()) next.assistant_text = assistantText;
     const userMessage = snapshot?.user_message && typeof snapshot.user_message === "object" ? snapshot.user_message : null;
-    if (userMessage) {
-        const content = String(userMessage?.content || "");
-        const attachments = cloneCeoSnapshotAttachments(userMessage?.attachments);
-        if (content.trim() || attachments.length) {
-            next.user_message = { content };
+    const userMessages = normalizeCeoSnapshotUserMessages(snapshot?.user_messages, userMessage);
+    if (userMessages.length) {
+        next.user_messages = userMessages;
+        const lastUserMessage = userMessages[userMessages.length - 1];
+        if (lastUserMessage) {
+            next.user_message = { content: String(lastUserMessage.content || "") };
+            const attachments = cloneCeoSnapshotAttachments(lastUserMessage.attachments);
             if (attachments.length) next.user_message.attachments = attachments;
         }
     }
@@ -2121,12 +2157,48 @@ function appendCeoSessionSnapshotMessage(messages = [], message = null) {
     return trimCeoSessionSnapshotMessages(next);
 }
 
+function ceoSnapshotHasEquivalentUserMessage(messages = [], candidate = null) {
+    const normalizedCandidate = normalizeCeoSnapshotMessage(candidate);
+    if (!normalizedCandidate || normalizedCandidate.role !== "user") return false;
+    const candidateTurnId = normalizeCeoTurnId(normalizedCandidate.turn_id || "");
+    const candidateAttachments = normalizeUploadList(normalizedCandidate.attachments);
+    return trimCeoSessionSnapshotMessages(messages).some((item) => {
+        if (String(item?.role || "").trim().toLowerCase() !== "user") return false;
+        const itemTurnId = normalizeCeoTurnId(item?.turn_id || "");
+        if (candidateTurnId) return itemTurnId === candidateTurnId;
+        const sameAttachments = JSON.stringify(normalizeUploadList(item?.attachments)) === JSON.stringify(candidateAttachments);
+        return String(item?.content || "") === String(normalizedCandidate.content || "") && sameAttachments;
+    });
+}
+
+function appendMissingCeoUserMessages(messages = [], userMessages = []) {
+    let next = trimCeoSessionSnapshotMessages(messages);
+    normalizeCeoSnapshotUserMessages(userMessages).forEach((message) => {
+        if (ceoSnapshotHasEquivalentUserMessage(next, message)) return;
+        next = appendCeoSessionSnapshotMessage(next, message);
+    });
+    return next;
+}
+
 function dedupeInflightUserMessageAgainstMessages(messages = [], inflightTurn = null) {
     const normalizedInflight = normalizeCeoSnapshotInflight(inflightTurn);
-    if (!normalizedInflight?.user_message) return normalizedInflight;
+    if (!normalizedInflight?.user_message && !(normalizedInflight?.user_messages || []).length) return normalizedInflight;
     const normalizedMessages = trimCeoSessionSnapshotMessages(messages);
+    const inflightTurnId = normalizeCeoTurnId(normalizedInflight.turn_id || "");
+    if (inflightTurnId) {
+        const alreadyTracked = normalizedMessages.some((item) => (
+            String(item?.role || "").trim().toLowerCase() === "user"
+            && normalizeCeoTurnId(item?.turn_id || "") === inflightTurnId
+        ));
+        if (alreadyTracked) {
+            const deduped = { ...normalizedInflight };
+            delete deduped.user_message;
+            delete deduped.user_messages;
+            return ceoNeedsAssistantTurn(deduped) ? deduped : null;
+        }
+    }
     const lastUserMessage = [...normalizedMessages].reverse().find((item) => String(item?.role || "").trim().toLowerCase() === "user");
-    if (!lastUserMessage) return normalizedInflight;
+    if (!lastUserMessage || !normalizedInflight?.user_message) return normalizedInflight;
     const userContent = String(normalizedInflight.user_message?.content || "");
     const userAttachments = normalizeUploadList(normalizedInflight.user_message?.attachments);
     const lastContent = String(lastUserMessage?.content || "");
@@ -2135,6 +2207,7 @@ function dedupeInflightUserMessageAgainstMessages(messages = [], inflightTurn = 
     if (lastContent !== userContent || !sameAttachments) return normalizedInflight;
     const deduped = { ...normalizedInflight };
     delete deduped.user_message;
+    delete deduped.user_messages;
     return ceoNeedsAssistantTurn(deduped) ? deduped : null;
 }
 
@@ -3851,9 +3924,12 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         icons();
     }, { scrollMode: "preserve" });
     if (targetSessionId) {
-        const inflightTurn = preferredCanonicalContext
+        const inflightTurn = dedupeInflightUserMessageAgainstMessages(
+            getCeoSessionSnapshotCache(targetSessionId)?.messages || [],
+            preferredCanonicalContext
             ? { ...(snapshot || {}), canonical_context: preferredCanonicalContext }
-            : snapshot;
+            : snapshot
+        );
         setCeoSessionSnapshotCache(targetSessionId, { [cacheField]: inflightTurn });
     }
     return true;
@@ -3862,9 +3938,31 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
 function restoreCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "inflight_turn" } = {}) {
     if (!snapshot || typeof snapshot !== "object") return;
     const source = normalizeCeoTurnSource(snapshot?.source || "");
+    const turnId = normalizeCeoTurnId(snapshot?.turn_id || "");
     const isHeartbeat = source === "heartbeat";
-    const userMessage = snapshot.user_message && typeof snapshot.user_message === "object" ? snapshot.user_message : null;
-    if (userMessage && !isHeartbeat) {
+    const userMessages = normalizeCeoSnapshotUserMessages(snapshot?.user_messages, snapshot?.user_message);
+    if (userMessages.length && !isHeartbeat) {
+        userMessages.forEach((userMessage) => {
+            const attachments = normalizeUploadList(userMessage.attachments);
+            const text = hasRenderableText(userMessage.content) ? String(userMessage.content || "") : summarizeUploads(attachments);
+            addMsg(text, "user", { attachments, scrollMode: "preserve" });
+        });
+    } else {
+        const userMessage = snapshot.user_message && typeof snapshot.user_message === "object" ? snapshot.user_message : null;
+        if (!userMessage || isHeartbeat) {
+            patchCeoInflightTurn(snapshot, { sessionId, cacheField });
+            const status = String(snapshot.status || "").trim().toLowerCase();
+            const assistantText = String(snapshot.assistant_text || "").trim();
+            if (status === "paused") {
+                finalizePausedCeoTurn(assistantText || "已暂停", { source, turnId });
+                return;
+            }
+            if (status === "error") {
+                const errorMessage = String(snapshot?.last_error?.message || "").trim() || "unknown error";
+                finalizeCeoTurn(`运行出错：${errorMessage}`, { source, turnId });
+            }
+            return;
+        }
         const attachments = normalizeUploadList(userMessage.attachments);
         const text = hasRenderableText(userMessage.content) ? String(userMessage.content || "") : summarizeUploads(attachments);
         addMsg(text, "user", { attachments, scrollMode: "preserve" });
@@ -3918,6 +4016,7 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
         preservedTurn
         && ceoAssistantTurnAlreadyPersisted(preservedTurn?.turn_id || "", { messages, sessionId: targetSessionId })
     ) ? null : preservedTurn;
+    const normalizedInflightTurn = dedupeInflightUserMessageAgainstMessages(messages, inflightTurn);
     hideCeoContextLoadNotice();
     withCeoFeedBatch(() => {
         resetCeoFeed();
@@ -3946,13 +4045,21 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
             { sessionId: targetSessionId, cacheField: "preserved_turn" }
         );
         restoreCeoInflightTurn(
-            dedupeInflightUserMessageAgainstMessages(messages, inflightTurn),
+            normalizedInflightTurn,
             { sessionId: targetSessionId, cacheField: "inflight_turn" }
         );
+        const representedMessages = [
+            ...normalizeCeoSnapshotUserMessages(messages),
+            ...normalizeCeoSnapshotUserMessages(
+                normalizedInflightTurn?.user_messages,
+                normalizedInflightTurn?.user_message
+            ),
+        ];
+        consumeRepresentedRuntimeSentCeoFollowUps(targetSessionId, representedMessages);
         if (targetSessionId) {
             setCeoSessionSnapshotCache(targetSessionId, {
                 messages,
-                inflight_turn: inflightTurn,
+                inflight_turn: normalizedInflightTurn,
                 preserved_turn: normalizedPreservedTurn,
             });
         }
@@ -5019,7 +5126,51 @@ function finalizeCeoTurn(text, meta = {}) {
     const normalizedSource = normalizeCeoTurnSource(meta?.source || "user");
     const normalizedTurnId = normalizeCeoTurnId(meta?.turn_id || "");
     const finalCanonicalContext = normalizeCeoSnapshotCanonicalContext(meta?.canonical_context || null);
+    const finalUserMessages = normalizeCeoSnapshotUserMessages(meta?.user_messages, meta?.user_message);
     const turn = pullActiveCeoTurn(normalizedSource, normalizedTurnId);
+    if (finalUserMessages.length) {
+        const updatedEntry = patchCeoSessionSnapshotCache(sessionId, (entry) => {
+            const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
+            const inflightTurnId = normalizeCeoTurnId(inflightTurn?.turn_id);
+            const inflightSource = normalizeCeoTurnSource(inflightTurn?.source || "user");
+            const inflightMatchesSource = !inflightTurn
+                || (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId ? false : true)
+                || !String(inflightTurn?.source || "").trim()
+                || inflightSource === normalizedSource;
+            const fallbackCanonicalContext = resolvePreferredCeoCanonicalContext(
+                turn?.lastExecutionTraceSummary || null,
+                inflightTurn?.canonical_context || null
+            );
+            const persistedCanonicalContext = resolvePreferredCeoCanonicalContext(
+                finalCanonicalContext,
+                fallbackCanonicalContext
+            );
+            let messages = trimCeoSessionSnapshotMessages(entry?.messages);
+            messages = appendMissingCeoUserMessages(messages, finalUserMessages);
+            messages = appendCeoSessionSnapshotMessage(messages, {
+                role: "assistant",
+                content: String(text || "").trim() || "Done.",
+                canonical_context: persistedCanonicalContext,
+            });
+            return {
+                ...(entry || {}),
+                messages,
+                inflight_turn: inflightMatchesSource ? null : inflightTurn,
+            };
+        });
+        const renderEntry = updatedEntry || getCeoSessionSnapshotCache(sessionId);
+        if (renderEntry) {
+            renderCeoSnapshot(renderEntry.messages || [], renderEntry.inflight_turn || null, {
+                sessionId,
+                preservedTurn: renderEntry.preserved_turn || null,
+            });
+        } else {
+            addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
+        }
+        consumeRepresentedRuntimeSentCeoFollowUps(sessionId, finalUserMessages);
+        maybeDispatchQueuedCeoFollowUps();
+        return;
+    }
     if (!turn?.textEl || !turn.flowEl) {
         addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
         discardPendingCeoTurns({
@@ -5039,18 +5190,23 @@ function finalizeCeoTurn(text, meta = {}) {
                 finalCanonicalContext,
                 inflightMatchesSource ? inflightTurn?.canonical_context || null : null
             );
-            const messages = appendCeoSessionSnapshotMessage(entry?.messages, {
+            const messages = appendCeoSessionSnapshotMessage(
+                appendMissingCeoUserMessages(entry?.messages, normalizeCeoSnapshotUserMessages(
+                    inflightTurn?.user_messages,
+                    inflightTurn?.user_message
+                )),
+                {
                 role: "assistant",
                 content: String(text || "").trim() || "Done.",
                 canonical_context: persistedCanonicalContext,
-            });
+                }
+            );
             return {
                 ...(entry || {}),
                 messages,
                 inflight_turn: inflightMatchesSource ? null : inflightTurn,
             };
         });
-        pruneRuntimeSentCeoFollowUps(sessionId);
         maybeDispatchQueuedCeoFollowUps();
         return;
     }
@@ -5096,12 +5252,11 @@ function finalizeCeoTurn(text, meta = {}) {
             || (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId ? false : true)
             || !String(inflightTurn?.source || "").trim()
             || inflightSource === normalizedSource;
-        if (inflightTurn?.user_message && inflightMatchesSource) {
-            messages = appendCeoSessionSnapshotMessage(messages, {
-                role: "user",
-                content: String(inflightTurn.user_message?.content || ""),
-                attachments: inflightTurn.user_message?.attachments || [],
-            });
+        if (inflightMatchesSource) {
+            messages = appendMissingCeoUserMessages(
+                messages,
+                normalizeCeoSnapshotUserMessages(inflightTurn?.user_messages, inflightTurn?.user_message)
+            );
         }
         messages = appendCeoSessionSnapshotMessage(messages, {
             role: "assistant",

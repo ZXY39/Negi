@@ -102,6 +102,12 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - CEO/frontdoor now consumes queued follow-ups at the safe boundary right before the next `call_model` send of the same visible turn. The runtime appends them as independent `user` messages to the current request body instead of concatenating them into one synthetic supplement string.
 - If the current visible turn finishes before another `call_model` round happens, the backend immediately starts the next fresh user turn from the queued follow-ups after the current turn closes.
 - Each queued item still remains its own user message in transcript persistence; batching only changes which next LLM request sees that group first.
+- Once a queued follow-up has been handed off to the backend, it should still remain in the composer-side queue lane until runtime snapshot/final-reply data can prove that the follow-up has been consumed into a visible turn.
+- Browser rendering must not create a provisional transcript bubble merely because a follow-up was accepted by the backend queue. Queue acceptance and visible conversation placement are intentionally different stages.
+- `ceo.reply.final` may now include `user_messages` for the just-finished visible turn. This is the authoritative current-turn user batch and exists specifically so the frontend can decide whether runtime-sent follow-ups belonged to that same reply or to a later chained turn.
+- If `ceo.reply.final.user_messages` includes a runtime-sent follow-up, the browser must rebuild the final visible order as `current turn user batch -> final assistant reply` and clear the matched queue entry.
+- If a runtime-sent follow-up does not appear in the just-finished turn's `user_messages`, the browser should keep it in the queue lane until a later fresh user turn or transcript snapshot represents it authoritatively.
+- `snapshot.ceo.messages` must also avoid replaying running-turn `pending` user transcript rows as ordinary history bubbles. During a live running turn, authoritative current-turn user placement comes from `inflight_turn.user_messages`, not from flat transcript replay.
 
 ### 2.5. Image Upload Gating
 
@@ -386,6 +392,7 @@ Tool output rendering should follow the canonical payload directly:
 The final-reply rule is now simpler:
 
 - `ceo.reply.final` may include `canonical_context` when the completed turn has stage data;
+- `ceo.reply.final` may also include `user_messages` for the authoritative current-turn user batch when follow-up ordering matters;
 - if the turn has no stage trace, omit `canonical_context` entirely rather than reusing an older turn's trace.
 
 ## Heartbeat/Cron ACK Contract

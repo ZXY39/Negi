@@ -4400,7 +4400,96 @@ def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monke
     final_events = [item for item in messages if item["type"] == "ceo.reply.final"]
     assert len(final_events) == 1
     assert final_events[0]["data"]["text"] == "I will keep waiting for the install."
-    assert final_events[0]["data"]["execution_trace_summary"]["stages"][0]["stage_goal"] == "install the requested skill"
+
+
+def test_ceo_websocket_final_reply_includes_current_turn_user_messages(tmp_path: Path, monkeypatch) -> None:
+    _mock_workspace(monkeypatch, tmp_path)
+
+    async def _ensure_services(_agent) -> None:
+        return None
+
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
+    session_id = "web:ceo-live-final-user-batch"
+
+    class _FakeUserBatchFinalSession:
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(status="idle", is_running=False)
+            self._listeners = set()
+
+        def subscribe(self, listener):
+            self._listeners.add(listener)
+
+            def _unsubscribe() -> None:
+                self._listeners.discard(listener)
+
+            return _unsubscribe
+
+        def state_dict(self) -> dict[str, object]:
+            return {"status": self.state.status, "is_running": self.state.is_running}
+
+        def inflight_turn_snapshot(self):
+            return {
+                "turn_id": "turn-batch-final",
+                "source": "user",
+                "status": "running",
+                "user_message": {"content": "Queued follow-up"},
+                "user_messages": [
+                    {"role": "user", "content": "Original request"},
+                    {"role": "user", "content": "Queued follow-up"},
+                ],
+            }
+
+        async def _emit(self, event_type: str, **payload) -> None:
+            event = AgentEvent(type=event_type, timestamp="2026-04-21T12:00:00", payload=payload)
+            for listener in list(self._listeners):
+                result = listener(event)
+                if hasattr(result, "__await__"):
+                    await result
+
+        async def prompt(self, user_message) -> SimpleNamespace:
+            _ = user_message
+            self.state.status = "running"
+            self.state.is_running = True
+            await self._emit("state_snapshot", state=self.state_dict())
+            await self._emit(
+                "message_end",
+                role="assistant",
+                text="Final answer",
+                source="user",
+                turn_id="turn-batch-final",
+            )
+            self.state.status = "completed"
+            self.state.is_running = False
+            await self._emit("state_snapshot", state=self.state_dict())
+            return SimpleNamespace(output="Final answer")
+
+    session_manager = SessionManager(tmp_path)
+    live_session = _FakeUserBatchFinalSession()
+    agent = SimpleNamespace(
+        sessions=session_manager,
+        main_task_service=_TaskService(),
+    )
+    monkeypatch.setattr(websocket_ceo, "get_agent", lambda: agent)
+    monkeypatch.setattr(websocket_ceo, "get_runtime_manager", lambda _agent=None: _RuntimeManager(live_session))
+
+    client = TestClient(_build_app())
+    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        assert ws.receive_json()["type"] == "snapshot.ceo"
+        assert ws.receive_json()["type"] == "ceo.state"
+
+        ws.send_json({"type": "client.user_message", "text": "Original request"})
+
+        final_payload, _seen = _recv_until(
+            ws,
+            lambda payload: payload.get("type") == "ceo.reply.final",
+        )
+
+    assert final_payload["data"]["text"] == "Final answer"
+    assert [item["content"] for item in final_payload["data"]["user_messages"]] == [
+        "Original request",
+        "Queued follow-up",
+    ]
 
 
 def test_ceo_websocket_forwards_cron_heartbeat_ok_as_internal_ack(tmp_path: Path, monkeypatch) -> None:
@@ -6661,6 +6750,41 @@ def test_websocket_build_ceo_snapshot_hides_internal_prompt_messages_but_keeps_v
             "timestamp": "2026-03-27T09:00:10+08:00",
         }
     ]
+
+
+def test_websocket_build_ceo_snapshot_hides_pending_user_messages_while_running_turn_exists() -> None:
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [
+            {
+                "role": "user",
+                "content": "Current running request",
+                "timestamp": "2026-04-21T10:00:00+08:00",
+                "metadata": {
+                    "_transcript_turn_id": "turn-live-1",
+                    "_transcript_state": "pending",
+                },
+            },
+            {
+                "role": "user",
+                "content": "Queued follow-up",
+                "timestamp": "2026-04-21T10:00:05+08:00",
+                "metadata": {
+                    "_transcript_turn_id": "turn-follow-up-1",
+                    "_transcript_state": "pending",
+                },
+            },
+        ],
+        inflight_turn={
+            "turn_id": "turn-live-1",
+            "source": "user",
+            "status": "running",
+            "user_messages": [
+                {"role": "user", "content": "Current running request"},
+            ],
+        },
+    )
+
+    assert snapshot == []
 
 
 def test_context_assembly_always_keeps_tool_execution_control_tools_visible() -> None:

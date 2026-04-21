@@ -978,19 +978,29 @@ class RuntimeAgentSession:
         return items
 
     def _pending_user_message_snapshot(self) -> dict[str, Any] | None:
-        prompt = self._last_prompt
+        user_messages = self._pending_user_messages_snapshot()
+        if not user_messages:
+            return None
+        return copy.deepcopy(user_messages[-1])
+
+    def _serialize_visible_user_input_snapshot(
+        self,
+        user_input: UserInputMessage | Any,
+    ) -> dict[str, Any] | None:
         attachments: list[dict[str, Any]] = []
         timestamp: str | None = None
-        if isinstance(prompt, UserInputMessage):
-            if self._internal_prompt_source(prompt) is not None:
+        turn_id = ""
+        if isinstance(user_input, UserInputMessage):
+            if self._internal_prompt_source(user_input) is not None:
                 return None
-            metadata = dict(prompt.metadata or {})
+            metadata = dict(user_input.metadata or {})
             raw_text = metadata.get("web_ceo_raw_text")
-            text = str(raw_text) if isinstance(raw_text, str) else self._history_text(prompt.content)
+            text = str(raw_text) if isinstance(raw_text, str) else self._history_text(user_input.content)
             attachments = self._normalize_web_uploads(metadata.get("web_ceo_uploads"))
-            timestamp = prompt.timestamp
+            timestamp = user_input.timestamp
+            turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip()
         else:
-            text = self._history_text(prompt)
+            text = self._history_text(user_input)
         if not text.strip() and not attachments:
             return None
         payload: dict[str, Any] = {"role": "user", "content": text}
@@ -998,7 +1008,29 @@ class RuntimeAgentSession:
             payload["attachments"] = attachments
         if isinstance(timestamp, str) and timestamp.strip():
             payload["timestamp"] = timestamp.strip()
+        if turn_id:
+            payload["turn_id"] = turn_id
         return payload
+
+    def _pending_user_messages_snapshot(self) -> list[dict[str, Any]]:
+        prompt = self._last_prompt
+        fallback_user_input = (
+            prompt
+            if isinstance(prompt, UserInputMessage) and self._internal_prompt_source(prompt) is None
+            else None
+        )
+        current_batch = self._current_user_batch_inputs(fallback_user_input)
+        if current_batch:
+            return [
+                payload
+                for payload in (
+                    self._serialize_visible_user_input_snapshot(item)
+                    for item in current_batch
+                )
+                if isinstance(payload, dict)
+            ]
+        serialized = self._serialize_visible_user_input_snapshot(prompt)
+        return [serialized] if isinstance(serialized, dict) else []
 
     def _internal_prompt_source(self, prompt: Any | None = None) -> str | None:
         current = self._last_prompt if prompt is None else prompt
@@ -1284,6 +1316,9 @@ class RuntimeAgentSession:
         prompt_source = self._internal_prompt_source(prompt)
         if prompt_source is not None:
             snapshot["source"] = prompt_source
+        user_messages = self._pending_user_messages_snapshot()
+        if user_messages:
+            snapshot["user_messages"] = copy.deepcopy(user_messages)
         user_message = self._pending_user_message_snapshot()
         if user_message is not None:
             snapshot["user_message"] = user_message

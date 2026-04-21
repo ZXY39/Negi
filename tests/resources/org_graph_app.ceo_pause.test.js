@@ -125,11 +125,15 @@ function loadApp() {
         WebSocket: function WebSocket() {},
         addEventListener() {},
         removeEventListener() {},
+        ApiClient: {
+            getCeoWsUrl: () => "ws://localhost/api/ws/ceo?session_id=web:test",
+            setActiveSessionId() {},
+        },
     };
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, finalizePausedCeoTurn, renderPersistedCeoAssistantTurn, renderCeoSnapshot, dedupeInflightUserMessageAgainstMessages, applyCeoState, maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, S, U, WebSocket, setAddMsg(fn) { addMsg = fn; }, setCreatePendingCeoTurn(fn) { createPendingCeoTurn = fn; }, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
+        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, finalizePausedCeoTurn, renderPersistedCeoAssistantTurn, renderCeoSnapshot, dedupeInflightUserMessageAgainstMessages, applyCeoState, maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, sendCeoMessage, S, U, WebSocket, setAddMsg(fn) { addMsg = fn; }, setCreatePendingCeoTurn(fn) { createPendingCeoTurn = fn; }, setSetCeoSessionSnapshotCache(fn) { setCeoSessionSnapshotCache = fn; }, setPatchCeoSessionSnapshotCache(fn) { patchCeoSessionSnapshotCache = fn; }, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
         context
     );
     vm.runInContext(
@@ -546,6 +550,7 @@ test("queued follow-ups drain as one batch request and render multiple user bubb
     const { maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, S } = context;
     const sent = [];
     const userBubbles = [];
+    const seenMessages = [];
     let pendingTurnCount = 0;
 
     context.WebSocket.OPEN = 1;
@@ -587,4 +592,197 @@ test("queued follow-ups drain as one batch request and render multiple user bubb
     ]);
     assert.equal(pendingTurnCount, 1);
     assert.equal(getCeoQueuedFollowUps("web:test").length, 0);
+});
+
+test("running-turn follow-up stays in the queue and does not render a user bubble yet", () => {
+    const context = loadApp();
+    const {
+        S,
+        U,
+        WebSocket,
+        sendCeoMessage,
+        setAddMsg,
+        setSetCeoSessionSnapshotCache,
+        setPatchCeoSessionSnapshotCache,
+    } = context;
+    const userBubbles = [];
+    const seenMessages = [];
+    const snapshotStore = {};
+
+    setAddMsg((text, role) => {
+        seenMessages.push({ text: String(text || ""), role: String(role || "") });
+        if (role === "user") userBubbles.push(String(text || ""));
+    });
+    setSetCeoSessionSnapshotCache((sessionId, entry = {}) => {
+        const key = String(sessionId || entry?.session_id || "").trim();
+        if (!key) return null;
+        const previous = snapshotStore[key] && typeof snapshotStore[key] === "object"
+            ? snapshotStore[key]
+            : {};
+        snapshotStore[key] = {
+            ...previous,
+            ...(entry && typeof entry === "object" ? entry : {}),
+            session_id: key,
+        };
+        S.ceoSnapshotCache = { ...snapshotStore };
+        return snapshotStore[key];
+    });
+    setPatchCeoSessionSnapshotCache((sessionId, updater) => {
+        const key = String(sessionId || "").trim();
+        const current = snapshotStore[key] && typeof snapshotStore[key] === "object"
+            ? { ...snapshotStore[key] }
+            : {};
+        const next = typeof updater === "function" ? updater(current) : current;
+        if (next === null) {
+            delete snapshotStore[key];
+            S.ceoSnapshotCache = { ...snapshotStore };
+            return null;
+        }
+        snapshotStore[key] = {
+            ...current,
+            ...(next && typeof next === "object" ? next : {}),
+            session_id: key,
+        };
+        S.ceoSnapshotCache = { ...snapshotStore };
+        return snapshotStore[key];
+    });
+
+    WebSocket.OPEN = 1;
+    S.ceoWs = {
+        readyState: 1,
+        sent: [],
+        send(payload) {
+            this.sent.push(JSON.parse(payload));
+        },
+        close() {},
+    };
+    S.activeSessionId = "web:test";
+    S.ceoTurnActive = true;
+    S.ceoUploads = [];
+    S.ceoPendingTurns = [makeTurn({ source: "user", steps: 1 })];
+    S.ceoPendingTurns[0].turnId = "turn-live";
+    snapshotStore["web:test"] = {
+        session_id: "web:test",
+        messages: [],
+        inflight_turn: {
+            source: "user",
+            turn_id: "turn-live",
+            status: "running",
+            user_message: { content: "Original request" },
+            assistant_text: "Still working",
+        },
+    };
+    S.ceoSnapshotCache = { ...snapshotStore };
+    U.ceoInput = { value: "Queued follow-up", style: {}, scrollHeight: 48 };
+
+    sendCeoMessage();
+
+    assert.deepEqual(
+        seenMessages.filter((item) => item.role !== "user"),
+        []
+    );
+    assert.equal(S.ceoWs.sent.length, 1);
+    assert.deepEqual(S.ceoWs.sent[0], {
+        type: "client.user_message",
+        session_id: "web:test",
+        messages: [{ text: "Queued follow-up", uploads: [] }],
+    });
+    assert.equal(Array.isArray(S.ceoQueuedFollowUps?.["web:test"]), true);
+    assert.equal(S.ceoQueuedFollowUps["web:test"].length, 1);
+    assert.match(String(S.ceoQueuedFollowUps["web:test"][0].runtime_sent_at || ""), /\d{4}-\d{2}-\d{2}T/);
+    assert.deepEqual(userBubbles, []);
+    assert.equal(U.ceoInput.value, "");
+});
+
+test("finalize reorders same-turn follow-up bubbles before the assistant reply", () => {
+    const context = loadApp();
+    const {
+        S,
+        finalizeCeoTurn,
+        setAddMsg,
+        setSetCeoSessionSnapshotCache,
+        setPatchCeoSessionSnapshotCache,
+    } = context;
+    const userBubbles = [];
+    const snapshotStore = {};
+
+    setAddMsg((text, role) => {
+        if (role === "user") userBubbles.push(String(text || ""));
+    });
+    setSetCeoSessionSnapshotCache((sessionId, entry = {}) => {
+        const key = String(sessionId || entry?.session_id || "").trim();
+        if (!key) return null;
+        const previous = snapshotStore[key] && typeof snapshotStore[key] === "object"
+            ? snapshotStore[key]
+            : {};
+        snapshotStore[key] = {
+            ...previous,
+            ...(entry && typeof entry === "object" ? entry : {}),
+            session_id: key,
+        };
+        S.ceoSnapshotCache = { ...snapshotStore };
+        return snapshotStore[key];
+    });
+    setPatchCeoSessionSnapshotCache((sessionId, updater) => {
+        const key = String(sessionId || "").trim();
+        const current = snapshotStore[key] && typeof snapshotStore[key] === "object"
+            ? { ...snapshotStore[key] }
+            : {};
+        const next = typeof updater === "function" ? updater(current) : current;
+        if (next === null) {
+            delete snapshotStore[key];
+            S.ceoSnapshotCache = { ...snapshotStore };
+            return null;
+        }
+        snapshotStore[key] = {
+            ...current,
+            ...(next && typeof next === "object" ? next : {}),
+            session_id: key,
+        };
+        S.ceoSnapshotCache = { ...snapshotStore };
+        return snapshotStore[key];
+    });
+
+    S.activeSessionId = "web:test";
+    S.ceoPendingTurns = [makeTurn({ source: "user", steps: 1 })];
+    S.ceoPendingTurns[0].turnId = "turn-live";
+    S.ceoQueuedFollowUps = {
+        "web:test": [
+            {
+                id: "follow-1",
+                text: "Queued follow-up",
+                uploads: [],
+                queued_at: "2026-04-21T10:00:00.000Z",
+                runtime_sent_at: "2026-04-21T10:00:01.000Z",
+            },
+        ],
+    };
+    snapshotStore["web:test"] = {
+        session_id: "web:test",
+        messages: [],
+        inflight_turn: {
+            source: "user",
+            turn_id: "turn-live",
+            status: "running",
+            user_message: { content: "Original request" },
+            assistant_text: "Still working",
+        },
+    };
+    S.ceoSnapshotCache = { ...snapshotStore };
+
+    finalizeCeoTurn("done", {
+        source: "user",
+        turn_id: "turn-live",
+        user_messages: [
+            { role: "user", content: "Original request" },
+            { role: "user", content: "Queued follow-up" },
+        ],
+    });
+
+    assert.deepEqual(
+        (S.ceoSnapshotCache["web:test"]?.messages || []).map((item) => String(item?.content || "")),
+        ["Original request", "Queued follow-up", "done"]
+    );
+    assert.deepEqual(userBubbles, ["Original request", "Queued follow-up"]);
+    assert.equal(S.ceoQueuedFollowUps["web:test"]?.length || 0, 0);
 });
