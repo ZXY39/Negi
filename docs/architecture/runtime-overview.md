@@ -252,6 +252,8 @@ Additional maintenance note for fixed-builtin resource executors:
 - The same class of executors also stays out of hydration LRU. `load_tool_context` may still surface their contract/help payload, but a successful loader result should not promote an already fixed-callable executor into hydrated state.
 - In practice this means "resource-backed fixed builtin" is now a third debugging category between "pure internal builtin" and "ordinary extension executor": it is resource-backed for catalog/help/RBAC purposes, but it does not spend semantic top-k or hydration-LRU budget.
 - `content_describe` / `content_open` / `content_search` no longer belong to that category. Fresh turns should surface them as ordinary candidates, and successful `load_tool_context(tool_id="content_*")` calls should promote them through the normal hydration path on later turns.
+- Within that split content family, the agent-facing callable contract for `content_open` now exposes only `start_line` / `end_line`. If maintainers still see `around_line` / `window`, first check REST callers, legacy `content(action=open)`, or direct service usage before assuming the split tool contract regressed.
+- Runtime tool-result status is now broader than plain `Error: ...` strings: any tool result payload whose top-level JSON contains `ok=false` must also enter the error lane for node execution and CEO/frontdoor live status handling.
 
 - 节点与 CEO/frontdoor 的 `candidate_tool_names` / `candidate_skill_ids` 现在都表示“`RBAC 可见 ∩ 语义召回命中` 的当前候选集合”；语义召回不可用时，候选集合退化为 `RBAC 可见集合`，而不是报错中断。
 - `load_tool_context` / `load_skill_context` 的准入只认当前 canonical candidate 集合；不再允许“RBAC 可见但不在 candidate 中”的旁路加载。

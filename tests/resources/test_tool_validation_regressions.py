@@ -198,6 +198,30 @@ class _ExecuteRuntimeErrorTool(Tool):
         raise RuntimeError("runtime execution failed")
 
 
+class _StructuredFailureTool(Tool):
+    @property
+    def name(self) -> str:
+        return "structured_failure_tool"
+
+    @property
+    def description(self) -> str:
+        return "tool that returns an ok=false structured failure payload"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "value": {"type": "string"},
+            },
+            "required": ["value"],
+        }
+
+    async def execute(self, **kwargs):
+        _ = kwargs
+        return '{"ok": false, "error": "structured execution failed"}'
+
+
 def test_tool_validate_params_accepts_union_type_object_and_string() -> None:
     tool = _UnionTypeTool()
 
@@ -265,6 +289,17 @@ async def test_tool_registry_execute_keeps_runtime_error_without_loader_guidance
 
     assert result.startswith("Error executing execute_runtime_error_tool: runtime execution failed")
     assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="execute_runtime_error_tool") not in result
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_execute_treats_ok_false_json_result_as_error_lane() -> None:
+    registry = ToolRegistry()
+    registry.register(_StructuredFailureTool())
+
+    result = await registry.execute("structured_failure_tool", {"value": "demo"})
+
+    assert result.startswith('{"ok": false, "error": "structured execution failed"}')
+    assert result.endswith("[Analyze the error above and try a different approach.]")
 
 
 @pytest.mark.asyncio

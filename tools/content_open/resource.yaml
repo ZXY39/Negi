@@ -38,14 +38,6 @@ parameters:
       type: integer
       minimum: 1
       description: Optional end line.
-    around_line:
-      type: integer
-      minimum: 1
-      description: Optional center line.
-    window:
-      type: integer
-      minimum: 1
-      description: Optional window size when around_line is set.
   required: []
 governance:
   family: content_navigation

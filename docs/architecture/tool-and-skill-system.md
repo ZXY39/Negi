@@ -129,9 +129,9 @@ Maintenance note for split content navigation executors:
 - 本地文件仍应优先传绝对 `path`
 - `path` 参数本身不接受 `artifact:`；如果把 `artifact:` 塞进 `path`，底层仍会返回 path-mode 错误
 - `content_search` 与 `content_open` 在同时收到 `ref` 和 `path` 时，会分别尝试两个目标并返回组合结果；某一侧失败不会覆盖另一侧成功结果
-- `content_open` 的 `start_line` / `end_line` 与 `around_line` / `window` 仍是同一目标上的两种选段方式；维护时不要假设组合模式会自动消除这组参数歧义
-- `content_open` 现在会把这两组选段方式当成互斥选择器：混传 `start_line` / `end_line` 与 `around_line` / `window` 时，runtime 应直接报参数错误，而不是静默偏向其中一组
-- 这些行号/窗口参数都是 1-based；非正数 `start_line`、`end_line`、`around_line`、`window` 无效，且单独传 `window` 而不传 `around_line` 也应视为参数错误
+- `content_open` 的 agent-facing tool contract 现在只暴露 `start_line` / `end_line` 这一组行范围参数，用来降低模型把两套选段方式混传的概率
+- 底层 content navigation service 与 legacy `content(action=open)` 仍保留 `around_line` / `window` 支持；如果在维护时看到这组参数继续出现在 REST / service / legacy wrapper 层，不要误判为 split `content_open` callable contract 回退
+- `content_open` 暴露给 agent 的行号参数仍是 1-based；非正数 `start_line`、`end_line` 无效
 
 legacy `content(action=...)` 仍然存在兼容包装，但它与 split tools 最终走的是同一底层 content service；不要假设 split tools 会比 legacy wrapper “更宽松”。
 
@@ -239,6 +239,8 @@ Maintenance note for parameter-error guidance:
 - Tool parameter validation errors now share one maintenance contract across `ToolRegistry`, CEO/frontdoor direct-tool execution, and node `ReActToolLoop`.
 - When runtime rejects parameters because `validate_params(...)` returned errors, because `validate_params(...)` itself crashed, or because tool execution raised `ValueError` / `TypeError`, the returned error text should preserve the original error and append a repair hint that points back to `load_tool_context(tool_id="<tool_name>")`.
 - Do not extend this lane to unrelated runtime failures. Permission errors, path-policy errors, timeout-stop errors, watchdog stops, pause/cancel signals, and ordinary `RuntimeError` should keep their original semantics instead of being mislabeled as parameter errors.
+- Separately from that parameter-guidance contract, runtime status classification now treats any structured tool result with top-level `{"ok": false, ...}` as an error-lane tool result across `ToolRegistry`, CEO/frontdoor, and node execution.
+- This status rule is intentionally broader than the parameter-guidance rule. It exists so embedded tools that encode failures as JSON payloads still enter the runtime error lane, even when they do not raise Python exceptions outward.
 
 - 节点的 hydration canonical state 在 runtime frame 中：`hydrated_executor_state` / `hydrated_executor_names`。这是节点生命周期级 LRU，会跨多轮、阶段切换、pause/resume、frame restore 保留。
 - CEO/frontdoor 的 hydration canonical state 在 session/frontdoor state 中：`RuntimeAgentSession._frontdoor_hydrated_tool_names` 与前门 persistent state 的 `hydrated_tool_names`。这是 session 生命周期级 LRU，会跨 turn 保留，但每轮都按当前 RBAC 可见集合过滤。

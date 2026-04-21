@@ -19,6 +19,7 @@ from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
     is_parameter_like_tool_exception,
 )
+from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_detached_watchdog,
     actor_role_allows_watchdog,
@@ -128,22 +129,23 @@ class ToolRegistry:
                 params=normalized,
                 runtime_context=runtime_context,
             )
-            if isinstance(result, str) and result.startswith("Error"):
-                await self._emit_progress(f"[tool:{name}] 执行失败: {result}")
+            rendered_result = self._stringify_result(result)
+            if is_error_like_tool_result(result):
+                await self._emit_progress(f"[tool:{name}] 执行失败: {rendered_result}")
                 if callback and emit_lifecycle:
                     try:
                         await self._emit_runtime_event(
-                            result,
+                            rendered_result,
                             event_kind="tool_error",
                             event_data={"tool_name": name},
                         )
                     except Exception:
                         pass
-                return result + _hint
+                return rendered_result + _hint
             if callback and emit_lifecycle:
                 try:
                     await self._emit_runtime_event(
-                        self._stringify_result(result),
+                        rendered_result,
                         event_kind="tool_result",
                         event_data={"tool_name": name},
                     )

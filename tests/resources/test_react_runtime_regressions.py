@@ -236,6 +236,11 @@ def test_react_loop_treats_loader_tools_as_budget_bypass(loader_tool_name: str) 
     ) == [loader_tool_name]
 
 
+def test_react_tool_message_status_treats_ok_false_payload_as_error() -> None:
+    assert ReActToolLoop._tool_message_status('{"ok": false, "error": "bad args"}') == "error"
+    assert ReActToolLoop._tool_message_status({"ok": False, "error": "bad args"}) == "error"
+
+
 class _DirectLoadTool(Tool):
     @property
     def name(self) -> str:

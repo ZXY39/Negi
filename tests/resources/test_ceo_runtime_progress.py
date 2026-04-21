@@ -124,6 +124,11 @@ class _TaskService:
         }
 
 
+def test_ceo_tool_status_treats_ok_false_payload_as_error() -> None:
+    assert CeoFrontDoorSupport._tool_status('{"ok": false, "error": "bad args"}') == "error"
+    assert CeoFrontDoorSupport._tool_status({"ok": False, "error": "bad args"}) == "error"
+
+
 class _RuntimeManager:
     def __init__(self, session) -> None:
         self._session = session

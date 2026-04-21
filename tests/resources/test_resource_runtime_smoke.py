@@ -930,8 +930,8 @@ async def test_content_open_split_tool_returns_ref_success_and_path_error_when_b
             await tool.execute(
                 ref=f'artifact:{artifact.artifact_id}',
                 path='artifact:artifact:demo123',
-                around_line=2,
-                window=3,
+                start_line=1,
+                end_line=3,
             )
         )
 
@@ -949,7 +949,7 @@ async def test_content_open_split_tool_returns_ref_success_and_path_error_when_b
         store.close()
 
 
-def test_content_open_split_tool_schema_rejects_non_positive_around_line(tmp_path: Path):
+def test_content_open_split_tool_schema_only_exposes_line_range_selector(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -962,48 +962,19 @@ def test_content_open_split_tool_schema_rejects_non_positive_around_line(tmp_pat
         tool = manager.get_tool('content_open')
         assert tool is not None
 
-        errors = tool.validate_params(
-            {
-                'path': str(workspace / 'demo.txt'),
-                'around_line': 0,
-                'window': 5,
-            }
-        )
+        parameters = dict(tool.parameters or {})
+        properties = dict(parameters.get('properties') or {})
+        model_parameters = dict(tool.to_model_schema()['function']['parameters'] or {})
+        model_properties = dict(model_parameters.get('properties') or {})
 
-        assert 'around_line must be >= 1' in errors
-    finally:
-        manager.close()
-
-
-@pytest.mark.asyncio
-async def test_content_open_split_tool_rejects_mixed_range_selectors(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    target_file = workspace / 'local.log'
-    target_file.parent.mkdir(parents=True, exist_ok=True)
-    target_file.write_text('alpha\nbeta\ngamma\ndelta\n', encoding='utf-8')
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
-    shutil.copytree(REPO_ROOT / 'tools' / 'content_open', workspace / 'tools' / 'content_open')
-
-    manager = ResourceManager(workspace, app_config=_resource_app_config())
-    manager.reload_now(trigger='test-bind')
-    try:
-        tool = manager.get_tool('content_open')
-        assert tool is not None
-
-        payload = json.loads(
-            await tool.execute(
-                path=str(target_file),
-                start_line=1,
-                end_line=2,
-                around_line=2,
-                window=3,
-            )
-        )
-
-        assert payload['ok'] is False
-        assert 'either start_line/end_line or around_line/window' in str(payload.get('error') or '')
+        assert 'start_line' in properties
+        assert 'end_line' in properties
+        assert 'around_line' not in properties
+        assert 'window' not in properties
+        assert 'start_line' in model_properties
+        assert 'end_line' in model_properties
+        assert 'around_line' not in model_properties
+        assert 'window' not in model_properties
     finally:
         manager.close()
 

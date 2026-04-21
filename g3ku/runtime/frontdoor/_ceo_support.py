@@ -23,6 +23,7 @@ from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
     is_parameter_like_tool_exception,
 )
+from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
 from g3ku.runtime.web_ceo_sessions import SESSION_TASK_DEFAULTS_SCOPE_SESSION, ceo_session_task_defaults_scope
 from main.protocol import now_iso
@@ -427,9 +428,8 @@ class CeoFrontDoorSupport:
         )
 
     @staticmethod
-    def _tool_status(result_text: str) -> str:
-        text = str(result_text or "").strip()
-        return "error" if text.startswith("Error") else "success"
+    def _tool_status(result: Any) -> str:
+        return "error" if is_error_like_tool_result(result) else "success"
 
     @staticmethod
     def _tool_result_payload_ref(payload: dict[str, Any]) -> str:
@@ -693,7 +693,7 @@ class CeoFrontDoorSupport:
         )
         finished_at = now_iso()
         elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
-        status = self._tool_status(rendered)
+        status = self._tool_status(result if result is not None else rendered)
         return result, rendered, status, started_at, finished_at, elapsed_seconds
 
     @staticmethod

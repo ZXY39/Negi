@@ -18,6 +18,7 @@ from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
     is_parameter_like_tool_exception,
 )
+from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.stage_prompt_compaction import (
     STAGE_COMPACT_PREFIX as _STAGE_COMPACT_PREFIX,
     STAGE_EXTERNALIZED_PREFIX as _STAGE_EXTERNALIZED_PREFIX,
@@ -2347,7 +2348,7 @@ class ReActToolLoop:
                         controller.release_tool_slot(slot_lease)
                 finished_at = now_iso()
                 elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
-                status = self._tool_message_status(tool_content)
+                status = self._tool_message_status(raw_result if raw_result is not None else tool_content)
                 ephemeral = self._is_ephemeral_tool_result(
                     raw_result,
                     tool_name=str(call.name or ''),
@@ -2567,9 +2568,8 @@ class ReActToolLoop:
         }
 
     @staticmethod
-    def _tool_message_status(tool_content: str) -> str:
-        text = str(tool_content or '').strip()
-        return 'error' if text.startswith('Error') else 'success'
+    def _tool_message_status(tool_result: Any) -> str:
+        return 'error' if is_error_like_tool_result(tool_result) else 'success'
 
     @staticmethod
     def _is_ephemeral_tool_result(result: Any, *, tool_name: str) -> bool:
@@ -3827,7 +3827,7 @@ class ReActToolLoop:
         )
         finished_at = now_iso()
         elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
-        status = self._tool_message_status(tool_content)
+        status = self._tool_message_status(raw_result if raw_result is not None else tool_content)
         self._update_tool_live_state(
             task_id=task.task_id,
             node_id=node.node_id,
@@ -4906,7 +4906,11 @@ class ReActToolLoop:
         if role == 'tool':
             summary, _ref = content_summary_and_ref((message or {}).get('content'))
             lowered = summary.lower()
-            if lowered.startswith('error') or '"status":"error"' in lowered or '"status": "error"' in lowered:
+            if (
+                is_error_like_tool_result(summary)
+                or '"status":"error"' in lowered
+                or '"status": "error"' in lowered
+            ):
                 tool_name = str((message or {}).get('name') or 'tool').strip() or 'tool'
                 return self._truncate_compact_text(f'Investigate failed tool result: {tool_name}')
         if role == 'user' and self._is_result_contract_prompt(message):
