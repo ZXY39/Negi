@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import re
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -3409,17 +3410,42 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         self,
         tool_call_payloads: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
-        risky = [
+        tool_calls = [
             dict(item)
             for item in list(tool_call_payloads or [])
-            if str(item.get("name") or "").strip() in self._reviewable_tool_names()
+            if isinstance(item, dict)
         ]
-        if not risky:
+        if not tool_calls:
+            return None
+        reviewable_names = self._reviewable_tool_names()
+        review_items: list[dict[str, Any]] = []
+        pass_through_tool_call_ids: list[str] = []
+        for item in tool_calls:
+            tool_call_id = str(item.get("id") or "").strip()
+            tool_name = str(item.get("name") or "").strip()
+            arguments = dict(item.get("arguments") or {})
+            if tool_name in reviewable_names:
+                review_items.append(
+                    {
+                        "tool_call_id": tool_call_id,
+                        "name": tool_name,
+                        "risk_level": "high",
+                        "arguments": arguments,
+                    }
+                )
+                continue
+            if tool_call_id:
+                pass_through_tool_call_ids.append(tool_call_id)
+        if not review_items:
             return None
         return {
-            "kind": "frontdoor_tool_approval",
-            "question": "Approve the CEO frontdoor tool execution?",
-            "tool_calls": risky,
+            "kind": "frontdoor_tool_approval_batch",
+            "batch_id": f"batch:{uuid.uuid4().hex[:12]}",
+            "mode": "regulatory_review",
+            "submission_mode": "batch_submit_only",
+            "tool_calls": tool_calls,
+            "review_items": review_items,
+            "pass_through_tool_call_ids": pass_through_tool_call_ids,
         }
 
     def _normalize_approval_resume_value(

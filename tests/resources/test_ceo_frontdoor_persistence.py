@@ -552,20 +552,45 @@ def test_ceo_frontdoor_approval_request_respects_enabled_flag() -> None:
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
                 frontdoor_interrupt_approval_enabled=True,
-                frontdoor_interrupt_tool_names=["create_async_task"],
+                frontdoor_interrupt_tool_names=["create_async_task", "exec"],
             )
         )
     )
     runner = CeoFrontDoorRunner(loop=loop)
 
     result = runner._approval_request_for_tool_calls(
-        [{"name": "create_async_task", "arguments": {"task": "demo"}}]
+        [
+            {"id": "call-low-1", "name": "content_open", "arguments": {"path": "/tmp/a"}},
+            {"id": "call-risk-1", "name": "create_async_task", "arguments": {"task": "demo"}},
+            {"id": "call-risk-2", "name": "exec", "arguments": {"command": "echo hi"}},
+        ]
     )
 
     assert result == {
-        "kind": "frontdoor_tool_approval",
-        "question": "Approve the CEO frontdoor tool execution?",
-        "tool_calls": [{"name": "create_async_task", "arguments": {"task": "demo"}}],
+        "kind": "frontdoor_tool_approval_batch",
+        "batch_id": result["batch_id"],
+        "mode": "regulatory_review",
+        "submission_mode": "batch_submit_only",
+        "tool_calls": [
+            {"id": "call-low-1", "name": "content_open", "arguments": {"path": "/tmp/a"}},
+            {"id": "call-risk-1", "name": "create_async_task", "arguments": {"task": "demo"}},
+            {"id": "call-risk-2", "name": "exec", "arguments": {"command": "echo hi"}},
+        ],
+        "review_items": [
+            {
+                "tool_call_id": "call-risk-1",
+                "name": "create_async_task",
+                "risk_level": "high",
+                "arguments": {"task": "demo"},
+            },
+            {
+                "tool_call_id": "call-risk-2",
+                "name": "exec",
+                "risk_level": "high",
+                "arguments": {"command": "echo hi"},
+            },
+        ],
+        "pass_through_tool_call_ids": ["call-low-1"],
     }
 
 

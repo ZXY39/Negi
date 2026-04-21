@@ -49,8 +49,20 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
     result = runner._graph_review_tool_calls(
         {
             "approval_request": {
-                "kind": "frontdoor_tool_approval",
-                "tool_calls": [{"id": "call-1", "name": "load_tool_context"}],
+                "kind": "frontdoor_tool_approval_batch",
+                "batch_id": "batch:123",
+                "mode": "regulatory_review",
+                "submission_mode": "batch_submit_only",
+                "tool_calls": [{"id": "call-1", "name": "load_tool_context", "arguments": {"tool_id": "filesystem_write"}}],
+                "review_items": [
+                    {
+                        "tool_call_id": "call-1",
+                        "name": "load_tool_context",
+                        "risk_level": "high",
+                        "arguments": {"tool_id": "filesystem_write"},
+                    }
+                ],
+                "pass_through_tool_call_ids": [],
             },
             "tool_call_payloads": [
                 {
@@ -95,8 +107,17 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
         "next_step": "execute_tools",
     }
     payload = dict(captured["payload"] or {})
-    assert payload["kind"] == "frontdoor_tool_approval"
-    assert payload["tool_calls"] == [{"id": "call-1", "name": "load_tool_context"}]
+    assert payload["kind"] == "frontdoor_tool_approval_batch"
+    assert payload["batch_id"] == "batch:123"
+    assert payload["tool_calls"] == [{"id": "call-1", "name": "load_tool_context", "arguments": {"tool_id": "filesystem_write"}}]
+    assert payload["review_items"] == [
+        {
+            "tool_call_id": "call-1",
+            "name": "load_tool_context",
+            "risk_level": "high",
+            "arguments": {"tool_id": "filesystem_write"},
+        }
+    ]
     assert payload["compression_state"] == {"status": "running", "text": "compressing", "source": "user"}
     assert "semantic_context_state" not in payload
     assert payload["hydrated_tool_names"] == ["filesystem_write"]
