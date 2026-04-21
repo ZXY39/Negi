@@ -504,6 +504,44 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return "\n".join(lines)
 
     @classmethod
+    def _web_ceo_multimodal_image_note(
+        cls,
+        *,
+        text: str,
+        uploads: list[dict[str, Any]],
+    ) -> str:
+        image_uploads = [
+            dict(item)
+            for item in list(uploads or [])
+            if str(item.get("kind") or "").strip().lower() == "image"
+        ]
+        file_names = [
+            str(item.get("name") or item.get("path") or "").strip()
+            for item in list(uploads or [])
+            if str(item.get("kind") or "").strip().lower() != "image"
+            and str(item.get("name") or item.get("path") or "").strip()
+        ]
+        if not image_uploads:
+            return cls._web_ceo_user_text_with_upload_note(text=text, uploads=uploads)
+        text_value = str(text or "").strip()
+        image_label = "image" if len(image_uploads) == 1 else "images"
+        lines = [
+            (
+                f"For this turn, the uploaded {image_label} "
+                f"are attached directly in this request. Use direct visual reasoning on the attached {image_label} first."
+                if len(image_uploads) > 1
+                else "For this turn, the uploaded image is attached directly in this request. "
+                "Use direct visual reasoning on the attached image first."
+            )
+        ]
+        if file_names:
+            lines.append("Other uploaded files in this turn: " + ", ".join(file_names) + ".")
+        note = "\n".join(lines).strip()
+        if text_value and note:
+            return f"{text_value}\n\n{note}"
+        return note or text_value
+
+    @classmethod
     def _web_ceo_user_text_with_upload_note(
         cls,
         *,
@@ -550,8 +588,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         raw_text = payload.get("web_ceo_raw_text")
         text_value = str(raw_text) if isinstance(raw_text, str) else self._content_text(content)
-        merged_text = self._web_ceo_user_text_with_upload_note(text=text_value, uploads=uploads)
-        if not self._ceo_image_multimodal_enabled_for_model_refs(model_refs):
+        multimodal_enabled = self._ceo_image_multimodal_enabled_for_model_refs(model_refs)
+        has_image_uploads = any(
+            str(item.get("kind") or "").strip().lower() == "image"
+            for item in uploads
+        )
+        merged_text = (
+            self._web_ceo_multimodal_image_note(text=text_value, uploads=uploads)
+            if multimodal_enabled and has_image_uploads
+            else self._web_ceo_user_text_with_upload_note(text=text_value, uploads=uploads)
+        )
+        if not multimodal_enabled:
             return merged_text
 
         content_blocks: list[dict[str, Any]] = []
@@ -621,6 +668,21 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if self._content_text(last.get("content")).strip() != self._content_text(stripped_live_content).strip():
             return records
         records[-1] = {**last, "content": live_user_content}
+        return records
+
+    @staticmethod
+    def _replace_last_user_message_content(
+        *,
+        messages: list[dict[str, Any]] | None,
+        content: Any,
+    ) -> list[dict[str, Any]]:
+        records = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+        if not records:
+            return records
+        last = dict(records[-1])
+        if str(last.get("role") or "").strip().lower() != "user":
+            return records
+        records[-1] = {**last, "content": content}
         return records
 
     @classmethod
@@ -3752,7 +3814,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         metadata = _user_input_metadata(user_input)
         builder_user_metadata = dict(metadata or {})
         batch_query_text = str(metadata.get("web_ceo_batch_query_text") or "").strip()
-        query_text = batch_query_text or self._content_text(user_content)
+        raw_query_text = str(metadata.get("web_ceo_raw_text") or "").strip()
+        query_text = batch_query_text or raw_query_text or self._content_text(user_content)
         heartbeat_internal = bool(metadata.get("heartbeat_internal"))
         cron_internal = bool(metadata.get("cron_internal"))
         retrieval_query = str(metadata.get("heartbeat_retrieval_query") or "").strip()
@@ -3843,6 +3906,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 model_refs=model_refs,
             )
         )
+        current_turn_has_multimodal_uploads = bool(metadata.get("web_ceo_uploads")) and self._message_content_has_multimodal_blocks(
+            current_turn_user_content
+        )
         if session_request_body_messages:
             request_body_seed_messages = list(session_request_body_messages)
             checkpoint_messages = []
@@ -3930,6 +3996,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             messages=messages,
             live_user_content=current_turn_user_content,
         )
+        if current_turn_has_multimodal_uploads:
+            messages = self._replace_last_user_message_content(
+                messages=messages,
+                content=current_turn_user_content,
+            )
         has_current_turn_user_content = bool(self._content_text(current_turn_user_content).strip())
         if has_current_turn_user_content and (
             not messages or str(messages[-1].get("role") or "").strip().lower() != "user"
@@ -3968,6 +4039,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         runtime_visible_tool_names = list(provider_tool_exposure.get("provider_tool_names") or [])
         tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
         stable_messages = self._prompt_message_records(getattr(assembly, "stable_messages", None)) or list(messages)
+        if current_turn_has_multimodal_uploads:
+            stable_messages = self._replace_last_user_message_content(
+                messages=stable_messages,
+                content=current_turn_user_content,
+            )
         dynamic_appendix_messages = self._prompt_message_records(
             getattr(assembly, "dynamic_appendix_messages", None)
         )
@@ -4205,13 +4281,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         follow_up_texts: list[str] = []
         model_refs = list(state.get("model_refs") or self._resolve_ceo_model_refs() or [])
         for item in queued_inputs:
+            item_metadata = dict(getattr(item, "metadata", {}) or {})
             expanded_content = self._expand_web_ceo_uploads_for_current_request_content(
                 content=self._model_content(getattr(item, "content", "")),
-                metadata=dict(getattr(item, "metadata", {}) or {}),
+                metadata=item_metadata,
                 model_refs=model_refs,
             )
             follow_up_messages.append({"role": "user", "content": expanded_content})
-            follow_up_text = self._content_text(getattr(item, "content", ""))
+            raw_follow_up_text = str(item_metadata.get("web_ceo_raw_text") or "").strip()
+            follow_up_text = raw_follow_up_text or self._content_text(getattr(item, "content", ""))
             if follow_up_text.strip():
                 follow_up_texts.append(follow_up_text)
         if not follow_up_messages:
