@@ -83,6 +83,30 @@ def _web_ceo_upload_metadata(image_path: Path) -> dict[str, object]:
     }
 
 
+def _stub_live_runtime_model(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    model_key: str = "ceo_primary",
+    image_multimodal_enabled: bool,
+    context_window_tokens: int = 128000,
+) -> None:
+    live_config = SimpleNamespace(
+        get_managed_model=lambda key: (
+            SimpleNamespace(
+                image_multimodal_enabled=image_multimodal_enabled,
+                context_window_tokens=context_window_tokens,
+            )
+            if key == model_key
+            else None
+        )
+    )
+    monkeypatch.setattr(
+        ceo_runtime_ops,
+        "get_runtime_config",
+        lambda force=False: (live_config, 1, False),
+    )
+
+
 def _canonical_frontdoor_state(**overrides) -> dict[str, object]:
     state: dict[str, object] = {
         "messages": [],
@@ -3663,6 +3687,7 @@ async def test_prepare_turn_promotes_uploaded_image_only_into_live_request_when_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_live_runtime_model(monkeypatch, image_multimodal_enabled=True)
     session_key = "web:shared"
     runtime_session = SimpleNamespace(session_key=session_key, messages=[])
     loop = SimpleNamespace(
@@ -3793,6 +3818,7 @@ async def test_prepare_turn_keeps_uploaded_image_as_text_only_when_binding_disab
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_live_runtime_model(monkeypatch, image_multimodal_enabled=False)
     session_key = "web:shared"
     runtime_session = SimpleNamespace(session_key=session_key, messages=[])
     loop = SimpleNamespace(
@@ -3907,6 +3933,7 @@ async def test_follow_up_uploaded_image_stays_multimodal_without_local_path_when
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_live_runtime_model(monkeypatch, image_multimodal_enabled=True)
     session_key = "web:shared"
     runtime_session = SimpleNamespace(session_key=session_key, messages=[])
     loop = SimpleNamespace(
@@ -3973,6 +4000,7 @@ def test_frontdoor_send_preflight_snapshot_adds_content_open_image_overlay_only_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_live_runtime_model(monkeypatch, image_multimodal_enabled=True)
     loop = SimpleNamespace(
         app_config=SimpleNamespace(
             get_managed_model=lambda key: SimpleNamespace(image_multimodal_enabled=(key == "ceo_primary"))
@@ -4043,6 +4071,7 @@ def test_frontdoor_send_preflight_snapshot_rejects_content_open_image_overlay_wi
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_live_runtime_model(monkeypatch, image_multimodal_enabled=False)
     loop = SimpleNamespace(
         app_config=SimpleNamespace(
             get_managed_model=lambda key: SimpleNamespace(image_multimodal_enabled=False)
@@ -4168,6 +4197,7 @@ async def test_prepare_turn_rejects_oversized_uploaded_image_when_binding_enable
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_live_runtime_model(monkeypatch, image_multimodal_enabled=True)
     session_key = "web:shared"
     runtime_session = SimpleNamespace(session_key=session_key, messages=[])
     loop = SimpleNamespace(
