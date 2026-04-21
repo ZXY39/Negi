@@ -117,6 +117,10 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - If `image_multimodal_enabled=false`, uploads stay on the text downgrade path and the model only sees ordinary text plus the attachment note.
 - If `image_multimodal_enabled=true`, only the live request of the current visible turn may contain provider-visible image input. Durable transcript/baseline lanes still strip those image blocks back out.
 - When that live multimodal path is active and the current turn includes image uploads, the model-facing text note must switch to a generic "image is attached directly in this request" guidance note. It must not expose `local path` text or tell the model to inspect local files first.
+- Historical image reopen via `content_open` is a second, separate multimodal lane. The browser/runtime may continue to show or persist the stored local file path as ordinary attachment metadata, but that does not mean a later turn automatically re-sends the image pixels.
+- When a multimodal route successfully reopens a historical image, the next live request gets a runtime-owned overlay message whose text is `图片已通过 content_open 打开，视觉内容已附带在本轮上下文中`, plus the provider-visible image block. Durable transcript/session baselines must immediately strip the image block back out.
+- If the current model binding is not multimodal, reopening a historical image through `content_open` must fail with `非多模态模型无法打开图片` rather than silently degrading to a fake text preview.
+- That reopened-image overlay is single-send only. If the send that carried it later overflows, compresses, or errors, the following turn should continue from the ordinary text/path baseline unless the agent explicitly reopens the image again.
 - That direct-visual rule applies to both the initial user message of a visible turn and any queued follow-up batch that is merged into the same turn before the next `call_model` send.
 - Web CEO upload protection now has two layers:
   - `/api/ceo/uploads` rejects any single image larger than `5 MiB`

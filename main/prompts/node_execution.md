@@ -16,6 +16,9 @@
 - 如果真实目标项目不在当前 `runtime_environment.workspace_root` 内，使用绝对路径直达目标位置，不要先在当前仓库里做大范围兜底搜索。
 - 本地仓库/目录/文件探查优先使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束；
 - `artifact:` 与外部化内容导航优先使用 `content_open` / `content_search`；
+- 如果历史上下文中只有图片路径或图片 `ref`，而你需要直接查看图像内容，使用 `content_open` 重新打开图片。
+- 若本轮已经直接带有图片输入，不要为了查看同一张当前轮图片再调用 `content_open`。
+- 若当前模型不是多模态模型，`content_open` 打开图片会被拒绝并返回 `非多模态模型无法打开图片`；不要对同一目标重复调用。
 - 任何文件创建、修改、复制、移动、删除或补丁提案优先通过 `filesystem_write`、`filesystem_edit`、`filesystem_copy`、`filesystem_move`、`filesystem_delete`、`filesystem_propose_patch` 完成，只有在exec允许非只读操作而上述工具无法完成时，才可使用exec完成。
 - 当前节点可调用的工具已经按权限与节点选择结果预过滤；只使用本轮实际提供给你的工具，不要假设其他工具仍然可调用。
 - 节点执行链路不提供直接长期记忆搜索；如未在当前上下文里给出相关长期记忆，就不要自行模拟或替代这类能力。

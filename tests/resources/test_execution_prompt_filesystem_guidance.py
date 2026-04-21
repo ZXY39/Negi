@@ -44,3 +44,20 @@ def test_ceo_frontdoor_prompt_prefers_direct_visual_reasoning_for_current_turn_i
     prompt = (REPO_ROOT / "g3ku/runtime/prompts/ceo_frontdoor.md").read_text(encoding="utf-8")
     assert "当前轮已经包含图片输入时，优先直接基于图片内容回答" in prompt
     assert "不要为了查看同一张当前轮图片而优先调用 `exec`、`content_open`" in prompt
+
+
+def test_prompts_describe_historical_image_reopen_via_content_open() -> None:
+    ceo_prompt = (REPO_ROOT / "g3ku/runtime/prompts/ceo_frontdoor.md").read_text(encoding="utf-8")
+    assert "如果历史上下文里只保留了图片 `path` / `ref`" in ceo_prompt
+    assert "调用 `content_open` 重新打开该图片" in ceo_prompt
+    assert "非多模态模型无法打开图片" in ceo_prompt
+
+    for relative_path in (
+        "main/prompts/node_execution.md",
+        "main/prompts/acceptance_execution.md",
+    ):
+        prompt = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        assert "如果历史上下文中只有图片路径或图片 `ref`" in prompt
+        assert "使用 `content_open` 重新打开图片" in prompt
+        assert "若本轮已经直接带有图片输入" in prompt
+        assert "非多模态模型无法打开图片" in prompt
