@@ -376,6 +376,11 @@ class ApiClient {
         return this.post(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/activate`, {});
     }
 
+    static async getCeoPendingInterrupts(sessionId) {
+        const data = await this.get(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/pending-interrupts`);
+        return Array.isArray(data.items) ? data.items : [];
+    }
+
     static async estimateCeoComposerPreflight(sessionId, payload) {
         const data = await this._request("POST", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/composer-preflight`, {
             body: payload || {},
@@ -886,6 +891,18 @@ class ApiClient {
             requestKey: `resources:tools:${offset}:${limit}`,
         });
         return data.items || [];
+    }
+
+    static async getToolGovernanceMode() {
+        const data = await this.get("/api/resources/tools/governance-mode");
+        return data.item || null;
+    }
+
+    static async updateToolGovernanceMode(enabled) {
+        const data = await this.put("/api/resources/tools/governance-mode", {
+            enabled: !!enabled,
+        }, { session_id: this.getActiveSessionId() });
+        return data.item || null;
     }
 
     static async getTool(toolId) {

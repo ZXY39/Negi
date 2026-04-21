@@ -517,6 +517,21 @@ This changes how maintainers should reason about surfaced tools such as `exec`, 
 - Resource refresh must preserve that metadata override; otherwise Tool Admin would show one mode while runtime execution silently falls back to another.
 - `load_tool_context("exec")` / `load_tool_context("exec_runtime")`, node dynamic contracts, and frontdoor dynamic contracts should all agree on the same `exec_runtime_policy` payload. If they disagree, debug the persisted tool family record first, then the contract-injection path.
 
+### CEO Regulatory Governance Mode
+
+- Tool Admin now also owns one global persisted switch for CEO/frontdoor: `ceo_frontdoor_regulatory_mode_enabled`.
+- This switch is not stored on a specific surfaced tool family. It is governance metadata used by CEO/frontdoor approval policy.
+- Its scope is narrower than generic Tool Admin RBAC:
+  - RBAC still decides whether a surfaced tool family/action is visible or callable at all.
+  - regulatory mode only decides whether already-visible medium/high-risk CEO tool calls must pause for batch human review.
+- The runtime contract when this switch is enabled is:
+  - risky CEO tool calls are grouped into one `frontdoor_tool_approval_batch` interrupt,
+  - `review_items` enumerate only the risky calls that require operator review,
+  - the resume side must submit one complete `submit_batch_review` payload covering every `review_item` exactly once.
+- Pass-through low-risk tool calls in the same original tool batch still remain part of the runtime-owned original tool-call ordering. Maintainers should not assume “review items == all tool calls in the round”.
+- Rejected risky calls no longer disappear. CEO/frontdoor constructs synthetic rejection tool results and merges them back with approved real tool results in original tool-call order before the next model round.
+- Changing the switch should affect future approval boundaries immediately, even for already-running CEO sessions. It must not silently rewrite an approval batch that is already paused and waiting for review.
+
 ### Hard Removal Of `message` / `messaging`
 
 The surfaced `message` executor and its Tool Admin family `messaging` are now removed from the resource/tool contract entirely.

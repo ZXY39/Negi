@@ -6,6 +6,11 @@ _TITLE_COLOR = "\x1b[1;93m"
 _ROLE_COLOR = "\x1b[1;93m"
 _RESET_COLOR = "\x1b[0m"
 _EMPTY = "[empty]"
+_MODEL_CHAIN_COLOR_BY_SEVERITY = {
+    "retry": "\x1b[1;94m",
+    "fallback": "\x1b[1;95m",
+    "error": "\x1b[1;91m",
+}
 
 
 def _is_text_block(item_type: str) -> bool:
@@ -82,5 +87,22 @@ def render_output_trace(output: str) -> str:
         [
             f"{_TITLE_COLOR}=====LLM\u8f93\u51fa====={_RESET_COLOR}",
             output or _EMPTY,
+        ]
+    )
+
+
+def render_model_chain_trace(*, title: str, severity: str = "fallback", lines: list[str] | tuple[str, ...] | None = None) -> str:
+    normalized_title = str(title or "MODEL CHAIN").strip() or "MODEL CHAIN"
+    normalized_severity = str(severity or "").strip().lower()
+    color = _MODEL_CHAIN_COLOR_BY_SEVERITY.get(normalized_severity, _TITLE_COLOR)
+    body_lines = [
+        str(line or "").strip()
+        for line in list(lines or [])
+        if str(line or "").strip()
+    ]
+    return "\n".join(
+        [
+            f"{color}=====MODEL CHAIN: {normalized_title.upper()}====={_RESET_COLOR}",
+            *(body_lines or [_EMPTY]),
         ]
     )

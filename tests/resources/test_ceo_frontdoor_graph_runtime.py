@@ -39,7 +39,13 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
 
     def _fake_interrupt(payload):
         captured["payload"] = payload
-        return {"approved": True}
+        return {
+            "type": "submit_batch_review",
+            "batch_id": "batch:123",
+            "decisions": [
+                {"tool_call_id": "call-1", "decision": "approve"},
+            ],
+        }
 
     monkeypatch.setattr(ceo_runtime_ops, "interrupt", _fake_interrupt)
 
@@ -97,6 +103,7 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
     assert result == {
         "approval_request": None,
         "approval_status": "approved",
+        "approval_batch_id": "batch:123",
         "tool_call_payloads": [
             {
                 "id": "call-1",

@@ -131,6 +131,7 @@
                         </div>
 
                         <div class="chat-input-area">
+                            <div id="ceo-approval-viewport" class="ceo-approval-viewport" aria-live="polite" aria-atomic="true" hidden></div>
                             <div id="ceo-context-load-notice" class="ceo-context-load-notice" role="status" aria-live="polite" aria-hidden="true" hidden></div>
                             <div class="ceo-composer">
                                 <div id="ceo-upload-list" class="ceo-upload-list" hidden aria-live="polite"></div>
@@ -290,6 +291,19 @@
                             placeholder="搜索 Skill 名称、ID 或路径">
                     </div>
                 </header>
+
+                <div id="tool-governance-banner" class="tool-governance-banner">
+                    <div class="tool-governance-banner-copy">
+                        <div class="tool-governance-banner-title">监管模式</div>
+                        <p id="tool-governance-banner-text" class="tool-governance-banner-text">开启后，主 Agent 调用中/高风险 Tool 会进入逐个审批，并在最后统一提交。</p>
+                    </div>
+                    <button id="tool-governance-switch" class="tool-governance-switch" type="button" aria-pressed="false" aria-label="切换监管模式">
+                        <span id="tool-governance-switch-track" class="tool-governance-switch-track" aria-hidden="true">
+                            <span class="tool-governance-switch-thumb"></span>
+                        </span>
+                        <span id="tool-governance-switch-label" class="tool-governance-switch-label">已关闭</span>
+                    </button>
+                </div>
 
                 <div class="resource-layout full-list-layout">
                     <aside class="resource-list-panel skill-list-panel full-width-panel">
@@ -614,6 +628,23 @@
                 </div>
             </div>
 
+            <div id="ceo-approval-args-backdrop" class="detail-backdrop" aria-hidden="true"></div>
+            <section id="ceo-approval-args-drawer" class="panel detail-drawer ceo-approval-args-drawer" role="dialog"
+                aria-modal="true" aria-hidden="true" aria-labelledby="ceo-approval-args-title" tabindex="-1">
+                <div class="detail-modal-header">
+                    <div class="detail-modal-title">
+                        <h2 id="ceo-approval-args-title">工具入参</h2>
+                        <p id="ceo-approval-args-subtitle" class="subtitle">完整参数仅供审批查看，不会在这里修改。</p>
+                    </div>
+                    <div class="detail-modal-actions">
+                        <button id="ceo-approval-args-close" type="button" class="toolbar-btn ghost" data-modal-close>关闭</button>
+                    </div>
+                </div>
+                <div class="detail-modal-body">
+                    <pre id="ceo-approval-args-body" class="ceo-approval-args-body"></pre>
+                </div>
+            </section>
+
             <div id="rename-session-backdrop" class="confirm-backdrop" hidden>
                 <div class="confirm-dialog">
                     <div class="confirm-header">
@@ -659,6 +690,7 @@
     <script src="org_graph_app.js"></script>
     <script src="org_graph_tasks.js"></script>
     <script src="org_graph_resources.js"></script>
+    <script src="org_graph_ceo_governance.js"></script>
     <script src="org_graph_llm.js"></script>
     <script>
         if (window.lucide && typeof window.lucide.createIcons === "function") {

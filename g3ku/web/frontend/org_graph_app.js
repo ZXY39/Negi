@@ -7789,10 +7789,30 @@ function initCeoWs() {
             renderCeoSessions();
             syncCeoSessionActions();
             syncCeoPrimaryButton();
+            if (effectiveSessionId === activeSessionId()) {
+                if (typeof syncCeoApprovalFromInterrupts === "function") {
+                    syncCeoApprovalFromInterrupts(payload.data?.inflight_turn?.interrupts || [], effectiveSessionId);
+                }
+                if (typeof refreshCeoApprovalFromServer === "function") {
+                    void refreshCeoApprovalFromServer(effectiveSessionId, { quiet: true });
+                }
+            }
         }
         if (payload.type === "error") {
             const code = ApiClient.getErrorCode(payload.data || {});
             const message = ApiClient.friendlyErrorMessage(payload.data || {}, payload.data?.message || "连接失败");
+            if (code === "ceo_approval_pending") {
+                showToast({
+                    title: "等待审批",
+                    text: message || "当前存在待审批工具调用，请先完成审批。",
+                    kind: "warn",
+                    durationMs: 2600,
+                });
+                if (typeof refreshCeoApprovalFromServer === "function") {
+                    void refreshCeoApprovalFromServer(activeSessionId(), { quiet: true });
+                }
+                return;
+            }
             if (code && code !== S.ceoWsLastErrorCode) {
                 S.ceoWsLastErrorCode = code;
                 showToast({
@@ -7806,6 +7826,11 @@ function initCeoWs() {
         }
         if (payload.type === "ceo.state") applyCeoState(payload.data?.state || {}, payload.data || {});
         if (payload.type === "ceo.control_ack") handleCeoControlAck(payload.data || {});
+        if (payload.type === "ceo.turn.interrupt" && effectiveSessionId === activeSessionId()) {
+            if (typeof syncCeoApprovalFromInterrupts === "function") {
+                syncCeoApprovalFromInterrupts(payload.data?.interrupts || [], effectiveSessionId, { authoritative: true });
+            }
+        }
         if (payload.type === "ceo.turn.patch") {
             if (effectiveSessionId === activeSessionId()) {
                 patchCeoInflightTurn(payload.data?.preserved_turn || null, {
@@ -9242,7 +9267,10 @@ function switchView(view) {
     if (view === "memory") startMemoryViewAutoRefresh();
     else stopMemoryViewAutoRefresh();
     if (view === "skills") void loadSkills();
-    if (view === "tools") void loadTools();
+    if (view === "tools") {
+        void loadTools();
+        if (typeof loadToolGovernanceMode === "function") void loadToolGovernanceMode();
+    }
     if (view === "memory") {
         if (!S.memoryLoadedOnce) void loadMemoryView();
         else void loadMemoryView({ quiet: true });
