@@ -52,6 +52,10 @@ from main.protocol import build_envelope
 
 router = APIRouter()
 _HEARTBEAT_OK = "HEARTBEAT_OK"
+_APPROVAL_INTERRUPT_KINDS = {
+    "frontdoor_tool_approval",
+    "frontdoor_tool_approval_batch",
+}
 
 
 def _registry(agent):
@@ -91,6 +95,39 @@ def _session_is_running(runtime_manager, session_id: str) -> bool:
     state = getattr(session, 'state', None)
     status = str(getattr(state, 'status', '') or '').strip().lower()
     return bool(getattr(state, 'is_running', False)) or status == 'running'
+
+
+def _approval_interrupts(items: Any) -> list[dict[str, Any]]:
+    approvals: list[dict[str, Any]] = []
+    for raw in list(items or []):
+        if not isinstance(raw, dict):
+            continue
+        value = raw.get("value") if isinstance(raw.get("value"), dict) else {}
+        kind = str(value.get("kind") or "").strip()
+        if kind in _APPROVAL_INTERRUPT_KINDS:
+            approvals.append(dict(raw))
+    return approvals
+
+
+def _pending_tool_approval_interrupts(
+    session: Any,
+    session_id: str,
+    persisted_session: Any | None = None,
+) -> list[dict[str, Any]]:
+    _ = session_id
+    state = getattr(session, "state", None)
+    from_state = _approval_interrupts(getattr(state, "pending_interrupts", None))
+    if from_state:
+        return from_state
+    try:
+        snapshot, _snapshot_source = resolve_execution_snapshot(session, persisted_session)
+    except Exception:
+        snapshot = None
+    if isinstance(snapshot, dict):
+        from_snapshot = _approval_interrupts(snapshot.get("interrupts"))
+        if from_snapshot:
+            return from_snapshot
+    return []
 
 
 def _is_channel_session_id(session_id: str) -> bool:
@@ -1118,6 +1155,20 @@ async def ceo_websocket(websocket: WebSocket):
                 continue
             if not user_messages:
                 continue
+            persisted = transcript_store.get_or_create(session_id)
+            if _pending_tool_approval_interrupts(session, session_id, persisted):
+                await _safe_send(
+                    build_envelope(
+                        channel='ceo',
+                        session_id=session_id,
+                        type='error',
+                        data={
+                            'code': 'ceo_approval_pending',
+                            'message': 'A CEO tool approval batch is pending. Complete approval before sending a new message.',
+                        },
+                    )
+                )
+                continue
             if _current_session_is_running() or (current_turn_task is not None and not current_turn_task.done()):
                 queue_follow_up_batch = getattr(session, 'queue_follow_up_batch', None)
                 if not callable(queue_follow_up_batch):
@@ -1145,7 +1196,6 @@ async def ceo_websocket(websocket: WebSocket):
                         )
                     )
                     continue
-                persisted = transcript_store.get_or_create(session_id)
                 preview_text = _history_text(user_messages[-1].content)
                 _publish_ceo_session_patch(
                     agent=agent,
@@ -1171,7 +1221,6 @@ async def ceo_websocket(websocket: WebSocket):
                     )
                 )
                 continue
-            persisted = transcript_store.get_or_create(session_id)
             preview_text = _history_text(user_messages[-1].content)
             _publish_ceo_session_patch(
                 agent=agent,

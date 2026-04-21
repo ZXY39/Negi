@@ -67,6 +67,8 @@ DINGTALK_ACCESS_TOKEN_URL = 'https://api.dingtalk.com/v1.0/oauth2/accessToken'
 WECOM_ACCESS_TOKEN_URL = 'https://qyapi.weixin.qq.com/cgi-bin/gettoken'
 FEISHU_APP_ACCESS_TOKEN_URL = 'https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal'
 MEMORY_NOTE_REF_RE = re.compile(r"^note_[a-z0-9_]+$")
+GOVERNANCE_MODE_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled'
+GOVERNANCE_MODE_UPDATED_AT_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled:updated_at'
 
 
 
@@ -286,6 +288,21 @@ class _StandaloneResourceService:
 
     def get_tool_family(self, tool_id: str):
         return self._decorate_tool_family(self._raw_tool_family(tool_id))
+
+    def get_governance_mode(self) -> dict[str, Any]:
+        return {
+            'enabled': self._governance_store.get_bool_meta(GOVERNANCE_MODE_META_KEY, default=False),
+            'updated_at': str(self._governance_store.get_meta(GOVERNANCE_MODE_UPDATED_AT_META_KEY) or ''),
+        }
+
+    def update_governance_mode(self, *, enabled: bool) -> dict[str, Any]:
+        self._governance_store.set_bool_meta(GOVERNANCE_MODE_META_KEY, bool(enabled))
+        updated_at = now_iso()
+        self._governance_store.set_meta(GOVERNANCE_MODE_UPDATED_AT_META_KEY, updated_at)
+        return {
+            'enabled': bool(enabled),
+            'updated_at': updated_at,
+        }
 
     def _tool_family_executor_name(self, family) -> str:
         return resolve_primary_executor_name(family, resource_manager=self._resource_manager)
@@ -2428,6 +2445,18 @@ async def delete_skill(skill_id: str, session_id: str = Query('web:shared')):
 async def list_tools():
     with _resource_service() as service:
         return {'ok': True, 'items': [item.model_dump(mode='json') for item in service.list_tool_resources()]}
+
+
+@router.get('/resources/tools/governance-mode')
+async def get_governance_mode():
+    with _resource_service() as service:
+        return {'ok': True, 'item': dict(service.get_governance_mode() or {})}
+
+
+@router.put('/resources/tools/governance-mode')
+async def update_governance_mode(payload: dict = Body(...)):
+    with _resource_service() as service:
+        return {'ok': True, 'item': dict(service.update_governance_mode(enabled=bool(payload.get('enabled'))) or {})}
 
 
 @router.get('/resources/tools/{tool_id}')

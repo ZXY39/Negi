@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import re
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -3528,17 +3529,42 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         self,
         tool_call_payloads: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
-        risky = [
+        tool_calls = [
             dict(item)
             for item in list(tool_call_payloads or [])
-            if str(item.get("name") or "").strip() in self._reviewable_tool_names()
+            if isinstance(item, dict)
         ]
-        if not risky:
+        if not tool_calls:
+            return None
+        reviewable_names = self._reviewable_tool_names()
+        review_items: list[dict[str, Any]] = []
+        pass_through_tool_call_ids: list[str] = []
+        for item in tool_calls:
+            tool_call_id = str(item.get("id") or "").strip()
+            tool_name = str(item.get("name") or "").strip()
+            arguments = dict(item.get("arguments") or {})
+            if tool_name in reviewable_names:
+                review_items.append(
+                    {
+                        "tool_call_id": tool_call_id,
+                        "name": tool_name,
+                        "risk_level": "high",
+                        "arguments": arguments,
+                    }
+                )
+                continue
+            if tool_call_id:
+                pass_through_tool_call_ids.append(tool_call_id)
+        if not review_items:
             return None
         return {
-            "kind": "frontdoor_tool_approval",
-            "question": "Approve the CEO frontdoor tool execution?",
-            "tool_calls": risky,
+            "kind": "frontdoor_tool_approval_batch",
+            "batch_id": f"batch:{uuid.uuid4().hex[:12]}",
+            "mode": "regulatory_review",
+            "submission_mode": "batch_submit_only",
+            "tool_calls": tool_calls,
+            "review_items": review_items,
+            "pass_through_tool_call_ids": pass_through_tool_call_ids,
         }
 
     def _normalize_approval_resume_value(
@@ -3546,7 +3572,57 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         *,
         decision: Any,
         original_payloads: list[dict[str, Any]],
+        approval_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        normalized_request = dict(approval_request or {})
+        if str(normalized_request.get("kind") or "").strip() == "frontdoor_tool_approval_batch":
+            if not isinstance(decision, dict):
+                raise ValueError("batch review resume payload must be an object")
+            if str(decision.get("type") or "").strip() != "submit_batch_review":
+                raise ValueError("unsupported approval resume type")
+            if str(decision.get("batch_id") or "").strip() != str(normalized_request.get("batch_id") or "").strip():
+                raise ValueError("approval batch mismatch")
+            review_items = [
+                dict(item)
+                for item in list(normalized_request.get("review_items") or [])
+                if isinstance(item, dict)
+            ]
+            decisions = [
+                dict(item)
+                for item in list(decision.get("decisions") or [])
+                if isinstance(item, dict)
+            ]
+            expected_ids = [
+                str(item.get("tool_call_id") or "").strip()
+                for item in review_items
+                if str(item.get("tool_call_id") or "").strip()
+            ]
+            decision_map = {
+                str(item.get("tool_call_id") or "").strip(): dict(item)
+                for item in decisions
+                if str(item.get("tool_call_id") or "").strip()
+            }
+            if sorted(decision_map.keys()) != sorted(expected_ids):
+                raise ValueError("batch review decisions must cover every review item exactly once")
+            normalized_decisions: list[dict[str, Any]] = []
+            for tool_call_id in expected_ids:
+                raw_decision = str(decision_map[tool_call_id].get("decision") or "").strip().lower()
+                if raw_decision not in {"approve", "reject"}:
+                    raise ValueError(f"unsupported batch review decision for {tool_call_id}")
+                normalized_item = {
+                    "tool_call_id": tool_call_id,
+                    "decision": raw_decision,
+                }
+                note = str(decision_map[tool_call_id].get("note") or "").strip()
+                if raw_decision == "reject" and note:
+                    normalized_item["note"] = note
+                normalized_decisions.append(normalized_item)
+            return {
+                "approved": True,
+                "tool_call_payloads": list(original_payloads),
+                "batch_review_decisions": normalized_decisions,
+                "batch_id": str(normalized_request.get("batch_id") or "").strip(),
+            }
         if decision is True:
             return {"approved": True, "tool_call_payloads": list(original_payloads)}
         if decision is False or decision in (None, ""):
@@ -3558,6 +3634,68 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "tool_call_payloads": list(original_payloads) if approved else [],
             }
         return {"approved": False, "tool_call_payloads": []}
+
+    def _build_synthetic_rejection_result(
+        self,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        normalized_tool_call_id = str(tool_call_id or "").strip()
+        normalized_tool_name = str(tool_name or "tool").strip() or "tool"
+        result_text = "Error: 用户不允许运行此工具。"
+        normalized_note = str(note or "").strip()
+        if normalized_note:
+            result_text = f"{result_text}\n补充说明：{normalized_note}"
+        return {
+            "tool_call_id": normalized_tool_call_id,
+            "tool_name": normalized_tool_name,
+            "status": "error",
+            "raw_result": None,
+            "result_text": result_text,
+            "tool_message": self._tool_result_message(
+                tool_call_id=normalized_tool_call_id,
+                tool_name=normalized_tool_name,
+                content=result_text,
+                started_at="",
+                finished_at="",
+                elapsed_seconds=None,
+            ),
+            "started_at": "",
+            "finished_at": "",
+            "elapsed_seconds": None,
+            "synthetic_rejection": True,
+        }
+
+    def _merge_ordered_tool_results(
+        self,
+        *,
+        original_payloads: list[dict[str, Any]],
+        real_results: list[dict[str, Any]],
+        synthetic_results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        real_by_id = {
+            str(item.get("tool_call_id") or "").strip(): dict(item)
+            for item in list(real_results or [])
+            if str(item.get("tool_call_id") or "").strip()
+        }
+        synthetic_by_id = {
+            str(item.get("tool_call_id") or "").strip(): dict(item)
+            for item in list(synthetic_results or [])
+            if str(item.get("tool_call_id") or "").strip()
+        }
+        merged: list[dict[str, Any]] = []
+        for payload in list(original_payloads or []):
+            tool_call_id = str(payload.get("id") or "").strip()
+            if tool_call_id in synthetic_by_id:
+                merged.append(dict(synthetic_by_id[tool_call_id]))
+                continue
+            if tool_call_id in real_by_id:
+                merged.append(dict(real_by_id[tool_call_id]))
+                continue
+            raise RuntimeError(f"missing merged tool result for {tool_call_id or '<unknown>'}")
+        return merged
 
     def _build_langchain_tools_for_state(
         self,
@@ -5005,6 +5143,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         normalized = self._normalize_approval_resume_value(
             decision=decision,
             original_payloads=list(state.get("tool_call_payloads") or []),
+            approval_request=approval_request,
         )
         if not normalized["approved"]:
             return {
@@ -5019,6 +5158,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "approval_request": None,
             "approval_status": "approved",
             "tool_call_payloads": list(normalized["tool_call_payloads"]),
+            "approval_batch_id": str(normalized.get("batch_id") or ""),
             "next_step": "execute_tools",
         }
 
@@ -5028,8 +5168,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         *,
         runtime: Runtime[CeoRuntimeContext],
     ) -> dict[str, Any]:
-        tool_call_payloads = list(state.get("tool_call_payloads") or [])
-        if not tool_call_payloads:
+        original_tool_call_payloads = list(state.get("tool_call_payloads") or [])
+        executable_tool_call_payloads = list(
+            state.get("executable_tool_call_payloads") or original_tool_call_payloads
+        )
+        synthetic_tool_results = [
+            dict(item)
+            for item in list(state.get("synthetic_tool_results") or [])
+            if isinstance(item, dict)
+        ]
+        if not original_tool_call_payloads:
             return {"next_step": "call_model"}
 
         execution_bundle = self._frontdoor_execution_bundle(state=state, runtime=runtime)
@@ -5049,7 +5197,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         semaphore = asyncio.Semaphore(
             self._parallel_slot_count(
                 state.get("max_parallel_tool_calls"),
-                len(tool_call_payloads),
+                len(executable_tool_call_payloads),
                 enabled=bool(state.get("parallel_enabled")),
             )
         )
@@ -5070,6 +5218,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ),
             )
             return {
+                "tool_call_id": str(payload.get("id") or "").strip(),
                 "tool_name": tool_name,
                 "status": "error",
                 "raw_result": None,
@@ -5125,6 +5274,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ),
             )
             return {
+                "tool_call_id": str(payload.get("id") or "").strip(),
                 "tool_name": tool_name,
                 "status": status,
                 "raw_result": result_payload.get("raw_result"),
@@ -5141,7 +5291,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         indexed_payloads = [
             (index, dict(payload))
-            for index, payload in enumerate(list(tool_call_payloads or []))
+            for index, payload in enumerate(list(executable_tool_call_payloads or []))
             if isinstance(payload, dict)
         ]
         stage_items = [
@@ -5172,7 +5322,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ordinary_results = await asyncio.gather(*[_run_single(payload) for _, payload in ordinary_items])
                 for (index, _payload), result in zip(ordinary_items, ordinary_results, strict=False):
                     ordered_results[index] = result
-        tool_results = [ordered_results[index] for index, _payload in indexed_payloads if index in ordered_results]
+        executed_tool_results = [ordered_results[index] for index, _payload in indexed_payloads if index in ordered_results]
+        tool_results = self._merge_ordered_tool_results(
+            original_payloads=original_tool_call_payloads,
+            real_results=executed_tool_results,
+            synthetic_results=synthetic_tool_results,
+        )
         pending_content_open_image_payloads = [
             dict(item)
             for item in list(state.get("pending_content_open_image_payloads") or [])
@@ -5188,7 +5343,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 **dict(state or {}),
                 "frontdoor_stage_state": base_stage_state,
             },
-            tool_call_payloads=tool_call_payloads,
+            tool_call_payloads=original_tool_call_payloads,
             tool_results=tool_results,
         )
         tool_messages = [dict(item.get("tool_message") or {}) for item in tool_results]
@@ -5200,7 +5355,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 if state.get("synthetic_tool_calls_used")
                 else self._model_content(response_payload.get("content", ""))
             ),
-            "tool_calls": self._assistant_tool_calls_from_payloads(tool_call_payloads),
+            "tool_calls": self._assistant_tool_calls_from_payloads(original_tool_call_payloads),
         }
         messages = list(state.get("messages") or [])
         if hasattr(self, "_state_message_records"):
@@ -5213,7 +5368,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         used_tools.extend(
             [
                 str(payload.get("name") or "").strip()
-                for payload in tool_call_payloads
+                for payload in original_tool_call_payloads
                 if str(payload.get("name") or "").strip()
                 and str(payload.get("name") or "").strip() not in self._CONTROL_TOOL_NAMES
             ]
@@ -5238,7 +5393,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         substantive_tool_names = [
             str(payload.get("name") or "").strip()
-            for payload in tool_call_payloads
+            for payload in original_tool_call_payloads
             if str(payload.get("name") or "").strip()
             and str(payload.get("name") or "").strip() not in self._CONTROL_TOOL_NAMES
         ]
@@ -5250,6 +5405,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "route_kind": route_kind,
             "analysis_text": "",
             "tool_call_payloads": [],
+            "executable_tool_call_payloads": [],
+            "synthetic_tool_results": [],
             "verified_task_ids": list(verified_task_ids),
             "synthetic_tool_calls_used": False,
             "frontdoor_stage_state": frontdoor_stage_state,

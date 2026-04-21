@@ -2599,6 +2599,61 @@ def test_ceo_session_pending_interrupts_fall_back_to_paused_disk_state(tmp_path:
     ]
 
 
+def test_ceo_session_pending_batch_interrupts_fall_back_to_paused_disk_state(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    monkeypatch.setattr(ceo_sessions, "workspace_path", lambda: tmp_path)
+    web_ceo_sessions.write_paused_execution_context(
+        "web:shared",
+        {
+            "status": "paused",
+            "interrupts": [
+                {
+                    "id": "interrupt-disk-1",
+                    "value": {
+                        "kind": "frontdoor_tool_approval_batch",
+                        "batch_id": "batch:123",
+                        "review_items": [
+                            {"tool_call_id": "call-1", "name": "exec", "risk_level": "high", "arguments": {"command": "echo hi"}}
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    session_manager = SessionManager(tmp_path)
+    session_manager.save(session_manager.get_or_create("web:shared"))
+    live_session = SimpleNamespace(
+        state=SimpleNamespace(status="paused", is_running=False, pending_interrupts=[]),
+    )
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix="/api")
+
+    monkeypatch.setattr(ceo_sessions, "get_agent", lambda: SimpleNamespace(sessions=session_manager))
+    monkeypatch.setattr(
+        ceo_sessions,
+        "get_runtime_manager",
+        lambda _agent: SimpleNamespace(get=lambda _session_id: live_session),
+    )
+
+    client = TestClient(app)
+    response = client.get("/api/ceo/sessions/web:shared/pending-interrupts")
+
+    assert response.status_code == 200
+    assert response.json()["items"] == [
+        {
+            "id": "interrupt-disk-1",
+            "value": {
+                "kind": "frontdoor_tool_approval_batch",
+                "batch_id": "batch:123",
+                "review_items": [
+                    {"tool_call_id": "call-1", "name": "exec", "risk_level": "high", "arguments": {"command": "echo hi"}}
+                ],
+            },
+        }
+    ]
+
+
 def test_ceo_session_resume_interrupt_recreates_runtime_from_persisted_pause(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
     monkeypatch.setattr(ceo_sessions, "workspace_path", lambda: tmp_path)
@@ -4785,6 +4840,230 @@ def test_ceo_websocket_user_message_after_manual_pause_starts_fresh_turn(tmp_pat
     assert len(live_session.prompt_payloads) == 1
     assert websocket_ceo._history_text(live_session.prompt_payloads[0].content) == "前10个"
     assert live_session.prompt_batch_payloads == []
+
+
+def test_ceo_websocket_blocks_user_message_while_tool_approval_batch_pending(tmp_path, monkeypatch) -> None:
+    class _ApprovalPendingSession:
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(
+                status="paused",
+                is_running=False,
+                pending_interrupts=[
+                    {
+                        "id": "interrupt-batch-1",
+                        "value": {
+                            "kind": "frontdoor_tool_approval_batch",
+                            "batch_id": "batch:123",
+                            "review_items": [
+                                {
+                                    "tool_call_id": "call-1",
+                                    "name": "exec",
+                                    "risk_level": "high",
+                                    "arguments": {"command": "echo hi"},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            )
+            self.prompt_payloads: list[object] = []
+            self.prompt_batch_payloads: list[list[object]] = []
+            self.queued_follow_up_payloads: list[list[object]] = []
+            self._listeners = set()
+
+        def subscribe(self, listener):
+            self._listeners.add(listener)
+            return lambda: self._listeners.discard(listener)
+
+        def state_dict(self) -> dict[str, object]:
+            return {
+                "status": self.state.status,
+                "is_running": self.state.is_running,
+                "pending_interrupts": list(self.state.pending_interrupts),
+            }
+
+        def inflight_turn_snapshot(self):
+            return {
+                "status": "paused",
+                "source": "user",
+                "turn_id": "turn-approval-1",
+                "interrupts": list(self.state.pending_interrupts),
+            }
+
+        def paused_execution_context_snapshot(self):
+            return {
+                "status": "paused",
+                "source": "user",
+                "turn_id": "turn-approval-1",
+                "interrupts": list(self.state.pending_interrupts),
+            }
+
+        async def prompt(self, user_message):
+            self.prompt_payloads.append(user_message)
+            raise RuntimeError("prompt should not run")
+
+        async def prompt_batch(self, user_messages):
+            self.prompt_batch_payloads.append(list(user_messages or []))
+            raise RuntimeError("prompt batch should not run")
+
+        async def queue_follow_up_batch(self, user_messages, persist_transcript: bool = True):
+            _ = persist_transcript
+            batch = list(user_messages or [])
+            self.queued_follow_up_payloads.append(batch)
+            return batch
+
+    live_session = _ApprovalPendingSession()
+    session_manager = SessionManager(tmp_path)
+    session_manager.get_or_create("web:shared")
+    app = FastAPI()
+    app.include_router(websocket_ceo.router, prefix="/api")
+
+    monkeypatch.setattr(
+        websocket_ceo,
+        "get_agent",
+        lambda: SimpleNamespace(
+            sessions=session_manager,
+            main_task_service=SimpleNamespace(
+                startup=lambda: None,
+                registry=SimpleNamespace(
+                    subscribe_ceo=lambda _session_id: asyncio.Queue(),
+                    subscribe_global_ceo=lambda: asyncio.Queue(),
+                    unsubscribe_ceo=lambda _session_id, _queue: None,
+                    unsubscribe_global_ceo=lambda _queue: None,
+                    next_ceo_seq=lambda _session_id: 1,
+                    publish_global_ceo=lambda _envelope: None,
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", lambda _agent: None)
+    monkeypatch.setattr(
+        websocket_ceo,
+        "get_runtime_manager",
+        lambda _agent: SimpleNamespace(get_or_create=lambda **kwargs: live_session, get=lambda _key: live_session),
+    )
+    monkeypatch.setattr(websocket_ceo, "workspace_path", lambda: tmp_path)
+
+    client = TestClient(app)
+    with client.websocket_connect("/api/ws/ceo?session_id=web:shared") as ws:
+        ws.receive_json()
+        ws.receive_json()
+        ws.receive_json()
+        ws.receive_json()
+        ws.send_json({"type": "client.user_message", "text": "blocked while approval pending"})
+        error_payload, _seen = _recv_until(
+            ws,
+            lambda payload: payload.get("type") in {"error", "ceo.error"},
+        )
+
+    assert error_payload["data"]["code"] == "ceo_approval_pending"
+    assert live_session.prompt_payloads == []
+    assert live_session.prompt_batch_payloads == []
+    assert live_session.queued_follow_up_payloads == []
+
+
+def test_ceo_websocket_blocks_user_message_when_pending_batch_only_exists_in_paused_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _mock_workspace(monkeypatch, tmp_path)
+    session_id = "web:shared"
+    web_ceo_sessions.write_paused_execution_context(
+        session_id,
+        {
+            "status": "paused",
+            "interrupts": [
+                {
+                    "id": "interrupt-disk-approval-1",
+                    "value": {
+                        "kind": "frontdoor_tool_approval_batch",
+                        "batch_id": "batch:disk-1",
+                        "review_items": [
+                            {
+                                "tool_call_id": "call-1",
+                                "name": "exec",
+                                "risk_level": "high",
+                                "arguments": {"command": "echo hi"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+
+    class _DiskOnlyApprovalPendingSession:
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(status="paused", is_running=False, pending_interrupts=[])
+            self.prompt_payloads: list[object] = []
+            self._listeners = set()
+
+        def subscribe(self, listener):
+            self._listeners.add(listener)
+            return lambda: self._listeners.discard(listener)
+
+        def state_dict(self) -> dict[str, object]:
+            return {
+                "status": self.state.status,
+                "is_running": self.state.is_running,
+                "pending_interrupts": list(self.state.pending_interrupts),
+            }
+
+        def inflight_turn_snapshot(self):
+            return None
+
+        def paused_execution_context_snapshot(self):
+            return None
+
+        async def prompt(self, user_message):
+            self.prompt_payloads.append(user_message)
+            raise RuntimeError("prompt should not run")
+
+    live_session = _DiskOnlyApprovalPendingSession()
+    session_manager = SessionManager(tmp_path)
+    session_manager.save(session_manager.get_or_create(session_id))
+    app = FastAPI()
+    app.include_router(websocket_ceo.router, prefix="/api")
+
+    monkeypatch.setattr(
+        websocket_ceo,
+        "get_agent",
+        lambda: SimpleNamespace(
+            sessions=session_manager,
+            main_task_service=SimpleNamespace(
+                startup=lambda: None,
+                registry=SimpleNamespace(
+                    subscribe_ceo=lambda _session_id: asyncio.Queue(),
+                    subscribe_global_ceo=lambda: asyncio.Queue(),
+                    unsubscribe_ceo=lambda _session_id, _queue: None,
+                    unsubscribe_global_ceo=lambda _queue: None,
+                    next_ceo_seq=lambda _session_id: 1,
+                    publish_global_ceo=lambda _envelope: None,
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", lambda _agent: None)
+    monkeypatch.setattr(
+        websocket_ceo,
+        "get_runtime_manager",
+        lambda _agent: SimpleNamespace(get_or_create=lambda **kwargs: live_session, get=lambda _key: live_session),
+    )
+
+    client = TestClient(app)
+    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
+        ws.receive_json()
+        ws.receive_json()
+        ws.receive_json()
+        ws.receive_json()
+        ws.send_json({"type": "client.user_message", "text": "blocked from paused snapshot"})
+        error_payload, _seen = _recv_until(
+            ws,
+            lambda payload: payload.get("type") in {"error", "ceo.error"},
+        )
+
+    assert error_payload["data"]["code"] == "ceo_approval_pending"
+    assert live_session.prompt_payloads == []
 
 
 def test_ceo_websocket_user_message_batch_payload_dispatches_single_fresh_batch_turn(tmp_path, monkeypatch) -> None:

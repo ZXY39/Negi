@@ -110,6 +110,27 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - `snapshot.ceo.messages` must also avoid replaying running-turn `pending` user transcript rows as ordinary history bubbles. During a live running turn, authoritative current-turn user placement comes from `inflight_turn.user_messages`, not from flat transcript replay.
 - When a running follow-up is actually consumed into the next model send of the same visible conversation lane, the runtime now also archives the pre-follow-up assistant execution bubble into visible UI history before the consumed user bubble is restored. That archive is UI-visible but prompt-hidden, so refresh/reconnect can preserve the same visual ordering without polluting later prompt history.
 
+### 2.2. Regulatory Approval Flow
+
+- Web CEO now has a second blocking composer lane besides ordinary running turns: a pending `frontdoor_tool_approval_batch`.
+- The websocket/runtime path emits that batch through `ceo.turn.interrupt`, and reconnect/session-restore should also be able to rebuild it from `GET /api/ceo/sessions/{session_id}/pending-interrupts` or the paused snapshot lane.
+- The frontend review UX is intentionally split:
+  - the operator reviews one risky tool call at a time in a toast-like approval card,
+  - but the browser must not resume the agent per item.
+- The authoritative resume payload is one batch submission:
+  - `client.resume_interrupt`
+  - `resume.type="submit_batch_review"`
+  - `resume.batch_id`
+  - `resume.decisions=[{tool_call_id, decision, note?}, ...]`
+- The browser may let the operator move backward, change earlier choices, and keep a session-local draft, but it must submit a complete decision for every `review_item` in the batch before the backend resumes.
+- Rejection notes are optional operator text, but they only belong to rejected items. The frontend should not send a `note` field for approved items.
+- Clicking the parameter preview opens a separate full-args modal. Long argument bodies must stay scrollable, and clicking outside that modal should close it.
+- While a regulatory approval batch is pending, the composer should behave as blocked-active state rather than as ordinary paused state:
+  - no new user message send,
+  - no queued follow-up dispatch,
+  - no silent switch-away that would hide the approval UI.
+- Once the operator submits the batch, the browser should clear the local draft for that batch and wait for the normal runtime events (`ceo.state`, `ceo.reply.final`, etc.) to continue the conversation.
+
 ### 2.5. Image Upload Gating
 
 - Web CEO uploads still persist attachment metadata and transcript/debugging information about the stored local file, but provider-visible current-turn content no longer has to reuse that same local-path note.
@@ -373,6 +394,16 @@ The backend responsibilities are now:
 - preserve explicit empty role lists through store readback and resource refresh,
 - derive runtime visibility for surfaced tools from that persisted RBAC state,
 - and keep internal non-Tool-Admin tools outside the Tool Admin contract.
+
+Tool Admin also now owns one global operator switch above the Tool list: `监管模式`.
+
+- This switch is persisted separately from per-family RBAC and from `exec_runtime.execution_mode`.
+- Its purpose is CEO/frontdoor approval policy, not executor safety policy:
+  - off = no regulatory approval batch for risky CEO tool calls,
+  - on = medium/high-risk CEO tool calls enter the batch-review interrupt lane.
+- Changing the switch should take effect immediately for future approval boundaries in both new and already-running CEO sessions.
+- Existing sessions that are already paused inside a pending approval batch do not get rewritten in place. Treat the switch as “future boundary” config, not as a retroactive migration of existing interrupts.
+- If the UI shows the new switch state but runtime behavior still follows the old one, inspect the dedicated governance-mode endpoint/store first, not the ordinary tool family policy rows.
 
 Web/channel delivery maintenance note:
 

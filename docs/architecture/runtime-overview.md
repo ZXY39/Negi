@@ -243,6 +243,11 @@ Maintenance note for `task_append_notice` and task message distribution:
 - 同一套 inflight snapshot / paused execution context 现在也会带上 `frontdoor_selection_debug`。排查“rewrite 后 query 不对”“向量召回打到了哪些 tool/skill”“为什么某个工具没进 candidate”时，优先查看这份 snapshot，而不是只看最终 assistant 文本。
 - approval interrupt 负载现在还会一起携带 `frontdoor_stage_state`、`compression_state`、`hydrated_tool_names`、`tool_call_payloads` 和 `frontdoor_selection_debug`；恢复时这些字段会直接回灌 session/runtime state，而不是再由 middleware 临时重建。
 
+- CEO/frontdoor 现在还有一条监管审批 lane：当 Tool Admin 的全局 `监管模式` 打开时，主 agent 对中/高风险工具的调用会被收束成一个 `frontdoor_tool_approval_batch` interrupt，而不是逐个 tool call 立即继续执行。
+- 这条 lane 的关键维护语义是 “UI 可以逐个审，但 runtime 必须整批回灌”。`review_items` 只覆盖需要人工审阅的 risky calls；resume payload 必须一次性提交整批 `decisions[]`，否则 runtime 会拒绝恢复。
+- 对同一批次里被拒绝的 tool call，runtime 不会把它们静默丢掉，而是构造 synthetic rejection tool results，并按原始 tool call 顺序与真正执行过的结果重新合并后再继续后续 round。排查“为什么 agent 看到了被拒绝工具的返回”时，应先检查 synthetic-result merge，而不是误判为 executor 真跑了。
+- Web CEO 的 pending approval 现在也是一种 blocking active state。只要当前 session 仍持有 `frontdoor_tool_approval_batch`（无论来自 live state 还是 paused snapshot / restart restore），新的用户消息与 queued follow-up dispatch 都必须被拦住，直到该批次统一提交给 runtime。
+
 阶段预算上还有一个容易被误判的点：
 
 - `load_tool_context` / `load_skill_context` 会照常进入 round 记录与执行轨迹，但它们现在不再增加 `tool_rounds_used`。

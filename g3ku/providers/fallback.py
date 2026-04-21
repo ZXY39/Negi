@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any
 
 from loguru import logger
 
 from g3ku.config.schema import Config
+from g3ku.prompt_trace import render_model_chain_trace
 from g3ku.providers.base import LLMProvider, LLMResponse
 from g3ku.utils.api_keys import APIKeyConfigurationError, iter_api_key_retry_slots
 
@@ -257,6 +259,31 @@ def normalized_retry_count(value: int | None) -> int:
         return 0
 
 
+def _build_provider_target_compat(build_provider_from_model_key, config: Config, model_key: str, *, api_key_index: int | None = None):
+    if api_key_index is None:
+        return build_provider_from_model_key(config, model_key)
+    try:
+        parameters = inspect.signature(build_provider_from_model_key).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "api_key_index" in parameters:
+        return build_provider_from_model_key(config, model_key, api_key_index=api_key_index)
+    return build_provider_from_model_key(config, model_key)
+
+
+def _log_model_chain_retry(*, model_ref: str, reason: Any) -> None:
+    logger.warning(
+        render_model_chain_trace(
+            title="RETRY",
+            severity="retry",
+            lines=[
+                f"model_ref: {str(model_ref or '').strip()}",
+                f"reason: {str(reason or '').strip()}",
+            ],
+        )
+    )
+
+
 class FallbackProvider(LLMProvider):
     """LLMProvider wrapper that retries through an ordered model chain."""
 
@@ -354,7 +381,8 @@ class FallbackProvider(LLMProvider):
                     target = base_target
                     selected_key_index = int(slot.key_index)
                     try:
-                        target = base_target if slot.attempt_number == 1 else build_provider_from_model_key(
+                        target = base_target if slot.attempt_number == 1 else _build_provider_target_compat(
+                            build_provider_from_model_key,
                             self._config,
                             model_key,
                             api_key_index=selected_key_index,
@@ -398,6 +426,7 @@ class FallbackProvider(LLMProvider):
                                 slot.key_count,
                                 exc,
                             )
+                            _log_model_chain_retry(model_ref=model_key, reason=exc)
                             continue
                         if rotate_key and not slot.is_last_round:
                             logger.warning(
@@ -409,6 +438,7 @@ class FallbackProvider(LLMProvider):
                                 slot.key_count,
                                 exc,
                             )
+                            _log_model_chain_retry(model_ref=model_key, reason=exc)
                             continue
                         if should_fallback_model_error(exc) and model_key != chain[-1]:
                             logger.warning(
@@ -448,6 +478,10 @@ class FallbackProvider(LLMProvider):
                                 slot.key_count,
                                 response.content or response.finish_reason,
                             )
+                            _log_model_chain_retry(
+                                model_ref=model_key,
+                                reason=response.error_text or response.content or response.finish_reason,
+                            )
                             continue
                         if not slot.is_last_round:
                             logger.warning(
@@ -458,6 +492,10 @@ class FallbackProvider(LLMProvider):
                                 slot.key_position + 1,
                                 slot.key_count,
                                 response.content or response.finish_reason,
+                            )
+                            _log_model_chain_retry(
+                                model_ref=model_key,
+                                reason=response.error_text or response.content or response.finish_reason,
                             )
                             continue
                     if fallback_response and model_key != chain[-1]:

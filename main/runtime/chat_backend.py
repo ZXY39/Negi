@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from loguru import logger
+
 from g3ku.config.schema import Config
 from g3ku.json_schema_utils import normalize_openai_tool_definitions
+from g3ku.prompt_trace import render_model_chain_trace
 from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
@@ -550,6 +554,77 @@ def _resolve_model_request_parameters(
     return resolved
 
 
+def _build_provider_target_compat(config: Config, model_ref: str, *, api_key_index: int | None = None):
+    if api_key_index is None:
+        return build_provider_from_model_key(config, model_ref)
+    try:
+        parameters = inspect.signature(build_provider_from_model_key).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "api_key_index" in parameters:
+        return build_provider_from_model_key(config, model_ref, api_key_index=api_key_index)
+    return build_provider_from_model_key(config, model_ref)
+
+
+def _model_chain_request_context_lines(messages: list[dict[str, Any]] | None) -> list[str]:
+    for message in list(messages or []):
+        if str(message.get("role") or "").strip().lower() != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        text = str(content or "").strip()
+        if not text.startswith("{"):
+            continue
+        try:
+            payload = json.loads(text)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        task_id = str(payload.get("task_id") or "").strip()
+        node_id = str(payload.get("node_id") or "").strip()
+        goal = str(payload.get("goal") or "").strip()
+        context_lines: list[str] = []
+        if task_id or node_id:
+            pair = " ".join(
+                part
+                for part in [
+                    f"task_id={task_id}" if task_id else "",
+                    f"node_id={node_id}" if node_id else "",
+                ]
+                if part
+            ).strip()
+            if pair:
+                context_lines.append(pair)
+        if goal:
+            context_lines.append(f"goal: {goal}")
+        return context_lines
+    return []
+
+
+def _log_model_chain_fallback(
+    *,
+    messages: list[dict[str, Any]] | None,
+    model_ref: str,
+    next_model_ref: str,
+    reason: Any,
+) -> None:
+    lines = [
+        *_model_chain_request_context_lines(messages),
+        f"model_ref: {str(model_ref or '').strip()}",
+        f"next_model_ref: {str(next_model_ref or '').strip()}",
+        f"reason: {str(reason or '').strip()}",
+    ]
+    logger.warning(
+        render_model_chain_trace(
+            title="FALLBACK",
+            severity="fallback",
+            lines=lines,
+        )
+    )
+
+
 class ConfigChatBackend:
     def __init__(self, config: Config):
         self._config = config
@@ -630,6 +705,12 @@ class ConfigChatBackend:
                     except Exception as exc:
                         last_error = round_last_error = exc
                         if should_fallback_model_error(exc) and index < len(refs) - 1:
+                            _log_model_chain_fallback(
+                                messages=messages,
+                                model_ref=ref,
+                                next_model_ref=refs[index + 1],
+                                reason=exc,
+                            )
                             continue
                         if should_fallback_model_error(exc):
                             exhausted = exhausted_model_chain_error(exc)
@@ -675,7 +756,7 @@ class ConfigChatBackend:
                         )
                         try:
                             selected_api_key_index = int(held_turn_lease.key_index) if use_held_turn_permit and held_turn_lease is not None else int(slot.key_index)
-                            target = build_provider_from_model_key(
+                            target = _build_provider_target_compat(
                                 self._config,
                                 ref,
                                 api_key_index=selected_api_key_index,
@@ -715,6 +796,12 @@ class ConfigChatBackend:
                             if rotate_key and not slot.is_last_round:
                                 continue
                             if should_fallback_model_error(exc) and index < len(refs) - 1:
+                                _log_model_chain_fallback(
+                                    messages=messages,
+                                    model_ref=ref,
+                                    next_model_ref=refs[index + 1],
+                                    reason=exc,
+                                )
                                 move_to_next_model = True
                                 break
                             if should_fallback_model_error(exc):
@@ -753,6 +840,12 @@ class ConfigChatBackend:
                             if not slot.is_last_round:
                                 continue
                         if fallback_response and index < len(refs) - 1:
+                            _log_model_chain_fallback(
+                                messages=messages,
+                                model_ref=ref,
+                                next_model_ref=refs[index + 1],
+                                reason=response.error_text or response.content or response.finish_reason,
+                            )
                             move_to_next_model = True
                             break
                         if fallback_response:
