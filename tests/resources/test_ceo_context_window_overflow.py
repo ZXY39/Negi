@@ -1,16 +1,38 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import struct
+import zlib
 from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage
 
+from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract
 from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.frontdoor.token_preflight_compaction import FrontdoorTokenPreflightResult
 from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    crc = zlib.crc32(kind + data) & 0xFFFFFFFF
+    return len(data).to_bytes(4, "big") + kind + data + crc.to_bytes(4, "big")
+
+
+def _png_data_url(width: int, height: int, *, text_payload: str = "") -> str:
+    header = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    chunks = [_png_chunk(b"IHDR", ihdr)]
+    if text_payload:
+        chunks.append(_png_chunk(b"tEXt", f"Comment\x00{text_payload}".encode("utf-8")))
+    raw = b"".join([b"\x00" + (b"\x00\x00\x00" * width) for _ in range(height)])
+    chunks.append(_png_chunk(b"IDAT", zlib.compress(raw)))
+    chunks.append(_png_chunk(b"IEND", b""))
+    encoded = base64.b64encode(header + b"".join(chunks)).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
 @pytest.mark.asyncio
@@ -139,6 +161,43 @@ async def test_graph_call_model_surfaces_resolution_error_when_context_window_is
         await runner._graph_call_model(state, runtime=runtime)
 
 
+def test_resolve_frontdoor_send_model_context_window_prefers_live_runtime_config_over_loop_app_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(app_config=SimpleNamespace(source="loop-app-config"))
+    )
+    live_config = SimpleNamespace(source="live-runtime-config")
+
+    monkeypatch.setattr(
+        ceo_runtime_ops,
+        "get_runtime_config",
+        lambda force=False: (live_config, 7, False),
+    )
+
+    def _resolve_send_model_context_window_info(*, config, model_refs):
+        assert config is live_config
+        assert model_refs == ["ceo_primary"]
+        return SimpleNamespace(
+            provider_id="responses",
+            provider_model="responses:gpt-5.2",
+            resolved_model="gpt-5.2",
+            context_window_tokens=64_000,
+            resolution_error="",
+        )
+
+    monkeypatch.setattr(
+        ceo_runtime_ops,
+        "resolve_send_model_context_window_info",
+        _resolve_send_model_context_window_info,
+    )
+
+    payload = runner._resolve_frontdoor_send_model_context_window(model_refs=["ceo_primary"])
+
+    assert payload["context_window_tokens"] == 64_000
+    assert payload["provider_model"] == "responses:gpt-5.2"
+
+
 def test_frontdoor_send_preflight_snapshot_uses_provider_request_preview_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -198,6 +257,40 @@ def test_frontdoor_send_preflight_snapshot_uses_provider_request_preview_tokens(
     assert preflight["trigger_tokens"] == 20_000
     assert preflight["estimated_total_tokens"] > preflight["trigger_tokens"]
     assert preflight["would_trigger_token_compression"] is True
+
+
+def test_frontdoor_image_token_estimator_ignores_data_url_text_length_for_same_dimensions() -> None:
+    short_url = _png_data_url(16, 16, text_payload="short")
+    long_url = _png_data_url(16, 16, text_payload="x" * 8_000)
+
+    def _payload(url: str) -> dict[str, object]:
+        return {
+            "model": "gpt-5.2",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe this image"},
+                        {"type": "input_image", "image_url": url, "detail": "high"},
+                    ],
+                }
+            ],
+            "tools": [],
+        }
+
+    short_tokens = ceo_runtime_ops._estimate_frontdoor_provider_request_tokens(
+        provider_request_body=_payload(short_url),
+        request_messages=[],
+        tool_schemas=[],
+    )
+    long_tokens = ceo_runtime_ops._estimate_frontdoor_provider_request_tokens(
+        provider_request_body=_payload(long_url),
+        request_messages=[],
+        tool_schemas=[],
+    )
+
+    assert short_tokens == long_tokens
+    assert short_tokens > 0
 
 
 def test_frontdoor_preflight_prefers_effective_input_tokens_plus_delta_when_preview_underestimates(

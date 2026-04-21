@@ -4089,6 +4089,80 @@ def test_frontdoor_send_preflight_snapshot_rejects_content_open_image_overlay_wi
         )
 
 
+def test_ceo_image_multimodal_enabled_for_model_refs_prefers_live_runtime_config_over_loop_app_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = SimpleNamespace(
+        app_config=SimpleNamespace(
+            get_managed_model=lambda key: SimpleNamespace(image_multimodal_enabled=False)
+        ),
+    )
+    runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
+    live_config = SimpleNamespace(
+        get_managed_model=lambda key: SimpleNamespace(image_multimodal_enabled=(key == "ceo_primary"))
+    )
+
+    monkeypatch.setattr(
+        ceo_runtime_ops,
+        "get_runtime_config",
+        lambda force=False: (live_config, 1, False),
+    )
+
+    assert runner._ceo_image_multimodal_enabled_for_model_refs(["ceo_primary"]) is True
+
+
+def test_frontdoor_build_tool_runtime_context_includes_image_multimodal_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_session = SimpleNamespace(session_key="web:shared")
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _channel="web",
+        _chat_id="shared",
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        inflight_turn_snapshot=lambda: {},
+        _current_turn_id=lambda: "turn-1",
+        _active_cancel_token=None,
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            sessions=SimpleNamespace(get_or_create=lambda key: runtime_session),
+            workspace=None,
+            temp_dir="",
+        )
+    )
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(runner, "_session_task_defaults", lambda runtime_session: {})
+    monkeypatch.setattr(
+        runner,
+        "_ceo_image_multimodal_enabled_for_model_refs",
+        lambda refs: list(refs or []) == ["ceo_primary"],
+    )
+
+    context = runner._build_tool_runtime_context(
+        state={
+            "user_input": {"metadata": {}},
+            "candidate_tool_names": [],
+            "candidate_skill_ids": [],
+            "rbac_visible_tool_names": [],
+            "rbac_visible_skill_ids": [],
+            "model_refs": ["ceo_primary"],
+        },
+        runtime=SimpleNamespace(
+            context=SimpleNamespace(
+                session=session,
+                session_key="web:shared",
+                on_progress=None,
+            )
+        ),
+    )
+
+    assert context["model_refs"] == ["ceo_primary"]
+    assert context["image_multimodal_enabled"] is True
+
+
 @pytest.mark.asyncio
 async def test_prepare_turn_rejects_oversized_uploaded_image_when_binding_enabled(
     tmp_path: Path,

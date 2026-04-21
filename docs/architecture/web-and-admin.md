@@ -368,11 +368,13 @@ The CEO composer now has a dedicated frontdoor-compression UI path that is separ
 - For idle/non-running sessions, the browser may debounce composer edits and call `POST /api/ceo/sessions/{session_id}/composer-preflight`.
 - That preflight request payload should represent the next outbound user batch for that session: existing queued follow-ups plus the current unsent draft/attachments, in FIFO order.
 - The preflight response should include the current model-facing estimate and threshold fields, including `estimated_total_tokens`, `context_window_tokens`, `ratio`, `provider_model`, `trigger_tokens`, `would_trigger_token_compression`, and `would_exceed_context_window`.
+- For multimodal drafts, that estimate is no longer allowed to scale with the raw `data:image/...;base64,...` string length. Backend preflight now derives image cost from a dedicated image-token heuristic plus text/schema cost, so a large inline data URL should not look like millions of text tokens just because it serialized to a huge JSON string.
 - For running sessions, the browser must stop treating composer-preflight as authoritative. The only valid source is the current inflight turn snapshot from `snapshot.ceo` / `ceo.turn.patch`, specifically the latest `frontdoor_token_preflight_diagnostics.final_request_tokens`, `frontdoor_token_preflight_diagnostics.max_context_tokens`, and `frontdoor_token_preflight_diagnostics.provider_model`.
 - This means the visible meter during a running turn is no longer "draft if sent now"; it is "the actual next provider-bound request the runtime is about to send."
 - When the current inflight snapshot does not yet carry an exact runtime request estimate, the meter must stay visually empty. Frontend code must not show `pending`, must not reuse the previous composer estimate, and must not infer a replacement value from the draft textarea, pinned sent entries, or `inflight_turn.user_message`.
 - The brain meter itself is live-only UI state. It must animate with the current ratio, clamp visual fill when the raw ratio exceeds `1.0`, and never create transcript messages, assistant bubbles, or persisted snapshot entries.
 - If the meter appears inconsistent with real send-time compression/error behavior, first check whether the browser is in the idle preflight lane or the running snapshot lane, then debug the corresponding backend source. Treat any browser-only fallback estimate during a running turn as a contract bug.
+- The runtime diagnostics for that meter now also expose additive image-estimation fields such as `estimated_image_tokens` and `image_estimation_method`. These are observability fields for operators and maintainers; they do not change the persisted transcript contract.
 
 ## Tool Admin RBAC Contract
 
