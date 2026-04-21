@@ -105,11 +105,13 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 
 ### 2.5. Image Upload Gating
 
-- Web CEO uploads still persist attachment metadata plus the text note that exposes the local file path to the agent.
+- Web CEO uploads still persist attachment metadata and transcript/debugging information about the stored local file, but provider-visible current-turn content no longer has to reuse that same local-path note.
 - The websocket/input layer no longer unconditionally turns uploaded images into provider-visible `image_url` blocks.
 - CEO/frontdoor now decides per turn whether uploaded images should expand into multimodal request content. The decision key is the selected model binding's `image_multimodal_enabled` flag.
 - If `image_multimodal_enabled=false`, uploads stay on the text downgrade path and the model only sees ordinary text plus the attachment note.
 - If `image_multimodal_enabled=true`, only the live request of the current visible turn may contain provider-visible image input. Durable transcript/baseline lanes still strip those image blocks back out.
+- When that live multimodal path is active and the current turn includes image uploads, the model-facing text note must switch to a generic "image is attached directly in this request" guidance note. It must not expose `local path` text or tell the model to inspect local files first.
+- That direct-visual rule applies to both the initial user message of a visible turn and any queued follow-up batch that is merged into the same turn before the next `call_model` send.
 - Web CEO upload protection now has two layers:
   - `/api/ceo/uploads` rejects any single image larger than `5 MiB`
   - the runtime rechecks image size again before expanding the upload into a provider request, so bypassing the upload endpoint does not bypass the limit

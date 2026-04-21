@@ -38,3 +38,9 @@ def test_prompts_and_exec_manifest_do_not_hardcode_exec_as_read_only() -> None:
 
     exec_manifest = (REPO_ROOT / "tools/exec/resource.yaml").read_text(encoding="utf-8")
     assert "read-only shell commands" not in exec_manifest
+
+
+def test_ceo_frontdoor_prompt_prefers_direct_visual_reasoning_for_current_turn_images() -> None:
+    prompt = (REPO_ROOT / "g3ku/runtime/prompts/ceo_frontdoor.md").read_text(encoding="utf-8")
+    assert "当前轮已经包含图片输入时，优先直接基于图片内容回答" in prompt
+    assert "不要为了查看同一张当前轮图片而优先调用 `exec`、`content_open`" in prompt
