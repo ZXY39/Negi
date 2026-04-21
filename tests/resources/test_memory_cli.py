@@ -33,7 +33,7 @@ def _memory_cfg():
 
     payload = MemoryToolsConfig().model_dump(mode="python")
     payload["document"] = {
-        "summary_max_chars": 100,
+        "summary_max_chars": 250,
         "document_max_chars": 10000,
         "memory_file": "memory/MEMORY.md",
         "notes_dir": "memory/notes",

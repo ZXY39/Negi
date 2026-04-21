@@ -442,12 +442,14 @@ class _MemoryToolSession:
         rewrites: list[dict[str, Any]] | None = None,
         deletes: list[str] | None = None,
         note_upserts: dict[str, str] | None = None,
+        noop_reason: str | None = None,
     ) -> dict[str, Any]:
         errors: dict[str, str] = {}
         normalized_adds: list[dict[str, str]] = []
         normalized_rewrites: list[dict[str, str]] = []
         normalized_deletes: list[str] = []
         normalized_note_upserts: dict[str, str] = {}
+        normalized_noop_reason = str(noop_reason or "").strip()
 
         raw_adds = list(adds or [])
         if not isinstance(raw_adds, list):
@@ -518,8 +520,11 @@ class _MemoryToolSession:
                     continue
                 normalized_note_upserts[ref] = body
 
-        if not normalized_adds and not normalized_rewrites and not normalized_deletes and not normalized_note_upserts:
-            errors["batch"] = "at least one add, rewrite, delete, or note_upsert is required"
+        has_mutation = bool(normalized_adds or normalized_rewrites or normalized_deletes or normalized_note_upserts)
+        if normalized_noop_reason and has_mutation:
+            errors["noop_reason"] = "noop_reason may not be combined with add, rewrite, delete, or note_upsert"
+        if not normalized_noop_reason and not has_mutation:
+            errors["batch"] = "at least one add, rewrite, delete, note_upsert, or noop_reason is required"
 
         if errors:
             return {"ok": False, "errors": errors}
@@ -530,6 +535,7 @@ class _MemoryToolSession:
             "rewrites": normalized_rewrites,
             "deletes": normalized_deletes,
             "note_upserts": normalized_note_upserts,
+            "noop_reason": normalized_noop_reason,
         }
         return {"ok": True, "status": "batch_staged"}
 
@@ -549,6 +555,7 @@ class _MemoryValidatedWrite:
     note_refs_written: list[str]
     memory_chars_after: int
     document_preview: str
+    noop_reason: str = ""
 
 
 class _MemoryAgentValidationError(ValueError):
@@ -690,7 +697,7 @@ class MemoryManager:
         stuck_after_seconds: int = 300,
     ) -> dict[str, Any]:
         snapshot_text = self.snapshot_text()
-        summary_limit = int(getattr(self.config.document, "summary_max_chars", 100) or 100)
+        summary_limit = int(getattr(self.config.document, "summary_max_chars", 250) or 250)
         document_limit = int(getattr(self.config.document, "document_max_chars", 10000) or 10000)
         document_error = ""
         document_valid = True
@@ -1473,7 +1480,7 @@ class MemoryManager:
         document_text = "".join(format_memory_entry(entry) for entry in entries)
         validate_memory_document(
             document_text,
-            summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 100) or 100),
+            summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 250) or 250),
             document_max_chars=int(getattr(self.config.document, "document_max_chars", 10000) or 10000),
         )
         note_refs = self._collect_note_refs(document_text)
@@ -1663,6 +1670,7 @@ class MemoryManager:
             rewrites: list[dict[str, Any]] | None = None,
             deletes: list[str] | None = None,
             note_upserts: dict[str, str] | None = None,
+            noop_reason: str | None = None,
         ) -> dict[str, Any]:
             """Stage one complete memory mutation batch."""
 
@@ -1671,6 +1679,7 @@ class MemoryManager:
                 rewrites=rewrites,
                 deletes=deletes,
                 note_upserts=note_upserts,
+                noop_reason=noop_reason,
             )
 
         return [memory_read_note, memory_apply_batch]
@@ -2099,6 +2108,9 @@ class MemoryManager:
             payload["memory_chars_after"] = int(validated.memory_chars_after)
             payload["note_refs_written"] = list(validated.note_refs_written)
             payload["document_preview"] = validated.document_preview
+            normalized_noop_reason = str(validated.noop_reason or "").strip()
+            if normalized_noop_reason:
+                payload["noop_reason"] = normalized_noop_reason
         self._append_ops_payload(payload)
         return payload
 
@@ -2393,6 +2405,7 @@ class MemoryManager:
             rewrites: list[dict[str, Any]] | None = None,
             deletes: list[str] | None = None,
             note_upserts: dict[str, str] | None = None,
+            noop_reason: str | None = None,
         ) -> dict[str, Any]:
             """Stage one complete memory mutation batch."""
 
@@ -2401,6 +2414,7 @@ class MemoryManager:
                 rewrites=rewrites,
                 deletes=deletes,
                 note_upserts=note_upserts,
+                noop_reason=noop_reason,
             )
 
         return [memory_read_note, memory_apply_batch]
@@ -2437,6 +2451,7 @@ class MemoryManager:
             "- rewrite 只传 id 和 content；系统会保留原 source 并刷新日期。\n"
             "- delete 传记忆 id 列表。\n"
             "- note_upserts 只写需要新增或改写的 note。\n"
+            "- 当本轮无需任何记忆或 note 变更时，可单独提交 noop_reason。\n"
             f"{repair_block}"
         )
 
@@ -2552,9 +2567,14 @@ class MemoryManager:
         rewrites = list(payload.get("rewrites") or [])
         deletes = list(payload.get("deletes") or [])
         note_upserts = dict(payload.get("note_upserts") or {})
+        noop_reason = str(payload.get("noop_reason") or "").strip()
 
         if batch.op == "delete" and (adds or rewrites):
             raise _MemoryAgentValidationError("delete batch may not add or rewrite memories")
+        if batch.op == "delete" and noop_reason:
+            raise _MemoryAgentValidationError("delete batch may not use noop_reason")
+        if noop_reason and (adds or rewrites or deletes or note_upserts):
+            raise _MemoryAgentValidationError("noop_reason may not be combined with add, rewrite, delete, or note_upsert")
 
         before_entries = parse_memory_document(before_text)
         existing_by_id = {entry.memory_id: entry for entry in before_entries}
@@ -2630,7 +2650,7 @@ class MemoryManager:
         document_text = "".join(format_memory_entry(entry) for entry in after_entries)
         validate_memory_document(
             document_text,
-            summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 100) or 100),
+            summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 250) or 250),
             document_max_chars=int(getattr(self.config.document, "document_max_chars", 10000) or 10000),
         )
         existing_refs = {path.stem for path in self.notes_dir.glob("*.md")}
@@ -2653,6 +2673,7 @@ class MemoryManager:
             note_refs_written=sorted(note_writes.keys()),
             memory_chars_after=len(self._normalize_document_text(document_text)),
             document_preview=self._document_preview(document_text),
+            noop_reason=noop_reason,
         )
 
     @staticmethod
@@ -2934,6 +2955,7 @@ class MemoryManager:
                 "provider_request_ids": list(processed_payload["provider_request_ids"]),
                 "request_artifact_paths": list(processed_payload["request_artifact_paths"]),
                 "processed_at": processed_at,
+                **({"noop_reason": str(processed_payload.get("noop_reason") or "").strip()} if str(processed_payload.get("noop_reason") or "").strip() else {}),
             }
         finally:
             _release_file_lock(worker_lease)

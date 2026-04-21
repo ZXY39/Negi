@@ -194,21 +194,22 @@ def test_memory_cards_show_only_status_and_time_then_open_full_detail_modal() ->
 
 def test_memory_card_css_uses_full_width_and_compact_centered_content() -> None:
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
-    memory_css = _fragment(css, ".memory-list {", "@media (max-width: 960px) {")
-
-    assert "align-items: stretch;" in memory_css
-    assert "width: 100%;" in memory_css
-    assert "height: 44px;" in memory_css
-    assert "padding: 0 14px;" in memory_css
-    assert ".memory-card-minimal-status {" in memory_css
-    assert "height: 100%;" in memory_css
-    assert ".memory-card-minimal-trailing {" in memory_css
-    assert "font-size: 1rem;" in memory_css
-    assert "width: 28px;" in memory_css
-    assert "height: 28px;" in memory_css
-    assert ".memory-card-minimal-status .status-badge {" in memory_css
-    assert "display: inline-flex;" in memory_css
-    assert "justify-content: center;" in memory_css
+    assert ".memory-list {\n    display: flex;\n    flex-direction: column;\n    align-items: stretch;" in css
+    assert ".memory-card.memory-card-compact {\n    display: block;\n    min-height: 0;\n    padding: 0;\n    width: 100%;" in css
+    assert "flex: 0 0 auto;" in _fragment(css, ".memory-card.memory-card-compact {", ".memory-card.memory-card-compact:hover,")
+    assert "overflow: visible;" in _fragment(css, ".memory-card.memory-card-compact {", ".memory-card.memory-card-compact:hover,")
+    assert ".memory-card-compact .memory-card-summary {\n    padding: 0;\n}" in css
+    assert ".memory-card-minimal-row {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;" in css
+    assert "padding: 0.5rem 0.875rem;" in css
+    assert ".memory-card-minimal-status {\n    display: flex;\n    align-items: center;\n    gap: var(--space-2);\n    min-width: 0;" in css
+    assert ".memory-card-minimal-status .status-badge {\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;" in css
+    assert ".memory-card-time {\n    color: var(--text-primary);\n    display: inline-flex;\n    align-items: center;" in css
+    assert "font-size: 1rem;" in css
+    assert "line-height: 1.25;" in css
+    assert "line-height: 1;" not in _fragment(css, ".memory-card-minimal-status .status-badge {", ".memory-card-minimal-trailing {")
+    assert ".memory-card-arrow {\n    width: 28px;\n    height: 28px;" in css
+    assert "font-size: 0;" in _fragment(css, ".memory-card-arrow {", "@media (max-width: 960px) {")
+    assert ".memory-card-arrow::before {" in css
 
 
 def test_memory_management_view_uses_read_only_queue_endpoints_with_safe_error_messages() -> None:

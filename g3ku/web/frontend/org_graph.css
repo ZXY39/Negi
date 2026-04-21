@@ -7909,6 +7909,8 @@ textarea {
 .memory-card.memory-card-compact {
     display: block;
     padding: 0;
+    flex: 0 0 auto;
+    overflow: visible;
     cursor: pointer;
     transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
 }
@@ -8241,9 +8243,11 @@ textarea {
 
 .memory-card.memory-card-compact {
     display: block;
-    height: 44px;
+    min-height: 0;
     padding: 0;
     width: 100%;
+    flex: 0 0 auto;
+    overflow: visible;
     cursor: pointer;
     transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease, background-color 0.18s ease;
 }
@@ -8261,19 +8265,21 @@ textarea {
     gap: 0;
 }
 
+.memory-card-compact .memory-card-summary {
+    padding: 0;
+}
+
 .memory-card-minimal-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
-    height: 44px;
-    padding: 0 14px;
+    padding: 0.5rem 0.875rem;
 }
 
 .memory-card-minimal-status {
     display: flex;
     align-items: center;
-    height: 100%;
     gap: var(--space-2);
     min-width: 0;
 }
@@ -8283,15 +8289,14 @@ textarea {
     align-items: center;
     justify-content: center;
     min-height: 24px;
-    padding: 0 12px;
-    line-height: 1;
+    padding: 0.125rem 0.75rem;
+    line-height: 1.25;
 }
 
 .memory-card-minimal-trailing {
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    height: 100%;
     gap: 10px;
     flex: 0 0 auto;
 }
@@ -8301,10 +8306,9 @@ textarea {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    height: 100%;
     font-size: 1rem;
     font-weight: 600;
-    line-height: 1;
+    line-height: 1.25;
     white-space: nowrap;
 }
 
@@ -8317,8 +8321,18 @@ textarea {
     border-radius: 999px;
     background: color-mix(in srgb, var(--bg-panel) 84%, var(--bg-app) 16%);
     color: var(--text-secondary);
-    font-size: 1rem;
-    line-height: 1;
+    font-size: 0;
+    line-height: 0;
+}
+
+.memory-card-arrow::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-top: 1.75px solid currentColor;
+    border-right: 1.75px solid currentColor;
+    transform: translateX(-1px) rotate(45deg);
+    transform-origin: center;
 }
 
 @media (max-width: 960px) {

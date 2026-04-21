@@ -58,17 +58,17 @@ def test_parse_memory_document_round_trips_user_and_self_entries() -> None:
     assert items[1].note_ref == "note_a1b2"
 
 
-def test_validate_memory_document_rejects_summary_over_100_chars() -> None:
+def test_validate_memory_document_rejects_summary_over_250_chars() -> None:
     module = _load_markdown_memory_module()
     text = (
         "---\n"
         "id:Ab12Z9\n"
         "2026/4/17-self：\n"
-        f"{'x' * 101}\n"
+        f"{'x' * 251}\n"
     )
 
-    with pytest.raises(ValueError, match="summary line exceeds 100 chars"):
-        module.validate_memory_document(text, summary_max_chars=100, document_max_chars=10000)
+    with pytest.raises(ValueError, match="summary line exceeds 250 chars"):
+        module.validate_memory_document(text, summary_max_chars=250, document_max_chars=10000)
 
 
 def test_validate_memory_document_rejects_document_over_10000_chars() -> None:
@@ -81,7 +81,7 @@ def test_validate_memory_document_rejects_document_over_10000_chars() -> None:
     oversized = body + ("x" * 10001)
 
     with pytest.raises(ValueError, match="memory document exceeds 10000 chars"):
-        module.validate_memory_document(oversized, summary_max_chars=100, document_max_chars=10000)
+        module.validate_memory_document(oversized, summary_max_chars=250, document_max_chars=10000)
 
 
 def test_v2_memory_entry_requires_id_line_and_formats_four_line_block() -> None:
@@ -128,7 +128,7 @@ def test_v2_validate_memory_document_rejects_legacy_blocks_without_id() -> None:
     )
 
     with pytest.raises(ValueError, match="memory document contains invalid blocks"):
-        module.validate_memory_document(text, summary_max_chars=100, document_max_chars=10000)
+        module.validate_memory_document(text, summary_max_chars=250, document_max_chars=10000)
 
 
 def _memory_cfg():
@@ -136,7 +136,7 @@ def _memory_cfg():
 
     payload = MemoryToolsConfig().model_dump(mode="python")
     payload["document"] = {
-        "summary_max_chars": 100,
+        "summary_max_chars": 250,
         "document_max_chars": 10000,
         "memory_file": "memory/MEMORY.md",
         "notes_dir": "memory/notes",

@@ -283,6 +283,7 @@ If an operator reports frontdoor send failures after a model or chain change, ch
 `tools/memory_runtime/resource.yaml` is still the runtime settings anchor for long-term memory, but the meaning of that settings surface changed.
 
 - `document.*` now controls the Markdown notebook layout, including `memory/MEMORY.md`, `memory/notes/`, the summary character limit, and the full document character ceiling.
+  - The current default `document.summary_max_chars` is `250`. When a memory candidate cannot be expressed within that one-line limit, the intended writer behavior is to compress it or switch to a one-line summary plus `note` pattern rather than overflowing the notebook line.
 - `queue.*` now controls the single durable queue, including `memory/queue.jsonl`, `memory/ops.jsonl`, batch size, max wait time, and the ordinary-turn review window size.
 - `agent.*` now controls the dedicated memory-maintenance worker behavior.
 - Older `store.*`, `retrieval.*`, and `embedding.*` sections still matter for the catalog bridge because tool/skill semantic narrowing still relies on that catalog-only projection, even though long-term memory正文 no longer depends on the old `rag_memory` runtime.
@@ -311,5 +312,10 @@ Two specific memory-runtime config semantics changed again:
 
 - `queue.review_interval_turns` now means the per-session ordinary-turn review window size, defaulting to `5`, not the earlier hashed sampling interval.
 - The internal memory prompts are now file-backed runtime assets under `main/prompts/memory_agent.md` and `main/prompts/memory_assessor.md`. If memory processing behavior looks wrong after prompt edits, inspect those files before changing Python code.
+- The current writer prompt contract is intentionally stricter than the original rollout:
+  - admission is narrowed to durable dissatisfaction signals, reusable user suggestions, explicit remember requests, and repeated-mistake lessons
+  - memory summaries should read like `condition + requirement`
+  - semantic duplicates must prefer `rewrite` and must not be re-added as synonymous `adds`
+  - write batches may now also resolve through an explicit `noop_reason` path when the candidate should be ignored and the durable notebook should remain unchanged; this path is write-only and must not be combined with add/rewrite/delete/note changes
 
 Do not assume a valid CEO model chain implies a valid memory-agent chain. The memory worker no longer falls back to CEO.

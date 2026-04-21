@@ -19,7 +19,7 @@ def _memory_cfg():
 
     payload = MemoryToolsConfig().model_dump(mode="python")
     payload["document"] = {
-        "summary_max_chars": 100,
+        "summary_max_chars": 250,
         "document_max_chars": 10000,
         "memory_file": "memory/MEMORY.md",
         "notes_dir": "memory/notes",
@@ -149,6 +149,15 @@ def test_memory_runtime_loads_memory_agent_and_assessor_prompts_from_main_prompt
         manager.close()
 
     assert "记忆" in system_prompt
+    assert "角色" in system_prompt
+    assert "职责" in system_prompt
+    assert "可用工具" in system_prompt
+    assert "处理规则" in system_prompt
+    assert "条件+要求" in system_prompt
+    assert "优先使用 rewrite" in system_prompt
+    assert "不得使用 adds" in system_prompt
+    assert "noop_reason" in system_prompt
+    assert "250" in system_prompt
     assert "null" in assessor_prompt.lower()
 
 
@@ -204,6 +213,74 @@ async def test_v2_run_due_batch_once_applies_write_batch_with_memory_apply_batch
         assert "id:" in snapshot_text
         assert "2026/4/18-user：" in snapshot_text
         assert "Prefer concise answers" in snapshot_text
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_run_due_batch_once_accepts_explicit_noop_reason_without_changing_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_memory_agent_runtime_module()
+    markdown_memory = importlib.import_module("g3ku.agent.markdown_memory")
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        (tmp_path / "memory" / "MEMORY.md").write_text(
+            markdown_memory.format_memory_entry(
+                markdown_memory.MemoryEntry(
+                    memory_id="Ab12Z9",
+                    date_text="2026/4/18",
+                    source="user",
+                    summary="Prefer concise answers",
+                )
+            ),
+            encoding="utf-8",
+        )
+        before_snapshot = manager.snapshot_text()
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="Prefer concise answers",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="write_1",
+            )
+        )
+        fake_model = _FakeToolCallingModel(
+            [
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "name": "memory_apply_batch",
+                            "args": {
+                                "noop_reason": "duplicate_of:Ab12Z9",
+                            },
+                        }
+                    ],
+                    usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
+                ),
+                _fake_response(content="done", usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0}),
+            ]
+        )
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        processed = _read_jsonl(tmp_path / "memory" / "ops.jsonl")
+
+        assert report["ok"] is True
+        assert report["status"] == "applied"
+        assert manager.snapshot_text() == before_snapshot
+        assert len(processed) == 1
+        assert processed[0]["request_ids"] == ["write_1"]
+        assert processed[0]["noop_reason"] == "duplicate_of:Ab12Z9"
     finally:
         manager.close()
 
