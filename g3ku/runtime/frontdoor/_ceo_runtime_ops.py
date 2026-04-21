@@ -3516,6 +3516,68 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             }
         return {"approved": False, "tool_call_payloads": []}
 
+    def _build_synthetic_rejection_result(
+        self,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        normalized_tool_call_id = str(tool_call_id or "").strip()
+        normalized_tool_name = str(tool_name or "tool").strip() or "tool"
+        result_text = "Error: 用户不允许运行此工具。"
+        normalized_note = str(note or "").strip()
+        if normalized_note:
+            result_text = f"{result_text}\n补充说明：{normalized_note}"
+        return {
+            "tool_call_id": normalized_tool_call_id,
+            "tool_name": normalized_tool_name,
+            "status": "error",
+            "raw_result": None,
+            "result_text": result_text,
+            "tool_message": self._tool_result_message(
+                tool_call_id=normalized_tool_call_id,
+                tool_name=normalized_tool_name,
+                content=result_text,
+                started_at="",
+                finished_at="",
+                elapsed_seconds=None,
+            ),
+            "started_at": "",
+            "finished_at": "",
+            "elapsed_seconds": None,
+            "synthetic_rejection": True,
+        }
+
+    def _merge_ordered_tool_results(
+        self,
+        *,
+        original_payloads: list[dict[str, Any]],
+        real_results: list[dict[str, Any]],
+        synthetic_results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        real_by_id = {
+            str(item.get("tool_call_id") or "").strip(): dict(item)
+            for item in list(real_results or [])
+            if str(item.get("tool_call_id") or "").strip()
+        }
+        synthetic_by_id = {
+            str(item.get("tool_call_id") or "").strip(): dict(item)
+            for item in list(synthetic_results or [])
+            if str(item.get("tool_call_id") or "").strip()
+        }
+        merged: list[dict[str, Any]] = []
+        for payload in list(original_payloads or []):
+            tool_call_id = str(payload.get("id") or "").strip()
+            if tool_call_id in synthetic_by_id:
+                merged.append(dict(synthetic_by_id[tool_call_id]))
+                continue
+            if tool_call_id in real_by_id:
+                merged.append(dict(real_by_id[tool_call_id]))
+                continue
+            raise RuntimeError(f"missing merged tool result for {tool_call_id or '<unknown>'}")
+        return merged
+
     def _build_langchain_tools_for_state(
         self,
         *,
@@ -4984,8 +5046,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         *,
         runtime: Runtime[CeoRuntimeContext],
     ) -> dict[str, Any]:
-        tool_call_payloads = list(state.get("tool_call_payloads") or [])
-        if not tool_call_payloads:
+        original_tool_call_payloads = list(state.get("tool_call_payloads") or [])
+        executable_tool_call_payloads = list(
+            state.get("executable_tool_call_payloads") or original_tool_call_payloads
+        )
+        synthetic_tool_results = [
+            dict(item)
+            for item in list(state.get("synthetic_tool_results") or [])
+            if isinstance(item, dict)
+        ]
+        if not original_tool_call_payloads:
             return {"next_step": "call_model"}
 
         execution_bundle = self._frontdoor_execution_bundle(state=state, runtime=runtime)
@@ -5005,7 +5075,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         semaphore = asyncio.Semaphore(
             self._parallel_slot_count(
                 state.get("max_parallel_tool_calls"),
-                len(tool_call_payloads),
+                len(executable_tool_call_payloads),
                 enabled=bool(state.get("parallel_enabled")),
             )
         )
@@ -5026,6 +5096,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ),
             )
             return {
+                "tool_call_id": str(payload.get("id") or "").strip(),
                 "tool_name": tool_name,
                 "status": "error",
                 "raw_result": None,
@@ -5081,6 +5152,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ),
             )
             return {
+                "tool_call_id": str(payload.get("id") or "").strip(),
                 "tool_name": tool_name,
                 "status": status,
                 "raw_result": result_payload.get("raw_result"),
@@ -5097,7 +5169,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         indexed_payloads = [
             (index, dict(payload))
-            for index, payload in enumerate(list(tool_call_payloads or []))
+            for index, payload in enumerate(list(executable_tool_call_payloads or []))
             if isinstance(payload, dict)
         ]
         stage_items = [
@@ -5128,7 +5200,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ordinary_results = await asyncio.gather(*[_run_single(payload) for _, payload in ordinary_items])
                 for (index, _payload), result in zip(ordinary_items, ordinary_results, strict=False):
                     ordered_results[index] = result
-        tool_results = [ordered_results[index] for index, _payload in indexed_payloads if index in ordered_results]
+        executed_tool_results = [ordered_results[index] for index, _payload in indexed_payloads if index in ordered_results]
+        tool_results = self._merge_ordered_tool_results(
+            original_payloads=original_tool_call_payloads,
+            real_results=executed_tool_results,
+            synthetic_results=synthetic_tool_results,
+        )
         updated_tool_contract_state = self._frontdoor_tool_state_after_tool_results(
             state=dict(state or {}),
             tool_results=tool_results,
@@ -5138,7 +5215,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 **dict(state or {}),
                 "frontdoor_stage_state": base_stage_state,
             },
-            tool_call_payloads=tool_call_payloads,
+            tool_call_payloads=original_tool_call_payloads,
             tool_results=tool_results,
         )
         tool_messages = [dict(item.get("tool_message") or {}) for item in tool_results]
@@ -5150,7 +5227,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 if state.get("synthetic_tool_calls_used")
                 else self._model_content(response_payload.get("content", ""))
             ),
-            "tool_calls": self._assistant_tool_calls_from_payloads(tool_call_payloads),
+            "tool_calls": self._assistant_tool_calls_from_payloads(original_tool_call_payloads),
         }
         messages = list(state.get("messages") or [])
         if hasattr(self, "_state_message_records"):
@@ -5163,7 +5240,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         used_tools.extend(
             [
                 str(payload.get("name") or "").strip()
-                for payload in tool_call_payloads
+                for payload in original_tool_call_payloads
                 if str(payload.get("name") or "").strip()
                 and str(payload.get("name") or "").strip() not in self._CONTROL_TOOL_NAMES
             ]
@@ -5188,7 +5265,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         substantive_tool_names = [
             str(payload.get("name") or "").strip()
-            for payload in tool_call_payloads
+            for payload in original_tool_call_payloads
             if str(payload.get("name") or "").strip()
             and str(payload.get("name") or "").strip() not in self._CONTROL_TOOL_NAMES
         ]
@@ -5200,6 +5277,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "route_kind": route_kind,
             "analysis_text": "",
             "tool_call_payloads": [],
+            "executable_tool_call_payloads": [],
+            "synthetic_tool_results": [],
             "verified_task_ids": list(verified_task_ids),
             "synthetic_tool_calls_used": False,
             "frontdoor_stage_state": frontdoor_stage_state,

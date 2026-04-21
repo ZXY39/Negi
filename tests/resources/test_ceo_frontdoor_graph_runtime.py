@@ -189,6 +189,66 @@ def test_graph_review_tool_calls_rejects_partial_batch_submit(monkeypatch) -> No
         )
 
 
+def test_build_synthetic_rejection_result_includes_optional_note() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    result = runner._build_synthetic_rejection_result(
+        tool_call_id="call-2",
+        tool_name="exec",
+        note="请先给出无需 exec 的方案。",
+    )
+
+    assert result["tool_call_id"] == "call-2"
+    assert result["tool_name"] == "exec"
+    assert result["status"] == "error"
+    assert "用户不允许运行此工具" in result["result_text"]
+    assert "补充说明：请先给出无需 exec 的方案。" in result["result_text"]
+    assert result["tool_message"]["role"] == "tool"
+    assert result["tool_message"]["tool_call_id"] == "call-2"
+
+
+def test_merge_ordered_tool_results_preserves_original_tool_call_order() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    original_payloads = [
+        {"id": "call-1", "name": "content_open", "arguments": {"path": "/tmp/a"}},
+        {"id": "call-2", "name": "exec", "arguments": {"command": "echo hi"}},
+        {"id": "call-3", "name": "agent_browser", "arguments": {"url": "https://example.com"}},
+    ]
+    real_results = [
+        {
+            "tool_call_id": "call-1",
+            "tool_name": "content_open",
+            "status": "success",
+            "result_text": "opened",
+            "tool_message": {"role": "tool", "tool_call_id": "call-1", "name": "content_open", "content": "opened"},
+        },
+        {
+            "tool_call_id": "call-3",
+            "tool_name": "agent_browser",
+            "status": "success",
+            "result_text": "browsed",
+            "tool_message": {"role": "tool", "tool_call_id": "call-3", "name": "agent_browser", "content": "browsed"},
+        },
+    ]
+    synthetic_results = [
+        runner._build_synthetic_rejection_result(
+            tool_call_id="call-2",
+            tool_name="exec",
+            note="请先给出无需 exec 的方案。",
+        )
+    ]
+
+    merged = runner._merge_ordered_tool_results(
+        original_payloads=original_payloads,
+        real_results=real_results,
+        synthetic_results=synthetic_results,
+    )
+
+    assert [item["tool_call_id"] for item in merged] == ["call-1", "call-2", "call-3"]
+    assert [item["tool_name"] for item in merged] == ["content_open", "exec", "agent_browser"]
+
+
 def test_frontdoor_tool_state_after_tool_results_skips_fixed_builtin_hydration_targets() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
@@ -444,3 +504,81 @@ async def test_graph_execute_tools_allows_submit_next_stage_mixed_with_other_too
     assert len(tool_messages) == 2
     assert tool_messages[0]["name"] == ceo_runtime_ops.STAGE_TOOL_NAME
     assert tool_messages[1]["name"] == "echo_tool"
+
+
+@pytest.mark.asyncio
+async def test_graph_execute_tools_executes_only_approved_calls_and_merges_synthetic_rejections(
+    monkeypatch,
+) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    executed: list[str] = []
+
+    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"echo_tool": _EchoTool()})
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
+    monkeypatch.setattr(runner, "_frontdoor_stage_gate_error", lambda **kwargs: "")
+
+    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
+        _ = tool, runtime_context, on_progress, tool_call_id
+        executed.append(tool_name)
+        raw_result = await tool.execute(**arguments)
+        return (
+            raw_result,
+            json.dumps(raw_result, ensure_ascii=False),
+            "success",
+            "2026-04-21T00:00:00+08:00",
+            "2026-04-21T00:00:01+08:00",
+            1.0,
+        )
+
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
+
+    synthetic = runner._build_synthetic_rejection_result(
+        tool_call_id="call-2",
+        tool_name="exec",
+        note="请先给出无需 exec 的方案。",
+    )
+
+    result = await runner._graph_execute_tools(
+        {
+            "messages": [],
+            "tool_names": ["echo_tool"],
+            "candidate_tool_names": [],
+            "hydrated_tool_names": [],
+            "visible_skill_ids": [],
+            "candidate_skill_ids": [],
+            "rbac_visible_tool_names": ["echo_tool"],
+            "rbac_visible_skill_ids": [],
+            "frontdoor_stage_state": {
+                "active_stage_id": "",
+                "transition_required": False,
+                "stages": [],
+            },
+            "tool_call_payloads": [
+                {"id": "call-1", "name": "echo_tool", "arguments": {"value": "alpha"}},
+                {"id": "call-2", "name": "exec", "arguments": {"command": "echo hi"}},
+            ],
+            "executable_tool_call_payloads": [
+                {"id": "call-1", "name": "echo_tool", "arguments": {"value": "alpha"}},
+            ],
+            "synthetic_tool_results": [synthetic],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "parallel_enabled": True,
+            "max_parallel_tool_calls": 2,
+            "synthetic_tool_calls_used": False,
+            "response_payload": {"content": "", "tool_calls": []},
+            "session_key": "web:shared",
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    tool_messages = [
+        dict(message)
+        for message in list(result["messages"])
+        if str(message.get("role") or "").strip().lower() == "tool"
+    ]
+    assert executed == ["echo_tool"]
+    assert [item["tool_call_id"] for item in tool_messages] == ["call-1", "call-2"]
+    assert tool_messages[0]["name"] == "echo_tool"
+    assert tool_messages[1]["name"] == "exec"
+    assert "用户不允许运行此工具" in str(tool_messages[1]["content"] or "")
