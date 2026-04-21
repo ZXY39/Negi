@@ -5056,6 +5056,61 @@ def test_update_tool_policy_endpoint_forwards_exec_execution_mode():
     assert response.json()['item']['metadata']['execution_mode'] == 'full_access'
 
 
+def test_governance_store_bool_meta_round_trip(tmp_path: Path):
+    from main.governance.store import GovernanceStore
+
+    store = GovernanceStore(tmp_path / 'governance.db')
+    try:
+        assert store.get_bool_meta('ceo_frontdoor_regulatory_mode_enabled', default=False) is False
+        store.set_bool_meta('ceo_frontdoor_regulatory_mode_enabled', True)
+        assert store.get_bool_meta('ceo_frontdoor_regulatory_mode_enabled', default=False) is True
+        store.set_bool_meta('ceo_frontdoor_regulatory_mode_enabled', False)
+        assert store.get_bool_meta('ceo_frontdoor_regulatory_mode_enabled', default=True) is False
+    finally:
+        store.close()
+
+
+def test_governance_mode_endpoints_round_trip():
+    captured: dict[str, object] = {}
+
+    class _StubService:
+        async def startup(self) -> None:
+            return None
+
+        def get_governance_mode(self):
+            return {'enabled': False, 'updated_at': ''}
+
+        def update_governance_mode(self, *, enabled: bool):
+            captured['enabled'] = enabled
+            return {'enabled': bool(enabled), 'updated_at': '2026-04-21T12:34:56Z'}
+
+    client = TestClient(_build_app(_StubService()))
+
+    get_response = client.get('/api/resources/tools/governance-mode')
+    assert get_response.status_code == 200
+    assert get_response.json() == {
+        'ok': True,
+        'item': {
+            'enabled': False,
+            'updated_at': '',
+        },
+    }
+
+    put_response = client.put(
+        '/api/resources/tools/governance-mode',
+        json={'enabled': True},
+    )
+    assert put_response.status_code == 200
+    assert captured == {'enabled': True}
+    assert put_response.json() == {
+        'ok': True,
+        'item': {
+            'enabled': True,
+            'updated_at': '2026-04-21T12:34:56Z',
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_path: Path):
     workspace = tmp_path / 'workspace'

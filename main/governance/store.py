@@ -155,6 +155,12 @@ class GovernanceStore:
         row = self._fetchone('SELECT value FROM governance_meta WHERE key = ?', (str(key or ''),))
         return str(row['value']) if row else None
 
+    def get_bool_meta(self, key: str, *, default: bool = False) -> bool:
+        raw = self.get_meta(key)
+        if raw is None:
+            return bool(default)
+        return str(raw).strip().lower() in {'1', 'true', 'yes', 'on'}
+
     def set_meta(self, key: str, value: str) -> None:
         stamp = now_iso()
         with self._lock, self._conn:
@@ -163,6 +169,9 @@ class GovernanceStore:
                 'ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at',
                 (str(key or ''), str(value or ''), stamp),
             )
+
+    def set_bool_meta(self, key: str, value: bool) -> None:
+        self.set_meta(key, 'true' if bool(value) else 'false')
 
     def _fetchone(self, sql: str, params: tuple[object, ...]) -> sqlite3.Row | None:
         with self._lock:
