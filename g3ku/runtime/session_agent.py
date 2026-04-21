@@ -71,6 +71,7 @@ class RuntimeAgentSession:
         self._tool_seq: int = 0
         self._active_cancel_token: ToolCancellationToken | None = None
         self._preserved_inflight_turn: dict[str, Any] | None = None
+        self._follow_up_transition_snapshot: dict[str, Any] | None = None
         self._paused_execution_context: dict[str, Any] | None = None
         self._frontdoor_stage_state: dict[str, Any] = {}
         self._frontdoor_canonical_context: dict[str, Any] = default_frontdoor_canonical_context()
@@ -726,9 +727,10 @@ class RuntimeAgentSession:
     async def _archive_inflight_assistant_for_follow_up_ui_history(
         self,
         *,
+        snapshot_override: dict[str, Any] | None = None,
         pending_follow_up_turn_ids: set[str] | None = None,
     ) -> Any | None:
-        snapshot = self._current_inflight_turn_snapshot()
+        snapshot = copy.deepcopy(snapshot_override) if isinstance(snapshot_override, dict) else self._current_inflight_turn_snapshot()
         if not isinstance(snapshot, dict) or not snapshot:
             return None
         source = str(snapshot.get("source") or "").strip().lower()
@@ -815,6 +817,38 @@ class RuntimeAgentSession:
         except Exception:
             logger.debug("Skipped follow-up archive persistence for {}", self._state.session_key)
         return None
+
+    def _capture_follow_up_transition_snapshot(self) -> None:
+        snapshot = self._current_inflight_turn_snapshot()
+        if not isinstance(snapshot, dict) or not snapshot:
+            return
+        source = str(snapshot.get("source") or "").strip().lower()
+        status = str(snapshot.get("status") or "").strip().lower()
+        if source in {"heartbeat", "cron", "approval"}:
+            return
+        if status not in {"running", "in_progress", "active"}:
+            return
+        if (
+            not str(snapshot.get("assistant_text") or "").strip()
+            and not isinstance(snapshot.get("canonical_context"), dict)
+            and not isinstance(snapshot.get("compression"), dict)
+        ):
+            return
+        self._follow_up_transition_snapshot = copy.deepcopy(snapshot)
+
+    async def archive_follow_up_chain_transition(
+        self,
+        *,
+        pending_follow_up_turn_ids: set[str] | None = None,
+    ) -> Any | None:
+        snapshot = copy.deepcopy(self._follow_up_transition_snapshot) if isinstance(self._follow_up_transition_snapshot, dict) else None
+        self._follow_up_transition_snapshot = None
+        if not isinstance(snapshot, dict) or not snapshot:
+            return None
+        return await self._archive_inflight_assistant_for_follow_up_ui_history(
+            snapshot_override=snapshot,
+            pending_follow_up_turn_ids=pending_follow_up_turn_ids,
+        )
 
     async def _archive_paused_execution_context_for_ui_history(self) -> None:
         snapshot = self.paused_execution_context_snapshot()
@@ -1381,6 +1415,8 @@ class RuntimeAgentSession:
         if not allow_manual_pause and self.manual_pause_waiting_reason():
             return None
         status = str(status_override or self._state.status or "").strip().lower()
+        if self._state.is_running and status not in {"paused", "error", "completed"}:
+            status = "running"
         if not (self._state.is_running or status in {"running", "paused", "error"}):
             return None
         canonical_context = self._frontdoor_visible_canonical_context_snapshot()
@@ -2460,6 +2496,7 @@ class RuntimeAgentSession:
         normalized_inputs = self._normalize_user_batch_inputs(messages)
         if not normalized_inputs:
             return []
+        self._capture_follow_up_transition_snapshot()
         queued_inputs = self._assign_transcript_batch_without_activating(normalized_inputs)
         self._state.queued_follow_up_messages.extend(queued_inputs)
         if persist_transcript:
@@ -2483,6 +2520,7 @@ class RuntimeAgentSession:
         await self._archive_inflight_assistant_for_follow_up_ui_history(
             pending_follow_up_turn_ids=follow_up_turn_ids,
         )
+        self._follow_up_transition_snapshot = None
         drained_inputs = self._assign_transcript_batch_without_activating(queued_inputs)
         existing_inputs = [
             item

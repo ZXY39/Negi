@@ -9,6 +9,24 @@
 
 ## 1. 基本启动方式
 
+### 首选一键启动脚本
+
+- Windows PowerShell: `.\start-g3ku.ps1`
+- Linux / macOS: `./start-g3ku.sh`
+
+适合：
+
+- 普通用户快速启动项目
+- 本地单机直接拉起 Web 与托管 worker
+- 让脚本自动处理 `.venv`、依赖安装、基础配置兜底与已有托管进程重启
+
+维护上要记住：
+
+- 这两个脚本现在都是普通用户首选入口
+- 它们会在启动前默认清理当前仓库下已有的 g3ku web / worker 进程
+- 它们最终仍然是调用 `g3ku` bootstrap，再进入 `g3ku web`
+- 当脚本使用 reload 模式时，Web 侧自动托管 worker 会关闭；这时要单独运行 `g3ku worker`
+
 ### CLI
 
 - `g3ku agent -m "Hello"`
@@ -46,9 +64,11 @@
 1. 检查 `.g3ku/config.json`
 2. 运行 `g3ku status`
 3. 运行一次 `g3ku agent -m "test"`
-4. 再启动 `g3ku web`
+4. 先用 `.\start-g3ku.ps1`（Windows）或 `./start-g3ku.sh`（Linux / macOS）启动项目
 5. 确认 Web API、任务面板、模型配置页能正常返回
 6. 如项目启用中国渠道，再跑 `g3ku china-bridge doctor`
+
+如果你要拆开验证启动链路，或排查“是脚本包装层问题还是 Web/runtime 本身问题”，再回退到手动运行 `g3ku web` / `g3ku worker`。
 
 当前 `g3ku status` 的记忆区块应按 queued Markdown runtime 理解：
 

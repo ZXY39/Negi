@@ -14,6 +14,18 @@ BOOTSTRAP_SCRIPT="$SCRIPT_DIR/g3ku.sh"
 usage() {
   cat <<'EOF'
 Usage: ./start-g3ku.sh [--host HOST] [--port PORT] [--open-browser] [--prompt-log] [--reload] [--keep-worker]
+
+Quick start:
+  ./start-g3ku.sh
+
+Common options:
+  --host HOST       Web bind host. Default: 127.0.0.1
+  --port PORT       Web bind port. Default: 18790
+  --open-browser    Open the browser after startup
+  --prompt-log      Enable G3KU_PROMPT_TRACE=1
+  --reload          Enable web reload mode (managed worker auto-start is disabled)
+  --keep-worker     Keep the managed worker running after web exit
+  -h, --help        Show this help text and exit
 EOF
 }
 

@@ -4240,6 +4240,50 @@ async def test_runtime_agent_session_archives_running_assistant_before_consumed_
 
 
 @pytest.mark.asyncio
+async def test_runtime_agent_session_archives_running_assistant_before_chained_follow_up_turn(
+    tmp_path: Path,
+) -> None:
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=None,
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        create_session_cancellation_token=lambda _session_key: None,
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=lambda _session_key: 0,
+        _use_rag_memory=lambda: False,
+    )
+    session_id = "web:ceo-follow-up-chain-archive"
+    session = RuntimeAgentSession(loop, session_key=session_id, channel="web", chat_id="ceo-follow-up-chain-archive")
+
+    original = UserInputMessage(content="Original request")
+    session._configure_user_batch([original], batch_id="batch-original")
+    session._last_prompt = original
+    session._state.latest_message = "Inspecting repo"
+    session._state.is_running = True
+    await session._persist_pending_user_messages(user_inputs=[original])
+
+    queued = await session.queue_follow_up_batch([UserInputMessage(content="Queued follow-up")], persist_transcript=True)
+    assert [websocket_ceo._history_text(item.content) for item in queued] == ["Queued follow-up"]
+
+    pending_turn_ids = {
+        str((item.metadata or {}).get("_transcript_turn_id") or "").strip()
+        for item in queued
+    }
+    await session.archive_follow_up_chain_transition(pending_follow_up_turn_ids=pending_turn_ids)
+
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    assert [message["role"] for message in reloaded.messages] == ["user", "assistant", "user"]
+    assert reloaded.messages[1]["content"] == "Inspecting repo"
+    assert reloaded.messages[1]["metadata"]["source"] == "follow_up_archive"
+    assert reloaded.messages[2]["content"] == "Queued follow-up"
+    assert reloaded.messages[2]["metadata"]["_transcript_state"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
     tmp_path: Path,
     monkeypatch,

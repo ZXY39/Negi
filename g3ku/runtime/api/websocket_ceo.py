@@ -930,6 +930,18 @@ async def ceo_websocket(websocket: WebSocket):
                 queued_follow_ups = await _drain_queued_follow_ups()
                 if not queued_follow_ups:
                     break
+                archive_follow_up_chain_transition = getattr(session, 'archive_follow_up_chain_transition', None)
+                if callable(archive_follow_up_chain_transition):
+                    follow_up_turn_ids = {
+                        str((getattr(item, 'metadata', None) or {}).get('_transcript_turn_id') or '').strip()
+                        for item in list(queued_follow_ups or [])
+                        if isinstance(item, UserInputMessage)
+                    }
+                    await _maybe_await(
+                        archive_follow_up_chain_transition(
+                            pending_follow_up_turn_ids=follow_up_turn_ids,
+                        )
+                    )
                 current_payload = list(queued_follow_ups)
         except asyncio.CancelledError:
             return

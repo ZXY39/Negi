@@ -4716,6 +4716,14 @@ textarea {
     flex: 1 1 220px;
 }
 
+.llm-binding-concurrency-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    justify-content: flex-start;
+}
+
 .llm-note-btn {
     flex: 0 0 auto;
 }
@@ -4769,12 +4777,35 @@ textarea {
     grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.llm-form-grid.llm-form-grid--binding-detail-policy {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    row-gap: var(--space-3);
+    align-items: start;
+}
+
+.llm-form-grid--binding-detail-policy .llm-binding-concurrency-actions {
+    grid-column: 3 / 4;
+}
+
 .llm-form-grid.single {
     grid-template-columns: minmax(0, 1fr);
 }
 
 .llm-image-checkbox-field {
     min-width: 0;
+}
+
+.llm-image-checkbox-field--header {
+    justify-content: flex-end;
+}
+
+.llm-image-checkbox-field--inline {
+    display: block;
+    flex: 0 0 auto;
+}
+
+.llm-image-checkbox-spacer {
+    visibility: hidden;
 }
 
 .llm-image-checkbox-control {
@@ -4789,7 +4820,17 @@ textarea {
     border: 1px solid var(--border-strong);
     background: var(--bg-surface-inner);
     color: var(--text-primary);
+    font-size: 0.82rem;
+    font-weight: 600;
     cursor: pointer;
+}
+
+.llm-image-checkbox-control--inline {
+    width: auto;
+    min-height: 34px;
+    gap: 10px;
+    padding: 6px 12px;
+    border-radius: 12px;
 }
 
 .llm-image-checkbox-input {
@@ -4961,6 +5002,10 @@ textarea {
     .llm-page-layout,
     .llm-form-grid {
         grid-template-columns: 1fr;
+    }
+
+    .llm-form-grid--binding-detail-policy .llm-binding-concurrency-actions {
+        grid-column: auto;
     }
 
     .llm-memory-grid {

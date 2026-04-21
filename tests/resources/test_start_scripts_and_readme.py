@@ -1,0 +1,78 @@
+import subprocess
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_start_g3ku_powershell_help_outputs_usage_for_short_and_long_flags() -> None:
+    script = REPO_ROOT / "start-g3ku.ps1"
+
+    short = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+            "-h",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    long = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+            "--help",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert short.returncode == 0
+    assert long.returncode == 0
+    assert "Usage:" in short.stdout
+    assert "Usage:" in long.stdout
+    assert "start-g3ku.ps1" in short.stdout
+    assert "-BindHost" in short.stdout
+    assert "-Reload" in short.stdout
+    assert "-OpenBrowser" in short.stdout
+
+
+def test_start_g3ku_shell_script_has_richer_help_text() -> None:
+    shell_text = (REPO_ROOT / "start-g3ku.sh").read_text(encoding="utf-8")
+
+    assert "-h|--help)" in shell_text
+    assert "Usage: ./start-g3ku.sh" in shell_text
+    assert "Common options:" in shell_text
+    assert "--open-browser" in shell_text
+    assert "--reload" in shell_text
+
+
+def test_readme_uses_start_script_as_primary_launch_and_moves_manual_commands_later() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+    startup_section_index = readme.index("## 2. 如何启动项目")
+    developer_section_index = readme.index("## 5. 面向开发者和 Agent 的补充说明")
+
+    startup_section = readme[startup_section_index:developer_section_index]
+    developer_section = readme[developer_section_index:]
+
+    assert ".\\start-g3ku.ps1" in startup_section
+    assert "./start-g3ku.sh" in startup_section
+    assert "g3ku web" not in startup_section
+    assert "g3ku worker" not in startup_section
+    assert "g3ku web" in developer_section
+    assert "g3ku worker" in developer_section

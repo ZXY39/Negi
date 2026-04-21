@@ -957,11 +957,22 @@
     };
   }
 
-  function renderImageMultimodalField() {
+  function renderImageMultimodalField({ layout = "default" } = {}) {
     const editor = llmState().editor || emptyEditorState();
+    const fieldClasses = ["resource-field", "llm-image-checkbox-field"];
+    const controlClasses = ["llm-image-checkbox-control"];
+    let spacer = "";
+    if (layout === "header") {
+      fieldClasses.push("llm-image-checkbox-field--header");
+      spacer = '<span class="resource-field-label llm-image-checkbox-spacer" aria-hidden="true">是否为图像多模态</span>';
+    } else if (layout === "inline") {
+      fieldClasses.push("llm-image-checkbox-field--inline");
+      controlClasses.push("llm-image-checkbox-control--inline");
+    }
     return `
-      <label class="resource-field llm-image-checkbox-field" for="llm-binding-image-multimodal-enabled">
-        <span class="resource-field-label llm-image-checkbox-control">
+      <label class="${fieldClasses.join(" ")}" for="llm-binding-image-multimodal-enabled">
+        ${spacer}
+        <span class="${controlClasses.join(" ")}">
           <span>是否为图像多模态</span>
           <span class="llm-image-checkbox-input">
             <input id="llm-binding-image-multimodal-enabled" type="checkbox"${editor.imageMultimodalEnabled ? " checked" : ""}>
@@ -973,8 +984,32 @@
 
   function renderBindingPolicyFields() {
     const editor = llmState().editor || emptyEditorState();
+    if (editor.mode === "create") {
+      return `
+        <div class="llm-form-grid">
+          <label class="resource-field">
+            <span class="resource-field-label">Retry On</span>
+            <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 5xx">
+          </label>
+          <label class="resource-field">
+            <span class="resource-field-label">重试次数</span>
+            <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0">
+          </label>
+          <label class="resource-field">
+            <span class="resource-field-label">单 API key 最大并发数</span>
+            <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="text" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制；多 key 可写 3,5,7">
+            <div class="llm-inline-field-actions llm-binding-concurrency-actions">
+              <button type="button" class="toolbar-btn ghost small" data-llm-action="test-max-concurrency">测试最大并发数</button>
+            </div>
+          </label>
+        </div>
+        <label class="resource-field">
+          <span class="resource-field-label">最大上下文TOKEN *</span>
+          <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
+        </label>`;
+    }
     return `
-      <div class="llm-form-grid">
+      <div class="llm-form-grid llm-form-grid--binding-detail-policy">
         <label class="resource-field">
           <span class="resource-field-label">Retry On</span>
           <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 5xx">
@@ -986,8 +1021,11 @@
         <label class="resource-field">
           <span class="resource-field-label">单 API key 最大并发数</span>
           <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="number" min="1" step="1" inputmode="numeric" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制">
+          <div class="llm-inline-field-actions llm-binding-concurrency-actions">
+            <button type="button" class="toolbar-btn ghost small" data-llm-action="test-max-concurrency">测试最大并发数</button>
+            ${editor.mode === "create" ? "" : renderImageMultimodalField({ layout: "inline" })}
+          </div>
         </label>
-        ${editor.mode === "create" ? "" : renderImageMultimodalField()}
       </div>
       <label class="resource-field">
         <span class="resource-field-label">最大上下文TOKEN *</span>
@@ -1032,8 +1070,32 @@
 
   function renderBindingPolicyFields() {
     const editor = llmState().editor || emptyEditorState();
+    if (editor.mode === "create") {
+      return `
+        <div class="llm-form-grid">
+          <label class="resource-field">
+            <span class="resource-field-label">Retry On</span>
+            <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 5xx">
+          </label>
+          <label class="resource-field">
+            <span class="resource-field-label">重试次数</span>
+            <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0">
+          </label>
+          <label class="resource-field">
+            <span class="resource-field-label">单 API key 最大并发数</span>
+            <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="text" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制；多 key 可写 3,5,7">
+            <div class="llm-inline-field-actions llm-binding-concurrency-actions">
+              <button type="button" class="toolbar-btn ghost small" data-llm-action="test-max-concurrency">测试最大并发数</button>
+            </div>
+          </label>
+        </div>
+        <label class="resource-field">
+          <span class="resource-field-label">最大上下文TOKEN *</span>
+          <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
+        </label>`;
+    }
     return `
-      <div class="llm-form-grid">
+      <div class="llm-form-grid llm-form-grid--binding-detail-policy">
         <label class="resource-field">
           <span class="resource-field-label">Retry On</span>
           <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 5xx">
@@ -1044,12 +1106,12 @@
         </label>
         <label class="resource-field">
           <span class="resource-field-label">单 API key 最大并发数</span>
-          <div class="llm-inline-field-actions">
-            <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="text" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制；多 key 可写 3,5,7">
-            <button type="button" class="toolbar-btn ghost small" data-llm-action="test-max-concurrency">测试最大并发数</button>
-          </div>
+          <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="text" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制；多 key 可写 3,5,7">
         </label>
         ${editor.mode === "create" ? "" : renderImageMultimodalField()}
+        <div class="llm-binding-concurrency-actions">
+          <button type="button" class="toolbar-btn ghost small" data-llm-action="test-max-concurrency">测试最大并发数</button>
+        </div>
       </div>
       <label class="resource-field">
         <span class="resource-field-label">最大上下文TOKEN *</span>
@@ -1094,7 +1156,7 @@
                   <span class="resource-field-label">供应商</span>
                   <select id="llm-provider-select" class="resource-search resource-select" data-resource-select-label="LLM provider">${state.templates.map((item) => `<option value="${escv(item.provider_id)}"${trim(item.provider_id) === trim(state.editor.providerId) ? " selected" : ""}>${escv(item.display_name || item.provider_id)}</option>`).join("")}</select>
                 </label>
-                ${renderImageMultimodalField()}
+                ${renderImageMultimodalField({ layout: "header" })}
               </div>
               ${renderBindingPolicyFields()}
               <label class="resource-field">
@@ -1203,7 +1265,7 @@
                   <span class="resource-field-label">供应商</span>
                   <select id="llm-provider-select" class="resource-search resource-select" data-resource-select-label="LLM provider">${state.templates.map((item) => `<option value="${escv(item.provider_id)}"${trim(item.provider_id) === trim(state.editor.providerId) ? " selected" : ""}>${escv(item.display_name || item.provider_id)}</option>`).join("")}</select>
                 </label>
-                ${renderImageMultimodalField()}
+                ${renderImageMultimodalField({ layout: "header" })}
               </div>
               ${renderBindingPolicyFields()}
               <label class="resource-field">
