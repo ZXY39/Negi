@@ -4905,7 +4905,12 @@ function applyCeoToolEventToTurn(turn, event = {}) {
         maybeShowCeoContextLoadNotice(turn, {
             toolName,
             status,
-            detailTexts: [rawText],
+            detailTexts: [
+                rawText,
+                String(event.output_text || "").trim(),
+                String(event.output_preview_text || "").trim(),
+                String(event.arguments_text || "").trim(),
+            ],
         });
         return null;
     }
@@ -6512,8 +6517,8 @@ function renderRoleLimitControl({ scopeKey, kind, label, value, editing }) {
         return `
         <div class="model-role-limit-field" data-model-role-limit-kind="${esc(kind)}" data-model-role-limit-scope="${esc(scopeKey)}" data-model-role-fixed="1" data-model-role-fixed-value="1">
             <span class="model-role-iterations-label">${esc(label)}</span>
-            <div class="model-role-limit-fixed-track" aria-hidden="true">
-                <span class="model-role-limit-fixed-pill">固定为1</span>
+            <div class="llm-segmented-control model-role-limit-fixed-track" aria-hidden="true">
+                <span class="llm-segmented-label model-role-limit-fixed-pill">固定为1</span>
             </div>
             <input type="hidden" value="1" data-model-role-limit-input="${esc(kind)}">
         </div>`;

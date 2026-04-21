@@ -597,7 +597,13 @@ def _serialize_tool_event(event: AgentEvent) -> dict[str, Any] | None:
     payload = event.payload if isinstance(event.payload, dict) else {}
     data = _coerce_event_data(payload)
     tool_name = str(payload.get('tool_name') or 'tool').strip() or 'tool'
-    text = str(payload.get('text') or '').strip()
+    text = str(
+        payload.get('text')
+        or data.get('text')
+        or data.get('output_text')
+        or data.get('output_preview_text')
+        or ''
+    ).strip()
     is_error = bool(payload.get('is_error'))
     source = str(payload.get('source') or data.get('source') or '').strip().lower() or 'user'
     if event.type == 'tool_execution_start':
@@ -615,6 +621,9 @@ def _serialize_tool_event(event: AgentEvent) -> dict[str, Any] | None:
         'status': status,
         'tool_name': tool_name or str(data.get('tool_name') or 'tool').strip() or 'tool',
         'text': text,
+        'output_text': str(data.get('output_text') or '').strip(),
+        'output_preview_text': str(data.get('output_preview_text') or '').strip(),
+        'arguments_text': str(data.get('arguments_text') or '').strip(),
         'timestamp': event.timestamp,
         'tool_call_id': str(payload.get('tool_call_id') or data.get('tool_call_id') or ''),
         'is_error': is_error,

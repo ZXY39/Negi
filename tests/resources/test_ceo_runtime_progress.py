@@ -5352,6 +5352,30 @@ def test_ceo_tool_event_serializers_preserve_source() -> None:
     assert normalized[0]["source"] == "heartbeat"
 
 
+def test_ceo_tool_event_serializer_falls_back_to_output_text_when_text_is_blank() -> None:
+    serialized = websocket_ceo._serialize_tool_event(
+        AgentEvent(
+            type="tool_execution_end",
+            timestamp="2026-04-21T10:00:00",
+            payload={
+                "tool_name": "load_tool_context",
+                "text": "",
+                "source": "user",
+                "data": {
+                    "tool_name": "load_tool_context",
+                    "output_text": '{"tool_id":"filesystem_write"}',
+                    "tool_call_id": "call-load-tool-1",
+                },
+            },
+        )
+    )
+
+    assert serialized is not None
+    assert serialized["status"] == "success"
+    assert serialized["text"] == '{"tool_id":"filesystem_write"}'
+    assert serialized["tool_call_id"] == "call-load-tool-1"
+
+
 def test_execution_trace_snapshot_helpers_extract_task_ids_preview_and_updated_at() -> None:
     snapshot = {
         "assistant_text": "",

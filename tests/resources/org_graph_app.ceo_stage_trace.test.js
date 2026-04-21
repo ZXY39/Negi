@@ -152,8 +152,11 @@ function makeTurn({ text = "" } = {}) {
 }
 
 function noticeText(item) {
-    if (!item || !item.children?.[0]) return "";
-    return String(item.children[0].textContent || "");
+    if (!item || !item.children?.length) return "";
+    const textChild = Array.from(item.children).find((child) => (
+        String(child?.className || "") === "ceo-context-load-notice-text"
+    ));
+    return String(textChild?.textContent || item.children[0]?.textContent || "");
 }
 
 function noticeRiskClass(item) {
@@ -499,6 +502,38 @@ test("ceo stage trace hides successful loader tools from interaction flow render
     assert.match(turn.listEl.innerHTML, /memory_note/);
     assert.equal(U.ceoContextLoadNotice.children.length, 0);
     assert.equal(U.ceoContextLoadNotice.hidden, true);
+});
+
+test("ceo loader tool live events still show notices when serialized output_text carries the loader payload", () => {
+    const { applyCeoToolEventToTurn, U, __context, S } = loadApp();
+    const turn = makeTurn({ text: "" });
+    const scheduled = [];
+
+    S.tools = [{ tool_id: "filesystem_write", actions: [{ risk_level: "high" }] }];
+
+    __context.setTimeout = (callback, delay) => {
+        scheduled.push({ callback, delay });
+        return scheduled.length;
+    };
+    __context.clearTimeout = () => {};
+    U.ceoContextLoadNotice = new StubHTMLElement();
+    U.ceoContextLoadNotice.hidden = true;
+
+    const rendered = applyCeoToolEventToTurn(turn, {
+        tool_name: "load_tool_context",
+        status: "success",
+        text: "",
+        output_text: '{"tool_id":"filesystem_write"}',
+        tool_call_id: "load-tool:output-text",
+        source: "user",
+    });
+
+    assert.equal(rendered, null);
+    assert.equal(turn.listEl.children.length, 0);
+    assert.equal(U.ceoContextLoadNotice.hidden, false);
+    assert.equal(U.ceoContextLoadNotice.children.length, 1);
+    assert.match(noticeText(U.ceoContextLoadNotice.children[0]), /filesystem_write/);
+    assert.deepEqual(scheduled.map((item) => item.delay), [10000]);
 });
 
 test("ceo stage trace keeps interaction flow collapsed by default", () => {

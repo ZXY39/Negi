@@ -793,8 +793,15 @@ class WebSessionHeartbeatService:
 
     def _serialize_tool_event(self, event: AgentEvent) -> dict[str, Any] | None:
         payload = event.payload if isinstance(event.payload, dict) else {}
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
         tool_name = str(payload.get("tool_name") or "tool").strip() or "tool"
-        text = str(payload.get("text") or "").strip()
+        text = str(
+            payload.get("text")
+            or data.get("text")
+            or data.get("output_text")
+            or data.get("output_preview_text")
+            or ""
+        ).strip()
         is_error = bool(payload.get("is_error"))
         if event.type == "tool_execution_start":
             status = "running"
@@ -806,8 +813,11 @@ class WebSessionHeartbeatService:
             "status": status,
             "tool_name": tool_name,
             "text": text,
+            "output_text": str(data.get("output_text") or "").strip(),
+            "output_preview_text": str(data.get("output_preview_text") or "").strip(),
+            "arguments_text": str(data.get("arguments_text") or "").strip(),
             "timestamp": event.timestamp,
-            "tool_call_id": str(payload.get("tool_call_id") or ""),
+            "tool_call_id": str(payload.get("tool_call_id") or data.get("tool_call_id") or ""),
             "is_error": is_error,
             "source": "heartbeat",
         }

@@ -960,13 +960,15 @@
   function renderImageMultimodalField() {
     const editor = llmState().editor || emptyEditorState();
     return `
-      <div class="resource-field llm-image-toggle-field">
-        <span class="resource-field-label">是否为图像多模态</span>
-        <label class="communication-toggle llm-image-toggle-control" aria-label="是否为图像多模态">
-          <input id="llm-binding-image-multimodal-enabled" type="checkbox"${editor.imageMultimodalEnabled ? " checked" : ""}>
-          <span class="communication-toggle-track" aria-hidden="true"></span>
-        </label>
-      </div>`;
+      <label class="resource-field llm-image-checkbox-field" for="llm-binding-image-multimodal-enabled">
+        <span class="resource-field-label llm-image-checkbox-control">
+          <span>是否为图像多模态</span>
+          <span class="llm-image-checkbox-input">
+            <input id="llm-binding-image-multimodal-enabled" type="checkbox"${editor.imageMultimodalEnabled ? " checked" : ""}>
+            <span class="llm-image-checkbox-indicator" aria-hidden="true"></span>
+          </span>
+        </span>
+      </label>`;
   }
 
   function renderBindingPolicyFields() {

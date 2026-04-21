@@ -32,7 +32,7 @@ def test_frontend_model_and_session_wording_matches_latest_copy() -> None:
     assert "暂停当前 CEO 会话" not in app_js
     assert "当前没有可暂停的 CEO 回合。" not in app_js
     assert "不能在 CEO 面板直接发送。" not in app_js
-    assert '<span class="model-role-limit-fixed-pill">固定为1</span>' in app_js
+    assert '<span class="llm-segmented-label model-role-limit-fixed-pill">固定为1</span>' in app_js
     assert '<span class="policy-chip neutral">固定 1</span>' not in app_js
     assert '<span class="policy-chip neutral">只读</span>' not in app_js
 
