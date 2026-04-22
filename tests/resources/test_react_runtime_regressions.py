@@ -2303,6 +2303,67 @@ def test_tool_provider_includes_candidate_tools_from_restored_selection() -> Non
     assert 'content_search' in provided
 
 
+def test_tool_provider_restores_candidates_from_frame_when_cache_was_cleared() -> None:
+    service = object.__new__(MainRuntimeService)
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
+    )
+    service._resource_manager = SimpleNamespace(
+        tool_instances=lambda: {
+            'content_open': _ModelSchemaRecordingTool(
+                name='content_open',
+                authoritative_description='content open authoritative schema',
+                model_description='content open model schema',
+            ),
+            'content_search': _ModelSchemaRecordingTool(
+                name='content_search',
+                authoritative_description='content search authoritative schema',
+                model_description='content search model schema',
+            ),
+        }
+    )
+    service._external_tool_provider = lambda _node: {}
+    service._builtin_tool_cache = None
+    service._node_context_selection_cache = {}
+    service.log_service = _FakeLogService()
+    service.log_service.upsert_frame(
+        'task-cache-miss-provider',
+        {
+            'node_id': 'node-cache-miss-provider',
+            'callable_tool_names': ['load_tool_context', 'content_open'],
+            'candidate_tool_names': ['content_search'],
+            'selected_skill_ids': [],
+            'candidate_skill_ids': [],
+            'rbac_visible_tool_names': ['load_tool_context', 'content_open', 'content_search'],
+            'rbac_visible_skill_ids': [],
+            'hydrated_executor_state': ['content_open'],
+            'hydrated_executor_names': ['content_open'],
+            'messages': [
+                {'role': 'system', 'content': 'system'},
+                {'role': 'user', 'content': '{"prompt":"verify framework"}'},
+            ],
+        },
+    )
+    service.list_effective_tool_names = (
+        lambda *, actor_role, session_id: ['load_tool_context', 'content_open', 'content_search']
+    )
+    service.list_contract_visible_skill_resources = lambda *, actor_role, session_id: []
+    service.list_visible_tool_families = lambda *, actor_role, session_id: []
+    service._actor_role_for_node = lambda node: 'inspection'
+
+    node = SimpleNamespace(
+        task_id='task-cache-miss-provider',
+        node_id='node-cache-miss-provider',
+        node_kind='acceptance',
+        can_spawn_children=False,
+    )
+
+    provided = service._tool_provider(node)
+
+    assert 'content_open' in provided
+    assert 'content_search' in provided
+
+
 def test_execution_selector_web_research_query_does_not_directly_promote_candidates() -> None:
     visible_tools = {
         'web_fetch': _ModelSchemaRecordingTool(

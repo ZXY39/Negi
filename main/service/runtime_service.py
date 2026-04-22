@@ -6434,6 +6434,24 @@ class MainRuntimeService:
         cached = cache.get(cache_key)
         return dict(cached) if isinstance(cached, dict) else None
 
+    def _tool_provider_selection_entry(self, *, task, node: NodeRecord) -> dict[str, Any] | None:
+        cached = self._cached_node_context_selection_entry(task=task, node=node)
+        if isinstance(cached, dict) and isinstance(cached.get('selection'), NodeContextSelectionResult):
+            return cached
+
+        restored = self._restore_node_context_selection_entry(task=task, node=node)
+        if restored is None:
+            return None
+
+        cache_key = self._node_context_selection_cache_key(task=task, node=node)
+        if cache_key is not None:
+            cache = getattr(self, '_node_context_selection_cache', None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._node_context_selection_cache = cache
+            cache[cache_key] = restored
+        return restored
+
     @staticmethod
     def _skill_record_value(record: Any, key: str) -> Any:
         if isinstance(record, dict):
@@ -6737,8 +6755,9 @@ class MainRuntimeService:
                 visible_tool_names=visible_tool_names,
             )
         )
-        cached = self._cached_node_context_selection_entry(task=(task or SimpleNamespace(task_id=node.task_id, session_id=session_id)), node=node)
-        selection = cached.get('selection') if isinstance(cached, dict) else None
+        task_for_selection = task or SimpleNamespace(task_id=node.task_id, session_id=session_id)
+        selection_entry = self._tool_provider_selection_entry(task=task_for_selection, node=node)
+        selection = selection_entry.get('selection') if isinstance(selection_entry, dict) else None
         for raw_name in list(getattr(selection, 'selected_tool_names', []) or []):
             name = str(raw_name or '').strip()
             if name and name in visible_tool_names:
