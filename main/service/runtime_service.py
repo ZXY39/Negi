@@ -6618,10 +6618,15 @@ class MainRuntimeService:
                 }
                 for skill_id in selected_skill_ids
             ]
+        restored_selected_tool_names: list[str] = []
+        for raw_name in [*list(callable_tool_names), *list(candidate_tool_names)]:
+            name = str(raw_name or '').strip()
+            if name and name not in restored_selected_tool_names:
+                restored_selected_tool_names.append(name)
         selection = NodeContextSelectionResult(
             mode='persisted_frame_restore',
             selected_skill_ids=selected_skill_ids,
-            selected_tool_names=callable_tool_names,
+            selected_tool_names=restored_selected_tool_names,
             candidate_skill_ids=candidate_skill_ids,
             candidate_tool_names=candidate_tool_names,
             trace={'mode': 'persisted_frame_restore'},
@@ -6735,6 +6740,10 @@ class MainRuntimeService:
         cached = self._cached_node_context_selection_entry(task=(task or SimpleNamespace(task_id=node.task_id, session_id=session_id)), node=node)
         selection = cached.get('selection') if isinstance(cached, dict) else None
         for raw_name in list(getattr(selection, 'selected_tool_names', []) or []):
+            name = str(raw_name or '').strip()
+            if name and name in visible_tool_names:
+                selected_visible.add(name)
+        for raw_name in list(getattr(selection, 'candidate_tool_names', []) or []):
             name = str(raw_name or '').strip()
             if name and name in visible_tool_names:
                 selected_visible.add(name)

@@ -2255,6 +2255,54 @@ def test_tool_provider_includes_hydrated_tools_even_when_selection_cache_exclude
     assert 'filesystem_write' in provided
 
 
+def test_tool_provider_includes_candidate_tools_from_restored_selection() -> None:
+    service = object.__new__(MainRuntimeService)
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
+    )
+    service._resource_manager = SimpleNamespace(
+        tool_instances=lambda: {
+            'content_open': _ModelSchemaRecordingTool(
+                name='content_open',
+                authoritative_description='content open authoritative schema',
+                model_description='content open model schema',
+            ),
+            'content_search': _ModelSchemaRecordingTool(
+                name='content_search',
+                authoritative_description='content search authoritative schema',
+                model_description='content search model schema',
+            ),
+        }
+    )
+    service._external_tool_provider = lambda _node: {}
+    service._builtin_tool_cache = None
+    service._node_context_selection_cache = {
+        ('task-restored-provider', 'node-restored-provider'): {
+            'selection': NodeContextSelectionResult(
+                mode='persisted_frame_restore',
+                selected_tool_names=['load_tool_context'],
+                candidate_tool_names=['content_open', 'content_search'],
+            )
+        }
+    }
+    service.log_service = _FakeLogService()
+    service.list_effective_tool_names = (
+        lambda *, actor_role, session_id: ['load_tool_context', 'content_open', 'content_search']
+    )
+    service._actor_role_for_node = lambda node: 'execution'
+
+    node = SimpleNamespace(
+        task_id='task-restored-provider',
+        node_id='node-restored-provider',
+        node_kind='execution',
+        can_spawn_children=False,
+    )
+    provided = service._tool_provider(node)
+
+    assert 'content_open' in provided
+    assert 'content_search' in provided
+
+
 def test_execution_selector_web_research_query_does_not_directly_promote_candidates() -> None:
     visible_tools = {
         'web_fetch': _ModelSchemaRecordingTool(

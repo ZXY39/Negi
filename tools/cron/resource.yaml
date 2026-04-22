@@ -39,16 +39,16 @@ parameters:
       description: Deprecated compatibility field. Reminder stopping is controlled by `max_runs`.
     every_seconds:
       type: integer
-      description: Interval in seconds for recurring tasks.
+      description: Interval in seconds for recurring tasks. Choose exactly one schedule mode from `every_seconds`, `cron_expr`, or `at`.
     cron_expr:
       type: string
-      description: Cron expression, for example `0 9 * * *`.
+      description: Cron expression, for example `0 9 * * *`. `tz` is only valid when `cron_expr` is used.
     tz:
       type: string
-      description: IANA time zone for the cron expression, for example `America/Vancouver`.
+      description: IANA time zone for the cron expression only, for example `America/Vancouver`. Do not send `tz` with `at` or `every_seconds`.
     at:
       type: string
-      description: One-shot ISO datetime, for example `2026-02-12T10:30:00`.
+      description: One-shot ISO datetime, for example `2026-02-12T10:30:00+08:00`. Do not combine `at` with `tz`; include the offset in the datetime itself when needed.
     job_id:
       type: string
       description: Task id used by `remove`.

@@ -3736,6 +3736,82 @@ async def test_restore_node_context_selection_prefers_frame_contract_over_stale_
 
 
 @pytest.mark.asyncio
+async def test_restore_node_context_selection_keeps_candidate_tools_in_selected_tool_names(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "messages": [
+                    {"role": "system", "content": "system"},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "prompt": "stable bootstrap",
+                                "callable_tool_names": ["load_tool_context", "web_fetch"],
+                                "candidate_tools": ["content_open", "content_search"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                "callable_tool_names": ["load_tool_context", "web_fetch"],
+                "candidate_tool_names": ["content_open", "content_search"],
+                "selected_skill_ids": [],
+                "candidate_skill_ids": [],
+                "rbac_visible_tool_names": [
+                    "load_tool_context",
+                    "web_fetch",
+                    "content_open",
+                    "content_search",
+                ],
+                "rbac_visible_skill_ids": [],
+                "model_visible_tool_names": ["load_tool_context", "web_fetch"],
+                "candidate_tool_items": [
+                    {"tool_id": "content_open", "description": "open content"},
+                    {"tool_id": "content_search", "description": "search content"},
+                ],
+                "hydrated_executor_names": ["web_fetch"],
+                "hydrated_executor_state": ["web_fetch"],
+            },
+            publish_snapshot=False,
+        )
+
+        restored = service._restore_node_context_selection_entry(task=task, node=root)
+
+        assert restored is not None
+        assert restored["selection"].selected_tool_names == [
+            "load_tool_context",
+            "web_fetch",
+            "content_open",
+            "content_search",
+        ]
+        assert restored["selection"].candidate_tool_names == ["content_open", "content_search"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_restore_node_context_selection_raises_when_frame_missing_canonical_contract_fields(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
