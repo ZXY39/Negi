@@ -1474,6 +1474,15 @@ class ReActToolLoop:
         frame = self._runtime_frame(task.task_id, node.node_id)
         if not isinstance(frame, dict):
             return None
+        distribution = dict((runtime_context or {}).get('distribution_state') or {})
+        if str(distribution.get('mode') or '').strip() == 'task_wide_barrier':
+            blocked_node_ids = {
+                str(item or '').strip()
+                for item in list(distribution.get('blocked_node_ids') or [])
+                if str(item or '').strip()
+            }
+            if str(node.node_id or '').strip() in blocked_node_ids:
+                return None
         if str(frame.get('phase') or '').strip() != 'waiting_children':
             return None
         if list(frame.get('pending_tool_calls') or []):

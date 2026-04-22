@@ -34,6 +34,7 @@ from main.runtime.append_notice_context import (
     consume_pending_append_notice_records,
     normalize_append_notice_context,
     normalize_pending_append_notice_records,
+    record_pending_append_notice_records,
     record_consumed_notifications,
 )
 from main.runtime.internal_tools import (
@@ -615,10 +616,78 @@ class NodeRunner:
                 node_id=node_id,
                 notification_ids=pending_root_notice_ids,
             )
+        distribution = self._distribution_runtime_state(task_id)
+        if (
+            str(distribution.get('mode') or '').strip() == 'task_wide_barrier'
+            and str(distribution.get('state') or '').strip() == 'resume_ready'
+        ):
+            pending_notice_node_ids = self.nodes_with_pending_distribution_notices(task_id=task_id)
+            if pending_notice_node_ids:
+                self._log_service.update_task_runtime_meta(
+                    task_id,
+                    distribution={
+                        'active_epoch_id': str(distribution.get('active_epoch_id') or '').strip(),
+                        'state': 'resume_ready',
+                        'mode': 'task_wide_barrier',
+                        'frontier_node_ids': [],
+                        'blocked_node_ids': [],
+                        'pending_notice_node_ids': list(pending_notice_node_ids),
+                        'queued_epoch_count': int(distribution.get('queued_epoch_count') or 0),
+                        'pending_mailbox_count': self.pending_distribution_mailbox_count(task_id=task_id),
+                    },
+                )
+            else:
+                self._log_service.update_task_runtime_meta(
+                    task_id,
+                    distribution={
+                        'active_epoch_id': '',
+                        'state': '',
+                        'mode': '',
+                        'frontier_node_ids': [],
+                        'blocked_node_ids': [],
+                        'pending_notice_node_ids': [],
+                        'queued_epoch_count': 0,
+                        'pending_mailbox_count': 0,
+                    },
+                )
 
     def _pending_root_notice_records(self, *, node: NodeRecord) -> list[dict[str, Any]]:
         metadata = dict(node.metadata or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
         return normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
+
+    def pending_distribution_mailbox_count(self, *, task_id: str) -> int:
+        count = 0
+        for record in list(self._store.list_task_nodes(task_id) or []):
+            node_id = str(getattr(record, 'node_id', '') or '').strip()
+            if not node_id:
+                continue
+            count += sum(
+                1
+                for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
+                if str(item.status or '').strip() == 'delivered'
+            )
+        return count
+
+    def nodes_with_pending_distribution_notices(self, *, task_id: str) -> list[str]:
+        node_ids: list[str] = []
+        seen: set[str] = set()
+        for record in list(self._store.list_task_nodes(task_id) or []):
+            node_id = str(getattr(record, 'node_id', '') or '').strip()
+            if not node_id or node_id in seen:
+                continue
+            node = self._store.get_node(node_id)
+            if node is None:
+                continue
+            has_pending_root = bool(self._pending_root_notice_records(node=node))
+            has_pending_child = any(
+                str(item.status or '').strip() == 'delivered'
+                for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
+            )
+            if not has_pending_root and not has_pending_child:
+                continue
+            seen.add(node_id)
+            node_ids.append(node_id)
+        return node_ids
 
     def _pending_root_notice_records_by_ids(self, *, node_id: str, notification_ids: list[str]) -> list[dict[str, Any]]:
         ids = {str(item or '').strip() for item in list(notification_ids or []) if str(item or '').strip()}
@@ -760,21 +829,79 @@ class NodeRunner:
         ]
         return '\n\n'.join(messages)
 
-    def _distribution_child_payloads(self, *, task_id: str, child_node_ids: list[str]) -> list[dict[str, Any]]:
+    def _distribution_child_sidecar(self, *, task_id: str, child_node_ids: list[str]) -> list[dict[str, Any]]:
         payloads: list[dict[str, Any]] = []
         for child_node_id in list(child_node_ids or []):
             child = self._store.get_node(child_node_id)
             if child is None or str(child.task_id or '').strip() != str(task_id or '').strip():
                 continue
+            detail = self._store.get_task_node_detail(child_node_id)
+            prompt_summary = ' '.join(str(child.prompt or '').split())[:240]
+            latest_output_preview = ''
+            if detail is not None:
+                prompt_summary = str(getattr(detail, 'prompt_summary', '') or prompt_summary).strip() or prompt_summary
+                latest_output_preview = str(getattr(detail, 'output_text', '') or '').strip()[:240]
             payloads.append(
                 {
                     'node_id': child.node_id,
-                    'goal': str(child.goal or ''),
-                    'prompt_summary': ' '.join(str(child.prompt or '').split())[:240],
                     'status': str(child.status or ''),
+                    'goal': str(child.goal or ''),
+                    'prompt_summary': prompt_summary,
+                    'latest_output_preview': latest_output_preview,
+                    'failure_reason': str(child.failure_reason or ''),
+                    'is_live_in_current_tree': True,
                 }
             )
         return payloads
+
+    def _root_distribution_notice_records(self, *, epoch) -> list[dict[str, Any]]:
+        payload = dict(epoch.payload or {})
+        queued_root_messages = [
+            str(item or '').strip()
+            for item in list(payload.get('queued_root_messages') or [])
+            if str(item or '').strip()
+        ]
+        if not queued_root_messages:
+            queued_root_messages = [str(epoch.root_message or '').strip()]
+        epoch_id = str(epoch.epoch_id or '').strip()
+        root_node_id = str(epoch.root_node_id or '').strip()
+        created_at = now_iso()
+        records: list[dict[str, Any]] = []
+        for index, message in enumerate(queued_root_messages, start=1):
+            if not message:
+                continue
+            records.append(
+                {
+                    'notification_id': f'root-notice:{epoch_id}:{index}',
+                    'epoch_id': epoch_id,
+                    'source_node_id': root_node_id,
+                    'message': message,
+                    'created_at': created_at,
+                    'order_index': index,
+                }
+            )
+        return records
+
+    def _queue_pending_root_distribution_notices(self, *, epoch) -> None:
+        root_node_id = str(epoch.root_node_id or '').strip()
+        if not root_node_id:
+            return
+        records = self._root_distribution_notice_records(epoch=epoch)
+        if not records:
+            return
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            updated = record_pending_append_notice_records(
+                metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY),
+                records=records,
+            )
+            if updated:
+                metadata[PENDING_APPEND_NOTICE_RECORDS_KEY] = updated
+            else:
+                metadata.pop(PENDING_APPEND_NOTICE_RECORDS_KEY, None)
+            return metadata
+
+        self._log_service.update_node_metadata(root_node_id, _mutate)
 
     def _persist_distribution_delivery(
         self,
@@ -825,7 +952,7 @@ class NodeRunner:
             return NodeFinalResult(status='success', summary=f'distribution turn already completed for {node.node_id}')
         incoming_message = self._distribution_node_message(task_id=task.task_id, node=node, epoch=epoch)
         live_child_node_ids = self.live_distribution_child_node_ids(task_id=task.task_id, parent_node_id=node.node_id)
-        child_payloads = self._distribution_child_payloads(task_id=task.task_id, child_node_ids=live_child_node_ids)
+        child_payloads = self._distribution_child_sidecar(task_id=task.task_id, child_node_ids=live_child_node_ids)
         prompt_messages = [
             {'role': 'system', 'content': load_prompt('node_message_distribution.md').strip()},
             {
@@ -937,6 +1064,18 @@ class NodeRunner:
             publish_snapshot=True,
         )
         epoch_payload = dict(epoch.payload or {})
+        if str(node.node_id or '').strip() == str(epoch.root_node_id or '').strip():
+            self._queue_pending_root_distribution_notices(epoch=epoch)
+        decision_records = list(epoch_payload.get('decision_records') or [])
+        decision_records.append(
+            {
+                'source_node_id': str(node.node_id or '').strip(),
+                'notes': str(submitted.get('notes') or '').strip(),
+                'local_notice_kept': str(node.node_id or '').strip() == str(epoch.root_node_id or '').strip(),
+                'delivered_child_ids': list(delivered_child_ids),
+                'created_at': now_iso(),
+            }
+        )
         distributed_node_ids = [
             str(item or '').strip()
             for item in list(epoch_payload.get('distributed_node_ids') or [])
@@ -958,6 +1097,7 @@ class NodeRunner:
                     'state': 'distributing',
                     'payload': {
                         **epoch_payload,
+                        'decision_records': decision_records,
                         'distributed_node_ids': distributed_node_ids,
                         'next_frontier_node_ids': next_frontier_node_ids,
                     },
@@ -969,9 +1109,20 @@ class NodeRunner:
             distribution={
                 'active_epoch_id': epoch_id,
                 'state': str(distribution.get('state') or 'distributing') or 'distributing',
+                'mode': str(distribution.get('mode') or '').strip(),
                 'frontier_node_ids': [
                     str(item or '').strip()
                     for item in list(distribution.get('frontier_node_ids') or [])
+                    if str(item or '').strip()
+                ],
+                'blocked_node_ids': [
+                    str(item or '').strip()
+                    for item in list(distribution.get('blocked_node_ids') or [])
+                    if str(item or '').strip()
+                ],
+                'pending_notice_node_ids': [
+                    str(item or '').strip()
+                    for item in list(distribution.get('pending_notice_node_ids') or [])
                     if str(item or '').strip()
                 ],
                 'queued_epoch_count': int(distribution.get('queued_epoch_count') or 0),
@@ -1135,6 +1286,7 @@ class NodeRunner:
             'project_python_hint': str(project_environment.get('project_python_hint') or ''),
             'task_temp_dir': task_temp_dir,
             'temp_dir': task_temp_dir,
+            'distribution_state': self._distribution_runtime_state(task.task_id),
             'tool_snapshot_supplier': (
                 (lambda current_task_id=task.task_id: self._tool_snapshot_supplier(current_task_id))
                 if callable(getattr(self, '_tool_snapshot_supplier', None))
@@ -3167,6 +3319,23 @@ class NodeRunner:
         if str(entry.get('child_node_id') or '').strip() != str(node.node_id or '').strip():
             return False
         return self.node_is_in_live_distribution_tree(task_id=task.task_id, node_id=parent.node_id)
+
+    def live_distribution_tree_node_ids(self, *, task_id: str) -> list[str]:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return []
+        node_ids: list[str] = []
+        for record in list(self._store.list_task_nodes(task_id) or []):
+            node_id = str(getattr(record, 'node_id', '') or '').strip()
+            if not node_id:
+                continue
+            if not self.node_is_in_live_distribution_tree(task_id=task_id, node_id=node_id):
+                continue
+            node_ids.append(node_id)
+        root_node_id = str(task.root_node_id or '').strip()
+        if root_node_id and root_node_id not in node_ids:
+            node_ids.insert(0, root_node_id)
+        return node_ids
 
     def _compose_acceptance_prompt(
         self,

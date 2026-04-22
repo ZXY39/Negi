@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -209,11 +210,16 @@ async def test_task_append_notice_requests_pause_then_creates_distribution_epoch
         assert len(epochs) == 1
         assert epochs[0].state == "pause_requested"
         assert epochs[0].root_node_id == record.root_node_id
+        assert epochs[0].payload.get("barrier_root_node_id") == record.root_node_id
+        assert epochs[0].payload.get("barrier_node_ids") == [record.root_node_id]
         assert epochs[0].root_message == "新增董事会验收格式"
         assert distribution == {
             "active_epoch_id": epochs[0].epoch_id,
-            "state": "pause_requested",
+            "state": "barrier_requested",
+            "mode": "task_wide_barrier",
             "frontier_node_ids": [],
+            "blocked_node_ids": [record.root_node_id],
+            "pending_notice_node_ids": [record.root_node_id],
             "queued_epoch_count": 1,
             "pending_mailbox_count": 0,
         }
@@ -670,9 +676,7 @@ async def _seed_distributing_epoch(
     return updated
 
 
-async def seed_live_root_with_two_running_children(
-    service: MainRuntimeService,
-):
+async def seed_live_root_with_two_running_children(service: MainRuntimeService):
     record = await service.create_task("鏁寸悊閲嶇偣瀹㈡埛娴佸け淇″彿", session_id="web:ceo-demo")
     task = service.get_task(record.task_id)
     root = service.store.get_node(record.root_node_id)
@@ -1195,6 +1199,68 @@ async def test_distribution_turn_omits_non_targeted_children(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_distribution_turn_uses_runtime_child_snapshot_and_persists_decisions(tmp_path: Path) -> None:
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_message_distribution",
+                        "arguments": {
+                            "children": [
+                                {"target_node_id": "CHILD_ONE", "message": "branch-a specific notice"},
+                            ],
+                            "notes": "keep one local notice on root",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
+        epoch = await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="new constraint",
+            frontier_node_ids=[root.node_id],
+        )
+        backend._responses[0].tool_calls[0]["arguments"]["children"][0]["target_node_id"] = branch_a.node_id
+
+        task = service.get_task(record.task_id)
+        assert task is not None
+
+        await service.node_runner._run_distribution_node(task=task, node=root)
+
+        assert len(backend.calls) == 1
+        prompt_payload = json.loads(str(backend.calls[0]["messages"][1]["content"] or "{}"))
+        first_child_payload = next(
+            item for item in list(prompt_payload.get("live_children") or [])
+            if item["node_id"] == branch_a.node_id
+        )
+        assert first_child_payload["is_live_in_current_tree"] is True
+
+        refreshed_epoch = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
+        assert refreshed_epoch is not None
+        decision_records = list((refreshed_epoch.payload or {}).get("decision_records") or [])
+        assert decision_records[0]["source_node_id"] == root.node_id
+        assert decision_records[0]["local_notice_kept"] is True
+        assert decision_records[0]["delivered_child_ids"] == [branch_a.node_id]
+
+        detail = service.query_service.get_node_detail(record.task_id, root.node_id, detail_level="full")
+        assert detail is not None
+        assert detail.message_list[0]["status"] == "pending"
+        assert detail.message_list[0]["deliveries"][0]["target_node_id"] == branch_a.node_id
+        assert branch_b.node_id not in {
+            item["target_node_id"] for item in list(detail.message_list[0]["deliveries"] or [])
+        }
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_success_execution_node_with_acceptance_is_reactivated_and_acceptance_invalidated_on_delivery(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:
@@ -1541,8 +1607,57 @@ async def test_distribution_epoch_completes_and_task_resumes_ordinary_execution(
         assert updated_root.failure_reason == ""
         assert updated_epoch is not None
         assert updated_epoch.state == "completed"
-        assert distribution["state"] == ""
+        assert distribution["state"] == "resume_ready"
+        assert distribution["mode"] == "task_wide_barrier"
         assert distribution["frontier_node_ids"] == []
+        assert distribution["pending_notice_node_ids"] == [record.root_node_id]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_epoch_enters_resume_ready_while_root_notice_is_still_pending(tmp_path: Path) -> None:
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_message_distribution",
+                        "arguments": {
+                            "children": [],
+                            "notes": "root node keeps the new requirement",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        epoch = await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="新增董事会验收格式",
+            frontier_node_ids=[record.root_node_id],
+        )
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        updated_epoch = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
+        updated_root = service.store.get_node(record.root_node_id)
+        progress = service.query_service.view_progress(record.task_id, mark_read=False)
+
+        assert updated_epoch is not None
+        assert updated_epoch.state == "completed"
+        assert updated_root is not None
+        assert list((updated_root.metadata or {}).get("pending_append_notice_records") or [])
+        assert progress is not None
+        assert progress.live_state is not None
+        assert progress.live_state.distribution.state == "resume_ready"
+        assert progress.live_state.distribution.mode == "task_wide_barrier"
+        assert progress.live_state.distribution.pending_notice_node_ids == [record.root_node_id]
     finally:
         await service.close()
 
@@ -1839,7 +1954,10 @@ async def test_task_progress_exposes_distribution_runtime_state(tmp_path: Path) 
             distribution={
                 "active_epoch_id": "epoch:summary",
                 "state": "distributing",
+                "mode": "task_wide_barrier",
                 "frontier_node_ids": ["node:root", "node:child"],
+                "blocked_node_ids": ["node:root"],
+                "pending_notice_node_ids": ["node:child"],
                 "queued_epoch_count": 1,
                 "pending_mailbox_count": 2,
             },
@@ -1851,7 +1969,10 @@ async def test_task_progress_exposes_distribution_runtime_state(tmp_path: Path) 
         assert progress.live_state is not None
         assert progress.live_state.distribution.active_epoch_id == "epoch:summary"
         assert progress.live_state.distribution.state == "distributing"
+        assert progress.live_state.distribution.mode == "task_wide_barrier"
         assert progress.live_state.distribution.frontier_node_ids == ["node:root", "node:child"]
+        assert progress.live_state.distribution.blocked_node_ids == ["node:root"]
+        assert progress.live_state.distribution.pending_notice_node_ids == ["node:child"]
         assert progress.live_state.distribution.pending_mailbox_count == 2
     finally:
         await service.close()
@@ -1875,6 +1996,8 @@ async def test_task_append_notice_creates_barrier_state_for_live_tree(tmp_path: 
         assert set(epoch.payload["barrier_node_ids"]) == {root.node_id, branch_a.node_id, branch_b.node_id}
 
         progress = service.query_service.view_progress(record.task_id, mark_read=False)
+        assert progress is not None
+        assert progress.live_state is not None
         assert progress.live_state.distribution.state == "barrier_requested"
         assert set(progress.live_state.distribution.blocked_node_ids) == {root.node_id, branch_a.node_id, branch_b.node_id}
     finally:
@@ -1895,9 +2018,79 @@ async def test_tree_snapshot_marks_nodes_waiting_for_distribution_barrier(tmp_pa
         )
 
         snapshot = service.query_service.get_tree_snapshot(record.task_id)
+        assert snapshot is not None
         assert snapshot.nodes_by_id[root.node_id].distribution_status == "barrier_blocked"
         assert snapshot.nodes_by_id[branch_a.node_id].distribution_status == "barrier_blocked"
         assert snapshot.nodes_by_id[branch_b.node_id].distribution_status == "barrier_blocked"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_barrier_drains_running_tree_before_frontier_propagation(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
+
+        service.log_service.replace_runtime_frames(
+            record.task_id,
+            active_node_ids=[branch_a.node_id, branch_b.node_id],
+            runnable_node_ids=[],
+            waiting_node_ids=[],
+            frames=[
+                {
+                    **service.log_service._default_frame(
+                        node_id=branch_a.node_id,
+                        depth=branch_a.depth,
+                        node_kind=branch_a.node_kind,
+                        phase="model.chat.await_response",
+                    ),
+                    "pending_tool_calls": [],
+                    "tool_calls": [],
+                    "child_pipelines": [],
+                    "pending_child_specs": [],
+                    "partial_child_results": [],
+                    "last_error": "",
+                },
+                {
+                    **service.log_service._default_frame(
+                        node_id=branch_b.node_id,
+                        depth=branch_b.depth,
+                        node_kind=branch_b.node_kind,
+                        phase="model.chat.await_response",
+                    ),
+                    "pending_tool_calls": [],
+                    "tool_calls": [],
+                    "child_pipelines": [],
+                    "pending_child_specs": [],
+                    "partial_child_results": [],
+                    "last_error": "",
+                },
+            ],
+            publish_snapshot=False,
+        )
+
+        await service.task_append_notice(
+            task_ids=[record.task_id],
+            node_ids=[],
+            message="new requirement",
+            session_id=record.session_id,
+        )
+
+        progress = service.query_service.view_progress(record.task_id, mark_read=False)
+        assert progress is not None
+        assert progress.live_state is not None
+        assert progress.live_state.distribution.state == "barrier_requested"
+
+        await service.task_actor_service._run_distribution_epoch(record.task_id)
+
+        refreshed = service.query_service.view_progress(record.task_id, mark_read=False)
+        assert refreshed is not None
+        assert refreshed.live_state is not None
+        assert refreshed.live_state.distribution.state == "barrier_draining"
+        assert root.node_id in refreshed.live_state.distribution.blocked_node_ids
+        assert branch_a.node_id in refreshed.live_state.distribution.blocked_node_ids
+        assert branch_b.node_id in refreshed.live_state.distribution.blocked_node_ids
     finally:
         await service.close()
 

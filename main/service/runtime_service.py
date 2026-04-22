@@ -2291,7 +2291,7 @@ class MainRuntimeService:
             active_epoch_id = str(current_state.get('active_epoch_id') or '').strip()
             active_state = str(current_state.get('state') or '').strip()
             queued_epoch: dict[str, Any] | None = None
-            if active_epoch_id and active_state == 'pause_requested':
+            if active_epoch_id and active_state in {'pause_requested', 'barrier_requested'}:
                 self._coalesce_pending_root_message(task_id=task_id, root_message=normalized_message)
             else:
                 queued_epoch = self._queue_distribution_epoch(
@@ -2345,16 +2345,41 @@ class MainRuntimeService:
                 if str(item.status or '').strip() in {'pending_distribution', 'delivered'}
             )
         frontier_node_ids = []
+        blocked_node_ids = []
+        pending_notice_node_ids = []
+        mode = ''
+        state = str(active.state or '').strip() if active is not None else ''
         if active is not None and isinstance(active.payload, dict):
             frontier_node_ids = [
                 str(item or '').strip()
                 for item in list(active.payload.get('frontier_node_ids') or [])
                 if str(item or '').strip()
             ]
+            blocked_node_ids = [
+                str(item or '').strip()
+                for item in list(active.payload.get('barrier_node_ids') or [])
+                if str(item or '').strip()
+            ]
+            if blocked_node_ids:
+                mode = 'task_wide_barrier'
+                if state == 'pause_requested':
+                    state = 'barrier_requested'
+                pending_notice_node_ids = [
+                    str(item or '').strip()
+                    for item in list(active.payload.get('pending_notice_node_ids') or [])
+                    if str(item or '').strip()
+                ]
+                if not pending_notice_node_ids:
+                    root_node_id = str(active.root_node_id or '').strip()
+                    if root_node_id:
+                        pending_notice_node_ids = [root_node_id]
         return {
             'active_epoch_id': str(active.epoch_id or '').strip() if active is not None else '',
-            'state': str(active.state or '').strip() if active is not None else '',
+            'state': state,
+            'mode': mode,
             'frontier_node_ids': frontier_node_ids,
+            'blocked_node_ids': blocked_node_ids,
+            'pending_notice_node_ids': pending_notice_node_ids,
             'queued_epoch_count': queued_epoch_count,
             'pending_mailbox_count': pending_mailbox_count,
         }
@@ -2364,17 +2389,30 @@ class MainRuntimeService:
         active_states = {'pause_requested', 'paused', 'distributing', 'resuming'}
         next_state = 'queued' if any(str(epoch.state or '').strip() in active_states for epoch in epochs) else 'pause_requested'
         epoch_id = new_command_id().replace('command:', 'epoch:', 1)
+        barrier_node_ids = list(
+            dict.fromkeys(
+                list(getattr(self.node_runner, 'live_distribution_tree_node_ids', lambda **_: [])(task_id=task_id) or [])
+            )
+        )
+        normalized_root_node_id = str(root_node_id or '').strip()
+        if normalized_root_node_id and normalized_root_node_id not in barrier_node_ids:
+            barrier_node_ids.insert(0, normalized_root_node_id)
         record = self.store.upsert_task_message_distribution_epoch(
             TaskMessageDistributionEpoch(
                 epoch_id=epoch_id,
                 task_id=task_id,
-                root_node_id=str(root_node_id or '').strip(),
+                root_node_id=normalized_root_node_id,
                 root_message=str(root_message or '').strip(),
                 state=next_state,
                 created_at=now_iso(),
                 payload={
+                    'barrier_root_node_id': normalized_root_node_id,
+                    'barrier_node_ids': list(barrier_node_ids),
+                    'drain_pending_node_ids': list(barrier_node_ids),
                     'frontier_node_ids': [],
                     'queued_root_messages': [str(root_message or '').strip()],
+                    'distributed_node_ids': [],
+                    'decision_records': [],
                 },
             )
         )
@@ -2435,7 +2473,10 @@ class MainRuntimeService:
             distribution={
                 'active_epoch_id': '',
                 'state': '',
+                'mode': '',
                 'frontier_node_ids': [],
+                'blocked_node_ids': [],
+                'pending_notice_node_ids': [],
                 'queued_epoch_count': 0,
                 'pending_mailbox_count': 0,
             },

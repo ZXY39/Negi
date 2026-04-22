@@ -2669,6 +2669,311 @@ def test_build_execution_trace_steps_no_longer_inserts_notice_pseudo_stage() -> 
     assert "消息通知" not in result["titles"]
 
 
+def test_render_tree_shows_pending_notice_banner_for_resume_ready_barrier() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        class StubElement {
+          constructor(tag = "div") {
+            this.tagName = tag.toUpperCase();
+            this.children = [];
+            this.className = "";
+            this.dataset = {};
+            this.style = {};
+            this.hidden = false;
+            this.attributes = {};
+            this.parentNode = null;
+            this.textContent = "";
+            this.classList = {
+              add: (...tokens) => {
+                const set = new Set(String(this.className || "").split(/\\s+/).filter(Boolean));
+                tokens.forEach((token) => set.add(String(token || "")));
+                this.className = [...set].join(" ");
+              },
+              remove: (...tokens) => {
+                const blocked = new Set(tokens.map((token) => String(token || "")));
+                this.className = String(this.className || "")
+                  .split(/\\s+/)
+                  .filter((token) => token && !blocked.has(token))
+                  .join(" ");
+              },
+              contains: (token) => String(this.className || "").split(/\\s+/).includes(String(token || "")),
+              toggle: (token, force) => {
+                const shouldAdd = force == null ? !this.classList.contains(token) : !!force;
+                if (shouldAdd) this.classList.add(token);
+                else this.classList.remove(token);
+                return shouldAdd;
+              },
+            };
+          }
+          appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
+          setAttribute(name, value) { this.attributes[name] = String(value); }
+          querySelector() { return null; }
+          querySelectorAll() { return []; }
+          addEventListener() {}
+          closest() { return null; }
+        }
+        global.Element = StubElement;
+        global.HTMLElement = StubElement;
+        global.document = {
+          createElement: (tag) => new StubElement(tag),
+        };
+        global.S = {
+          currentTaskId: "task:test",
+          currentTask: { metadata: {} },
+          taskSummary: { active_node_count: 0, runnable_node_count: 0, waiting_node_count: 0 },
+          taskRuntimeSummary: {
+            distribution: {
+              active_epoch_id: "epoch:demo",
+              mode: "task_wide_barrier",
+              state: "resume_ready",
+              frontier_node_ids: [],
+              blocked_node_ids: [],
+              pending_notice_node_ids: ["root"],
+              queued_epoch_count: 0,
+              pending_mailbox_count: 0,
+            },
+          },
+          treeRootNodeId: "root",
+          treeNodesById: {
+            root: {
+              node_id: "root",
+              title: "Root",
+              status: "in_progress",
+              node_kind: "execution",
+              rounds: [],
+              auxiliary_child_ids: [],
+              default_round_id: "",
+              pending_notice_count: 1,
+            },
+          },
+          treeView: null,
+          treeSelectedRoundByNodeId: {},
+          treePan: {
+            offsetX: 0,
+            offsetY: 0,
+            scale: 1,
+            suppressClickNodeId: null,
+          },
+          selectedNodeId: null,
+          taskNodeDetails: {},
+          treeLargeMode: false,
+        };
+        global.U = {
+          tree: new StubElement("div"),
+          tdActiveCount: new StubElement("span"),
+          taskTreeResetRounds: new StubElement("button"),
+          taskSelectionEmpty: new StubElement("div"),
+          detail: new StubElement("div"),
+          nodeEmpty: new StubElement("div"),
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        global.treeNormalizeInt = global.normalizeInt;
+        global.esc = (value) => String(value ?? "");
+        global.icons = () => {};
+        global.setTaskDetailOpen = () => {};
+        global.captureTaskDetailViewState = () => ({});
+        global.stashTaskDetailViewState = () => {};
+        global.scheduleTaskDetailSessionPersist = () => {};
+        global.findTreeNode = () => null;
+        global.resolveExecutionTreeDensity = () => ({ mode: "default", stats: { totalItems: 1, maxBreadth: 1 } });
+        global.hasManualTreeRoundSelections = () => false;
+        global.showAgent = () => Promise.resolve();
+        global.enhanceResourceSelects = () => {};
+        global.formatTokenCount = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        renderTree();
+
+        const notice = U.tree.children.find((item) => item instanceof StubElement && String(item.className || "").includes("task-tree-distribution-bubble"));
+        console.log(JSON.stringify({
+          noticeText: notice?.textContent || "",
+        }));
+        """
+    )
+
+    assert result["noticeText"] == "\u63a5\u6536\u5230\u65b0\u6d88\u606f\uff0c\u7b49\u5f85\u8282\u70b9\u5904\u7406"
+    return
+
+    assert result["noticeText"] == "鎺ユ敹鍒版柊娑堟伅锛岀瓑寰呰妭鐐瑰鐞?"
+
+
+def test_render_tree_marks_barrier_blocked_nodes() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+
+        class StubClassList {
+          constructor(owner) {
+            this.owner = owner;
+            this.tokens = new Set();
+          }
+          add(...tokens) {
+            tokens.filter(Boolean).forEach((token) => this.tokens.add(String(token)));
+            this.owner.className = [...this.tokens].join(" ");
+          }
+          remove(...tokens) {
+            tokens.filter(Boolean).forEach((token) => this.tokens.delete(String(token)));
+            this.owner.className = [...this.tokens].join(" ");
+          }
+          contains(token) {
+            return this.tokens.has(String(token));
+          }
+          toggle(token, force) {
+            const normalized = String(token);
+            const shouldAdd = force === undefined ? !this.tokens.has(normalized) : !!force;
+            if (shouldAdd) this.tokens.add(normalized);
+            else this.tokens.delete(normalized);
+            this.owner.className = [...this.tokens].join(" ");
+            return shouldAdd;
+          }
+        }
+
+        class StubElement {
+          constructor(tagName = "div") {
+            this.tagName = String(tagName || "div").toUpperCase();
+            this.children = [];
+            this.dataset = {};
+            this.style = {};
+            this.hidden = false;
+            this.disabled = false;
+            this.className = "";
+            this.classList = new StubClassList(this);
+            this.attributes = {};
+            this.innerHTML = "";
+            this.textContent = "";
+            this.parentNode = null;
+            this.title = "";
+          }
+          appendChild(child) {
+            if (child && typeof child === "object") child.parentNode = this;
+            this.children.push(child);
+            return child;
+          }
+          setAttribute(name, value) {
+            this.attributes[String(name)] = String(value);
+          }
+          addEventListener() {}
+          querySelector() { return null; }
+          querySelectorAll() { return []; }
+        }
+
+        function findByDatasetId(node, nodeId) {
+          if (!node || typeof node !== "object") return null;
+          if (String(node?.dataset?.id || "") === String(nodeId || "")) return node;
+          for (const child of Array.isArray(node.children) ? node.children : []) {
+            const found = findByDatasetId(child, nodeId);
+            if (found) return found;
+          }
+          return null;
+        }
+
+        global.window = global;
+        global.HTMLElement = StubElement;
+        global.Element = StubElement;
+        global.HTMLButtonElement = StubElement;
+        global.HTMLInputElement = StubElement;
+        global.HTMLSelectElement = StubElement;
+        global.DocumentFragment = StubElement;
+        global.document = {
+          createElement(tagName) { return new StubElement(tagName); },
+        };
+        global.S = {
+          currentTaskId: "task:test",
+          currentTask: { metadata: {} },
+          taskSummary: { active_node_count: 0, runnable_node_count: 0, waiting_node_count: 0 },
+          taskRuntimeSummary: {
+            distribution: {
+              active_epoch_id: "epoch:demo",
+              mode: "task_wide_barrier",
+              state: "barrier_draining",
+              frontier_node_ids: [],
+              blocked_node_ids: ["root"],
+              pending_notice_node_ids: ["root"],
+              queued_epoch_count: 0,
+              pending_mailbox_count: 0,
+            },
+          },
+          treeRootNodeId: "root",
+          treeNodesById: {
+            root: {
+              node_id: "root",
+              title: "Root",
+              status: "in_progress",
+              node_kind: "execution",
+              rounds: [],
+              auxiliary_child_ids: [],
+              default_round_id: "",
+              distribution_status: "barrier_blocked",
+            },
+          },
+          treeView: null,
+          treeSelectedRoundByNodeId: {},
+          treePan: {
+            offsetX: 0,
+            offsetY: 0,
+            scale: 1,
+            suppressClickNodeId: null,
+          },
+          selectedNodeId: null,
+          taskNodeDetails: {},
+          treeLargeMode: false,
+        };
+        global.U = {
+          tree: new StubElement("div"),
+          tdActiveCount: new StubElement("span"),
+          taskTreeResetRounds: new StubElement("button"),
+          taskSelectionEmpty: new StubElement("div"),
+          detail: new StubElement("div"),
+          nodeEmpty: new StubElement("div"),
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        global.treeNormalizeInt = global.normalizeInt;
+        global.esc = (value) => String(value ?? "");
+        global.icons = () => {};
+        global.setTaskDetailOpen = () => {};
+        global.captureTaskDetailViewState = () => ({});
+        global.stashTaskDetailViewState = () => {};
+        global.scheduleTaskDetailSessionPersist = () => {};
+        global.findTreeNode = () => null;
+        global.resolveExecutionTreeDensity = () => ({ mode: "default", stats: { totalItems: 1, maxBreadth: 1 } });
+        global.hasManualTreeRoundSelections = () => false;
+        global.showAgent = () => Promise.resolve();
+        global.enhanceResourceSelects = () => {};
+        global.formatTokenCount = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        renderTree();
+
+        const rootButton = findByDatasetId(U.tree, "root");
+        console.log(JSON.stringify({
+          className: rootButton?.className || "",
+        }));
+        """
+    )
+
+    assert "execution-tree-node--distribution-blocked" in result["className"]
+
+
 def test_build_node_message_list_steps_renders_message_and_distribution_details() -> None:
     result = _run_node_script(
         """

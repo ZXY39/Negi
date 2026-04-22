@@ -39,6 +39,25 @@ def normalize_failure_class(value: Any, *, default: str = '') -> str:
     return str(default or '').strip().lower()
 
 
+def normalize_optional_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if value is None:
+        return ''
+    return str(value).strip()
+
+
+def normalize_string_list(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = normalize_optional_text(item)
+        if text:
+            items.append(text)
+    return items
+
+
 
 
 class NodeEvidenceItem(Model):

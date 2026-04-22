@@ -7493,6 +7493,140 @@ async def test_resume_waiting_children_turn_replays_incomplete_spawn_operation(t
 
 
 @pytest.mark.asyncio
+async def test_distribution_barrier_preempts_waiting_children_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+    _install_allow_all_spawn_review(service, monkeypatch)
+
+    try:
+        record = await service.create_task("recover waiting children", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(
+            goal="child goal",
+            prompt="child prompt",
+            execution_policy=_execution_policy(),
+        )
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=spec,
+        )
+        assert child is not None
+
+        def _mutate(metadata: dict[str, object]) -> dict[str, object]:
+            metadata["spawn_operations"] = {
+                "call:spawn-round": {
+                    "specs": [spec.model_dump(mode="json")],
+                    "entries": [
+                        {
+                            "index": 0,
+                            "goal": "child goal",
+                            "prompt": "child prompt",
+                            "requires_acceptance": False,
+                            "acceptance_prompt": "",
+                            "status": "running",
+                            "started_at": now_iso(),
+                            "finished_at": "",
+                            "child_node_id": child.node_id,
+                            "acceptance_node_id": "",
+                            "check_status": "skipped",
+                            "result": {},
+                        }
+                    ],
+                    "results": [],
+                    "completed": False,
+                }
+            }
+            return metadata
+
+        service.log_service.update_node_metadata(root.node_id, _mutate)
+        service.log_service.update_node_metadata(
+            root.node_id,
+            lambda metadata: {
+                **metadata,
+                "pending_append_notice_records": [
+                    {
+                        "notification_id": "root-notice:demo:1",
+                        "epoch_id": "epoch:demo",
+                        "source_node_id": root.node_id,
+                        "message": "new constraint",
+                        "created_at": now_iso(),
+                        "order_index": 1,
+                    }
+                ],
+            },
+        )
+        service.log_service.replace_runtime_frames(
+            record.task_id,
+            active_node_ids=[root.node_id],
+            runnable_node_ids=[root.node_id],
+            waiting_node_ids=[root.node_id],
+            frames=[
+                {
+                    **service.log_service._default_frame(
+                        node_id=root.node_id,
+                        depth=root.depth,
+                        node_kind=root.node_kind,
+                        phase="waiting_children",
+                    ),
+                    "pending_tool_calls": [],
+                    "tool_calls": [],
+                    "child_pipelines": [],
+                    "pending_child_specs": [],
+                    "partial_child_results": [],
+                    "last_error": "",
+                }
+            ],
+            publish_snapshot=False,
+        )
+        service.log_service.update_task_runtime_meta(
+            record.task_id,
+            distribution={
+                "active_epoch_id": "epoch:demo",
+                "mode": "task_wide_barrier",
+                "state": "barrier_draining",
+                "frontier_node_ids": [],
+                "blocked_node_ids": [root.node_id],
+                "pending_notice_node_ids": [root.node_id],
+                "queued_epoch_count": 0,
+                "pending_mailbox_count": 0,
+            },
+        )
+
+        root = service.get_node(root.node_id)
+        assert root is not None
+
+        history = await service.node_runner._react_loop._resume_waiting_children_turn_if_needed(
+            task=task,
+            node=root,
+            message_history=[],
+            tools=service.node_runner._build_tools(task=task, node=root),
+            runtime_context={
+                **service.node_runner._runtime_context(task=task, node=root),
+                "distribution_state": dict(
+                    (service.log_service.read_task_runtime_meta(record.task_id) or {}).get("distribution") or {}
+                ),
+            },
+        )
+
+        assert history is None
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_resume_pending_tool_turn_uses_recovery_check_for_verified_done_write(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

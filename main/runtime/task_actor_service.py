@@ -18,6 +18,13 @@ _DEFAULT_NODE_DISPATCH_LIMITS = {
     'execution': 8,
     'inspection': 4,
 }
+_DISTRIBUTION_BARRIER_SAFE_PHASES = {
+    'before_model',
+    'waiting_tool_results',
+    'after_model',
+    'waiting_children',
+    'waiting_acceptance',
+}
 _CURRENT_DISPATCH_LEASE: ContextVar['_DispatchLease | None'] = ContextVar(
     'task_node_dispatch_lease',
     default=None,
@@ -378,7 +385,7 @@ class TaskActorService:
                 )
             else:
                 distribution = self._distribution_runtime_state(task_id)
-                if str(distribution.get('state') or '').strip() in {'pause_requested', 'paused', 'distributing'}:
+                if str(distribution.get('state') or '').strip() in {'pause_requested', 'barrier_requested', 'paused', 'distributing'}:
                     distribution_result = await self._run_distribution_epoch(task_id)
                     if distribution_result is not None:
                         control_only_return = True
@@ -486,6 +493,32 @@ class TaskActorService:
         runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
         return dict(runtime_meta.get('distribution') or {})
 
+    def _barrier_drain_pending_node_ids(self, *, task_id: str, barrier_node_ids: list[str]) -> list[str]:
+        frame_map = {
+            str(item.node_id or '').strip(): item
+            for item in list(self._store.list_task_runtime_frames(task_id) or [])
+            if str(item.node_id or '').strip()
+        }
+        pending_node_ids: list[str] = []
+        seen: set[str] = set()
+        for raw_node_id in list(barrier_node_ids or []):
+            node_id = str(raw_node_id or '').strip()
+            if not node_id or node_id in seen:
+                continue
+            seen.add(node_id)
+            node = self._store.get_node(node_id)
+            if node is None:
+                continue
+            if str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                continue
+            frame = frame_map.get(node_id)
+            if frame is None:
+                continue
+            phase = str(getattr(frame, 'phase', '') or '').strip()
+            if phase not in _DISTRIBUTION_BARRIER_SAFE_PHASES:
+                pending_node_ids.append(node_id)
+        return pending_node_ids
+
     @staticmethod
     def _root_distribution_notice_records(*, epoch, created_at: str) -> list[dict[str, object]]:
         payload = dict(epoch.payload or {})
@@ -545,14 +578,52 @@ class TaskActorService:
         if epoch is None:
             return None
         state = str(distribution.get('state') or '').strip()
+        payload = dict(epoch.payload or {})
+        barrier_node_ids = [
+            str(item or '').strip()
+            for item in list(payload.get('barrier_node_ids') or [])
+            if str(item or '').strip()
+        ]
+        pending_notice_node_ids = [
+            str(item or '').strip()
+            for item in list(distribution.get('pending_notice_node_ids') or [])
+            if str(item or '').strip()
+        ]
+        if not pending_notice_node_ids:
+            root_node_id = str(epoch.root_node_id or '').strip()
+            if root_node_id:
+                pending_notice_node_ids = [root_node_id]
         frontier = [
             str(item or '').strip()
             for item in list(distribution.get('frontier_node_ids') or [])
             if str(item or '').strip()
         ]
-        if state in {'pause_requested', 'paused'}:
+        if barrier_node_ids and state in {'pause_requested', 'barrier_requested', 'paused', 'barrier_draining'}:
+            drain_pending_node_ids = self._barrier_drain_pending_node_ids(
+                task_id=task_id,
+                barrier_node_ids=barrier_node_ids,
+            )
+            payload['drain_pending_node_ids'] = list(drain_pending_node_ids)
+            if drain_pending_node_ids:
+                self._store.upsert_task_message_distribution_epoch(
+                    epoch.model_copy(update={'state': 'barrier_draining', 'payload': payload})
+                )
+                self._log_service.update_task_runtime_meta(
+                    task_id,
+                    distribution={
+                        'active_epoch_id': epoch_id,
+                        'state': 'barrier_draining',
+                        'mode': 'task_wide_barrier',
+                        'frontier_node_ids': [],
+                        'blocked_node_ids': list(barrier_node_ids),
+                        'pending_notice_node_ids': list(pending_notice_node_ids),
+                        'queued_epoch_count': int(distribution.get('queued_epoch_count') or 0),
+                        'pending_mailbox_count': int(distribution.get('pending_mailbox_count') or 0),
+                    },
+                )
+                return True
+        if state in {'pause_requested', 'barrier_requested', 'paused', 'barrier_draining'}:
             frontier = frontier or [str(task.root_node_id or '').strip()]
-            payload = dict(epoch.payload or {})
             payload['frontier_node_ids'] = list(frontier)
             payload.setdefault('distributed_node_ids', [])
             payload['next_frontier_node_ids'] = []
@@ -561,6 +632,10 @@ class TaskActorService:
             )
             distribution['state'] = 'distributing'
             distribution['frontier_node_ids'] = list(frontier)
+            if barrier_node_ids:
+                distribution['mode'] = 'task_wide_barrier'
+                distribution['blocked_node_ids'] = list(barrier_node_ids)
+                distribution['pending_notice_node_ids'] = list(pending_notice_node_ids)
             self._log_service.update_task_runtime_meta(task_id, distribution=distribution)
         if not frontier:
             return True
@@ -585,7 +660,10 @@ class TaskActorService:
                 distribution={
                     'active_epoch_id': epoch_id,
                     'state': 'distributing',
+                    'mode': str(distribution.get('mode') or '').strip(),
                     'frontier_node_ids': list(next_frontier),
+                    'blocked_node_ids': list(distribution.get('blocked_node_ids') or []),
+                    'pending_notice_node_ids': list(distribution.get('pending_notice_node_ids') or []),
                     'queued_epoch_count': int(distribution.get('queued_epoch_count') or 0),
                     'pending_mailbox_count': int(distribution.get('pending_mailbox_count') or 0),
                 },
@@ -611,7 +689,10 @@ class TaskActorService:
                 distribution={
                     'active_epoch_id': next_epoch.epoch_id,
                     'state': 'distributing',
+                    'mode': str(distribution.get('mode') or '').strip(),
                     'frontier_node_ids': [str(task.root_node_id or '').strip()],
+                    'blocked_node_ids': list(distribution.get('blocked_node_ids') or []),
+                    'pending_notice_node_ids': list(distribution.get('pending_notice_node_ids') or []),
                     'queued_epoch_count': remaining_queued,
                     'pending_mailbox_count': int(distribution.get('pending_mailbox_count') or 0),
                 },
@@ -629,16 +710,35 @@ class TaskActorService:
         )
         self._queue_root_distribution_notices(epoch=completed_epoch, created_at=completed_at)
         self.clear_pause(task_id)
-        self._log_service.update_task_runtime_meta(
-            task_id,
-            distribution={
-                'active_epoch_id': '',
-                'state': '',
-                'frontier_node_ids': [],
-                'queued_epoch_count': 0,
-                'pending_mailbox_count': 0,
-            },
-        )
+        pending_notice_node_ids = list(self._node_runner.nodes_with_pending_distribution_notices(task_id=task_id))
+        if pending_notice_node_ids:
+            self._log_service.update_task_runtime_meta(
+                task_id,
+                distribution={
+                    'active_epoch_id': epoch_id,
+                    'state': 'resume_ready',
+                    'mode': 'task_wide_barrier',
+                    'frontier_node_ids': [],
+                    'blocked_node_ids': [],
+                    'pending_notice_node_ids': pending_notice_node_ids,
+                    'queued_epoch_count': 0,
+                    'pending_mailbox_count': self._node_runner.pending_distribution_mailbox_count(task_id=task_id),
+                },
+            )
+        else:
+            self._log_service.update_task_runtime_meta(
+                task_id,
+                distribution={
+                    'active_epoch_id': '',
+                    'state': '',
+                    'mode': '',
+                    'frontier_node_ids': [],
+                    'blocked_node_ids': [],
+                    'pending_notice_node_ids': [],
+                    'queued_epoch_count': 0,
+                    'pending_mailbox_count': 0,
+                },
+            )
         resume_callback = self.distribution_resume_callback
         if callable(resume_callback):
             result = resume_callback(task_id)
