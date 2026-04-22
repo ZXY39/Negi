@@ -347,8 +347,13 @@ async def get_ceo_session_pending_interrupts(session_id: str):
     _agent, session_manager, runtime_manager, _state_store = _sessions()
     session = _assert_known_session(session_manager, session_id)
     runtime_session = _runtime_session(runtime_manager, session.key)
-    items = list(getattr(getattr(runtime_session, "state", None), "pending_interrupts", []) or [])
+    runtime_state = getattr(runtime_session, "state", None)
+    items = list(getattr(runtime_state, "pending_interrupts", []) or [])
+    status = str(getattr(runtime_state, "status", "") or "").strip().lower()
+    is_running = bool(getattr(runtime_state, "is_running", False)) or status == "running"
     if not items:
+        if is_running:
+            return {"ok": True, "session_id": session.key, "items": []}
         snapshot = read_paused_execution_context(session.key) or {}
         items = list(snapshot.get("interrupts") or [])
     return {"ok": True, "session_id": session.key, "items": items}

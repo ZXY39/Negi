@@ -91,7 +91,7 @@ from .canonical_context import (
     normalize_frontdoor_canonical_context,
 )
 from .message_builder import CeoMessageBuilder
-from .prompt_cache_contract import build_frontdoor_prompt_contract
+from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION, build_frontdoor_prompt_contract
 from .state_models import (
     CeoFrontdoorInterrupted,
     CeoPendingInterrupt,
@@ -2150,7 +2150,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if raw_names is None and isinstance(state, dict):
             raw_names = list(state.get("tool_names") or [])
         normalized = self._normalized_tool_name_state_list(raw_names)
-        if isinstance(state, dict) and bool(state.get("cron_internal")):
+        if isinstance(state, dict) and (
+            bool(state.get("cron_internal")) or bool(state.get("heartbeat_internal"))
+        ):
             return normalized
         if self._frontdoor_has_valid_stage(state):
             return normalized
@@ -2166,7 +2168,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if raw_names is None and isinstance(state, dict):
             raw_names = list(state.get("provider_tool_names") or state.get("tool_names") or [])
         normalized = self._normalized_tool_name_state_list(raw_names)
-        if isinstance(state, dict) and bool(state.get("cron_internal")):
+        if isinstance(state, dict) and (
+            bool(state.get("cron_internal")) or bool(state.get("heartbeat_internal"))
+        ):
             return normalized
         if STAGE_TOOL_NAME not in normalized:
             return [*normalized, STAGE_TOOL_NAME]
@@ -2495,6 +2499,114 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return {}
         raw_value = state.get("frontdoor_selection_debug")
         return dict(raw_value) if isinstance(raw_value, dict) else {}
+
+    @classmethod
+    def _inherited_internal_turn_contract_state(
+        cls,
+        *,
+        state: CeoGraphState | None,
+        session: Any | None,
+    ) -> dict[str, Any]:
+        if not isinstance(state, dict):
+            return {}
+        tool_names = cls._normalized_tool_name_state_list(state.get("tool_names"))
+        if not tool_names:
+            return {}
+        provider_tool_names = (
+            cls._normalized_tool_name_state_list(state.get("provider_tool_names"))
+            or list(tool_names)
+        )
+        pending_provider_tool_names = cls._normalized_tool_name_state_list(
+            state.get("pending_provider_tool_names")
+        )
+        candidate_tool_names = cls._normalized_tool_name_state_list(state.get("candidate_tool_names"))
+        candidate_tool_items = cls._normalized_candidate_tool_items(
+            state.get("candidate_tool_items"),
+            fallback_names=candidate_tool_names,
+        )
+        hydrated_tool_names = cls._normalized_hydrated_tool_names(
+            state.get("hydrated_tool_names")
+            or getattr(session, "_frontdoor_hydrated_tool_names", [])
+        )
+        visible_skill_ids = cls._normalized_tool_name_state_list(
+            state.get("visible_skill_ids")
+            or getattr(session, "_frontdoor_visible_skill_ids", [])
+        )
+        candidate_skill_ids = (
+            cls._normalized_tool_name_state_list(state.get("candidate_skill_ids"))
+            or list(visible_skill_ids)
+        )
+        rbac_visible_tool_names = (
+            cls._normalized_tool_name_state_list(
+                state.get("rbac_visible_tool_names")
+                or getattr(session, "_frontdoor_visible_tool_ids", [])
+            )
+            or list(provider_tool_names)
+        )
+        rbac_visible_skill_ids = (
+            cls._normalized_tool_name_state_list(
+                state.get("rbac_visible_skill_ids")
+                or getattr(session, "_frontdoor_visible_skill_ids", [])
+            )
+            or list(visible_skill_ids)
+        )
+        selection_debug = cls._frontdoor_selection_debug_snapshot(state)
+        if not selection_debug:
+            raw_debug = getattr(session, "_frontdoor_selection_debug", None)
+            selection_debug = dict(raw_debug) if isinstance(raw_debug, dict) else {}
+        cache_family_revision = (
+            str(state.get("cache_family_revision") or "").strip()
+            or str(getattr(session, "_frontdoor_capability_snapshot_exposure_revision", "") or "").strip()
+            or DEFAULT_CACHE_FAMILY_REVISION
+        )
+        provider_tool_exposure_revision = str(
+            state.get("provider_tool_exposure_revision") or ""
+        ).strip() or cls._provider_tool_exposure_revision(provider_tool_names)
+        repair_required_tool_items = [
+            dict(item)
+            for item in list(state.get("repair_required_tool_items") or [])
+            if isinstance(item, dict)
+        ]
+        if not repair_required_tool_items:
+            repair_required_tool_items = [
+                dict(item)
+                for item in list(getattr(session, "_frontdoor_repair_required_tool_items", []) or [])
+                if isinstance(item, dict)
+            ]
+        repair_required_skill_items = [
+            dict(item)
+            for item in list(state.get("repair_required_skill_items") or [])
+            if isinstance(item, dict)
+        ]
+        if not repair_required_skill_items:
+            repair_required_skill_items = [
+                dict(item)
+                for item in list(getattr(session, "_frontdoor_repair_required_skill_items", []) or [])
+                if isinstance(item, dict)
+            ]
+        return {
+            "tool_names": list(tool_names),
+            "provider_tool_names": list(provider_tool_names),
+            "pending_provider_tool_names": list(pending_provider_tool_names),
+            "provider_tool_exposure_pending": bool(
+                state.get("provider_tool_exposure_pending") or pending_provider_tool_names
+            ),
+            "provider_tool_exposure_revision": provider_tool_exposure_revision,
+            "provider_tool_exposure_commit_reason": str(
+                state.get("provider_tool_exposure_commit_reason") or ""
+            ).strip(),
+            "candidate_tool_names": list(candidate_tool_names),
+            "candidate_tool_items": list(candidate_tool_items),
+            "hydrated_tool_names": list(hydrated_tool_names),
+            "visible_skill_ids": list(visible_skill_ids),
+            "candidate_skill_ids": list(candidate_skill_ids),
+            "rbac_visible_tool_names": list(rbac_visible_tool_names),
+            "rbac_visible_skill_ids": list(rbac_visible_skill_ids),
+            "cache_family_revision": cache_family_revision,
+            "frontdoor_selection_debug": dict(selection_debug),
+            "repair_required_tool_items": list(repair_required_tool_items),
+            "repair_required_skill_items": list(repair_required_skill_items),
+        }
 
     @staticmethod
     def _compression_state_has_material_content(value: Any) -> bool:
@@ -3753,18 +3865,64 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             build_ceo_stage_result_block_message(stage_gate),
         )
 
-    def _reviewable_tool_names(self) -> set[str]:
+    @staticmethod
+    def _normalize_review_risk_level(value: Any, *, default: str = "high") -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"low", "medium", "high"}:
+            return normalized
+        fallback = str("" if default is None else default).strip().lower()
+        if fallback in {"low", "medium", "high"}:
+            return fallback
+        return ""
+
+    def _legacy_reviewable_tool_risk_map(self) -> dict[str, str]:
         assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
         if not bool(getattr(assembly_cfg, "frontdoor_interrupt_approval_enabled", False)):
-            return set()
+            return {}
         raw_names = list(
             getattr(assembly_cfg, "frontdoor_interrupt_tool_names", ["create_async_task"]) or []
         )
-        return {str(name).strip() for name in raw_names if str(name).strip()}
+        reviewable: dict[str, str] = {}
+        for raw_name in raw_names:
+            name = str(raw_name or "").strip()
+            if name:
+                reviewable[name] = "high"
+        return reviewable
+
+    def _dynamic_reviewable_tool_risk_map(self, *, session_key: str) -> dict[str, str]:
+        service = getattr(self._loop, "main_task_service", None)
+        supplier = getattr(service, "frontdoor_reviewable_tool_risk_map", None) if service is not None else None
+        if not callable(supplier):
+            return {}
+        try:
+            payload = supplier(actor_role="ceo", session_id=str(session_key or "").strip() or "web:shared")
+        except Exception:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        reviewable: dict[str, str] = {}
+        for raw_name, raw_risk in payload.items():
+            name = str(raw_name or "").strip()
+            if not name:
+                continue
+            reviewable[name] = self._normalize_review_risk_level(raw_risk)
+        return reviewable
+
+    def _reviewable_tool_risk_map(self, *, session_key: str) -> dict[str, str]:
+        reviewable = dict(self._legacy_reviewable_tool_risk_map())
+        dynamic_reviewable = self._dynamic_reviewable_tool_risk_map(session_key=session_key)
+        risk_rank = {"low": 0, "medium": 1, "high": 2}
+        for tool_name, risk_level in dynamic_reviewable.items():
+            current = reviewable.get(tool_name, "low")
+            if risk_rank[risk_level] >= risk_rank.get(current, 0):
+                reviewable[tool_name] = risk_level
+        return reviewable
 
     def _approval_request_for_tool_calls(
         self,
         tool_call_payloads: list[dict[str, Any]],
+        *,
+        session_key: str = "",
     ) -> dict[str, Any] | None:
         tool_calls = [
             dict(item)
@@ -3773,19 +3931,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         ]
         if not tool_calls:
             return None
-        reviewable_names = self._reviewable_tool_names()
+        reviewable_risk_map = self._reviewable_tool_risk_map(session_key=session_key)
         review_items: list[dict[str, Any]] = []
         pass_through_tool_call_ids: list[str] = []
         for item in tool_calls:
             tool_call_id = str(item.get("id") or "").strip()
             tool_name = str(item.get("name") or "").strip()
             arguments = dict(item.get("arguments") or {})
-            if tool_name in reviewable_names:
+            risk_level = self._normalize_review_risk_level(
+                reviewable_risk_map.get(tool_name, ""),
+                default="",
+            )
+            if risk_level:
                 review_items.append(
                     {
                         "tool_call_id": tool_call_id,
                         "name": tool_name,
-                        "risk_level": "high",
+                        "risk_level": risk_level,
                         "arguments": arguments,
                     }
                 )
@@ -4328,10 +4490,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     getattr(session, "_chat_id", session.state.session_key),
                 )
 
-        exposure = await self._resolver.resolve_for_actor(
-            actor_role="ceo",
-            session_id=session.state.session_key,
-        )
         paused_manual_snapshot = (
             self._paused_manual_frontdoor_snapshot(session)
             if not heartbeat_internal and not cron_internal
@@ -4385,6 +4543,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 current_compression_state = paused_compression_state
         checkpoint_messages = list(state.get("messages") or [])
         request_body_seed_messages: list[dict[str, Any]] = []
+        has_prior_request_body_seed = False
         internal_seed_messages, internal_event_bundle_text, internal_event_message_metadata = (
             self._internal_prompt_seed_messages(metadata=metadata)
         )
@@ -4407,142 +4566,241 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             request_body_seed_messages = list(session_request_body_messages)
             checkpoint_messages = []
             builder_user_metadata["_frontdoor_history_seed"] = "session_window"
+            has_prior_request_body_seed = True
         if internal_seed_messages:
             request_body_seed_messages = [*list(request_body_seed_messages), *list(internal_seed_messages)]
-        seeded_hydrated_tool_names = (
-            list(getattr(session, "_frontdoor_hydrated_tool_names", []) or [])
-            or list(state.get("hydrated_tool_names") or [])
+        inherited_internal_contract_state = (
+            self._inherited_internal_turn_contract_state(state=state, session=session)
+            if (heartbeat_internal or cron_internal) and has_prior_request_body_seed
+            else {}
         )
-        if not seeded_hydrated_tool_names and paused_manual_snapshot:
-            seeded_hydrated_tool_names = [
+        repair_required_tool_items: list[dict[str, Any]] = []
+        repair_required_skill_items: list[dict[str, Any]] = []
+        compression_state_payload = dict(current_compression_state or self._default_compression_state())
+        frontdoor_history_shrink_reason_from_prepare = ""
+        turn_overlay_section_count = 0
+        if inherited_internal_contract_state:
+            selected_skill_ids = list(inherited_internal_contract_state.get("visible_skill_ids") or [])
+            candidate_tool_names = list(inherited_internal_contract_state.get("candidate_tool_names") or [])
+            candidate_tool_items = [
+                dict(item)
+                for item in list(inherited_internal_contract_state.get("candidate_tool_items") or [])
+                if isinstance(item, dict)
+            ]
+            hydrated_tool_names = list(inherited_internal_contract_state.get("hydrated_tool_names") or [])
+            rbac_visible_tool_names = list(inherited_internal_contract_state.get("rbac_visible_tool_names") or [])
+            rbac_visible_skill_ids = list(inherited_internal_contract_state.get("rbac_visible_skill_ids") or [])
+            repair_required_tool_items = [
+                dict(item)
+                for item in list(inherited_internal_contract_state.get("repair_required_tool_items") or [])
+                if isinstance(item, dict)
+            ]
+            repair_required_skill_items = [
+                dict(item)
+                for item in list(inherited_internal_contract_state.get("repair_required_skill_items") or [])
+                if isinstance(item, dict)
+            ]
+            frontdoor_selection_debug = dict(
+                inherited_internal_contract_state.get("frontdoor_selection_debug") or {}
+            )
+            tool_names = list(inherited_internal_contract_state.get("tool_names") or [])
+            callable_tool_names = self._frontdoor_callable_tool_names_for_state(
+                {
+                    "frontdoor_stage_state": current_frontdoor_stage_state,
+                    "cron_internal": cron_internal,
+                    "heartbeat_internal": heartbeat_internal,
+                },
+                tool_names=tool_names,
+            )
+            frontdoor_selection_debug["callable_tool_names"] = list(callable_tool_names)
+            frontdoor_selection_debug["candidate_tool_names"] = list(candidate_tool_names)
+            frontdoor_selection_debug["hydrated_tool_names"] = list(hydrated_tool_names)
+            messages = self._prompt_message_records(request_body_seed_messages)
+            has_current_turn_user_content = bool(self._content_text(current_turn_user_content).strip())
+            if has_current_turn_user_content and (
+                not messages or str(messages[-1].get("role") or "").strip().lower() != "user"
+            ):
+                messages.append({"role": "user", "content": current_turn_user_content})
+            provider_model = str(model_refs[0] if model_refs else "").strip()
+            runtime_visible_tool_names = list(
+                inherited_internal_contract_state.get("provider_tool_names") or []
+            )
+            provider_tool_exposure = {
+                "provider_tool_names": list(runtime_visible_tool_names),
+                "pending_provider_tool_names": list(
+                    inherited_internal_contract_state.get("pending_provider_tool_names") or []
+                ),
+                "provider_tool_exposure_pending": bool(
+                    inherited_internal_contract_state.get("provider_tool_exposure_pending")
+                ),
+                "provider_tool_exposure_revision": str(
+                    inherited_internal_contract_state.get("provider_tool_exposure_revision") or ""
+                ).strip(),
+                "provider_tool_exposure_commit_reason": str(
+                    inherited_internal_contract_state.get("provider_tool_exposure_commit_reason") or ""
+                ).strip(),
+            }
+            tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
+            stable_messages = list(messages)
+            dynamic_appendix_messages: list[dict[str, Any]] = []
+            cache_family_revision = str(
+                inherited_internal_contract_state.get("cache_family_revision") or ""
+            ).strip()
+            turn_overlay_text = ""
+        else:
+            exposure = await self._resolver.resolve_for_actor(
+                actor_role="ceo",
+                session_id=session.state.session_key,
+            )
+            seeded_hydrated_tool_names = (
+                list(getattr(session, "_frontdoor_hydrated_tool_names", []) or [])
+                or list(state.get("hydrated_tool_names") or [])
+            )
+            if not seeded_hydrated_tool_names and paused_manual_snapshot:
+                seeded_hydrated_tool_names = [
+                    str(item or "").strip()
+                    for item in list(paused_manual_snapshot.get("hydrated_tool_names") or [])
+                    if str(item or "").strip()
+                ]
+            hydrated_tool_names = self._frontdoor_hydrated_tool_lru(
+                existing_tool_names=seeded_hydrated_tool_names,
+                incoming_tool_names=[],
+                visible_tool_names=list(exposure.get("tool_names") or []),
+            )
+            assembly = await self._builder.build_for_ceo(
+                session=session,
+                query_text=builder_query_text,
+                exposure=exposure,
+                persisted_session=runtime_session,
+                checkpoint_messages=checkpoint_messages,
+                request_body_seed_messages=request_body_seed_messages,
+                user_content=current_turn_user_content,
+                user_metadata=builder_user_metadata,
+                frontdoor_stage_state=current_frontdoor_stage_state,
+                frontdoor_canonical_context=current_frontdoor_canonical_context,
+                semantic_context_state={},
+                hydrated_tool_names=list(hydrated_tool_names),
+            )
+            selected_skill_ids = [
+                str(item.get("skill_id") or "").strip()
+                for item in list(getattr(assembly, "trace", {}).get("selected_skills") or [])
+                if isinstance(item, dict) and str(item.get("skill_id") or "").strip()
+            ]
+            candidate_tool_names = list(getattr(assembly, "candidate_tool_names", []) or [])
+            candidate_tool_items = self._normalized_candidate_tool_items(
+                getattr(assembly, "candidate_tool_items", None),
+                fallback_names=candidate_tool_names,
+            )
+            rbac_visible_tool_names = [
                 str(item or "").strip()
-                for item in list(paused_manual_snapshot.get("hydrated_tool_names") or [])
+                for item in list(getattr(assembly, "trace", {}).get("capability_snapshot", {}).get("visible_tool_ids") or [])
                 if str(item or "").strip()
             ]
-        hydrated_tool_names = self._frontdoor_hydrated_tool_lru(
-            existing_tool_names=seeded_hydrated_tool_names,
-            incoming_tool_names=[],
-            visible_tool_names=list(exposure.get("tool_names") or []),
-        )
-        assembly = await self._builder.build_for_ceo(
-            session=session,
-            query_text=builder_query_text,
-            exposure=exposure,
-            persisted_session=runtime_session,
-            checkpoint_messages=checkpoint_messages,
-            request_body_seed_messages=request_body_seed_messages,
-            user_content=current_turn_user_content,
-            user_metadata=builder_user_metadata,
-            frontdoor_stage_state=current_frontdoor_stage_state,
-            frontdoor_canonical_context=current_frontdoor_canonical_context,
-            semantic_context_state={},
-            hydrated_tool_names=list(hydrated_tool_names),
-        )
-        selected_skill_ids = [
-            str(item.get("skill_id") or "").strip()
-            for item in list(getattr(assembly, "trace", {}).get("selected_skills") or [])
-            if isinstance(item, dict) and str(item.get("skill_id") or "").strip()
-        ]
-        candidate_tool_names = list(getattr(assembly, "candidate_tool_names", []) or [])
-        candidate_tool_items = self._normalized_candidate_tool_items(
-            getattr(assembly, "candidate_tool_items", None),
-            fallback_names=candidate_tool_names,
-        )
-        rbac_visible_tool_names = [
-            str(item or "").strip()
-            for item in list(getattr(assembly, "trace", {}).get("capability_snapshot", {}).get("visible_tool_ids") or [])
-            if str(item or "").strip()
-        ]
-        rbac_visible_skill_ids = [
-            str(item or "").strip()
-            for item in list(getattr(assembly, "trace", {}).get("capability_snapshot", {}).get("visible_skill_ids") or [])
-            if str(item or "").strip()
-        ]
-        frontdoor_selection_debug = {
-            "query_text": str(builder_query_text or "").strip(),
-            "raw_turn_query_text": str(query_text or "").strip(),
-            "semantic_frontdoor": dict(getattr(assembly, "trace", {}).get("semantic_frontdoor") or {}),
-            "tool_selection": dict(getattr(assembly, "trace", {}).get("tool_selection") or {}),
-            "selected_skills": list(getattr(assembly, "trace", {}).get("selected_skills") or []),
-            "capability_snapshot": dict(getattr(assembly, "trace", {}).get("capability_snapshot") or {}),
-            "callable_tool_names": [],
-            "candidate_tool_names": list(candidate_tool_names),
-            "hydrated_tool_names": list(hydrated_tool_names),
-        }
-        tool_names = list(
-            getattr(assembly, "tool_names", None)
-            or getattr(assembly, "callable_tool_names", None)
-            or []
-        )
-        if cron_internal:
-            tool_names = ["cron"]
-        callable_tool_names = self._frontdoor_callable_tool_names_for_state(
-            {
-                "frontdoor_stage_state": current_frontdoor_stage_state,
-                "cron_internal": cron_internal,
-                "heartbeat_internal": heartbeat_internal,
-            },
-            tool_names=tool_names,
-        )
-        frontdoor_selection_debug["callable_tool_names"] = list(callable_tool_names)
-        messages: list[dict[str, Any]] = list(assembly.model_messages or [])
-        messages = self._prefer_live_user_payload_over_text_history(
-            messages=messages,
-            live_user_content=current_turn_user_content,
-        )
-        if current_turn_has_multimodal_uploads:
-            messages = self._replace_last_user_message_content(
-                messages=messages,
-                content=current_turn_user_content,
+            rbac_visible_skill_ids = [
+                str(item or "").strip()
+                for item in list(getattr(assembly, "trace", {}).get("capability_snapshot", {}).get("visible_skill_ids") or [])
+                if str(item or "").strip()
+            ]
+            repair_required_tool_items = [
+                dict(item)
+                for item in list(getattr(assembly, "repair_required_tool_items", []) or [])
+                if isinstance(item, dict)
+            ]
+            repair_required_skill_items = [
+                dict(item)
+                for item in list(getattr(assembly, "repair_required_skill_items", []) or [])
+                if isinstance(item, dict)
+            ]
+            compression_state_payload = dict(
+                getattr(assembly, "trace", {}).get("compression_state_payload")
+                or current_compression_state
+                or self._default_compression_state()
             )
-        has_current_turn_user_content = bool(self._content_text(current_turn_user_content).strip())
-        if has_current_turn_user_content and (
-            not messages or str(messages[-1].get("role") or "").strip().lower() != "user"
-        ):
-            messages.append({"role": "user", "content": current_turn_user_content})
+            frontdoor_history_shrink_reason_from_prepare = str(
+                getattr(assembly, "trace", {}).get("frontdoor_history_shrink_reason") or ""
+            ).strip()
+            turn_overlay_section_count = int(
+                getattr(assembly, "trace", {}).get("turn_overlay_section_count", 0) or 0
+            )
+            frontdoor_selection_debug = {
+                "query_text": str(builder_query_text or "").strip(),
+                "raw_turn_query_text": str(query_text or "").strip(),
+                "semantic_frontdoor": dict(getattr(assembly, "trace", {}).get("semantic_frontdoor") or {}),
+                "tool_selection": dict(getattr(assembly, "trace", {}).get("tool_selection") or {}),
+                "selected_skills": list(getattr(assembly, "trace", {}).get("selected_skills") or []),
+                "capability_snapshot": dict(getattr(assembly, "trace", {}).get("capability_snapshot") or {}),
+                "callable_tool_names": [],
+                "candidate_tool_names": list(candidate_tool_names),
+                "hydrated_tool_names": list(hydrated_tool_names),
+            }
+            tool_names = list(
+                getattr(assembly, "tool_names", None)
+                or getattr(assembly, "callable_tool_names", None)
+                or []
+            )
+            callable_tool_names = self._frontdoor_callable_tool_names_for_state(
+                {
+                    "frontdoor_stage_state": current_frontdoor_stage_state,
+                    "cron_internal": cron_internal,
+                    "heartbeat_internal": heartbeat_internal,
+                },
+                tool_names=tool_names,
+            )
+            frontdoor_selection_debug["callable_tool_names"] = list(callable_tool_names)
+            messages = list(assembly.model_messages or [])
+            messages = self._prefer_live_user_payload_over_text_history(
+                messages=messages,
+                live_user_content=current_turn_user_content,
+            )
+            if current_turn_has_multimodal_uploads:
+                messages = self._replace_last_user_message_content(
+                    messages=messages,
+                    content=current_turn_user_content,
+                )
+            has_current_turn_user_content = bool(self._content_text(current_turn_user_content).strip())
+            if has_current_turn_user_content and (
+                not messages or str(messages[-1].get("role") or "").strip().lower() != "user"
+            ):
+                messages.append({"role": "user", "content": current_turn_user_content})
 
-        provider_model = str(model_refs[0] if model_refs else "").strip()
-        provider_tool_seed_names = (
-            list(tool_names)
-            if cron_internal
-            else [
+            provider_model = str(model_refs[0] if model_refs else "").strip()
+            provider_tool_seed_names = [
                 str(item or "").strip()
                 for item in list(exposure.get("tool_names") or [])
                 if str(item or "").strip()
             ]
-        )
-        runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
-            {
-                "frontdoor_stage_state": current_frontdoor_stage_state,
-                "cron_internal": cron_internal,
-                "heartbeat_internal": heartbeat_internal,
-            },
-            tool_names=provider_tool_seed_names,
-        )
-        desired_provider_tool_names = list(runtime_visible_tool_names)
-        provider_tool_exposure = self._resolve_frontdoor_provider_tool_exposure(
-            active_provider_tool_names=self._normalized_tool_name_state_list(
-                state.get("provider_tool_names")
-            ),
-            pending_provider_tool_names=self._normalized_tool_name_state_list(
-                state.get("pending_provider_tool_names")
-            ),
-            desired_provider_tool_names=desired_provider_tool_names,
-            commit_reason="",
-        )
-        runtime_visible_tool_names = list(provider_tool_exposure.get("provider_tool_names") or [])
-        tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
-        stable_messages = self._prompt_message_records(getattr(assembly, "stable_messages", None)) or list(messages)
-        if current_turn_has_multimodal_uploads:
-            stable_messages = self._replace_last_user_message_content(
-                messages=stable_messages,
-                content=current_turn_user_content,
+            runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
+                {
+                    "frontdoor_stage_state": current_frontdoor_stage_state,
+                    "cron_internal": cron_internal,
+                    "heartbeat_internal": heartbeat_internal,
+                },
+                tool_names=provider_tool_seed_names,
             )
-        dynamic_appendix_messages = self._prompt_message_records(
-            getattr(assembly, "dynamic_appendix_messages", None)
-        )
-        cache_family_revision = str(getattr(assembly, "cache_family_revision", "") or "").strip()
-        turn_overlay_text = str(getattr(assembly, "turn_overlay_text", "") or "").strip()
+            desired_provider_tool_names = list(runtime_visible_tool_names)
+            provider_tool_exposure = self._resolve_frontdoor_provider_tool_exposure(
+                active_provider_tool_names=self._normalized_tool_name_state_list(
+                    state.get("provider_tool_names")
+                ),
+                pending_provider_tool_names=self._normalized_tool_name_state_list(
+                    state.get("pending_provider_tool_names")
+                ),
+                desired_provider_tool_names=desired_provider_tool_names,
+                commit_reason="",
+            )
+            runtime_visible_tool_names = list(provider_tool_exposure.get("provider_tool_names") or [])
+            tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
+            stable_messages = self._prompt_message_records(getattr(assembly, "stable_messages", None)) or list(messages)
+            if current_turn_has_multimodal_uploads:
+                stable_messages = self._replace_last_user_message_content(
+                    messages=stable_messages,
+                    content=current_turn_user_content,
+                )
+            dynamic_appendix_messages = self._prompt_message_records(
+                getattr(assembly, "dynamic_appendix_messages", None)
+            )
+            cache_family_revision = str(getattr(assembly, "cache_family_revision", "") or "").strip()
+            turn_overlay_text = str(getattr(assembly, "turn_overlay_text", "") or "").strip()
         dynamic_appendix_messages = upsert_frontdoor_tool_contract_message(
             dynamic_appendix_messages,
             build_frontdoor_tool_contract(
@@ -4553,8 +4811,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 frontdoor_stage_state=dict(current_frontdoor_stage_state or {}),
                 visible_skill_ids=list(selected_skill_ids),
                 candidate_skill_ids=list(selected_skill_ids),
-                repair_required_tool_items=list(getattr(assembly, "repair_required_tool_items", []) or []),
-                repair_required_skill_items=list(getattr(assembly, "repair_required_skill_items", []) or []),
+                repair_required_tool_items=list(repair_required_tool_items),
+                repair_required_skill_items=list(repair_required_skill_items),
                 rbac_visible_tool_names=list(rbac_visible_tool_names),
                 rbac_visible_skill_ids=list(rbac_visible_skill_ids),
                 contract_revision=cache_family_revision,
@@ -4612,7 +4870,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             cache_family_revision=cache_family_revision,
             session_key=str(getattr(session.state, "session_key", "") or ""),
             overlay_text=turn_overlay_text,
-            overlay_section_count=int(getattr(assembly, "trace", {}).get("turn_overlay_section_count", 0) or 0),
+            overlay_section_count=turn_overlay_section_count,
         )
         messages = list(contract.request_messages)
         stable_messages = list(contract.stable_messages)
@@ -4642,7 +4900,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             else:
                 persisted_dynamic_appendix_messages = []
         shrink_reason = str(
-            getattr(assembly, "trace", {}).get("frontdoor_history_shrink_reason")
+            frontdoor_history_shrink_reason_from_prepare
             or state.get("frontdoor_history_shrink_reason")
             or session_shrink_reason
             or ""
@@ -4671,7 +4929,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "frontdoor_stage_state": current_frontdoor_stage_state,
             "frontdoor_canonical_context": current_frontdoor_canonical_context,
             "compression_state": dict(
-                getattr(assembly, "trace", {}).get("compression_state_payload")
+                compression_state_payload
                 or current_compression_state
                 or self._default_compression_state()
             ),
@@ -4695,12 +4953,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "candidate_tool_items": list(candidate_tool_items),
             "repair_required_tool_items": [
                 dict(item)
-                for item in list(getattr(assembly, "repair_required_tool_items", []) or [])
+                for item in list(repair_required_tool_items or [])
                 if isinstance(item, dict)
             ],
             "repair_required_skill_items": [
                 dict(item)
-                for item in list(getattr(assembly, "repair_required_skill_items", []) or [])
+                for item in list(repair_required_skill_items or [])
                 if isinstance(item, dict)
             ],
             "hydrated_tool_names": list(hydrated_tool_names),
@@ -5215,7 +5473,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         tool_call_payloads = self._tool_call_payloads_from_calls(response_tool_calls)
         if tool_call_payloads:
             analysis_text = "" if synthetic_tool_calls_used else self._content_text(response_view.content)
-            approval_request = self._approval_request_for_tool_calls(tool_call_payloads)
+            approval_request = self._approval_request_for_tool_calls(
+                tool_call_payloads,
+                session_key=str(state.get("session_key") or "").strip(),
+            )
             return {
                 "analysis_text": analysis_text.strip(),
                 "tool_call_payloads": tool_call_payloads,

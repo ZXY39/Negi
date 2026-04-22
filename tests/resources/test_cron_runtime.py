@@ -237,6 +237,31 @@ def test_cron_service_rejects_non_positive_max_runs(tmp_path: Path) -> None:
         )
 
 
+def test_cron_service_rejects_expired_at_jobs_on_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_path = tmp_path / "jobs.json"
+    service = CronService(store_path)
+    monkeypatch.setattr("g3ku.services.cron._format_local_time_ms", lambda _now_ms: "2026-04-22 13:08:16 +08:00")
+
+    with pytest.raises(
+        ValueError,
+        match="任务定时已过期，当前时间为2026-04-22 13:08:16 \\+08:00，请立即执行或视情况废弃而不要创建过期任务",
+    ):
+        service.add_job(
+            name="demo",
+            schedule=CronSchedule(kind="at", at_ms=int(time.time() * 1000) - 1000),
+            message="hello",
+            deliver=True,
+            channel="web",
+            to="shared",
+        )
+
+    assert service.list_jobs(include_disabled=True) == []
+    assert not store_path.exists()
+
+
 @pytest.mark.asyncio
 async def test_cron_tool_accepts_asia_shanghai_without_zoneinfo_tzdata(monkeypatch) -> None:
     service = _CronToolService()
@@ -260,6 +285,30 @@ async def test_cron_tool_accepts_asia_shanghai_without_zoneinfo_tzdata(monkeypat
     assert result == "Created job 'job' (id: job-1)"
     assert service.add_calls[-1]["schedule"].tz == "Asia/Shanghai"
     assert service.add_calls[-1]["max_runs"] == 2
+
+
+@pytest.mark.asyncio
+async def test_cron_tool_reports_expired_at_jobs_clearly() -> None:
+    class _RejectExpiredCronService(_CronToolService):
+        def add_job(self, **kwargs):
+            raise ValueError(
+                "任务定时已过期，当前时间为2026-04-22 13:08:16 +08:00，请立即执行或视情况废弃而不要创建过期任务"
+            )
+
+    service = _RejectExpiredCronService()
+    tool = CronTool(service)
+    tool.set_context("web", "shared")
+
+    result = await tool.execute(
+        action="add",
+        message="hello",
+        at="2026-04-22T13:07:21+08:00",
+    )
+
+    assert (
+        result
+        == "Error: 任务定时已过期，当前时间为2026-04-22 13:08:16 +08:00，请立即执行或视情况废弃而不要创建过期任务"
+    )
 
 
 def test_resolve_timezone_reports_missing_tzdata_helpfully(monkeypatch) -> None:

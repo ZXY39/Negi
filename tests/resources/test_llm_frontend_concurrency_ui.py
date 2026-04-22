@@ -251,6 +251,72 @@ def test_api_client_update_llm_binding_returns_item_and_runtime_refresh() -> Non
     }
 
 
+def test_api_client_update_managed_model_uses_extended_timeout_for_save_requests() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.window.location = { origin: "http://localhost" };
+        global.fetch = () => {
+          throw new Error("fetch should not be called in this test");
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/api_client.js", "utf8");
+        vm.runInThisContext(code);
+
+        const captured = [];
+        ApiClient._request = async (method, path, options = {}) => {
+          captured.push({ method, path, timeoutMs: options.timeoutMs ?? null });
+          return { items: [{ key: "demo" }], roles: {}, roleIterations: {}, roleConcurrency: {} };
+        };
+
+        ApiClient.updateManagedModel("demo", { providerModel: "openai:gpt-5.2" }).then(() => {
+          console.log(JSON.stringify(captured));
+        });
+        """
+    )
+
+    assert result[0] == {
+        "method": "PUT",
+        "path": "/api/models/demo",
+        "timeoutMs": 30000,
+    }
+
+
+def test_api_client_update_llm_config_uses_extended_timeout_for_save_requests() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.window.location = { origin: "http://localhost" };
+        global.fetch = () => {
+          throw new Error("fetch should not be called in this test");
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/api_client.js", "utf8");
+        vm.runInThisContext(code);
+
+        const captured = [];
+        ApiClient._request = async (method, path, options = {}) => {
+          captured.push({ method, path, timeoutMs: options.timeoutMs ?? null });
+          return { item: { config_id: "cfg-1" }, runtime_refresh: null };
+        };
+
+        ApiClient.updateLlmConfig("cfg-1", { default_model: "gpt-5.2" }).then(() => {
+          console.log(JSON.stringify(captured));
+        });
+        """
+    )
+
+    assert result == [
+        {
+            "method": "PUT",
+            "path": "/api/llm/configs/cfg-1",
+            "timeoutMs": 30000,
+        }
+    ]
+
+
 def test_api_client_delete_llm_binding_returns_runtime_refresh() -> None:
     result = _run_node_script(
         """

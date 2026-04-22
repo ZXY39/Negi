@@ -2646,6 +2646,11 @@ class RuntimeAgentSession:
             runner = getattr(self._loop, "multi_agent_runner", None)
             if runner is None or not hasattr(runner, "resume_turn"):
                 raise RuntimeError("frontdoor_interrupt_resume_unavailable")
+            paused_snapshot = self.paused_execution_context_snapshot()
+            if isinstance(paused_snapshot, dict):
+                paused_turn_id = str(paused_snapshot.get("turn_id") or "").strip()
+                if paused_turn_id and not str(self._active_turn_id or "").strip():
+                    self._active_turn_id = paused_turn_id
             self._event_log = []
             self._state.is_running = True
             self._state.paused = False

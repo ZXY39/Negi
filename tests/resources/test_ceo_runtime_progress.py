@@ -2693,6 +2693,53 @@ def test_ceo_session_pending_batch_interrupts_fall_back_to_paused_disk_state(tmp
     ]
 
 
+def test_ceo_session_pending_interrupts_do_not_fall_back_to_stale_paused_disk_state_while_running(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    monkeypatch.setattr(ceo_sessions, "workspace_path", lambda: tmp_path)
+    web_ceo_sessions.write_paused_execution_context(
+        "web:shared",
+        {
+            "status": "paused",
+            "interrupts": [
+                {
+                    "id": "interrupt-disk-1",
+                    "value": {
+                        "kind": "frontdoor_tool_approval_batch",
+                        "batch_id": "batch:123",
+                        "review_items": [
+                            {"tool_call_id": "call-1", "name": "exec", "risk_level": "high", "arguments": {"command": "echo hi"}}
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    session_manager = SessionManager(tmp_path)
+    session_manager.save(session_manager.get_or_create("web:shared"))
+    live_session = SimpleNamespace(
+        state=SimpleNamespace(status="running", is_running=True, pending_interrupts=[]),
+    )
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix="/api")
+
+    monkeypatch.setattr(ceo_sessions, "get_agent", lambda: SimpleNamespace(sessions=session_manager))
+    monkeypatch.setattr(
+        ceo_sessions,
+        "get_runtime_manager",
+        lambda _agent: SimpleNamespace(get=lambda _session_id: live_session),
+    )
+
+    client = TestClient(app)
+    response = client.get("/api/ceo/sessions/web:shared/pending-interrupts")
+
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+
+
 def test_ceo_session_resume_interrupt_recreates_runtime_from_persisted_pause(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
     monkeypatch.setattr(ceo_sessions, "workspace_path", lambda: tmp_path)
@@ -2767,8 +2814,59 @@ def test_ceo_session_resume_interrupt_recreates_runtime_from_persisted_pause(tmp
             "memory_chat_id": "memory-shared",
         }
     ]
-    assert recreated.resume_payloads == [{"approved": True}]
-    assert response.json()["output"] == "approved reply"
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_session_resume_frontdoor_interrupt_restores_turn_id_from_paused_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    web_ceo_sessions.write_paused_execution_context(
+        "web:shared",
+        {
+            "status": "paused",
+            "source": "approval",
+            "turn_id": "turn-from-disk",
+            "user_message": {"content": "create the task"},
+            "interrupts": [{"id": "interrupt-disk-1", "value": {"kind": "frontdoor_tool_approval_batch"}}],
+        },
+    )
+
+    events: list[AgentEvent] = []
+
+    class _Runner:
+        async def resume_turn(self, *, session, resume_value, on_progress):
+            _ = resume_value, on_progress
+            paused_snapshot = session.paused_execution_context_snapshot()
+            assert paused_snapshot is not None
+            assert paused_snapshot["turn_id"] == "turn-from-disk"
+            return "approved reply"
+
+    loop = SimpleNamespace(
+        multi_agent_runner=_Runner(),
+        model="gpt-test",
+        reasoning_effort=None,
+    )
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+    session.state.pending_interrupts = [{"id": "interrupt-disk-1", "value": {"kind": "frontdoor_tool_approval_batch"}}]
+    session.state.paused = True
+    session.state.status = "paused"
+
+    session.subscribe(lambda event: events.append(event))
+
+    result = await session.resume_frontdoor_interrupt(resume_value={"approved": True})
+
+    assert result.output == "approved reply"
+    message_end = next(event for event in events if event.type == "message_end")
+    assert message_end.payload["turn_id"] == "turn-from-disk"
 
 
 def test_read_inflight_turn_snapshot_ignores_terminal_error_snapshot(tmp_path: Path, monkeypatch) -> None:
@@ -6856,6 +6954,526 @@ async def test_ceo_frontdoor_prepare_turn_continues_full_context_and_appends_hid
     assert state_update["cache_family_revision"] == "frontdoor:v1"
     assert state_update["prompt_cache_key"] == "frontdoor-cache-key"
     assert state_update["prompt_cache_diagnostics"] == {"stable_prompt_signature": "frontdoor-sig"}
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state_without_reselection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
+    from g3ku.runtime.frontdoor.prompt_cache_contract import FrontdoorPromptContract
+    from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
+
+    async def _noop_ready() -> None:
+        return None
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+    heartbeat_rules_text = "heartbeat stable system"
+    heartbeat_event_bundle = "heartbeat request bundle"
+    existing_baseline = [
+        {"role": "system", "content": "frontdoor fallback"},
+        {"role": "user", "content": "prior visible request"},
+        {"role": "assistant", "content": "prior visible answer"},
+    ]
+
+    async def _resolver_should_not_run(**kwargs):
+        raise AssertionError(f"resolve_for_actor should not run for inherited heartbeat state: {kwargs}")
+
+    async def _builder_should_not_run(**kwargs):
+        raise AssertionError(f"build_for_ceo should not run for inherited heartbeat state: {kwargs}")
+
+    def _fake_build_frontdoor_prompt_contract(**kwargs):
+        request_messages = [
+            *list(kwargs.get("stable_messages") or []),
+            *list(kwargs.get("dynamic_appendix_messages") or []),
+        ]
+        return FrontdoorPromptContract(
+            request_messages=request_messages,
+            prompt_cache_key="frontdoor-cache-key",
+            diagnostics={"stable_prompt_signature": "frontdoor-sig"},
+            stable_prefix_hash="stable-hash",
+            dynamic_appendix_hash="dynamic-hash",
+            stable_messages=list(kwargs.get("stable_messages") or []),
+            dynamic_appendix_messages=list(kwargs.get("dynamic_appendix_messages") or []),
+            diagnostic_dynamic_messages=[],
+            cache_family_revision=str(kwargs.get("cache_family_revision") or "exp:prior"),
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolver_should_not_run)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _builder_should_not_run)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai:gpt-4.1"])
+    monkeypatch.setattr(runner, "_selected_tool_schemas", lambda names: [{"name": name, "parameters": {"type": "object"}} for name in list(names or [])])
+    monkeypatch.setattr(ceo_runtime_ops, "build_frontdoor_prompt_contract", _fake_build_frontdoor_prompt_contract)
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=list(existing_baseline),
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_stage_state={"active_stage_id": "", "transition_required": False, "stages": []},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={},
+        _semantic_context_state={},
+        _frontdoor_hydrated_tool_names=["filesystem_write"],
+        _frontdoor_selection_debug={"query_text": "prior visible request", "tool_selection": {"source": "prior"}},
+        _frontdoor_capability_snapshot_exposure_revision="exp:prior",
+        _frontdoor_visible_tool_ids=["create_async_task", "task_list", "filesystem_write", "web_fetch"],
+        _frontdoor_visible_skill_ids=["find-skills"],
+        _frontdoor_provider_tool_schema_names=["create_async_task", "task_list", "filesystem_write"],
+    )
+    runtime = SimpleNamespace(
+        context=ceo_runtime_ops.CeoRuntimeContext(
+            loop=loop,
+            session=session,
+            session_key="web:shared",
+            on_progress=None,
+        )
+    )
+
+    state_update = await runner._graph_prepare_turn(
+        {
+            "tool_names": ["create_async_task", "task_list", "filesystem_write"],
+            "provider_tool_names": ["create_async_task", "task_list", "filesystem_write"],
+            "pending_provider_tool_names": [],
+            "provider_tool_exposure_pending": False,
+            "provider_tool_exposure_revision": "pte:prior",
+            "provider_tool_exposure_commit_reason": "",
+            "candidate_tool_names": ["web_fetch"],
+            "candidate_tool_items": [{"tool_id": "web_fetch", "description": "fetch web pages"}],
+            "hydrated_tool_names": ["filesystem_write"],
+            "visible_skill_ids": ["find-skills"],
+            "candidate_skill_ids": ["find-skills"],
+            "rbac_visible_tool_names": ["create_async_task", "task_list", "filesystem_write", "web_fetch"],
+            "rbac_visible_skill_ids": ["find-skills"],
+            "cache_family_revision": "exp:prior",
+            "frontdoor_selection_debug": {"query_text": "prior visible request", "tool_selection": {"source": "prior"}},
+            "user_input": {
+                "content": heartbeat_event_bundle,
+                "metadata": {
+                    "heartbeat_internal": True,
+                    "heartbeat_stable_rules_text": heartbeat_rules_text,
+                    "heartbeat_event_bundle_text": heartbeat_event_bundle,
+                    "heartbeat_retrieval_query": "this should be ignored",
+                },
+            },
+        },
+        runtime=runtime,
+    )
+
+    assert state_update["tool_names"] == ["create_async_task", "task_list", "filesystem_write"]
+    assert state_update["provider_tool_names"] == ["create_async_task", "task_list", "filesystem_write"]
+    assert state_update["candidate_tool_names"] == ["web_fetch"]
+    assert state_update["candidate_tool_items"] == [{"tool_id": "web_fetch", "description": "fetch web pages"}]
+    assert state_update["hydrated_tool_names"] == ["filesystem_write"]
+    assert state_update["visible_skill_ids"] == ["find-skills"]
+    assert state_update["candidate_skill_ids"] == ["find-skills"]
+    assert state_update["rbac_visible_tool_names"] == ["create_async_task", "task_list", "filesystem_write", "web_fetch"]
+    assert state_update["rbac_visible_skill_ids"] == ["find-skills"]
+    assert state_update["cache_family_revision"] == "exp:prior"
+    assert state_update["frontdoor_selection_debug"]["query_text"] == "prior visible request"
+    assert state_update["frontdoor_selection_debug"]["tool_selection"] == {"source": "prior"}
+    assert state_update["frontdoor_selection_debug"]["callable_tool_names"] == [
+        "create_async_task",
+        "task_list",
+        "filesystem_write",
+    ]
+    assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
+    assert state_update["frontdoor_selection_debug"]["hydrated_tool_names"] == ["filesystem_write"]
+    assert state_update["frontdoor_request_body_messages"] == [
+        *existing_baseline,
+        {
+            "role": "system",
+            "content": heartbeat_rules_text,
+            "metadata": {
+                "source": "heartbeat",
+                "prompt_visible": True,
+                "ui_visible": False,
+                "internal_prompt_kind": "heartbeat_rule",
+            },
+        },
+        {
+            "role": "user",
+            "content": heartbeat_event_bundle,
+            "metadata": {
+                "source": "heartbeat",
+                "prompt_visible": True,
+                "ui_visible": False,
+                "internal_prompt_kind": "heartbeat_event_bundle",
+            },
+        },
+    ]
+    contract_messages = [
+        dict(item)
+        for item in list(state_update["dynamic_appendix_messages"] or [])
+        if is_frontdoor_tool_contract_message(dict(item))
+    ]
+    assert len(contract_messages) == 1
+    contract_text = str(contract_messages[0]["content"] or "")
+    assert "callable_tools: `create_async_task`, `task_list`, `filesystem_write`" in contract_text
+    assert "hydrated_tools: `filesystem_write`" in contract_text
+    assert "candidate_skills: `find-skills`" in contract_text
+    assert "`web_fetch`: fetch web pages" in contract_text
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_without_reselection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
+    from g3ku.runtime.frontdoor.prompt_cache_contract import FrontdoorPromptContract
+    from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
+
+    async def _noop_ready() -> None:
+        return None
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+    existing_baseline = [
+        {"role": "system", "content": "frontdoor fallback"},
+        {"role": "user", "content": "prior visible request"},
+        {"role": "assistant", "content": "prior visible answer"},
+    ]
+
+    async def _resolver_should_not_run(**kwargs):
+        raise AssertionError(f"resolve_for_actor should not run for inherited cron state: {kwargs}")
+
+    async def _builder_should_not_run(**kwargs):
+        raise AssertionError(f"build_for_ceo should not run for inherited cron state: {kwargs}")
+
+    def _fake_build_frontdoor_prompt_contract(**kwargs):
+        request_messages = [
+            *list(kwargs.get("stable_messages") or []),
+            *list(kwargs.get("dynamic_appendix_messages") or []),
+        ]
+        return FrontdoorPromptContract(
+            request_messages=request_messages,
+            prompt_cache_key="frontdoor-cache-key",
+            diagnostics={"stable_prompt_signature": "frontdoor-sig"},
+            stable_prefix_hash="stable-hash",
+            dynamic_appendix_hash="dynamic-hash",
+            stable_messages=list(kwargs.get("stable_messages") or []),
+            dynamic_appendix_messages=list(kwargs.get("dynamic_appendix_messages") or []),
+            diagnostic_dynamic_messages=[],
+            cache_family_revision=str(kwargs.get("cache_family_revision") or "exp:prior"),
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolver_should_not_run)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _builder_should_not_run)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai:gpt-4.1"])
+    monkeypatch.setattr(runner, "_selected_tool_schemas", lambda names: [{"name": name, "parameters": {"type": "object"}} for name in list(names or [])])
+    monkeypatch.setattr(ceo_runtime_ops, "build_frontdoor_prompt_contract", _fake_build_frontdoor_prompt_contract)
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=list(existing_baseline),
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_stage_state={"active_stage_id": "", "transition_required": False, "stages": []},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={},
+        _semantic_context_state={},
+        _frontdoor_hydrated_tool_names=["filesystem_write"],
+        _frontdoor_selection_debug={"query_text": "prior visible request", "tool_selection": {"source": "prior"}},
+        _frontdoor_capability_snapshot_exposure_revision="exp:prior",
+        _frontdoor_visible_tool_ids=["create_async_task", "task_list", "filesystem_write", "web_fetch"],
+        _frontdoor_visible_skill_ids=["find-skills"],
+        _frontdoor_provider_tool_schema_names=["create_async_task", "task_list", "filesystem_write"],
+    )
+    runtime = SimpleNamespace(
+        context=ceo_runtime_ops.CeoRuntimeContext(
+            loop=loop,
+            session=session,
+            session_key="web:shared",
+            on_progress=None,
+        )
+    )
+
+    state_update = await runner._graph_prepare_turn(
+        {
+            "tool_names": ["create_async_task", "task_list", "filesystem_write"],
+            "provider_tool_names": ["create_async_task", "task_list", "filesystem_write"],
+            "pending_provider_tool_names": [],
+            "provider_tool_exposure_pending": False,
+            "provider_tool_exposure_revision": "pte:prior",
+            "provider_tool_exposure_commit_reason": "",
+            "candidate_tool_names": ["web_fetch"],
+            "candidate_tool_items": [{"tool_id": "web_fetch", "description": "fetch web pages"}],
+            "hydrated_tool_names": ["filesystem_write"],
+            "visible_skill_ids": ["find-skills"],
+            "candidate_skill_ids": ["find-skills"],
+            "rbac_visible_tool_names": ["create_async_task", "task_list", "filesystem_write", "web_fetch"],
+            "rbac_visible_skill_ids": ["find-skills"],
+            "cache_family_revision": "exp:prior",
+            "frontdoor_selection_debug": {"query_text": "prior visible request", "tool_selection": {"source": "prior"}},
+            "user_input": {
+                "content": "Create a detached task for the scheduled work.",
+                "metadata": {
+                    "cron_internal": True,
+                    "cron_job_id": "job-77",
+                    "cron_max_runs": 2,
+                    "cron_delivery_index": 1,
+                    "cron_delivered_runs": 0,
+                    "cron_reminder_text": "Create a detached task for the scheduled work.",
+                },
+            },
+        },
+        runtime=runtime,
+    )
+
+    assert state_update["tool_names"] == ["create_async_task", "task_list", "filesystem_write"]
+    assert state_update["provider_tool_names"] == ["create_async_task", "task_list", "filesystem_write"]
+    assert state_update["candidate_tool_names"] == ["web_fetch"]
+    assert state_update["candidate_tool_items"] == [{"tool_id": "web_fetch", "description": "fetch web pages"}]
+    assert state_update["hydrated_tool_names"] == ["filesystem_write"]
+    assert state_update["visible_skill_ids"] == ["find-skills"]
+    assert state_update["candidate_skill_ids"] == ["find-skills"]
+    assert state_update["rbac_visible_tool_names"] == ["create_async_task", "task_list", "filesystem_write", "web_fetch"]
+    assert state_update["rbac_visible_skill_ids"] == ["find-skills"]
+    assert state_update["cache_family_revision"] == "exp:prior"
+    assert state_update["frontdoor_selection_debug"]["query_text"] == "prior visible request"
+    assert state_update["frontdoor_selection_debug"]["tool_selection"] == {"source": "prior"}
+    assert state_update["frontdoor_selection_debug"]["callable_tool_names"] == [
+        "create_async_task",
+        "task_list",
+        "filesystem_write",
+    ]
+    assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
+    assert state_update["frontdoor_selection_debug"]["hydrated_tool_names"] == ["filesystem_write"]
+    assert state_update["frontdoor_request_body_messages"] == [
+        *existing_baseline,
+        {
+            "role": "system",
+            "content": "\n".join(
+                [
+                    "You are handling a cron-internal structured reminder turn.",
+                    "Current cron job id: job-77",
+                    "Reminder delivery: 1/2",
+                    "Required behavior:",
+                    "- Treat the cron reminder as an internal instruction to your future self, not as a new user message.",
+                    "- Do not reinterpret this reminder as a natural-language stop condition or cancellation request.",
+                    "- Delivery counting and automatic stop are enforced by the scheduler, not by your own natural-language reasoning.",
+                    "- During cron-internal reminder turns, do not create, update, list, or remove cron jobs yourself.",
+                ]
+            ),
+            "metadata": {
+                "source": "cron",
+                "prompt_visible": True,
+                "ui_visible": False,
+                "internal_prompt_kind": "cron_rule",
+                "cron_job_id": "job-77",
+            },
+        },
+        {
+            "role": "system",
+            "content": "[CRON INTERNAL EVENT]\n{\n  \"message_type\": \"cron_internal_event\",\n  \"cron_job_id\": \"job-77\",\n  \"delivery_index\": 1,\n  \"max_runs\": 2,\n  \"delivered_runs_before_this_turn\": 0,\n  \"scheduled_run_at_ms\": null,\n  \"last_delivered_at_ms\": null,\n  \"reminder_text\": \"Create a detached task for the scheduled work.\",\n  \"semantic_role\": \"internal_self_reminder\"\n}",
+            "metadata": {
+                "source": "cron",
+                "prompt_visible": True,
+                "ui_visible": False,
+                "internal_prompt_kind": "cron_event_bundle",
+                "cron_job_id": "job-77",
+            },
+        },
+    ]
+    contract_messages = [
+        dict(item)
+        for item in list(state_update["dynamic_appendix_messages"] or [])
+        if is_frontdoor_tool_contract_message(dict(item))
+    ]
+    assert len(contract_messages) == 1
+    contract_text = str(contract_messages[0]["content"] or "")
+    assert "callable_tools: `create_async_task`, `task_list`, `filesystem_write`" in contract_text
+    assert "hydrated_tools: `filesystem_write`" in contract_text
+    assert "candidate_skills: `find-skills`" in contract_text
+    assert "`web_fetch`: fetch web pages" in contract_text
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_prepare_turn_internal_turn_without_prior_baseline_falls_back_to_normal_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
+    from g3ku.runtime.frontdoor.prompt_cache_contract import FrontdoorPromptContract
+
+    async def _noop_ready() -> None:
+        return None
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+    captured: dict[str, object] = {}
+    heartbeat_rules_text = "heartbeat stable system"
+    heartbeat_event_bundle = "heartbeat request bundle"
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        captured["resolver_called"] = {"actor_role": actor_role, "session_id": session_id}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec"]}
+
+    async def _build_for_ceo(**kwargs):
+        captured["builder_kwargs"] = kwargs
+        seed_messages = list(kwargs.get("request_body_seed_messages") or [])
+        user_content = kwargs.get("user_content")
+        return SimpleNamespace(
+            tool_names=["exec"],
+            model_messages=[*seed_messages, {"role": "user", "content": user_content}],
+            stable_messages=[*seed_messages, {"role": "user", "content": user_content}],
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["exec"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    def _fake_build_frontdoor_prompt_contract(**kwargs):
+        return FrontdoorPromptContract(
+            request_messages=list(kwargs.get("stable_messages") or []),
+            prompt_cache_key="frontdoor-cache-key",
+            diagnostics={"stable_prompt_signature": "frontdoor-sig"},
+            stable_prefix_hash="stable-hash",
+            dynamic_appendix_hash="dynamic-hash",
+            stable_messages=list(kwargs.get("stable_messages") or []),
+            dynamic_appendix_messages=list(kwargs.get("dynamic_appendix_messages") or []),
+            diagnostic_dynamic_messages=[],
+            cache_family_revision="frontdoor:v1",
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai:gpt-4.1"])
+    monkeypatch.setattr(ceo_runtime_ops, "build_frontdoor_prompt_contract", _fake_build_frontdoor_prompt_contract)
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=[],
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_stage_state={},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={},
+        _semantic_context_state={},
+        _frontdoor_hydrated_tool_names=["filesystem_write"],
+        _frontdoor_selection_debug={"query_text": "prior visible request"},
+        _frontdoor_capability_snapshot_exposure_revision="exp:prior",
+        _frontdoor_visible_tool_ids=["filesystem_write"],
+        _frontdoor_visible_skill_ids=["find-skills"],
+        _frontdoor_provider_tool_schema_names=["filesystem_write"],
+    )
+    runtime = SimpleNamespace(
+        context=ceo_runtime_ops.CeoRuntimeContext(
+            loop=loop,
+            session=session,
+            session_key="web:shared",
+            on_progress=None,
+        )
+    )
+
+    state_update = await runner._graph_prepare_turn(
+        {
+            "tool_names": ["filesystem_write"],
+            "provider_tool_names": ["filesystem_write"],
+            "candidate_tool_names": ["web_fetch"],
+            "candidate_tool_items": [{"tool_id": "web_fetch", "description": "fetch web pages"}],
+            "hydrated_tool_names": ["filesystem_write"],
+            "visible_skill_ids": ["find-skills"],
+            "candidate_skill_ids": ["find-skills"],
+            "rbac_visible_tool_names": ["filesystem_write", "web_fetch"],
+            "rbac_visible_skill_ids": ["find-skills"],
+            "cache_family_revision": "exp:prior",
+            "frontdoor_selection_debug": {"query_text": "prior visible request"},
+            "user_input": {
+                "content": heartbeat_event_bundle,
+                "metadata": {
+                    "heartbeat_internal": True,
+                    "heartbeat_stable_rules_text": heartbeat_rules_text,
+                    "heartbeat_event_bundle_text": heartbeat_event_bundle,
+                },
+            },
+        },
+        runtime=runtime,
+    )
+
+    assert captured["resolver_called"] == {"actor_role": "ceo", "session_id": "web:shared"}
+    assert captured["builder_kwargs"]["request_body_seed_messages"] == [
+        {
+            "role": "system",
+            "content": heartbeat_rules_text,
+            "metadata": {
+                "source": "heartbeat",
+                "prompt_visible": True,
+                "ui_visible": False,
+                "internal_prompt_kind": "heartbeat_rule",
+            },
+        }
+    ]
+    assert captured["builder_kwargs"]["user_content"] == heartbeat_event_bundle
+    assert state_update["tool_names"] == ["exec"]
+    assert state_update["provider_tool_names"] == ["filesystem_write"]
+    assert state_update["pending_provider_tool_names"] == ["exec"]
+    assert state_update["provider_tool_exposure_pending"] is True
+    assert state_update["cache_family_revision"] == "frontdoor:v1"
 
 
 @pytest.mark.asyncio

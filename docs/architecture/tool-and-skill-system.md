@@ -277,11 +277,17 @@ Maintenance note for parameter-error guidance:
 - 这里的“稳定”现在有正式状态机：desired provider tool 集可以随 RBAC/hydration/阶段变化而变化，但 active `provider_tool_names` 只会在 `token_compression` 时从 `pending_provider_tool_names` 提交；普通轮次、fresh-turn continuity、pause/resume 和 `stage_compaction` 都不能直接切 provider-facing `tools[]`。
 - execution / acceptance 节点现在也采用同样的 contract 收紧，而且没有类似 `cron_internal` 的例外：只要没有有效阶段，当前轮模型可见的 callable tool 列表就只剩 `submit_next_stage`。
 - 但这不意味着 execution / acceptance 节点必须把 `submit_next_stage` 单独拆成一轮。若同一批 tool calls 里同时出现 `submit_next_stage` 和普通工具，执行循环会先推进阶段，再让这些普通工具作为新阶段首轮执行；若阶段切换失败，同批剩余普通工具会被批内阻断，而不会回退到旧阶段继续执行。
-- 当前保留的特例是 `cron_internal`：为了继续支持 cron 自移除，这类内部轮次不会被收紧到只剩 `submit_next_stage`。
-- 但 `cron_internal` 的维护语义已经改变：这个 lane 仍只暴露 cron 自身，不再把 reminder 正文伪装成 `user` 事件消息，也不再依赖自然语言 `stop_condition` 让模型决定何时停止。
+- 当前保留的内部-turn 特例是 `heartbeat_internal` 与 `cron_internal`：只要当前 session 已有权威的 frontdoor baseline 与前序 contract state，这类内部轮次都不会被收紧到只剩 `submit_next_stage`，也不会重新跑 candidate/hydration/skill selection，而是直接继承上一轮的 callable / candidate / hydrated / provider-tool / visible-skill 状态。
+- 这意味着 `heartbeat_internal` / `cron_internal` 都不再是独立的“special lane”。从 agent 视角看，它们就是在上一轮 frontdoor contract 上追加隐藏内部提示后的普通 CEO/frontdoor 轮次；模型可以直接输出，也可以立即开始阶段并调用已继承的普通工具。
+- 如果当前 session 还没有权威 frontdoor baseline，这条继承规则不会强行触发；内部轮次会回退到普通 CEO/frontdoor exposure assembly，同时继续遵守 provider-facing active/pending tool exposure 状态机。
+- `cron_internal` 的真正特例只剩两点：
+  - reminder 正文不再伪装成 `user` 事件消息，而是隐藏的结构化 `system` 事件块
+  - cron 任务生命周期不再依赖模型自己调用 `cron(action="remove")` 或自然语言 `stop_condition` 推断停止；停止与删除由 scheduler 侧的 `payload.max_runs` / `state.delivered_runs` 计数器负责
+- 因此，若维护者排查“cron 到点了但没有创建异步任务 / 没有查询任务 / 只会重复谈 cron 自己”，应优先检查 frontdoor tool exposure 是否被错误缩成了 `cron`，而不是先怀疑 scheduler 没触发。
 - 当前 cron 工具合同应该理解为“结构化提醒”而不是“自然语言循环任务”：
   - `message` = 给未来 agent 的提醒动作
   - `max_runs` = 成功送达上限；省略时默认为 1
+  - `at` = 只接受创建时仍在未来的单次触发时间；若真正执行 `add_job()` 时该时间已过，运行时会拒绝创建并提示 `任务定时已过期，当前时间为<service-local time>，请立即执行或视情况废弃而不要创建过期任务`
   - `stop_condition` = 兼容字段，不再参与 runtime 停止判断
 - 因为停止逻辑已经转到 cron service 的计数器上，维护者排查“为什么没有自动停止”时应先看 cron store 里的 `payload.max_runs` / `state.delivered_runs`，而不是先看模型回复里有没有提到“已发送 N 次”。
 - `submit_next_stage` 的阶段预算现在在 execution / acceptance / CEO-frontdoor 三条路径上统一为 `1-10`；运行时仍允许在预算未耗尽前提前切到下一阶段，因此预算应理解为“本阶段声明的上限窗口”，而不是“必须烧满的最小轮数”。

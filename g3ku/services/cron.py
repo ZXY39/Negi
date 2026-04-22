@@ -28,6 +28,14 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _format_local_time_ms(now_ms: int) -> str:
+    dt = datetime.fromtimestamp(now_ms / 1000).astimezone().replace(microsecond=0)
+    offset = dt.strftime("%z")
+    if len(offset) == 5:
+        offset = f"{offset[:3]}:{offset[3:]}"
+    return f"{dt.strftime('%Y-%m-%d %H:%M:%S')} {offset}".strip()
+
+
 def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
     """Compute next run time in ms."""
     if schedule.kind == "at":
@@ -394,6 +402,13 @@ class CronService:
         store = self._load_store()
         _validate_schedule_for_add(schedule)
         now = _now_ms()
+        if schedule.kind == "at":
+            at_ms = int(schedule.at_ms or 0)
+            if at_ms <= now:
+                current_time_text = _format_local_time_ms(now)
+                raise ValueError(
+                    f"任务定时已过期，当前时间为{current_time_text}，请立即执行或视情况废弃而不要创建过期任务"
+                )
         _ = stop_condition
         effective_max_runs = _normalize_max_runs(schedule=schedule, max_runs=max_runs)
 

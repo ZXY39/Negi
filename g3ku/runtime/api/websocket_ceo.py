@@ -119,6 +119,10 @@ def _pending_tool_approval_interrupts(
     from_state = _approval_interrupts(getattr(state, "pending_interrupts", None))
     if from_state:
         return from_state
+    status = str(getattr(state, "status", "") or "").strip().lower()
+    is_running = bool(getattr(state, "is_running", False)) or status == "running"
+    if is_running:
+        return []
     try:
         snapshot, _snapshot_source = resolve_execution_snapshot(session, persisted_session)
     except Exception:

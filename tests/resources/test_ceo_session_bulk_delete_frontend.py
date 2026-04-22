@@ -78,6 +78,7 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     assert skill_section is not None
     skill_html = skill_section.group(0)
     assert 'id="skill-save-btn"' not in skill_html
+    assert 'id="tool-governance-banner"' not in skill_html
     assert skill_html.index('id="skill-risk-filter"') < skill_html.index('id="skill-status-filter"')
     assert skill_html.index('id="skill-status-filter"') < skill_html.index('id="skill-search-input"')
     assert skill_html.count('>全部</option>') == 2
@@ -86,6 +87,9 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     assert tool_section is not None
     tool_html = tool_section.group(0)
     assert 'id="tool-save-btn"' not in tool_html
+    assert 'id="tool-governance-banner"' in tool_html
+    assert tool_html.index('id="tool-refresh-btn"') < tool_html.index('id="tool-governance-banner"')
+    assert tool_html.index('id="tool-governance-banner"') < tool_html.index('id="tool-risk-filter"')
     assert tool_html.index('id="tool-risk-filter"') < tool_html.index('id="tool-status-filter"')
     assert tool_html.index('id="tool-status-filter"') < tool_html.index('id="tool-search-input"')
     assert tool_html.count('>全部</option>') == 2

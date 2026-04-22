@@ -143,6 +143,11 @@
 - `main/service/runtime_service.py`
 - `main/runtime/node_runner.py`
 
+如果问题是“一次性 cron / 定时提醒为什么没有真正创建或没有后续触发”，还要先区分两类情况：
+
+- job 已成功落进 `.g3ku/cron/jobs.json`，但后续没有被消费：再继续查 scheduler / Web 主进程 / session dispatch
+- `cron add` 本身在创建阶段就失败：尤其是 `at` 单次提醒，如果真正执行 `add_job()` 时目标时间已经过去，服务现在会直接拒绝创建并提示 `任务定时已过期，当前时间为<service-local time>，请立即执行或视情况废弃而不要创建过期任务`；这时应优先排查前门/tool 调用延迟、重试、参数错误，而不是先怀疑 scheduler 没触发
+
 Maintenance note for `task_append_notice` / task message distribution:
 
 - If a task appears stuck in `pause_requested` or `distributing`, inspect these together before blaming the model:

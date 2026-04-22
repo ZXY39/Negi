@@ -149,6 +149,8 @@ from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
 
 _UNSET = object()
+GOVERNANCE_MODE_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled'
+GOVERNANCE_MODE_UPDATED_AT_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled:updated_at'
 _WORKER_STATUS_STALE_AFTER_SECONDS = 15.0
 _WORKER_STATUS_ACTIVE_TASK_STALE_AFTER_SECONDS = 60.0
 _WORKER_STATUS_STARTING_GRACE_SECONDS = 10.0
@@ -5725,6 +5727,81 @@ class MainRuntimeService:
 
     def get_tool_family(self, tool_id: str):
         return self._decorate_tool_family(self._raw_tool_family(tool_id))
+
+    def get_governance_mode(self) -> dict[str, Any]:
+        return {
+            'enabled': self.governance_store.get_bool_meta(GOVERNANCE_MODE_META_KEY, default=False),
+            'updated_at': str(self.governance_store.get_meta(GOVERNANCE_MODE_UPDATED_AT_META_KEY) or ''),
+        }
+
+    def update_governance_mode(self, *, enabled: bool) -> dict[str, Any]:
+        self.governance_store.set_bool_meta(GOVERNANCE_MODE_META_KEY, bool(enabled))
+        updated_at = now_iso()
+        self.governance_store.set_meta(GOVERNANCE_MODE_UPDATED_AT_META_KEY, updated_at)
+        return {
+            'enabled': bool(enabled),
+            'updated_at': updated_at,
+        }
+
+    @staticmethod
+    def _normalize_permission_risk_level(value: Any, *, default: str = 'medium') -> str:
+        normalized = str(value or '').strip().lower()
+        if normalized in {'low', 'medium', 'high'}:
+            return normalized
+        fallback = str(default or 'medium').strip().lower()
+        return fallback if fallback in {'low', 'medium', 'high'} else 'medium'
+
+    def frontdoor_reviewable_tool_risk_map(self, *, actor_role: str, session_id: str) -> dict[str, str]:
+        if not bool(self.get_governance_mode().get('enabled')):
+            return {}
+        normalized_actor_role = str(actor_role or 'ceo').strip().lower() or 'ceo'
+        normalized_session_id = self._normalize_session_key(session_id)
+        visible_names = set(
+            self.list_effective_tool_names(
+                actor_role=normalized_actor_role,
+                session_id=normalized_session_id,
+            )
+        )
+        if not visible_names:
+            return {}
+        risk_rank = {'low': 0, 'medium': 1, 'high': 2}
+        reviewable: dict[str, str] = {}
+        families = list(
+            self.list_visible_tool_families(
+                actor_role=normalized_actor_role,
+                session_id=normalized_session_id,
+            ) or []
+        )
+        for family in families:
+            family_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+            for action in list(getattr(family, 'actions', []) or []):
+                risk_level = self._normalize_permission_risk_level(
+                    getattr(action, 'risk_level', 'medium'),
+                )
+                if risk_level not in {'medium', 'high'}:
+                    continue
+                executor_names = [
+                    str(name or '').strip()
+                    for name in list(getattr(action, 'executor_names', []) or [])
+                    if str(name or '').strip()
+                ]
+                if not executor_names:
+                    fallback_names: list[str] = []
+                    primary_executor_name = str(
+                        resolve_primary_executor_name(family, resource_manager=self._resource_manager) or ''
+                    ).strip()
+                    if primary_executor_name:
+                        fallback_names.append(primary_executor_name)
+                    if family_tool_id:
+                        fallback_names.append(family_tool_id)
+                    executor_names = fallback_names
+                for executor_name in executor_names:
+                    if executor_name not in visible_names:
+                        continue
+                    current = reviewable.get(executor_name, 'low')
+                    if risk_rank[risk_level] >= risk_rank.get(current, 0):
+                        reviewable[executor_name] = risk_level
+        return reviewable
 
     def reconcile_core_tool_families(self) -> bool:
         resolution = self._core_tool_resolution()

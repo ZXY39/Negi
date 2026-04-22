@@ -594,6 +594,61 @@ def test_ceo_frontdoor_approval_request_respects_enabled_flag() -> None:
     }
 
 
+def test_ceo_frontdoor_approval_request_uses_dynamic_governance_risk_map() -> None:
+    captured: dict[str, object] = {}
+
+    class _Service:
+        def frontdoor_reviewable_tool_risk_map(self, *, actor_role: str, session_id: str) -> dict[str, str]:
+            captured["actor_role"] = actor_role
+            captured["session_id"] = session_id
+            return {
+                "exec": "high",
+                "memory_write": "medium",
+            }
+
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=_Service()))
+
+    result = runner._approval_request_for_tool_calls(
+        [
+            {"id": "call-low-1", "name": "content_open", "arguments": {"path": "/tmp/a"}},
+            {"id": "call-risk-1", "name": "exec", "arguments": {"command": "echo hi"}},
+            {"id": "call-risk-2", "name": "memory_write", "arguments": {"content": "remember this"}},
+        ],
+        session_key="web:ceo-dynamic",
+    )
+
+    assert captured == {
+        "actor_role": "ceo",
+        "session_id": "web:ceo-dynamic",
+    }
+    assert result == {
+        "kind": "frontdoor_tool_approval_batch",
+        "batch_id": result["batch_id"],
+        "mode": "regulatory_review",
+        "submission_mode": "batch_submit_only",
+        "tool_calls": [
+            {"id": "call-low-1", "name": "content_open", "arguments": {"path": "/tmp/a"}},
+            {"id": "call-risk-1", "name": "exec", "arguments": {"command": "echo hi"}},
+            {"id": "call-risk-2", "name": "memory_write", "arguments": {"content": "remember this"}},
+        ],
+        "review_items": [
+            {
+                "tool_call_id": "call-risk-1",
+                "name": "exec",
+                "risk_level": "high",
+                "arguments": {"command": "echo hi"},
+            },
+            {
+                "tool_call_id": "call-risk-2",
+                "name": "memory_write",
+                "risk_level": "medium",
+                "arguments": {"content": "remember this"},
+            },
+        ],
+        "pass_through_tool_call_ids": ["call-low-1"],
+    }
+
+
 def test_ceo_frontdoor_get_compiled_graph_uses_explicit_state_graph_with_checkpointer_and_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

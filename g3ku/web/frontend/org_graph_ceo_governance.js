@@ -34,7 +34,6 @@ function ensureCeoGovernanceState() {
     if (!U.toolGovernanceSwitch) U.toolGovernanceSwitch = document.getElementById("tool-governance-switch");
     if (!U.toolGovernanceSwitchTrack) U.toolGovernanceSwitchTrack = document.getElementById("tool-governance-switch-track");
     if (!U.toolGovernanceSwitchLabel) U.toolGovernanceSwitchLabel = document.getElementById("tool-governance-switch-label");
-    if (!U.toolGovernanceBannerText) U.toolGovernanceBannerText = document.getElementById("tool-governance-banner-text");
     if (!U.ceoApprovalViewport) U.ceoApprovalViewport = document.getElementById("ceo-approval-viewport");
     if (!U.ceoApprovalArgsBackdrop) U.ceoApprovalArgsBackdrop = document.getElementById("ceo-approval-args-backdrop");
     if (!U.ceoApprovalArgsDrawer) U.ceoApprovalArgsDrawer = document.getElementById("ceo-approval-args-drawer");
@@ -283,9 +282,6 @@ function syncCeoApprovalFromInterrupts(interrupts = [], sessionId = activeSessio
         return null;
     }
     applyCeoApprovalFlow(nextFlow, { preserveExistingDecisions: true });
-    if (S.view !== "ceo" && typeof switchView === "function") {
-        switchView("ceo");
-    }
     return nextFlow;
 }
 
@@ -316,7 +312,46 @@ async function refreshCeoApprovalFromServer(sessionId = activeSessionId(), { qui
 
 window.refreshCeoApprovalFromServer = refreshCeoApprovalFromServer;
 
-function renderToolGovernanceMode() {
+function isApprovalInterruptKind(value = null) {
+    const kind = String(value?.kind || "").trim();
+    return kind === "frontdoor_tool_approval" || kind === "frontdoor_tool_approval_batch";
+}
+
+function clearApprovalInterruptsFromSnapshotCache(sessionId = activeSessionId()) {
+    const normalizedSessionId = String(sessionId || "").trim();
+    if (!normalizedSessionId || typeof patchCeoSessionSnapshotCache !== "function") return;
+    patchCeoSessionSnapshotCache(normalizedSessionId, (entry) => {
+        const currentEntry = entry && typeof entry === "object" ? entry : {};
+        const stripInterrupts = (snapshot) => {
+            if (!snapshot || typeof snapshot !== "object") return { snapshot, changed: false };
+            const interrupts = Array.isArray(snapshot?.interrupts) ? snapshot.interrupts : [];
+            if (!interrupts.length) return { snapshot, changed: false };
+            const kept = interrupts.filter((item) => !isApprovalInterruptKind(item?.value || null));
+            if (kept.length === interrupts.length) return { snapshot, changed: false };
+            const nextSnapshot = { ...snapshot };
+            if (kept.length) nextSnapshot.interrupts = kept;
+            else delete nextSnapshot.interrupts;
+            return { snapshot: nextSnapshot, changed: true };
+        };
+        const inflight = stripInterrupts(currentEntry.inflight_turn);
+        const preserved = stripInterrupts(currentEntry.preserved_turn);
+        if (!inflight.changed && !preserved.changed) return currentEntry;
+        return {
+            ...currentEntry,
+            inflight_turn: inflight.snapshot,
+            preserved_turn: preserved.snapshot,
+        };
+    });
+}
+
+function rebindActiveApprovalTurnToUserLane() {
+    if (typeof getActiveCeoTurn !== "function") return;
+    const turn = getActiveCeoTurn("approval");
+    if (!turn || turn.finalized) return;
+    turn.source = "user";
+}
+
+function renderToolGovernanceModeLegacy() {
     ensureCeoGovernanceState();
     const state = governanceModeState();
     const banner = U.toolGovernanceBanner;
@@ -368,6 +403,32 @@ async function loadToolGovernanceMode({ quiet = true } = {}) {
 }
 
 window.loadToolGovernanceMode = loadToolGovernanceMode;
+
+function renderToolGovernanceMode() {
+    ensureCeoGovernanceState();
+    const state = governanceModeState();
+    const banner = U.toolGovernanceBanner;
+    const toggle = U.toolGovernanceSwitch;
+    const label = U.toolGovernanceSwitchLabel;
+    if (!banner || !toggle || !label) return;
+    const enabled = !!state.enabled;
+    const description = enabled
+        ? "开启后，主 Agent 调用中/高风险 Tool 会进入逐个审批，并在最后统一提交。"
+        : "关闭后，后续 Tool 调用将按非监管模式直接继续执行。";
+    toggle.setAttribute("aria-pressed", enabled ? "true" : "false");
+    toggle.setAttribute("aria-label", enabled ? "关闭监管模式" : "开启监管模式");
+    toggle.title = description;
+    toggle.disabled = !!state.loading || !!state.saving;
+    banner.dataset.enabled = enabled ? "true" : "false";
+    banner.title = description;
+    label.textContent = state.saving
+        ? "保存中"
+        : state.loading
+            ? "加载中"
+            : enabled
+                ? "开启"
+                : "关闭";
+}
 
 async function toggleToolGovernanceMode() {
     ensureCeoGovernanceState();
@@ -598,6 +659,8 @@ async function submitCeoApprovalFlow() {
                 decisions,
             },
         }));
+        rebindActiveApprovalTurnToUserLane();
+        clearApprovalInterruptsFromSnapshotCache(sessionId);
         clearApprovalDraft(sessionId, flow.batchId);
         flow.submitting = true;
         renderCeoApprovalFlow();
@@ -692,37 +755,36 @@ bindToolGovernanceUi();
 bindCeoApprovalUi();
 renderToolGovernanceMode();
 renderCeoApprovalFlow();
+if (typeof syncCeoApprovalFromSnapshotEntry === "function") {
+    syncCeoApprovalFromSnapshotEntry(activeSessionId(), null, {
+        authoritative: true,
+        refreshServer: true,
+    });
+} else if (typeof refreshCeoApprovalFromServer === "function") {
+    void refreshCeoApprovalFromServer(activeSessionId(), { quiet: true });
+}
 if (S.view === "tools") {
     void loadToolGovernanceMode({ quiet: true });
 }
 
 const __baseCanMutateCeoSessions = canMutateCeoSessions;
 canMutateCeoSessions = function wrappedCanMutateCeoSessions(...args) {
-    return __baseCanMutateCeoSessions.apply(this, args) && !hasActiveCeoApprovalBlockingState();
+    return __baseCanMutateCeoSessions.apply(this, args);
 };
 
 const __baseSwitchView = switchView;
-switchView = function wrappedSwitchView(view, ...args) {
-    if (view !== "ceo" && hasActiveCeoApprovalBlockingState()) {
-        showToast({
-            title: "监管审批进行中",
-            text: "请先完成当前工具审批，再切换到其他页面。",
-            kind: "warn",
-            durationMs: 2400,
-        });
-        return;
-    }
+switchView = function approvalNonBlockingSwitchView(view, ...args) {
     return __baseSwitchView.call(this, view, ...args);
 };
 
 const __baseCanCreateCeoSessions = canCreateCeoSessions;
 canCreateCeoSessions = function wrappedCanCreateCeoSessions(...args) {
-    return __baseCanCreateCeoSessions.apply(this, args) && !hasActiveCeoApprovalBlockingState();
+    return __baseCanCreateCeoSessions.apply(this, args);
 };
 
 const __baseCanActivateCeoSessions = canActivateCeoSessions;
 canActivateCeoSessions = function wrappedCanActivateCeoSessions(...args) {
-    return __baseCanActivateCeoSessions.apply(this, args) && !hasActiveCeoApprovalBlockingState();
+    return __baseCanActivateCeoSessions.apply(this, args);
 };
 
 const __baseSyncCeoPrimaryButton = syncCeoPrimaryButton;

@@ -220,8 +220,9 @@ Maintenance note for `task_append_notice` and task message distribution:
   - 这两个列表服务于模型决策边界，不代表 provider-facing `tools[]` 发生变化
 - 但 provider-facing `tools` schemas 现在不再随着 `transition_required=true` 收紧到只剩 `submit_next_stage`。前门会继续向 provider 发送稳定的 active `provider_tool_names` bundle，以减少阶段切换回合对 prompt cache 前缀命中的破坏。
 - 这条稳定性规则现在还有一个显式提交边界：RBAC、hydration、阶段状态变化会先让当前轮的 desired tool 集发生变化，但最新 provider-facing `tools[]` 只会先写入 `pending_provider_tool_names`；只有当前轮真实进入 `token_compression` 时，pending 集才允许提交成新的 active `provider_tool_names`。
-- 当前唯一保留的例外是 `cron_internal`。这类内部轮次仍保留自己的 callable tool 集合，以便按既有协议继续调用 `cron(action="remove")` 完成自移除；维护时不要把这个 internal lane 与普通 CEO user turn 混为一谈。
-- 维护上不要把这个规则误读成“前门内部状态已经只剩 `submit_next_stage`”。`tool_names` 仍保存阶段内可恢复的完整工具池，供同一 turn 成功开阶段后的下一次 model call 立即恢复完整 callable 列表；agent-facing 决策边界由前门的 callable-tool helper 与动态合同消息表达，而 provider-facing schema 稳定性由 active/pending provider-tool exposure 状态保证。
+- 当前保留的内部-turn 例外是 `heartbeat_internal` 与 `cron_internal`。只要 session 已有权威的 `frontdoor_request_body_messages` / actual-request baseline，且前序 frontdoor contract state 仍在，这类内部轮次就不会被前门 callable-tool helper 收紧到只剩 `submit_next_stage`，也不会重新跑 tool/skill selector；它们会直接继承上一轮的 callable / candidate / hydrated / provider-tool / visible-skill 状态，只在原 baseline 之后追加隐藏内部提示。
+- 这同样意味着 heartbeat / cron 内部轮次从 agent 视角与普通 CEO/frontdoor 轮次一致：模型既可以直接输出内容，也可以立刻开阶段、调用当前已继承的普通工具。若维护时看到到点后的 heartbeat/cron 只能围着 `submit_next_stage` 或 `cron` 自己打转，优先排查 frontdoor contract state 是否在内部轮次开始前被错误清空或重选。
+- 若当前 session 还没有权威 frontdoor baseline，这条“直接继承上一轮 contract”规则不会强行触发；内部轮次会回退到普通 CEO/frontdoor exposure assembly，而 provider-facing schema 稳定性仍由 active/pending provider-tool exposure 状态机保证。
 - `g3ku/runtime/frontdoor/_ceo_create_agent_impl.py` 仍是 runner 入口，但它不再把 `create_agent + middleware` 当作前门主执行链；维护时应把 `_graph_*` 节点看成唯一权威路径。
 - frontdoor 与节点动态合同现在还会携带 `exec_runtime_policy`。这让 prompt 中不再需要把 exec 的“只读/受监管”规则写死为静态事实；维护者应优先把当前 exec 模式视为 runtime contract 的一部分，而不是 prompt 文案的一部分。
 - CEO/frontdoor 的稳定 system prompt 现在只保留最小的 capability exposure revision 锚点，不再把可见 tool/skill 名单整块写进稳定前缀。
@@ -584,6 +585,8 @@ Heartbeat and cron turns now share the same strict internal-turn contract.
 - The hidden internal prompt messages are durable prompt history, not live-only lane text. They should be persisted with `prompt_visible=true`, `ui_visible=false`, and an `internal_prompt_kind` such as `heartbeat_rule`, `heartbeat_event_bundle`, `cron_rule`, or `cron_event_bundle`.
 - Heartbeat still carries its event payload as a hidden `user` event-bundle message because that lane still models a session-owned follow-up event.
 - Cron no longer injects its reminder payload as a hidden `user` message. It now appends a second hidden `system` block that describes a structured reminder delivery event for the future agent.
+- When the prior frontdoor baseline already has contract state, heartbeat and cron internal turns also inherit the ordinary CEO tool/skill exposure contract rather than rebuilding or narrowing it from scratch. The only callable-tool special-case is that these internal turns bypass the usual “no valid stage => `submit_next_stage` only” shrink so the reminder/wakeup turn can act immediately on the inherited instruction context.
+- If no authoritative frontdoor baseline exists yet, heartbeat/cron fall back to the ordinary exposure assembly path for that round instead of inheriting a partial internal-only seed.
 - Visible heartbeat / cron assistant replies and tool traces remain ordinary durable turn output. They should stay `prompt_visible=true`, `ui_visible=true`, and continue to inherit the same continuity, token-preflight, token-compression, and pause contracts as visible user turns.
 - Service-layer code must not auto-retry tasks or synthesize fallback assistant replies on behalf of the model.
 - An internal turn that ends with `HEARTBEAT_OK` is still the one live-only ACK exception: the ACK event may surface in UI, but it must not create a new visible assistant transcript entry.

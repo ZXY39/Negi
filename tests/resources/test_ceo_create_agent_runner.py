@@ -26,7 +26,6 @@ from g3ku.runtime.frontdoor.prompt_cache_contract import (
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, initial_persistent_state
 from g3ku.runtime.frontdoor.tool_contract import (
-    frontdoor_tool_contract_payload_from_message,
     is_frontdoor_tool_contract_message,
 )
 from g3ku.runtime import web_ceo_sessions
@@ -1930,6 +1929,94 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_cron_internal_event_
         for item in list(prepared["frontdoor_request_body_messages"] or [])
         if isinstance(item, dict)
     )
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_graph_prepare_turn_keeps_normal_ceo_tools_for_cron_internal() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            sessions=SimpleNamespace(get_or_create=lambda session_key: SimpleNamespace(session_key=session_key)),
+            main_task_service=None,
+            tools=SimpleNamespace(get=lambda *_: None, tool_names=[]),
+            provider_name="openai",
+            model="gpt-test",
+        )
+    )
+
+    async def _resolve_for_actor(**kwargs):
+        _ = kwargs
+        return {
+            "skills": [],
+            "tool_families": [],
+            "tool_names": ["create_async_task", "task_list", "cron"],
+        }
+
+    async def _build_for_ceo(**kwargs):
+        stable_messages = list(kwargs.get("request_body_seed_messages") or [])
+        return SimpleNamespace(
+            model_messages=list(stable_messages),
+            stable_messages=list(stable_messages),
+            dynamic_appendix_messages=[],
+            tool_names=["create_async_task", "task_list", "cron"],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            repair_required_tool_items=[],
+            repair_required_skill_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["create_async_task", "task_list", "cron"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    runner._resolver = SimpleNamespace(resolve_for_actor=_resolve_for_actor)
+    runner._builder = SimpleNamespace(build_for_ceo=_build_for_ceo)
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    runner._selected_tool_schemas = (
+        lambda tool_names: [{"name": name, "parameters": {"type": "object"}} for name in list(tool_names or [])]
+    )
+
+    prepared = await runner._graph_prepare_turn(
+        state=initial_persistent_state(
+            user_input={
+                "content": "Create an async task that continues the scheduled work.",
+                "metadata": {
+                    "cron_internal": True,
+                    "cron_job_id": "job-88",
+                    "cron_max_runs": 1,
+                    "cron_delivery_index": 1,
+                    "cron_delivered_runs": 0,
+                    "cron_reminder_text": "Create an async task that continues the scheduled work.",
+                },
+            }
+        ),
+        runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
+    )
+
+    assert prepared["tool_names"] == ["create_async_task", "task_list", "cron"]
+    assert "create_async_task" in list(prepared["provider_tool_names"] or [])
+    assert "task_list" in list(prepared["provider_tool_names"] or [])
+
+    contract_messages = [
+        dict(item)
+        for item in list(prepared["dynamic_appendix_messages"] or [])
+        if _is_frontdoor_runtime_tool_contract_record(dict(item))
+    ]
+    assert len(contract_messages) == 1
+    contract_text = str(contract_messages[0]["content"] or "")
+    assert "callable_tools: `create_async_task`, `task_list`, `cron`" in contract_text
 
 
 @pytest.mark.asyncio

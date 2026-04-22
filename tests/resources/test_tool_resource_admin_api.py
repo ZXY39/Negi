@@ -5062,6 +5062,99 @@ def test_governance_store_bool_meta_round_trip(tmp_path: Path):
         store.close()
 
 
+@pytest.mark.asyncio
+async def test_main_runtime_service_governance_mode_round_trip(tmp_path: Path):
+    runtime_store = tmp_path / 'runtime.sqlite3'
+    governance_store = tmp_path / 'governance.sqlite3'
+    files_base_dir = tmp_path / 'tasks'
+    artifact_dir = tmp_path / 'artifacts'
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=runtime_store,
+        files_base_dir=files_base_dir,
+        artifact_dir=artifact_dir,
+        governance_store_path=governance_store,
+    )
+    try:
+        assert service.get_governance_mode() == {
+            'enabled': False,
+            'updated_at': '',
+        }
+        updated = service.update_governance_mode(enabled=True)
+        assert updated['enabled'] is True
+        assert str(updated['updated_at']).strip()
+        assert service.get_governance_mode() == updated
+    finally:
+        await service.close()
+
+    restarted = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=runtime_store,
+        files_base_dir=files_base_dir,
+        artifact_dir=artifact_dir,
+        governance_store_path=governance_store,
+    )
+    try:
+        reloaded = restarted.get_governance_mode()
+        assert reloaded['enabled'] is True
+        assert reloaded['updated_at'] == updated['updated_at']
+    finally:
+        await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_main_runtime_service_frontdoor_reviewable_tool_risk_map_uses_governance_mode_and_tool_risk(
+    tmp_path: Path,
+):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'content', 'exec', 'memory_runtime', 'memory_write')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-frontdoor-governance-risk-map')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        await service.startup()
+        assert service.frontdoor_reviewable_tool_risk_map(
+            actor_role='ceo',
+            session_id='web:shared',
+        ) == {}
+
+        service.update_tool_policy(
+            'exec_runtime',
+            session_id='web:shared',
+            allowed_roles_by_action={'run': ['ceo', 'execution']},
+        )
+        service.update_tool_policy(
+            'memory',
+            session_id='web:shared',
+            allowed_roles_by_action={'write': ['ceo']},
+        )
+        service.update_governance_mode(enabled=True)
+        reviewable = service.frontdoor_reviewable_tool_risk_map(
+            actor_role='ceo',
+            session_id='web:shared',
+        )
+
+        assert reviewable['exec'] == 'high'
+        assert reviewable['memory_write'] == 'medium'
+        assert 'content_open' not in reviewable
+    finally:
+        await service.close()
+        manager.close()
+
+
 def test_governance_mode_endpoints_round_trip():
     captured: dict[str, object] = {}
 

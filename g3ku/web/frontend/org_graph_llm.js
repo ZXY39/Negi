@@ -1665,8 +1665,8 @@
           },
           draft,
       });
-      await waitForRuntimeRefreshAndUpdateToast(saveResult?.runtimeRefresh);
       closeEditor();
+      await waitForRuntimeRefreshAndUpdateToast(saveResult?.runtimeRefresh);
       await loadAll();
     } finally {
       state.saving = false;
@@ -1756,8 +1756,8 @@
         showToast({ title: "无需保存", text: "当前没有需要应用的修改。", kind: "info" });
         return;
       }
-      await waitForRuntimeRefreshAndUpdateToast(runtimeRefresh);
       closeEditor();
+      await waitForRuntimeRefreshAndUpdateToast(runtimeRefresh);
       await loadAll();
     } finally {
       state.saving = false;

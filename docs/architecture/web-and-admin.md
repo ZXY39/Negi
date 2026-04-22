@@ -128,7 +128,8 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - While a regulatory approval batch is pending, the composer should behave as blocked-active state rather than as ordinary paused state:
   - no new user message send,
   - no queued follow-up dispatch,
-  - no silent switch-away that would hide the approval UI.
+- session/page switching is allowed while the batch is pending, but the pending review must remain session-local draft state and reappear when the operator returns to that CEO session.
+- Frontend pause rendering must not rely only on `source="approval"`. Approval pauses may arrive with ordinary `source="user"` plus approval interrupts in the inflight/paused snapshot lane; in that case the browser should keep the current visible turn in the approval-waiting state instead of finalizing a new `已暂停` history bubble.
 - Once the operator submits the batch, the browser should clear the local draft for that batch and wait for the normal runtime events (`ceo.state`, `ceo.reply.final`, etc.) to continue the conversation.
 
 ### 2.5. Image Upload Gating

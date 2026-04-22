@@ -19,6 +19,8 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 
 - Heartbeat and cron are no longer assembled through a separate short `ceo_heartbeat` request lane on the main CEO path.
 - Each internal activation now resumes from the same session-owned `frontdoor_request_body_messages` / actual-request scaffold used by the next visible CEO turn.
+- When that authoritative frontdoor baseline already carries prior frontdoor contract state, heartbeat and cron inherit the previous callable/candidate/hydrated/provider-tool/visible-skill state directly instead of rerunning tool or skill selection.
+- If no authoritative frontdoor baseline exists yet, internal turns fall back to the ordinary CEO/frontdoor exposure assembly path for that round.
 - Heartbeat still appends two hidden durable messages before the model call:
   - a `system` rule message
   - a `user` event-bundle message
@@ -40,11 +42,14 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 
 - Cron is now a structured reminder mechanism for the future agent, not a natural-language stop-condition engine.
 - Cron `message` should be understood as the reminder instruction for the future agent, not as a ready-to-send user reply.
+- Cron-internal turns are not a cron-only tool lane. When prior frontdoor contract state exists, they reuse the ordinary CEO/frontdoor tool exposure for the current role; the special-case is only that they bypass the normal “no valid stage => `submit_next_stage` only” shrink so a scheduled reminder can immediately call `create_async_task`, task query builtins, or other already-visible CEO tools.
+- The prompt-side cron rule still explicitly tells the model not to create, update, list, or remove cron jobs itself during that internal turn. That guidance is about avoiding self-referential reminder churn, not about hiding ordinary CEO tools.
 - Repetition is enforced by service-side counters:
   - `payload.max_runs`
   - `state.delivered_runs`
 - A cron reminder only counts as delivered after the internal prompt is durably accepted by the runtime/session path.
 - When `delivered_runs >= max_runs`, the cron service removes the job immediately and does not schedule another wakeup.
+- One-shot `at` reminders are now also validated at creation time against the service clock. If the target timestamp is already in the past when `add_job()` runs, the cron service rejects creation immediately with `任务定时已过期，当前时间为<service-local time>，请立即执行或视情况废弃而不要创建过期任务` instead of storing a dormant expired job.
 - If an old cron store uses the previous schema version, the runtime now drops those jobs instead of attempting migration; maintainers should treat this as an intentional semantic reset.
 
 ## Task Terminal Repair Contract

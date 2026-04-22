@@ -1888,6 +1888,20 @@ function normalizeCeoSnapshotUserMessages(messages = [], fallbackMessage = null)
     return fallback ? [fallback] : [];
 }
 
+function normalizeCeoSnapshotInterrupts(interrupts = []) {
+    return (Array.isArray(interrupts) ? interrupts : [])
+        .map((item) => {
+            if (!item || typeof item !== "object") return null;
+            const id = String(item.id || "").trim();
+            const value = item.value && typeof item.value === "object"
+                ? structuredClone(item.value)
+                : null;
+            if (!id || !value) return null;
+            return { id, value };
+        })
+        .filter(Boolean);
+}
+
 function normalizeCeoSnapshotInflight(snapshot = null) {
     if (!snapshot || typeof snapshot !== "object") return null;
     const next = {};
@@ -1922,6 +1936,8 @@ function normalizeCeoSnapshotInflight(snapshot = null) {
     if (Number.isFinite(actualRequestMessageCount) && actualRequestMessageCount > 0) {
         next.actual_request_message_count = Math.floor(actualRequestMessageCount);
     }
+    const interrupts = normalizeCeoSnapshotInterrupts(snapshot?.interrupts);
+    if (interrupts.length) next.interrupts = interrupts;
     if (
         !ceoInflightTurnHasVisibleAssistantState(next)
         && !next.user_message
@@ -2269,7 +2285,40 @@ function renderCeoSessionSnapshotFromCache(sessionId, { scrollToLatest = true } 
     if (!entry) return false;
     if (scrollToLatest) S.ceoScrollToLatestOnSnapshot = true;
     renderCeoSnapshot(entry.messages || [], entry.inflight_turn || null, { preservedTurn: entry.preserved_turn || null });
+    if (String(sessionId || "").trim() === activeSessionId()) {
+        syncCeoApprovalFromSnapshotEntry(sessionId, entry, { authoritative: true, refreshServer: true });
+    }
     return true;
+}
+
+function ceoApprovalInterruptsFromSnapshotEntry(entry = null) {
+    const snapshotEntry = entry && typeof entry === "object" ? entry : null;
+    const inflightInterrupts = Array.isArray(snapshotEntry?.inflight_turn?.interrupts)
+        ? snapshotEntry.inflight_turn.interrupts
+        : [];
+    if (inflightInterrupts.length) return inflightInterrupts;
+    return Array.isArray(snapshotEntry?.preserved_turn?.interrupts)
+        ? snapshotEntry.preserved_turn.interrupts
+        : [];
+}
+
+function syncCeoApprovalFromSnapshotEntry(
+    sessionId,
+    entry = null,
+    { authoritative = false, refreshServer = false } = {},
+) {
+    const normalizedSessionId = String(sessionId || "").trim();
+    if (!normalizedSessionId) return;
+    const snapshotEntry = entry && typeof entry === "object"
+        ? entry
+        : getCeoSessionSnapshotCache(normalizedSessionId);
+    const interrupts = ceoApprovalInterruptsFromSnapshotEntry(snapshotEntry);
+    if (typeof syncCeoApprovalFromInterrupts === "function") {
+        syncCeoApprovalFromInterrupts(interrupts, normalizedSessionId, { authoritative });
+    }
+    if (refreshServer && typeof refreshCeoApprovalFromServer === "function") {
+        void refreshCeoApprovalFromServer(normalizedSessionId, { quiet: true });
+    }
 }
 
 function isTaskDetailsViewActive() {
@@ -3444,6 +3493,42 @@ function finalizePausedCeoTurn(text = "已暂停", { source = null } = {}) {
     return true;
 }
 
+function isCeoApprovalPauseSourceLegacy(source = "") {
+    return normalizeCeoTurnSource(source) === "approval";
+}
+
+function holdApprovalPausedCeoTurnLegacy(text = "", { source = "", turnId = "" } = {}) {
+    const normalizedSource = normalizeCeoTurnSource(source || "approval");
+    const normalizedTurnId = normalizeCeoTurnId(turnId);
+    const turn = ensureActiveCeoTurn({ source: normalizedSource, turnId: normalizedTurnId });
+    if (!turn?.textEl || !turn.flowEl) return false;
+    mutateCeoFeed(() => {
+        renderCeoAssistantTextIntoTurn(turn, String(text || ""), { status: "paused" });
+        turn.finalized = false;
+        if (turn.steps > 0) {
+            turn.flowEl.hidden = false;
+            turn.flowEl.open = false;
+        }
+        updateCeoTurnMeta(turn, "绛夊緟瀹℃壒");
+    }, { scrollMode: "preserve" });
+    patchCeoSessionSnapshotCache(activeSessionId(), (entry) => {
+        const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
+        if (!inflightTurn) return entry || {};
+        const inflightSource = String(inflightTurn?.source || "").trim().toLowerCase();
+        if (normalizedSource && inflightSource && normalizeCeoTurnSource(inflightSource) !== normalizedSource) {
+            return entry || {};
+        }
+        return {
+            ...(entry || {}),
+            inflight_turn: {
+                ...inflightTurn,
+                status: "paused",
+            },
+        };
+    });
+    return true;
+}
+
 function applyCeoState(state = {}, meta = {}) {
     const status = String(state?.status || "").trim().toLowerCase();
     const source = String(meta?.source || state?.source || "").trim().toLowerCase();
@@ -4000,8 +4085,12 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
     }
     const status = String(snapshot.status || "").trim().toLowerCase();
     const existingTurn = getActiveCeoTurn(source, turnId);
+    const existingTurnSource = normalizeCeoTurnSource(existingTurn?.source || "user");
     const shouldReuseExistingTurn = !!existingTurn && (
-        !!turnId || !normalizeCeoTurnId(existingTurn?.turnId || "")
+        !!turnId
+        || !normalizeCeoTurnId(existingTurn?.turnId || "")
+        || source === "approval"
+        || existingTurnSource === "approval"
     );
     if (!shouldReuseExistingTurn && !ceoNeedsAssistantTurn(snapshot)) return false;
     let turn = shouldReuseExistingTurn ? existingTurn : null;
@@ -4098,6 +4187,94 @@ function restoreCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = 
         finalizeCeoTurn(`运行出错：${errorMessage}`, { source, turnId });
     }
 }
+
+function isCeoApprovalPauseSource(source = "") {
+    return normalizeCeoTurnSource(source) === "approval";
+}
+
+function holdApprovalPausedCeoTurn({ source = "", turnId = "", text = "" } = {}) {
+    const normalizedSource = normalizeCeoTurnSource(source || "approval");
+    const normalizedTurnId = normalizeCeoTurnId(turnId);
+    const turn = ensureActiveCeoTurn({ source: normalizedSource, turnId: normalizedTurnId });
+    if (!turn?.textEl || !turn?.flowEl) return false;
+    mutateCeoFeed(() => {
+        renderCeoAssistantTextIntoTurn(turn, String(text || ""), { status: "paused" });
+        turn.finalized = false;
+        if (turn.steps > 0) {
+            turn.flowEl.hidden = false;
+            turn.flowEl.open = false;
+        }
+        updateCeoTurnMeta(turn, "等待审批");
+        icons();
+    }, { scrollMode: "preserve" });
+    patchCeoSessionSnapshotCache(activeSessionId(), (entry) => {
+        const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
+        if (!inflightTurn) return entry || {};
+        const inflightSource = String(inflightTurn?.source || "").trim().toLowerCase();
+        if (normalizedSource && inflightSource && normalizeCeoTurnSource(inflightSource) !== normalizedSource) {
+            return entry || {};
+        }
+        return {
+            ...(entry || {}),
+            inflight_turn: {
+                ...inflightTurn,
+                status: "paused",
+            },
+        };
+    });
+    return true;
+}
+
+const __approvalPauseBaseApplyCeoState = applyCeoState;
+applyCeoState = function approvalAwareApplyCeoState(state = {}, meta = {}) {
+    const status = String(state?.status || "").trim().toLowerCase();
+    const source = String(meta?.source || state?.source || "").trim().toLowerCase();
+    if (!(status === "paused" && shouldTreatCeoPauseAsApproval(state, { source }))) {
+        return __approvalPauseBaseApplyCeoState.call(this, state, meta);
+    }
+    const turnId = String(meta?.turn_id || state?.turn_id || "").trim();
+    const running = !!state?.is_running || status === "running";
+    const paused = !!state?.paused || status === "paused";
+    const activeTurn = source || turnId ? getActiveCeoTurn(source, turnId) : getActiveCeoTurn();
+    const hadTurnContext = !!activeTurn || !!S.ceoTurnActive;
+    S.ceoTurnActive = running;
+    if (patchCeoSessionRuntimeState(activeSessionId(), running)) renderCeoSessions();
+    if (!running) S.ceoPauseBusy = false;
+    if (running) {
+        if (activeTurn) {
+            if (source) activeTurn.source = normalizeCeoTurnSource(source);
+            if (turnId) activeTurn.turnId = turnId;
+        } else if (hadTurnContext && (source || turnId) && source !== "heartbeat") {
+            ensureActiveCeoTurn({ source, turnId });
+        }
+    }
+    if (paused) holdApprovalPausedCeoTurn({ source, turnId });
+    scheduleSyncCeoComposerUsageOutline();
+    syncCeoSessionActions();
+    syncCeoPrimaryButton();
+    if (!running && !paused) {
+        pruneRuntimeSentCeoFollowUps(activeSessionId());
+        maybeDispatchQueuedCeoFollowUps();
+    }
+};
+
+const __approvalPauseBaseRestoreCeoInflightTurn = restoreCeoInflightTurn;
+restoreCeoInflightTurn = function approvalAwareRestoreCeoInflightTurn(
+    snapshot = null,
+    { sessionId = "", cacheField = "inflight_turn" } = {},
+) {
+    const status = String(snapshot?.status || "").trim().toLowerCase();
+    const source = normalizeCeoTurnSource(snapshot?.source || "");
+    if (!(status === "paused" && shouldTreatCeoPauseAsApproval(snapshot, { source, sessionId }))) {
+        return __approvalPauseBaseRestoreCeoInflightTurn.call(this, snapshot, { sessionId, cacheField });
+    }
+    patchCeoInflightTurn(snapshot, { sessionId, cacheField });
+    holdApprovalPausedCeoTurn({
+        source,
+        turnId: snapshot?.turn_id || "",
+        text: snapshot?.assistant_text || "",
+    });
+};
 
 function renderPersistedCeoAssistantTurn(item = {}) {
     const canonicalContext = normalizeCeoSnapshotCanonicalContext(item?.canonical_context);
@@ -4247,6 +4424,44 @@ function normalizeCeoTurnSource(source = "") {
     return normalized || "user";
 }
 
+function isCeoApprovalInterruptValue(value = null) {
+    const kind = String(value?.kind || "").trim();
+    return kind === "frontdoor_tool_approval" || kind === "frontdoor_tool_approval_batch";
+}
+
+function ceoSnapshotHasApprovalInterrupts(snapshot = null) {
+    if (!snapshot || typeof snapshot !== "object") return false;
+    return normalizeCeoSnapshotInterrupts(snapshot?.interrupts)
+        .some((item) => isCeoApprovalInterruptValue(item?.value || null));
+}
+
+function ceoSessionHasActiveApprovalBlockingState(sessionId = activeSessionId()) {
+    try {
+        return typeof hasActiveCeoApprovalBlockingState === "function"
+            && !!hasActiveCeoApprovalBlockingState(sessionId);
+    } catch (error) {
+        void error;
+        return false;
+    }
+}
+
+function shouldTreatCeoPauseAsApproval(stateOrSnapshot = null, { source = "", sessionId = "" } = {}) {
+    const normalizedSource = normalizeCeoTurnSource(source || stateOrSnapshot?.source || "");
+    if (normalizedSource === "approval") return true;
+    if (ceoSnapshotHasApprovalInterrupts(stateOrSnapshot)) return true;
+    const normalizedSessionId = String(sessionId || activeSessionId()).trim();
+    return !!normalizedSessionId && ceoSessionHasActiveApprovalBlockingState(normalizedSessionId);
+}
+
+function ceoTurnSourceMatches(expectedSource = "", actualSource = "") {
+    const expected = normalizeCeoTurnSource(expectedSource);
+    const actual = normalizeCeoTurnSource(actualSource);
+    if (expected === actual) return true;
+    const sameVisibleUserLane = (expected === "user" || expected === "approval")
+        && (actual === "user" || actual === "approval");
+    return sameVisibleUserLane;
+}
+
 function normalizeCeoTurnId(turnId = "") {
     return String(turnId || "").trim();
 }
@@ -4266,7 +4481,7 @@ function findActiveCeoTurnIndex({ source = null, turnId = "" } = {}) {
         const turn = S.ceoPendingTurns[index];
         if (!turn || turn.finalized) continue;
         if (!hasExpectedSource) return index;
-        if (normalizeCeoTurnSource(turn.source) === expectedSource) return index;
+        if (ceoTurnSourceMatches(expectedSource, turn.source)) return index;
     }
     return -1;
 }
@@ -4303,7 +4518,7 @@ function discardActiveCeoTurn({ source = "", turnId = "" } = {}) {
                 const snapshotTurnId = normalizeCeoTurnId(snapshot?.turn_id);
                 if (normalizedTurnId && snapshotTurnId && snapshotTurnId !== normalizedTurnId) return false;
                 const snapshotSource = String(snapshot?.source || "").trim().toLowerCase();
-                if (normalizedSource && snapshotSource && normalizeCeoTurnSource(snapshotSource) !== normalizedSource) return false;
+                if (normalizedSource && snapshotSource && !ceoTurnSourceMatches(normalizedSource, snapshotSource)) return false;
                 return true;
             };
             const next = { ...(entry || {}) };
@@ -4338,7 +4553,7 @@ function discardPendingCeoTurns({ force = false, source = null, turnId = "" } = 
             continue;
         }
         if (expectedTurnId && normalizeCeoTurnId(turn.turnId) !== expectedTurnId) continue;
-        if (hasExpectedSource && normalizeCeoTurnSource(turn.source) !== expectedSource) continue;
+        if (hasExpectedSource && !ceoTurnSourceMatches(expectedSource, turn.source)) continue;
         if (!force && hasRunningCeoToolStep(turn)) continue;
         const [removedTurn] = S.ceoPendingTurns.splice(index, 1);
         if (removedTurn) removed.push(removedTurn);
@@ -5256,7 +5471,7 @@ function finalizeCeoTurn(text, meta = {}) {
             const inflightMatchesSource = !inflightTurn
                 || (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId ? false : true)
                 || !String(inflightTurn?.source || "").trim()
-                || inflightSource === normalizedSource;
+                || ceoTurnSourceMatches(normalizedSource, inflightSource);
             const fallbackCanonicalContext = resolvePreferredCeoCanonicalContext(
                 turn?.lastExecutionTraceSummary || null,
                 inflightTurn?.canonical_context || null
@@ -5305,7 +5520,7 @@ function finalizeCeoTurn(text, meta = {}) {
             const inflightMatchesSource = !inflightTurn
                 || (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId ? false : true)
                 || !inflightSource
-                || normalizeCeoTurnSource(inflightSource) === normalizedSource;
+                || ceoTurnSourceMatches(normalizedSource, inflightSource);
             const persistedCanonicalContext = resolvePreferredCeoCanonicalContext(
                 finalCanonicalContext,
                 inflightMatchesSource ? inflightTurn?.canonical_context || null : null
@@ -5371,7 +5586,7 @@ function finalizeCeoTurn(text, meta = {}) {
         const inflightMatchesSource = !inflightTurn
             || (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId ? false : true)
             || !String(inflightTurn?.source || "").trim()
-            || inflightSource === normalizedSource;
+            || ceoTurnSourceMatches(normalizedSource, inflightSource);
         if (inflightMatchesSource) {
             messages = appendMissingCeoUserMessages(
                 messages,
@@ -7385,6 +7600,15 @@ function applyCeoSessionsPayload(payload = {}, { preferLocalActive = false } = {
     if (nextActiveId) ApiClient.setActiveSessionId(nextActiveId);
     resetCeoComposerForSessionChange(previousActiveId, nextActiveId);
     renderCeoSessions();
+    if (nextActiveId) {
+        const approvalSnapshotEntry = getCeoSessionSnapshotCache(nextActiveId);
+        syncCeoApprovalFromSnapshotEntry(nextActiveId, approvalSnapshotEntry, {
+            authoritative: true,
+            refreshServer: true,
+        });
+        syncCeoComposerReadonlyState();
+        syncCeoPrimaryButton();
+    }
     if (S.view === "tasks" && previousActiveId !== nextActiveId) renderTasks();
     return nextActiveId;
 }
@@ -7433,6 +7657,15 @@ function applyCeoSessionPatch(payload = {}) {
     if (activeId) ApiClient.setActiveSessionId(activeId);
     resetCeoComposerForSessionChange(previousActiveId, activeId);
     renderCeoSessions();
+    if (activeId) {
+        const approvalSnapshotEntry = getCeoSessionSnapshotCache(activeId);
+        syncCeoApprovalFromSnapshotEntry(activeId, approvalSnapshotEntry, {
+            authoritative: true,
+            refreshServer: true,
+        });
+        syncCeoComposerReadonlyState();
+        syncCeoPrimaryButton();
+    }
 }
 
 function applyOptimisticCeoSessionSwitch(sessionId, session = null) {
@@ -7891,12 +8124,14 @@ function initCeoWs() {
         const effectiveSessionId = payloadSessionId || requestedSessionId || activeSessionId();
         if (payload.type === "snapshot.ceo") {
             S.ceoWsLastErrorCode = "";
+            const snapshotEntry = {
+                session_id: effectiveSessionId,
+                messages: payload.data?.messages || [],
+                inflight_turn: payload.data?.inflight_turn || null,
+                preserved_turn: payload.data?.preserved_turn || null,
+            };
             if (effectiveSessionId) {
-                setCeoSessionSnapshotCache(effectiveSessionId, {
-                    messages: payload.data?.messages || [],
-                    inflight_turn: payload.data?.inflight_turn || null,
-                    preserved_turn: payload.data?.preserved_turn || null,
-                });
+                setCeoSessionSnapshotCache(effectiveSessionId, snapshotEntry);
             }
             if (effectiveSessionId === activeSessionId()) {
                 renderCeoSnapshot(
@@ -7910,12 +8145,10 @@ function initCeoWs() {
             syncCeoSessionActions();
             syncCeoPrimaryButton();
             if (effectiveSessionId === activeSessionId()) {
-                if (typeof syncCeoApprovalFromInterrupts === "function") {
-                    syncCeoApprovalFromInterrupts(payload.data?.inflight_turn?.interrupts || [], effectiveSessionId);
-                }
-                if (typeof refreshCeoApprovalFromServer === "function") {
-                    void refreshCeoApprovalFromServer(effectiveSessionId, { quiet: true });
-                }
+                syncCeoApprovalFromSnapshotEntry(effectiveSessionId, snapshotEntry, {
+                    authoritative: true,
+                    refreshServer: true,
+                });
             }
         }
         if (payload.type === "error") {
@@ -7952,6 +8185,11 @@ function initCeoWs() {
             }
         }
         if (payload.type === "ceo.turn.patch") {
+            const patchEntry = {
+                session_id: effectiveSessionId,
+                inflight_turn: payload.data?.inflight_turn || null,
+                preserved_turn: payload.data?.preserved_turn || null,
+            };
             if (effectiveSessionId === activeSessionId()) {
                 patchCeoInflightTurn(payload.data?.preserved_turn || null, {
                     sessionId: effectiveSessionId,
@@ -7962,10 +8200,16 @@ function initCeoWs() {
                     cacheField: "inflight_turn",
                 });
             } else if (effectiveSessionId) {
-                setCeoSessionSnapshotCache(effectiveSessionId, {
-                    preserved_turn: payload.data?.preserved_turn || null,
-                    inflight_turn: payload.data?.inflight_turn || null,
-                });
+                setCeoSessionSnapshotCache(effectiveSessionId, patchEntry);
+            }
+            if (effectiveSessionId === activeSessionId()) {
+                const patchInterrupts = ceoApprovalInterruptsFromSnapshotEntry(patchEntry);
+                if (patchInterrupts.length) {
+                    syncCeoApprovalFromSnapshotEntry(effectiveSessionId, patchEntry, {
+                        authoritative: true,
+                        refreshServer: false,
+                    });
+                }
             }
         }
         if (payload.type === "ceo.agent.tool" && effectiveSessionId === activeSessionId()) {

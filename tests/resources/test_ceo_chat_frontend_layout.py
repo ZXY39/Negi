@@ -15,3 +15,13 @@ def test_ceo_chat_feed_uses_compact_left_padding_without_avatar_gap() -> None:
         css,
         flags=re.MULTILINE,
     )
+
+
+def test_ceo_approval_viewport_is_centered_above_chat_input() -> None:
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+
+    assert re.search(
+        r"\.ceo-approval-viewport\s*\{[^}]*position:\s*absolute;[^}]*left:\s*0;[^}]*right:\s*0;[^}]*bottom:\s*calc\(100%\s*\+\s*12px\);[^}]*justify-content:\s*center;",
+        css,
+        flags=re.MULTILINE,
+    )

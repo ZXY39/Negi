@@ -102,6 +102,9 @@ function loadApp() {
             initCeoWs,
             getCeoSessionSnapshotCache,
             activeSessionId,
+            applyOptimisticCeoSessionSwitch,
+            applyCeoSessionsPayload,
+            applyCeoSessionPatch,
         };`,
         context
     );
@@ -113,6 +116,8 @@ function loadApp() {
         globalThis.__toolEvents = [];
         globalThis.__reminderEvents = [];
         globalThis.__patchCalls = [];
+        globalThis.__approvalSyncCalls = [];
+        globalThis.__approvalRefreshCalls = [];
         renderCeoSnapshot = (messages, inflightTurn, options = {}) => {
             globalThis.__renderCalls.push({
                 sessionId: String(options?.sessionId || ""),
@@ -144,6 +149,20 @@ function loadApp() {
         discardActiveCeoTurn = () => {};
         applyCeoSessionsPayload = () => {};
         applyCeoSessionPatch = () => {};
+        syncCeoApprovalFromInterrupts = (interrupts, sessionId, options = {}) => {
+            globalThis.__approvalSyncCalls.push({
+                interrupts,
+                sessionId: String(sessionId || ""),
+                authoritative: !!options?.authoritative,
+            });
+        };
+        refreshCeoApprovalFromServer = (sessionId, options = {}) => {
+            globalThis.__approvalRefreshCalls.push({
+                sessionId: String(sessionId || ""),
+                quiet: !!options?.quiet,
+            });
+            return Promise.resolve([]);
+        };
         ApiClient = {
             getCeoWsUrl: (sessionId) => 'ws://localhost/api/ws/ceo?session_id=' + encodeURIComponent(String(sessionId || '')),
             getErrorCode: () => '',
@@ -252,6 +271,59 @@ test("snapshot.ceo forwards preserved_turn separately from current inflight turn
     assert.equal(entry?.preserved_turn?.turn_id, "turn-user-preserved");
 });
 
+test("snapshot.ceo syncs approval flow from preserved_turn interrupts when inflight_turn is empty", () => {
+    const { S, initCeoWs, __socket, __context, getCeoSessionSnapshotCache } = loadApp();
+
+    S.activeSessionId = "web:current";
+    initCeoWs();
+
+    const socket = __socket();
+    assert.ok(socket);
+
+    socket.onmessage({
+        data: JSON.stringify({
+            type: "snapshot.ceo",
+            session_id: "web:current",
+            data: {
+                messages: [],
+                inflight_turn: null,
+                preserved_turn: {
+                    source: "user",
+                    turn_id: "turn-user-paused",
+                    status: "paused",
+                    interrupts: [
+                        {
+                            id: "interrupt-approval-1",
+                            value: {
+                                kind: "frontdoor_tool_approval_batch",
+                                batch_id: "batch:123",
+                                review_items: [
+                                    {
+                                        tool_call_id: "call-1",
+                                        name: "exec",
+                                        risk_level: "high",
+                                        arguments: { command: "echo hi" },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            },
+        }),
+    });
+
+    assert.equal(__context.__approvalSyncCalls.length, 1);
+    assert.equal(__context.__approvalSyncCalls[0].sessionId, "web:current");
+    assert.equal(__context.__approvalSyncCalls[0].authoritative, true);
+    assert.equal(__context.__approvalSyncCalls[0].interrupts[0].value.kind, "frontdoor_tool_approval_batch");
+    assert.equal(__context.__approvalRefreshCalls.length, 1);
+    assert.equal(__context.__approvalRefreshCalls[0].sessionId, "web:current");
+    assert.equal(__context.__approvalRefreshCalls[0].quiet, true);
+    const entry = getCeoSessionSnapshotCache("web:current");
+    assert.equal(entry?.preserved_turn?.interrupts?.[0]?.value?.kind, "frontdoor_tool_approval_batch");
+});
+
 test("ceo.turn.patch forwards preserved_turn and current inflight turn as separate patch calls", () => {
     const { S, initCeoWs, __socket, __context } = loadApp();
 
@@ -287,6 +359,296 @@ test("ceo.turn.patch forwards preserved_turn and current inflight turn as separa
     assert.equal(__context.__patchCalls[0].options.cacheField, "preserved_turn");
     assert.equal(__context.__patchCalls[1].snapshot.turn_id, "turn-heartbeat-current");
     assert.equal(__context.__patchCalls[1].options.cacheField, "inflight_turn");
+});
+
+test("ceo.turn.patch syncs approval flow from preserved_turn interrupts", () => {
+    const { S, initCeoWs, __socket, __context } = loadApp();
+
+    S.activeSessionId = "web:current";
+    initCeoWs();
+
+    const socket = __socket();
+    assert.ok(socket);
+
+    socket.onmessage({
+        data: JSON.stringify({
+            type: "ceo.turn.patch",
+            session_id: "web:current",
+            data: {
+                inflight_turn: null,
+                preserved_turn: {
+                    source: "user",
+                    turn_id: "turn-user-paused",
+                    status: "paused",
+                    interrupts: [
+                        {
+                            id: "interrupt-approval-1",
+                            value: {
+                                kind: "frontdoor_tool_approval_batch",
+                                batch_id: "batch:123",
+                                review_items: [
+                                    {
+                                        tool_call_id: "call-1",
+                                        name: "exec",
+                                        risk_level: "high",
+                                        arguments: { command: "echo hi" },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            },
+        }),
+    });
+
+    assert.equal(__context.__approvalSyncCalls.length, 1);
+    assert.equal(__context.__approvalSyncCalls[0].sessionId, "web:current");
+    assert.equal(__context.__approvalSyncCalls[0].authoritative, true);
+    assert.equal(__context.__approvalSyncCalls[0].interrupts[0].value.kind, "frontdoor_tool_approval_batch");
+    assert.equal(__context.__approvalRefreshCalls.length, 0);
+});
+
+test("optimistic session switch syncs approval flow from cached preserved_turn interrupts", () => {
+    const { S, applyOptimisticCeoSessionSwitch, __context, getCeoSessionSnapshotCache } = loadApp();
+
+    S.activeSessionId = "web:previous";
+    S.ceoSnapshotCache = {
+        "web:target": {
+            session_id: "web:target",
+            messages: [],
+            inflight_turn: null,
+            preserved_turn: {
+                source: "user",
+                turn_id: "turn-user-paused",
+                status: "paused",
+                interrupts: [
+                    {
+                        id: "interrupt-approval-1",
+                        value: {
+                            kind: "frontdoor_tool_approval_batch",
+                            batch_id: "batch:123",
+                            review_items: [
+                                {
+                                    tool_call_id: "call-1",
+                                    name: "exec",
+                                    risk_level: "high",
+                                    arguments: { command: "echo hi" },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            },
+        },
+    };
+
+    const result = applyOptimisticCeoSessionSwitch("web:target", { session_family: "local" });
+
+    assert.equal(result.renderedFromCache, true);
+    assert.equal(__context.__approvalSyncCalls.length, 1);
+    assert.equal(__context.__approvalSyncCalls[0].sessionId, "web:target");
+    assert.equal(__context.__approvalSyncCalls[0].authoritative, true);
+    assert.equal(__context.__approvalSyncCalls[0].interrupts[0].value.kind, "frontdoor_tool_approval_batch");
+    assert.equal(__context.__approvalRefreshCalls.length, 1);
+    assert.equal(__context.__approvalRefreshCalls[0].sessionId, "web:target");
+    const entry = getCeoSessionSnapshotCache("web:target");
+    assert.equal(entry?.preserved_turn?.interrupts?.[0]?.value?.kind, "frontdoor_tool_approval_batch");
+});
+
+test("applyCeoSessionsPayload syncs approval flow from cached preserved_turn interrupts for the restored active session", () => {
+    const { S, applyCeoSessionsPayload, __context } = loadApp();
+
+    S.activeSessionId = "";
+    S.ceoSnapshotCache = {
+        "web:restored": {
+            session_id: "web:restored",
+            messages: [{ role: "assistant", content: "paused turn" }],
+            inflight_turn: null,
+            preserved_turn: {
+                source: "user",
+                turn_id: "turn-user-paused",
+                status: "paused",
+                interrupts: [
+                    {
+                        id: "interrupt-approval-1",
+                        value: {
+                            kind: "frontdoor_tool_approval_batch",
+                            batch_id: "batch:123",
+                            review_items: [
+                                {
+                                    tool_call_id: "call-1",
+                                    name: "exec",
+                                    risk_level: "high",
+                                    arguments: { command: "echo hi" },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            },
+        },
+    };
+
+    const nextActiveId = applyCeoSessionsPayload({
+        items: [
+            {
+                session_id: "web:restored",
+                title: "Restored session",
+                session_family: "local",
+                updated_at: "2026-04-22T17:42:18+08:00",
+            },
+        ],
+        active_session_id: "web:restored",
+        active_session_family: "local",
+    });
+
+    assert.equal(nextActiveId, "web:restored");
+    assert.equal(S.activeSessionId, "web:restored");
+    assert.equal(__context.__approvalSyncCalls.length, 1);
+    assert.equal(__context.__approvalSyncCalls[0].sessionId, "web:restored");
+    assert.equal(__context.__approvalSyncCalls[0].authoritative, true);
+    assert.equal(__context.__approvalSyncCalls[0].interrupts[0].value.kind, "frontdoor_tool_approval_batch");
+    assert.equal(__context.__approvalRefreshCalls.length, 1);
+    assert.equal(__context.__approvalRefreshCalls[0].sessionId, "web:restored");
+});
+
+test("applyCeoSessionsPayload still refreshes approval state when the active session stays the same but cached snapshot is stale", () => {
+    const { S, applyCeoSessionsPayload, __context } = loadApp();
+
+    S.activeSessionId = "web:restored";
+    S.ceoSnapshotCache = {
+        "web:restored": {
+            session_id: "web:restored",
+            messages: [{ role: "assistant", content: "stale cached snapshot" }],
+            inflight_turn: null,
+            preserved_turn: null,
+        },
+    };
+
+    const nextActiveId = applyCeoSessionsPayload({
+        items: [
+            {
+                session_id: "web:restored",
+                title: "Restored session",
+                session_family: "local",
+                updated_at: "2026-04-22T18:47:18+08:00",
+            },
+        ],
+        active_session_id: "web:restored",
+        active_session_family: "local",
+    });
+
+    assert.equal(nextActiveId, "web:restored");
+    assert.equal(__context.__approvalSyncCalls.length, 1);
+    assert.equal(__context.__approvalSyncCalls[0].sessionId, "web:restored");
+    assert.equal(__context.__approvalSyncCalls[0].authoritative, true);
+    assert.equal(__context.__approvalSyncCalls[0].interrupts.length, 0);
+    assert.equal(__context.__approvalRefreshCalls.length, 1);
+    assert.equal(__context.__approvalRefreshCalls[0].sessionId, "web:restored");
+});
+
+test("applyCeoSessionPatch syncs approval flow from cached preserved_turn interrupts for the active session", () => {
+    const { S, applyCeoSessionPatch, __context } = loadApp();
+
+    S.activeSessionId = "web:restored";
+    S.ceoSnapshotCache = {
+        "web:restored": {
+            session_id: "web:restored",
+            messages: [{ role: "assistant", content: "paused turn" }],
+            inflight_turn: null,
+            preserved_turn: {
+                source: "user",
+                turn_id: "turn-user-paused",
+                status: "paused",
+                interrupts: [
+                    {
+                        id: "interrupt-approval-1",
+                        value: {
+                            kind: "frontdoor_tool_approval_batch",
+                            batch_id: "batch:123",
+                            review_items: [
+                                {
+                                    tool_call_id: "call-1",
+                                    name: "exec",
+                                    risk_level: "high",
+                                    arguments: { command: "echo hi" },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            },
+        },
+    };
+    S.ceoLocalSessions = [
+        {
+            session_id: "web:restored",
+            title: "Restored session",
+            session_family: "local",
+            updated_at: "2026-04-22T17:42:18+08:00",
+        },
+    ];
+    S.ceoSessions = [...S.ceoLocalSessions];
+
+    applyCeoSessionPatch({
+        active_session_id: "web:restored",
+        active_session_family: "local",
+        item: {
+            session_id: "web:restored",
+            title: "Restored session",
+            session_family: "local",
+            updated_at: "2026-04-22T17:42:20+08:00",
+        },
+    });
+
+    assert.equal(__context.__approvalSyncCalls.length, 1);
+    assert.equal(__context.__approvalSyncCalls[0].sessionId, "web:restored");
+    assert.equal(__context.__approvalSyncCalls[0].authoritative, true);
+    assert.equal(__context.__approvalSyncCalls[0].interrupts[0].value.kind, "frontdoor_tool_approval_batch");
+    assert.equal(__context.__approvalRefreshCalls.length, 1);
+    assert.equal(__context.__approvalRefreshCalls[0].sessionId, "web:restored");
+});
+
+test("applyCeoSessionPatch still refreshes approval state when the active session stays the same but cached snapshot is stale", () => {
+    const { S, applyCeoSessionPatch, __context } = loadApp();
+
+    S.activeSessionId = "web:restored";
+    S.ceoSnapshotCache = {
+        "web:restored": {
+            session_id: "web:restored",
+            messages: [{ role: "assistant", content: "stale cached snapshot" }],
+            inflight_turn: null,
+            preserved_turn: null,
+        },
+    };
+    S.ceoLocalSessions = [
+        {
+            session_id: "web:restored",
+            title: "Restored session",
+            session_family: "local",
+            updated_at: "2026-04-22T18:47:18+08:00",
+        },
+    ];
+    S.ceoSessions = [...S.ceoLocalSessions];
+
+    applyCeoSessionPatch({
+        active_session_id: "web:restored",
+        active_session_family: "local",
+        item: {
+            session_id: "web:restored",
+            title: "Restored session",
+            session_family: "local",
+            updated_at: "2026-04-22T18:47:20+08:00",
+        },
+    });
+
+    assert.equal(__context.__approvalSyncCalls.length, 1);
+    assert.equal(__context.__approvalSyncCalls[0].sessionId, "web:restored");
+    assert.equal(__context.__approvalSyncCalls[0].authoritative, true);
+    assert.equal(__context.__approvalSyncCalls[0].interrupts.length, 0);
+    assert.equal(__context.__approvalRefreshCalls.length, 1);
+    assert.equal(__context.__approvalRefreshCalls[0].sessionId, "web:restored");
 });
 
 test("ceo.agent.tool forwards live tool events into the active session feed", () => {

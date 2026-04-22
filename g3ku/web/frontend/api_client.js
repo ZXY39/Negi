@@ -1,5 +1,6 @@
 const API_BASE_URL = "";
 const FALLBACK_SESSION_ID = "web:shared";
+const MODEL_SAVE_TIMEOUT_MS = 30000;
 
 class ApiClient {
     static _activeSessionId = "";
@@ -572,11 +573,17 @@ class ApiClient {
     }
 
     static async createManagedModel(payload) {
-        return this._refreshModelsAfter(this.post("/api/models", this._toManagedModelPayload(payload)));
+        return this._refreshModelsAfter(this._request("POST", "/api/models", {
+            body: this._toManagedModelPayload(payload),
+            timeoutMs: MODEL_SAVE_TIMEOUT_MS,
+        }));
     }
 
     static async updateManagedModel(modelKey, payload) {
-        return this._refreshModelsAfter(this.put(`/api/models/${modelKey}`, this._toManagedModelPayload(payload)));
+        return this._refreshModelsAfter(this._request("PUT", `/api/models/${modelKey}`, {
+            body: this._toManagedModelPayload(payload),
+            timeoutMs: MODEL_SAVE_TIMEOUT_MS,
+        }));
     }
 
     static async enableManagedModel(modelKey) {
@@ -679,12 +686,18 @@ class ApiClient {
     }
 
     static async createLlmConfig(payload) {
-        const data = await this.post("/api/llm/configs", payload || {});
+        const data = await this._request("POST", "/api/llm/configs", {
+            body: payload || {},
+            timeoutMs: MODEL_SAVE_TIMEOUT_MS,
+        });
         return data.item || null;
     }
 
     static async updateLlmConfig(configId, payload) {
-        const data = await this.put(`/api/llm/configs/${encodeURIComponent(configId)}`, payload || {});
+        const data = await this._request("PUT", `/api/llm/configs/${encodeURIComponent(configId)}`, {
+            body: payload || {},
+            timeoutMs: MODEL_SAVE_TIMEOUT_MS,
+        });
         return {
             item: data.item || null,
             runtimeRefresh: data.runtime_refresh || data.runtimeRefresh || null,
@@ -706,7 +719,10 @@ class ApiClient {
     }
 
     static async createLlmBinding(payload) {
-        const data = await this.post("/api/llm/bindings", payload || {});
+        const data = await this._request("POST", "/api/llm/bindings", {
+            body: payload || {},
+            timeoutMs: MODEL_SAVE_TIMEOUT_MS,
+        });
         return {
             item: data.item || null,
             runtimeRefresh: data.runtime_refresh || data.runtimeRefresh || null,
@@ -714,7 +730,10 @@ class ApiClient {
     }
 
     static async updateLlmBinding(modelKey, payload) {
-        const data = await this.put(`/api/llm/bindings/${encodeURIComponent(modelKey)}`, payload || {});
+        const data = await this._request("PUT", `/api/llm/bindings/${encodeURIComponent(modelKey)}`, {
+            body: payload || {},
+            timeoutMs: MODEL_SAVE_TIMEOUT_MS,
+        });
         return {
             item: data.item || null,
             runtimeRefresh: data.runtime_refresh || data.runtimeRefresh || null,

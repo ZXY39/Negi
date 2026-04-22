@@ -190,7 +190,10 @@ function loadApp() {
         },
     };
     context.__testExports.S.activeSessionId = "web:test";
-    return context.__testExports;
+    return {
+        ...context.__testExports,
+        __context: context,
+    };
 }
 
 test("manual pause ack replaces pending label with paused label and keeps tool flow", () => {
@@ -242,6 +245,46 @@ test("manual pause ack ignores legacy waiting-reason flag", () => {
     assert.equal(legacy.getPatchSnapshotCalls(), baseline.getPatchSnapshotCalls());
 });
 
+test("approval pause keeps the current pending turn instead of finalizing a paused history bubble", () => {
+    const { applyCeoState, S } = loadApp();
+    const turn = makeTurn({ steps: 2, source: "approval" });
+
+    S.ceoPendingTurns = [turn];
+    S.ceoTurnActive = true;
+
+    applyCeoState(
+        { status: "paused", paused: true, is_running: false },
+        { source: "approval", turn_id: "turn-approval-1" }
+    );
+
+    assert.equal(turn.finalized, false);
+    assert.equal(turn.turnId, "turn-approval-1");
+    assert.equal(turn.textEl.textContent, PAUSED_LABEL);
+    assert.equal(turn.flowEl.hidden, false);
+    assert.equal(turn.flowEl.open, false);
+    assert.match(turn.metaEl.textContent, /\u7b49\u5f85\u5ba1\u6279/);
+    assert.equal(S.ceoPendingTurns.length, 1);
+});
+
+test("approval pause reuses the existing user turn when turn id is not yet known locally", () => {
+    const { applyCeoState, S } = loadApp();
+    const turn = makeTurn({ steps: 2, source: "user" });
+
+    S.ceoPendingTurns = [turn];
+    S.ceoTurnActive = true;
+
+    applyCeoState(
+        { status: "paused", paused: true, is_running: false },
+        { source: "approval", turn_id: "turn-approval-1" }
+    );
+
+    assert.equal(S.ceoPendingTurns.length, 1);
+    assert.equal(S.ceoPendingTurns[0], turn);
+    assert.equal(turn.turnId, "turn-approval-1");
+    assert.equal(turn.textEl.textContent, PAUSED_LABEL);
+    assert.match(turn.metaEl.textContent, /\u7b49\u5f85\u5ba1\u6279/);
+});
+
 test("paused inflight snapshot does not fall back to processing placeholder", () => {
     const { patchCeoInflightTurn, S } = loadApp();
     const turn = makeTurn({ text: "", steps: 0 });
@@ -262,6 +305,99 @@ test("paused inflight snapshot does not fall back to processing placeholder", ()
     assert.notEqual(turn.textEl.textContent, PROCESSING_LABEL);
     assert.equal(turn.textEl.classList.contains("pending"), false);
     assert.equal(turn.flowEl.hidden, false);
+});
+
+test("approval inflight snapshot restore keeps a single active turn instead of finalizing a paused bubble", () => {
+    const { renderCeoSnapshot, S } = loadApp();
+
+    renderCeoSnapshot(
+        [],
+        {
+            source: "approval",
+            turn_id: "turn-approval-restore",
+            status: "paused",
+            canonical_context: {
+                stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo", rounds: [] }],
+            },
+        },
+    );
+
+    assert.equal(S.ceoPendingTurns.length, 1);
+    assert.equal(S.ceoPendingTurns[0].finalized, false);
+    assert.equal(S.ceoPendingTurns[0].turnId, "turn-approval-restore");
+    assert.match(S.ceoPendingTurns[0].metaEl.textContent, /\u7b49\u5f85\u5ba1\u6279/);
+});
+
+test("approval inflight snapshot with source user still keeps a single active turn when approval interrupts are present", () => {
+    const { renderCeoSnapshot, S } = loadApp();
+
+    renderCeoSnapshot(
+        [],
+        {
+            source: "user",
+            turn_id: "turn-approval-user-source",
+            status: "paused",
+            interrupts: [
+                {
+                    id: "interrupt-approval-1",
+                    value: {
+                        kind: "frontdoor_tool_approval_batch",
+                        batch_id: "batch:1",
+                        review_items: [{ tool_call_id: "call-1", name: "exec", risk_level: "high", arguments: { command: "dir" } }],
+                    },
+                },
+            ],
+            canonical_context: {
+                stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo", rounds: [] }],
+            },
+        },
+    );
+
+    assert.equal(S.ceoPendingTurns.length, 1);
+    assert.equal(S.ceoPendingTurns[0].finalized, false);
+    assert.equal(S.ceoPendingTurns[0].turnId, "turn-approval-user-source");
+    assert.match(S.ceoPendingTurns[0].metaEl.textContent, /\u7b49\u5f85\u5ba1\u6279/);
+});
+
+test("paused ceo.state reuses the current turn when approval flow is already active even if source is user", () => {
+    const { applyCeoState, S, __context } = loadApp();
+    const turn = makeTurn({ steps: 2, source: "user" });
+
+    __context.hasActiveCeoApprovalBlockingState = () => true;
+    S.ceoPendingTurns = [turn];
+    S.ceoTurnActive = true;
+
+    applyCeoState(
+        { status: "paused", paused: true, is_running: false },
+        { source: "user", turn_id: "turn-approval-live-1" }
+    );
+
+    assert.equal(S.ceoPendingTurns.length, 1);
+    assert.equal(S.ceoPendingTurns[0], turn);
+    assert.equal(turn.finalized, false);
+    assert.equal(turn.turnId, "turn-approval-live-1");
+    assert.match(turn.metaEl.textContent, /\u7b49\u5f85\u5ba1\u6279/);
+});
+
+test("running patch without turn id reuses the existing approval turn instead of creating a new bubble", () => {
+    const { patchCeoInflightTurn, S } = loadApp();
+    const turn = makeTurn({ text: PAUSED_LABEL, source: "approval", steps: 2 });
+    turn.turnId = "turn-approval-restore";
+
+    S.ceoPendingTurns = [turn];
+    S.ceoTurnActive = true;
+
+    const patched = patchCeoInflightTurn({
+        source: "user",
+        status: "running",
+        assistant_text: "still working",
+    });
+
+    assert.equal(patched, true);
+    assert.equal(S.ceoPendingTurns.length, 1);
+    assert.equal(S.ceoPendingTurns[0], turn);
+    assert.equal(turn.source, "approval");
+    assert.match(turn.textEl.innerHTML, /still working/);
 });
 
 test("persisted paused assistant history renders as a paused bubble", () => {
