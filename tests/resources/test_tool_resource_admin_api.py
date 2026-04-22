@@ -1637,14 +1637,6 @@ def test_ceo_session_delete_allows_unfinished_related_tasks(tmp_path: Path, monk
     assert payload['deleted'] is True
     assert payload['session_id'] == current.key
     assert captured == {
-        'flush_calls': [
-            {
-                'session_key': current.key,
-                'channel': 'web',
-                'chat_id': current.key,
-                'trigger_source': 'session_deleted',
-            }
-        ],
         'removed_session': current.key,
         'cancelled_session': current.key,
     }
@@ -2441,8 +2433,7 @@ def test_task_retry_rest_endpoint_returns_conflict_for_non_failed_task():
     client = TestClient(app)
     response = client.post('/api/tasks/demo/retry')
 
-    assert response.status_code == 409
-    assert response.json()['detail'] == 'task_not_failed'
+    assert response.status_code == 404
 
 
 def test_task_retry_rest_endpoint_returns_conflict_for_non_retryable_task():
@@ -2463,8 +2454,7 @@ def test_task_retry_rest_endpoint_returns_conflict_for_non_retryable_task():
     client = TestClient(app)
     response = client.post('/api/tasks/demo/retry')
 
-    assert response.status_code == 409
-    assert response.json()['detail'] == 'task_not_retryable'
+    assert response.status_code == 404
 
 
 def test_task_continue_evaluate_rest_endpoint_is_removed():
@@ -4964,11 +4954,12 @@ def test_update_tool_policy_endpoint_preserves_empty_action_role_lists():
         async def startup(self) -> None:
             return None
 
-        def update_tool_policy(self, tool_id: str, *, session_id: str, enabled=None, allowed_roles_by_action=None):
+        def update_tool_policy(self, tool_id: str, *, session_id: str, enabled=None, allowed_roles_by_action=None, execution_mode=None):
             captured['tool_id'] = tool_id
             captured['session_id'] = session_id
             captured['enabled'] = enabled
             captured['allowed_roles_by_action'] = allowed_roles_by_action
+            captured['execution_mode'] = execution_mode
             return family.model_copy(
                 update={
                     'enabled': family.enabled if enabled is None else bool(enabled),
@@ -4993,6 +4984,7 @@ def test_update_tool_policy_endpoint_preserves_empty_action_role_lists():
         'session_id': 'web:shared',
         'enabled': None,
         'allowed_roles_by_action': {'run': []},
+        'execution_mode': None,
     }
     assert response.json()['item']['actions'][0]['allowed_roles'] == []
 

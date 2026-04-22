@@ -43,8 +43,14 @@ def field(
     )
 
 
-def _base_fields(default_base_url: str, default_model: str, api_key_default: str = "") -> list[TemplateFieldSpec]:
-    return [
+def _base_fields(
+    default_base_url: str,
+    default_model: str,
+    api_key_default: str = "",
+    *,
+    capability: Capability = Capability.CHAT,
+) -> list[TemplateFieldSpec]:
+    fields = [
         field(
             key="api_key",
             label="API Key",
@@ -70,22 +76,6 @@ def _base_fields(default_base_url: str, default_model: str, api_key_default: str
             default=default_model,
         ),
         field(
-            key="temperature",
-            label="Temperature",
-            input_type=FieldInputType.NUMBER,
-            required=False,
-            default=None,
-            constraints={"min": 0, "max": 2, "integer": False},
-        ),
-        field(
-            key="max_tokens",
-            label="Max Tokens",
-            input_type=FieldInputType.NUMBER,
-            required=False,
-            default=None,
-            constraints={"min": 1, "integer": True},
-        ),
-        field(
             key="extra_headers",
             label="Extra Headers",
             input_type=FieldInputType.KV_LIST,
@@ -102,6 +92,37 @@ def _base_fields(default_base_url: str, default_model: str, api_key_default: str
             default={},
         ),
     ]
+    if capability == Capability.CHAT:
+        fields.extend(
+            [
+                field(
+                    key="context_window_tokens",
+                    label="Context Window Tokens",
+                    input_type=FieldInputType.NUMBER,
+                    required=True,
+                    default=32000,
+                    constraints={"min": 25001, "integer": True},
+                    help_text="Required for chat providers and must be greater than 25000.",
+                ),
+                field(
+                    key="temperature",
+                    label="Temperature",
+                    input_type=FieldInputType.NUMBER,
+                    required=False,
+                    default=None,
+                    constraints={"min": 0, "max": 2, "integer": False},
+                ),
+                field(
+                    key="max_tokens",
+                    label="Max Tokens",
+                    input_type=FieldInputType.NUMBER,
+                    required=False,
+                    default=None,
+                    constraints={"min": 1, "integer": True},
+                ),
+            ]
+        )
+    return fields
 
 
 def _api_mode_options(default_api_mode: ProtocolAdapter) -> list[TemplateFieldOption]:
@@ -131,7 +152,12 @@ def build_openai_compatible_template(
     capability: Capability = Capability.CHAT,
     auth_mode: AuthMode = AuthMode.API_KEY,
 ) -> ProviderTemplate:
-    fields = _base_fields(default_base_url, default_model, api_key_default)
+    fields = _base_fields(
+        default_base_url,
+        default_model,
+        api_key_default,
+        capability=capability,
+    )
     for entry in fields:
         if entry.key == "default_model":
             entry.options = [option(model) for model in suggested_models]
@@ -234,7 +260,12 @@ def build_anthropic_compatible_template(
     capability: Capability = Capability.CHAT,
     auth_mode: AuthMode = AuthMode.API_KEY,
 ) -> ProviderTemplate:
-    fields = _base_fields(default_base_url, default_model, api_key_default)
+    fields = _base_fields(
+        default_base_url,
+        default_model,
+        api_key_default,
+        capability=capability,
+    )
     for entry in fields:
         if entry.key == "default_model":
             entry.options = [option(model) for model in suggested_models]
@@ -295,7 +326,11 @@ def build_gemini_template(
     capability: Capability = Capability.CHAT,
     auth_mode: AuthMode = AuthMode.API_KEY,
 ) -> ProviderTemplate:
-    fields = _base_fields(default_base_url, default_model)
+    fields = _base_fields(
+        default_base_url,
+        default_model,
+        capability=capability,
+    )
     for entry in fields:
         if entry.key == "default_model":
             entry.options = [option(model) for model in suggested_models]
@@ -347,7 +382,12 @@ def build_ollama_template(
     capability: Capability = Capability.CHAT,
     auth_mode: AuthMode = AuthMode.API_KEY,
 ) -> ProviderTemplate:
-    fields = _base_fields(default_base_url, default_model, api_key_default="ollama-local")
+    fields = _base_fields(
+        default_base_url,
+        default_model,
+        api_key_default="ollama-local",
+        capability=capability,
+    )
     for entry in fields:
         if entry.key == "default_model":
             entry.options = [option(model) for model in suggested_models]

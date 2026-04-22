@@ -505,7 +505,7 @@ class CeoMessageBuilder:
         history = [
             self._history_message(message)
             for message in list(checkpoint_messages or [])
-            if message_role(message) in {'system', 'user', 'assistant', 'tool'}
+            if message_role(message) in {'user', 'assistant', 'tool'}
             and is_prompt_visible_message(message)
         ]
         while history:

@@ -35,7 +35,7 @@ def test_ensure_startup_config_ready_bootstraps_empty_model_catalog(tmp_path, mo
     assert changed is True
     raw = json.loads((workspace / ".g3ku" / "config.json").read_text(encoding="utf-8"))
     assert raw["models"]["catalog"] == []
-    assert raw["models"]["roles"] == {"ceo": [], "execution": [], "inspection": []}
+    assert raw["models"]["roles"] == {"ceo": [], "execution": [], "inspection": [], "memory": []}
     assert not (workspace / ".g3ku" / "llm-config").exists()
 
     cfg = load_config()
@@ -84,6 +84,7 @@ def test_first_model_can_be_created_without_role_assignments(tmp_path, monkeypat
             "api_base": "https://api.openai.com/v1",
             "enabled": True,
             "scopes": [],
+            "context_window_tokens": 32000,
         },
     )
 
@@ -93,7 +94,7 @@ def test_first_model_can_be_created_without_role_assignments(tmp_path, monkeypat
     assert payload["item"]["key"] == "primary"
 
     saved = json.loads((workspace / ".g3ku" / "config.json").read_text(encoding="utf-8"))
-    assert saved["models"]["roles"] == {"ceo": [], "execution": [], "inspection": []}
+    assert saved["models"]["roles"] == {"ceo": [], "execution": [], "inspection": [], "memory": []}
 
     reloaded = load_config()
     assert [item.key for item in reloaded.models.catalog] == ["primary"]

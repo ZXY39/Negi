@@ -23,6 +23,7 @@ from g3ku.resources.registry import ResourceRegistry
 from g3ku.resources.tool_settings import FilesystemToolSettings
 from main.api import rest as api_rest
 from main.governance.resource_bridge import build_tool_families
+from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
 from main.service.runtime_service import MainRuntimeService
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
@@ -3174,10 +3175,11 @@ async def test_execution_node_messages_include_visible_skill_inventory(tmp_path:
 
         messages = await service.node_runner._build_messages(task=task, node=node)
         bootstrap_payload = json.loads(messages[1]['content'])
-        contract_payload = json.loads(messages[-1]['content'])
+        contract_payload = extract_node_dynamic_contract_payload(messages)
 
         assert 'visible_skills' not in bootstrap_payload
         assert 'execution_stage' not in bootstrap_payload
+        assert contract_payload is not None
         assert contract_payload['message_type'] == 'node_runtime_tool_contract'
         assert contract_payload['candidate_skills'] == [
             {

@@ -17,6 +17,7 @@ from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.frontdoor.tool_contract import (
     build_frontdoor_tool_contract,
+    frontdoor_tool_contract_payload_from_message,
     is_frontdoor_tool_contract_message,
     upsert_frontdoor_tool_contract_message,
 )
@@ -329,8 +330,7 @@ def test_ceo_prompt_builder_keeps_memory_guidance() -> None:
     assert "memory_write" in prompt
     assert "memory_delete" in prompt
     assert "memory_note" in prompt
-    assert "MEMORY.md" in prompt
-    assert "已检索上下文" in prompt
+    assert "长期记忆" in prompt
     assert "submit_next_stage" in prompt
 
 
@@ -975,13 +975,12 @@ async def test_message_builder_renders_candidate_tools_as_structured_tool_id_and
         item
         for item in list(result.dynamic_appendix_messages or [])
         if isinstance(item, dict)
-        and str(item.get("role") or "").strip().lower() == "user"
-        and isinstance(item.get("content"), str)
-        and str(item.get("content") or "").strip()
+        and is_frontdoor_tool_contract_message(item)
     ]
 
     assert len(contract_messages) == 1
-    payload = json.loads(contract_messages[0]["content"])
+    payload = frontdoor_tool_contract_payload_from_message(contract_messages[0])
+    assert isinstance(payload, dict)
     assert payload["candidate_tools"] == [
         {
             "tool_id": "filesystem_edit",

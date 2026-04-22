@@ -996,7 +996,13 @@ class WebSessionHeartbeatService:
             provider_model="",
             stable_rules_text=stable_rules_text,
             task_ledger_summary=task_ledger_summary,
-            events=[dict(event.payload or {}, reason=event.reason) for event in events],
+            events=[
+                {
+                    **dict(event.payload or {}),
+                    "event_reason": str(event.reason or "").strip(),
+                }
+                for event in events
+            ],
         )
         metadata: dict[str, Any] = {
             "heartbeat_internal": True,

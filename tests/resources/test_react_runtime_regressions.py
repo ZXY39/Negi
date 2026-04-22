@@ -888,7 +888,12 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
     emitted_tools = list(requests[0].get('tools') or [])
     emitted_tool_names = [item['function']['name'] for item in emitted_tools]
 
-    assert emitted_tool_names == ['submit_next_stage']
+    assert emitted_tool_names == [
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+        'stop_tool_execution',
+    ]
     assert 'filesystem' not in emitted_tool_names
     assert 'memory_write' not in emitted_tool_names
 
@@ -942,7 +947,7 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
                 'spawn_child_nodes',
                 'load_tool_context_v2',
             ],
-            'hydrated_executor_names': ['filesystem', 'content'],
+            'hydrated_executor_names': ['filesystem_write', 'content_describe'],
         },
     )
     fake_log_service.execution_stage_gate_snapshot = lambda task_id, node_id: {
@@ -1059,10 +1064,11 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
     assert 'submit_next_stage' in emitted_tool_names
     assert 'submit_final_result' in emitted_tool_names
     assert 'spawn_child_nodes' in emitted_tool_names
+    assert 'load_tool_context_v2' in emitted_tool_names
     assert 'filesystem' not in emitted_tool_names
     assert 'content' not in emitted_tool_names
-    assert 'filesystem_write' in emitted_tool_names
-    assert 'content_describe' in emitted_tool_names
+    assert 'filesystem_write' not in emitted_tool_names
+    assert 'content_describe' not in emitted_tool_names
     assert 'memory_write' not in emitted_tool_names
 
 
@@ -2884,7 +2890,7 @@ async def test_execute_tool_calls_allows_submit_next_stage_and_passes_runtime_co
             "task_id": "task-stage-probe",
             "node_id": "node-stage-probe",
             "actor_role": "execution",
-            "stage_turn_granted": True,
+            "stage_turn_granted": False,
             "candidate_tool_names": ["filesystem_write"],
             "candidate_skill_ids": ["skill-creator"],
             "current_tool_call_id": "call-stage-probe",
@@ -2892,6 +2898,7 @@ async def test_execute_tool_calls_allows_submit_next_stage_and_passes_runtime_co
             "allowed_content_refs": [],
             "enforce_content_ref_allowlist": False,
             "prior_overflow_signatures": [],
+            "image_multimodal_enabled": False,
         }
     ]
 
@@ -3733,7 +3740,8 @@ async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_sk
         }
     ]
     assert retrieve_block_calls == []
-    dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
+    dynamic_payload = extract_node_dynamic_contract_payload(enriched)
+    assert dynamic_payload is not None
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
     assert dynamic_payload["candidate_skills"] == [
         {
@@ -3806,7 +3814,8 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_without_memory
     )
 
     assert retrieve_block_calls == []
-    dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
+    dynamic_payload = extract_node_dynamic_contract_payload(enriched)
+    assert dynamic_payload is not None
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
     assert dynamic_payload["candidate_skills"] == [
         {
@@ -3891,7 +3900,8 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
         ],
     )
 
-    dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
+    dynamic_payload = extract_node_dynamic_contract_payload(enriched)
+    assert dynamic_payload is not None
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
     assert dynamic_payload["callable_tool_names"] == ["load_tool_context", "filesystem_write"]
     assert dynamic_payload["candidate_tools"] == [
@@ -4037,7 +4047,8 @@ async def test_enrich_node_messages_locks_callable_tools_to_submit_next_stage_wi
         ],
     )
 
-    dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
+    dynamic_payload = extract_node_dynamic_contract_payload(enriched)
+    assert dynamic_payload is not None
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
     assert dynamic_payload["callable_tool_names"] == ["submit_next_stage"]
     assert dynamic_payload["candidate_tools"] == [
@@ -4107,8 +4118,9 @@ async def test_enrich_node_messages_never_injects_memory_retrieval_overlay(
     )
 
     user_messages = [message for message in enriched if message.get("role") == "user"]
-    assert len(user_messages) == 2
-    payload = json.loads(str(user_messages[-1].get("content") or ""))
+    assert len(user_messages) == 1
+    payload = extract_node_dynamic_contract_payload(enriched)
+    assert payload is not None
     assert payload["message_type"] == "node_runtime_tool_contract"
     assert payload["candidate_skills"] == [
         {
@@ -4183,7 +4195,8 @@ async def test_enrich_node_messages_still_applies_selector_when_unified_context_
         ],
     )
 
-    dynamic_payload = json.loads(str(enriched[-1]["content"] or ""))
+    dynamic_payload = extract_node_dynamic_contract_payload(enriched)
+    assert dynamic_payload is not None
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
     assert dynamic_payload["candidate_skills"] == [
         {

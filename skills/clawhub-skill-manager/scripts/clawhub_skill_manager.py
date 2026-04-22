@@ -95,6 +95,144 @@ def strip_html(value: str) -> str:
     return re.sub(r'<[^>]+>', '', value or '').strip()
 
 
+def split_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    lines = str(text or '').splitlines()
+    if not lines or lines[0].strip() != '---':
+        return {}, str(text or '')
+    end_index = None
+    for index in range(1, len(lines)):
+        if lines[index].strip() == '---':
+            end_index = index
+            break
+    if end_index is None:
+        return {}, str(text or '')
+    frontmatter: dict[str, str] = {}
+    for raw_line in lines[1:end_index]:
+        if ':' not in raw_line:
+            continue
+        key, value = raw_line.split(':', 1)
+        frontmatter[key.strip()] = value.strip().strip('"').strip("'")
+    body = '\n'.join(lines[end_index + 1 :])
+    return frontmatter, body
+
+
+def first_paragraph(body: str) -> str:
+    lines: list[str] = []
+    in_code_block = False
+    for raw_line in str(body or '').splitlines():
+        line = raw_line.strip()
+        if line.startswith('```'):
+            in_code_block = not in_code_block
+            if lines:
+                break
+            continue
+        if in_code_block:
+            continue
+        if not line:
+            if lines:
+                break
+            continue
+        if line.startswith('#'):
+            continue
+        lines.append(line)
+    return ' '.join(lines).strip()
+
+
+def _iso_from_timestamp(value: Any) -> str:
+    raw = value
+    if raw in (None, ''):
+        return ''
+    try:
+        numeric = float(raw)
+    except (TypeError, ValueError):
+        return str(raw or '').strip()
+    if numeric > 1_000_000_000_000:
+        numeric = numeric / 1000.0
+    return datetime.fromtimestamp(numeric, tz=UTC).isoformat()
+
+
+def build_resource_manifest(
+    *,
+    skill_root: Path,
+    skill_id: str,
+    slug: str,
+    detail: dict[str, Any] | None,
+    version_payload: dict[str, Any] | None,
+    upstream_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    root = Path(skill_root)
+    detail_payload = dict(detail or {})
+    skill_payload = dict(detail_payload.get('skill') or {})
+    owner_payload = dict(detail_payload.get('owner') or {})
+    latest_version_payload = dict(detail_payload.get('latestVersion') or {})
+    version_info = dict((version_payload or {}).get('version') or {})
+    upstream = dict(upstream_meta or {})
+
+    skill_md_path = root / 'SKILL.md'
+    frontmatter: dict[str, str] = {}
+    body = ''
+    if skill_md_path.is_file():
+        frontmatter, body = split_frontmatter(skill_md_path.read_text(encoding='utf-8'))
+
+    local_description = str(frontmatter.get('description') or '').strip() or first_paragraph(body)
+    remote_description = strip_html(
+        str(skill_payload.get('summary') or skill_payload.get('description') or '')
+    )
+    owner_handle = str(owner_payload.get('handle') or owner_payload.get('username') or '').strip()
+    owner_display_name = str(owner_payload.get('displayName') or '').strip()
+    published_at = (
+        _iso_from_timestamp(version_info.get('createdAt'))
+        or _iso_from_timestamp(latest_version_payload.get('createdAt'))
+        or _iso_from_timestamp(upstream.get('publishedAt'))
+    )
+    version = (
+        str(version_info.get('version') or '').strip()
+        or str(latest_version_payload.get('version') or '').strip()
+        or str(upstream.get('version') or '').strip()
+    )
+
+    content: dict[str, Any] = {'main': 'SKILL.md'}
+    if (root / 'references').is_dir():
+        content['references'] = 'references'
+
+    source = {
+        'type': 'clawhub',
+        'slug': str(slug or '').strip(),
+        'url': build_skill_url(str(slug or '').strip(), owner_handle or None),
+        'detail_api': f"{API_BASE}/skills/{str(slug or '').strip()}",
+    }
+    if owner_handle:
+        source['owner'] = owner_handle
+
+    manifest: dict[str, Any] = {
+        'schema_version': 1,
+        'kind': 'skill',
+        'name': str(skill_id or '').strip(),
+        'display_name': str(skill_payload.get('displayName') or '').strip() or str(skill_id or '').strip(),
+        'description': local_description or remote_description or f'Imported from ClawHub skill {skill_id}.',
+        'content': content,
+        'source': source,
+        'current_version': {
+            'version': version,
+            'published_at': published_at,
+            'installed_at': datetime.now(UTC).isoformat(),
+        },
+        'x_g3ku': {
+            'clawhub': {
+                'slug': str(slug or '').strip(),
+                'owner': owner_handle,
+                'owner_display_name': owner_display_name,
+                'managed': True,
+            }
+        },
+    }
+    if not published_at:
+        manifest['current_version'].pop('published_at', None)
+    if not version:
+        manifest['current_version'].pop('version', None)
+    return manifest
+
+
 def build_skill_url(slug: str, owner: str | None = None) -> str:
     slug = (slug or '').strip().strip('/')
     owner = (owner or '').strip().strip('/')

@@ -139,8 +139,8 @@ def test_skill_creator_routes_github_skill_installs_to_skill_installer():
 
     assert "优先直接调用 `skill-installer` 工具" in skill_text
     assert "优先转交给 skill-installer" in skill_text
-    assert "安装 skill" in resource_text
-    assert "GitHub skill" in resource_text
+    assert "GitHub repo/path" in skill_text
+    assert "skill-installer" in resource_text
 
 
 def test_skill_installer_git_fallback_uses_separate_temp_repo_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

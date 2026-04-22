@@ -1237,7 +1237,7 @@ class TaskLogService:
         normalized_change_type = str(change_type or 'modified').strip().lower()
         if not normalized_path:
             return None
-        if normalized_change_type not in {'created', 'modified'}:
+        if normalized_change_type not in {'created', 'modified', 'deleted'}:
             normalized_change_type = 'modified'
         with self._task_lock(task_id):
             task = self._store.get_task(task_id)
@@ -1373,7 +1373,13 @@ class TaskLogService:
         change_type: str,
     ) -> list[NodeToolFileChange]:
         normalized_path = str(path or '').strip()
-        normalized_change_type = 'created' if str(change_type or '').strip().lower() == 'created' else 'modified'
+        raw_change_type = str(change_type or '').strip().lower()
+        if raw_change_type == 'created':
+            normalized_change_type = 'created'
+        elif raw_change_type == 'deleted':
+            normalized_change_type = 'deleted'
+        else:
+            normalized_change_type = 'modified'
         merged: list[NodeToolFileChange] = []
         found = False
         for item in list(current_changes or []):
@@ -1381,13 +1387,18 @@ class TaskLogService:
                 merged.append(item)
                 continue
             found = True
+            current_type = str(item.change_type or '').strip().lower()
+            if normalized_change_type == 'deleted' or current_type == 'deleted':
+                next_type = 'deleted'
+            elif current_type == 'created' or normalized_change_type == 'created':
+                next_type = 'created'
+            else:
+                next_type = 'modified'
             merged.append(
                 item.model_copy(
                     update={
                         'path': normalized_path,
-                        'change_type': 'created'
-                        if str(item.change_type or '').strip().lower() == 'created' or normalized_change_type == 'created'
-                        else 'modified',
+                        'change_type': next_type,
                     }
                 )
             )

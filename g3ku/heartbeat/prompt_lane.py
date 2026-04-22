@@ -83,7 +83,12 @@ def _tool_terminal_lines(event: dict[str, Any], retrieval_parts: list[str]) -> l
 def _task_stall_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list[str]:
     task_id = _non_empty_text(event.get("task_id"))
     title = _non_empty_text(event.get("title")) or task_id or "task"
-    stall_reason = _non_empty_text(event.get("reason")) or "suspected_stall"
+    stall_reason = (
+        _non_empty_text(event.get("stall_reason"))
+        or _non_empty_text(event.get("task_stall_reason"))
+        or _non_empty_text(event.get("reason"))
+        or "suspected_stall"
+    )
     stalled_minutes = _int_value(event.get("stalled_minutes"), 0)
     bucket_minutes = _int_value(event.get("bucket_minutes"), 0)
     brief_text = _non_empty_text(event.get("brief_text")) or "No task summary."
@@ -192,7 +197,7 @@ def _event_bundle_content(events: list[dict[str, Any]], *, output_inline_limit: 
     retrieval_parts: list[str] = []
     for raw_event in list(events or []):
         event = dict(raw_event or {})
-        reason = _non_empty_text(event.get("reason")).lower()
+        reason = _non_empty_text(event.get("event_reason") or event.get("kind") or event.get("reason")).lower()
         if reason == "tool_background":
             lines.extend(_tool_background_lines(event, retrieval_parts))
             continue

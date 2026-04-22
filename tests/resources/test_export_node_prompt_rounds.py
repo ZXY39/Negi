@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from main.runtime.node_prompt_contract import is_node_dynamic_contract_message
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -17,12 +19,7 @@ def _script_path() -> Path:
 def _dynamic_contract_messages(messages: list[dict[str, object]]) -> list[dict[str, object]]:
     matched: list[dict[str, object]] = []
     for message in list(messages or []):
-        if str((message or {}).get("role") or "").strip().lower() != "user":
-            continue
-        raw_content = (message or {}).get("content")
-        if not isinstance(raw_content, str):
-            continue
-        if '"message_type": "node_runtime_tool_contract"' in raw_content:
+        if is_node_dynamic_contract_message(dict(message or {})):
             matched.append(message)
     return matched
 
@@ -55,7 +52,7 @@ def test_export_node_prompt_rounds_script_exports_two_consecutive_requests(tmp_p
     round2_contracts = _dynamic_contract_messages(list(round2.get("messages") or []))
 
     assert len(round1_contracts) == 1
-    assert len(round2_contracts) == 1
+    assert len(round2_contracts) == 2
 
     assert round1_payload["message_type"] == "node_runtime_tool_contract"
     assert round1_payload["candidate_tools"] == [
@@ -82,9 +79,10 @@ def test_export_node_prompt_rounds_script_exports_two_consecutive_requests(tmp_p
         }
     ]
 
-    assert summary["rounds"][0]["dynamic_contract_message_indexes"] == [2]
-    assert summary["rounds"][1]["dynamic_contract_message_indexes"] == [5]
-    assert summary["rounds"][1]["last_message_role"] == "user"
+    assert summary["rounds"][0]["dynamic_contract_message_indexes"] == [3]
+    assert summary["rounds"][1]["dynamic_contract_message_indexes"] == [3, 7]
+    assert summary["rounds"][1]["last_message_role"] == "assistant"
+    assert summary["rounds"][1]["dynamic_contract_message_count"] == 2
 
     round1_model_messages = json.loads((output_dir / "round1.model_messages.json").read_text(encoding="utf-8"))
     round2_model_messages = json.loads((output_dir / "round2.model_messages.json").read_text(encoding="utf-8"))

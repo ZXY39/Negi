@@ -5,6 +5,8 @@ from typing import Any
 
 import pytest
 
+import main.runtime.react_loop as react_loop_module
+from main.runtime.chat_backend import SendModelContextWindowInfo
 from g3ku.agent.tools.base import Tool
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from main.runtime.react_loop import ReActToolLoop
@@ -87,6 +89,29 @@ class _SubmitFinalResultTool(Tool):
 
     async def execute(self, **kwargs: Any) -> Any:
         return dict(kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _default_node_send_preflight_context_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        react_loop_module,
+        "get_runtime_config",
+        lambda **_: (SimpleNamespace(), 0, False),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        react_loop_module.runtime_chat_backend,
+        "resolve_send_model_context_window_info",
+        lambda **kwargs: SendModelContextWindowInfo(
+            model_key=str((list(kwargs.get("model_refs") or []) or ["fake"])[0] or "").strip() or "fake",
+            provider_id="test",
+            provider_model="test:fake",
+            resolved_model="fake",
+            context_window_tokens=32000,
+            resolution_error="",
+        ),
+        raising=False,
+    )
 
 
 def test_normalize_tool_call_arguments_handles_non_mapping_inputs() -> None:

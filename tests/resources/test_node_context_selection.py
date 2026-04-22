@@ -228,4 +228,7 @@ async def test_node_selector_dense_rerank_excludes_fixed_builtin_tools_from_cand
         visible_tool_names=visible_tools,
     )
 
-    assert result.candidate_tool_names == [f"tool-{index:02d}" for index in range(16)]
+    assert result.candidate_tool_names == [
+        "content_open",
+        *[f"tool-{index:02d}" for index in range(15)],
+    ]

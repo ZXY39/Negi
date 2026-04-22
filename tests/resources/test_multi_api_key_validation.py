@@ -41,6 +41,7 @@ def test_normalize_draft_accepts_multiple_api_keys() -> None:
         base_url="https://example.com/v1",
         default_model="custom-model",
         parameters={
+            "context_window_tokens": 32000,
             "timeout_s": 8,
             "temperature": 0.2,
             "max_tokens": 256,

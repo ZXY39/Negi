@@ -2262,6 +2262,8 @@ class NodeRunner:
                     status=status,
                     finished_at=_now(),
                     check_status=check_status,
+                    runtime_error_text=reason_text if status == 'error' else '',
+                    result=result.model_dump(mode='json', exclude_none=True),
                 )
             payload['completed'] = not any(
                 self._spawn_entry_is_active(item)

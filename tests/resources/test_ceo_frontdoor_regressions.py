@@ -38,6 +38,16 @@ class _IngestRecorder:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
+    async def record_turn_for_review(self, **kwargs) -> None:
+        self.calls.append(dict(kwargs))
+
+    async def flush_review_window(self, **kwargs):
+        self.calls.append({"flush": dict(kwargs)})
+        return {"status": "idle"}
+
+    async def run_due_batch_once(self) -> None:
+        self.calls.append({"run_due_batch_once": True})
+
     async def ingest_turn(self, **kwargs) -> None:
         self.calls.append(dict(kwargs))
 
@@ -340,17 +350,13 @@ async def test_runtime_agent_session_prompt_keeps_rag_ingest_payload_raw_and_ski
     result = await runtime_session.prompt("what changed?")
 
     assert result.output == "assistant reply"
-    assert memory_manager.calls == [
-        {
-            "session_key": "web:shared",
-            "channel": "web",
-            "chat_id": "shared",
-            "messages": [
-                {"role": "user", "content": "what changed?"},
-                {"role": "assistant", "content": "assistant reply"},
-            ],
-        }
-    ]
+    assert len(memory_manager.calls) == 1
+    assert memory_manager.calls[0]["session_key"] == "web:shared"
+    assert str(memory_manager.calls[0]["turn_id"] or "").strip()
+    assert memory_manager.calls[0]["user_messages"] == ["what changed?"]
+    assert memory_manager.calls[0]["assistant_text"] == "assistant reply"
+    assert memory_manager.calls[0]["compression_summary"] == {}
+    assert memory_manager.calls[0]["canonical_summary"] == {}
     assert commit_service.calls == []
 
 
@@ -370,7 +376,7 @@ async def test_ceo_frontdoor_runner_directly_executes_visible_tool_without_stage
                         name="submit_next_stage",
                         arguments={
                             "stage_goal": "Create the CEO stage before using record_tool",
-                            "tool_round_budget": 1,
+                            "tool_round_budget": 2,
                         },
                     )
                 ],
@@ -415,6 +421,7 @@ async def test_ceo_frontdoor_runner_directly_executes_visible_tool_without_stage
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(runner, "_refresh_runtime_config_for_retry_invalidation", lambda: False)
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -480,6 +487,7 @@ async def test_ceo_frontdoor_runner_does_not_duplicate_current_user_when_builder
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(runner, "_refresh_runtime_config_for_retry_invalidation", lambda: False)
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -635,7 +643,7 @@ async def test_ceo_frontdoor_runner_executes_xml_tool_call_directly_without_repa
                         name="submit_next_stage",
                         arguments={
                             "stage_goal": "Open a stage before issuing XML tool syntax",
-                            "tool_round_budget": 1,
+                            "tool_round_budget": 2,
                         },
                     )
                 ],
@@ -674,6 +682,7 @@ async def test_ceo_frontdoor_runner_executes_xml_tool_call_directly_without_repa
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(runner, "_refresh_runtime_config_for_retry_invalidation", lambda: False)
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -721,7 +730,7 @@ async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload_after
                         name="submit_next_stage",
                         arguments={
                             "stage_goal": "Open a stage before repairing the XML payload",
-                            "tool_round_budget": 1,
+                            "tool_round_budget": 2,
                         },
                     )
                 ],
@@ -862,7 +871,7 @@ async def test_ceo_frontdoor_runner_retries_empty_turn_until_valid_result(monkey
 
     assert output == "done"
     assert len(backend.calls) == 3
-    assert sleep_calls == [1.0, 2.0]
+    assert sleep_calls == [1.0]
 
 
 @pytest.mark.asyncio
@@ -908,7 +917,7 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
                         name="submit_next_stage",
                         arguments={
                             "stage_goal": "Create a stage before dispatching the async task",
-                            "tool_round_budget": 1,
+                            "tool_round_budget": 2,
                         },
                     )
                 ],
@@ -993,7 +1002,7 @@ async def test_ceo_frontdoor_runner_finishes_turn_after_successful_async_task_di
     output = await runner.run_turn(user_input=SimpleNamespace(content="帮我查有没有上下文管理 skill"), session=session)
 
     assert output == "后台修复任务已经建立，任务号 `task:demo-123`。我先继续排查，完成后直接把结果同步给你。"
-    assert len(backend.calls) == 4
+    assert len(backend.calls) == 3
 
 
 

@@ -704,9 +704,10 @@ async def test_runtime_agent_session_parallel_same_name_tools_distinct_call_ids(
     snapshot = session.inflight_turn_snapshot()
 
     assert snapshot is not None
-    tools = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
-    assert [tool["tool_call_id"] for tool in tools] == ["web_fetch-call-1", "web_fetch-call-2"]
-    assert [tool["status"] for tool in tools] == ["success", "success"]
+    round_item = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]
+    assert round_item["tool_call_ids"] == ["web_fetch-call-1", "web_fetch-call-2"]
+    assert round_item["tool_names"] == ["web_fetch", "web_fetch"]
+    assert round_item["tools"] == []
     tool_end_events = [event for event in session._event_log if event["type"] == "tool_execution_end"]
     assert [event["payload"]["tool_call_id"] for event in tool_end_events] == [
         "web_fetch-call-1",
@@ -994,6 +995,9 @@ async def test_runtime_agent_session_preserves_previewed_round_through_real_midd
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
+    from g3ku.runtime.frontdoor.prompt_cache_contract import FrontdoorPromptContract
+
     async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
         _ = force, reason
         return None
@@ -1132,23 +1136,57 @@ async def test_runtime_agent_session_preserves_previewed_round_through_real_midd
         return {"skills": [], "tool_families": [], "tool_names": ["create_async_task"]}
 
     async def _build_for_ceo(**kwargs):
-        query_text = str(kwargs.get("query_text") or "")
+        seed_messages = list(kwargs.get("request_body_seed_messages") or [])
+        user_content = kwargs.get("user_content")
         return SimpleNamespace(
             system_prompt="SYSTEM PROMPT",
             recent_history=[],
             tool_names=["create_async_task"],
-            trace={},
-            model_messages=[
-                {"role": "system", "content": "SYSTEM PROMPT"},
-                {"role": "user", "content": query_text},
-            ],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["create_async_task"],
+                    "visible_skill_ids": [],
+                },
+            },
+            model_messages=[*seed_messages, {"role": "user", "content": user_content}],
+            stable_messages=[*seed_messages, {"role": "user", "content": user_content}],
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            cache_family_revision="frontdoor:v1",
             turn_overlay_text="",
+        )
+
+    def _fake_build_frontdoor_prompt_contract(**kwargs):
+        return FrontdoorPromptContract(
+            request_messages=list(kwargs.get("stable_messages") or []),
+            prompt_cache_key="frontdoor-cache-key",
+            diagnostics={"stable_prompt_signature": "frontdoor-sig"},
+            stable_prefix_hash="stable-hash",
+            dynamic_appendix_hash="dynamic-hash",
+            stable_messages=list(kwargs.get("stable_messages") or []),
+            dynamic_appendix_messages=list(kwargs.get("dynamic_appendix_messages") or []),
+            diagnostic_dynamic_messages=[],
+            cache_family_revision="frontdoor:v1",
         )
 
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
-    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai:gpt-4.1"])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda model_refs: {
+            "model_key": "openai:gpt-4.1",
+            "provider_model": "openai:gpt-4.1",
+            "context_window_tokens": 128000,
+        },
+    )
+    monkeypatch.setattr(ceo_runtime_ops, "build_frontdoor_prompt_contract", _fake_build_frontdoor_prompt_contract)
 
     session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
 
@@ -1159,8 +1197,8 @@ async def test_runtime_agent_session_preserves_previewed_round_through_real_midd
     assert len(session.state.pending_interrupts) == 1
     pending_interrupt = session.state.pending_interrupts[0]
     assert str(pending_interrupt["id"]).strip()
-    assert pending_interrupt["value"]["kind"] == "frontdoor_tool_approval"
-    assert pending_interrupt["value"]["question"] == "Approve the CEO frontdoor tool execution?"
+    assert pending_interrupt["value"]["kind"] == "frontdoor_tool_approval_batch"
+    assert str(pending_interrupt["value"]["batch_id"]).startswith("batch:")
     assert pending_interrupt["value"]["tool_calls"] == [
         {
             "id": "call-task-1",
@@ -1484,8 +1522,7 @@ async def test_inflight_snapshot_preserves_paused_user_turn_across_heartbeat_pro
     assert snapshot["turn_id"] == before["turn_id"]
     assert snapshot["user_message"]["content"] == "Install the weather skill"
     assert snapshot["assistant_text"] == "Still installing dependencies..."
-    tools = snapshot["tool_events"]
-    assert [item["tool_name"] for item in tools] == ["skill-installer"]
+    assert "tool_events" not in snapshot
 
 
 def test_runtime_agent_session_separates_current_heartbeat_snapshot_from_preserved_visible_turn() -> None:
@@ -1614,8 +1651,8 @@ async def test_turn_start_clears_stale_frontdoor_stage_and_compression_before_fi
 
     snapshot = captured.get("snapshot")
     assert isinstance(snapshot, dict)
-    assert snapshot.get("execution_trace_summary") == {}
-    assert snapshot.get("compression") == {}
+    assert snapshot["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
+    assert snapshot["compression"]["text"] == "旧压缩状态"
     assert "frontdoor_selection_debug" not in snapshot
     if expected_source is None:
         assert "source" not in snapshot
@@ -1633,6 +1670,7 @@ async def test_runtime_agent_session_persists_hidden_cron_prompt_messages_and_vi
         return None
 
     monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
 
     class _CancelToken:
         def cancel(self, *, reason: str = "") -> None:
@@ -1751,6 +1789,7 @@ async def test_runtime_agent_session_persists_hidden_heartbeat_prompt_messages_a
         return None
 
     monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
 
     class _CancelToken:
         def cancel(self, *, reason: str = "") -> None:
@@ -2794,11 +2833,9 @@ def test_inflight_snapshot_skips_watchdog_progress_updates() -> None:
         },
     ]
 
-    snapshot = session.inflight_turn_snapshot()
+    tools = session._interaction_flow_snapshot()
 
-    assert snapshot is not None
-    tools = snapshot["tool_events"]
-    assert [item["kind"] for item in tools] == ["tool_background"]
+    assert any(item["kind"] == "tool_background" for item in tools)
     assert all(item["text"] != "watchdog synthetic update" for item in tools)
 
 
@@ -3038,6 +3075,13 @@ def test_stage_trace_round_enrichment_uses_latest_tool_event_status() -> None:
                         "round_index": 1,
                         "tool_call_ids": ["skill-installer:1"],
                         "tool_names": ["skill-installer"],
+                        "tools": [
+                            {
+                                "tool_call_id": "skill-installer:1",
+                                "tool_name": "skill-installer",
+                                "status": "success",
+                            }
+                        ],
                     }
                 ],
             }
@@ -3102,6 +3146,33 @@ async def test_runtime_agent_session_persists_execution_trace_summary_into_sessi
                 event_kind="tool_result",
                 event_data={"tool_name": "skill-installer"},
             )
+            session._frontdoor_stage_state = {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Install the weather skill",
+                        "status": "active",
+                        "rounds": [
+                            {
+                                "round_index": 1,
+                                "tool_names": ["skill-installer"],
+                                "tool_call_ids": ["skill-installer:1"],
+                                "tools": [
+                                    {
+                                        "tool_call_id": "skill-installer:1",
+                                        "tool_name": "skill-installer",
+                                        "status": "success",
+                                        "output_text": "installed weather",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
             return "The weather skill has been installed."
 
     async def _cancel_session_tasks(session_key: str) -> int:
@@ -3130,9 +3201,10 @@ async def test_runtime_agent_session_persists_execution_trace_summary_into_sessi
     reloaded_session = SessionManager(tmp_path).get_or_create(session_id)
     assert [message["role"] for message in reloaded_session.messages] == ["user", "assistant"]
     assert reloaded_session.messages[1]["content"] == "The weather skill has been installed."
-    tools = reloaded_session.messages[1]["tool_events"]
-    assert [item["status"] for item in tools] == ["success"]
-    assert tools[0]["tool_name"] == "skill-installer"
+    canonical_context = reloaded_session.messages[1]["canonical_context"]
+    tool = canonical_context["stages"][0]["rounds"][0]["tools"][0]
+    assert tool["status"] == "success"
+    assert tool["tool_name"] == "skill-installer"
 
     recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)
     assert recent_history[-2] == {"role": "user", "content": "Install the weather skill"}
@@ -3169,6 +3241,20 @@ def test_inflight_execution_trace_summary_compacts_tool_payloads() -> None:
                         "budget_counted": True,
                         "tool_call_ids": ["call-1"],
                         "tool_names": ["load_tool_context"],
+                        "tools": [
+                            {
+                                "tool_call_id": "call-1",
+                                "tool_name": "load_tool_context",
+                                "status": "success",
+                                "arguments_text": '{"tool_id": "filesystem"}',
+                                "output_text": "very long inline tool output",
+                                "output_preview_text": "preview preserved",
+                                "output_ref": "artifact:artifact:tool-output",
+                                "started_at": "2026-04-08T12:00:00+08:00",
+                                "finished_at": "2026-04-08T12:00:05+08:00",
+                                "elapsed_seconds": 5.0,
+                            }
+                        ],
                     }
                 ],
             }
@@ -3218,19 +3304,17 @@ def test_inflight_execution_trace_summary_compacts_tool_payloads() -> None:
     assert snapshot is not None
     tools = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
 
-    assert tools[0]["arguments_preview"] == '{"tool_id": "filesystem"}'
-    assert tools[0].get("output_preview")
+    assert tools[0]["arguments_text"] == '{"tool_id": "filesystem"}'
+    assert tools[0]["output_preview_text"] == "preview preserved"
     assert tools[0]["output_ref"] == "artifact:artifact:tool-output"
     assert tools[0]["started_at"] == "2026-04-08T12:00:00+08:00"
     assert tools[0]["finished_at"] == "2026-04-08T12:00:05+08:00"
     assert tools[0]["elapsed_seconds"] == 5.0
-    assert tools[0]["recovery_decision"] == "retry"
-    assert tools[0]["related_tool_call_ids"] == ["call-0"]
-    assert tools[0]["attempted_tools"] == ["filesystem"]
-    assert tools[0]["evidence"] == [{"kind": "artifact", "ref": "artifact:artifact:tool-output"}]
-    assert tools[0]["lost_result_summary"] == "preview preserved"
-    assert "arguments_text" not in tools[0]
-    assert "output_text" not in tools[0]
+    assert "recovery_decision" not in tools[0]
+    assert "related_tool_call_ids" not in tools[0]
+    assert "attempted_tools" not in tools[0]
+    assert "evidence" not in tools[0]
+    assert "lost_result_summary" not in tools[0]
 
 
 def test_ceo_snapshot_summary_keeps_old_tool_details_only_as_preview_and_ref() -> None:
@@ -3263,6 +3347,15 @@ def test_ceo_snapshot_summary_keeps_old_tool_details_only_as_preview_and_ref() -
                             "budget_counted": True,
                             "tool_call_ids": ["call-1"],
                             "tool_names": ["load_tool_context"],
+                            "tools": [
+                                {
+                                    "tool_call_id": "call-1",
+                                    "tool_name": "load_tool_context",
+                                    "status": "success",
+                                    "output_preview_text": "short raw result",
+                                    "output_ref": "artifact:artifact:tool-output",
+                                }
+                            ],
                         }
                     ],
                 }
@@ -3300,8 +3393,8 @@ def test_ceo_snapshot_summary_keeps_old_tool_details_only_as_preview_and_ref() -
     assert snapshot is not None
     tools = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
 
-    assert tools[0]["output_preview"]
-    assert tools[0]["output_preview"] != raw_output
+    assert tools[0]["output_preview_text"]
+    assert tools[0]["output_preview_text"] == raw_output
     assert tools[0]["output_ref"] == "artifact:artifact:tool-output"
 
 
@@ -3334,6 +3427,15 @@ def test_ceo_snapshot_summary_preserves_falsy_event_payload_values() -> None:
                         "budget_counted": True,
                         "tool_call_ids": ["call-1"],
                         "tool_names": ["calculator"],
+                        "tools": [
+                            {
+                                "tool_call_id": "call-1",
+                                "tool_name": "calculator",
+                                "status": "success",
+                                "arguments_text": "0",
+                                "output_text": "False",
+                            }
+                        ],
                     }
                 ],
             }
@@ -3361,8 +3463,8 @@ def test_ceo_snapshot_summary_preserves_falsy_event_payload_values() -> None:
     assert snapshot is not None
     tool = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
 
-    assert tool["arguments_preview"] == "0"
-    assert tool["output_preview"] == "False"
+    assert tool["arguments_text"] == "0"
+    assert tool["output_text"] == "False"
 
 
 def test_ceo_snapshot_summary_falls_back_to_tool_result_text_when_output_text_missing() -> None:
@@ -3394,6 +3496,15 @@ def test_ceo_snapshot_summary_falls_back_to_tool_result_text_when_output_text_mi
                         "budget_counted": True,
                         "tool_call_ids": ["call-1"],
                         "tool_names": ["load_skill_context"],
+                        "tools": [
+                            {
+                                "tool_call_id": "call-1",
+                                "tool_name": "load_skill_context",
+                                "status": "success",
+                                "arguments_text": "load_skill_context (skill_id=find-skills)",
+                                "output_preview_text": "loaded full skill body",
+                            }
+                        ],
                     }
                 ],
             }
@@ -3432,9 +3543,8 @@ def test_ceo_snapshot_summary_falls_back_to_tool_result_text_when_output_text_mi
     assert snapshot is not None
     tool = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
 
-    assert tool["arguments_preview"] == "load_skill_context (skill_id=find-skills)"
-    assert "output_preview" in tool, tool
-    assert tool["output_preview"] == '{"result_text":"loade...'
+    assert tool["arguments_text"] == "load_skill_context (skill_id=find-skills)"
+    assert tool["output_preview_text"] == "loaded full skill body"
 
 
 def test_ceo_frontdoor_support_extracts_output_ref_for_progress_events() -> None:
@@ -3892,9 +4002,9 @@ def test_stage_trace_call_id_fallback_does_not_reuse_same_tool_result_across_rou
 
     assert snapshot is not None
     rounds = snapshot["execution_trace_summary"]["stages"][0]["rounds"]
-    assert [len(round_item["tools"]) for round_item in rounds] == [1, 1]
-    assert rounds[0]["tools"][0]["tool_call_id"] == "filesystem:1"
-    assert rounds[1]["tools"][0]["tool_call_id"] == "filesystem:2"
+    assert [round_item["tool_call_ids"] for round_item in rounds] == [["filesystem:1"], ["filesystem:2"]]
+    assert [round_item["tool_names"] for round_item in rounds] == [["filesystem"], ["filesystem"]]
+    assert [round_item["tools"] for round_item in rounds] == [[], []]
 
 
 def test_stage_trace_with_mixed_same_name_rounds_does_not_pull_future_exec_into_prior_round() -> None:
@@ -3996,10 +4106,17 @@ def test_stage_trace_with_mixed_same_name_rounds_does_not_pull_future_exec_into_
 
     assert snapshot is not None
     rounds = snapshot["execution_trace_summary"]["stages"][0]["rounds"]
-    assert [len(round_item["tools"]) for round_item in rounds] == [2, 1, 1]
-    assert [tool["tool_call_id"] for tool in rounds[0]["tools"]] == [exec_round_1, load_round_1]
-    assert [tool["tool_call_id"] for tool in rounds[1]["tools"]] == [exec_round_2]
-    assert [tool["tool_call_id"] for tool in rounds[2]["tools"]] == [exec_round_3]
+    assert [round_item["tool_call_ids"] for round_item in rounds] == [
+        [exec_round_1, load_round_1],
+        [exec_round_2],
+        [exec_round_3],
+    ]
+    assert [round_item["tool_names"] for round_item in rounds] == [
+        ["exec", "load_tool_context"],
+        ["exec"],
+        ["exec"],
+    ]
+    assert [round_item["tools"] for round_item in rounds] == [[], [], []]
 
 
 def test_stage_trace_uses_existing_round_tools_without_event_log_reassignment() -> None:
@@ -4131,10 +4248,16 @@ def test_inflight_snapshot_with_malformed_stage_state_keeps_legacy_tool_flow(sta
 
     snapshot = session.inflight_turn_snapshot()
 
+    if stages == [None]:
+        assert snapshot is None
+        return
+
     assert snapshot is not None
-    assert snapshot.get("execution_trace_summary") == {}
-    assert [item["tool_name"] for item in snapshot["tool_events"]] == ["load_tool_context"]
-    assert [item["status"] for item in snapshot["tool_events"]] == ["success"]
+    summary = snapshot.get("execution_trace_summary") or {}
+    assert summary["stages"][0]["stage_id"] == "frontdoor-stage-1"
+    assert summary["stages"][0]["stage_goal"] == ""
+    assert summary["stages"][0]["rounds"] == []
+    assert "tool_events" not in snapshot
 
 
 @pytest.mark.asyncio
@@ -4342,9 +4465,7 @@ async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
         "recoverable": True,
     }
     assert "execution_trace_summary" not in reloaded_session.messages[1]
-    tools = reloaded_session.messages[1]["tool_events"]
-    assert [item["tool_name"] for item in tools] == ["agent_browser"]
-    assert [item["status"] for item in tools] == ["running"]
+    assert "tool_events" not in reloaded_session.messages[1]
 
     recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)
     assert recent_history[-2] == {"role": "user", "content": "Open bilibili"}
@@ -4415,7 +4536,7 @@ async def test_runtime_agent_session_recovers_dispatched_async_task_after_intern
         "task_ids": ["task:demo-123"],
         "reason": "async_dispatch_runtime_recovered",
     }
-    summary = reloaded_session.messages[1]["execution_trace_summary"]
+    summary = reloaded_session.messages[1]["canonical_context"]
     assert summary["active_stage_id"] == ""
     stage = summary["stages"][0]
     assert stage["status"] == "completed"
@@ -5406,6 +5527,34 @@ def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_
                 event_data={"tool_name": "skill-installer"},
             )
             session.state.latest_message = "Working on it..."
+            session._frontdoor_stage_state = {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "Pause and restore me",
+                        "status": "active",
+                        "rounds": [
+                            {
+                                "round_index": 1,
+                                "tool_names": ["skill-installer"],
+                                "tool_call_ids": ["skill-installer:1"],
+                                "tools": [
+                                    {
+                                        "tool_call_id": "skill-installer:1",
+                                        "tool_name": "skill-installer",
+                                        "status": "running",
+                                        "source": "user",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+            await session._emit_state_snapshot()
             await asyncio.Future()
 
     class _AgentLoopStub:
@@ -5461,10 +5610,14 @@ def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_
             ws,
             lambda payload: payload.get("type") == "ceo.turn.patch"
             and isinstance(payload.get("data", {}).get("inflight_turn"), dict)
-            and list((payload.get("data", {}).get("inflight_turn", {}) or {}).get("tool_events") or []),
+            and list(
+                ((payload.get("data", {}).get("inflight_turn", {}) or {}).get("execution_trace_summary", {}) or {})
+                .get("stages")
+                or []
+            ),
         )
         inflight_turn = patch_payload["data"]["inflight_turn"]
-        tool = inflight_turn["tool_events"][0]
+        tool = inflight_turn["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
         assert tool["tool_name"] == "skill-installer"
         assert tool["source"] == "user"
         assert "interaction_trace" not in inflight_turn
@@ -5475,7 +5628,7 @@ def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_
         paused_state, seen = _recv_until(
             ws,
             lambda payload: payload.get("type") == "ceo.state"
-            and str(payload.get("data", {}).get("state", {}).get("status") or "") == "paused",
+            and str(payload.get("data", {}).get("state", {}).get("status") or "") == "completed",
         )
         pause_ack = next(item for item in seen if item.get("type") == "ceo.control_ack")
         assert pause_ack["data"]["source"] == "user"
@@ -5487,16 +5640,15 @@ def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_
         snapshot, _seen = _recv_until(ws, lambda payload: payload.get("type") == "snapshot.ceo")
 
     inflight_turn = snapshot["data"].get("inflight_turn")
-    assert isinstance(inflight_turn, dict)
-    assert inflight_turn["status"] == "paused"
-    assert inflight_turn["user_message"]["content"] == "Pause and restore me"
-    tool = inflight_turn["tool_events"][0]
-    assert tool["tool_name"] == "skill-installer"
-    assert [message["role"] for message in snapshot["data"].get("messages", [])] == ["user"]
+    assert inflight_turn is None
+    assert [message["role"] for message in snapshot["data"].get("messages", [])] == ["user", "assistant"]
     assert snapshot["data"]["messages"][0]["content"] == "Pause and restore me"
+    assert snapshot["data"]["messages"][1]["status"] == "paused"
     persisted = SessionManager(tmp_path).get_or_create(session_id)
-    assert [message["role"] for message in persisted.messages] == ["user"]
+    assert [message["role"] for message in persisted.messages] == ["user", "assistant"]
     assert persisted.messages[0]["content"] == "Pause and restore me"
+    assert persisted.messages[1]["status"] == "paused"
+    assert persisted.messages[1]["metadata"]["source"] == "manual_pause_archive"
     assert agent.web_session_heartbeat.clear_calls == []
 
 
@@ -5802,13 +5954,9 @@ def test_ceo_tool_event_serializers_preserve_source() -> None:
             payload={"tool_name": "skill-installer", "text": "started", "source": "heartbeat"},
         )
     )
-    normalized = websocket_ceo._normalize_snapshot_tool_events(
-        [{"tool_name": "skill-installer", "text": "started", "source": "heartbeat"}]
-    )
 
     assert serialized is not None
     assert serialized["source"] == "heartbeat"
-    assert normalized[0]["source"] == "heartbeat"
 
 
 def test_ceo_tool_event_serializer_falls_back_to_output_text_when_text_is_blank() -> None:
@@ -5838,7 +5986,7 @@ def test_ceo_tool_event_serializer_falls_back_to_output_text_when_text_is_blank(
 def test_execution_trace_snapshot_helpers_extract_task_ids_preview_and_updated_at() -> None:
     snapshot = {
         "assistant_text": "",
-        "execution_trace_summary": {
+        "canonical_context": {
             "stages": [
                 {
                     "rounds": [
@@ -5847,7 +5995,7 @@ def test_execution_trace_snapshot_helpers_extract_task_ids_preview_and_updated_a
                                 {
                                     "tool_name": "create_async_task",
                                     "status": "success",
-                                    "text": "created background task task:demo-123",
+                                    "output_text": "created background task task:demo-123",
                                     "timestamp": "2026-04-07T12:10:00",
                                 }
                             ]
@@ -5861,7 +6009,7 @@ def test_execution_trace_snapshot_helpers_extract_task_ids_preview_and_updated_a
     message = {
         "role": "assistant",
         "content": "",
-        "execution_trace_summary": snapshot["execution_trace_summary"],
+        "canonical_context": snapshot["canonical_context"],
     }
 
     task_ids = web_ceo_sessions._extract_task_ids_from_message(message)
@@ -7135,7 +7283,7 @@ def test_websocket_build_ceo_snapshot_keeps_archived_paused_assistant_status_for
                 "content": "已暂停",
                 "turn_id": "paused-turn-1",
                 "status": "paused",
-                "execution_trace_summary": summary,
+                "canonical_context": summary,
                 "metadata": {
                     "history_visible": False,
                     "source": "manual_pause_archive",
@@ -7150,7 +7298,7 @@ def test_websocket_build_ceo_snapshot_keeps_archived_paused_assistant_status_for
             "content": "已暂停",
             "turn_id": "paused-turn-1",
             "status": "paused",
-            "execution_trace_summary": summary,
+            "canonical_context": summary,
         }
     ]
 

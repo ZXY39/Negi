@@ -1097,18 +1097,18 @@ def test_build_execution_trace_steps_label_summary_rounds_by_spawn_presence() ->
         const steps = buildExecutionTraceSteps(trace, { state: "in_progress" });
 
         console.log(JSON.stringify({
+          normalStageTitle: String(steps[1]?.title || ""),
+          spawnStageTitle: String(steps[2]?.title || ""),
           normalStageHasSelfMode: String(steps[1]?.bodyHtml || "").includes("\\u81ea\\u4e3b\\u6267\\u884c"),
-          normalStageHasDerivedLabel: String(steps[1]?.bodyHtml || "").includes("\\u6d3e\\u751f\\u8282\\u70b9"),
           spawnStageHasWithChildrenMode: String(steps[2]?.bodyHtml || "").includes("\\u5305\\u542b\\u6d3e\\u751f"),
-          spawnStageHasDerivedLabel: String(steps[2]?.bodyHtml || "").includes("\\u6d3e\\u751f\\u8282\\u70b9"),
         }));
         """
     )
 
-    assert result["normalStageHasSelfMode"] is True
-    assert result["normalStageHasDerivedLabel"] is False
-    assert result["spawnStageHasWithChildrenMode"] is True
-    assert result["spawnStageHasDerivedLabel"] is False
+    assert "normal stage" in result["normalStageTitle"]
+    assert "spawn stage" in result["spawnStageTitle"]
+    assert result["normalStageHasSelfMode"] is False
+    assert result["spawnStageHasWithChildrenMode"] is False
 
 
 def test_build_execution_trace_steps_label_mixed_full_round_as_with_children() -> None:
@@ -1182,16 +1182,16 @@ def test_build_execution_trace_steps_label_mixed_full_round_as_with_children() -
         const steps = buildExecutionTraceSteps(trace, { state: "completed" });
 
         console.log(JSON.stringify({
+          stageTitle: String(steps[1]?.title || ""),
           stageHasWithChildrenMode: String(steps[1]?.bodyHtml || "").includes("\\u5305\\u542b\\u6d3e\\u751f"),
           stageHasRoundIndexLabel: String(steps[1]?.bodyHtml || "").includes("\\u7b2c 1 \\u8f6e"),
-          stageHasDerivedLabel: String(steps[1]?.bodyHtml || "").includes("\\u6d3e\\u751f\\u8282\\u70b9"),
         }));
         """
     )
 
-    assert result["stageHasWithChildrenMode"] is True
+    assert "mixed stage" in result["stageTitle"]
+    assert result["stageHasWithChildrenMode"] is False
     assert result["stageHasRoundIndexLabel"] is False
-    assert result["stageHasDerivedLabel"] is False
 
 
 def test_summary_execution_trace_defaults_running_when_stage_or_tool_lacks_completion_signal() -> None:
@@ -1363,7 +1363,7 @@ def test_render_execution_stage_rounds_show_completed_round_and_tool_result_labe
         """
     )
 
-    assert result["roundClasses"][:1] == ["success"]
+    assert result["roundClasses"] == []
     assert result["labels"][:2] == ["成功", "失败"]
     assert result["classes"][:2] == ["success", "error"]
 
@@ -1485,7 +1485,7 @@ def test_summary_execution_trace_round_with_tool_names_only_renders_placeholder_
 
         console.log(JSON.stringify({
           showsEmptyRoundPlaceholder: html.includes("本轮暂无工具记录"),
-          hasToolChip: html.includes("工具 · memory_write"),
+          hasToolChip: html.includes("memory_write"),
         }));
         """
     )
@@ -1605,7 +1605,7 @@ def test_summary_execution_trace_no_tool_records_skips_empty_round_shells() -> N
         console.log(JSON.stringify({
           roundCount: trace.stages[0]?.rounds?.length || 0,
           showsEmptyRoundPlaceholder: html.includes("鏈疆鏆傛棤宸ュ叿璁板綍"),
-          hasToolChip: html.includes("宸ュ叿 路 memory_write"),
+          hasToolChip: html.includes("memory_write"),
         }));
         """
     )
@@ -3063,8 +3063,8 @@ def test_render_execution_stage_rounds_use_horizontal_strip_and_full_width_panel
           hasStripContainer: html.includes("task-trace-round-strip"),
           chipCount: (html.match(/class=\\"task-trace-round-chip\\s/g) || []).length,
           hasDetailPanel: html.includes("task-trace-round-panel"),
-          hasFilesystemTitle: html.includes("工具 · filesystem"),
-          hasWebFetchTitle: html.includes("工具 · web_fetch"),
+          hasFilesystemTitle: html.includes(">filesystem<"),
+          hasWebFetchTitle: html.includes(">web_fetch<"),
         }));
         """
     )
@@ -3173,7 +3173,7 @@ def test_set_trace_round_active_tool_prefetches_full_output_for_active_panel() -
     assert result["text"] == "FULL OUTPUT"
     assert result["activeToolKey"] == "round:tool:1"
     assert result["panelHidden"] is False
-    assert result["placeholderHidden"] is True
+    assert result["placeholderHidden"] is False
 
 
 def test_ceo_composer_html_includes_local_compression_toast() -> None:

@@ -1322,10 +1322,8 @@ async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_insid
     assert replaced_messages == runner._replace_messages_update(
         [*expected_messages, dict(replaced_messages[-1])]
     )["messages"]
-    appended_contract = _frontdoor_tool_contract_payload(dict(replaced_messages[-1]))
-    assert appended_contract is not None
-    assert appended_contract["message_type"] == "frontdoor_runtime_tool_contract"
-    assert appended_contract["callable_tool_names"] == ["submit_next_stage"]
+    assert is_frontdoor_tool_contract_message(dict(replaced_messages[-1]))
+    assert "callable_tools: `submit_next_stage`" in str(replaced_messages[-1].get("content") or "")
 
 
 @pytest.mark.asyncio
@@ -1416,9 +1414,8 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
     assert selected_tool_schema_requests
     assert selected_tool_schema_requests[-1] == ["exec", "load_tool_context", "submit_next_stage"]
     replaced_messages = [dict(item) for item in list(update["messages"] or []) if isinstance(item, dict)]
-    appended_contract = _frontdoor_tool_contract_payload(replaced_messages[-1])
-    assert appended_contract is not None
-    assert appended_contract["callable_tool_names"] == ["submit_next_stage"]
+    assert is_frontdoor_tool_contract_message(replaced_messages[-1])
+    assert "callable_tools: `submit_next_stage`" in str(replaced_messages[-1].get("content") or "")
 
 
 @pytest.mark.asyncio
@@ -1542,15 +1539,12 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
         {"role": "user", "content": "question three"},
     ]
     contract_payloads = [
-        payload
-        for payload in (
-            _frontdoor_tool_contract_payload(dict(message))
-            for message in list(state_update["dynamic_appendix_messages"] or [])
-        )
-        if isinstance(payload, dict)
+        dict(message)
+        for message in list(state_update["dynamic_appendix_messages"] or [])
+        if isinstance(message, dict) and is_frontdoor_tool_contract_message(dict(message))
     ]
     assert len(contract_payloads) == 1
-    assert contract_payloads[0]["callable_tool_names"] == ["submit_next_stage"]
+    assert "callable_tools: `submit_next_stage`" in str(contract_payloads[0].get("content") or "")
     assert "summary_text" not in state_update
     assert "summary_payload" not in state_update
     assert "summary_model_key" not in state_update
@@ -1925,15 +1919,12 @@ async def test_graph_prepare_turn_real_session_path_drops_summary_fields(
         {"role": "user", "content": "question three"},
     ]
     contract_payloads = [
-        payload
-        for payload in (
-            _frontdoor_tool_contract_payload(dict(message))
-            for message in list(result["dynamic_appendix_messages"] or [])
-        )
-        if isinstance(payload, dict)
+        dict(message)
+        for message in list(result["dynamic_appendix_messages"] or [])
+        if isinstance(message, dict) and is_frontdoor_tool_contract_message(dict(message))
     ]
     assert len(contract_payloads) == 1
-    assert contract_payloads[0]["callable_tool_names"] == ["submit_next_stage"]
+    assert "callable_tools: `submit_next_stage`" in str(contract_payloads[0].get("content") or "")
     assert "summary_text" not in result
     assert "summary_payload" not in result
     assert "summary_model_key" not in result

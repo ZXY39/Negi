@@ -17,10 +17,15 @@ from g3ku.agent.tools.base import Tool
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from main.protocol import now_iso
 from main.prompts import load_prompt
+from main.runtime.chat_backend import SendModelContextWindowInfo
 from main.runtime.internal_tools import SubmitFinalResultTool
+from main.runtime.node_prompt_contract import (
+    extract_node_dynamic_contract_payload,
+    is_node_dynamic_contract_message,
+)
 from main.runtime.react_loop import ReActToolLoop
+import main.runtime.react_loop as react_loop_module
 
-_CONTRACT_MARKER = '"message_type": "node_runtime_tool_contract"'
 _OVERLAY_MARKER = "\n\nSystem note for this turn only:\n"
 
 
@@ -358,14 +363,8 @@ def _serializable_chat_request(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _extract_dynamic_contract_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    for message in list(messages or []):
-        if str((message or {}).get("role") or "").strip().lower() != "user":
-            continue
-        raw_content = str((message or {}).get("content") or "")
-        if _CONTRACT_MARKER not in raw_content:
-            continue
-        contract_content = raw_content.split(_OVERLAY_MARKER, 1)[0]
-        payload = json.loads(contract_content)
+    for message in reversed(list(messages or [])):
+        payload = extract_node_dynamic_contract_payload([dict(message) if isinstance(message, dict) else {}])
         if isinstance(payload, dict):
             return payload
     raise RuntimeError("node runtime tool contract not found in request messages")
@@ -383,9 +382,7 @@ def _render_messages_markdown(messages: list[dict[str, Any]]) -> str:
 def _dynamic_contract_message_indexes(messages: list[dict[str, Any]]) -> list[int]:
     indexes: list[int] = []
     for index, message in enumerate(list(messages or [])):
-        if str((message or {}).get("role") or "").strip().lower() != "user":
-            continue
-        if _CONTRACT_MARKER in str((message or {}).get("content") or ""):
+        if is_node_dynamic_contract_message(dict(message or {})):
             indexes.append(index)
     return indexes
 
@@ -452,6 +449,17 @@ def _build_hydration_promoter(log_service: _RecordingLogService):
 
 async def _export_rounds(*, output_dir: Path) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    react_loop_module.get_runtime_config = lambda **_: (SimpleNamespace(), 0, False)
+    react_loop_module.runtime_chat_backend.resolve_send_model_context_window_info = (
+        lambda **kwargs: SendModelContextWindowInfo(
+            model_key=str((list(kwargs.get("model_refs") or []) or ["execution"])[0] or "").strip() or "execution",
+            provider_id="test",
+            provider_model="test:execution",
+            resolved_model="execution",
+            context_window_tokens=32000,
+            resolution_error="",
+        )
+    )
     task = SimpleNamespace(
         task_id="task-node-prompt-export",
         status="in_progress",
@@ -557,8 +565,7 @@ async def _export_rounds(*, output_dir: Path) -> dict[str, Any]:
                 "dynamic_contract_message_count": sum(
                     1
                     for message in request_messages
-                    if str((message or {}).get("role") or "").strip().lower() == "user"
-                    and _CONTRACT_MARKER in str((message or {}).get("content") or "")
+                    if is_node_dynamic_contract_message(dict(message or {}))
                 ),
                 "last_message_role": (
                     str((request_messages[-1] or {}).get("role") or "")

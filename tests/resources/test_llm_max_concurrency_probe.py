@@ -28,6 +28,7 @@ def _build_draft(api_key: str) -> ProviderConfigDraft:
         base_url="https://example.com/v1",
         default_model="custom-model",
         parameters={
+            "context_window_tokens": 32000,
             "timeout_s": 8,
             "temperature": 0.2,
             "max_tokens": 64,

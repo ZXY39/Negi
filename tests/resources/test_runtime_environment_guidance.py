@@ -57,8 +57,8 @@ def test_ceo_prompt_builder_includes_stage_first_protocol_and_recovery_rule(monk
 
     prompt = CeoPromptBuilder(loop=SimpleNamespace(workspace=r'D:\projects\G3KU')).build(skills=[])
 
-    assert '必须先调用`submit_next_stage`工具创建阶段后才能使用工具' in prompt
-    assert '如果调用工具返回 `no active stage`，下一步必须立即调用 `submit_next_stage` 进入阶段' in prompt
+    assert '必须先使用`submit_next_stage`工具创建阶段，才能使用工具' in prompt
+    assert '如果调用工具返回 `no active stage`，下一步必须立即调用 `submit_next_stage` 进入阶段。' in prompt
 
 
 def test_ceo_prompt_builder_visible_skills_block_requires_active_stage() -> None:
@@ -120,7 +120,7 @@ def test_node_execution_prompt_mentions_visible_skill_only_policy(monkeypatch) -
 
     prompt = runner._build_system_prompt(node=node)
 
-    assert 'visible_skills' in prompt
+    assert 'candidate_skills' in prompt
     assert 'load_skill_context(skill_id="' in prompt
 
 

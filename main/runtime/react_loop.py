@@ -2313,6 +2313,11 @@ class ReActToolLoop:
         candidate_skill_ids = self._normalized_name_list(
             list(runtime_context.get('candidate_skill_ids') or current_frame.get('candidate_skill_ids') or [])
         )
+        current_model_refs = [
+            str(item or '').strip()
+            for item in list(runtime_context.get('model_refs') or [])
+            if str(item or '').strip()
+        ]
 
         def _call_runtime_context(call: Any, *, stage_turn_granted: bool | None = None) -> dict[str, Any]:
             granted = bool(runtime_context.get('stage_turn_granted')) if stage_turn_granted is None else bool(stage_turn_granted)

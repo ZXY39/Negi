@@ -293,6 +293,8 @@ def is_prompt_visible_message(message: Any) -> bool:
     if role not in {'system', 'user', 'assistant', 'tool'}:
         return False
     metadata = message_metadata(message)
+    if metadata.get('history_visible') is False:
+        return False
     return metadata.get('prompt_visible') is not False
 
 
