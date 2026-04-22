@@ -25,8 +25,10 @@ from main.models import (
     NodeRecord,
     TaskRecord,
     normalize_failure_class,
+    normalize_optional_text,
     normalize_execution_stage_metadata,
     normalize_final_acceptance_metadata,
+    normalize_string_list,
     normalize_tool_file_changes,
 )
 from main.runtime.stage_budget import (
@@ -651,14 +653,9 @@ class TaskLogService:
     @staticmethod
     def _sanitize_distribution_state(payload: Any) -> dict[str, Any]:
         current = dict(payload or {}) if isinstance(payload, dict) else {}
-        frontier_node_ids: list[str] = []
-        seen: set[str] = set()
-        for item in list(current.get('frontier_node_ids') or []):
-            node_id = str(item or '').strip()
-            if not node_id or node_id in seen:
-                continue
-            seen.add(node_id)
-            frontier_node_ids.append(node_id)
+        frontier_node_ids = normalize_string_list(current.get('frontier_node_ids'))
+        blocked_node_ids = normalize_string_list(current.get('blocked_node_ids'))
+        pending_notice_node_ids = normalize_string_list(current.get('pending_notice_node_ids'))
         try:
             queued_epoch_count = max(0, int(current.get('queued_epoch_count') or 0))
         except (TypeError, ValueError):
@@ -668,9 +665,12 @@ class TaskLogService:
         except (TypeError, ValueError):
             pending_mailbox_count = 0
         return {
-            'active_epoch_id': str(current.get('active_epoch_id') or '').strip(),
-            'state': str(current.get('state') or '').strip(),
+            'active_epoch_id': normalize_optional_text(current.get('active_epoch_id')),
+            'state': normalize_optional_text(current.get('state')),
+            'mode': normalize_optional_text(current.get('mode')),
             'frontier_node_ids': frontier_node_ids,
+            'blocked_node_ids': blocked_node_ids,
+            'pending_notice_node_ids': pending_notice_node_ids,
             'queued_epoch_count': queued_epoch_count,
             'pending_mailbox_count': pending_mailbox_count,
         }

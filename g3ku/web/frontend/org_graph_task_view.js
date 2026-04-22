@@ -55,6 +55,7 @@ function normalizeTaskTreeSnapshotNode(value = {}, existing = null) {
             .map((item) => String(item || "").trim())
             .filter(Boolean),
         pending_notice_count: Math.max(0, treeNormalizeInt(value?.pending_notice_count ?? prior?.pending_notice_count, 0)),
+        distribution_status: String(value?.distribution_status || prior?.distribution_status || "").trim(),
     };
 }
 
@@ -513,6 +514,7 @@ function buildExecutionTreeFromSnapshot(nodeId = S.treeRootNodeId, selections = 
         inspectionNodes,
         children: childNodes,
         activeNodeCount,
+        distribution_status: String(snapshotNode.distribution_status || "").trim(),
     };
 }
 
@@ -1943,6 +1945,20 @@ function activeTaskDistributionState() {
     if (distribution && typeof distribution === "object") {
         const activeEpochId = String(distribution.active_epoch_id || "").trim();
         const state = String(distribution.state || "").trim();
+        const mode = String(distribution.mode || "").trim();
+        if (mode === "task_wide_barrier") {
+            if (state === "resume_ready") {
+                return { ...distribution, ui_mode: "pending_notice" };
+            }
+            if (
+                activeEpochId
+                || state
+                || (Array.isArray(distribution.blocked_node_ids) && distribution.blocked_node_ids.length)
+                || (Array.isArray(distribution.pending_notice_node_ids) && distribution.pending_notice_node_ids.length)
+            ) {
+                return { ...distribution, ui_mode: "distribution" };
+            }
+        }
         if (activeEpochId || state) {
             return { ...distribution, ui_mode: "distribution" };
         }
@@ -2043,6 +2059,9 @@ function renderTree() {
         button.className = `execution-tree-node${S.selectedNodeId === node.node_id ? " selected" : ""}`;
         if (mergedBase) button.classList.add("execution-tree-node-base");
         if (inspectionBlock) button.classList.add("is-inspection");
+        if (String(node.distribution_status || "").trim() === "barrier_blocked") {
+            button.classList.add("execution-tree-node--distribution-blocked");
+        }
         button.dataset.id = node.node_id;
         button.dataset.kind = node.kind || "execution";
         button.dataset.status = nodeStatus;

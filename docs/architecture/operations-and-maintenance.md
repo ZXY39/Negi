@@ -150,15 +150,18 @@
 
 Maintenance note for `task_append_notice` / task message distribution:
 
-- If a task appears stuck in `pause_requested` or `distributing`, inspect these together before blaming the model:
+- If a task appears stuck in `barrier_requested`, `barrier_draining`, `distributing`, or `resume_ready`, inspect these together before blaming the model:
   - `task_message_distribution_epochs` rows for the task
   - `task_node_notifications` rows for the task
   - `task_runtime_meta.distribution`
-  - the current runtime frames for the frontier nodes
+  - the current runtime frames for the barrier / frontier nodes
+  - epoch payload fields such as `barrier_node_ids`, `drain_pending_node_ids`, and `decision_records`
   - the target node's `append_notice_context` metadata when the symptom is “notice vanished after compaction/compression”
-- `pause_requested` means the append-notice transaction has requested the existing pause barrier but ordinary execution has not yet consumed the next distribution step.
+- `barrier_requested` means the append-notice transaction has captured the live tree and requested the task-wide barrier, but the tree has not started draining yet.
+- `barrier_draining` means some live node is still outside a safe boundary. Check whether that node is waiting on model/tool IO or whether a runtime-frame phase is unexpectedly stuck.
 - `distributing` means the active frontier is currently being processed through the ordinary task/node dispatcher. This is still queue-controlled node work, not a sidecar lane.
-- After the final frontier finishes, v1 clears distribution state and schedules the next ordinary task run instead of keeping a long-lived `resuming` marker in runtime meta.
+- `resume_ready` means distribution decisions are finished, but at least one node still has an unconsumed local notice or delivered mailbox row. Ordinary execution may resume, but the append-notice transaction is not complete until `pending_notice_node_ids` becomes empty.
+- If root remains in `waiting_children` while `runtime_meta.distribution.mode == "task_wide_barrier"` still blocks that node, treat that as a barrier-priority regression before changing prompt logic.
 - If a child execution node was previously terminal and now appears active again after append-notice, check whether its old acceptance node was logically invalidated rather than deleted. The acceptance record should still exist for audit, but it should no longer be authoritative for the current spawn entry.
 - If a notice appears in mailbox rows but not in the next model request, inspect whether it is still in the raw notice window or has already been rolled into a compressed notice-tail segment. Those tail blocks are now intentionally kept ahead of stage archive blocks in prompt assembly.
 - If force delete is requested during message distribution, deletion should win immediately. Do not wait for the epoch to finish naturally; confirm instead that epochs/mailboxes were cancelled or purged before the task row disappeared.

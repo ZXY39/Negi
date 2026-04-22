@@ -2,9 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
-from main.models import Model, ModelTokenUsageRecord, NodeToolFileChange, TokenUsageSummary
+from main.models import (
+    Model,
+    ModelTokenUsageRecord,
+    NodeToolFileChange,
+    TokenUsageSummary,
+    normalize_optional_text,
+    normalize_string_list,
+)
 from main.types import NodeStatus, TaskStatus
 
 
@@ -31,6 +38,12 @@ class TaskTreeSnapshotNode(Model):
     rounds: list[TaskTreeSnapshotRound] = Field(default_factory=list)
     auxiliary_child_ids: list[str] = Field(default_factory=list)
     pending_notice_count: int = 0
+    distribution_status: str = ''
+
+    @field_validator('distribution_status', mode='before')
+    @classmethod
+    def _normalize_distribution_status(cls, value: Any) -> str:
+        return normalize_optional_text(value)
 
 
 class TaskTreeSnapshot(Model):
@@ -93,9 +106,22 @@ class TaskLiveFrame(Model):
 class TaskDistributionState(Model):
     active_epoch_id: str = ''
     state: str = ''
+    mode: str = ''
     frontier_node_ids: list[str] = Field(default_factory=list)
+    blocked_node_ids: list[str] = Field(default_factory=list)
+    pending_notice_node_ids: list[str] = Field(default_factory=list)
     queued_epoch_count: int = 0
     pending_mailbox_count: int = 0
+
+    @field_validator('active_epoch_id', 'state', 'mode', mode='before')
+    @classmethod
+    def _normalize_text_fields(cls, value: Any) -> str:
+        return normalize_optional_text(value)
+
+    @field_validator('frontier_node_ids', 'blocked_node_ids', 'pending_notice_node_ids', mode='before')
+    @classmethod
+    def _normalize_node_id_lists(cls, value: Any) -> list[str]:
+        return normalize_string_list(value)
 
 
 class TaskLiveState(Model):

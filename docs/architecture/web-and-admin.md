@@ -223,13 +223,15 @@ The backend contract behind that UI behavior is:
 
 ### Task Message Distribution UI Contract
 
-- When the current task enters message distribution mode (`runtime_summary.distribution.active_epoch_id/state` is present), the task-tree view now surfaces a task-local sticky notice above the tree with text `接收到新消息，分发中`.
-- The same sticky notice now has a pending-notice fallback after the compact distribution window closes: if the root node snapshot still reports unconsumed appended messages, the tree keeps a yellow notice in place with text equivalent to `接收到新消息，等待节点处理` until the node consumes them.
+- Task-tree distribution UI is now task-wide, not root-only. The frontend should treat `runtime_summary.distribution.mode == "task_wide_barrier"` as the authoritative banner source instead of inferring state only from the root node's pending notice count.
+- While the task is in `barrier_requested`, `barrier_draining`, or `distributing`, the task-tree view surfaces a task-local sticky notice above the tree with text equivalent to `接收到新消息，分发中`.
+- When the runtime enters `resume_ready`, the sticky notice switches to the pending-notice variant with text equivalent to `接收到新消息，等待节点处理`. This is still task-scoped barrier state, not a generic root fallback.
 - During the same distribution window, the execution-tree wrapper switches into a dedicated distribution visual mode and forces all connector lines into the same yellow family, regardless of the individual node success/running/failed color mapping.
-- This is intentionally task-scoped UI state, not a global shell toast. It should follow the currently opened task detail view and disappear only after both distribution state and root pending-notice state clear.
+- Nodes in the live tree may render as distribution-blocked even when they are not the active frontier node. Backend tree snapshots now expose `distribution_status`, and `barrier_blocked` should render as a node-level yellow warning style.
+- This is intentionally task-scoped UI state, not a global shell toast. It should follow the currently opened task detail view and disappear only after both distribution state and pending local notices clear.
 - Node detail now receives a backend-owned message list contract instead of rendering appended messages as a pseudo execution stage. The frontend must not reconstruct these entries from raw mailbox tables or by parsing prompt tail blocks.
 - That same rule applies to root-node appended messages: the backend may expose them through the node detail message list even when the root has no `task_node_notifications` row, because root delivery uses node-local pending notice metadata rather than mailbox storage.
-- In the node detail drawer, the message list appears as its own section before `派生记录`. Each entry shows received time plus pending/consumed state, expands to the full message body, and includes the per-node distribution result (the child messages sent during that epoch/source turn, or `无` when no child delivery happened).
+- In the node detail drawer, the message list appears as its own section before `派生记录`. Each entry shows received time plus pending/consumed state, expands to the full message body, and includes the per-node distribution result from the epoch `decision_records` / child deliveries for that source turn.
 
 ### Task Depth Default Contract
 

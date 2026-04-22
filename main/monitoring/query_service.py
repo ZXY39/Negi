@@ -1035,6 +1035,14 @@ class TaskQueryService:
             )
             for node_id, record in node_map.items()
         }
+        runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
+        distribution = TaskDistributionState.model_validate(runtime_meta.get('distribution') or {})
+        if distribution.mode == 'task_wide_barrier':
+            for node_id in set(distribution.blocked_node_ids or []):
+                current = snapshot_nodes.get(str(node_id or '').strip())
+                if current is None:
+                    continue
+                snapshot_nodes[current.node_id] = current.model_copy(update={'distribution_status': 'barrier_blocked'})
         included_ids: set[str]
         normalized_scope_root_id = str(scope_root_id or '').strip()
         if normalized_scope_root_id:
