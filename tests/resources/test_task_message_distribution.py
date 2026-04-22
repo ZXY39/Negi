@@ -163,6 +163,10 @@ def _build_service(tmp_path: Path) -> MainRuntimeService:
     return _build_service_with_backend(tmp_path, chat_backend=_DummyChatBackend())
 
 
+def build_service(tmp_path: Path) -> MainRuntimeService:
+    return _build_service(tmp_path)
+
+
 def _build_service_with_backend(tmp_path: Path, *, chat_backend) -> MainRuntimeService:
     service = MainRuntimeService(
         chat_backend=chat_backend,
@@ -664,6 +668,51 @@ async def _seed_distributing_epoch(
         },
     )
     return updated
+
+
+async def seed_live_root_with_two_running_children(
+    service: MainRuntimeService,
+):
+    record = await service.create_task("鏁寸悊閲嶇偣瀹㈡埛娴佸け淇″彿", session_id="web:ceo-demo")
+    task = service.get_task(record.task_id)
+    root = service.store.get_node(record.root_node_id)
+    assert task is not None
+    assert root is not None
+
+    branch_a_spec = SpawnChildSpec(goal="branch a", prompt="branch a prompt", execution_policy={"mode": "focus"})
+    branch_b_spec = SpawnChildSpec(goal="branch b", prompt="branch b prompt", execution_policy={"mode": "focus"})
+    branch_a = service.node_runner._create_execution_child(
+        task=task,
+        parent=root,
+        spec=branch_a_spec,
+        owner_round_id="round-live",
+        owner_entry_index=0,
+    )
+    branch_b = service.node_runner._create_execution_child(
+        task=task,
+        parent=root,
+        spec=branch_b_spec,
+        owner_round_id="round-live",
+        owner_entry_index=1,
+    )
+    _set_spawn_operations(
+        service,
+        root_node_id=root.node_id,
+        payload={
+            "round-live": {
+                "specs": [
+                    branch_a_spec.model_dump(mode="json"),
+                    branch_b_spec.model_dump(mode="json"),
+                ],
+                "entries": [
+                    {"index": 0, "goal": "branch a", "child_node_id": branch_a.node_id},
+                    {"index": 1, "goal": "branch b", "child_node_id": branch_b.node_id},
+                ],
+                "completed": False,
+            }
+        },
+    )
+    return record, root, branch_a, branch_b
 
 
 @pytest.mark.asyncio
@@ -1804,6 +1853,51 @@ async def test_task_progress_exposes_distribution_runtime_state(tmp_path: Path) 
         assert progress.live_state.distribution.state == "distributing"
         assert progress.live_state.distribution.frontier_node_ids == ["node:root", "node:child"]
         assert progress.live_state.distribution.pending_mailbox_count == 2
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_task_append_notice_creates_barrier_state_for_live_tree(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    try:
+        record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
+
+        await service.task_append_notice(
+            task_ids=[record.task_id],
+            node_ids=[],
+            message="new constraint",
+            session_id=record.session_id,
+        )
+
+        epoch = service.store.list_active_task_message_distribution_epochs(record.task_id)[0]
+        assert epoch.state == "pause_requested"
+        assert set(epoch.payload["barrier_node_ids"]) == {root.node_id, branch_a.node_id, branch_b.node_id}
+
+        progress = service.query_service.view_progress(record.task_id, mark_read=False)
+        assert progress.live_state.distribution.state == "barrier_requested"
+        assert set(progress.live_state.distribution.blocked_node_ids) == {root.node_id, branch_a.node_id, branch_b.node_id}
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_tree_snapshot_marks_nodes_waiting_for_distribution_barrier(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    try:
+        record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
+
+        await service.task_append_notice(
+            task_ids=[record.task_id],
+            node_ids=[],
+            message="new constraint",
+            session_id=record.session_id,
+        )
+
+        snapshot = service.query_service.get_tree_snapshot(record.task_id)
+        assert snapshot.nodes_by_id[root.node_id].distribution_status == "barrier_blocked"
+        assert snapshot.nodes_by_id[branch_a.node_id].distribution_status == "barrier_blocked"
+        assert snapshot.nodes_by_id[branch_b.node_id].distribution_status == "barrier_blocked"
     finally:
         await service.close()
 

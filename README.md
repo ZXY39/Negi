@@ -438,6 +438,23 @@ g3ku china-bridge doctor
 
 也就是说，G3KU 不只是一个前端页面加一个聊天后端，而是一整套可以长期运行、可扩展、可运维的 Agent 基础设施。
 
-## 许可证
+## 7. 致谢与参考
 
-本项目采用 MIT 许可证，详见 [LICENSE](LICENSE)。
+G3KU 在设计和迭代过程中，参考了部分优秀开源项目的工程实践与产品思路。在此对相关项目与作者表示感谢。
+
+- [OpenClaw](https://github.com/openclaw/openclaw.git)
+  为 G3KU 的整体项目开发方向和 Agent 工程化实践提供了重要启发。
+- [openclaw-china](https://github.com/BytePioneer-AI/openclaw-china.git)
+  `subsystems/china_channels_host` 中的中国渠道运行时整合了该项目的上游运行时代码，并在 G3KU 中通过桥接与包装层接入。
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent.git)
+  为 G3KU 的自主维护记忆、长期记忆沉淀与持续协作能力提供了灵感来源。
+- [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent.git)
+  为 G3KU 的多 Agent 编排、任务拆解与协同推进提供了设计启发。
+- [OpenViking](https://github.com/volcengine/OpenViking.git)
+  为 G3KU 的分层渐进式加载、能力暴露控制与上下文组织方式提供了灵感来源。
+
+说明：G3KU 为结合自身目标、运行时设计与使用场景的独立项目；其中 `subsystems/china_channels_host` 包含已整合并适配的 `openclaw-china` 上游运行时代码。第三方来源与许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 和 [subsystems/china_channels_host/UPSTREAM.md](subsystems/china_channels_host/UPSTREAM.md)。
+
+## 8. 许可证
+
+本项目整体采用 MIT 许可证，详见 [LICENSE](LICENSE)。仓库内整合的第三方代码来源与说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

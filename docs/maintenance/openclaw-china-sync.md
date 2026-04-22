@@ -10,6 +10,8 @@
 - sync map: `subsystems/china_channels_host/upstream_map.yaml`
 - shared runtime registry: `subsystems/china_channels_host/channel_registry.json`
 - Node runtime root: `subsystems/china_channels_host/src`
+- subtree provenance note: `subsystems/china_channels_host/UPSTREAM.md`
+- repository-level third-party notice: `THIRD_PARTY_NOTICES.md`
 
 The sync map now describes the full runtime boundary:
 
@@ -30,8 +32,9 @@ Vendor directories may retain upstream test files as read-only references, but t
 1. Replace the upstream snapshot reference in `channel_registry.json` and `upstream_map.yaml`.
 2. Re-copy the upstream runtime files into `src/vendor/*`.
 3. Re-run the sync-map audit: every vendor runtime file must appear in `upstream_map.yaml`.
-4. Review G3KU-native files only: `src/config.ts`, `src/host.ts`, `src/runtime_bridge.ts`, wrapper files, Python registry/config/admin glue, and docs.
-5. Rebuild the Node host and rerun Python/JS checks.
+4. Update `UPSTREAM.md` and `THIRD_PARTY_NOTICES.md` if the snapshot reference, upstream license declaration, or attribution surface changed.
+5. Review G3KU-native files only: `src/config.ts`, `src/host.ts`, `src/runtime_bridge.ts`, wrapper files, Python registry/config/admin glue, and docs.
+6. Rebuild the Node host and rerun Python/JS checks.
 
 ## Validation Checklist
 
