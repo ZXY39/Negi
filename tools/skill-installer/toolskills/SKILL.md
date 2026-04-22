@@ -63,12 +63,42 @@
 - `method`
 - `warnings`
 
+## 安装后必须复核
+
+默认自动完成安装与 manifest 补齐后，**不要直接把结果视为已经完全可用**。后续必须立刻做两步检查：
+
+1. **检查 skill 是否处于待修复状态**
+   - 先确认该 skill 不在当前运行时合同的 `repair_required_skills` 中。
+   - 再尝试 `load_skill_context(skill_id="<skill_id>")`；如果返回的是修复指引、不可用提示，或资源本身带 warnings/errors，就说明它仍是待修复状态。
+   - 一旦发现待修复，不要继续把它当成正常 skill 使用；先修复，再重新检查。
+
+2. **必须检验一遍 `resource.yaml` 是否合规**
+   - 自动生成的 `resource.yaml` 只是“尽量补齐”，不是最终验收结果。
+   - 合规标准至少按下面清单逐项核对；任何不合规点都要立即修改。
+
+`resource.yaml` 合规标准：
+
+1. `schema_version` 必须是 `1`，`kind` 必须是 `skill`。
+2. `name` 必须是最终要在本地使用的稳定 skill id，并与安装目录、后续调用 id 保持一致。
+3. `description` 必须完整、准确、适合检索；不能保留被截断、多行丢失、语义含糊或与真实用途不符的描述。
+4. `trigger.keywords` 必须覆盖真实触发表达；如果当前关键词不足以让模型稳定想到它，要立即补齐。
+5. `requires.tools / bins / env` 必须反映 skill 的真实依赖；不能因为自动生成时未识别就长期保留空数组。
+6. `content.main` 必须指向 `SKILL.md`；若存在 `references/`、`scripts/`、`assets/`，`content` 中也应显式声明。
+7. `exposure.agent` 与 `exposure.main_runtime` 必须符合预期使用范围，不能靠默认值蒙混过关。
+8. 若本次导入来自 GitHub，`source.type / url / repo / ref / path` 必须与真实来源一致，便于后续追溯。
+9. 如果 skill 实际上并不适合直接作为 G3KU 本地 skill 使用，而只是上游素材，应立刻转 `skill-creator` 做结构适配，而不是带着不合规 manifest 继续使用。
+
+结论要求：
+
+- 只要发现不合规点，就要**立即修改**，不要把“先装上再说”当成完成。
+- 只有在“非待修复”且 `resource.yaml` 通过上述清单后，才能把安装结果视为可继续使用的本地 skill。
+
 ## 行为边界
 
 - 目标目录必须位于当前 workspace 内。
 - 已存在的目标目录不会被覆盖；如需重装，先手动删除旧目录再调用。
 - 如果上游自带 `resource.yaml`，工具会保留它，不会强改上游 skill id。
-- 如果上游只有 `SKILL.md`，工具会自动生成最小可用的 `resource.yaml`，并触发一次资源刷新。
+- 如果上游只有 `SKILL.md`，工具会自动生成一个结构感知的 `resource.yaml`，并触发一次资源刷新，但你仍然必须按上面的复核流程检查并修正。
 - 本工具不负责 ClawHub 搜索、下载或更新；这些请求统一走 `clawhub-skill-manager`。
 
 ## 失败与回退

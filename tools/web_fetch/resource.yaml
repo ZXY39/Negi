@@ -5,13 +5,13 @@ display_name: Web Fetch
 description: Lightweight HTTP fetch for reading public web pages and extracting readable text without a browser runtime.
 tool_result_delivery_contract: runtime_managed
 source:
-  type: local_adapted
-  url: file:///E:/Program/openclaw-2026.3.13-1/src/agents/tools/web-fetch.ts
-  ref: openclaw-2026.3.13-1
+  type: self_maintained
+  url: ''
+  ref: ''
 current_version:
   number: 0.1.1
   released_at: '2026-03-23'
-  summary: Initial G3KU-adapted local implementation based on OpenClaw web-fetch.
+  summary: G3KU self-maintained implementation for lightweight public web fetching.
 tool_type: internal
 entry:
   module: tools.web_fetch.main.tool

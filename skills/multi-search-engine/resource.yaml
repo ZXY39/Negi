@@ -4,8 +4,8 @@ version: "2.0.1"
 description: "Multi search engine integration with 17 engines (8 CN + 9 Global). Supports advanced search operators, time filters, site search, privacy engines, and WolframAlpha knowledge queries. No API keys required."
 license: MIT
 source:
-  type: local_import
-  from_path: "D:/Downloads/multi-search-engine-2-1.0.0"
+  type: clawhub
+  url: "https://clawhub.ai/djttt/openclaw-multi-search-engine"
 files:
   entry: SKILL.md
   config:

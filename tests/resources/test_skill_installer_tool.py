@@ -9,6 +9,7 @@ from types import MethodType
 from uuid import uuid4
 
 import pytest
+import yaml
 
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.registry import ResourceRegistry
@@ -111,9 +112,17 @@ Use DuckDuckGo for quick web lookups.
     assert payload["method"] == "mock"
     assert payload["catalog"]["ok"] is False
 
-    manifest_text = (installed_root / "resource.yaml").read_text(encoding="utf-8")
-    assert 'name: "ddg-web-search"' in manifest_text
-    assert 'description: "Search the web with DuckDuckGo."' in manifest_text
+    manifest = yaml.safe_load((installed_root / "resource.yaml").read_text(encoding="utf-8"))
+    assert manifest["name"] == "ddg-web-search"
+    assert manifest["description"] == "Search the web with DuckDuckGo."
+    assert manifest["content"] == {"main": "SKILL.md", "references": "references"}
+    assert manifest["source"] == {
+        "type": "github",
+        "url": "https://github.com/openclaw/skills/tree/main/skills/jakelin/ddg-web-search",
+        "repo": "openclaw/skills",
+        "ref": "main",
+        "path": "skills/jakelin/ddg-web-search",
+    }
     assert (installed_root / "references" / "guide.md").read_text(encoding="utf-8") == "Example reference\n"
 
     assert service.refresh_calls == [
@@ -133,6 +142,167 @@ Use DuckDuckGo for quick web lookups.
     assert skill_descriptor.main_path == installed_root / "SKILL.md"
 
 
+@pytest.mark.asyncio
+async def test_skill_installer_uses_yaml_frontmatter_name_and_multiline_description(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    (workspace / "skills").mkdir(parents=True, exist_ok=True)
+    (workspace / "tools").mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / "tools" / "skill-installer", workspace / "tools" / "skill-installer")
+
+    source_repo = tmp_path / "source-repo"
+    source_skill = source_repo / "skills" / "vendor" / "search-skill"
+    source_skill.mkdir(parents=True, exist_ok=True)
+    (source_skill / "SKILL.md").write_text(
+        """---
+name: duckduckgo-search
+description: >-
+  Search the web with DuckDuckGo and summarize results for the current task
+  without leaving the workspace flow.
+---
+# DuckDuckGo Search
+
+Use DuckDuckGo for quick web lookups.
+""",
+        encoding="utf-8",
+    )
+
+    descriptor = ResourceRegistry(
+        workspace,
+        skills_dir=workspace / "skills",
+        tools_dir=workspace / "tools",
+    ).discover().tools["skill-installer"]
+    tool = ResourceLoader(workspace).load_tool(descriptor, services={"main_task_service": _StubMainTaskService()})
+    handler = getattr(tool, "_handler", None)
+    assert handler is not None
+    handler._prepare_repo = MethodType(
+        lambda self, *, source, method, tmp_dir, cancel_token=None: (source_repo, "mock"),
+        handler,
+    )
+
+    payload = json.loads(
+        await tool.execute(
+            url="https://github.com/openclaw/skills/tree/main/skills/vendor/search-skill",
+            __g3ku_runtime={"actor_role": "ceo", "session_key": "web:shared"},
+        )
+    )
+
+    installed_root = workspace / "skills" / "duckduckgo-search"
+    manifest = yaml.safe_load((installed_root / "resource.yaml").read_text(encoding="utf-8"))
+
+    assert payload["ok"] is True
+    assert payload["skill_id"] == "duckduckgo-search"
+    assert payload["installed_path"] == str(installed_root)
+    assert manifest["name"] == "duckduckgo-search"
+    assert manifest["description"] == (
+        "Search the web with DuckDuckGo and summarize results for the current task "
+        "without leaving the workspace flow."
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_installer_preserves_explicit_name_override_when_frontmatter_name_differs(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    (workspace / "skills").mkdir(parents=True, exist_ok=True)
+    (workspace / "tools").mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / "tools" / "skill-installer", workspace / "tools" / "skill-installer")
+
+    source_repo = tmp_path / "source-repo"
+    source_skill = source_repo / "skills" / "vendor" / "search-skill"
+    source_skill.mkdir(parents=True, exist_ok=True)
+    (source_skill / "SKILL.md").write_text(
+        """---
+name: upstream-skill-name
+description: Search the web with DuckDuckGo.
+---
+# Upstream Skill
+""",
+        encoding="utf-8",
+    )
+
+    descriptor = ResourceRegistry(
+        workspace,
+        skills_dir=workspace / "skills",
+        tools_dir=workspace / "tools",
+    ).discover().tools["skill-installer"]
+    tool = ResourceLoader(workspace).load_tool(descriptor, services={"main_task_service": _StubMainTaskService()})
+    handler = getattr(tool, "_handler", None)
+    assert handler is not None
+    handler._prepare_repo = MethodType(
+        lambda self, *, source, method, tmp_dir, cancel_token=None: (source_repo, "mock"),
+        handler,
+    )
+
+    payload = json.loads(
+        await tool.execute(
+            url="https://github.com/openclaw/skills/tree/main/skills/vendor/search-skill",
+            name="local-ddg-skill",
+            __g3ku_runtime={"actor_role": "ceo", "session_key": "web:shared"},
+        )
+    )
+
+    installed_root = workspace / "skills" / "local-ddg-skill"
+    manifest = yaml.safe_load((installed_root / "resource.yaml").read_text(encoding="utf-8"))
+
+    assert payload["ok"] is True
+    assert payload["skill_id"] == "local-ddg-skill"
+    assert payload["installed_path"] == str(installed_root)
+    assert manifest["name"] == "local-ddg-skill"
+
+
+@pytest.mark.asyncio
+async def test_skill_installer_adds_optional_content_roots_when_present(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    (workspace / "skills").mkdir(parents=True, exist_ok=True)
+    (workspace / "tools").mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / "tools" / "skill-installer", workspace / "tools" / "skill-installer")
+
+    source_repo = tmp_path / "source-repo"
+    source_skill = source_repo / "skills" / "vendor" / "rich-skill"
+    (source_skill / "references").mkdir(parents=True, exist_ok=True)
+    (source_skill / "scripts").mkdir(parents=True, exist_ok=True)
+    (source_skill / "assets").mkdir(parents=True, exist_ok=True)
+    (source_skill / "SKILL.md").write_text(
+        """---
+name: rich-skill
+description: Rich imported skill.
+---
+# Rich Skill
+""",
+        encoding="utf-8",
+    )
+
+    descriptor = ResourceRegistry(
+        workspace,
+        skills_dir=workspace / "skills",
+        tools_dir=workspace / "tools",
+    ).discover().tools["skill-installer"]
+    tool = ResourceLoader(workspace).load_tool(descriptor, services={"main_task_service": _StubMainTaskService()})
+    handler = getattr(tool, "_handler", None)
+    assert handler is not None
+    handler._prepare_repo = MethodType(
+        lambda self, *, source, method, tmp_dir, cancel_token=None: (source_repo, "mock"),
+        handler,
+    )
+
+    payload = json.loads(
+        await tool.execute(
+            url="https://github.com/openclaw/skills/tree/main/skills/vendor/rich-skill",
+            __g3ku_runtime={"actor_role": "ceo", "session_key": "web:shared"},
+        )
+    )
+
+    installed_root = workspace / "skills" / "rich-skill"
+    manifest = yaml.safe_load((installed_root / "resource.yaml").read_text(encoding="utf-8"))
+
+    assert payload["ok"] is True
+    assert manifest["content"] == {
+        "main": "SKILL.md",
+        "references": "references",
+        "scripts": "scripts",
+        "assets": "assets",
+    }
+
+
 def test_skill_creator_routes_github_skill_installs_to_skill_installer():
     skill_text = (REPO_ROOT / "skills" / "skill-creator" / "SKILL.md").read_text(encoding="utf-8")
     resource_text = (REPO_ROOT / "skills" / "skill-creator" / "resource.yaml").read_text(encoding="utf-8")
@@ -141,6 +311,17 @@ def test_skill_creator_routes_github_skill_installs_to_skill_installer():
     assert "优先转交给 skill-installer" in skill_text
     assert "GitHub repo/path" in skill_text
     assert "skill-installer" in resource_text
+
+
+def test_skill_installer_toolskill_requires_post_install_repair_and_manifest_checks():
+    skill_text = (REPO_ROOT / "tools" / "skill-installer" / "toolskills" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "待修复" in skill_text
+    assert "resource.yaml" in skill_text
+    assert "1." in skill_text
+    assert "2." in skill_text
+    assert "不合规" in skill_text
+    assert "立即修改" in skill_text
 
 
 def test_skill_installer_git_fallback_uses_separate_temp_repo_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

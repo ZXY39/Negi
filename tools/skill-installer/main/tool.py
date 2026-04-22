@@ -13,8 +13,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from g3ku.resources.tool_settings import SkillInstallerToolSettings, runtime_tool_settings
 from g3ku.runtime.cancellation import ToolCancellationRequested
@@ -35,6 +38,12 @@ class GitHubSource:
         self.ref = ref
         self.path = path
         self.url = url
+
+
+class SkillManifestMetadata:
+    def __init__(self, *, frontmatter: dict[str, Any], body: str) -> None:
+        self.frontmatter = dict(frontmatter or {})
+        self.body = str(body or "")
 
 
 def _normalize_skill_id(value: str, *, fallback: str = "imported-skill") -> str:
@@ -211,12 +220,6 @@ class SkillInstallerTool:
             self._check_cancel(cancel_token)
             source = self._resolve_source(url=url, repo=repo, path=path, ref=ref)
             self._emit_progress_sync(loop, runtime, f"skill-installer: resolving {source.owner}/{source.repo}:{source.path}")
-            requested_name = _normalize_skill_id(name or Path(source.path).name or source.repo)
-            destination = self._resolve_destination(dest=dest, requested_name=requested_name)
-            if destination.exists():
-                raise InstallError(f"Destination already exists: {destination}")
-
-            destination.parent.mkdir(parents=True, exist_ok=True)
 
             with tempfile.TemporaryDirectory(
                 prefix="g3ku-skill-installer-",
@@ -233,6 +236,15 @@ class SkillInstallerTool:
                 self._emit_progress_sync(loop, runtime, f"skill-installer: upstream fetched via {method_used}")
                 self._check_cancel(cancel_token)
                 skill_root = self._resolve_skill_root(repo_root=repo_root, repo_path=source.path)
+                metadata = self._read_skill_manifest_metadata(skill_root / "SKILL.md")
+                frontmatter_name = str(metadata.frontmatter.get("name") or "").strip()
+                requested_name = _normalize_skill_id(
+                    name or frontmatter_name or Path(source.path).name or source.repo
+                )
+                destination = self._resolve_destination(dest=dest, requested_name=requested_name)
+                if destination.exists():
+                    raise InstallError(f"Destination already exists: {destination}")
+                destination.parent.mkdir(parents=True, exist_ok=True)
                 self._copy_skill_tree(skill_root, destination, cancel_token=cancel_token)
                 self._emit_progress_sync(loop, runtime, f"skill-installer: copied files into {destination}")
 
@@ -498,8 +510,9 @@ class SkillInstallerTool:
         if manifest_path.exists():
             return False
 
-        skill_md_path = skill_root / "SKILL.md"
-        frontmatter, body = self._split_frontmatter(skill_md_path.read_text(encoding="utf-8"))
+        metadata = self._read_skill_manifest_metadata(skill_root / "SKILL.md")
+        frontmatter = metadata.frontmatter
+        body = metadata.body
         description = str(frontmatter.get("description") or "").strip() or self._first_paragraph(body)
         if not description:
             description = (
@@ -516,41 +529,50 @@ class SkillInstallerTool:
             if token and token not in deduped_keywords:
                 deduped_keywords.append(token)
 
-        manifest_lines = [
-            "schema_version: 1",
-            "kind: skill",
-            f"name: {json.dumps(requested_name, ensure_ascii=False)}",
-            f"description: {json.dumps(description, ensure_ascii=False)}",
-            "trigger:",
-        ]
-        if deduped_keywords:
-            manifest_lines.append("  keywords:")
-            manifest_lines.extend(
-                f"    - {json.dumps(keyword, ensure_ascii=False)}"
-                for keyword in deduped_keywords
-            )
-        else:
-            manifest_lines.append("  keywords: []")
-        manifest_lines.extend(
-            [
-                "  always: false",
-                "requires:",
-                "  tools: []",
-                "  bins: []",
-                "  env: []",
-                "content:",
-                "  main: SKILL.md",
-                "exposure:",
-                "  agent: true",
-                "  main_runtime: true",
-                "",
-            ]
+        content: dict[str, Any] = {"main": "SKILL.md"}
+        for key in ("references", "scripts", "assets"):
+            if (skill_root / key).is_dir():
+                content[key] = key
+
+        manifest_payload = {
+            "schema_version": 1,
+            "kind": "skill",
+            "name": requested_name,
+            "description": description,
+            "trigger": {
+                "keywords": deduped_keywords,
+                "always": False,
+            },
+            "requires": {
+                "tools": [],
+                "bins": [],
+                "env": [],
+            },
+            "content": content,
+            "exposure": {
+                "agent": True,
+                "main_runtime": True,
+            },
+            "source": {
+                "type": "github",
+                "url": source.url,
+                "repo": f"{source.owner}/{source.repo}",
+                "ref": source.ref,
+                "path": source.path,
+            },
+            "current_version": {
+                "ref": source.ref,
+                "imported_at": datetime.now(UTC).isoformat(),
+            },
+        }
+        manifest_path.write_text(
+            yaml.safe_dump(manifest_payload, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
         )
-        manifest_path.write_text("\n".join(manifest_lines), encoding="utf-8")
         return True
 
     @staticmethod
-    def _split_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         lines = text.splitlines()
         if not lines or lines[0].strip() != "---":
             return {}, text
@@ -561,14 +583,38 @@ class SkillInstallerTool:
                 break
         if end_index is None:
             return {}, text
-        frontmatter: dict[str, str] = {}
-        for raw_line in lines[1:end_index]:
+        frontmatter_block = "\n".join(lines[1:end_index])
+        frontmatter = SkillInstallerTool._parse_frontmatter(frontmatter_block)
+        body = "\n".join(lines[end_index + 1 :])
+        return frontmatter, body
+
+    @staticmethod
+    def _parse_frontmatter(frontmatter_block: str) -> dict[str, Any]:
+        raw_block = str(frontmatter_block or "").strip()
+        if not raw_block:
+            return {}
+        try:
+            parsed = yaml.safe_load(raw_block)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            return dict(parsed)
+
+        fallback: dict[str, Any] = {}
+        for raw_line in raw_block.splitlines():
             if ":" not in raw_line:
                 continue
             key, value = raw_line.split(":", 1)
-            frontmatter[key.strip()] = value.strip().strip('"').strip("'")
-        body = "\n".join(lines[end_index + 1 :])
-        return frontmatter, body
+            normalized_key = key.strip()
+            if not normalized_key or normalized_key in fallback:
+                continue
+            fallback[normalized_key] = value.strip().strip('"').strip("'")
+        return fallback
+
+    @classmethod
+    def _read_skill_manifest_metadata(cls, skill_md_path: Path) -> SkillManifestMetadata:
+        frontmatter, body = cls._split_frontmatter(skill_md_path.read_text(encoding="utf-8"))
+        return SkillManifestMetadata(frontmatter=frontmatter, body=body)
 
     @staticmethod
     def _first_paragraph(body: str) -> str:
