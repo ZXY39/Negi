@@ -211,6 +211,7 @@ Maintenance note for the memory tool family:
   - `candidate_tool_names` 是运行时去重、hydration 排除、恢复和 gate 判断用的 canonical name list
   - `candidate_tool_items` 是当前轮显示层缓存，通常是 `{tool_id, description}`，用于保证 contract rebuild / refresh 之后仍能保留描述文本
   - 这两者都可能存在于 runtime state，但 agent 只应看到结构化 `candidate_tools`，不应同时看到 `candidate_tool_names`
+  - `candidate_tool_items` 只是 `candidate_tool_names` 的显示投影，不是第二份权威候选集。若 canonical `candidate_tool_names=[]`，则 agent-facing `candidate_tools` 也必须为空；不要再从旧 contract、旧 `candidate_tool_items` 或旧动态消息把已失效候选补回 prompt
 - 当前前门的语义召回和 fallback 打分也都会优先面向 concrete executor，而不是泛化的 family：
   - 当 query 明显表达文件写入、改写、删除、移动、复制、补丁意图时，query rewrite fallback 与本地候选打分都会优先把 `filesystem_write`、`filesystem_edit`、`filesystem_delete`、`filesystem_move`、`filesystem_copy`、`filesystem_propose_patch` 这类 concrete ids 往前推
   - `exec` 仍可作为固定 builtin 保持可调用，但在这类 mutating intent 下，不应再被当成候选文件变更方案的首选
@@ -333,6 +334,7 @@ Maintenance note for parameter-error guidance:
 - 对执行节点和检验节点，和运行时合同同轮出现的 overlay / repair overlay 也只允许作为 request-tail 临时消息追加；它们不应再原地改写 bootstrap user 或任何更早的持久化消息，否则会破坏稳定前缀与 prompt cache 命中。
 - 对执行节点和检验节点，`node_runtime_tool_contract` 里的 `candidate_tools` 现在是 display-oriented 的结构化候选摘要；如需恢复 canonical candidate name 列表，优先读取 runtime frame 里的 `candidate_tool_names` / `candidate_tool_items`。
 - 对执行节点和检验节点，`node_runtime_tool_contract` 里的 `candidate_skills` 现在也是最小结构化摘要：`[{skill_id, description}]`。如需恢复 canonical skill state，优先读取 runtime frame 里的 `candidate_skill_ids` / `candidate_skill_items`。
+- 对执行节点和检验节点，`candidate_tool_names` / `candidate_skill_ids` 现在是唯一 gate truth source；`candidate_tool_items` / `candidate_skill_items` 只是描述文本投影。只要 canonical name/id 列表已经为空，重建后的 `node_runtime_tool_contract` 也必须把 `candidate_tools` / `candidate_skills` 渲染为空，不能再从旧 contract item 列表或旧 frame item 缓存复活失效候选。
 - 对执行节点和检验节点，还要再区分“当前轮对模型暴露的 callable 合同”和“内部可恢复的完整 callable pool”：前者在无有效阶段时会被收紧到 `submit_next_stage`，后者只保留在本地 `model_visible_tool_selection_trace.full_callable_tool_names` 里供排障。
 - 节点侧的 `runtime frame`、动态 `node_runtime_tool_contract` 与 `runtime-frame-messages:{node_id}` artifact 现在都必须写入同一份收紧后的 callable 列表；如果三者不一致，应按运行时合同分裂排查，而不是先怀疑 prompt 文本。
 - 同理，节点侧的 runtime frame 与重建后的 `node_runtime_tool_contract` 也必须对 skill 候选保持一致：`candidate_skill_ids` 与 `candidate_skill_items` 若在 frame 中存在，就不应因为阶段压缩或 active window 裁剪而在下一轮 contract 中无故清空。

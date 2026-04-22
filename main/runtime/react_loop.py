@@ -2027,6 +2027,36 @@ class ReActToolLoop:
         return ordered
 
     @staticmethod
+    def _candidate_names_from_entries(entries: Any, *, id_key: str) -> list[str]:
+        raw_names: list[Any] = []
+        for item in list(entries or []):
+            if isinstance(item, dict):
+                raw_names.append(item.get(id_key))
+            else:
+                raw_names.append(item)
+        return ReActToolLoop._normalized_name_list(raw_names)
+
+    @staticmethod
+    def _project_candidate_prompt_items(
+        names: list[str] | None,
+        preferred_items: Any,
+        *,
+        id_key: str,
+    ) -> list[dict[str, str]]:
+        descriptions_by_id: dict[str, str] = {}
+        for item in list(preferred_items or []):
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get(id_key) or '').strip()
+            if not item_id or item_id in descriptions_by_id:
+                continue
+            descriptions_by_id[item_id] = str(item.get('description') or '').strip()
+        projected: list[dict[str, str]] = []
+        for name in ReActToolLoop._normalized_name_list(list(names or [])):
+            projected.append({id_key: name, 'description': descriptions_by_id.get(name, '')})
+        return projected
+
+    @staticmethod
     def _stage_prompt_payload_from_gate(stage_gate: dict[str, Any]) -> dict[str, Any]:
         active_stage = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else None
         return {
@@ -2049,45 +2079,76 @@ class ReActToolLoop:
             str(getattr(node, 'node_id', '') or '').strip(),
         ) or {}
         callable_tool_names = self._normalized_name_list(list(tool_schema_selection.get('tool_names') or []))
-        candidate_tool_names = self._normalized_name_list(
-            [
-                item.get('tool_id') if isinstance(item, dict) else item
-                for item in list(
-                    tool_schema_selection.get('candidate_tool_names')
-                    or existing_payload.get('candidate_tools')
-                    or current_frame.get('candidate_tool_items')
-                    or current_frame.get('candidate_tool_names')
-                    or []
-                )
-            ]
-        )
+        candidate_tool_name_entries = tool_schema_selection.get('candidate_tool_names', _UNSET)
+        if candidate_tool_name_entries is not _UNSET:
+            candidate_tool_names = self._candidate_names_from_entries(
+                candidate_tool_name_entries,
+                id_key='tool_id',
+            )
+        elif isinstance(current_frame.get('candidate_tool_names'), list):
+            candidate_tool_names = self._candidate_names_from_entries(
+                current_frame.get('candidate_tool_names'),
+                id_key='tool_id',
+            )
+        elif isinstance(existing_payload.get('candidate_tools'), list):
+            candidate_tool_names = self._candidate_names_from_entries(
+                existing_payload.get('candidate_tools'),
+                id_key='tool_id',
+            )
+        elif isinstance(current_frame.get('candidate_tool_items'), list):
+            candidate_tool_names = self._candidate_names_from_entries(
+                current_frame.get('candidate_tool_items'),
+                id_key='tool_id',
+            )
+        else:
+            candidate_tool_names = []
         candidate_tool_names = [name for name in candidate_tool_names if name not in set(callable_tool_names)]
-        candidate_tool_items = [dict(item) for item in list(existing_payload.get('candidate_tools') or []) if isinstance(item, dict)]
-        if not candidate_tool_items:
-            candidate_tool_items = [dict(item) for item in list(current_frame.get('candidate_tool_items') or []) if isinstance(item, dict)]
-        if candidate_tool_items:
-            candidate_tool_items = [
-                dict(item)
-                for item in candidate_tool_items
-                if str(item.get('tool_id') or '').strip() and str(item.get('tool_id') or '').strip() not in set(callable_tool_names)
-            ]
-        candidate_skill_ids = self._normalized_name_list(
-            [
-                item.get('skill_id') if isinstance(item, dict) else item
-                for item in list(
-                    existing_payload.get('candidate_skills')
-                    or current_frame.get('candidate_skill_items')
-                    or current_frame.get('candidate_skill_ids')
-                    or current_frame.get('selected_skill_ids')
-                    or []
-                )
-            ]
+        preferred_candidate_tool_items = (
+            existing_payload.get('candidate_tools')
+            if isinstance(existing_payload.get('candidate_tools'), list)
+            else current_frame.get('candidate_tool_items')
         )
-        candidate_skill_items = [dict(item) for item in list(existing_payload.get('candidate_skills') or []) if isinstance(item, dict)]
-        if not candidate_skill_items:
-            candidate_skill_items = [dict(item) for item in list(current_frame.get('candidate_skill_items') or []) if isinstance(item, dict)]
-        if not candidate_skill_items:
-            candidate_skill_items = [dict(item) for item in list(current_frame.get('visible_skills') or []) if isinstance(item, dict)]
+        candidate_tool_items = self._project_candidate_prompt_items(
+            candidate_tool_names,
+            preferred_candidate_tool_items,
+            id_key='tool_id',
+        )
+        if isinstance(current_frame.get('candidate_skill_ids'), list):
+            candidate_skill_ids = self._candidate_names_from_entries(
+                current_frame.get('candidate_skill_ids'),
+                id_key='skill_id',
+            )
+        elif isinstance(existing_payload.get('candidate_skills'), list):
+            candidate_skill_ids = self._candidate_names_from_entries(
+                existing_payload.get('candidate_skills'),
+                id_key='skill_id',
+            )
+        elif isinstance(current_frame.get('candidate_skill_items'), list):
+            candidate_skill_ids = self._candidate_names_from_entries(
+                current_frame.get('candidate_skill_items'),
+                id_key='skill_id',
+            )
+        elif isinstance(current_frame.get('selected_skill_ids'), list):
+            candidate_skill_ids = self._candidate_names_from_entries(
+                current_frame.get('selected_skill_ids'),
+                id_key='skill_id',
+            )
+        else:
+            candidate_skill_ids = []
+        preferred_candidate_skill_items = (
+            existing_payload.get('candidate_skills')
+            if isinstance(existing_payload.get('candidate_skills'), list)
+            else (
+                current_frame.get('candidate_skill_items')
+                if isinstance(current_frame.get('candidate_skill_items'), list)
+                else current_frame.get('visible_skills')
+            )
+        )
+        candidate_skill_items = self._project_candidate_prompt_items(
+            candidate_skill_ids,
+            preferred_candidate_skill_items,
+            id_key='skill_id',
+        )
         exec_runtime_policy = None
         if EXEC_TOOL_EXECUTOR_NAME in set(callable_tool_names + candidate_tool_names) or EXEC_TOOL_FAMILY_ID in set(callable_tool_names + candidate_tool_names):
             raw_exec_runtime_policy = current_frame.get('exec_runtime_policy') or existing_payload.get('exec_runtime_policy')

@@ -3101,6 +3101,322 @@ async def test_react_loop_writes_candidate_skill_items_into_before_model_frame()
     assert result.answer == "done"
 
 
+def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_tools_when_names_are_empty() -> None:
+    log_service = _FakeLogService()
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+    task_id = "task-no-stale-candidates"
+    node = SimpleNamespace(task_id=task_id, node_id="node-no-stale-candidates", depth=0, node_kind="execution")
+
+    stale_contract = NodeRuntimeToolContract(
+        node_id=node.node_id,
+        node_kind=node.node_kind,
+        callable_tool_names=["submit_next_stage"],
+        candidate_tool_names=["filesystem_write"],
+        visible_skills=[],
+        candidate_skill_ids=[],
+        candidate_skill_items=[],
+        candidate_tool_items=[{"tool_id": "filesystem_write", "description": "write file"}],
+        stage_payload={},
+        hydrated_executor_names=[],
+        lightweight_tool_ids=[],
+        selection_trace={},
+    ).to_message()
+
+    log_service.upsert_frame(
+        task_id,
+        {
+            "node_id": node.node_id,
+            "depth": node.depth,
+            "node_kind": node.node_kind,
+            "phase": "before_model",
+            "messages": [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": '{"prompt":"demo"}'},
+                stale_contract,
+            ],
+            "callable_tool_names": ["submit_next_stage"],
+            "candidate_tool_names": [],
+            "candidate_tool_items": [{"tool_id": "filesystem_write", "description": "write file"}],
+            "selected_skill_ids": [],
+            "candidate_skill_ids": [],
+            "hydrated_executor_state": ["web_fetch"],
+            "hydrated_executor_names": ["web_fetch"],
+        },
+        publish_snapshot=False,
+    )
+
+    contract = loop._build_node_dynamic_contract(
+        node=node,
+        message_history=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"prompt":"demo"}'},
+            stale_contract,
+        ],
+        tool_schema_selection={
+            "tool_names": ["submit_next_stage"],
+            "candidate_tool_names": [],
+            "hydrated_executor_names": ["web_fetch"],
+            "lightweight_tool_ids": [],
+            "trace": {},
+        },
+        stage_gate={"has_active_stage": True, "transition_required": False, "active_stage": {"stage_id": "stage-1"}},
+    )
+
+    assert contract.candidate_tool_names == []
+    assert contract.to_message_payload()["candidate_tools"] == []
+
+
+def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_skills_when_ids_are_empty() -> None:
+    log_service = _FakeLogService()
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+    task_id = "task-no-stale-skill-candidates"
+    node = SimpleNamespace(task_id=task_id, node_id="node-no-stale-skill-candidates", depth=0, node_kind="execution")
+
+    stale_contract = NodeRuntimeToolContract(
+        node_id=node.node_id,
+        node_kind=node.node_kind,
+        callable_tool_names=["submit_next_stage"],
+        candidate_tool_names=[],
+        visible_skills=[],
+        candidate_skill_ids=["tmux"],
+        candidate_skill_items=[{"skill_id": "tmux", "description": "terminal workflow"}],
+        stage_payload={},
+        hydrated_executor_names=[],
+        lightweight_tool_ids=[],
+        selection_trace={},
+    ).to_message()
+
+    log_service.upsert_frame(
+        task_id,
+        {
+            "node_id": node.node_id,
+            "depth": node.depth,
+            "node_kind": node.node_kind,
+            "phase": "before_model",
+            "messages": [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": '{"prompt":"demo"}'},
+                stale_contract,
+            ],
+            "callable_tool_names": ["submit_next_stage"],
+            "candidate_tool_names": [],
+            "candidate_tool_items": [],
+            "selected_skill_ids": [],
+            "candidate_skill_ids": [],
+            "candidate_skill_items": [{"skill_id": "tmux", "description": "terminal workflow"}],
+            "hydrated_executor_state": [],
+            "hydrated_executor_names": [],
+        },
+        publish_snapshot=False,
+    )
+
+    contract = loop._build_node_dynamic_contract(
+        node=node,
+        message_history=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"prompt":"demo"}'},
+            stale_contract,
+        ],
+        tool_schema_selection={
+            "tool_names": ["submit_next_stage"],
+            "candidate_tool_names": [],
+            "hydrated_executor_names": [],
+            "lightweight_tool_ids": [],
+            "trace": {},
+        },
+        stage_gate={"has_active_stage": True, "transition_required": False, "active_stage": {"stage_id": "stage-1"}},
+    )
+
+    assert contract.candidate_skill_ids == []
+    assert contract.to_message_payload()["candidate_skills"] == []
+
+
+@pytest.mark.asyncio
+async def test_react_loop_before_model_frame_keeps_candidate_tool_items_aligned_with_empty_candidate_names() -> None:
+    log_service = _FakeLogService()
+    final_tool = _submit_final_result_tool()
+    node_id = "node-before-model-empty-candidates"
+    stale_contract = NodeRuntimeToolContract(
+        node_id=node_id,
+        node_kind="execution",
+        callable_tool_names=["submit_final_result"],
+        candidate_tool_names=["filesystem_write"],
+        visible_skills=[],
+        candidate_skill_ids=[],
+        candidate_skill_items=[],
+        candidate_tool_items=[{"tool_id": "filesystem_write", "description": "write file"}],
+        stage_payload={},
+        hydrated_executor_names=[],
+        lightweight_tool_ids=[],
+        selection_trace={},
+    ).to_message()
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            frame = log_service.read_runtime_frame("task-before-model-empty-candidates", node_id)
+            assert frame.get("candidate_tool_names") == []
+            assert frame.get("candidate_tool_items") == []
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final-empty-candidates",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "done",
+                            "answer": "done",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=2)
+    loop._visible_tools_for_iteration = lambda **kwargs: dict(kwargs.get("tools") or {})
+    loop._model_visible_tools_for_iteration = lambda **kwargs: (
+        {"submit_final_result": final_tool},
+        {
+            "tool_names": ["submit_final_result"],
+            "candidate_tool_names": [],
+            "lightweight_tool_ids": [],
+            "hydrated_executor_names": ["web_fetch"],
+            "trace": {"rbac_visible_tool_names": ["submit_final_result", "filesystem_write", "web_fetch"]},
+        },
+    )
+
+    result = await loop.run(
+        task=SimpleNamespace(task_id="task-before-model-empty-candidates"),
+        node=SimpleNamespace(
+            task_id="task-before-model-empty-candidates",
+            node_id=node_id,
+            depth=0,
+            node_kind="execution",
+        ),
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-before-model-empty-candidates","goal":"demo"}'},
+            stale_contract,
+        ],
+        tools={"submit_final_result": final_tool},
+        model_refs=["fake"],
+        runtime_context={"task_id": "task-before-model-empty-candidates", "node_id": node_id},
+        max_iterations=2,
+    )
+
+    assert result.status == "success"
+    assert result.answer == "done"
+
+
+@pytest.mark.asyncio
+async def test_react_loop_before_model_frame_keeps_candidate_skill_items_aligned_with_empty_candidate_ids() -> None:
+    log_service = _FakeLogService()
+    final_tool = _submit_final_result_tool()
+    node_id = "node-before-model-empty-skill-candidates"
+    stale_contract = NodeRuntimeToolContract(
+        node_id=node_id,
+        node_kind="execution",
+        callable_tool_names=["submit_final_result"],
+        candidate_tool_names=[],
+        visible_skills=[],
+        candidate_skill_ids=["tmux"],
+        candidate_skill_items=[{"skill_id": "tmux", "description": "terminal workflow"}],
+        stage_payload={},
+        hydrated_executor_names=[],
+        lightweight_tool_ids=[],
+        selection_trace={},
+    ).to_message()
+    log_service.upsert_frame(
+        "task-before-model-empty-skill-candidates",
+        {
+            "node_id": node_id,
+            "depth": 0,
+            "node_kind": "execution",
+            "phase": "before_model",
+            "messages": [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": '{"task_id":"task-before-model-empty-skill-candidates","goal":"demo"}'},
+                stale_contract,
+            ],
+            "callable_tool_names": ["submit_final_result"],
+            "candidate_tool_names": [],
+            "candidate_tool_items": [],
+            "selected_skill_ids": [],
+            "candidate_skill_ids": [],
+            "candidate_skill_items": [],
+        },
+        publish_snapshot=False,
+    )
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            frame = log_service.read_runtime_frame("task-before-model-empty-skill-candidates", node_id)
+            assert frame.get("candidate_skill_ids") == []
+            assert frame.get("candidate_skill_items") == []
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final-empty-skill-candidates",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "done",
+                            "answer": "done",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=2)
+    loop._visible_tools_for_iteration = lambda **kwargs: dict(kwargs.get("tools") or {})
+    loop._model_visible_tools_for_iteration = lambda **kwargs: (
+        {"submit_final_result": final_tool},
+        {
+            "tool_names": ["submit_final_result"],
+            "candidate_tool_names": [],
+            "lightweight_tool_ids": [],
+            "hydrated_executor_names": [],
+            "trace": {"rbac_visible_tool_names": ["submit_final_result"]},
+        },
+    )
+
+    result = await loop.run(
+        task=SimpleNamespace(task_id="task-before-model-empty-skill-candidates"),
+        node=SimpleNamespace(
+            task_id="task-before-model-empty-skill-candidates",
+            node_id=node_id,
+            depth=0,
+            node_kind="execution",
+        ),
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-before-model-empty-skill-candidates","goal":"demo"}'},
+            stale_contract,
+        ],
+        tools={"submit_final_result": final_tool},
+        model_refs=["fake"],
+        runtime_context={"task_id": "task-before-model-empty-skill-candidates", "node_id": node_id},
+        max_iterations=2,
+    )
+
+    assert result.status == "success"
+    assert result.answer == "done"
+
+
 @pytest.mark.asyncio
 async def test_react_loop_execute_tool_keeps_direct_load_payload_inline(tmp_path) -> None:
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")

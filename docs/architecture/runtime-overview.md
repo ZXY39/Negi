@@ -270,6 +270,7 @@ Additional maintenance note for fixed-builtin resource executors:
 
 - 节点与 CEO/frontdoor 的 `candidate_tool_names` / `candidate_skill_ids` 现在都表示“`RBAC 可见 ∩ 语义召回命中` 的当前候选集合”；语义召回不可用时，候选集合退化为 `RBAC 可见集合`，而不是报错中断。
 - `load_tool_context` / `load_skill_context` 的准入只认当前 canonical candidate 集合；不再允许“RBAC 可见但不在 candidate 中”的旁路加载。
+- 对节点与 CEO/frontdoor，`candidate_tool_items` / `candidate_skill_items` 现在都只应被理解为 display cache，而不是第二份候选真相源。只要 canonical `candidate_tool_names` / `candidate_skill_ids` 已为空，agent-facing runtime contract 中的 `candidate_tools` / `candidate_skills` 也必须同步为空，不能再从旧 contract item 列表或旧 frame item 缓存把候选“补回去”。
 - 节点的 hydration canonical state 继续落在 runtime frame：`hydrated_executor_state` / `hydrated_executor_names`。这是节点生命周期级 LRU，跨多轮、阶段切换、pause/resume、restore 保留。
 - 节点的 skill candidate canonical state 也继续落在 runtime frame：至少包括 `candidate_skill_ids`，以及供 dynamic contract 重建使用的 `candidate_skill_items` 显示缓存。阶段切换后的 prompt compaction 可以裁掉旧的 `node_runtime_tool_contract` user 消息，但下一轮 contract 刷新仍应从 frame 恢复这两份 skill 状态，而不是把 skill 候选清空。
 - CEO/frontdoor 的 hydration canonical state 继续落在 session/frontdoor state：`RuntimeAgentSession._frontdoor_hydrated_tool_names` 加上前门 persistent state 中的 `hydrated_tool_names`。这是 session 生命周期级 LRU，跨 turn 保留，但每轮都会按当前 RBAC 可见集合过滤。
@@ -411,6 +412,7 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - `task_runtime_messages` / `runtime-frame-messages:{node_id}` artifact 不再只是当前 messages 列表；它现在还会在同一个 artifact 里累计 `callable_tool_snapshots`。
 - 每条快照代表一次 `before_model` 轮次下，本地运行时真正记录的 callable/candidate 截面，包括 `callable_tool_names`、`candidate_tool_names`、`candidate_tool_items`、`candidate_skill_ids`、`candidate_skill_items`、`model_visible_tool_names`、`hydrated_executor_names` 和选择 trace。
 - 对 execution / acceptance 节点，如果当轮没有有效阶段，那么这些快照里的 `callable_tool_names` 与 `model_visible_tool_names` 都应只剩 `submit_next_stage`；候选集合仍保留在 `candidate_tool_names`，完整 callable pool 则留在选择 trace 里。
+- 对 execution / acceptance 节点，这些快照里如果 `candidate_tool_names=[]` 或 `candidate_skill_ids=[]`，则同一快照里的 `candidate_tool_items` / `candidate_skill_items` 也应已经被同步清空。若 items 仍保留旧值而 canonical name/id 列表已空，应按运行时 contract 重建分裂排查，而不是先怀疑 `load_tool_context` / `load_skill_context` 自身。
 - 对 execution / acceptance 节点与 CEO/frontdoor 都一样：`content_describe` / `content_open` / `content_search` 现在应默认出现在 candidate 侧，而不是 fresh-turn callable 侧；只有 hydration 成功后的后续快照才应把它们写进 `callable_tool_names` / `hydrated_executor_names`。
 - 因此当维护者排查“为什么这一轮模型明明 load 过工具却没法调用”时，先看这个 artifact 里的最近一条快照，再去看 transcript 或 stage trace；它比只看最终 messages 更能说明当轮可调用集到底是什么。
 - 执行节点与检验节点现在都应理解为“两层消息结构”：稳定 bootstrap user JSON 负责任务定义，只保留稳定节点上下文；`execution_stage` 不再写在 bootstrap 里。单独的动态 `node_runtime_tool_contract` user 消息负责当前轮的 callable/candidate tool/skill 合同，并且固定追加在当前 request 尾部。
