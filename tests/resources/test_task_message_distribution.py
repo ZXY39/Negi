@@ -9,6 +9,11 @@ from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES, NODE_FIXED_BUILTIN_TOOL_NAMES
 from main.models import SpawnChildSpec, TaskMessageDistributionEpoch, TaskNodeNotification
 from main.protocol import now_iso
+from main.runtime.pending_notice_state import (
+    PENDING_NOTICE_STATE_KEY,
+    RESUME_MODE_ORDINARY,
+    RESUME_MODE_WAIT_FOR_CHILDREN,
+)
 from main.service.runtime_service import MainRuntimeService
 from main.storage.sqlite_store import SQLiteTaskStore
 
@@ -1558,6 +1563,78 @@ async def test_terminal_node_rebuilds_history_from_latest_runtime_refs_before_co
 
         assert resumed["messages"][1]["content"] == "historic child request"
         assert resumed["messages"][-1]["content"] == "必须补充风险分层"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_root_distribution_notice_uses_wait_for_children_resume_mode_when_active_round_exists(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("鏁寸悊閲嶇偣瀹㈡埛娴佸け淇″彿", session_id="web:ceo-demo")
+        root = service.store.get_node(record.root_node_id)
+        assert root is not None
+
+        _set_spawn_operations(
+            service,
+            root_node_id=root.node_id,
+            payload={
+                "round-live": {
+                    "specs": [],
+                    "entries": [],
+                    "completed": False,
+                }
+            },
+        )
+        epoch = await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="鏂板钁ｄ簨浼氶獙鏀舵牸寮?",
+            frontier_node_ids=[record.root_node_id],
+        )
+        created_at = "2026-04-24T12:00:00+08:00"
+
+        service.task_actor_service._queue_root_distribution_notices(epoch=epoch, created_at=created_at)
+
+        updated_root = service.store.get_node(record.root_node_id)
+        pending_notice_state = dict((updated_root.metadata or {}).get(PENDING_NOTICE_STATE_KEY) or {})
+
+        assert updated_root is not None
+        assert pending_notice_state == {
+            "resume_mode": RESUME_MODE_WAIT_FOR_CHILDREN,
+            "epoch_id": epoch.epoch_id,
+            "holding_round_id": "round-live",
+            "updated_at": created_at,
+        }
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_root_distribution_notice_uses_ordinary_resume_mode_without_active_round(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("鏁寸悊閲嶇偣瀹㈡埛娴佸け淇″彿", session_id="web:ceo-demo")
+        epoch = await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="鏂板钁ｄ簨浼氶獙鏀舵牸寮?",
+            frontier_node_ids=[record.root_node_id],
+        )
+        created_at = "2026-04-24T12:05:00+08:00"
+
+        service.task_actor_service._queue_root_distribution_notices(epoch=epoch, created_at=created_at)
+
+        updated_root = service.store.get_node(record.root_node_id)
+        pending_notice_state = dict((updated_root.metadata or {}).get(PENDING_NOTICE_STATE_KEY) or {})
+
+        assert updated_root is not None
+        assert pending_notice_state == {
+            "resume_mode": RESUME_MODE_ORDINARY,
+            "epoch_id": epoch.epoch_id,
+            "holding_round_id": "",
+            "updated_at": created_at,
+        }
     finally:
         await service.close()
 

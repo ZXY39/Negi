@@ -44,6 +44,13 @@ from main.runtime.internal_tools import (
     SubmitNextStageTool,
 )
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
+from main.runtime.pending_notice_state import (
+    PENDING_NOTICE_STATE_KEY,
+    RESUME_MODE_ORDINARY,
+    RESUME_MODE_WAIT_FOR_CHILDREN,
+    normalize_pending_notice_state,
+    set_pending_notice_state,
+)
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
@@ -667,6 +674,36 @@ class NodeRunner:
     def _pending_root_notice_records(self, *, node: NodeRecord) -> list[dict[str, Any]]:
         metadata = dict(node.metadata or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
         return normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
+
+    def _pending_notice_state(self, *, node: NodeRecord) -> dict[str, str]:
+        metadata = dict(node.metadata or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
+        return normalize_pending_notice_state(metadata.get(PENDING_NOTICE_STATE_KEY))
+
+    def _update_pending_notice_state(
+        self,
+        *,
+        node_id: str,
+        resume_mode: str,
+        epoch_id: str,
+        holding_round_id: str,
+        updated_at: str | None = None,
+    ) -> None:
+        normalized_node_id = str(node_id or '').strip()
+        if not normalized_node_id:
+            return
+        normalized_updated_at = str(updated_at or now_iso()).strip()
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            metadata[PENDING_NOTICE_STATE_KEY] = set_pending_notice_state(
+                metadata.get(PENDING_NOTICE_STATE_KEY),
+                resume_mode=resume_mode,
+                epoch_id=epoch_id,
+                holding_round_id=holding_round_id,
+                updated_at=normalized_updated_at,
+            )
+            return metadata
+
+        self._log_service.update_node_metadata(normalized_node_id, _mutate)
 
     def pending_distribution_mailbox_count(self, *, task_id: str) -> int:
         count = 0
@@ -3281,6 +3318,17 @@ class NodeRunner:
                 continue
             return str(round_id or '').strip(), copy.deepcopy(payload)
         return None
+
+    def _pending_notice_resume_target(self, *, node: NodeRecord) -> tuple[str, str]:
+        if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_EXECUTION:
+            return RESUME_MODE_ORDINARY, ''
+        latest_round = self._latest_incomplete_spawn_round(parent=node)
+        if latest_round is None:
+            return RESUME_MODE_ORDINARY, ''
+        round_id, _payload = latest_round
+        if not round_id:
+            return RESUME_MODE_ORDINARY, ''
+        return RESUME_MODE_WAIT_FOR_CHILDREN, round_id
 
     def live_distribution_child_node_ids(self, *, task_id: str, parent_node_id: str) -> list[str]:
         task = self._store.get_task(task_id)
