@@ -467,6 +467,43 @@ Operator interpretation of the three queue entry types:
 - `delete`: id-based memory deletion waiting for real memory processing
 - `assess`: buffered ordinary-turn/compression window waiting for the assessor lane; if the assessor returns `null`, rejects the batch, or the batch fails runtime precheck, no committed memory change follows and the runtime records a durable discarded row in `memory/ops.jsonl`
 
+## Docker / Compose Startup
+
+G3KU now has two supported operator startup modes:
+
+- direct local startup through `start-g3ku.ps1` / `start-g3ku.sh`
+- container startup through `compose.yaml`
+
+For the container path, the maintenance contract is:
+
+- the `web` container owns Web shell startup, heartbeat, cron, and China bridge supervision
+- the `worker` container owns the background task worker only
+- both containers must share the same workspace state
+
+The required durable paths are:
+
+- `.g3ku/`
+- `memory/`
+- `sessions/`
+- `temp/`
+- `skills/`
+- `tools/`
+- `externaltools/`
+
+Do not treat only `.g3ku/` as sufficient persistence. Detached task temp files now live under `temp/tasks/`, external tool installs live under `externaltools/`, and mutable skill/tool resource copies may also need to survive restart.
+
+Deployment unlock now has an operator-facing env contract:
+
+- `G3KU_BOOTSTRAP_PASSWORD` allows a locked project to auto-unlock at process start
+- `G3KU_INTERNAL_CALLBACK_URL` allows the worker container to call back into the web container over the Compose network instead of assuming `127.0.0.1`
+
+If Docker startup appears healthy but detached tasks never report back, inspect these in order:
+
+1. the shared `.g3ku/internal-callback.json` payload
+2. the effective `G3KU_INTERNAL_CALLBACK_URL` in both containers
+3. whether `web` is healthy at `/api/bootstrap/status`
+4. whether the worker container actually reached unlocked state
+
 ## 10. Memory Reset Workflow
 
 `memory/` now contains both user long-term memory data and unified-context retrieval state, including tool/skill catalog retrieval indexes. A full physical reset of the directory removes all of these together.

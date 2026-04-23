@@ -10,6 +10,11 @@ from pathlib import Path
 import typer
 
 from g3ku.config.loader import ensure_startup_config_ready, load_config
+from g3ku.deployment.runtime_startup import (
+    auto_unlock_from_env,
+    ensure_persistent_workspace_dirs,
+    seed_workspace_resources,
+)
 from g3ku.runtime.bootstrap_factory import make_agent_loop as _make_agent_loop
 from g3ku.runtime.bootstrap_factory import make_provider as _make_provider
 from g3ku.security import BOOTSTRAP_MASTER_KEY_ENV, get_bootstrap_security_service
@@ -139,12 +144,19 @@ def prepare_web_server_start(
     root = _resolve_project_root()
     configure_openai_sdk_logging()
     ensure_startup_config_ready()
+    ensure_persistent_workspace_dirs(root)
+    seed_workspace_resources(root)
+    auto_unlock_from_env(workspace=root)
     _ensure_frontend_ready()
     resolved_host, resolved_port = _resolve_web_bind(host, port)
     _acquire_web_start_lock(root, port=resolved_port)
 
-    callback_token = secrets.token_urlsafe(24)
-    callback_url = f"http://127.0.0.1:{resolved_port}{TASK_TERMINAL_CALLBACK_PATH}"
+    callback_url = str(os.getenv(TASK_TERMINAL_CALLBACK_URL_ENV, "") or "").strip()
+    if not callback_url:
+        callback_url = f"http://127.0.0.1:{resolved_port}{TASK_TERMINAL_CALLBACK_PATH}"
+    callback_token = str(os.getenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "") or "").strip()
+    if not callback_token:
+        callback_token = secrets.token_urlsafe(24)
     os.environ[TASK_TERMINAL_CALLBACK_URL_ENV] = callback_url
     os.environ[TASK_TERMINAL_CALLBACK_TOKEN_ENV] = callback_token
     save_task_terminal_callback_config(workspace=root, url=callback_url, token=callback_token)
@@ -194,8 +206,11 @@ def run_default_web_entrypoint() -> None:
 async def run_worker_runtime() -> None:
     from g3ku.bus.queue import MessageBus
 
-    _resolve_project_root()
+    root = _resolve_project_root()
     configure_openai_sdk_logging()
+    ensure_persistent_workspace_dirs(root)
+    seed_workspace_resources(root)
+    auto_unlock_from_env(workspace=root)
     os.environ["G3KU_TASK_RUNTIME_ROLE"] = "worker"
     master_key = str(os.environ.pop(BOOTSTRAP_MASTER_KEY_ENV, "")).strip()
     if master_key:

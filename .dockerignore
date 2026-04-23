@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+.pytest_cache
+.ruff_cache
+.g3ku
+memory
+sessions
+temp
+externaltools
+logs
+worktrees
+subsystems/china_channels_host/node_modules
+subsystems/china_channels_host/dist

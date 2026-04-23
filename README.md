@@ -1,5 +1,28 @@
 # G3KU
 
+## Docker Deployment
+
+G3KU now supports a Docker / Compose deployment path in addition to the existing direct-run scripts.
+
+- `compose.yaml` runs `web` and `worker` as separate services.
+- The `web` service owns the Web UI, heartbeat, cron, and China bridge supervisor.
+- The `worker` service owns the detached task worker only.
+- Copy `.env.docker.example` to `.env` before running `docker compose up --build`.
+
+For persistence, these workspace directories must stay on durable volumes:
+
+- `.g3ku/`
+- `memory/`
+- `sessions/`
+- `temp/`
+- `skills/`
+- `tools/`
+- `externaltools/`
+
+Those paths together cover project config, task runtime state, transcript history, long-term memory, temporary task files, mutable resource copies, and third-party tool payloads. If you recreate containers but keep the volumes, those states should remain available after restart.
+
+The direct-run paths `start-g3ku.ps1` and `start-g3ku.sh` remain supported. Docker is an additional deployment mode, not a replacement for local development.
+
 目录：[项目介绍](#项目介绍) | [1. 配置环境](#1-配置环境) | [2. 启动项目](#2-启动项目) | [3. 配置模型](#3-配置模型) | [4. 通信配置（可选）](#4-通信配置可选) | [5. 功能介绍](#5-功能介绍) | [6. 面向开发者和-agent-的补充说明](#6-面向开发者和-agent-的补充说明) | [7. 致谢与参考](#7-致谢与参考) | [8. 许可证](#8-许可证)
 
 ## 项目介绍
@@ -92,7 +115,7 @@ g3ku onboard --project
 
 后续模型、Web、通信、运行时等配置都会围绕这个文件和前端配置页面展开。
 
-## 2. 启动项目
+## 2. 如何启动项目
 
 ### 默认启动方式：一键启动脚本 `start-g3ku`
 
@@ -305,7 +328,7 @@ Linux / macOS:
 
 如果你第一次接触 G3KU，下面这几类能力最容易快速上手：
 
-1. 直接问新建会话问 Agent“你能做什么？有哪些技能和工具？”
+1. 直接问 Agent“你能做什么？有哪些技能和工具？”
    这是最快的入门方式之一。你可以直接让 Agent 列出当前可用的能力范围，快速了解它现在能处理哪些任务、能调用哪些技能、又有哪些工具可以配合使用。
 2. 在 Skill 管理和 Tool 管理页面里自定义管理能力
    你可以在前端页面里按需启用、停用、查看和调整 Skill 与 Tool，让系统能力更贴近自己的场景。对于支持热插拔的资源，更新后通常可以快速生效，不需要每次都重启整套系统。

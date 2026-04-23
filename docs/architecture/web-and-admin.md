@@ -432,6 +432,28 @@ If an operator reports "save succeeded but reopen restored the roles", first ins
 
 Do not start with frontdoor prompt debugging unless those three layers already agree.
 
+## Container Deployment Contract
+
+The web/admin stack now has an explicit container-safe startup mode.
+
+- `g3ku web --no-worker` is the container-safe web entrypoint.
+- In this mode, the web process still owns FastAPI routes, websocket session/runtime integration, heartbeat startup, cron startup, and China bridge supervision.
+- Detached task execution is expected to come from a separate `g3ku worker` process or container rather than from the web-managed local child worker path.
+
+`/api/bootstrap/status` is also now the preferred healthcheck-friendly read endpoint for the web container:
+
+- it is available even when the project is still locked
+- it reports both bootstrap mode and runtime readiness
+- Compose healthchecks should use it instead of inventing a second ad-hoc web-only route
+
+There is also a new mutable-resource startup boundary maintainers should keep in mind:
+
+- container images may ship immutable baseline `skills/` and `tools/`
+- runtime startup may seed missing baseline files into the mutable workspace copy
+- that seed path must be missing-file-only and must not overwrite operator edits already present in the shared workspace volume
+
+If operators report "the image has the new built-in skill/tool but the running project still shows the old workspace copy", debug the persistent `skills/` / `tools/` volume contents first. In container mode, the mounted workspace copy is authoritative after startup.
+
 ## CEO Canonical Context UI Contract
 
 The CEO browser/runtime integration now uses `canonical_context` as the only stage-trace protocol field.

@@ -377,6 +377,7 @@ def web(
     port: int | None = typer.Option(None, "--port", "-p", help="Web bind port. Defaults to web.port from project config."),
     reload: bool = typer.Option(False, "--reload/--no-reload", help="Enable auto-reload"),
     debug: bool = typer.Option(False, "--debug/--no-debug", help="Enable full backend debug trace logs."),
+    with_worker: bool = typer.Option(True, "--with-worker/--no-worker", help="Allow the web process to manage a local task worker."),
 ):
     """Start g3ku Web UI."""
     from g3ku.shells.web import run_web_shell
@@ -387,6 +388,7 @@ def web(
         reload=reload,
         debug=debug,
         set_debug_mode=_set_debug_mode,
+        with_worker=with_worker,
     )
 
 
