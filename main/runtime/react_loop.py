@@ -1274,7 +1274,7 @@ class ReActToolLoop:
             return None
         if self._distribution_priority_blocks_recovery(
             runtime_context=runtime_context,
-            node_id=str(node.node_id or '').strip(),
+            node=node,
         ):
             return None
         pending_tool_calls = [
