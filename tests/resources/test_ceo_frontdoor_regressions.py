@@ -847,6 +847,7 @@ async def test_ceo_frontdoor_runner_retries_empty_turn_until_valid_result(monkey
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(runner, "_refresh_runtime_config_for_retry_invalidation", lambda: False)
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
