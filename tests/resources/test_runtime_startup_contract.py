@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pytest
 from typer.testing import CliRunner
 
 import g3ku.cli.commands as commands
@@ -102,6 +104,28 @@ def test_prepare_web_server_start_uses_explicit_callback_env(monkeypatch, tmp_pa
     assert payload["token"] == "shared-token"
 
 
+def test_prepare_web_server_start_primes_workspace_and_attempts_env_unlock(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(launcher, "_resolve_project_root", lambda: tmp_path)
+    monkeypatch.setattr(launcher, "ensure_startup_config_ready", lambda: False)
+    monkeypatch.setattr(launcher, "_ensure_frontend_ready", lambda: None)
+    monkeypatch.setattr(launcher, "_resolve_web_bind", lambda host, port: ("0.0.0.0", 18790))
+    monkeypatch.setattr(launcher, "_acquire_web_start_lock", lambda root, port: None)
+    monkeypatch.setattr(launcher, "ensure_persistent_workspace_dirs", lambda root: calls.append(f"dirs:{root}"))
+    monkeypatch.setattr(launcher, "seed_workspace_resources", lambda root: calls.append(f"seed:{root}"))
+    monkeypatch.setattr(launcher, "auto_unlock_from_env", lambda workspace=None: calls.append(f"unlock:{workspace}") or "password")
+
+    launcher.prepare_web_server_start(host=None, port=None, reload=False, with_worker=False)
+
+    assert calls == [
+        f"dirs:{tmp_path}",
+        f"seed:{tmp_path}",
+        f"unlock:{tmp_path}",
+    ]
+
+
 def test_web_lifespan_attempts_env_auto_unlock_before_runtime_boot(monkeypatch) -> None:
     calls: list[str] = []
 
@@ -119,3 +143,43 @@ def test_web_lifespan_attempts_env_auto_unlock_before_runtime_boot(monkeypatch) 
         pass
 
     assert calls == ["unlock"]
+
+
+def test_run_worker_runtime_uses_env_auto_unlock(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    class _Service:
+        async def startup(self) -> None:
+            raise RuntimeError("stop_after_unlock")
+
+    class _Agent:
+        def __init__(self) -> None:
+            self.main_task_service = _Service()
+
+        async def close_mcp(self) -> None:
+            calls.append("close_mcp")
+
+    monkeypatch.setattr(launcher, "_resolve_project_root", lambda: tmp_path)
+    monkeypatch.setattr(launcher, "configure_openai_sdk_logging", lambda: None)
+    monkeypatch.setattr(launcher, "ensure_startup_config_ready", lambda: False)
+    monkeypatch.setattr(launcher, "ensure_persistent_workspace_dirs", lambda root: calls.append(f"dirs:{root}"))
+    monkeypatch.setattr(launcher, "seed_workspace_resources", lambda root: calls.append(f"seed:{root}"))
+    monkeypatch.setattr(launcher, "auto_unlock_from_env", lambda workspace=None: calls.append(f"unlock:{workspace}") or "password")
+    monkeypatch.setattr(
+        launcher,
+        "load_config",
+        lambda: type("Config", (), {"workspace_path": tmp_path})(),
+    )
+    monkeypatch.setattr(launcher, "sync_workspace_templates", lambda workspace: calls.append(f"sync:{workspace}"))
+    monkeypatch.setattr(launcher, "_make_provider", lambda config: ("provider", config))
+    monkeypatch.setattr(launcher, "_make_agent_loop", lambda config, bus, provider, debug_mode=False: _Agent())
+
+    with pytest.raises(RuntimeError, match="stop_after_unlock"):
+        asyncio.run(launcher.run_worker_runtime())
+
+    assert calls[:4] == [
+        f"dirs:{tmp_path}",
+        f"seed:{tmp_path}",
+        f"unlock:{tmp_path}",
+        f"sync:{tmp_path}",
+    ]

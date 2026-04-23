@@ -1,0 +1,53 @@
+services:
+  web:
+    build: .
+    command: ["/app/docker/web-entrypoint.sh"]
+    environment:
+      G3KU_BOOTSTRAP_PASSWORD: ${G3KU_BOOTSTRAP_PASSWORD:-change-me}
+      G3KU_WEB_PORT: ${G3KU_WEB_PORT:-18790}
+      G3KU_INTERNAL_CALLBACK_URL: ${G3KU_INTERNAL_CALLBACK_URL:-http://web:18790/api/internal/task-terminal}
+    ports:
+      - "18790:18790"
+    volumes:
+      - g3ku-data:/app/.g3ku
+      - g3ku-memory:/app/memory
+      - g3ku-sessions:/app/sessions
+      - g3ku-temp:/app/temp
+      - g3ku-skills:/app/skills
+      - g3ku-tools:/app/tools
+      - g3ku-externaltools:/app/externaltools
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18790/api/bootstrap/status').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["/app/docker/worker-entrypoint.sh"]
+    environment:
+      G3KU_BOOTSTRAP_PASSWORD: ${G3KU_BOOTSTRAP_PASSWORD:-change-me}
+      G3KU_WEB_PORT: ${G3KU_WEB_PORT:-18790}
+      G3KU_INTERNAL_CALLBACK_URL: ${G3KU_INTERNAL_CALLBACK_URL:-http://web:18790/api/internal/task-terminal}
+    depends_on:
+      web:
+        condition: service_healthy
+    volumes:
+      - g3ku-data:/app/.g3ku
+      - g3ku-memory:/app/memory
+      - g3ku-sessions:/app/sessions
+      - g3ku-temp:/app/temp
+      - g3ku-skills:/app/skills
+      - g3ku-tools:/app/tools
+      - g3ku-externaltools:/app/externaltools
+    restart: unless-stopped
+
+volumes:
+  g3ku-data:
+  g3ku-memory:
+  g3ku-sessions:
+  g3ku-temp:
+  g3ku-skills:
+  g3ku-tools:
+  g3ku-externaltools:
