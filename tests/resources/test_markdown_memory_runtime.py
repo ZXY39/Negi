@@ -743,6 +743,181 @@ async def test_v2_review_turn_payload_keeps_only_user_assistant_and_stage_summar
 
 
 @pytest.mark.asyncio
+async def test_v2_review_window_keeps_stage_summary_deltas_inside_one_window(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-1",
+            user_messages=["first turn"],
+            assistant_text="assistant one",
+            compression_summary={"status": ""},
+            canonical_summary={
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-alpha",
+                        "stage_goal": "stage alpha goal",
+                        "completed_stage_summary": "stage alpha completed",
+                    }
+                ]
+            },
+        )
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-2",
+            user_messages=["second turn"],
+            assistant_text="assistant two",
+            compression_summary={"status": ""},
+            canonical_summary={
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-alpha",
+                        "stage_goal": "stage alpha goal",
+                        "completed_stage_summary": "stage alpha completed",
+                    },
+                    {
+                        "stage_id": "frontdoor-stage-beta",
+                        "stage_goal": "stage beta goal",
+                        "completed_stage_summary": "stage beta completed",
+                    },
+                ]
+            },
+        )
+
+        result = await manager.flush_review_window(
+            session_key="web:shared",
+            trigger_source="token_compression",
+        )
+        queue_items = await manager.list_queue(limit=10)
+
+        assert result["status"] == "queued"
+        payload_text = queue_items[0]["payload_text"]
+        assert payload_text.count("frontdoor-stage-alpha") == 1
+        assert payload_text.count("stage alpha completed") == 1
+        assert payload_text.count("frontdoor-stage-beta") == 1
+        assert payload_text.count("stage beta completed") == 1
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_review_window_stage_cursor_survives_flush_for_next_window(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-1",
+            user_messages=["first window"],
+            assistant_text="assistant one",
+            compression_summary={"status": ""},
+            canonical_summary={
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-alpha",
+                        "stage_goal": "stage alpha goal",
+                        "completed_stage_summary": "stage alpha completed",
+                    }
+                ]
+            },
+        )
+        first_flush = await manager.flush_review_window(
+            session_key="web:shared",
+            trigger_source="token_compression",
+        )
+        assert first_flush["status"] == "queued"
+
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-2",
+            user_messages=["second window"],
+            assistant_text="assistant two",
+            compression_summary={"status": ""},
+            canonical_summary={
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-alpha",
+                        "stage_goal": "stage alpha goal",
+                        "completed_stage_summary": "stage alpha completed",
+                    },
+                    {
+                        "stage_id": "frontdoor-stage-beta",
+                        "stage_goal": "stage beta goal",
+                        "completed_stage_summary": "stage beta completed",
+                    },
+                ]
+            },
+        )
+        second_flush = await manager.flush_review_window(
+            session_key="web:shared",
+            trigger_source="token_compression",
+        )
+        queue_items = await manager.list_queue(limit=10)
+
+        assert second_flush["status"] == "queued"
+        assert len(queue_items) == 2
+        second_payload = queue_items[1]["payload_text"]
+        assert "frontdoor-stage-alpha" not in second_payload
+        assert "stage alpha completed" not in second_payload
+        assert "frontdoor-stage-beta" in second_payload
+        assert "stage beta completed" in second_payload
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_review_window_records_stage_when_summary_version_changes(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-1",
+            user_messages=["stage started"],
+            assistant_text="assistant one",
+            compression_summary={"status": ""},
+            canonical_summary={
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-alpha",
+                        "stage_goal": "stage alpha goal",
+                    }
+                ]
+            },
+        )
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-2",
+            user_messages=["stage completed"],
+            assistant_text="assistant two",
+            compression_summary={"status": ""},
+            canonical_summary={
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-alpha",
+                        "stage_goal": "stage alpha goal",
+                        "completed_stage_summary": "stage alpha completed later",
+                    }
+                ]
+            },
+        )
+
+        result = await manager.flush_review_window(
+            session_key="web:shared",
+            trigger_source="token_compression",
+        )
+        queue_items = await manager.list_queue(limit=10)
+
+        assert result["status"] == "queued"
+        payload_text = queue_items[0]["payload_text"]
+        assert payload_text.count("frontdoor-stage-alpha") == 2
+        assert "stage alpha completed later" in payload_text
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_collect_due_batch_respects_char_limit_before_wait_limit(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())

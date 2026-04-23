@@ -196,7 +196,7 @@ textarea {
 
 /* Sidebar */
 .sidebar {
-    width: 280px;
+    width: 160px;
     background-color: var(--bg-panel);
     border-right: 1px solid var(--border-color);
     display: flex;
@@ -3518,7 +3518,7 @@ textarea {
 
 @media (max-width: 768px) {
     .sidebar {
-        width: 240px;
+        width: 160px;
     }
 
     .content-header,

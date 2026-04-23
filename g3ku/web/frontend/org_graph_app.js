@@ -8918,7 +8918,8 @@ function renderMemoryDetailPreview() {
     const secondaryText = String(preview.secondaryText || "").trim();
     if (U.memoryDetailSecondarySection) U.memoryDetailSecondarySection.hidden = !secondaryText;
     if (U.memoryDetailSecondaryTitle) {
-        U.memoryDetailSecondaryTitle.textContent = preview.kind === "processed" ? "结果摘要" : "最近错误";
+        U.memoryDetailSecondaryTitle.textContent = String(preview.secondaryTitle || "").trim()
+            || (preview.kind === "processed" ? "结果摘要" : "最近错误");
     }
     if (U.memoryDetailSecondary) {
         U.memoryDetailSecondary.innerHTML = secondaryText ? renderMemoryTextWithNoteRefs(secondaryText) : "";
@@ -8949,7 +8950,6 @@ function openMemoryDetailPreview(kind, key) {
             { label: "状态", value: memoryProcessedStatusLabel(source) || "-" },
             { label: "操作", value: memoryProcessedOpLabel(source) || "-" },
             { label: "处理时间", value: formatCompactTime(source?.processed_at) || String(source?.processed_at || "-") },
-            ...(noopReason ? [{ label: "无变更原因", value: noopReason }] : []),
             { label: "模型链", value: (Array.isArray(source?.model_chain) ? source.model_chain.join(" -> ") : "") || "-" },
             { label: "请求数", value: String(source?.request_count || payloadTexts.length || 0) },
             { label: "输入", value: String(usage.input_tokens || 0) },
@@ -8974,8 +8974,11 @@ function openMemoryDetailPreview(kind, key) {
         primaryText: isProcessed
             ? payloadTexts.join("\n\n---\n\n")
             : String(source?.payload_text || ""),
+        secondaryTitle: isProcessed
+            ? (noopReason ? "无变更原因" : "结果摘要")
+            : "最近错误",
         secondaryText: isProcessed
-            ? String(source?.document_preview || "")
+            ? String(noopReason || source?.document_preview || "")
             : String(source?.last_error_text || ""),
     };
     renderMemoryDetailPreview();

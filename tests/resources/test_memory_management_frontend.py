@@ -643,7 +643,7 @@ def test_memory_processed_noop_and_discarded_batches_render_as_no_change() -> No
     assert "已废弃" not in str(result["discardedHtml"])
 
 
-def test_memory_processed_detail_preview_includes_noop_reason() -> None:
+def test_memory_processed_detail_preview_uses_noop_reason_in_summary_slot() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -726,16 +726,14 @@ def test_memory_processed_detail_preview_includes_noop_reason() -> None:
         const preview = context.__testExports.S.memoryDetailPreview;
         console.log(JSON.stringify({
           fields: preview.fields,
+          secondaryTitle: preview.secondaryTitle,
           secondaryText: preview.secondaryText,
         }));
         """
     )
 
     fields = list(result["fields"])
-    assert any(field["label"] == "无变更原因" for field in fields)
-    assert any(
-        field["label"] == "无变更原因"
-        and "现有长期记忆无需改写或补充" in str(field["value"])
-        for field in fields
-    )
-    assert str(result["secondaryText"]) == "---\nid:demo\n已有记忆预览"
+    assert not any(field["label"] == "无变更原因" for field in fields)
+    assert str(result["secondaryTitle"]) == "无变更原因"
+    assert "现有长期记忆无需改写或补充" in str(result["secondaryText"])
+    assert "---\nid:demo\n已有记忆预览" not in str(result["secondaryText"])

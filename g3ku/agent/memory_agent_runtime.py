@@ -1880,7 +1880,15 @@ class MemoryManager:
                 for item in list(raw_state.get("pending_turns") or [])
                 if isinstance(item, dict)
             ]
-            normalized_sessions[session_key] = {"pending_turns": pending_turns}
+            stage_versions = {
+                str(key or "").strip(): str(value or "").strip()
+                for key, value in dict(raw_state.get("stage_versions") or {}).items()
+                if str(key or "").strip() and str(value or "").strip()
+            }
+            normalized_sessions[session_key] = {
+                "pending_turns": pending_turns,
+                "stage_versions": stage_versions,
+            }
         return {"sessions": normalized_sessions}
 
     def _write_review_state(self, payload: dict[str, Any]) -> None:
@@ -1945,6 +1953,59 @@ class MemoryManager:
         if stages:
             compact["stages"] = stages
         return compact or None
+
+    @staticmethod
+    def _review_stage_identity(stage: dict[str, Any]) -> str:
+        stage_id = str(stage.get("stage_id") or "").strip()
+        if stage_id:
+            return stage_id
+        encoded = json.dumps(stage, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return f"anonymous:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:16]}"
+
+    @staticmethod
+    def _review_stage_version(stage: dict[str, Any]) -> str:
+        payload = {
+            "stage_goal": str(stage.get("stage_goal") or "").strip(),
+            "completed_stage_summary": str(stage.get("completed_stage_summary") or "").strip(),
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _compact_review_stage_summary_delta(
+        *,
+        canonical_summary: dict[str, Any] | None,
+        stage_versions: dict[str, str] | None,
+    ) -> tuple[dict[str, Any] | None, dict[str, str]]:
+        compact = MemoryManager._compact_review_stage_summary(canonical_summary)
+        normalized_versions = {
+            str(key or "").strip(): str(value or "").strip()
+            for key, value in dict(stage_versions or {}).items()
+            if str(key or "").strip() and str(value or "").strip()
+        }
+        if not isinstance(compact, dict):
+            return None, normalized_versions
+
+        next_versions = dict(normalized_versions)
+        delta_stages: list[dict[str, str]] = []
+        for stage in list(compact.get("stages") or []):
+            if not isinstance(stage, dict):
+                continue
+            identity = MemoryManager._review_stage_identity(stage)
+            version = MemoryManager._review_stage_version(stage)
+            if normalized_versions.get(identity) == version:
+                continue
+            next_versions[identity] = version
+            delta_stages.append(stage)
+
+        if not delta_stages:
+            return None, next_versions
+
+        delta: dict[str, Any] = {"stages": delta_stages}
+        active_stage_id = str(compact.get("active_stage_id") or "").strip()
+        if active_stage_id and any(str(stage.get("stage_id") or "").strip() == active_stage_id for stage in delta_stages):
+            delta["active_stage_id"] = active_stage_id
+        return delta, next_versions
 
     @staticmethod
     def _message_to_request_dict(message: Any) -> dict[str, Any]:
@@ -2193,23 +2254,32 @@ class MemoryManager:
         normalized_session = str(session_key or "").strip()
         if not normalized_session:
             return {"ok": True, "status": "ignored", "reason": "missing_session_key"}
-        payload_text = self._review_turn_payload(
-            turn_id=turn_id,
-            user_messages=user_messages,
-            assistant_text=assistant_text,
-            compression_summary=compression_summary,
-            canonical_summary=canonical_summary,
-        )
-        if not payload_text:
-            return {"ok": True, "status": "ignored", "reason": "empty_turn"}
         state = self._read_review_state()
         sessions = dict(state.get("sessions") or {})
         session_state = dict(sessions.get(normalized_session) or {})
+        stage_versions = {
+            str(key or "").strip(): str(value or "").strip()
+            for key, value in dict(session_state.get("stage_versions") or {}).items()
+            if str(key or "").strip() and str(value or "").strip()
+        }
+        stage_summary_delta, next_stage_versions = self._compact_review_stage_summary_delta(
+            canonical_summary=canonical_summary,
+            stage_versions=stage_versions,
+        )
         pending_turns = [
             dict(item)
             for item in list(session_state.get("pending_turns") or [])
             if isinstance(item, dict)
         ]
+        payload_text = self._review_turn_payload(
+            turn_id=turn_id,
+            user_messages=user_messages,
+            assistant_text=assistant_text,
+            compression_summary=compression_summary,
+            canonical_summary=stage_summary_delta,
+        )
+        if not payload_text:
+            return {"ok": True, "status": "ignored", "reason": "empty_turn"}
         pending_turns.append(
             {
                 "turn_id": str(turn_id or "").strip(),
@@ -2218,7 +2288,10 @@ class MemoryManager:
             }
         )
         if len(pending_turns) < self._review_window_turns():
-            sessions[normalized_session] = {"pending_turns": pending_turns}
+            sessions[normalized_session] = {
+                "pending_turns": pending_turns,
+                "stage_versions": next_stage_versions,
+            }
             self._write_review_state({"sessions": sessions})
             return {
                 "ok": True,
@@ -2235,7 +2308,10 @@ class MemoryManager:
             session_key=normalized_session,
             trigger_source="ordinary_turn_window",
         )
-        sessions[normalized_session] = {"pending_turns": []}
+        sessions[normalized_session] = {
+            "pending_turns": [],
+            "stage_versions": next_stage_versions,
+        }
         self._write_review_state({"sessions": sessions})
         await self._append_queue_request(request)
         return {
@@ -2277,7 +2353,14 @@ class MemoryManager:
             session_key=normalized_session,
             trigger_source=normalized_trigger,
         )
-        sessions[normalized_session] = {"pending_turns": []}
+        sessions[normalized_session] = {
+            "pending_turns": [],
+            "stage_versions": {
+                str(key or "").strip(): str(value or "").strip()
+                for key, value in dict(session_state.get("stage_versions") or {}).items()
+                if str(key or "").strip() and str(value or "").strip()
+            },
+        }
         self._write_review_state({"sessions": sessions})
         await self._append_queue_request(request)
         return {

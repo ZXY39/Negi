@@ -25,3 +25,24 @@ def test_ceo_approval_viewport_is_centered_above_chat_input() -> None:
         css,
         flags=re.MULTILINE,
     )
+
+
+def test_app_sidebars_use_compact_160px_width_before_mobile_stack() -> None:
+    css_files = [
+        REPO_ROOT / "g3ku/web/frontend/org_graph.css",
+        REPO_ROOT / "g3ku/web/frontend/search.css",
+    ]
+
+    for css_path in css_files:
+        css = css_path.read_text(encoding="utf-8")
+
+        assert re.search(
+            r"\.sidebar\s*\{[^}]*width:\s*160px;",
+            css,
+            flags=re.MULTILINE,
+        ), css_path.as_posix()
+        assert re.search(
+            r"@media\s*\(max-width:\s*768px\)\s*\{[^{}]*\.sidebar\s*\{[^}]*width:\s*160px;",
+            css,
+            flags=re.MULTILINE | re.DOTALL,
+        ), css_path.as_posix()
