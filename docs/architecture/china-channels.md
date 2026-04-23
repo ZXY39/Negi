@@ -235,3 +235,23 @@ Python 侧 `send_outbound()` 会过滤 `_progress`、`_tool_hint`、`_session_ev
 
 - `subsystems/china_channels_host/src/host.ts`
   这是 Node host 的真正调度中心。
+## Containerized China Bridge
+
+Docker deployment does not split China bridge into a third long-lived service. The current contract remains:
+
+- the web process or web container owns `ChinaBridgeSupervisor`
+- the Node host still runs as a supervised child process of that web runtime
+- the worker container does not own China bridge startup
+
+This matters for image construction and troubleshooting:
+
+- Node 20 and the package-manager toolchain belong in the web image build
+- the built host entry `subsystems/china_channels_host/dist/index.js` should already exist in the image, rather than relying on first-request ad-hoc setup
+- bridge runtime state still persists under `.g3ku/china-bridge/`
+
+If containerized China bridge fails while the rest of the web runtime is healthy, debug in this order:
+
+1. web container image contents for `subsystems/china_channels_host/dist/index.js`
+2. web container Node / pnpm availability
+3. shared `.g3ku/china-bridge/` status and logs
+4. exported host runtime config under the bridge state directory

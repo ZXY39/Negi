@@ -1,5 +1,28 @@
 # G3KU
 
+## Docker Deployment
+
+G3KU now supports a Docker / Compose deployment path in addition to the existing direct-run scripts.
+
+- `compose.yaml` runs `web` and `worker` as separate services.
+- The `web` service owns the Web UI, heartbeat, cron, and China bridge supervisor.
+- The `worker` service owns the detached task worker only.
+- Copy `.env.docker.example` to `.env` before running `docker compose up --build`.
+
+For persistence, these workspace directories must stay on durable volumes:
+
+- `.g3ku/`
+- `memory/`
+- `sessions/`
+- `temp/`
+- `skills/`
+- `tools/`
+- `externaltools/`
+
+Those paths together cover project config, task runtime state, transcript history, long-term memory, temporary task files, mutable resource copies, and third-party tool payloads. If you recreate containers but keep the volumes, those states should remain available after restart.
+
+The direct-run paths `start-g3ku.ps1` and `start-g3ku.sh` remain supported. Docker is an additional deployment mode, not a replacement for local development.
+
 目录：[项目介绍](#项目介绍) | [1. 配置环境](#1-配置环境) | [2. 启动项目](#2-启动项目) | [3. 配置模型](#3-配置模型) | [4. 通信配置（可选）](#4-通信配置可选) | [5. 功能介绍](#5-功能介绍) | [6. 面向开发者和-agent-的补充说明](#6-面向开发者和-agent-的补充说明) | [7. 致谢与参考](#7-致谢与参考) | [8. 许可证](#8-许可证)
 
 ## 项目介绍
