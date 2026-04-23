@@ -48,6 +48,7 @@ from main.runtime.pending_notice_state import (
     PENDING_NOTICE_STATE_KEY,
     RESUME_MODE_ORDINARY,
     RESUME_MODE_WAIT_FOR_CHILDREN,
+    normalize_pending_notice_state,
     set_pending_notice_state,
 )
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
@@ -438,6 +439,19 @@ class NodeRunner:
         pending_root_notice_records = self._pending_root_notice_records(node=node)
         request_body_seed_messages = self._latest_actual_request_seed_messages(task=task, node=node)
         if notifications or pending_root_notice_records:
+            if self._pending_notice_waits_for_children(node=node):
+                frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
+                if isinstance(frame.get('messages'), list) and frame.get('messages'):
+                    return {
+                        'messages': list(frame.get('messages') or []),
+                        'message_source': 'restored_frame',
+                        'request_body_seed_messages': request_body_seed_messages,
+                    }
+                return {
+                    'messages': await self._build_messages(task=task, node=node),
+                    'message_source': 'fresh',
+                    'request_body_seed_messages': request_body_seed_messages,
+                }
             messages = await self._base_messages_for_reactivated_or_live_node(task=task, node=node)
             messages = self._append_notice_messages(messages=messages, notices=notifications)
             messages = self._append_notice_messages(messages=messages, notices=pending_root_notice_records)
@@ -673,6 +687,26 @@ class NodeRunner:
     def _pending_root_notice_records(self, *, node: NodeRecord) -> list[dict[str, Any]]:
         metadata = dict(node.metadata or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
         return normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
+
+    def _pending_notice_state(self, *, node: NodeRecord) -> dict[str, str]:
+        metadata = dict(node.metadata or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
+        return normalize_pending_notice_state(metadata.get(PENDING_NOTICE_STATE_KEY))
+
+    def _pending_notice_waits_for_children(self, *, node: NodeRecord) -> bool:
+        state = self._pending_notice_state(node=node)
+        if str(state.get('resume_mode') or '').strip() != RESUME_MODE_WAIT_FOR_CHILDREN:
+            return False
+        latest_round = self._latest_incomplete_spawn_round(parent=node)
+        if latest_round is None:
+            self._update_pending_notice_state(
+                node_id=node.node_id,
+                resume_mode=RESUME_MODE_ORDINARY,
+                epoch_id='',
+                holding_round_id='',
+                updated_at=now_iso(),
+            )
+            return False
+        return True
 
     def _update_pending_notice_state(
         self,
