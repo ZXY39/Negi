@@ -56,6 +56,7 @@ from main.runtime.chat_backend import (
     resolve_send_model_context_window_info,
 )
 from main.runtime.send_token_preflight import (
+    build_runtime_estimated_input_truth,
     build_runtime_hybrid_send_token_estimate,
     build_runtime_observed_input_truth,
     build_runtime_send_token_preflight_snapshot,
@@ -3175,17 +3176,27 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         usage: dict[str, Any] | None,
         provider_model: str,
         actual_request_hash: str,
+        fallback_estimated_input_tokens: int = 0,
     ) -> dict[str, Any]:
         normalized_usage = normalize_usage_payload(usage)
-        if not normalized_usage:
-            return {}
-        truth = build_runtime_observed_input_truth(
-            usage=normalized_usage,
-            provider_model=str(provider_model or "").strip(),
-            actual_request_hash=str(actual_request_hash or "").strip(),
-            source="provider_usage",
-        )
-        if int(truth.input_tokens or 0) <= 0 and int(truth.cache_hit_tokens or 0) <= 0:
+        truth = None
+        if normalized_usage:
+            candidate_truth = build_runtime_observed_input_truth(
+                usage=normalized_usage,
+                provider_model=str(provider_model or "").strip(),
+                actual_request_hash=str(actual_request_hash or "").strip(),
+                source="provider_usage",
+            )
+            if int(candidate_truth.input_tokens or 0) > 0 or int(candidate_truth.cache_hit_tokens or 0) > 0:
+                truth = candidate_truth
+        if truth is None and int(fallback_estimated_input_tokens or 0) > 0:
+            truth = build_runtime_estimated_input_truth(
+                estimated_input_tokens=int(fallback_estimated_input_tokens or 0),
+                provider_model=str(provider_model or "").strip(),
+                actual_request_hash=str(actual_request_hash or "").strip(),
+                source="preflight_estimate",
+            )
+        if truth is None:
             return {}
         return {
             "effective_input_tokens": int(truth.effective_input_tokens or 0),
@@ -3237,13 +3248,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             or provider_model
             or ""
         ).strip()
+        preflight_diagnostics = dict(state.get("frontdoor_token_preflight_diagnostics") or {})
         observed_input_truth = self._frontdoor_observed_input_truth(
             usage=usage,
             provider_model=resolved_provider_model,
             actual_request_hash=str(diagnostics.get("actual_request_hash") or "").strip(),
+            fallback_estimated_input_tokens=int(
+                preflight_diagnostics.get("final_request_tokens")
+                or preflight_diagnostics.get("estimated_total_tokens")
+                or 0
+            ),
         )
         frontdoor_token_preflight_diagnostics = self._frontdoor_diagnostics_with_observed_input_truth(
-            dict(state.get("frontdoor_token_preflight_diagnostics") or {}),
+            preflight_diagnostics,
             observed_input_truth,
         )
         return {

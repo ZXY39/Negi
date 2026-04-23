@@ -250,23 +250,51 @@ def normalize_usage_payload(raw_usage: Any) -> dict[str, int]:
     """Normalize provider-specific usage payloads into a stable token shape."""
 
     payload: dict[str, int] = {}
-    fields = (
-        ("input_tokens", ("input_tokens",), ("prompt_tokens",)),
-        ("output_tokens", ("output_tokens",), ("completion_tokens",)),
-        (
-            "cache_hit_tokens",
-            ("cache_hit_tokens",),
-            ("cache_read_tokens",),
-            ("cached_tokens",),
-            ("prompt_tokens_details", "cached_tokens"),
-            ("input_tokens_details", "cached_tokens"),
-        ),
-    )
-    for target, *candidates in fields:
-        for path in candidates:
-            found, value = _usage_lookup(raw_usage, *path)
-            if not found:
-                continue
-            payload[target] = _coerce_usage_int(value)
-            break
+    input_total = 0
+    input_found = False
+    for path in (("input_tokens",), ("prompt_tokens",)):
+        found, value = _usage_lookup(raw_usage, *path)
+        if not found:
+            continue
+        input_total = _coerce_usage_int(value)
+        input_found = True
+        payload["input_tokens"] = input_total
+        break
+
+    for path in (("output_tokens",), ("completion_tokens",)):
+        found, value = _usage_lookup(raw_usage, *path)
+        if not found:
+            continue
+        payload["output_tokens"] = _coerce_usage_int(value)
+        break
+
+    direct_cache_tokens = 0
+    direct_cache_found = False
+    for path in (("cache_hit_tokens",), ("cache_read_tokens",), ("cached_tokens",)):
+        found, value = _usage_lookup(raw_usage, *path)
+        if not found:
+            continue
+        direct_cache_tokens = _coerce_usage_int(value)
+        direct_cache_found = True
+        break
+
+    breakdown_cache_tokens = 0
+    breakdown_cache_found = False
+    for path in (("input_tokens_details", "cached_tokens"), ("prompt_tokens_details", "cached_tokens")):
+        found, value = _usage_lookup(raw_usage, *path)
+        if not found:
+            continue
+        breakdown_cache_tokens = _coerce_usage_int(value)
+        breakdown_cache_found = True
+        break
+
+    # Nested cached-token details are a breakdown of total input tokens on providers
+    # such as OpenAI `/responses`, so normalize the uncached input lane before
+    # computing `effective_input_tokens = input_tokens + cache_hit_tokens`.
+    if direct_cache_found:
+        payload["cache_hit_tokens"] = direct_cache_tokens
+    elif breakdown_cache_found:
+        payload["cache_hit_tokens"] = breakdown_cache_tokens
+        if input_found:
+            payload["input_tokens"] = max(0, input_total - breakdown_cache_tokens)
     return payload

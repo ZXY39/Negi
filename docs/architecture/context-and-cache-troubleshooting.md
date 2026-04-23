@@ -27,6 +27,7 @@
 - 先比较 `Cache Read Tokens` 是否显著下降
 - 再比较 `Input Tokens + Cache Read Tokens` 是否真的缩短
 - 最后再决定这是“总上下文缩短”还是“总上下文近似不变但前缀复用消失”
+- Maintenance note: for OpenAI-style `/responses` usage, nested fields such as `input_tokens_details.cached_tokens` are a breakdown of total input tokens, not an extra lane to add again. When those nested fields exist, normalize `input_tokens` back to the uncached lane before comparing it with `Cache Read Tokens`.
 
 ### 1.2 caller-side family churn，不等于 provider request 前缀断裂
 
@@ -424,6 +425,7 @@ This changes the troubleshooting rule:
 
 - `estimate_source=usage_plus_delta` 说明 runtime 已经确认 continuity 足够稳定，并且 `final_request_tokens` 可能明显高于 preview-only 估算
 - `estimate_source=preview_estimate` 不一定表示 usage 不存在，也可能只是 continuity 不可证明；这时优先看 `comparable_to_previous_request=false` 的原因，而不是先怀疑阈值
+- `observed_input_truth.source=preflight_estimate` means the provider omitted usable input-side usage for that send, so runtime fell back to the final send-time estimate instead of leaving the truth lane blank. This is expected fallback behavior, not automatically a cache bug.
 - 如果 top-level已是压缩后值，而你想知道“为什么这轮会先压缩”，应看 `pre_compaction_estimate_source` / `pre_compaction_final_estimate_tokens` / `pre_compaction_effective_input_tokens`
 
 另外要额外排一类很隐蔽的误判：

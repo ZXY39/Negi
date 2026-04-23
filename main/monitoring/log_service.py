@@ -60,7 +60,10 @@ from main.runtime.append_notice_context import (
 )
 from main.runtime.chat_backend import build_actual_request_diagnostics
 from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
-from main.runtime.send_token_preflight import build_runtime_observed_input_truth
+from main.runtime.send_token_preflight import (
+    build_runtime_estimated_input_truth,
+    build_runtime_observed_input_truth,
+)
 from main.token_usage import aggregate_node_token_usage, build_token_usage_from_attempts, merge_token_usage_by_model, merge_token_usage_records
 
 
@@ -347,6 +350,8 @@ class TaskLogService:
             'actual_request_hash': '',
             'actual_request_message_count': 0,
             'actual_tool_schema_hash': '',
+            'token_preflight_diagnostics': {},
+            'history_shrink_reason': '',
             'last_error': '',
         }
 
@@ -983,6 +988,7 @@ class TaskLogService:
         provider_tool_exposure_commit_reason: str = '',
         provider_request_meta: dict[str, Any] | None = None,
         provider_request_body: dict[str, Any] | None = None,
+        token_preflight_diagnostics: dict[str, Any] | None = None,
     ) -> NodeRecord | None:
         with self._task_lock(task_id):
             current = self._store.get_node(node_id)
@@ -993,6 +999,19 @@ class TaskLogService:
             delta_usage_by_model: list[Any] = []
             if usage_attempts is not None and tracked_usage:
                 delta_usage, delta_usage_by_model = build_token_usage_from_attempts(usage_attempts, tracked=True)
+            current_frame = self._store.get_task_runtime_frame(task_id, node_id)
+            current_frame_payload = dict(current_frame.payload or {}) if current_frame is not None else {}
+            active_preflight_diagnostics = dict(
+                token_preflight_diagnostics
+                or current_frame_payload.get('token_preflight_diagnostics')
+                or {}
+            )
+            fallback_estimated_input_tokens = int(
+                active_preflight_diagnostics.get('final_request_tokens')
+                or active_preflight_diagnostics.get('estimated_total_tokens')
+                or 0
+            )
+            fallback_provider_model = str(active_preflight_diagnostics.get('provider_model') or '').strip()
 
             text, ref = self._summarize_content(
                 content,
@@ -1024,6 +1043,8 @@ class TaskLogService:
                 observed_input_truth = self._build_observed_input_truth_from_attempts(
                     usage_attempts=usage_attempts,
                     actual_request_hash=str(actual_request_payload.get('actual_request_hash') or '').strip(),
+                    fallback_estimated_input_tokens=fallback_estimated_input_tokens,
+                    fallback_provider_model=fallback_provider_model,
                 )
                 if observed_input_truth:
                     actual_request_payload['observed_input_truth'] = dict(observed_input_truth)
@@ -1031,6 +1052,8 @@ class TaskLogService:
                 observed_input_truth = self._build_observed_input_truth_from_attempts(
                     usage_attempts=usage_attempts,
                     actual_request_hash='',
+                    fallback_estimated_input_tokens=fallback_estimated_input_tokens,
+                    fallback_provider_model=fallback_provider_model,
                 )
             actual_request_ref = self._persist_actual_request_artifact(
                 task_id=task_id,
@@ -1038,8 +1061,6 @@ class TaskLogService:
                 call_index=call_index,
                 payload=actual_request_payload,
             )
-            current_frame = self._store.get_task_runtime_frame(task_id, node_id)
-            current_frame_payload = dict(current_frame.payload or {}) if current_frame is not None else {}
             resolved_prompt_cache_key_hash = str(
                 current_frame_payload.get('prompt_cache_key_hash')
                 or ((actual_request_payload or {}).get('prompt_cache_key_hash') if actual_request_payload is not None else '')
@@ -1566,6 +1587,8 @@ class TaskLogService:
         *,
         usage_attempts: list[Any] | None,
         actual_request_hash: str,
+        fallback_estimated_input_tokens: int = 0,
+        fallback_provider_model: str = '',
     ) -> dict[str, Any]:
         attempts = list(usage_attempts or [])
         selected_attempt = None
@@ -1574,15 +1597,24 @@ class TaskLogService:
             if dict(usage or {}):
                 selected_attempt = attempt
                 break
-        if selected_attempt is None:
-            return {}
-        truth = build_runtime_observed_input_truth(
-            usage=getattr(selected_attempt, 'usage', None),
-            provider_model=str(getattr(selected_attempt, 'provider_model', '') or '').strip(),
-            actual_request_hash=str(actual_request_hash or '').strip(),
-            source='provider_usage',
-        )
-        if int(truth.input_tokens or 0) <= 0 and int(truth.cache_hit_tokens or 0) <= 0:
+        truth = None
+        if selected_attempt is not None:
+            candidate_truth = build_runtime_observed_input_truth(
+                usage=getattr(selected_attempt, 'usage', None),
+                provider_model=str(getattr(selected_attempt, 'provider_model', '') or '').strip(),
+                actual_request_hash=str(actual_request_hash or '').strip(),
+                source='provider_usage',
+            )
+            if int(candidate_truth.input_tokens or 0) > 0 or int(candidate_truth.cache_hit_tokens or 0) > 0:
+                truth = candidate_truth
+        if truth is None and int(fallback_estimated_input_tokens or 0) > 0:
+            truth = build_runtime_estimated_input_truth(
+                estimated_input_tokens=int(fallback_estimated_input_tokens or 0),
+                provider_model=str(fallback_provider_model or '').strip(),
+                actual_request_hash=str(actual_request_hash or '').strip(),
+                source='preflight_estimate',
+            )
+        if truth is None:
             return {}
         return {
             'effective_input_tokens': int(truth.effective_input_tokens or 0),
@@ -3763,6 +3795,12 @@ class TaskLogService:
                 'actual_request_hash': str(next_frame.get('actual_request_hash') or '').strip(),
                 'actual_request_message_count': int(next_frame.get('actual_request_message_count') or 0),
                 'actual_tool_schema_hash': str(next_frame.get('actual_tool_schema_hash') or '').strip(),
+                'token_preflight_diagnostics': (
+                    dict(next_frame.get('token_preflight_diagnostics') or {})
+                    if isinstance(next_frame.get('token_preflight_diagnostics'), dict)
+                    else {}
+                ),
+                'history_shrink_reason': str(next_frame.get('history_shrink_reason') or '').strip(),
                 'last_error': str(next_frame.get('last_error') or ''),
                 'messages_ref': str(next_frame.get('messages_ref') or ''),
                 'messages_count': int(next_frame.get('messages_count') or 0),
@@ -3940,6 +3978,12 @@ class TaskLogService:
             'actual_request_hash': str(payload.get('actual_request_hash') or '').strip(),
             'actual_request_message_count': int(payload.get('actual_request_message_count') or 0),
             'actual_tool_schema_hash': str(payload.get('actual_tool_schema_hash') or '').strip(),
+            'token_preflight_diagnostics': (
+                dict(payload.get('token_preflight_diagnostics') or {})
+                if isinstance(payload.get('token_preflight_diagnostics'), dict)
+                else {}
+            ),
+            'history_shrink_reason': str(payload.get('history_shrink_reason') or '').strip(),
             'last_error': str(payload.get('last_error') or ''),
         }
 
@@ -4543,6 +4587,12 @@ class TaskLogService:
             'actual_request_hash': str(payload.get('actual_request_hash') or '').strip(),
             'actual_request_message_count': int(payload.get('actual_request_message_count') or 0),
             'actual_tool_schema_hash': str(payload.get('actual_tool_schema_hash') or '').strip(),
+            'token_preflight_diagnostics': (
+                dict(payload.get('token_preflight_diagnostics') or {})
+                if isinstance(payload.get('token_preflight_diagnostics'), dict)
+                else {}
+            ),
+            'history_shrink_reason': str(payload.get('history_shrink_reason') or '').strip(),
             'last_error': str(payload.get('last_error') or ''),
         }
 

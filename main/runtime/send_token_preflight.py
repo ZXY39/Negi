@@ -155,6 +155,24 @@ def build_runtime_observed_input_truth(
     )
 
 
+def build_runtime_estimated_input_truth(
+    *,
+    estimated_input_tokens: int,
+    provider_model: str,
+    actual_request_hash: str,
+    source: str,
+) -> RuntimeObservedInputTruth:
+    input_tokens = max(0, int(estimated_input_tokens or 0))
+    return RuntimeObservedInputTruth(
+        effective_input_tokens=input_tokens,
+        input_tokens=input_tokens,
+        cache_hit_tokens=0,
+        provider_model=str(provider_model or "").strip(),
+        actual_request_hash=str(actual_request_hash or "").strip(),
+        source=str(source or "").strip() or "preflight_estimate",
+    )
+
+
 def build_runtime_hybrid_send_token_estimate(
     *,
     preview_estimate_tokens: int,
@@ -200,6 +218,7 @@ __all__ = [
     "RuntimeObservedInputTruth",
     "RuntimeSendTokenPreflightSnapshot",
     "RuntimeSendTokenPreflightThresholds",
+    "build_runtime_estimated_input_truth",
     "build_runtime_hybrid_send_token_estimate",
     "build_runtime_observed_input_truth",
     "build_runtime_send_token_preflight_snapshot",
