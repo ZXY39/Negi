@@ -48,7 +48,6 @@ from main.runtime.pending_notice_state import (
     PENDING_NOTICE_STATE_KEY,
     RESUME_MODE_ORDINARY,
     RESUME_MODE_WAIT_FOR_CHILDREN,
-    normalize_pending_notice_state,
     set_pending_notice_state,
 )
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
@@ -675,10 +674,6 @@ class NodeRunner:
         metadata = dict(node.metadata or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
         return normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
 
-    def _pending_notice_state(self, *, node: NodeRecord) -> dict[str, str]:
-        metadata = dict(node.metadata or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
-        return normalize_pending_notice_state(metadata.get(PENDING_NOTICE_STATE_KEY))
-
     def _update_pending_notice_state(
         self,
         *,
@@ -910,7 +905,7 @@ class NodeRunner:
             )
         return payloads
 
-    def _root_distribution_notice_records(self, *, epoch) -> list[dict[str, Any]]:
+    def _root_distribution_notice_records(self, *, epoch, created_at: str | None = None) -> list[dict[str, Any]]:
         payload = dict(epoch.payload or {})
         queued_root_messages = [
             str(item or '').strip()
@@ -921,7 +916,7 @@ class NodeRunner:
             queued_root_messages = [str(epoch.root_message or '').strip()]
         epoch_id = str(epoch.epoch_id or '').strip()
         root_node_id = str(epoch.root_node_id or '').strip()
-        created_at = now_iso()
+        normalized_created_at = str(created_at or now_iso()).strip()
         records: list[dict[str, Any]] = []
         for index, message in enumerate(queued_root_messages, start=1):
             if not message:
@@ -932,19 +927,25 @@ class NodeRunner:
                     'epoch_id': epoch_id,
                     'source_node_id': root_node_id,
                     'message': message,
-                    'created_at': created_at,
+                    'created_at': normalized_created_at,
                     'order_index': index,
                 }
             )
         return records
 
-    def _queue_pending_root_distribution_notices(self, *, epoch) -> None:
+    def _queue_pending_root_distribution_notices(self, *, epoch, created_at: str | None = None) -> None:
         root_node_id = str(epoch.root_node_id or '').strip()
         if not root_node_id:
             return
-        records = self._root_distribution_notice_records(epoch=epoch)
+        normalized_created_at = str(created_at or now_iso()).strip()
+        records = self._root_distribution_notice_records(epoch=epoch, created_at=normalized_created_at)
         if not records:
             return
+        root_node = self._store.get_node(root_node_id)
+        resume_mode = RESUME_MODE_ORDINARY
+        holding_round_id = ''
+        if root_node is not None:
+            resume_mode, holding_round_id = self._pending_notice_resume_target(node=root_node)
 
         def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
             updated = record_pending_append_notice_records(
@@ -958,6 +959,13 @@ class NodeRunner:
             return metadata
 
         self._log_service.update_node_metadata(root_node_id, _mutate)
+        self._update_pending_notice_state(
+            node_id=root_node_id,
+            resume_mode=resume_mode,
+            epoch_id=str(epoch.epoch_id or '').strip(),
+            holding_round_id=holding_round_id,
+            updated_at=normalized_created_at,
+        )
 
     def _persist_distribution_delivery(
         self,

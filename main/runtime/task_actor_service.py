@@ -7,16 +7,6 @@ from dataclasses import dataclass
 from main.errors import TaskPausedError, describe_exception
 from main.models import NodeFinalResult, normalize_final_acceptance_metadata
 from main.protocol import now_iso
-from main.runtime.append_notice_context import (
-    PENDING_APPEND_NOTICE_RECORDS_KEY,
-    normalize_pending_append_notice_records,
-    record_pending_append_notice_records,
-)
-from main.runtime.pending_notice_state import (
-    PENDING_NOTICE_STATE_KEY,
-    RESUME_MODE_ORDINARY,
-    set_pending_notice_state,
-)
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 
 _DEFAULT_NODE_DISPATCH_LIMITS = {
@@ -524,66 +514,8 @@ class TaskActorService:
                 pending_node_ids.append(node_id)
         return pending_node_ids
 
-    @staticmethod
-    def _root_distribution_notice_records(*, epoch, created_at: str) -> list[dict[str, object]]:
-        payload = dict(epoch.payload or {})
-        queued_root_messages = [
-            str(item or '').strip()
-            for item in list(payload.get('queued_root_messages') or [])
-            if str(item or '').strip()
-        ]
-        if not queued_root_messages:
-            queued_root_messages = [str(epoch.root_message or '').strip()]
-        root_node_id = str(epoch.root_node_id or '').strip()
-        epoch_id = str(epoch.epoch_id or '').strip()
-        records: list[dict[str, object]] = []
-        for index, message in enumerate(queued_root_messages, start=1):
-            if not message:
-                continue
-            records.append(
-                {
-                    'notification_id': f'root-notice:{epoch_id}:{index}',
-                    'epoch_id': epoch_id,
-                    'source_node_id': root_node_id,
-                    'message': message,
-                    'created_at': str(created_at or '').strip(),
-                    'order_index': index,
-                }
-            )
-        return records
-
     def _queue_root_distribution_notices(self, *, epoch, created_at: str) -> None:
-        root_node_id = str(epoch.root_node_id or '').strip()
-        if not root_node_id:
-            return
-        notice_records = self._root_distribution_notice_records(epoch=epoch, created_at=created_at)
-        if not notice_records:
-            return
-        resume_mode = RESUME_MODE_ORDINARY
-        holding_round_id = ''
-        root_node = self._store.get_node(root_node_id)
-        if root_node is not None:
-            resume_mode, holding_round_id = self._node_runner._pending_notice_resume_target(node=root_node)
-        epoch_id = str(epoch.epoch_id or '').strip()
-        normalized_created_at = str(created_at or '').strip()
-
-        def _mutate(metadata: dict[str, object]) -> dict[str, object]:
-            current = normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
-            updated = record_pending_append_notice_records(current, records=notice_records)
-            if updated:
-                metadata[PENDING_APPEND_NOTICE_RECORDS_KEY] = updated
-            else:
-                metadata.pop(PENDING_APPEND_NOTICE_RECORDS_KEY, None)
-            metadata[PENDING_NOTICE_STATE_KEY] = set_pending_notice_state(
-                metadata.get(PENDING_NOTICE_STATE_KEY),
-                resume_mode=resume_mode,
-                epoch_id=epoch_id,
-                holding_round_id=holding_round_id,
-                updated_at=normalized_created_at,
-            )
-            return metadata
-
-        self._log_service.update_node_metadata(root_node_id, _mutate)
+        self._node_runner._queue_pending_root_distribution_notices(epoch=epoch, created_at=created_at)
 
     async def _run_distribution_epoch(self, task_id: str) -> bool | None:
         task = self._store.get_task(task_id)

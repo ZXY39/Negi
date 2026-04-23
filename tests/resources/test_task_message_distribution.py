@@ -1594,7 +1594,7 @@ async def test_root_distribution_notice_uses_wait_for_children_resume_mode_when_
         )
         created_at = "2026-04-24T12:00:00+08:00"
 
-        service.task_actor_service._queue_root_distribution_notices(epoch=epoch, created_at=created_at)
+        service.node_runner._queue_pending_root_distribution_notices(epoch=epoch, created_at=created_at)
 
         updated_root = service.store.get_node(record.root_node_id)
         pending_notice_state = dict((updated_root.metadata or {}).get(PENDING_NOTICE_STATE_KEY) or {})
@@ -1623,7 +1623,7 @@ async def test_root_distribution_notice_uses_ordinary_resume_mode_without_active
         )
         created_at = "2026-04-24T12:05:00+08:00"
 
-        service.task_actor_service._queue_root_distribution_notices(epoch=epoch, created_at=created_at)
+        service.node_runner._queue_pending_root_distribution_notices(epoch=epoch, created_at=created_at)
 
         updated_root = service.store.get_node(record.root_node_id)
         pending_notice_state = dict((updated_root.metadata or {}).get(PENDING_NOTICE_STATE_KEY) or {})
