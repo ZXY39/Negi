@@ -738,7 +738,13 @@ class NodeRunner:
         )
 
     def _distribution_runtime_state(self, task_id: str) -> dict[str, Any]:
-        runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
+        getter = getattr(self._log_service, 'read_task_runtime_meta', None)
+        if not callable(getter):
+            return {}
+        try:
+            runtime_meta = dict(getter(task_id) or {})
+        except Exception:
+            return {}
         return dict(runtime_meta.get('distribution') or {})
 
     def _distribution_mode_active(self, *, task_id: str, node_id: str) -> bool:
@@ -1267,7 +1273,10 @@ class NodeRunner:
             workspace_root=self._workspace_root(),
             process_cwd=self._process_cwd(),
         )
-        task_temp_dir = str(self._task_temp_dir(getattr(task, 'task_id', None)))
+        workspace_root = Path(
+            project_environment.get('workspace_root') or self._workspace_root()
+        ).expanduser().resolve()
+        task_temp_dir = str(self._task_temp_dir(getattr(task, 'task_id', None), fallback_root=workspace_root))
         return {
             'session_key': task.session_id,
             'task_id': task.task_id,
@@ -1328,8 +1337,9 @@ class NodeRunner:
             return Path(shell).name
         return 'sh'
 
-    def _task_temp_dir(self, task_id: str | None) -> Path:
-        fallback = (self._workspace_root() / 'temp').resolve()
+    def _task_temp_dir(self, task_id: str | None, *, fallback_root: Path | None = None) -> Path:
+        base_root = Path(fallback_root or self._workspace_root()).expanduser().resolve()
+        fallback = (base_root / 'temp').resolve()
         normalized_task_id = str(task_id or '').strip()
         if not normalized_task_id:
             return fallback
@@ -1355,7 +1365,10 @@ class NodeRunner:
             workspace_root=self._workspace_root(),
             process_cwd=self._process_cwd(),
         )
-        task_temp_dir = str(self._task_temp_dir(getattr(task, 'task_id', None)))
+        workspace_root = Path(
+            project_environment.get('workspace_root') or self._workspace_root()
+        ).expanduser().resolve()
+        task_temp_dir = str(self._task_temp_dir(getattr(task, 'task_id', None), fallback_root=workspace_root))
         return {
             'os_family': self._os_family(),
             'shell_family': str(project_environment.get('shell_family') or self._shell_family()),

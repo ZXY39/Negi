@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -147,6 +148,7 @@ def test_web_lifespan_attempts_env_auto_unlock_before_runtime_boot(monkeypatch) 
 
 def test_run_worker_runtime_uses_env_auto_unlock(monkeypatch, tmp_path: Path) -> None:
     calls: list[str] = []
+    original_runtime_role = os.environ.get("G3KU_TASK_RUNTIME_ROLE")
 
     class _Service:
         async def startup(self) -> None:
@@ -174,12 +176,18 @@ def test_run_worker_runtime_uses_env_auto_unlock(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(launcher, "_make_provider", lambda config: ("provider", config))
     monkeypatch.setattr(launcher, "_make_agent_loop", lambda config, bus, provider, debug_mode=False: _Agent())
 
-    with pytest.raises(RuntimeError, match="stop_after_unlock"):
-        asyncio.run(launcher.run_worker_runtime())
+    try:
+        with pytest.raises(RuntimeError, match="stop_after_unlock"):
+            asyncio.run(launcher.run_worker_runtime())
 
-    assert calls[:4] == [
-        f"dirs:{tmp_path}",
-        f"seed:{tmp_path}",
-        f"unlock:{tmp_path}",
-        f"sync:{tmp_path}",
-    ]
+        assert calls[:4] == [
+            f"dirs:{tmp_path}",
+            f"seed:{tmp_path}",
+            f"unlock:{tmp_path}",
+            f"sync:{tmp_path}",
+        ]
+    finally:
+        if original_runtime_role is None:
+            os.environ.pop("G3KU_TASK_RUNTIME_ROLE", None)
+        else:
+            os.environ["G3KU_TASK_RUNTIME_ROLE"] = original_runtime_role

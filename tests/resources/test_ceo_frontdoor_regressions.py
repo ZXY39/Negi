@@ -871,7 +871,7 @@ async def test_ceo_frontdoor_runner_retries_empty_turn_until_valid_result(monkey
 
     assert output == "done"
     assert len(backend.calls) == 3
-    assert sleep_calls == [1.0]
+    assert sleep_calls == [1.0, 2.0]
 
 
 @pytest.mark.asyncio
@@ -1185,6 +1185,7 @@ async def test_graph_execute_tools_drops_frontdoor_summary_fields(monkeypatch, t
             "messages": [{"role": "user", "content": f"message {idx}"} for idx in range(6)],
             "tool_call_payloads": [{"id": "call-1", "name": "missing_tool", "arguments": {"value": "alpha"}}],
             "response_payload": {"content": "tool preface"},
+            "model_refs": ["openai_codex:gpt-test"],
             "synthetic_tool_calls_used": False,
             "parallel_enabled": False,
             "max_parallel_tool_calls": None,
@@ -1243,6 +1244,7 @@ async def test_graph_execute_tools_ignores_stale_frontdoor_summary_inputs(monkey
             "messages": [{"role": "user", "content": f"message {idx}"} for idx in range(6)],
             "tool_call_payloads": [{"id": "call-1", "name": "missing_tool", "arguments": {"value": "alpha"}}],
             "response_payload": {"content": "tool preface"},
+            "model_refs": ["openai_codex:gpt-test"],
             "synthetic_tool_calls_used": False,
             "parallel_enabled": False,
             "max_parallel_tool_calls": None,
