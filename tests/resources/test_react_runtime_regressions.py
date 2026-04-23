@@ -3168,6 +3168,7 @@ async def test_react_loop_writes_candidate_skill_items_into_before_model_frame()
                 "description": "terminal workflow",
             }
         ],
+        contract_visible_skill_ids=["skill-creator", "tmux"],
         stage_payload={},
         hydrated_executor_names=[],
         lightweight_tool_ids=[],
@@ -3185,6 +3186,7 @@ async def test_react_loop_writes_candidate_skill_items_into_before_model_frame()
                 }
             ]
             assert frame.get("candidate_skill_ids") == ["tmux"]
+            assert frame.get("contract_visible_skill_ids") == ["skill-creator", "tmux"]
             return LLMResponse(
                 content="",
                 tool_calls=[
@@ -4465,6 +4467,7 @@ async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_sk
             "description": "terminal workflow",
         },
     ]
+    assert dynamic_payload["contract_visible_skill_ids"] == ["skill-creator", "tmux"]
     assert enriched[0]["content"] == "base prompt"
 
 

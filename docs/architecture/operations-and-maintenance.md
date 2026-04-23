@@ -162,6 +162,7 @@ Maintenance note for `task_append_notice` / task message distribution:
 - `distributing` means the active frontier is currently being processed through the ordinary task/node dispatcher. This is still queue-controlled node work, not a sidecar lane.
 - `resume_ready` means distribution decisions are finished, but at least one node still has an unconsumed local notice or delivered mailbox row. Ordinary execution may resume, but the append-notice transaction is not complete until `pending_notice_node_ids` becomes empty.
 - If root remains in `waiting_children` while `runtime_meta.distribution.mode == "task_wide_barrier"` still blocks that node, treat that as a barrier-priority regression before changing prompt logic.
+- If the epoch is already in `resume_ready` and the same node is still listed in `pending_notice_node_ids`, that node must still skip interrupted-turn recovery such as `pending_tool_turn` or `waiting_children` replay until the pending local notice or mailbox delivery is consumed. If replay wins first, treat that as a resume-priority regression.
 - If a child execution node was previously terminal and now appears active again after append-notice, check whether its old acceptance node was logically invalidated rather than deleted. The acceptance record should still exist for audit, but it should no longer be authoritative for the current spawn entry.
 - If a notice appears in mailbox rows but not in the next model request, inspect whether it is still in the raw notice window or has already been rolled into a compressed notice-tail segment. Those tail blocks are now intentionally kept ahead of stage archive blocks in prompt assembly.
 - If force delete is requested during message distribution, deletion should win immediately. Do not wait for the epoch to finish naturally; confirm instead that epochs/mailboxes were cancelled or purged before the task row disappeared.
@@ -221,6 +222,13 @@ Maintenance note for `task_append_notice` / task message distribution:
 - `g3ku/agent/tools/registry.py`
 - `g3ku/runtime/context/`
 - `main/service/runtime_service.py`
+- 如果症状是执行节点/验收节点说“当前没有 candidate skills”或把本应当作 skill 的东西误判成“缺失的 callable 联网工具”，优先同时检查节点 runtime frame 与 `runtime-frame-messages:{node_id}` artifact 里的两组字段：
+  - `contract_visible_skill_ids`：回答 `runtime_service._node_context_selection_inputs()` 当轮实际看到了哪些 contract-visible skills
+  - `candidate_skill_ids`：回答 selector 最终留下了哪些 canonical skill candidates
+- 排障顺序应先分层：
+  - `contract_visible_skill_ids=[]`：优先怀疑 RBAC / governance / resource visibility 输入层
+  - `contract_visible_skill_ids` 非空但 `candidate_skill_ids=[]`：优先怀疑 selector、dense fallback、或 contract/frame 重建链路
+  - 两者都非空但模型文本里 `candidate_skills: none`：优先怀疑动态 contract 重建或 stale frame/消息恢复问题
 
 ### 模型配置不生效
 

@@ -319,6 +319,7 @@ class NodeRuntimeToolContract:
     hydrated_executor_names: list[str]
     lightweight_tool_ids: list[str]
     selection_trace: dict[str, Any]
+    contract_visible_skill_ids: list[str] | None = None
     candidate_tool_items: list[dict[str, str]] | None = None
     candidate_skill_items: list[dict[str, str]] | None = None
     repair_required_tool_items: list[dict[str, str]] | None = None
@@ -346,6 +347,10 @@ class NodeRuntimeToolContract:
         repair_required_skills = _normalized_repair_required_skill_items(self.repair_required_skill_items)
         if repair_required_skills:
             payload['repair_required_skills'] = repair_required_skills
+        if self.contract_visible_skill_ids is not None:
+            payload['contract_visible_skill_ids'] = _normalized_name_list(
+                list(self.contract_visible_skill_ids or [])
+            )
         if isinstance(self.exec_runtime_policy, dict):
             payload['exec_runtime_policy'] = dict(self.exec_runtime_policy)
         return payload

@@ -331,6 +331,7 @@ class TaskLogService:
             'selected_skill_ids': [],
             'candidate_skill_ids': [],
             'candidate_skill_items': [],
+            'contract_visible_skill_ids': [],
             'rbac_visible_tool_names': [],
             'rbac_visible_skill_ids': [],
             'hydrated_executor_state': [],
@@ -3552,11 +3553,18 @@ class TaskLogService:
             messages=messages,
         )
         payload['callable_tool_snapshots'] = callable_tool_snapshots
-        if messages or callable_tool_snapshots:
+        contract_visible_skill_ids = [
+            str(item or '').strip()
+            for item in list(payload.get('contract_visible_skill_ids') or [])
+            if str(item or '').strip()
+        ]
+        payload['contract_visible_skill_ids'] = contract_visible_skill_ids
+        if messages or callable_tool_snapshots or contract_visible_skill_ids:
             serialized = json.dumps(
                 {
                     'messages': messages,
                     'callable_tool_snapshots': callable_tool_snapshots,
+                    'contract_visible_skill_ids': contract_visible_skill_ids,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -3664,6 +3672,11 @@ class TaskLogService:
                     for item in list(next_frame.get('candidate_skill_items') or [])
                     if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
                 ],
+                'contract_visible_skill_ids': [
+                    str(item or '').strip()
+                    for item in list(next_frame.get('contract_visible_skill_ids') or [])
+                    if str(item or '').strip()
+                ],
                 'rbac_visible_tool_names': [
                     str(item or '').strip()
                     for item in list(next_frame.get('rbac_visible_tool_names') or [])
@@ -3740,6 +3753,11 @@ class TaskLogService:
         payload = dict(record.payload or {})
         messages: list[dict[str, Any]] = []
         callable_tool_snapshots: list[dict[str, Any]] = self._sanitize_callable_tool_snapshots(payload.get('callable_tool_snapshots') or [])
+        contract_visible_skill_ids = [
+            str(item or '').strip()
+            for item in list(payload.get('contract_visible_skill_ids') or [])
+            if str(item or '').strip()
+        ]
         ref = str(payload.get('messages_ref') or '').strip()
         if ref:
             text = self._resolve_content_ref(ref)
@@ -3755,6 +3773,12 @@ class TaskLogService:
                     callable_tool_snapshots = self._sanitize_callable_tool_snapshots(
                         parsed.get('callable_tool_snapshots') or callable_tool_snapshots
                     )
+                    if not contract_visible_skill_ids:
+                        contract_visible_skill_ids = [
+                            str(item or '').strip()
+                            for item in list(parsed.get('contract_visible_skill_ids') or [])
+                            if str(item or '').strip()
+                        ]
         return {
             'node_id': record.node_id,
             'depth': int(record.depth or 0),
@@ -3825,6 +3849,7 @@ class TaskLogService:
                 for item in list(payload.get('candidate_skill_items') or [])
                 if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
             ],
+            'contract_visible_skill_ids': list(contract_visible_skill_ids),
             'rbac_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('rbac_visible_tool_names') or [])
@@ -4420,6 +4445,11 @@ class TaskLogService:
                 for item in list(payload.get('candidate_skill_items') or [])
                 if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
             ],
+            'contract_visible_skill_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('contract_visible_skill_ids') or [])
+                if str(item or '').strip()
+            ],
             'rbac_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('rbac_visible_tool_names') or [])
@@ -4506,6 +4536,11 @@ class TaskLogService:
             'candidate_skill_ids': [
                 str(item or '').strip()
                 for item in list(payload.get('candidate_skill_ids') or [])
+                if str(item or '').strip()
+            ],
+            'contract_visible_skill_ids': [
+                str(item or '').strip()
+                for item in list(payload.get('contract_visible_skill_ids') or [])
                 if str(item or '').strip()
             ],
             'hydrated_executor_state': [

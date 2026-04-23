@@ -465,6 +465,9 @@ class ReActToolLoop:
                         for item in list(dynamic_contract_payload.get('candidate_skills') or [])
                         if isinstance(item, dict)
                     ],
+                    'contract_visible_skill_ids': self._normalized_name_list(
+                        list(dynamic_contract_payload.get('contract_visible_skill_ids') or [])
+                    ),
                     'rbac_visible_tool_names': list(
                         (tool_schema_selection.get('trace') or {}).get('rbac_visible_tool_names') or []
                     ),
@@ -1248,6 +1251,11 @@ class ReActToolLoop:
         frame = self._runtime_frame(task.task_id, node.node_id)
         if not isinstance(frame, dict):
             return None
+        if self._distribution_priority_blocks_recovery(
+            runtime_context=runtime_context,
+            node_id=str(node.node_id or '').strip(),
+        ):
+            return None
         pending_tool_calls = [
             dict(item)
             for item in list(frame.get('pending_tool_calls') or [])
@@ -1476,6 +1484,28 @@ class ReActToolLoop:
         )
         return prepared_history
 
+    @staticmethod
+    def _distribution_priority_blocks_recovery(*, runtime_context: dict[str, Any], node_id: str) -> bool:
+        distribution = dict((runtime_context or {}).get('distribution_state') or {})
+        if str(distribution.get('mode') or '').strip() != 'task_wide_barrier':
+            return False
+        normalized_node_id = str(node_id or '').strip()
+        if not normalized_node_id:
+            return False
+        blocked_node_ids = {
+            str(item or '').strip()
+            for item in list(distribution.get('blocked_node_ids') or [])
+            if str(item or '').strip()
+        }
+        if normalized_node_id in blocked_node_ids:
+            return True
+        pending_notice_node_ids = {
+            str(item or '').strip()
+            for item in list(distribution.get('pending_notice_node_ids') or [])
+            if str(item or '').strip()
+        }
+        return normalized_node_id in pending_notice_node_ids
+
     async def _resume_waiting_children_turn_if_needed(
         self,
         *,
@@ -1488,15 +1518,11 @@ class ReActToolLoop:
         frame = self._runtime_frame(task.task_id, node.node_id)
         if not isinstance(frame, dict):
             return None
-        distribution = dict((runtime_context or {}).get('distribution_state') or {})
-        if str(distribution.get('mode') or '').strip() == 'task_wide_barrier':
-            blocked_node_ids = {
-                str(item or '').strip()
-                for item in list(distribution.get('blocked_node_ids') or [])
-                if str(item or '').strip()
-            }
-            if str(node.node_id or '').strip() in blocked_node_ids:
-                return None
+        if self._distribution_priority_blocks_recovery(
+            runtime_context=runtime_context,
+            node_id=str(node.node_id or '').strip(),
+        ):
+            return None
         if str(frame.get('phase') or '').strip() != 'waiting_children':
             return None
         if list(frame.get('pending_tool_calls') or []):
@@ -2172,6 +2198,21 @@ class ReActToolLoop:
             preferred_candidate_skill_items,
             id_key='skill_id',
         )
+        if isinstance(current_frame.get('contract_visible_skill_ids'), list):
+            contract_visible_skill_ids = self._normalized_name_list(
+                list(current_frame.get('contract_visible_skill_ids') or [])
+            )
+        elif isinstance(existing_payload.get('contract_visible_skill_ids'), list):
+            contract_visible_skill_ids = self._normalized_name_list(
+                list(existing_payload.get('contract_visible_skill_ids') or [])
+            )
+        elif isinstance(current_frame.get('visible_skills'), list):
+            contract_visible_skill_ids = self._candidate_names_from_entries(
+                current_frame.get('visible_skills'),
+                id_key='skill_id',
+            )
+        else:
+            contract_visible_skill_ids = []
         exec_runtime_policy = None
         if EXEC_TOOL_EXECUTOR_NAME in set(callable_tool_names + candidate_tool_names) or EXEC_TOOL_FAMILY_ID in set(callable_tool_names + candidate_tool_names):
             raw_exec_runtime_policy = current_frame.get('exec_runtime_policy') or existing_payload.get('exec_runtime_policy')
@@ -2186,6 +2227,7 @@ class ReActToolLoop:
             visible_skills=[],
             candidate_skill_ids=candidate_skill_ids,
             candidate_skill_items=candidate_skill_items,
+            contract_visible_skill_ids=contract_visible_skill_ids,
             stage_payload=self._stage_prompt_payload_from_gate(stage_gate),
             hydrated_executor_names=self._normalized_name_list(list(tool_schema_selection.get('hydrated_executor_names') or [])),
             lightweight_tool_ids=self._normalized_name_list(list(tool_schema_selection.get('lightweight_tool_ids') or [])),

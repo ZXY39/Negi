@@ -188,7 +188,11 @@ Maintenance note for the memory tool family:
 - 对 CEO/frontdoor，`candidate_tool_names` / `candidate_skill_ids` 属于 internal canonical state；真正暴露给模型的当前轮显示合同只保留一份 `frontdoor_runtime_tool_contract`。
 - 这还意味着 frontdoor 的旧轮 candidate/tool/skill catalog 不应进入 durable history。后续轮次只能继承真实工具调用轨迹与上下文，而不是再次看到上一轮的候选列表。
 - 对执行/验收节点，skill 候选不再只依赖当前轮的 `node_runtime_tool_contract` user 消息存活；canonical `candidate_skill_ids` 继续落在 runtime frame，`candidate_skill_items` 也会随 frame 一起持久化，供阶段切换、prompt compaction 之后的下一轮 contract 刷新从 frame 恢复。
+- 节点侧现在还会把 `runtime_service._node_context_selection_inputs()` 当轮拿到的 contract-visible skill 快照单独记成 `contract_visible_skill_ids`，并随 runtime frame 与 `runtime-frame-messages:{node_id}` artifact 一起落盘。它不是新的 candidate truth source，而是专门给排障用的输入层证据。
 - 维护时如果看到 `load_skill_context` 报“当前运行时候选技能未包含 ...”，不要只检查模型当轮提示里是否还看得到那条 dynamic contract；先看节点 runtime frame 里的 `candidate_skill_ids` / `candidate_skill_items` 是否仍在，若 frame 还在而动态消息丢了，说明是 contract 重建链路问题，而不是 selector 一开始没选中。
+- 如果排查的是“为什么这轮 `candidate_skills` 直接是空的”，先对照 `contract_visible_skill_ids` 与 `candidate_skill_ids`：
+  - 前者也为空，优先怀疑 runtime-service 输入层的可见 skill 集合本来就空了
+  - 前者非空但后者为空，优先怀疑 selector / canonical candidate 生成链路，而不是把 skill 当成了 callable tool 或 prompt 文本丢失
 - 节点路径里，语义可用时的 candidate skills / candidate tools 上限都固定为 16；语义不可用时，直接退化为全部 RBAC 可见集合。
 - CEO/frontdoor 路径里，语义可用时默认也按 16 取候选：`skill_inventory_top_k=16`、`extension_tool_top_k=16`；这两个值的实际来源是 `tools/memory_runtime/resource.yaml` / `MemoryAssemblyConfig`，而不是前门内的额外 6/8 fallback。
 - frontdoor 的 `extension_tool_top_k` 现在只控制“最终候选工具数”，不等于 dense 检索宽度；前门会先用更宽的 `tool_limit` 做 dense/rerank，再在最后一层把 candidate 工具收敛到 `extension_tool_top_k`。

@@ -6532,6 +6532,18 @@ class MainRuntimeService:
             return record.get(key)
         return getattr(record, key, None)
 
+    @classmethod
+    def _normalized_skill_id_list(cls, records: list[Any] | None) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for record in list(records or []):
+            skill_id = str(cls._skill_record_value(record, 'skill_id') or '').strip()
+            if not skill_id or skill_id in seen:
+                continue
+            seen.add(skill_id)
+            ordered.append(skill_id)
+        return ordered
+
     @staticmethod
     def _normalized_reason_values(items: list[Any] | None) -> list[str]:
         ordered: list[str] = []
@@ -6746,10 +6758,19 @@ class MainRuntimeService:
         )
         session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         actor_role = self._actor_role_for_node(node)
+        visible_skills = list(self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
+        contract_visible_skill_ids = [
+            str(item or '').strip()
+            for item in list(frame.get('contract_visible_skill_ids') or [])
+            if str(item or '').strip()
+        ]
+        if not contract_visible_skill_ids:
+            contract_visible_skill_ids = self._normalized_skill_id_list(visible_skills)
         return {
             'session_key': session_key,
             'actor_role': actor_role,
-            'visible_skills': list(self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_key) or []),
+            'visible_skills': visible_skills,
+            'contract_visible_skill_ids': contract_visible_skill_ids,
             'candidate_tool_items': candidate_tool_items,
             'candidate_skill_items': candidate_skill_items,
             'visible_tool_families': list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_key) or []),
@@ -6774,6 +6795,7 @@ class MainRuntimeService:
             'session_key': session_key,
             'actor_role': actor_role,
             'visible_skills': visible_skills,
+            'contract_visible_skill_ids': self._normalized_skill_id_list(visible_skills),
             'visible_tool_families': visible_tool_families,
             'visible_tool_names': visible_tool_names,
             'prompt': prompt,
@@ -7259,6 +7281,11 @@ class MainRuntimeService:
         inputs = cached or self._node_context_selection_inputs(task=task, node=node)
         session_key = str(inputs.get('session_key') or getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         visible_skills = list(inputs.get('visible_skills') or [])
+        contract_visible_skill_ids = [
+            str(item or '').strip()
+            for item in list(inputs.get('contract_visible_skill_ids') or [])
+            if str(item or '').strip()
+        ]
         full_callable_tool_names = self._callable_tool_names_for_node(
             task=task,
             node=node,
@@ -7363,6 +7390,7 @@ class MainRuntimeService:
                 visible_skills=[],
                 candidate_skill_ids=candidate_skill_ids,
                 candidate_skill_items=candidate_skill_items,
+                contract_visible_skill_ids=contract_visible_skill_ids,
                 repair_required_tool_items=repair_required_tool_items,
                 repair_required_skill_items=repair_required_skill_items,
                 stage_payload=stage_payload,
