@@ -1264,6 +1264,128 @@ async def test_frontdoor_actual_request_trace_round_trips_usage_ground_truth(
 
 
 @pytest.mark.asyncio
+async def test_ceo_frontdoor_call_model_falls_back_to_preflight_truth_when_usage_has_no_input_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(
+        runner,
+        "_selected_tool_schemas",
+        lambda names: [
+            {
+                "name": str((list(names or []) or ["submit_next_stage"])[0]),
+                "description": "",
+                "parameters": {"type": "object"},
+            }
+        ],
+        raising=False,
+    )
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "ceo_primary",
+            "provider_model": "openai:gpt-5.2",
+            "context_window_tokens": 32000,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **_: 1200, raising=False)
+
+    async def _call_model_without_input_usage(**kwargs):
+        return AIMessage(
+            content="plain reply",
+            response_metadata={
+                "finish_reason": "stop",
+                "usage": {
+                    "output_tokens": 9,
+                },
+                "provider_request_meta": {
+                    "provider": "responses",
+                    "endpoint": "https://example.test/v1/responses",
+                },
+                "provider_request_body": {
+                    "model": "gpt-5.4-mini",
+                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                    "prompt_cache_key": "cache-key",
+                    "tool_choice": "auto",
+                },
+            },
+        )
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_without_input_usage)
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _active_turn_id="turn-frontdoor-estimate-fallback-1",
+        _frontdoor_actual_request_history=[],
+        _current_turn_id=lambda prompt=None: "turn-frontdoor-estimate-fallback-1",
+    )
+
+    update = await runner._graph_call_model(
+        {
+            "messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "hello"},
+            ],
+            "stable_messages": [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "hello"},
+            ],
+            "dynamic_appendix_messages": [],
+            "turn_overlay_text": "",
+            "tool_names": ["submit_next_stage"],
+            "candidate_tool_names": [],
+            "candidate_tool_items": [],
+            "hydrated_tool_names": [],
+            "visible_skill_ids": [],
+            "candidate_skill_ids": [],
+            "rbac_visible_tool_names": ["submit_next_stage"],
+            "rbac_visible_skill_ids": [],
+            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "model_refs": ["openai_codex:gpt-test"],
+            "parallel_enabled": False,
+            "prompt_cache_key": "cache-key",
+            "iteration": 0,
+            "max_iterations": 4,
+            "session_key": "web:shared",
+        },
+        runtime=SimpleNamespace(
+            context=CeoRuntimeContext(
+                loop=None,
+                session=session,
+                session_key="web:shared",
+                on_progress=None,
+            )
+        ),
+    )
+
+    request_path = Path(str(update["frontdoor_actual_request_path"]))
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+    expected_truth = {
+        "effective_input_tokens": 1200,
+        "input_tokens": 1200,
+        "cache_hit_tokens": 0,
+        "provider_model": "openai:gpt-5.2",
+        "actual_request_hash": str(payload["actual_request_hash"] or "").strip(),
+        "source": "preflight_estimate",
+    }
+
+    assert payload["observed_input_truth"] == expected_truth
+    assert payload["frontdoor_token_preflight_diagnostics"]["observed_input_truth"] == expected_truth
+    assert payload["frontdoor_token_preflight_diagnostics"]["effective_input_tokens"] == 1200
+    assert update["frontdoor_token_preflight_diagnostics"]["observed_input_truth"] == expected_truth
+    assert update["frontdoor_token_preflight_diagnostics"]["effective_input_tokens"] == 1200
+    assert update["frontdoor_actual_request_history"][-1]["observed_input_truth"] == expected_truth
+    assert payload["usage"] == {
+        "output_tokens": 9,
+    }
+
+
+@pytest.mark.asyncio
 async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_inside_turn_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

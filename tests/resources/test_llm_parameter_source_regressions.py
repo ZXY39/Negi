@@ -799,6 +799,64 @@ def test_runtime_observed_input_truth_accepts_cache_read_tokens_alias() -> None:
     assert truth.effective_input_tokens == 10200
 
 
+def test_normalize_usage_payload_treats_nested_input_cached_tokens_as_breakdown() -> None:
+    from g3ku.providers.base import normalize_usage_payload
+
+    normalized = normalize_usage_payload(
+        {
+            "input_tokens": 57986,
+            "output_tokens": 125,
+            "input_tokens_details": {
+                "cached_tokens": 56064,
+            },
+        }
+    )
+
+    assert normalized == {
+        "input_tokens": 1922,
+        "output_tokens": 125,
+        "cache_hit_tokens": 56064,
+    }
+
+
+def test_normalize_usage_payload_treats_nested_prompt_cached_tokens_as_breakdown() -> None:
+    from g3ku.providers.base import normalize_usage_payload
+
+    normalized = normalize_usage_payload(
+        {
+            "prompt_tokens": 2006,
+            "completion_tokens": 300,
+            "prompt_tokens_details": {
+                "cached_tokens": 1920,
+            },
+        }
+    )
+
+    assert normalized == {
+        "input_tokens": 86,
+        "output_tokens": 300,
+        "cache_hit_tokens": 1920,
+    }
+
+
+def test_normalize_usage_payload_keeps_cache_read_alias_as_separate_input_lane() -> None:
+    from g3ku.providers.base import normalize_usage_payload
+
+    normalized = normalize_usage_payload(
+        {
+            "input_tokens": 8000,
+            "output_tokens": 250,
+            "cache_read_tokens": 2200,
+        }
+    )
+
+    assert normalized == {
+        "input_tokens": 8000,
+        "output_tokens": 250,
+        "cache_hit_tokens": 2200,
+    }
+
+
 def test_runtime_hybrid_estimate_prefers_conservative_upper_bound() -> None:
     from main.runtime.send_token_preflight import build_runtime_hybrid_send_token_estimate
 

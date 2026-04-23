@@ -256,7 +256,7 @@ def test_memory_management_view_keeps_admin_mutations_hidden_by_default() -> Non
     assert "/api/memory/admin/retry-head" not in html_source
 
 
-def test_memory_processed_card_renders_discarded_rows_as_discarded_status_only() -> None:
+def test_memory_processed_card_renders_discarded_rows_as_no_change_status_only() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -340,11 +340,13 @@ def test_memory_processed_card_renders_discarded_rows_as_discarded_status_only()
 
     rendered = str(result["html"])
     assert 'data-status="success"' not in rendered
-    assert 'data-status="unpassed"' in rendered
+    assert 'data-status="pending"' in rendered
     assert 'data-memory-detail-open="processed"' in rendered
     assert "policy-chip" not in rendered
     assert "memory-card-time" in rendered
     assert "memory-card-arrow" in rendered
+    assert "无变更" in rendered
+    assert "已废弃" not in rendered
 
 
 def test_memory_processed_applied_row_uses_processed_status_and_time_only() -> None:
@@ -531,3 +533,209 @@ def test_memory_processed_card_prefers_non_readonly_operation_labels_over_applie
     assert "已应用" not in str(result["writeHtml"])
     assert "增加" in str(result["writeHtml"])
     assert "删除" in str(result["deleteHtml"])
+
+
+def test_memory_processed_noop_and_discarded_batches_render_as_no_change() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+
+        class StubElement {}
+        class StubHTMLElement extends StubElement {}
+        class StubHTMLButtonElement extends StubHTMLElement {}
+        class StubHTMLInputElement extends StubHTMLElement {}
+        class StubHTMLTextAreaElement extends StubHTMLElement {}
+        class StubHTMLSelectElement extends StubHTMLElement {}
+
+        class StubDocument {
+          getElementById() { return null; }
+          querySelector() { return null; }
+          querySelectorAll() { return []; }
+          addEventListener() {}
+          createElement() { return {}; }
+        }
+
+        const context = {
+          console,
+          setTimeout,
+          clearTimeout,
+          setInterval,
+          clearInterval,
+          queueMicrotask,
+          navigator: { clipboard: { writeText: async () => {} } },
+          location: { protocol: "http:", host: "localhost", pathname: "/org_graph.html" },
+          localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+          sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+          document: new StubDocument(),
+          window: {},
+          Element: StubElement,
+          HTMLElement: StubHTMLElement,
+          HTMLButtonElement: StubHTMLButtonElement,
+          HTMLInputElement: StubHTMLInputElement,
+          HTMLTextAreaElement: StubHTMLTextAreaElement,
+          HTMLSelectElement: StubHTMLSelectElement,
+          URLSearchParams,
+          URL,
+          AbortController,
+          fetch: async () => ({ ok: true, json: async () => ({}) }),
+          lucide: { createIcons() {} },
+          marked: { parse: (value) => String(value) },
+          DOMPurify: { sanitize: (value) => String(value) },
+          structuredClone: global.structuredClone,
+          performance: { now: () => 0 },
+          requestAnimationFrame: (callback) => { callback(); return 1; },
+          cancelAnimationFrame: () => {},
+          WebSocket: function WebSocket() {},
+          addEventListener() {},
+          removeEventListener() {},
+        };
+        context.window = context;
+
+        vm.createContext(context);
+        vm.runInContext(
+          `${appCode}\\nthis.__testExports = { renderMemoryProcessedCard, memoryProcessedStatusLabel, memoryProcessedBadgeStatus, memoryProcessedOpLabel };`,
+          context,
+        );
+
+        const noopItem = {
+          batch_id: "noop_demo",
+          op: "write",
+          source_op: "assess",
+          status: "applied",
+          noop_reason: "现有长期记忆无需改写或补充。",
+          processed_at: "2026-04-23T23:23:37+08:00",
+        };
+        const discardedItem = {
+          batch_id: "discard_demo",
+          op: "write",
+          source_op: "assess",
+          status: "discarded",
+          discard_reason: "assessed_null",
+          processed_at: "2026-04-23T23:01:56+08:00",
+        };
+
+        console.log(JSON.stringify({
+          noopStatusLabel: context.__testExports.memoryProcessedStatusLabel(noopItem),
+          noopOpLabel: context.__testExports.memoryProcessedOpLabel(noopItem),
+          noopBadgeStatus: context.__testExports.memoryProcessedBadgeStatus(noopItem),
+          noopHtml: context.__testExports.renderMemoryProcessedCard(noopItem),
+          discardedStatusLabel: context.__testExports.memoryProcessedStatusLabel(discardedItem),
+          discardedOpLabel: context.__testExports.memoryProcessedOpLabel(discardedItem),
+          discardedBadgeStatus: context.__testExports.memoryProcessedBadgeStatus(discardedItem),
+          discardedHtml: context.__testExports.renderMemoryProcessedCard(discardedItem),
+        }));
+        """
+    )
+
+    assert str(result["noopStatusLabel"]) == "无变更"
+    assert str(result["noopOpLabel"]) == "无变更"
+    assert str(result["noopBadgeStatus"]) == "pending"
+    assert "无变更" in str(result["noopHtml"])
+    assert "增加" not in str(result["noopHtml"])
+
+    assert str(result["discardedStatusLabel"]) == "无变更"
+    assert str(result["discardedOpLabel"]) == "无变更"
+    assert str(result["discardedBadgeStatus"]) == "pending"
+    assert "无变更" in str(result["discardedHtml"])
+    assert "已废弃" not in str(result["discardedHtml"])
+
+
+def test_memory_processed_detail_preview_includes_noop_reason() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+
+        class StubElement {}
+        class StubHTMLElement extends StubElement {}
+        class StubHTMLButtonElement extends StubHTMLElement {}
+        class StubHTMLInputElement extends StubHTMLElement {}
+        class StubHTMLTextAreaElement extends StubHTMLElement {}
+        class StubHTMLSelectElement extends StubHTMLElement {}
+
+        class StubDocument {
+          getElementById() { return null; }
+          querySelector() { return null; }
+          querySelectorAll() { return []; }
+          addEventListener() {}
+          createElement() { return {}; }
+        }
+
+        const context = {
+          console,
+          setTimeout,
+          clearTimeout,
+          setInterval,
+          clearInterval,
+          queueMicrotask,
+          navigator: { clipboard: { writeText: async () => {} } },
+          location: { protocol: "http:", host: "localhost", pathname: "/org_graph.html" },
+          localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+          sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+          document: new StubDocument(),
+          window: {},
+          Element: StubElement,
+          HTMLElement: StubHTMLElement,
+          HTMLButtonElement: StubHTMLButtonElement,
+          HTMLInputElement: StubHTMLInputElement,
+          HTMLTextAreaElement: StubHTMLTextAreaElement,
+          HTMLSelectElement: StubHTMLSelectElement,
+          URLSearchParams,
+          URL,
+          AbortController,
+          fetch: async () => ({ ok: true, json: async () => ({}) }),
+          lucide: { createIcons() {} },
+          marked: { parse: (value) => String(value) },
+          DOMPurify: { sanitize: (value) => String(value) },
+          structuredClone: global.structuredClone,
+          performance: { now: () => 0 },
+          requestAnimationFrame: (callback) => { callback(); return 1; },
+          cancelAnimationFrame: () => {},
+          WebSocket: function WebSocket() {},
+          addEventListener() {},
+          removeEventListener() {},
+        };
+        context.window = context;
+
+        vm.createContext(context);
+        vm.runInContext(
+          `${appCode}\\nrenderMemoryDetailPreview = () => {}; this.__testExports = { openMemoryDetailPreview, S };`,
+          context,
+        );
+
+        context.__testExports.S.memoryProcessedItems = [{
+          batch_id: "noop_demo",
+          op: "write",
+          source_op: "assess",
+          status: "applied",
+          processed_at: "2026-04-23T23:23:37+08:00",
+          payload_texts: ["原始请求内容"],
+          document_preview: "---\\nid:demo\\n已有记忆预览",
+          model_chain: ["mem"],
+          request_count: 1,
+          usage: { input_tokens: 1, output_tokens: 2, cache_read_tokens: 3 },
+          noop_reason: "候选内容是一次性技术抓包/调用细节，现有长期记忆无需改写或补充。",
+        }];
+
+        context.__testExports.openMemoryDetailPreview("processed", "noop_demo");
+        const preview = context.__testExports.S.memoryDetailPreview;
+        console.log(JSON.stringify({
+          fields: preview.fields,
+          secondaryText: preview.secondaryText,
+        }));
+        """
+    )
+
+    fields = list(result["fields"])
+    assert any(field["label"] == "无变更原因" for field in fields)
+    assert any(
+        field["label"] == "无变更原因"
+        and "现有长期记忆无需改写或补充" in str(field["value"])
+        for field in fields
+    )
+    assert str(result["secondaryText"]) == "---\nid:demo\n已有记忆预览"

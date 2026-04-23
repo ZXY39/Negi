@@ -8587,7 +8587,18 @@ function memoryOpLabel(op) {
     return String(op || "").trim().toLowerCase() === "delete" ? "删除" : "增加";
 }
 
+function memoryProcessedNoopReason(item) {
+    return String(item?.noop_reason || "").trim();
+}
+
+function memoryProcessedIsNoChange(item) {
+    const normalized = String(item?.status || "").trim().toLowerCase();
+    if (normalized === "discarded") return true;
+    return !!memoryProcessedNoopReason(item);
+}
+
 function memoryProcessedStatusLabel(item) {
+    if (memoryProcessedIsNoChange(item)) return "无变更";
     const normalized = String(item?.status || "").trim().toLowerCase();
     if (normalized === "discarded") return "已废弃";
     if (normalized === "applied") return "已应用";
@@ -8595,6 +8606,7 @@ function memoryProcessedStatusLabel(item) {
 }
 
 function memoryProcessedBadgeStatus(item) {
+    if (memoryProcessedIsNoChange(item)) return "pending";
     const normalized = String(item?.status || "").trim().toLowerCase();
     if (normalized === "discarded") return "unpassed";
     if (normalized === "applied") return "success";
@@ -8602,6 +8614,7 @@ function memoryProcessedBadgeStatus(item) {
 }
 
 function memoryProcessedOpLabel(item) {
+    if (memoryProcessedIsNoChange(item)) return "无变更";
     const opLabels = [item?.source_op, item?.op]
         .map((value) => String(value || "").trim().toLowerCase())
         .map((value) => {
@@ -8929,12 +8942,14 @@ function openMemoryDetailPreview(kind, key) {
     if (!source) return;
     const usage = source?.usage && typeof source.usage === "object" ? source.usage : {};
     const payloadTexts = Array.isArray(source?.payload_texts) ? source.payload_texts : [];
+    const noopReason = isProcessed ? memoryProcessedNoopReason(source) : "";
     const fields = isProcessed
         ? [
             { label: "批次", value: normalizedKey },
             { label: "状态", value: memoryProcessedStatusLabel(source) || "-" },
             { label: "操作", value: memoryProcessedOpLabel(source) || "-" },
             { label: "处理时间", value: formatCompactTime(source?.processed_at) || String(source?.processed_at || "-") },
+            ...(noopReason ? [{ label: "无变更原因", value: noopReason }] : []),
             { label: "模型链", value: (Array.isArray(source?.model_chain) ? source.model_chain.join(" -> ") : "") || "-" },
             { label: "请求数", value: String(source?.request_count || payloadTexts.length || 0) },
             { label: "输入", value: String(usage.input_tokens || 0) },
@@ -9651,8 +9666,7 @@ function renderMemoryQueueCard(item) {
 
 function renderMemoryProcessedCard(item) {
     const batchId = String(item?.batch_id || "").trim();
-    const normalizedStatus = String(item?.status || "").trim().toLowerCase();
-    const badgeStatus = normalizedStatus === "discarded" ? "unpassed" : "success";
+    const badgeStatus = memoryProcessedBadgeStatus(item);
     const statusLabel = memoryProcessedOpLabel(item);
     const processedAt = formatCompactTime(item?.processed_at) || String(item?.processed_at || "");
     return `

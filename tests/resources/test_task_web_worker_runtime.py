@@ -2488,6 +2488,82 @@ def test_node_observed_input_truth_is_not_cleared_by_later_output_without_usage(
     assert latest_context["observed_input_truth"] == observed_input_truth
 
 
+def test_node_actual_request_artifact_falls_back_to_preflight_truth_when_usage_has_no_input_tokens(
+    tmp_path: Path,
+) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    service.log_service.update_frame(
+        record.task_id,
+        root.node_id,
+        lambda frame: {
+            **frame,
+            "token_preflight_diagnostics": {
+                "final_request_tokens": 4321,
+                "provider_model": "test:gpt-5.4",
+                "estimate_source": "preview_estimate",
+            },
+        },
+        publish_snapshot=False,
+    )
+
+    service.log_service.append_node_output(
+        record.task_id,
+        root.node_id,
+        content="done",
+        tool_calls=[],
+        usage_attempts=[
+            LLMModelAttempt(
+                model_key="sub gpt-5.4",
+                provider_id="test",
+                provider_model="gpt-5.4",
+                usage={"output_tokens": 5},
+            )
+        ],
+        model_messages=[{"role": "user", "content": "u"}],
+        request_messages=[{"role": "user", "content": "u"}],
+        prompt_cache_key="stable-cache-key",
+    )
+
+    events = service.store.list_task_events(task_id=record.task_id, limit=20)
+    model_call = [item for item in events if item["event_type"] == "task.model.call"][-1]["payload"]
+    expected_truth = {
+        "effective_input_tokens": 4321,
+        "input_tokens": 4321,
+        "cache_hit_tokens": 0,
+        "provider_model": "test:gpt-5.4",
+        "actual_request_hash": str(model_call["actual_request_hash"] or "").strip(),
+        "source": "preflight_estimate",
+    }
+
+    assert model_call["observed_input_truth"] == expected_truth
+
+    actual_request_ref = str(model_call.get("actual_request_ref") or "")
+    actual_request_payload = json.loads(service.log_service.resolve_content_ref(actual_request_ref))
+
+    assert actual_request_payload["observed_input_truth"] == expected_truth
+
+    node_after = service.get_node(record.root_node_id)
+    assert node_after is not None
+    assert dict(node_after.metadata or {}).get("latest_runtime_observed_input_truth") == expected_truth
+
+    latest_context = service.get_node_latest_context_payload(record.task_id, root.node_id)
+    assert latest_context is not None
+    assert latest_context["observed_input_truth"] == expected_truth
+
+
 def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
