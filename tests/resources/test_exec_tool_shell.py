@@ -106,6 +106,15 @@ def test_exec_tool_builds_subprocess_env_with_managed_temp_and_externaltools(tmp
     assert (tmp_path / 'externaltools').is_dir()
 
 
+def test_exec_tool_builds_subprocess_env_sets_pythonioencoding_on_windows(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(shell_module.os, 'name', 'nt', raising=False)
+    tool = ExecTool(workspace_root=str(tmp_path))
+
+    env = tool._build_subprocess_env(runtime={'session_key': 'web:shared'}, cwd=str(tmp_path))
+
+    assert env['PYTHONIOENCODING'] == 'utf-8'
+
+
 def test_exec_tool_uses_task_temp_dir_for_default_cwd_and_env(tmp_path) -> None:
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
@@ -289,6 +298,34 @@ async def test_exec_tool_full_access_mode_skips_exec_guardrails(monkeypatch) -> 
     assert payload['status'] == 'success'
     assert payload['exit_code'] == 0
     assert payload['head_preview'].strip() == 'ok'
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_windows_decodes_legacy_codepage_output(monkeypatch, tmp_path) -> None:
+    class _StubProcess:
+        returncode = 1
+
+        async def communicate(self):
+            return (b'', '站点经验\n'.encode('gbk'))
+
+        async def wait(self):
+            return 1
+
+        def kill(self):
+            return None
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        return _StubProcess()
+
+    tool = ExecTool(workspace_root=str(tmp_path))
+
+    monkeypatch.setattr(shell_module.os, 'name', 'nt', raising=False)
+    monkeypatch.setattr(shell_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    payload = json.loads(await tool.execute(command='python -c "pass"', __g3ku_runtime={'session_key': 'web:shared'}))
+
+    assert payload['status'] == 'error'
+    assert '站点经验' in payload['head_preview']
 
 
 def test_exec_tool_model_description_reflects_full_access_mode() -> None:

@@ -559,6 +559,245 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
     assert result["lastCallIndex"] == 1
 
 
+def test_render_tasks_uses_effective_input_tokens_for_task_card_metric() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+
+        class StubClassList {
+          constructor(owner) {
+            this.owner = owner;
+            this.tokens = new Set();
+          }
+          add(...tokens) {
+            tokens.forEach((token) => {
+              const normalized = String(token || "").trim();
+              if (normalized) this.tokens.add(normalized);
+            });
+            this.owner.className = [...this.tokens].join(" ");
+          }
+          remove(...tokens) {
+            tokens.forEach((token) => this.tokens.delete(String(token || "").trim()));
+            this.owner.className = [...this.tokens].join(" ");
+          }
+          contains(token) {
+            return this.tokens.has(String(token || "").trim());
+          }
+          toggle(token, force) {
+            const normalized = String(token || "").trim();
+            const shouldAdd = force == null ? !this.tokens.has(normalized) : !!force;
+            if (shouldAdd) this.tokens.add(normalized);
+            else this.tokens.delete(normalized);
+            this.owner.className = [...this.tokens].join(" ");
+            return shouldAdd;
+          }
+        }
+
+        class StubElement {
+          constructor(tagName = "div") {
+            this.tagName = String(tagName || "div").toUpperCase();
+            this.children = [];
+            this.dataset = {};
+            this.style = {};
+            this.hidden = false;
+            this.disabled = false;
+            this.className = "";
+            this.classList = new StubClassList(this);
+            this.attributes = {};
+            this.innerHTML = "";
+            this.textContent = "";
+            this.parentNode = null;
+            this.title = "";
+          }
+          appendChild(child) {
+            if (child && typeof child === "object") child.parentNode = this;
+            this.children.push(child);
+            return child;
+          }
+          setAttribute(name, value) {
+            this.attributes[String(name)] = String(value);
+          }
+          addEventListener() {}
+          querySelector() { return null; }
+          querySelectorAll() { return []; }
+          closest() { return null; }
+        }
+
+        global.window = global;
+        global.HTMLElement = StubElement;
+        global.Element = StubElement;
+        global.HTMLButtonElement = StubElement;
+        global.HTMLInputElement = StubElement;
+        global.HTMLSelectElement = StubElement;
+        global.DocumentFragment = StubElement;
+        global.document = {
+          createElement(tagName) { return new StubElement(tagName); },
+        };
+        global.CSS = { escape: (value) => String(value || "") };
+        global.pStatus = (value) => String(value || "").trim().toLowerCase();
+        global.esc = (value) => String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+        global.S = {
+          tasks: [
+            {
+              task_id: "task:demo",
+              title: "Demo task",
+              status: "in_progress",
+              token_usage: {
+                tracked: true,
+                input_tokens: 120,
+                output_tokens: 30,
+                cache_hit_tokens: 40,
+                call_count: 2,
+                calls_with_usage: 2,
+                calls_without_usage: 0,
+                is_partial: false,
+              },
+            },
+          ],
+          selectedTaskIds: new Set(),
+          multiSelectMode: false,
+          taskBusy: false,
+          taskPage: 1,
+          taskPageSize: 20,
+          taskGridSignature: "",
+          taskMetricSnapshot: {},
+          taskMetricAnimationTaskIds: new Set(),
+          taskHallStats: {},
+          tasksWorkerState: "online",
+          tasksWorkerReportedState: "online",
+          tasksWorkerLastSeenAt: "",
+          tasksWorkerControlAvailable: true,
+          tasksWorkerStatusPayload: null,
+          tasksWorker: null,
+          visibleTaskIds: [],
+          pendingTaskCardPatchIds: new Set(),
+          taskCardPatchQueuedAt: {},
+          taskListDirtyWhileHidden: false,
+        };
+        global.U = {
+          taskGrid: new StubElement("div"),
+        };
+        global.orderedTasks = (items) => Array.isArray(items) ? items : [];
+        global.paginateResources = (items, currentPage, pageSize) => ({
+          total: Array.isArray(items) ? items.length : 0,
+          items: Array.isArray(items) ? items : [],
+          currentPage: Number(currentPage || 1),
+          pageSize: Number(pageSize || 20),
+        });
+        global.syncTaskPagination = () => {};
+        global.renderTaskPerformanceBar = () => {};
+        global.updateTaskToolbar = () => {};
+        global.icons = () => {};
+        global.copyTaskId = async () => {};
+        global.openTask = async () => {};
+        global.setTaskCardMenuOpen = () => {};
+        global.runTaskAction = async () => {};
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appStart = appCode.indexOf("const canPause");
+        const appEnd = appCode.indexOf("function ensureTaskTokenUi");
+        vm.runInThisContext(appCode.slice(appStart, appEnd));
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        vm.runInThisContext(tasksCode);
+
+        renderTasks();
+        const card = U.taskGrid.children[0];
+        console.log(JSON.stringify({
+          html: card?.innerHTML || "",
+          snapshot: S.taskMetricSnapshot["task:demo"] || null,
+        }));
+        """
+    )
+
+    assert 'data-task-metric-value="input_tokens">160<' in result["html"]
+    assert result["snapshot"]["input_tokens"] == 160
+    assert result["snapshot"]["cache_hit_tokens"] == 40
+
+
+def test_render_task_token_stats_uses_effective_input_tokens_for_hit_rate() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.pStatus = (value) => String(value || "").trim().toLowerCase();
+        global.esc = (value) => String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+        global.S = {
+          currentTask: {
+            token_usage: {
+              tracked: true,
+              input_tokens: 100,
+              output_tokens: 12,
+              cache_hit_tokens: 40,
+              call_count: 1,
+              calls_with_usage: 1,
+              calls_without_usage: 0,
+              is_partial: false,
+            },
+          },
+          taskSummary: {
+            token_usage_by_model: [],
+          },
+          recentModelCalls: [
+            {
+              call_index: 1,
+              prepared_message_count: 3,
+              prepared_message_chars: 200,
+              response_tool_call_count: 0,
+              delta_usage: {
+                tracked: true,
+                input_tokens: 100,
+                output_tokens: 5,
+                cache_hit_tokens: 40,
+                call_count: 1,
+                calls_with_usage: 1,
+                calls_without_usage: 0,
+                is_partial: false,
+              },
+              delta_usage_by_model: [{ model_key: "demo-model" }],
+            },
+          ],
+          taskModelCallsPage: 1,
+          taskModelCallsPageSize: 100,
+        };
+        global.U = {
+          taskTokenContent: { innerHTML: "" },
+          taskTokenSummaryText: { textContent: "" },
+          taskTokenButton: { title: "" },
+        };
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const tokenStart = appCode.indexOf("const canPause");
+        const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
+        vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const tokenStatsStart = tasksCode.indexOf("function renderTaskTokenStats");
+        const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
+        vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
+
+        renderTaskTokenStats();
+        console.log(JSON.stringify({
+          html: U.taskTokenContent.innerHTML,
+        }));
+        """
+    )
+
+    assert "28.6%" in result["html"]
+
+
 def test_format_node_detail_heading_prefixes_node_id_before_title() -> None:
     result = _run_node_script(
         """

@@ -11,6 +11,7 @@ from typing import Any
 from g3ku.agent.tools.base import Tool
 from g3ku.resources.tool_settings import AgentBrowserToolSettings, runtime_tool_settings
 from g3ku.runtime.cancellation import ToolCancellationRequested
+from g3ku.utils.subprocess_text import decode_subprocess_output
 
 
 class AgentBrowserTool(Tool):
@@ -440,8 +441,8 @@ class AgentBrowserTool(Tool):
             await self._terminate_process(process)
             raise
 
-        stdout_text = stdout.decode('utf-8', errors='replace') if stdout else ''
-        stderr_text = stderr.decode('utf-8', errors='replace') if stderr else ''
+        stdout_text = decode_subprocess_output(stdout)
+        stderr_text = decode_subprocess_output(stderr)
         return {
             'ok': process.returncode == 0,
             'command': [*list(command_prefix or []), *list(args or [])],

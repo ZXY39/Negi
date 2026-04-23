@@ -8318,11 +8318,18 @@ function normalizeTokenUsage(raw) {
         const num = Number(value);
         return Number.isFinite(num) && num >= 0 ? Math.floor(num) : 0;
     };
+    const inputTokens = toInt(source.input_tokens);
+    const cacheHitTokens = toInt(source.cache_hit_tokens);
+    const effectiveInputTokens = Math.max(
+        toInt(source.effective_input_tokens),
+        inputTokens + cacheHitTokens,
+    );
     return {
         tracked: !!source.tracked,
-        input_tokens: toInt(source.input_tokens),
+        input_tokens: inputTokens,
         output_tokens: toInt(source.output_tokens),
-        cache_hit_tokens: toInt(source.cache_hit_tokens),
+        cache_hit_tokens: cacheHitTokens,
+        effective_input_tokens: effectiveInputTokens,
         call_count: toInt(source.call_count),
         calls_with_usage: toInt(source.calls_with_usage),
         calls_without_usage: toInt(source.calls_without_usage),
@@ -8361,7 +8368,7 @@ function normalizeTaskModelCall(raw) {
 
 function modelCallHitRate(call) {
     const data = normalizeTaskModelCall(call);
-    const inputTokens = Number(data.delta_usage.input_tokens || 0);
+    const inputTokens = Number(data.delta_usage.effective_input_tokens || 0);
     const cacheHitTokens = Number(data.delta_usage.cache_hit_tokens || 0);
     if (!inputTokens) return 0;
     return cacheHitTokens / inputTokens;
@@ -8375,15 +8382,27 @@ function formatTokenCount(value) {
 
 function tokenKnownTotal(usage) {
     const data = normalizeTokenUsage(usage);
-    return data.input_tokens + data.output_tokens;
+    return data.effective_input_tokens + data.output_tokens;
 }
 
 function taskTokenUsage(task = null, progress = null) {
     return normalizeTokenUsage(task?.token_usage || progress?.token_usage || EMPTY_TOKEN_USAGE());
 }
 
-function taskTokenSummaryLine(usage) {
+function tokenDisplayUsage(usage) {
     const data = normalizeTokenUsage(usage);
+    return {
+        ...data,
+        input_tokens: data.effective_input_tokens,
+    };
+}
+
+function taskTokenDisplayUsage(task = null, progress = null) {
+    return tokenDisplayUsage(taskTokenUsage(task, progress));
+}
+
+function taskTokenSummaryLine(usage) {
+    const data = tokenDisplayUsage(usage);
     if (!data.tracked) return "历史任务未统计";
     if (!data.call_count) return "尚未发生模型调用";
     const parts = [

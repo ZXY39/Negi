@@ -107,3 +107,4 @@
 - `summary` 应是简洁的验收结论；`answer` 可给出更完整的裁定说明。
 - `failed + blocked` 时，`blocking_reason` 必须非空。
 - 不要把上述对象当成最终文本回复直接输出；必须通过 `submit_final_result` 提交。
+- 不通过时，视情况建议父节点派生子节点完成验收不通过的部分。

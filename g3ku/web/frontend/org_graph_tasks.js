@@ -229,7 +229,7 @@ function trackTaskCardPatchQueueAge(taskId) {
 }
 
 function taskMetricSnapshotValue(task) {
-    const tokenUsage = taskTokenUsage(task);
+    const tokenUsage = taskTokenDisplayUsage(task);
     return tokenUsage.tracked ? {
         input_tokens: Number(tokenUsage.input_tokens || 0),
         output_tokens: Number(tokenUsage.output_tokens || 0),
@@ -264,7 +264,7 @@ function patchTaskCardElement(taskId) {
         titleEl.textContent = title;
         titleEl.setAttribute("title", title);
     }
-    const tokenUsage = taskTokenUsage(task);
+    const tokenUsage = taskTokenDisplayUsage(task);
     const previousMetrics = S.taskMetricSnapshot?.[key] || null;
     const nextMetrics = taskMetricSnapshotValue(task);
     ["input_tokens", "output_tokens", "cache_hit_tokens"].forEach((metricKey) => {
@@ -534,7 +534,7 @@ function taskGridRenderSignature(meta) {
         selectedTaskIds: [...S.selectedTaskIds].map((id) => String(id || "")).sort(),
         items: visibleItems.map((task) => {
             const taskId = String(task?.task_id || "");
-            const tokenUsage = taskTokenUsage(task);
+            const tokenUsage = taskTokenDisplayUsage(task);
             return {
                 taskId,
                 selected: S.selectedTaskIds.has(taskId),
@@ -596,7 +596,7 @@ function renderTasks() {
         const taskId = String(task?.task_id || "");
         const selected = S.selectedTaskIds.has(taskId);
         const statusKey = taskStatusKey(task);
-        const tokenUsage = taskTokenUsage(task);
+        const tokenUsage = taskTokenDisplayUsage(task);
         const previousMetrics = S.taskMetricSnapshot?.[taskId] || null;
         const metricItems = [
             { key: "input_tokens", label: "输入Token", value: tokenUsage.tracked ? tokenUsage.input_tokens : null },
@@ -1012,7 +1012,7 @@ function setTaskTokenStatsOpen(open) {
 
 function renderTaskTokenStats() {
     if (!U.taskTokenContent || !U.taskTokenSummaryText) return;
-    const summary = taskTokenUsage(S.currentTask, null);
+    const summary = taskTokenDisplayUsage(S.currentTask, null);
     U.taskTokenSummaryText.textContent = taskTokenSummaryLine(summary);
     if (U.taskTokenButton) U.taskTokenButton.title = taskTokenSummaryLine(summary);
     if (!summary.tracked) {
@@ -1056,6 +1056,7 @@ function renderTaskTokenStats() {
     const rowsMarkup = modelRows.length
         ? modelRows.map((item) => {
             const subtitleParts = [item.provider_id, item.provider_model].filter(Boolean);
+            const displayUsage = tokenDisplayUsage(item);
             const badges = [];
             if (item.is_partial) badges.push('<span class="task-token-badge warn">部分缺失</span>');
             if (!item.calls_without_usage) badges.push('<span class="task-token-badge success">完整</span>');
@@ -1069,9 +1070,9 @@ function renderTaskTokenStats() {
                         <div class="task-token-model-badges">${badges.join("")}</div>
                     </div>
                     <div class="task-token-model-stats">
-                        <span>输入 ${esc(formatTokenCount(item.input_tokens))}</span>
-                        <span>输出 ${esc(formatTokenCount(item.output_tokens))}</span>
-                        <span>缓存命中 ${esc(formatTokenCount(item.cache_hit_tokens))}</span>
+                        <span>输入 ${esc(formatTokenCount(displayUsage.input_tokens))}</span>
+                        <span>输出 ${esc(formatTokenCount(displayUsage.output_tokens))}</span>
+                        <span>缓存命中 ${esc(formatTokenCount(displayUsage.cache_hit_tokens))}</span>
                     </div>
                     <div class="task-token-model-meta">
                         调用 ${esc(formatTokenCount(item.call_count))} · 有 usage ${esc(formatTokenCount(item.calls_with_usage))} · 缺失 ${esc(formatTokenCount(item.calls_without_usage))}

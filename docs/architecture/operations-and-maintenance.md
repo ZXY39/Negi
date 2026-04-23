@@ -509,6 +509,7 @@ Deployment unlock now has an operator-facing env contract:
 
 - `G3KU_BOOTSTRAP_PASSWORD` allows a locked project to auto-unlock at process start
 - `G3KU_INTERNAL_CALLBACK_URL` allows the worker container to call back into the web container over the Compose network instead of assuming `127.0.0.1`
+- The official container image now also pins text/runtime locale explicitly with `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, and `PYTHONIOENCODING=utf-8`. If container-only `exec`, validation-command, or Python traceback output shows mojibake, verify those three env vars before blaming prompt assembly or websocket rendering.
 
 If Docker startup appears healthy but detached tasks never report back, inspect these in order:
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.resources.tool_settings import FilesystemToolSettings, runtime_tool_settings
+from g3ku.utils.subprocess_text import decode_subprocess_output, enrich_subprocess_env_for_text
 
 _METADATA_START = '### G3KU_PATCH_METADATA ###'
 _DIFF_START = '### G3KU_PATCH_DIFF ###'
@@ -933,7 +934,7 @@ class FilesystemTool:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
-                    env=os.environ.copy(),
+                    env=enrich_subprocess_env_for_text(os.environ.copy()),
                 )
             else:
                 process = await asyncio.create_subprocess_shell(
@@ -956,8 +957,8 @@ class FilesystemTool:
                 'ok': process.returncode == 0,
                 'timed_out': False,
                 'exit_code': process.returncode,
-                'stdout': stdout.decode('utf-8', errors='replace') if stdout else '',
-                'stderr': stderr.decode('utf-8', errors='replace') if stderr else '',
+                'stdout': decode_subprocess_output(stdout),
+                'stderr': decode_subprocess_output(stderr),
             }
         except Exception as exc:
             return {'ok': False, 'timed_out': False, 'exit_code': None, 'stdout': '', 'stderr': str(exc)}

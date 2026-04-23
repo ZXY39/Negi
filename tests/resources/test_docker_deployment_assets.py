@@ -27,3 +27,11 @@ def test_dockerfile_seeds_mutable_resources_and_uses_uv() -> None:
     assert "/opt/g3ku-seed/skills" in text
     assert "/opt/g3ku-seed/tools" in text
     assert "--no-worker" in script
+
+
+def test_dockerfile_pins_utf8_locale_and_python_stdio_encoding() -> None:
+    text = Path("Dockerfile").read_text(encoding="utf-8")
+
+    assert "LANG=C.UTF-8" in text
+    assert "LC_ALL=C.UTF-8" in text
+    assert "PYTHONIOENCODING=utf-8" in text

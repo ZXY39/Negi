@@ -10,6 +10,7 @@ from typing import Any
 
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.project_environment import apply_project_environment, resolve_project_environment
+from g3ku.utils.subprocess_text import decode_subprocess_output, enrich_subprocess_env_for_text
 from main.governance.exec_tool_policy import (
     EXEC_TOOL_FAMILY_ID,
     EXECUTION_MODE_FULL_ACCESS,
@@ -175,8 +176,8 @@ class ExecTool(Tool):
                     error=f"Command timed out after {self.timeout} seconds",
                 )
 
-            stdout_text = stdout.decode("utf-8", errors="replace") if stdout else ""
-            stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
+            stdout_text = decode_subprocess_output(stdout)
+            stderr_text = decode_subprocess_output(stderr)
             return self._build_payload(
                 status="success" if process.returncode == 0 else "error",
                 exit_code=process.returncode,
@@ -401,18 +402,20 @@ class ExecTool(Tool):
         env["TMPDIR"] = temp_dir
         env["TMP"] = temp_dir
         env["TEMP"] = temp_dir
-        return apply_project_environment(
-            env,
-            runtime=resolve_project_environment(
-                runtime=runtime,
+        return enrich_subprocess_env_for_text(
+            apply_project_environment(
+                env,
+                runtime=resolve_project_environment(
+                    runtime=runtime,
+                    shell_family='powershell' if os.name == 'nt' else None,
+                    workspace_root=self.workspace_root,
+                    process_cwd=cwd,
+                ),
                 shell_family='powershell' if os.name == 'nt' else None,
                 workspace_root=self.workspace_root,
                 process_cwd=cwd,
-            ),
-            shell_family='powershell' if os.name == 'nt' else None,
-            workspace_root=self.workspace_root,
-            process_cwd=cwd,
-            path_append=self.path_append,
+                path_append=self.path_append,
+            )
         )
 
     def _resolve_cwd(self, working_dir: str | None, *, runtime: dict[str, Any] | None = None) -> str:
