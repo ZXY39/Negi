@@ -143,8 +143,12 @@ def prepare_web_server_start(
     resolved_host, resolved_port = _resolve_web_bind(host, port)
     _acquire_web_start_lock(root, port=resolved_port)
 
-    callback_token = secrets.token_urlsafe(24)
-    callback_url = f"http://127.0.0.1:{resolved_port}{TASK_TERMINAL_CALLBACK_PATH}"
+    callback_url = str(os.getenv(TASK_TERMINAL_CALLBACK_URL_ENV, "") or "").strip()
+    if not callback_url:
+        callback_url = f"http://127.0.0.1:{resolved_port}{TASK_TERMINAL_CALLBACK_PATH}"
+    callback_token = str(os.getenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "") or "").strip()
+    if not callback_token:
+        callback_token = secrets.token_urlsafe(24)
     os.environ[TASK_TERMINAL_CALLBACK_URL_ENV] = callback_url
     os.environ[TASK_TERMINAL_CALLBACK_TOKEN_ENV] = callback_token
     save_task_terminal_callback_config(workspace=root, url=callback_url, token=callback_token)

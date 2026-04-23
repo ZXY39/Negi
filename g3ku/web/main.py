@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 
+from g3ku.deployment.runtime_startup import auto_unlock_from_env
 from g3ku.security import get_bootstrap_security_service
 from g3ku.shells.web import ensure_web_runtime_services, shutdown_web_runtime
 from g3ku.runtime.api import router as runtime_router
@@ -111,6 +112,11 @@ async def lifespan(_app: FastAPI):
                 await asyncio.to_thread(ensure_frontend_vendor_assets)
         except Exception as exc:
             logger.warning("frontend asset sync skipped: {}", exc)
+
+        try:
+            auto_unlock_from_env()
+        except Exception as exc:
+            logger.warning("runtime env unlock skipped: {}", exc)
 
         security = get_bootstrap_security_service()
         if security.is_unlocked():

@@ -733,13 +733,14 @@ async def shutdown_web_runtime() -> None:
         logger.debug('Agent runtime close skipped during shutdown')
 
 
-def run_web_shell(*, host: str | None, port: int | None, reload: bool, debug: bool, set_debug_mode) -> None:
+def run_web_shell(*, host: str | None, port: int | None, reload: bool, debug: bool, set_debug_mode, with_worker: bool = True) -> None:
     set_debug_mode(debug)
     run_web_server_entrypoint(
         host=host,
         port=port,
         reload=reload,
         log_level='debug' if debug else 'info',
+        with_worker=with_worker,
     )
 
 
