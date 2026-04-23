@@ -4329,6 +4329,166 @@ async def test_spawn_children_empty_runtime_exception_includes_exception_class_n
 
 
 @pytest.mark.asyncio
+async def test_pending_notice_wait_for_children_blocks_new_spawn_round(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    _install_allow_all_spawn_review(service, monkeypatch)
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        existing_spec = SpawnChildSpec(goal="stale child", prompt="stale prompt", execution_policy=_execution_policy())
+        stale_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=existing_spec,
+        )
+        assert stale_child is not None
+
+        _stamp_incomplete_spawn_round(
+            service,
+            root_node_id=root.node_id,
+            round_id="round-1",
+            spec=existing_spec,
+            child_node_id=stale_child.node_id,
+        )
+        _set_pending_notice_state(
+            service,
+            node_id=root.node_id,
+            resume_mode=RESUME_MODE_WAIT_FOR_CHILDREN,
+            epoch_id="epoch:hold",
+            holding_round_id="round-1",
+        )
+        service.log_service.update_node_metadata(
+            root.node_id,
+            lambda metadata: {
+                **metadata,
+                "pending_append_notice_records": [
+                    {
+                        "notification_id": "root-notice:1",
+                        "epoch_id": "epoch:hold",
+                        "source_node_id": root.node_id,
+                        "message": "new constraint",
+                        "created_at": now_iso(),
+                        "order_index": 1,
+                    }
+                ],
+            },
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="pending local notice must wait for the active child round to finish before starting a new spawn round",
+        ):
+            await service.node_runner._spawn_children(
+                task_id=record.task_id,
+                parent_node_id=root.node_id,
+                specs=[SpawnChildSpec(goal="new child", prompt="new prompt", execution_policy=_execution_policy())],
+                call_id="round-2",
+            )
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_notice_wait_for_children_allows_same_round_recovery_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    _install_allow_all_spawn_review(service, monkeypatch)
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        existing_spec = SpawnChildSpec(goal="existing child", prompt="existing prompt", execution_policy=_execution_policy())
+        child = service.node_runner._create_execution_child(task=task, parent=root, spec=existing_spec)
+        assert child is not None
+
+        _stamp_incomplete_spawn_round(
+            service,
+            root_node_id=root.node_id,
+            round_id="round-1",
+            spec=existing_spec,
+            child_node_id=child.node_id,
+        )
+        _set_pending_notice_state(
+            service,
+            node_id=root.node_id,
+            resume_mode=RESUME_MODE_WAIT_FOR_CHILDREN,
+            epoch_id="epoch:hold",
+            holding_round_id="round-1",
+        )
+        service.log_service.update_node_metadata(
+            root.node_id,
+            lambda metadata: {
+                **metadata,
+                "pending_append_notice_records": [
+                    {
+                        "notification_id": "root-notice:1",
+                        "epoch_id": "epoch:hold",
+                        "source_node_id": root.node_id,
+                        "message": "new constraint",
+                        "created_at": now_iso(),
+                        "order_index": 1,
+                    }
+                ],
+            },
+        )
+
+        async def _finish_child(task_id: str, node_id: str):
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary="child done",
+                    answer="child done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "_run_nested_node", _finish_child)
+
+        results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[existing_spec],
+            call_id="round-1",
+        )
+
+        assert len(results) == 1
+        assert results[0].failure_info is None
+        assert results[0].node_output == "child done"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_new_spawn_round_supersedes_active_old_subtree_and_preserves_terminal_success_nodes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

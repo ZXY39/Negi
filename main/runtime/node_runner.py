@@ -1552,6 +1552,13 @@ class NodeRunner:
             raise ValueError('spawn_child_nodes is not available for this node')
         self._log_service.mark_execution_stage_contains_spawn(task.task_id, parent.node_id)
         cache_key = str(call_id or f'call:{len(specs)}')
+        if self._pending_notice_waits_for_children(node=parent):
+            existing = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
+            existing_incomplete_round = isinstance(existing, dict) and not bool(existing.get('completed'))
+            if not existing_incomplete_round:
+                raise RuntimeError(
+                    'pending local notice must wait for the active child round to finish before starting a new spawn round'
+                )
         await self._settle_superseded_spawn_operations(
             task=task,
             parent=parent,
