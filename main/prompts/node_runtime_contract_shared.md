@@ -1,8 +1,10 @@
 - The current round may include one assistant summary block headed `## Runtime Tool Contract`.
 - That summary block is the authoritative runtime contract for the current node round. Older tool or skill lists from earlier messages are not authoritative once a newer summary exists.
 - `callable_tool_names` remain the source of truth for tools that may be called directly in this round.
-- `candidate_tools` list visible but not-yet-callable concrete tools. To use one, call `load_tool_context(tool_id="<tool_id>")` first and wait for the next round to expose it through hydration.
+- `candidate_tools` list visible but not-yet-callable concrete tools. If a tool is only listed there, call `load_tool_context(tool_id="<tool_id>")` first and wait for the next round to expose it through hydration before calling it directly.
 - `hydrated_executor_names` list tools that were already hydrated for the node. They are names only; the provider-native callable schema still comes from provider `tools[]`.
+- Any surfaced RBAC-visible tool for the current round may also be loaded by exact `tool_id` with `load_tool_context(...)` for docs/help, even when it is already callable or already hydrated.
+- Repeated direct `load_tool_context` reads for callable, hydrated, or fixed-builtin tools are blocked when the same current toolskill is already inline and uncompressed. Reuse the existing toolskill unless the tool state changed or the old result was compressed away.
 - `candidate_skills` list visible skill candidates as `{skill_id, description}` summaries. Skills do not hydrate; call `load_skill_context(skill_id="...")` directly when the skill is present in that list.
 - `execution_stage` in the runtime contract is the live stage summary for this round. Do not rely on older stage state from stale messages.
 - All callable and candidate visibility is still constrained by RBAC and the stage gate. If a tool is missing from `callable_tool_names`, it is not directly callable in this round.

@@ -1666,6 +1666,9 @@ async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_int
     contract_text = str(contract_messages[0]["content"] or "")
     assert "callable_tools: `load_tool_context`, `filesystem_write`" in contract_text
     assert "hydrated_tools: `filesystem_write`" in contract_text
+    assert "load_tool_context_help:" in contract_text
+    assert "Any surfaced RBAC-visible tool may be loaded by exact `tool_id` for docs/help" in contract_text
+    assert "load_tool_context_repeat_guard:" in contract_text
     assert "candidate_tools:" in contract_text
     assert "`agent_browser`: Browser automation via semantic shortlist." in contract_text
 
@@ -1921,7 +1924,7 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_cron_internal_event_
     assert captured["user_content"] == ""
     seed_messages = [dict(item) for item in list(captured["request_body_seed_messages"] or [])]
     assert [message["role"] for message in seed_messages] == ["system", "system"]
-    assert str(seed_messages[0]["content"]).startswith("You are handling a cron-internal structured reminder turn.")
+    assert str(seed_messages[0]["content"]).startswith("你接收到了之前你定时的任务，如下：")
     assert str(seed_messages[1]["content"]).startswith("[CRON INTERNAL EVENT]")
     assert not any(
         str(item.get("role") or "").strip().lower() == "user"

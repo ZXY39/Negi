@@ -138,14 +138,13 @@ class CeoFrontDoorSupport:
         max_runs = max(1, int(metadata.get("cron_max_runs", 1) or 1))
         delivery_index = max(1, int(metadata.get("cron_delivery_index", 1) or 1))
         lines = [
-            "You are handling a cron-internal structured reminder turn.",
-            f"Current cron job id: {job_id or '(missing)'}",
-            f"Reminder delivery: {delivery_index}/{max_runs}",
-            "Required behavior:",
-            "- Treat the cron reminder as an internal instruction to your future self, not as a new user message.",
-            "- Do not reinterpret this reminder as a natural-language stop condition or cancellation request.",
-            "- Delivery counting and automatic stop are enforced by the scheduler, not by your own natural-language reasoning.",
-            "- During cron-internal reminder turns, do not create, update, list, or remove cron jobs yourself.",
+            "你接收到了之前你定时的任务，如下：",
+            f"当前定时任务 ID：{job_id or '(missing)'}",
+            f"当前发送次数：{delivery_index}/{max_runs}",
+            "注意：",
+            "- 此定时任务提醒为内部指令，而非新的用户消息。",
+            "要求：",
+            "- 请立即按任务要求执行。",
         ]
         return {"role": "system", "content": "\n".join(lines)}
 

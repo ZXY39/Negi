@@ -63,7 +63,12 @@ from main.governance.exec_tool_policy import (
     resolve_exec_runtime_policy_payload,
 )
 from main.governance.roles import normalize_public_allowed_roles
-from main.governance.tool_context import build_tool_toolskill_payload, resolve_primary_executor_name
+from main.governance.tool_context import (
+    apply_runtime_tool_context_projection,
+    build_tool_context_fingerprint,
+    build_tool_toolskill_payload,
+    resolve_primary_executor_name,
+)
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
     FAILURE_CLASS_BUSINESS_UNPASSED,
@@ -4676,11 +4681,13 @@ class MainRuntimeService:
         payload = dict(raw_result or {})
         if not bool(payload.get('ok')):
             return
+        normalized_arguments = self._normalize_tool_call_arguments(getattr(tool_call, 'arguments', {}))
         requested_tool_id = str(
-            payload.get('tool_id')
-            or self._normalize_tool_call_arguments(getattr(tool_call, 'arguments', {})).get('tool_id')
+            normalized_arguments.get('tool_id')
+            or payload.get('tool_id')
             or ''
         ).strip()
+        resolved_tool_id = str(payload.get('tool_id') or requested_tool_id or '').strip()
         if not requested_tool_id:
             return
         store = getattr(self, 'store', None)
@@ -4693,17 +4700,35 @@ class MainRuntimeService:
             runtime_context=dict(runtime_context or {}),
             node_kind=str(getattr(node, 'node_kind', '') or runtime_context.get('node_kind') or ''),
         )
-        visible_family = self._visible_tool_family_map(actor_role=actor_role, session_id=session_id).get(requested_tool_id)
+        log_service = getattr(self, 'log_service', None)
+        read_runtime_frame = getattr(log_service, 'read_runtime_frame', None)
+        current_frame = (
+            read_runtime_frame(str(task_id or '').strip(), str(node_id or '').strip())
+            if callable(read_runtime_frame)
+            else {}
+        )
+        candidate_tool_names = self._normalized_tool_name_list(
+            list(
+                runtime_context.get('candidate_tool_names')
+                or dict(current_frame or {}).get('candidate_tool_names')
+                or []
+            )
+        )
+        if not any(name in candidate_tool_names for name in [requested_tool_id, resolved_tool_id] if name):
+            return
+        visible_family_map = self._visible_tool_family_map(actor_role=actor_role, session_id=session_id)
+        visible_family = visible_family_map.get(requested_tool_id) or visible_family_map.get(resolved_tool_id)
         if visible_family is None:
             return
-        promoted_executor_names = self._tool_context_hydration_targets(
-            requested_tool_id=requested_tool_id,
-            visible_family=visible_family,
-            actor_role=actor_role,
-        )
+        promoted_executor_names = self._normalized_tool_name_list(payload.get('hydration_targets'))
+        if not promoted_executor_names:
+            promoted_executor_names = self._tool_context_hydration_targets(
+                requested_tool_id=requested_tool_id,
+                visible_family=visible_family,
+                actor_role=actor_role,
+            )
         if not promoted_executor_names:
             return
-        log_service = getattr(self, 'log_service', None)
         update_frame = getattr(log_service, 'update_frame', None)
         if not callable(update_frame):
             return
@@ -5123,7 +5148,7 @@ class MainRuntimeService:
             callable_value=toolskill.get('callable'),
             available_value=toolskill.get('available'),
         )
-        return {
+        payload = {
             'ok': True,
             'tool_id': resolved_tool_id,
             'content': content,
@@ -5141,6 +5166,10 @@ class MainRuntimeService:
             'exec_runtime_policy': toolskill.get('exec_runtime_policy'),
             **contract_payload,
         }
+        fingerprint = build_tool_context_fingerprint(payload)
+        if fingerprint:
+            payload['tool_context_fingerprint'] = fingerprint
+        return payload
 
     def load_tool_context_v2(
         self,
@@ -5178,21 +5207,21 @@ class MainRuntimeService:
             callable_value=toolskill.get('callable'),
             available_value=toolskill.get('available'),
         )
-        payload = layered_body_payload(
+        layered_payload = layered_body_payload(
             body=content,
             title=str(toolskill.get('tool_id') or tool_name),
             description=str(toolskill.get('description') or ''),
             path=str(toolskill.get('path') or ''),
         )
-        return {
+        payload = {
             'ok': True,
             'tool_id': resolved_tool_id,
             'uri': f'g3ku://resource/tool/{resolved_tool_id}',
-            'level': payload['level'],
-            'content': payload['content'],
-            'l0': payload['l0'],
-            'l1': payload['l1'],
-            'path': payload['path'],
+            'level': layered_payload['level'],
+            'content': layered_payload['content'],
+            'l0': layered_payload['l0'],
+            'l1': layered_payload['l1'],
+            'path': layered_payload['path'],
             'tool_type': toolskill.get('tool_type'),
             'install_dir': toolskill.get('install_dir'),
             'callable': toolskill.get('callable'),
@@ -5207,6 +5236,10 @@ class MainRuntimeService:
             'exec_runtime_policy': toolskill.get('exec_runtime_policy'),
             **contract_payload,
         }
+        fingerprint = build_tool_context_fingerprint(payload)
+        if fingerprint:
+            payload['tool_context_fingerprint'] = fingerprint
+        return payload
 
     def list_skill_resources(self) -> list[Any]:
         return list(self.resource_registry.list_skill_resources())
@@ -6584,6 +6617,27 @@ class MainRuntimeService:
             seen.add(normalized)
             ordered.append(normalized)
         return ordered
+
+    @staticmethod
+    def _normalize_tool_call_arguments(arguments: Any) -> dict[str, Any]:
+        if isinstance(arguments, dict):
+            return dict(arguments)
+        if isinstance(arguments, str):
+            text = str(arguments or '').strip()
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return {}
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        if arguments is None:
+            return {}
+        try:
+            parsed = dict(arguments)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
 
     def _restore_node_context_selection_entry(self, *, task, node: NodeRecord) -> dict[str, Any] | None:
         log_service = getattr(self, 'log_service', None)

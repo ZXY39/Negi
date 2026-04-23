@@ -8,6 +8,7 @@ import pytest
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.agent.tools.base import Tool
+from main.governance.tool_context import build_tool_context_fingerprint
 
 
 class _EchoTool(Tool):
@@ -280,6 +281,139 @@ def test_frontdoor_tool_state_after_tool_results_skips_fixed_builtin_hydration_t
         "candidate_tool_items": [{"tool_id": "agent_browser", "description": ""}],
         "hydrated_tool_names": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_frontdoor_duplicate_load_tool_context_guard_blocks_same_uncompressed_toolskill() -> None:
+    current_payload = {
+        "ok": True,
+        "tool_id": "exec",
+        "content": "# exec",
+        "parameter_contract_markdown": "## Parameter Contract",
+        "required_parameters": ["command"],
+        "example_arguments": {"command": "pwd"},
+        "warnings": [],
+        "errors": [],
+        "callable": True,
+        "available": True,
+        "repair_required": False,
+        "callable_now": True,
+        "will_be_hydrated_next_turn": False,
+        "hydration_targets": [],
+        "exec_runtime_policy": {
+            "mode": "governed",
+            "guardrails_enabled": True,
+            "summary": "exec will execute shell commands with exec-side guardrails.",
+        },
+    }
+    current_payload["tool_context_fingerprint"] = build_tool_context_fingerprint(current_payload)
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            main_task_service=SimpleNamespace(
+                load_tool_context_v2=lambda **kwargs: dict(current_payload),
+            )
+        )
+    )
+
+    error_text = await runner._frontdoor_load_tool_context_duplicate_error(
+        payload={"id": "call-1", "name": "load_tool_context", "arguments": {"tool_id": "exec"}},
+        state={
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-old",
+                    "name": "load_tool_context",
+                    "content": json.dumps(current_payload, ensure_ascii=False),
+                }
+            ],
+            "tool_names": ["load_tool_context", "exec"],
+            "candidate_tool_names": [],
+            "hydrated_tool_names": [],
+            "rbac_visible_tool_names": ["load_tool_context", "exec"],
+        },
+        runtime_context={"session_key": "web:shared", "actor_role": "ceo"},
+    )
+
+    assert error_text == (
+        "Error: 上下文中已有该工具当前版本的未压缩 toolskill，禁止重复读取！"
+        "请直接复用已有说明，或在工具状态变化/旧内容被压缩后再重试。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_frontdoor_duplicate_load_tool_context_guard_allows_refresh_when_fingerprint_changes() -> None:
+    current_payload = {
+        "ok": True,
+        "tool_id": "exec",
+        "content": "# exec",
+        "parameter_contract_markdown": "## Parameter Contract",
+        "required_parameters": ["command"],
+        "example_arguments": {"command": "pwd"},
+        "warnings": [],
+        "errors": [],
+        "callable": True,
+        "available": True,
+        "repair_required": False,
+        "callable_now": True,
+        "will_be_hydrated_next_turn": False,
+        "hydration_targets": [],
+        "exec_runtime_policy": {
+            "mode": "full_access",
+            "guardrails_enabled": False,
+            "summary": "exec will execute shell commands without exec-side guardrails.",
+        },
+    }
+    current_payload["tool_context_fingerprint"] = build_tool_context_fingerprint(current_payload)
+    prior_payload = {
+        "ok": True,
+        "tool_id": "exec",
+        "content": "# exec",
+        "parameter_contract_markdown": "## Parameter Contract",
+        "required_parameters": ["command"],
+        "example_arguments": {"command": "pwd"},
+        "warnings": [],
+        "errors": [],
+        "callable": True,
+        "available": True,
+        "repair_required": False,
+        "callable_now": True,
+        "will_be_hydrated_next_turn": False,
+        "hydration_targets": [],
+        "exec_runtime_policy": {
+            "mode": "governed",
+            "guardrails_enabled": True,
+            "summary": "exec will execute shell commands with exec-side guardrails.",
+        },
+    }
+    prior_payload["tool_context_fingerprint"] = build_tool_context_fingerprint(prior_payload)
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            main_task_service=SimpleNamespace(
+                load_tool_context_v2=lambda **kwargs: dict(current_payload),
+            )
+        )
+    )
+
+    error_text = await runner._frontdoor_load_tool_context_duplicate_error(
+        payload={"id": "call-1", "name": "load_tool_context", "arguments": {"tool_id": "exec"}},
+        state={
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-old",
+                    "name": "load_tool_context",
+                    "content": json.dumps(prior_payload, ensure_ascii=False),
+                }
+            ],
+            "tool_names": ["load_tool_context", "exec"],
+            "candidate_tool_names": [],
+            "hydrated_tool_names": [],
+            "rbac_visible_tool_names": ["load_tool_context", "exec"],
+        },
+        runtime_context={"session_key": "web:shared", "actor_role": "ceo"},
+    )
+
+    assert error_text == ""
 
 
 @pytest.mark.asyncio

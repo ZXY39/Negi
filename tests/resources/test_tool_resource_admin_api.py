@@ -5645,6 +5645,7 @@ async def test_load_tool_context_includes_exec_runtime_policy(tmp_path: Path):
             'guardrails_enabled': False,
             'summary': 'exec will execute shell commands without exec-side guardrails.',
         }
+        assert str(payload.get('tool_context_fingerprint') or '').startswith('tcf:')
     finally:
         await service.close()
         manager.close()

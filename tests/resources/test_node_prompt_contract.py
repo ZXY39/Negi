@@ -104,6 +104,9 @@ def test_node_runtime_contract_serializes_minimal_agent_facing_payload() -> None
     assert "callable_tools: `exec`" in message["content"]
     assert "candidate_tools:" in message["content"]
     assert 'load_tool_context(tool_id="filesystem_write")' in message["content"]
+    assert "load_tool_context_help:" in message["content"]
+    assert "Any surfaced RBAC-visible tool may be loaded by exact `tool_id` for docs/help" in message["content"]
+    assert "load_tool_context_repeat_guard:" in message["content"]
     assert "hydrated_tools: `filesystem_write`" in message["content"]
 
 

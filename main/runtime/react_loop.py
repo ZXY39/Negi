@@ -38,6 +38,7 @@ from g3ku.runtime.tool_watchdog import (
     run_tool_with_watchdog,
 )
 from main.governance.exec_tool_policy import EXEC_TOOL_EXECUTOR_NAME, EXEC_TOOL_FAMILY_ID
+from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.errors import TaskPausedError, describe_exception
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_actual_request_diagnostics, build_stable_prompt_cache_key
@@ -771,6 +772,19 @@ class ReActToolLoop:
                     message_history=message_history,
                     prior_violation_counts=read_only_repeat_violation_counts,
                 )
+                direct_load_repeat_violations = await self._load_tool_context_direct_read_violations(
+                    response_tool_calls=response_tool_calls,
+                    task=task,
+                    node=node,
+                    message_history=message_history,
+                    runtime_context=runtime_context,
+                    tools=current_tools,
+                )
+                if direct_load_repeat_violations:
+                    read_only_repeat_violations = [
+                        *list(read_only_repeat_violations or []),
+                        *list(direct_load_repeat_violations or []),
+                    ]
                 if read_only_repeat_violations:
                     repair_messages: list[str] = []
                     threshold_violation: dict[str, Any] | None = None
@@ -2383,6 +2397,27 @@ class ReActToolLoop:
         candidate_skill_ids = self._normalized_name_list(
             list(runtime_context.get('candidate_skill_ids') or current_frame.get('candidate_skill_ids') or [])
         )
+        rbac_visible_tool_names = self._normalized_name_list(
+            list(runtime_context.get('rbac_visible_tool_names') or current_frame.get('rbac_visible_tool_names') or [])
+        )
+        callable_tool_names = self._normalized_name_list(
+            list(runtime_context.get('callable_tool_names') or current_frame.get('callable_tool_names') or [])
+        )
+        hydrated_executor_names = self._normalized_name_list(
+            list(
+                runtime_context.get('hydrated_executor_names')
+                or current_frame.get('hydrated_executor_names')
+                or current_frame.get('hydrated_executor_state')
+                or []
+            )
+        )
+        full_callable_tool_names = self._normalized_name_list(
+            list(
+                runtime_context.get('full_callable_tool_names')
+                or dict(current_frame.get('model_visible_tool_selection_trace') or {}).get('full_callable_tool_names')
+                or []
+            )
+        )
         current_model_refs = [
             str(item or '').strip()
             for item in list(runtime_context.get('model_refs') or [])
@@ -2398,6 +2433,10 @@ class ReActToolLoop:
                 'tool_contract_enforced': True,
                 'candidate_tool_names': list(candidate_tool_names),
                 'candidate_skill_ids': list(candidate_skill_ids),
+                'rbac_visible_tool_names': list(rbac_visible_tool_names),
+                'callable_tool_names': list(callable_tool_names),
+                'hydrated_executor_names': list(hydrated_executor_names),
+                'full_callable_tool_names': list(full_callable_tool_names),
                 'allowed_content_refs': allowed_content_refs,
                 'enforce_content_ref_allowlist': str(runtime_context.get('node_kind') or '').strip().lower() == 'acceptance',
                 'prior_overflow_signatures': sorted(prior_overflow_signatures or set()),
@@ -2543,7 +2582,10 @@ class ReActToolLoop:
                                 arguments={'tool_id': str(hydration_payload.get('tool_id') or '').strip()},
                             ),
                             raw_result=dict(hydration_payload),
-                            runtime_context=dict(runtime_context or {}),
+                            runtime_context=_call_runtime_context(
+                                call,
+                                stage_turn_granted=stage_turn_granted,
+                            ),
                         )
                     tool_content = self._render_tool_message_content(
                         raw_result,
@@ -4293,6 +4335,171 @@ class ReActToolLoop:
             dict(assistant_message),
             *self._dedupe_tool_messages(tool_messages, existing_messages=existing_messages),
         ]
+
+    async def _load_tool_context_runtime_payload(
+        self,
+        *,
+        tools: dict[str, Tool],
+        tool_name: str,
+        requested_tool_id: str,
+        runtime_context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        tool = dict(tools or {}).get(str(tool_name or "").strip())
+        if tool is None or not callable(getattr(tool, "_service", None)):
+            return None
+        service = await tool._service()
+        actor_role = str(runtime_context.get("actor_role") or "execution").strip().lower() or "execution"
+        session_id = (
+            str(runtime_context.get("session_key") or runtime_context.get("session_id") or "").strip()
+            or "web:shared"
+        )
+        if hasattr(service, "load_tool_context_v2"):
+            payload = service.load_tool_context_v2(
+                actor_role=actor_role,
+                session_id=session_id,
+                tool_id=str(requested_tool_id or "").strip(),
+            )
+        else:
+            payload = service.load_tool_context(
+                actor_role=actor_role,
+                session_id=session_id,
+                tool_id=str(requested_tool_id or "").strip(),
+            )
+        if not isinstance(payload, dict) or not bool(payload.get("ok")):
+            return None
+        return apply_runtime_tool_context_projection(
+            payload,
+            requested_tool_id=str(requested_tool_id or "").strip(),
+            runtime=runtime_context,
+        )
+
+    @classmethod
+    def _latest_load_tool_context_messages_by_tool_id(
+        cls,
+        messages: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        latest: dict[str, dict[str, Any]] = {}
+        for message in reversed(list(messages or [])):
+            if str((message or {}).get("role") or "").strip().lower() != "tool":
+                continue
+            tool_name = str((message or {}).get("name") or "").strip()
+            if tool_name not in {"load_tool_context", "load_tool_context_v2"}:
+                continue
+            payload = cls._tool_message_json_payload(message)
+            if not bool(payload.get("ok")):
+                continue
+            tool_id = str(payload.get("tool_id") or "").strip()
+            fingerprint = str(payload.get("tool_context_fingerprint") or "").strip()
+            if not tool_id or not fingerprint or tool_id in latest:
+                continue
+            latest[tool_id] = dict(message or {})
+        return latest
+
+    @staticmethod
+    def _load_tool_context_repeat_repair_message() -> str:
+        return (
+            "上下文中已有该工具当前版本的未压缩 toolskill，禁止重复读取！"
+            "请直接复用已有说明，或在工具状态变化/旧内容被压缩后再重试。"
+        )
+
+    async def _load_tool_context_direct_read_violations(
+        self,
+        *,
+        response_tool_calls: list[Any],
+        task,
+        node,
+        message_history: list[dict[str, Any]],
+        runtime_context: dict[str, Any],
+        tools: dict[str, Tool],
+    ) -> list[dict[str, Any]]:
+        normalized_kind = str(getattr(node, "node_kind", "") or "").strip().lower()
+        if normalized_kind not in _STAGE_BUDGET_NODE_KINDS:
+            return []
+        current_frame = self._runtime_frame(str(getattr(task, "task_id", "") or ""), str(getattr(node, "node_id", "") or "")) or {}
+        candidate_tool_names = set(
+            self._normalized_name_list(
+                list(runtime_context.get("candidate_tool_names") or current_frame.get("candidate_tool_names") or [])
+            )
+        )
+        callable_tool_names = set(
+            self._normalized_name_list(
+                list(runtime_context.get("callable_tool_names") or current_frame.get("callable_tool_names") or [])
+            )
+        )
+        hydrated_tool_names = set(
+            self._normalized_name_list(
+                list(
+                    runtime_context.get("hydrated_executor_names")
+                    or current_frame.get("hydrated_executor_names")
+                    or current_frame.get("hydrated_executor_state")
+                    or []
+                )
+            )
+        )
+        full_callable_tool_names = set(
+            self._normalized_name_list(
+                list(
+                    runtime_context.get("full_callable_tool_names")
+                    or dict(current_frame.get("model_visible_tool_selection_trace") or {}).get("full_callable_tool_names")
+                    or []
+                )
+            )
+        )
+        visible_tool_names = set(
+            self._normalized_name_list(
+                list(runtime_context.get("rbac_visible_tool_names") or current_frame.get("rbac_visible_tool_names") or [])
+            )
+        )
+        latest_messages = self._latest_load_tool_context_messages_by_tool_id(message_history)
+        violations: list[dict[str, Any]] = []
+        for call in list(response_tool_calls or []):
+            tool_name = str(getattr(call, "name", "") or "").strip()
+            if tool_name not in {"load_tool_context", "load_tool_context_v2"}:
+                continue
+            arguments = self._normalize_tool_call_arguments(getattr(call, "arguments", {}))
+            requested_tool_id = str(arguments.get("tool_id") or "").strip()
+            if not requested_tool_id or str(arguments.get("search_query") or "").strip():
+                continue
+            if requested_tool_id not in visible_tool_names and requested_tool_id not in candidate_tool_names:
+                continue
+            if requested_tool_id in candidate_tool_names:
+                continue
+            if (
+                requested_tool_id not in callable_tool_names
+                and requested_tool_id not in hydrated_tool_names
+                and requested_tool_id not in full_callable_tool_names
+            ):
+                continue
+            current_payload = await self._load_tool_context_runtime_payload(
+                tools=tools,
+                tool_name=tool_name,
+                requested_tool_id=requested_tool_id,
+                runtime_context={
+                    **dict(runtime_context or {}),
+                    "candidate_tool_names": list(candidate_tool_names),
+                    "callable_tool_names": list(callable_tool_names),
+                    "hydrated_executor_names": list(hydrated_tool_names),
+                    "full_callable_tool_names": list(full_callable_tool_names),
+                    "rbac_visible_tool_names": list(visible_tool_names),
+                },
+            )
+            if not isinstance(current_payload, dict) or not bool(current_payload.get("ok")):
+                continue
+            resolved_tool_id = str(current_payload.get("tool_id") or requested_tool_id).strip()
+            current_fingerprint = str(current_payload.get("tool_context_fingerprint") or "").strip()
+            latest_tool_message = latest_messages.get(resolved_tool_id)
+            if not latest_tool_message or not current_fingerprint:
+                continue
+            latest_payload = self._tool_message_json_payload(latest_tool_message)
+            if str(latest_payload.get("tool_context_fingerprint") or "").strip() != current_fingerprint:
+                continue
+            violations.append(
+                {
+                    "signature": f"{tool_name}:{resolved_tool_id}:{current_fingerprint}",
+                    "repair_text": self._load_tool_context_repeat_repair_message(),
+                }
+            )
+        return violations
 
     @classmethod
     def _read_only_repeat_violations(

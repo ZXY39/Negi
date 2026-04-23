@@ -237,16 +237,19 @@ Maintenance note for `task_append_notice` and task message distribution:
 
 维护上现在还要区分 frontdoor 的两份工具状态：
 
-- `candidate_tool_names` 表示当前轮对模型可见、但默认仍需先 `load_tool_context` 的 concrete tools。
+- `candidate_tool_names` 表示当前轮对模型可见、但默认仍需先 `load_tool_context` 并在后续轮次 hydration 后才能直接调用的 concrete tools。
 - `hydrated_tool_names` 表示本 turn 里已经成功读过契约、并被提升为下一轮 callable 的 concrete tools。
+- `load_tool_context(tool_id="...")` 的精确工具加载现在不再是 candidate-only：只要工具属于当前 RBAC 可见且已 surfaced 的 concrete tool，就可以读取 toolskill / 参数说明，即使它已经 callable 或已经 hydrated。
 - frontdoor 的语义工具选择现在直接面向 concrete tool，而不是“先命中 family 再按 family 顺序展开 executor”；因此 `frontdoor_selection_debug.semantic_frontdoor` 里的 `tool_ids` 应直接是诸如 `filesystem_write` 这样的 concrete tool names。
 
 这两份状态都由 frontdoor persistent state 维护，而不是只存在于某一轮 prompt 文本里。其直接后果是：
 
-- 同一用户 turn 内，`load_tool_context` 成功后，下一轮真正发给模型的函数工具列表会并入对应 hydrated tool。
+- 同一用户 turn 内，`load_tool_context` 只有在目标工具仍属于 canonical `candidate_tool_names`、且解析到的是普通 extension executor 时，下一轮真正发给模型的函数工具列表才会并入对应 hydrated tool。
+- 对已经 callable、已经 hydrated、fixed builtin 或其他“仅 RBAC 可见但不在当前 candidate 中”的 direct-load lane，`load_tool_context` 只返回 toolskill / help payload，不会改 hydration 状态，也不会占用 hydration LRU 槽位。
 - frontdoor approval interrupt、session inflight snapshot、paused execution context 也会携带这份 hydrated state，避免“暂停前已经 load 成功，恢复后又退回 candidate-only”。
 - 同一套 inflight snapshot / paused execution context 现在也会带上 `frontdoor_selection_debug`。排查“rewrite 后 query 不对”“向量召回打到了哪些 tool/skill”“为什么某个工具没进 candidate”时，优先查看这份 snapshot，而不是只看最终 assistant 文本。
 - approval interrupt 负载现在还会一起携带 `frontdoor_stage_state`、`compression_state`、`hydrated_tool_names`、`tool_call_payloads` 和 `frontdoor_selection_debug`；恢复时这些字段会直接回灌 session/runtime state，而不是再由 middleware 临时重建。
+- 对 CEO/frontdoor 与 execution / acceptance 节点，callable / hydrated / fixed-builtin direct-load 现在还有一条重复读取防线：runtime 会检查当前未压缩 inline 历史里最近一次成功 `load_tool_context` 的 `tool_context_fingerprint`。若同一 resolved `tool_id` 的 fingerprint 未变化，就会 soft-reject，并要求模型复用已有 toolskill。
 
 - CEO/frontdoor 现在还有一条监管审批 lane：当 Tool Admin 的全局 `监管模式` 打开时，主 agent 对中/高风险工具的调用会被收束成一个 `frontdoor_tool_approval_batch` interrupt，而不是逐个 tool call 立即继续执行。
 - 这条 lane 的关键维护语义是 “UI 可以逐个审，但 runtime 必须整批回灌”。`review_items` 只覆盖需要人工审阅的 risky calls；resume payload 必须一次性提交整批 `decisions[]`，否则 runtime 会拒绝恢复。
@@ -273,7 +276,8 @@ Additional maintenance note for fixed-builtin resource executors:
 - Runtime tool-result status is now broader than plain `Error: ...` strings: any tool result payload whose top-level JSON contains `ok=false` must also enter the error lane for node execution and CEO/frontdoor live status handling.
 
 - 节点与 CEO/frontdoor 的 `candidate_tool_names` / `candidate_skill_ids` 现在都表示“`RBAC 可见 ∩ 语义召回命中` 的当前候选集合”；语义召回不可用时，候选集合退化为 `RBAC 可见集合`，而不是报错中断。
-- `load_tool_context` / `load_skill_context` 的准入只认当前 canonical candidate 集合；不再允许“RBAC 可见但不在 candidate 中”的旁路加载。
+- `load_tool_context(tool_id="...")` 的精确工具加载现在接受两条准入路径：当前 canonical `candidate_tool_names`，或当前 `rbac_visible_tool_names` 中仍然 surfaced 的 concrete tool。`load_skill_context` 仍然只认当前 canonical skill candidate 集合。
+- 这次放宽只影响 loader gate，不影响 provider-facing `tools[]` / `provider_tool_names` 的提交语义；如果维护者看到模型可以读 toolskill 却没有新增 provider schema，这属于预期行为。
 - 对节点与 CEO/frontdoor，`candidate_tool_items` / `candidate_skill_items` 现在都只应被理解为 display cache，而不是第二份候选真相源。只要 canonical `candidate_tool_names` / `candidate_skill_ids` 已为空，agent-facing runtime contract 中的 `candidate_tools` / `candidate_skills` 也必须同步为空，不能再从旧 contract item 列表或旧 frame item 缓存把候选“补回去”。
 - 节点的 hydration canonical state 继续落在 runtime frame：`hydrated_executor_state` / `hydrated_executor_names`。这是节点生命周期级 LRU，跨多轮、阶段切换、pause/resume、restore 保留。
 - 节点的 skill candidate canonical state 也继续落在 runtime frame：至少包括 `candidate_skill_ids`，以及供 dynamic contract 重建使用的 `candidate_skill_items` 显示缓存。阶段切换后的 prompt compaction 可以裁掉旧的 `node_runtime_tool_contract` user 消息，但下一轮 contract 刷新仍应从 frame 恢复这两份 skill 状态，而不是把 skill 候选清空。
@@ -313,6 +317,7 @@ If a maintainer sees a CEO stage trace where a later `exec` appears inside an ea
 - 因此前门的“tool contract 更新”和“阶段工具显示”是两条平行链路：
   - promotion 改动只影响 callable/candidate/hydrated contract
 - `round.tools` inside `canonical_context` still depends only on the display-oriented fields derived from `tool_call_payloads + tool_results`
+- `load_tool_context` 成功 payload 现在还会附带内部用的 `tool_context_fingerprint`。它只服务于运行时 freshness / duplicate-read 判定，不属于 provider-facing schema，也不应用作 durable business state。
 - `g3ku/runtime/frontdoor/ceo_agent_middleware.py` 现在只剩兼容/测试价值，不再是生产前门的权威执行链。若线上 frontdoor 行为与预期不符，优先检查显式图节点和 checkpoint state，而不是先检查 middleware hook 次序。
 
 维护上一个容易误判的点是：动态 skill/tool 提示块里虽然会出现“如何读取 skill 正文”或“如何读取 tool 契约”的说明，但这些说明不能覆盖 `ceo_frontdoor.md` 里的 stage-first 协议。当前前门的权威顺序是：

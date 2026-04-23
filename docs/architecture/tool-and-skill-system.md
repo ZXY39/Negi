@@ -177,7 +177,10 @@ Maintenance note for the memory tool family:
 - `candidate_tool_names` / `candidate_skill_ids` 现在都采用同一语义：`RBAC 可见 ∩ 语义召回命中` 的当前候选集合。
 - 如果语义召回不可用，候选集合直接退化为 `RBAC 可见集合`，而不是停止运行。
 - 对 agent 来说，candidate 仍然是“可见但默认不可直接调用”的资源；candidate 不会自动进入 callable tool 集合。
-- `load_tool_context` / `load_skill_context` 现在也只允许命中当前 canonical candidate 集合，不再允许“RBAC 可见但不在 candidate 中”的旁路加载。
+- `load_tool_context(tool_id="...")` 的精确工具加载现在不再是 candidate-only：当前 canonical `candidate_tool_names` 中的 concrete tool 与当前 `rbac_visible_tool_names` 中仍然 surfaced 的 concrete tool 都可以读取 toolskill / 参数说明。
+- 这条放宽只适用于精确 `tool_id` load。`load_tool_context(search_query=...)` 仍然保持原来的可见工具搜索路径，不应被理解成“枚举所有 RBAC 可见工具”的新 API。
+- `load_skill_context` 仍然只允许命中当前 canonical skill candidate 集合；这次补丁没有放宽 skill loader gate。
+- 但只有普通 candidate tool load 才会进入 hydration/promotion。对已经 callable、已经 hydrated、fixed builtin，或任何当前仅 RBAC 可见但不在 candidate 里的 direct-load lane，`load_tool_context` 都只是 read-only toolskill 加载，不会推进 hydration，也不会占用 hydration LRU。
 - 但“普通 candidate”不再覆盖 repair-required 资源：
   - repair-required tools 会从 agent-facing `candidate_tools` / `callable_tools` / `hydrated_tools` 中剥离，单独进入 `repair_required_tools`
   - repair-required skills 会从 agent-facing `candidate_skills` 中剥离，单独进入 `repair_required_skills`
@@ -236,6 +239,9 @@ Maintenance note for hydration LRU:
 - The hydration LRU is still concrete-tool-only and still defaults to 16 entries.
 - Resource-backed fixed builtin executors no longer enter hydration LRU. Loading tool context for a tool that is already fixed-callable may still return contract/help text, but it should not spend a hydration slot or produce a promoted callable entry for the next turn.
 - This applies on both sides: node runtime frame hydration (`hydrated_executor_state` / `hydrated_executor_names`) and CEO/frontdoor session-state hydration (`hydrated_tool_names`).
+- Successful `load_tool_context` payloads now also carry an internal `tool_context_fingerprint`. The runtime uses it only to judge whether the current toolskill contract has changed enough to justify rereading; it is not a provider-facing schema field.
+- For callable / hydrated / fixed-builtin direct-loads, node runtime and CEO/frontdoor both scan current uncompressed inline history for the latest successful `load_tool_context` result for the same resolved `tool_id`. If that inline result has the same `tool_context_fingerprint`, the runtime soft-rejects the reread and tells the model to reuse the existing toolskill.
+- If the fingerprint changed, or the old direct-load result was already compacted away by `token_compression` / `stage_compaction`, rereading is allowed again.
 - When debugging a missing hydration promotion, first distinguish between "ordinary extension executor" and "resource-backed fixed builtin". The latter is expected to stay outside LRU by design.
 - `content_describe` / `content_open` / `content_search` are now in the first category, not the second: a successful `load_tool_context(tool_id="content_*")` should spend an ordinary hydration slot and promote that concrete tool on the next turn.
 
@@ -310,7 +316,7 @@ Maintenance note for parameter-error guidance:
 2. `runtime/context` 模块根据 query、历史、治理规则挑出候选工具/技能。
 3. prompt builder 把它们以 candidate 列表形式展示给模型。
 4. 模型若决定需要某候选工具，先调用 `load_tool_context(tool_id="...")`。
-5. 系统记录 hydration 状态。
+5. 只有当该工具仍属于 canonical candidate，且解析到的是普通 concrete extension executor 时，系统才记录 hydration 状态。
 6. 下一轮 `model_visible_tool_names = fixed builtin tools + hydrated tools`。
 7. 只有这一轮，工具才真正成为 callable tool。
 
@@ -318,6 +324,7 @@ Maintenance note for parameter-error guidance:
 
 - “看得见”不等于“现在就能调用”
 - “load_tool_context 成功”也不等于“这一轮立刻可调”
+- “RBAC 可见且 surfaced”也不等于“必然会 promotion”；它也可能只是一个 read-only toolskill load
 - prompt 里的候选池与实际 callable tool 集合是两套集合
 
 对 frontdoor 还要再补一个边界：
@@ -328,6 +335,7 @@ Maintenance note for parameter-error guidance:
   - agent-facing 当前轮显示合同只剩一份 `frontdoor_runtime_tool_contract`；它向模型显示结构化 `candidate_tools=[{tool_id, description}]`
   - 但真正驱动去重、hydration 排除与恢复的仍然是 persistent state 中的 `candidate_tool_names`
 - 如果维护者在排查 `load_tool_context` 成功后下一轮仍然只会 `exec` / 再次 `load_tool_context`，优先检查 frontdoor persistent state 里的 `hydrated_tool_names`、`tool_names`、`candidate_tool_names` 是否一起更新，而不是只检查 toolskill 内容。
+- 如果维护者看到模型反复对同一个 callable / hydrated / fixed-builtin 工具再次调用 `load_tool_context`，先检查当前消息历史里是否还保留着同一 resolved `tool_id` 且 `tool_context_fingerprint` 未变化的未压缩 inline 结果；这是预期中的 duplicate direct-load 软拦截，不是 tool registry 丢失。
 - 如果线上 frontdoor 表现与测试里的 graph helper 一致、却和实际会话不一致，先确认 runner 是否真的走显式 graph checkpoint，而不是怀疑还存在第二条生产 promotion 路径；当前生产路径已经不再以 `ceo_agent_middleware.py` 为权威。
 - 对执行节点和检验节点，`callable_tool_names` / `candidate_tools` / `candidate_skills` 现在都不应再视为 bootstrap user JSON 的静态字段；它们属于每轮动态 `node_runtime_tool_contract`。
 - 对执行节点和检验节点，稳定 bootstrap user JSON 只保留稳定节点上下文；`execution_stage` 不再写进 bootstrap，而是只由当前轮尾部的 `node_runtime_tool_contract` 承载。

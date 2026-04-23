@@ -37,7 +37,9 @@
 ### 1.2 创建阶段后的Skill / Tool 上下文加载规则
 
 - 如需使用工具，查看对应工具的 toolskill，或调用 `load_tool_context` / `load_skill_context` 读取完整上下文。
-- 需要引入当前轮尚未 callable 的 tools 时，先对候选中的具体工具名调用 `load_tool_context(tool_id="<tool_id>")`；不要对工具族、模糊别名或未暴露名称试探调用。
+- 对当前轮任意 RBAC 可见且 surfaced 的具体工具名，都可以调用 `load_tool_context(tool_id="<tool_id>")` 读取 toolskill / 参数说明；不要对工具族、模糊别名或未暴露名称试探调用。
+- 如果该工具当前只出现在 `candidate_tools` 中，读取后仍需等待下一轮 hydration 后才可直接调用。
+- 对已 callable、已 hydrated 或 fixed builtin 的工具，如果上下文里已经有同版本且未压缩的 toolskill，不要重复调用 `load_tool_context`，直接复用已有说明。
 - 需要 skill 正文时，对当前轮提示中已经列出的候选 `skill_id` 调用 `load_skill_context(skill_id="...")`。
 - 用户提出找/下载skills，而候选的skills不足时，优先创建异步任务，用find-skills和clawhub-skill-manager去找。
 

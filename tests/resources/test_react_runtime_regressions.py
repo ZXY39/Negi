@@ -27,6 +27,7 @@ from main.monitoring.log_service import (
     _EXECUTION_STAGE_STATUS_ACTIVE,
     _EXECUTION_STAGE_STATUS_COMPLETED,
 )
+from main.governance.tool_context import build_tool_context_fingerprint
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
@@ -1589,6 +1590,7 @@ def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
             'node_id': 'node-tool-hydration',
             'model_visible_tool_names': list(first_selection['tool_names']),
             'hydrated_executor_names': [],
+            'candidate_tool_names': ['filesystem'],
         },
     )
 
@@ -1626,6 +1628,7 @@ def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
             'node_id': 'node-tool-hydration',
             'session_key': 'web:shared',
             'actor_role': 'execution',
+            'candidate_tool_names': ['filesystem'],
         },
     )
 
@@ -1682,7 +1685,11 @@ def test_promote_tool_context_hydration_keeps_executor_requests_precise() -> Non
         node_id='node-hydration-precise',
         tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': 'filesystem_write'}),
         raw_result={'ok': True, 'tool_id': 'filesystem_write'},
-        runtime_context={'session_key': 'web:shared', 'actor_role': 'execution'},
+        runtime_context={
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+            'candidate_tool_names': ['filesystem_write'],
+        },
     )
 
     promoted_frame = log_service.read_runtime_frame('task-hydration-precise', 'node-hydration-precise')
@@ -1720,7 +1727,11 @@ def test_promote_tool_context_hydration_rejects_family_names() -> None:
         node_id='node-hydration-family',
         tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': 'filesystem'}),
         raw_result={'ok': True, 'tool_id': 'filesystem'},
-        runtime_context={'session_key': 'web:shared', 'actor_role': 'execution'},
+        runtime_context={
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+            'candidate_tool_names': ['filesystem'],
+        },
     )
 
     promoted_frame = log_service.read_runtime_frame('task-hydration-family', 'node-hydration-family')
@@ -1750,7 +1761,11 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
             node_id='node-hydration-lru',
             tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': tool_id}),
             raw_result={'ok': True, 'tool_id': tool_id},
-            runtime_context={'session_key': 'web:shared', 'actor_role': 'execution'},
+            runtime_context={
+                'session_key': 'web:shared',
+                'actor_role': 'execution',
+                'candidate_tool_names': ['filesystem_write', 'content_open', 'agent_browser', 'web_fetch'],
+            },
         )
 
     promoted_frame = log_service.read_runtime_frame('task-hydration-lru', 'node-hydration-lru')
@@ -1770,7 +1785,11 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
         node_id='node-hydration-lru',
         tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': 'content_open'}),
         raw_result={'ok': True, 'tool_id': 'content_open'},
-        runtime_context={'session_key': 'web:shared', 'actor_role': 'execution'},
+        runtime_context={
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+            'candidate_tool_names': ['filesystem_write', 'content_open', 'agent_browser', 'web_fetch'],
+        },
     )
 
     promoted_frame = log_service.read_runtime_frame('task-hydration-lru', 'node-hydration-lru')
@@ -1805,7 +1824,11 @@ def test_promote_tool_context_hydration_skips_fixed_builtin_executors() -> None:
         node_id='node-hydration-fixed-builtin',
         tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': 'exec'}),
         raw_result={'ok': True, 'tool_id': 'exec'},
-        runtime_context={'session_key': 'web:shared', 'actor_role': 'execution'},
+        runtime_context={
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+            'candidate_tool_names': ['exec'],
+        },
     )
 
     promoted_frame = log_service.read_runtime_frame('task-hydration-fixed-builtin', 'node-hydration-fixed-builtin')
@@ -3004,6 +3027,10 @@ async def test_execute_tool_calls_allows_submit_next_stage_and_passes_runtime_co
             "candidate_skill_ids": ["skill-creator"],
             "current_tool_call_id": "call-stage-probe",
             "tool_contract_enforced": True,
+            "rbac_visible_tool_names": [],
+            "callable_tool_names": [],
+            "hydrated_executor_names": [],
+            "full_callable_tool_names": [],
             "allowed_content_refs": [],
             "enforce_content_ref_allowlist": False,
             "prior_overflow_signatures": [],
@@ -3555,7 +3582,7 @@ async def test_react_loop_execute_tool_keeps_direct_load_payload_inline(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_load_tool_context_tool_rejects_non_candidate_runtime_target() -> None:
+async def test_load_tool_context_tool_allows_rbac_visible_non_candidate_runtime_target() -> None:
     service = _RuntimeToolService()
     tool = LoadToolContextTool(lambda: service)
 
@@ -3566,6 +3593,35 @@ async def test_load_tool_context_tool_rejects_non_candidate_runtime_target() -> 
             "actor_role": "execution",
             "tool_contract_enforced": True,
             "candidate_tool_names": ["agent_browser"],
+            "rbac_visible_tool_names": ["filesystem_write"],
+        },
+    )
+
+    payload = json.loads(rendered)
+    assert payload["ok"] is True
+    assert payload["tool_id"] == "filesystem_write"
+    assert service.load_tool_calls == [
+        {
+            "actor_role": "execution",
+            "session_id": "web:shared",
+            "tool_id": "filesystem_write",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_load_tool_context_tool_rejects_non_visible_runtime_target() -> None:
+    service = _RuntimeToolService()
+    tool = LoadToolContextTool(lambda: service)
+
+    rendered = await tool.execute(
+        tool_id="filesystem_write",
+        _LoadToolContextTool__g3ku_runtime={
+            "session_key": "web:shared",
+            "actor_role": "execution",
+            "tool_contract_enforced": True,
+            "candidate_tool_names": ["agent_browser"],
+            "rbac_visible_tool_names": ["web_fetch"],
         },
     )
 
@@ -3590,6 +3646,237 @@ async def test_load_skill_context_tool_rejects_non_candidate_runtime_target() ->
 
     assert rendered.startswith("Error:")
     assert service.load_skill_calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_calls_injects_rbac_visible_tool_names_into_runtime_context() -> None:
+    class _RuntimeCaptureTool(Tool):
+        @property
+        def name(self) -> str:
+            return "capture_runtime"
+
+        @property
+        def description(self) -> str:
+            return "Capture runtime context"
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {
+                "type": "object",
+                "properties": {
+                    "value": {"type": "string", "description": "value"},
+                },
+                "required": ["value"],
+            }
+
+        async def execute(self, value: str, __g3ku_runtime: dict[str, object] | None = None, **kwargs):
+            _ = kwargs
+            runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else {}
+            return json.dumps(
+                {
+                    "value": value,
+                    "rbac_visible_tool_names": runtime.get("rbac_visible_tool_names"),
+                    "callable_tool_names": runtime.get("callable_tool_names"),
+                    "hydrated_executor_names": runtime.get("hydrated_executor_names"),
+                    "full_callable_tool_names": runtime.get("full_callable_tool_names"),
+                },
+                ensure_ascii=False,
+            )
+
+    log_service = _FakeLogService()
+    log_service.upsert_frame(
+        "task-runtime-rbac",
+        {
+            "node_id": "node-runtime-rbac",
+            "rbac_visible_tool_names": ["exec", "load_tool_context"],
+            "callable_tool_names": ["load_tool_context"],
+            "hydrated_executor_names": ["exec"],
+            "model_visible_tool_selection_trace": {"full_callable_tool_names": ["load_tool_context", "exec"]},
+        },
+    )
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+
+    results = await loop._execute_tool_calls(
+        task=SimpleNamespace(task_id="task-runtime-rbac"),
+        node=SimpleNamespace(node_id="node-runtime-rbac", depth=0, node_kind="execution"),
+        response_tool_calls=[SimpleNamespace(id="call-runtime-rbac", name="capture_runtime", arguments={"value": "demo"})],
+        tools={"capture_runtime": _RuntimeCaptureTool()},
+        allowed_content_refs=[],
+        runtime_context={"session_key": "web:shared", "actor_role": "execution", "node_kind": "execution"},
+    )
+
+    payload = json.loads(str(results[0]["raw_result"] or ""))
+    assert payload["value"] == "demo"
+    assert payload["rbac_visible_tool_names"] == ["exec", "load_tool_context"]
+    assert payload["callable_tool_names"] == ["load_tool_context"]
+    assert payload["hydrated_executor_names"] == ["exec"]
+    assert payload["full_callable_tool_names"] == ["load_tool_context", "exec"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("node_kind", ["execution", "acceptance"])
+async def test_load_tool_context_direct_read_guard_blocks_duplicate_inline_toolskill_for_callable_lane(
+    node_kind: str,
+) -> None:
+    class _InlineToolContextService:
+        async def startup(self) -> None:
+            return None
+
+        def load_tool_context_v2(self, **kwargs):
+            _ = kwargs
+            return {
+                "ok": True,
+                "tool_id": "exec",
+                "content": "# exec",
+                "parameter_contract_markdown": "## Parameter Contract",
+                "required_parameters": ["command"],
+                "example_arguments": {"command": "pwd"},
+                "warnings": [],
+                "errors": [],
+                "callable": True,
+                "available": True,
+                "repair_required": False,
+                "callable_now": True,
+                "will_be_hydrated_next_turn": False,
+                "hydration_targets": [],
+                "exec_runtime_policy": {
+                    "mode": "governed",
+                    "guardrails_enabled": True,
+                    "summary": "exec will execute shell commands with exec-side guardrails.",
+                },
+                "tool_context_fingerprint": "tcf:current",
+            }
+
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    prior_payload = {
+        "ok": True,
+        "tool_id": "exec",
+        "content": "# exec",
+        "parameter_contract_markdown": "## Parameter Contract",
+        "required_parameters": ["command"],
+        "example_arguments": {"command": "pwd"},
+        "warnings": [],
+        "errors": [],
+        "callable": True,
+        "available": True,
+        "repair_required": False,
+        "callable_now": True,
+        "will_be_hydrated_next_turn": False,
+        "hydration_targets": [],
+        "exec_runtime_policy": {
+            "mode": "governed",
+            "guardrails_enabled": True,
+            "summary": "exec will execute shell commands with exec-side guardrails.",
+        },
+    }
+    prior_payload["tool_context_fingerprint"] = build_tool_context_fingerprint(prior_payload)
+    violations = await loop._load_tool_context_direct_read_violations(
+        response_tool_calls=[SimpleNamespace(id="call-1", name="load_tool_context", arguments={"tool_id": "exec"})],
+        task=SimpleNamespace(task_id=f"task-{node_kind}-duplicate"),
+        node=SimpleNamespace(node_id=f"node-{node_kind}-duplicate", node_kind=node_kind),
+        message_history=[
+            {
+                "role": "tool",
+                "tool_call_id": "call-old",
+                "name": "load_tool_context",
+                "content": json.dumps(prior_payload, ensure_ascii=False),
+            }
+        ],
+        runtime_context={
+            "session_key": "web:shared",
+            "actor_role": "execution",
+            "rbac_visible_tool_names": ["exec"],
+            "callable_tool_names": ["load_tool_context", "exec"],
+            "full_callable_tool_names": ["load_tool_context", "exec"],
+        },
+        tools={"load_tool_context": LoadToolContextTool(lambda: _InlineToolContextService())},
+    )
+
+    assert violations == [
+        {
+            "signature": f"load_tool_context:exec:{prior_payload['tool_context_fingerprint']}",
+            "repair_text": "上下文中已有该工具当前版本的未压缩 toolskill，禁止重复读取！请直接复用已有说明，或在工具状态变化/旧内容被压缩后再重试。",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_load_tool_context_direct_read_guard_allows_refresh_when_fingerprint_changes() -> None:
+    class _InlineToolContextService:
+        async def startup(self) -> None:
+            return None
+
+        def load_tool_context_v2(self, **kwargs):
+            _ = kwargs
+            return {
+                "ok": True,
+                "tool_id": "exec",
+                "content": "# exec",
+                "parameter_contract_markdown": "## Parameter Contract",
+                "required_parameters": ["command"],
+                "example_arguments": {"command": "pwd"},
+                "warnings": [],
+                "errors": [],
+                "callable": True,
+                "available": True,
+                "repair_required": False,
+                "callable_now": True,
+                "will_be_hydrated_next_turn": False,
+                "hydration_targets": [],
+                "exec_runtime_policy": {
+                    "mode": "full_access",
+                    "guardrails_enabled": False,
+                    "summary": "exec will execute shell commands without exec-side guardrails.",
+                },
+                "tool_context_fingerprint": "tcf:changed",
+            }
+
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    prior_payload = {
+        "ok": True,
+        "tool_id": "exec",
+        "content": "# exec",
+        "parameter_contract_markdown": "## Parameter Contract",
+        "required_parameters": ["command"],
+        "example_arguments": {"command": "pwd"},
+        "warnings": [],
+        "errors": [],
+        "callable": True,
+        "available": True,
+        "repair_required": False,
+        "callable_now": True,
+        "will_be_hydrated_next_turn": False,
+        "hydration_targets": [],
+        "exec_runtime_policy": {
+            "mode": "governed",
+            "guardrails_enabled": True,
+            "summary": "exec will execute shell commands with exec-side guardrails.",
+        },
+    }
+    prior_payload["tool_context_fingerprint"] = build_tool_context_fingerprint(prior_payload)
+    violations = await loop._load_tool_context_direct_read_violations(
+        response_tool_calls=[SimpleNamespace(id="call-1", name="load_tool_context", arguments={"tool_id": "exec"})],
+        task=SimpleNamespace(task_id="task-execution-refresh"),
+        node=SimpleNamespace(node_id="node-execution-refresh", node_kind="execution"),
+        message_history=[
+            {
+                "role": "tool",
+                "tool_call_id": "call-old",
+                "name": "load_tool_context",
+                "content": json.dumps(prior_payload, ensure_ascii=False),
+            }
+        ],
+        runtime_context={
+            "session_key": "web:shared",
+            "actor_role": "execution",
+            "rbac_visible_tool_names": ["exec"],
+            "callable_tool_names": ["load_tool_context", "exec"],
+            "full_callable_tool_names": ["load_tool_context", "exec"],
+        },
+        tools={"load_tool_context": LoadToolContextTool(lambda: _InlineToolContextService())},
+    )
+
+    assert violations == []
 
 
 def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_after_stage_compaction() -> None:

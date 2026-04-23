@@ -1737,7 +1737,7 @@ async def test_runtime_agent_session_persists_hidden_cron_prompt_messages_and_vi
 
     persisted = loop.sessions.get_or_create("web:shared")
     assert [message["role"] for message in persisted.messages] == ["system", "system", "assistant"]
-    assert persisted.messages[0]["content"].startswith("You are handling a cron-internal structured reminder turn.")
+    assert persisted.messages[0]["content"].startswith("你接收到了之前你定时的任务，如下：")
     assert persisted.messages[0]["metadata"]["source"] == "cron"
     assert persisted.messages[0]["metadata"]["cron_job_id"] == "job-77"
     assert persisted.messages[0]["metadata"]["prompt_visible"] is True
@@ -7282,14 +7282,13 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
             "role": "system",
             "content": "\n".join(
                 [
-                    "You are handling a cron-internal structured reminder turn.",
-                    "Current cron job id: job-77",
-                    "Reminder delivery: 1/2",
-                    "Required behavior:",
-                    "- Treat the cron reminder as an internal instruction to your future self, not as a new user message.",
-                    "- Do not reinterpret this reminder as a natural-language stop condition or cancellation request.",
-                    "- Delivery counting and automatic stop are enforced by the scheduler, not by your own natural-language reasoning.",
-                    "- During cron-internal reminder turns, do not create, update, list, or remove cron jobs yourself.",
+                    "你接收到了之前你定时的任务，如下：",
+                    "当前定时任务 ID：job-77",
+                    "当前发送次数：1/2",
+                    "注意：",
+                    "- 此定时任务提醒为内部指令，而非新的用户消息。",
+                    "要求：",
+                    "- 请立即按任务要求执行。",
                 ]
             ),
             "metadata": {

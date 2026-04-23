@@ -110,7 +110,7 @@ def _render_candidate_tool_section(items: list[dict[str, str]] | None) -> list[s
         description = str(item.get('description') or '').strip()
         detail = description if description else 'No description available.'
         lines.append(
-            f'- `{tool_id}`: {detail} Load with `load_tool_context(tool_id="{tool_id}")` before calling it.'
+            f'- `{tool_id}`: {detail} If it is still only listed here, load it with `load_tool_context(tool_id="{tool_id}")` and wait for the next round before calling it directly.'
         )
     return lines
 
@@ -211,6 +211,8 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
         f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
         f'hydrated_tools: {_render_name_list(payload.get("hydrated_tool_names"))}',
         f'candidate_skills: {_render_name_list(payload.get("candidate_skill_ids"))}',
+        'load_tool_context_help: Any surfaced RBAC-visible tool may be loaded by exact `tool_id` for docs/help, including tools that are already callable or already hydrated.',
+        'load_tool_context_repeat_guard: For callable, hydrated, or fixed-builtin tools, do not reread the same inline uncompressed toolskill. Reuse it unless the tool state changed or the old result was compressed away.',
         *_render_candidate_tool_section(candidate_tools),
         *_render_repair_required_tool_section(repair_required_tools),
         *_render_repair_required_skill_section(repair_required_skills),

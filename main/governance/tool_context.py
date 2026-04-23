@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Callable
 
 from g3ku.json_schema_utils import (
@@ -12,6 +14,107 @@ from main.governance.exec_tool_policy import (
     EXEC_TOOL_FAMILY_ID,
     resolve_exec_runtime_policy_payload,
 )
+
+
+def _normalized_runtime_name_list(values: Any) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw_value in list(values or []):
+        value = str(raw_value or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def build_tool_context_fingerprint(payload: dict[str, Any] | None) -> str:
+    normalized = dict(payload or {}) if isinstance(payload, dict) else {}
+    if not normalized:
+        return ""
+    fingerprint_payload = {
+        "tool_id": str(normalized.get("tool_id") or "").strip(),
+        "content": str(normalized.get("content") or ""),
+        "parameter_contract_markdown": str(normalized.get("parameter_contract_markdown") or ""),
+        "required_parameters": [
+            str(item or "").strip()
+            for item in list(normalized.get("required_parameters") or [])
+            if str(item or "").strip()
+        ],
+        "example_arguments": normalized.get("example_arguments") or {},
+        "warnings": [
+            str(item or "").strip()
+            for item in list(normalized.get("warnings") or [])
+            if str(item or "").strip()
+        ],
+        "errors": [
+            str(item or "").strip()
+            for item in list(normalized.get("errors") or [])
+            if str(item or "").strip()
+        ],
+        "callable": bool(normalized.get("callable")),
+        "available": bool(normalized.get("available")),
+        "repair_required": bool(normalized.get("repair_required")),
+        "callable_now": bool(normalized.get("callable_now")),
+        "will_be_hydrated_next_turn": bool(normalized.get("will_be_hydrated_next_turn")),
+        "hydration_targets": _normalized_runtime_name_list(normalized.get("hydration_targets")),
+        "exec_runtime_policy": (
+            dict(normalized.get("exec_runtime_policy") or {})
+            if isinstance(normalized.get("exec_runtime_policy"), dict)
+            else None
+        ),
+    }
+    encoded = json.dumps(
+        fingerprint_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return f"tcf:{hashlib.sha256(encoded).hexdigest()[:16]}"
+
+
+def apply_runtime_tool_context_projection(
+    payload: dict[str, Any] | None,
+    *,
+    requested_tool_id: str = "",
+    runtime: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    projected = dict(payload or {}) if isinstance(payload, dict) else {}
+    if not projected:
+        return {}
+    requested_name = str(requested_tool_id or "").strip()
+    resolved_name = str(projected.get("tool_id") or "").strip()
+    target_names = [name for name in [requested_name, resolved_name] if name]
+    runtime_payload = runtime if isinstance(runtime, dict) else {}
+    candidate_names = set(_normalized_runtime_name_list(runtime_payload.get("candidate_tool_names")))
+    callable_names = set(
+        _normalized_runtime_name_list(
+            runtime_payload.get("callable_tool_names")
+            or runtime_payload.get("tool_names")
+        )
+    )
+    hydrated_names = set(
+        _normalized_runtime_name_list(
+            runtime_payload.get("hydrated_executor_names")
+            or runtime_payload.get("hydrated_tool_names")
+        )
+    )
+    normalized_targets = _normalized_runtime_name_list(projected.get("hydration_targets"))
+    candidate_hit = any(name in candidate_names for name in target_names)
+    callable_hit = any(name in callable_names for name in target_names)
+    hydrated_hit = any(name in hydrated_names for name in target_names)
+    if target_names:
+        if not candidate_hit or callable_hit or hydrated_hit:
+            normalized_targets = []
+            projected["will_be_hydrated_next_turn"] = False
+        else:
+            projected["will_be_hydrated_next_turn"] = bool(normalized_targets)
+    projected["hydration_targets"] = list(normalized_targets)
+    fingerprint = build_tool_context_fingerprint(projected)
+    if fingerprint:
+        projected["tool_context_fingerprint"] = fingerprint
+    return projected
 
 
 def find_tool_family(

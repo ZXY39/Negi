@@ -47,6 +47,7 @@ from g3ku.runtime.frontdoor.token_preflight_compaction import (
     FrontdoorTokenPreflightResult,
     compact_frontdoor_history_zone,
 )
+from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.models import normalize_execution_policy_metadata
 from main.protocol import now_iso
 from main.runtime.chat_backend import (
@@ -2093,8 +2094,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 list(state.get("model_refs") or self._resolve_ceo_model_refs() or [])
             ),
             "tool_contract_enforced": True,
+            "callable_tool_names": list(state.get("tool_names") or []),
             "candidate_tool_names": list(state.get("candidate_tool_names") or []),
             "candidate_skill_ids": list(state.get("candidate_skill_ids") or []),
+            "hydrated_tool_names": list(state.get("hydrated_tool_names") or []),
             "rbac_visible_tool_names": list(state.get("rbac_visible_tool_names") or []),
             "rbac_visible_skill_ids": list(state.get("rbac_visible_skill_ids") or []),
             "channel": getattr(session, "_channel", "cli"),
@@ -2409,6 +2412,123 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 return None
             return dict(parsed) if isinstance(parsed, dict) else None
         return None
+
+    def _current_load_tool_context_payload_for_frontdoor(
+        self,
+        *,
+        requested_tool_id: str,
+        runtime_context: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        main_service = getattr(self._loop, "main_task_service", None)
+        if main_service is None:
+            return None
+        actor_role = str(dict(runtime_context or {}).get("actor_role") or "ceo").strip().lower() or "ceo"
+        session_id = (
+            str(dict(runtime_context or {}).get("session_key") or dict(runtime_context or {}).get("session_id") or "").strip()
+            or "web:shared"
+        )
+        if hasattr(main_service, "load_tool_context_v2"):
+            payload = main_service.load_tool_context_v2(
+                actor_role=actor_role,
+                session_id=session_id,
+                tool_id=str(requested_tool_id or "").strip(),
+            )
+        else:
+            payload = main_service.load_tool_context(
+                actor_role=actor_role,
+                session_id=session_id,
+                tool_id=str(requested_tool_id or "").strip(),
+            )
+        if not isinstance(payload, dict) or not bool(payload.get("ok")):
+            return None
+        return apply_runtime_tool_context_projection(
+            payload,
+            requested_tool_id=str(requested_tool_id or "").strip(),
+            runtime=runtime_context,
+        )
+
+    @classmethod
+    def _latest_frontdoor_load_tool_context_messages_by_tool_id(
+        cls,
+        messages: list[dict[str, Any]] | None,
+    ) -> dict[str, dict[str, Any]]:
+        latest: dict[str, dict[str, Any]] = {}
+        for message in reversed(list(messages or [])):
+            if str((message or {}).get("role") or "").strip().lower() != "tool":
+                continue
+            tool_name = str((message or {}).get("name") or "").strip()
+            if tool_name not in {"load_tool_context", "load_tool_context_v2"}:
+                continue
+            payload = cls._tool_context_hydration_payload((message or {}).get("content"))
+            if not isinstance(payload, dict) or not bool(payload.get("ok")):
+                continue
+            tool_id = str(payload.get("tool_id") or "").strip()
+            fingerprint = str(payload.get("tool_context_fingerprint") or "").strip()
+            if not tool_id or not fingerprint or tool_id in latest:
+                continue
+            latest[tool_id] = dict(message or {})
+        return latest
+
+    @staticmethod
+    def _load_tool_context_duplicate_repair_text() -> str:
+        return (
+            "Error: 上下文中已有该工具当前版本的未压缩 toolskill，禁止重复读取！"
+            "请直接复用已有说明，或在工具状态变化/旧内容被压缩后再重试。"
+        )
+
+    async def _frontdoor_load_tool_context_duplicate_error(
+        self,
+        *,
+        payload: dict[str, Any],
+        state: dict[str, Any],
+        runtime_context: dict[str, Any] | None,
+    ) -> str:
+        tool_name = str(payload.get("name") or "").strip()
+        if tool_name not in {"load_tool_context", "load_tool_context_v2"}:
+            return ""
+        arguments = dict(payload.get("arguments") or {})
+        requested_tool_id = str(arguments.get("tool_id") or "").strip()
+        if not requested_tool_id or str(arguments.get("search_query") or "").strip():
+            return ""
+        candidate_tool_names = self._normalized_tool_name_state_list(state.get("candidate_tool_names"))
+        if requested_tool_id in set(candidate_tool_names):
+            return ""
+        callable_tool_names = self._normalized_tool_name_state_list(state.get("tool_names"))
+        hydrated_tool_names = self._normalized_tool_name_state_list(state.get("hydrated_tool_names"))
+        visible_tool_names = self._normalized_tool_name_state_list(state.get("rbac_visible_tool_names"))
+        if requested_tool_id not in set(visible_tool_names):
+            return ""
+        if requested_tool_id not in set(callable_tool_names) and requested_tool_id not in set(hydrated_tool_names):
+            return ""
+        effective_runtime_context = {
+            **dict(runtime_context or {}),
+            "candidate_tool_names": list(candidate_tool_names),
+            "callable_tool_names": list(callable_tool_names),
+            "hydrated_tool_names": list(hydrated_tool_names),
+            "rbac_visible_tool_names": list(visible_tool_names),
+        }
+        current_payload = self._current_load_tool_context_payload_for_frontdoor(
+            requested_tool_id=requested_tool_id,
+            runtime_context=effective_runtime_context,
+        )
+        if not isinstance(current_payload, dict) or not bool(current_payload.get("ok")):
+            return ""
+        resolved_tool_id = str(current_payload.get("tool_id") or requested_tool_id).strip()
+        current_fingerprint = str(current_payload.get("tool_context_fingerprint") or "").strip()
+        if not current_fingerprint:
+            return ""
+        latest_messages = self._latest_frontdoor_load_tool_context_messages_by_tool_id(
+            list(state.get("messages") or [])
+        )
+        latest_message = latest_messages.get(resolved_tool_id)
+        if latest_message is None:
+            return ""
+        latest_payload = self._tool_context_hydration_payload(latest_message.get("content"))
+        if not isinstance(latest_payload, dict):
+            return ""
+        if str(latest_payload.get("tool_context_fingerprint") or "").strip() != current_fingerprint:
+            return ""
+        return self._load_tool_context_duplicate_repair_text()
 
     def _frontdoor_hydrated_tool_limit_value(self) -> int:
         main_service = getattr(self._loop, "main_task_service", None)
@@ -3224,6 +3344,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             state.get("rbac_visible_tool_names")
             or [*tool_names, *candidate_tool_names]
         )
+        candidate_name_set = set(candidate_tool_names)
         promotion_targets: list[str] = []
         for tool_result in list(tool_results or []):
             tool_name = str(tool_result.get("tool_name") or "").strip()
@@ -3234,6 +3355,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 continue
             targets = self._normalized_tool_name_state_list(raw_payload.get("hydration_targets"))
             for name in targets:
+                if name not in candidate_name_set:
+                    continue
                 if name in CEO_FIXED_BUILTIN_TOOL_NAMES:
                     continue
                 if name not in promotion_targets:
@@ -5751,6 +5874,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             gate_error = self._frontdoor_stage_gate_error(tool_name=tool_name, stage_state=mutable_stage_state)
             if gate_error:
                 return await _error_result(payload, gate_error)
+            duplicate_load_error = await self._frontdoor_load_tool_context_duplicate_error(
+                payload=payload,
+                state=dict(state or {}),
+                runtime_context=runtime_context,
+            )
+            if duplicate_load_error:
+                return await _error_result(payload, duplicate_load_error)
             tool = visible_tools.get(tool_name)
             if tool is None:
                 return await _error_result(payload, f"tool not available: {tool_name}")
