@@ -41,7 +41,6 @@ def set_pending_notice_state(
 
 
 def clear_pending_notice_state(payload: Any) -> dict[str, str]:
-    _ = normalize_pending_notice_state(payload)
     return {
         "resume_mode": RESUME_MODE_ORDINARY,
         "epoch_id": "",
