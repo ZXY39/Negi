@@ -8639,6 +8639,69 @@ async def test_resume_react_state_injects_pending_notice_once_active_round_is_go
 
 
 @pytest.mark.asyncio
+async def test_consuming_last_pending_notice_clears_pending_notice_state(
+    tmp_path: Path,
+):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task("clear hold state", session_id="web:shared")
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+
+        _set_pending_notice_state(
+            service,
+            node_id=root.node_id,
+            resume_mode=RESUME_MODE_ORDINARY,
+            epoch_id="epoch:hold",
+            holding_round_id="",
+        )
+        service.log_service.update_node_metadata(
+            root.node_id,
+            lambda metadata: {
+                **metadata,
+                "pending_append_notice_records": [
+                    {
+                        "notification_id": "root-notice:1",
+                        "epoch_id": "epoch:hold",
+                        "source_node_id": root.node_id,
+                        "message": "new constraint",
+                        "created_at": now_iso(),
+                        "order_index": 1,
+                    }
+                ],
+            },
+        )
+
+        service.node_runner._consume_inflight_notice_ids(
+            task_id=record.task_id,
+            node_id=root.node_id,
+            pending_notification_ids=[],
+            pending_root_notice_ids=["root-notice:1"],
+        )
+
+        root_after = service.get_node(root.node_id)
+        metadata = dict((root_after.metadata or {})) if root_after is not None else {}
+        assert list(metadata.get("pending_append_notice_records") or []) == []
+        assert dict(metadata.get(PENDING_NOTICE_STATE_KEY) or {}) == {
+            "resume_mode": RESUME_MODE_ORDINARY,
+            "epoch_id": "",
+            "holding_round_id": "",
+            "updated_at": "",
+        }
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_resume_ready_pending_notice_preempts_pending_tool_turn(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

@@ -162,7 +162,16 @@ Maintenance note for `task_append_notice` / task message distribution:
 - `distributing` means the active frontier is currently being processed through the ordinary task/node dispatcher. This is still queue-controlled node work, not a sidecar lane.
 - `resume_ready` means distribution decisions are finished, but at least one node still has an unconsumed local notice or delivered mailbox row. Ordinary execution may resume, but the append-notice transaction is not complete until `pending_notice_node_ids` becomes empty.
 - If root remains in `waiting_children` while `runtime_meta.distribution.mode == "task_wide_barrier"` still blocks that node, treat that as a barrier-priority regression before changing prompt logic.
-- If the epoch is already in `resume_ready` and the same node is still listed in `pending_notice_node_ids`, that node must still skip interrupted-turn recovery such as `pending_tool_turn` or `waiting_children` replay until the pending local notice or mailbox delivery is consumed. If replay wins first, treat that as a resume-priority regression.
+- If a parent shows pending local notice metadata but continues running child work, that can now be expected. Check the node metadata `pending_notice_state.resume_mode`:
+  - `ordinary` means the next resumed node turn may consume the notice immediately.
+  - `wait_for_children` means the notice is durable but intentionally held out of the prompt until the parent no longer owns an incomplete child round.
+- If the epoch is already in `resume_ready` and the same node is still listed in `pending_notice_node_ids`, inspect `pending_notice_state.resume_mode` before calling it a regression:
+  - `ordinary` means interrupted-turn recovery such as `pending_tool_turn` or `waiting_children` replay should still stay blocked until the pending local notice or mailbox delivery is consumed.
+  - `wait_for_children` means `waiting_children` replay is allowed to continue the existing child round, but the held notice must still stay out of the ordinary prompt and must not open a new spawn round yet.
+- If operators report `distribution finished but the parent stayed waiting`, inspect both:
+  - node metadata `pending_notice_state`
+  - parent `spawn_operations` / runtime frame `phase=waiting_children`
+  That combination now expresses the strong parent-waiting constraint, not a stuck distribution loop.
 - If a child execution node was previously terminal and now appears active again after append-notice, check whether its old acceptance node was logically invalidated rather than deleted. The acceptance record should still exist for audit, but it should no longer be authoritative for the current spawn entry.
 - If a notice appears in mailbox rows but not in the next model request, inspect whether it is still in the raw notice window or has already been rolled into a compressed notice-tail segment. Those tail blocks are now intentionally kept ahead of stage archive blocks in prompt assembly.
 - If force delete is requested during message distribution, deletion should win immediately. Do not wait for the epoch to finish naturally; confirm instead that epochs/mailboxes were cancelled or purged before the task row disappeared.

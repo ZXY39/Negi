@@ -45,6 +45,7 @@ from main.runtime.internal_tools import (
 )
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
 from main.runtime.pending_notice_state import (
+    clear_pending_notice_state,
     PENDING_NOTICE_STATE_KEY,
     RESUME_MODE_ORDINARY,
     RESUME_MODE_WAIT_FOR_CHILDREN,
@@ -649,6 +650,7 @@ class NodeRunner:
                 node_id=node_id,
                 notification_ids=pending_root_notice_ids,
             )
+        self._clear_pending_notice_state_if_idle(node_id=node_id)
         distribution = self._distribution_runtime_state(task_id)
         if (
             str(distribution.get('mode') or '').strip() == 'task_wide_barrier'
@@ -683,6 +685,26 @@ class NodeRunner:
                         'pending_mailbox_count': 0,
                     },
                 )
+
+    def _clear_pending_notice_state_if_idle(self, *, node_id: str) -> None:
+        node = self._store.get_node(node_id)
+        if node is None:
+            return
+        if self._pending_root_notice_records(node=node):
+            return
+        if any(
+            str(item.status or '').strip() == 'delivered'
+            for item in list(self._store.list_task_node_notifications(node.task_id, node_id) or [])
+        ):
+            return
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            metadata[PENDING_NOTICE_STATE_KEY] = clear_pending_notice_state(
+                metadata.get(PENDING_NOTICE_STATE_KEY)
+            )
+            return metadata
+
+        self._log_service.update_node_metadata(node_id, _mutate)
 
     def _pending_root_notice_records(self, *, node: NodeRecord) -> list[dict[str, Any]]:
         metadata = dict(node.metadata or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
