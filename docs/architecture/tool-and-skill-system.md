@@ -189,10 +189,22 @@ Maintenance note for the memory tool family:
 - 这还意味着 frontdoor 的旧轮 candidate/tool/skill catalog 不应进入 durable history。后续轮次只能继承真实工具调用轨迹与上下文，而不是再次看到上一轮的候选列表。
 - 对执行/验收节点，skill 候选不再只依赖当前轮的 `node_runtime_tool_contract` user 消息存活；canonical `candidate_skill_ids` 继续落在 runtime frame，`candidate_skill_items` 也会随 frame 一起持久化，供阶段切换、prompt compaction 之后的下一轮 contract 刷新从 frame 恢复。
 - 节点侧现在还会把 `runtime_service._node_context_selection_inputs()` 当轮拿到的 contract-visible skill 快照单独记成 `contract_visible_skill_ids`，并随 runtime frame 与 `runtime-frame-messages:{node_id}` artifact 一起落盘。它不是新的 candidate truth source，而是专门给排障用的输入层证据。
+- 节点侧还会把更下一层的 skill 可见性切面一起落盘为 `skill_visibility_diagnostics`。这份诊断来自 `list_contract_visible_skill_resources(...)` 内部使用的 live resource registry / role / policy 判断，至少保留 `registry_skill_ids` 和逐 skill 的 `{enabled, available, allowed_for_actor_role, policy_effect, included_in_contract_visible}`。
+- 对执行/验收节点，fresh skill 合同现在是明确的 first-turn truth source：`_enrich_node_messages()` 注入的 `node_runtime_tool_contract` 若已经带有 `candidate_skills` / `contract_visible_skill_ids` / `skill_visibility_diagnostics`，后续 `react_loop` 不应再让初始化默认空 frame 把这些字段覆写成空。
+- 这意味着节点 runtime frame 现在分成“bootstrap 占位 frame”和“authoritative skill-contract frame”两类：默认空 frame 只负责占位与 phase 跟踪，不再被视为 skill candidate truth source；只有已经携带 skill 合同或 skill 诊断的 frame，才能在后续 contract rebuild 中优先于 fresh payload。
+- 同一 turn 内，如果 `_prepare_messages()` 裁掉了旧的 `node_runtime_tool_contract` 尾部消息，NodeRunner 现在会把 fresh skill 合同摘要沿 runtime context 继续传给 `react_loop`。因此后续 round 的 contract rebuild 仍应保持最初那份 `candidate_skill_ids` / `contract_visible_skill_ids` / `skill_visibility_diagnostics`，直到 runtime frame 自己也变成 authoritative 为止。
+- 节点侧的内存 `node context selection cache` 与 `persisted_frame_restore` 现在都带有一层 live-visibility freshness gate。运行时在复用旧 selection 之前，会重新对照当前 `session_key`、`actor_role`、`visible_tool_names`、`contract_visible_skill_ids`，以及 `skill_visibility_diagnostics.registry_skill_ids`。
+- 只要这份 live snapshot 与旧 cache / 旧 frame 漂移，运行时就会丢弃旧 selection，重新跑 `_node_context_selection_inputs()` 与 `build_node_context_selection(...)`，而不是继续沿用旧的 `candidate_skill_ids` / `candidate_tool_names`。
+- 这条规则是为了挡住“外部 resource/governance refresh 已经把 skill 或 tool visibility 改了，但当前节点仍长期沿用旧 cache / 旧 frame”这种回归，尤其是“首轮 skill 可见集为空，后续轮次一直空”的情况。
 - 维护时如果看到 `load_skill_context` 报“当前运行时候选技能未包含 ...”，不要只检查模型当轮提示里是否还看得到那条 dynamic contract；先看节点 runtime frame 里的 `candidate_skill_ids` / `candidate_skill_items` 是否仍在，若 frame 还在而动态消息丢了，说明是 contract 重建链路问题，而不是 selector 一开始没选中。
 - 如果排查的是“为什么这轮 `candidate_skills` 直接是空的”，先对照 `contract_visible_skill_ids` 与 `candidate_skill_ids`：
   - 前者也为空，优先怀疑 runtime-service 输入层的可见 skill 集合本来就空了
   - 前者非空但后者为空，优先怀疑 selector / canonical candidate 生成链路，而不是把 skill 当成了 callable tool 或 prompt 文本丢失
+- 如果 `contract_visible_skill_ids` 与当前 live visibility 已经非空，但当前节点仍在复用更早一轮的空 `candidate_skill_ids` / 空 `contract_visible_skill_ids`，优先怀疑 selection freshness gate / cache invalidation，而不是 prompt wording。
+- 如果还要继续往下拆，改看 `skill_visibility_diagnostics.entries`：
+  - `registry_skill_ids` 都缺少目标 skill：优先怀疑 live `resource_registry` 没加载到该 skill
+  - entry 存在但 `allowed_for_actor_role=false`：优先怀疑 `allowed_roles`
+  - entry 存在且 `allowed_for_actor_role=true`，但 `policy_effect` 不是 `allow` 且 `included_in_contract_visible=false`：优先怀疑治理策略/role policy
 - 节点路径里，语义可用时的 candidate skills / candidate tools 上限都固定为 16；语义不可用时，直接退化为全部 RBAC 可见集合。
 - CEO/frontdoor 路径里，语义可用时默认也按 16 取候选：`skill_inventory_top_k=16`、`extension_tool_top_k=16`；这两个值的实际来源是 `tools/memory_runtime/resource.yaml` / `MemoryAssemblyConfig`，而不是前门内的额外 6/8 fallback。
 - frontdoor 的 `extension_tool_top_k` 现在只控制“最终候选工具数”，不等于 dense 检索宽度；前门会先用更宽的 `tool_limit` 做 dense/rerank，再在最后一层把 candidate 工具收敛到 `extension_tool_top_k`。
@@ -231,6 +243,7 @@ Maintenance note for the memory tool family:
 - 需要显式 `load_skill_context(skill_id="...")`
 - skill 加载通常是“当前轮立即消费正文”
 - 不走 hydration 状态机
+- 对 CEO/frontdoor，最新的 `frontdoor_runtime_tool_contract` 摘要现在也会把 `candidate_skills` 明确标成“可通过 `load_skill_context` 读取正文”的候选，避免模型把它们误读成需要安装/水合的候选工具
 - repair-required skill 现在还有一个更强的门控：
   - 它仍可作为“待修复资源”出现在 agent-facing `repair_required_skills` 中
   - 但在修复完成前，`load_skill_context(...)` / `load_skill_context_v2(...)` 不再返回正文，而是直接返回 repair-required 错误与修复指引
@@ -285,7 +298,7 @@ Maintenance note for parameter-error guidance:
 - CEO/frontdoor 的 stage gate 现在由 `execute_tools` 真正执行，而不是只靠 prompt 约束。普通工具在无活动阶段或预算耗尽时会直接收到 gate error；如果同一批 tool calls 同时包含 `submit_next_stage` 和普通工具，runtime 会先执行 `submit_next_stage`，再把同批普通工具当作新阶段的第一批调用处理，并在该新阶段上记账预算。
 - CEO/frontdoor 现在还多了一层更前置的 contract 收紧：当当前没有“有效阶段”时，agent-facing `frontdoor_runtime_tool_contract.callable_tool_names` 会收紧到只剩 `submit_next_stage`。这条规则同样适用于阶段预算已耗尽、必须换阶段的时刻。
 - 但这条前门规则不再等价于“provider-facing callable tool schemas 也只剩 `submit_next_stage`”。为了保持 prompt cache 前缀稳定，provider body 里的 `tools` 继续使用稳定的 runtime-visible tool bundle；真正的阶段控制回到动态合同和 `execute_tools` stage gate。
-- 这里的“稳定”现在有正式状态机：desired provider tool 集可以随 RBAC/hydration/阶段变化而变化，但 active `provider_tool_names` 只会在 `token_compression` 时从 `pending_provider_tool_names` 提交；普通轮次、fresh-turn continuity、pause/resume 和 `stage_compaction` 都不能直接切 provider-facing `tools[]`。
+- 这里的“稳定”现在不再依赖 active/pending provider-bundle 状态机：普通轮次直接按当前 RBAC-visible concrete tools 条件刷新 `provider_tool_names`；如果当前 send 已经在做 `token_compression`，这一轮实际发给 provider 的 bundle 必须继续沿用压缩前已持久化的 bundle。
 - execution / acceptance 节点现在也采用同样的 contract 收紧，而且没有类似 `cron_internal` 的例外：只要没有有效阶段，当前轮模型可见的 callable tool 列表就只剩 `submit_next_stage`。
 - 但这不意味着 execution / acceptance 节点必须把 `submit_next_stage` 单独拆成一轮。若同一批 tool calls 里同时出现 `submit_next_stage` 和普通工具，执行循环会先推进阶段，再让这些普通工具作为新阶段首轮执行；若阶段切换失败，同批剩余普通工具会被批内阻断，而不会回退到旧阶段继续执行。
 - 当前保留的内部-turn 特例是 `heartbeat_internal` 与 `cron_internal`：只要当前 session 已有权威的 frontdoor baseline 与前序 contract state，这类内部轮次都不会被收紧到只剩 `submit_next_stage`，也不会重新跑 candidate/hydration/skill selection，而是直接继承上一轮的 callable / candidate / hydrated / provider-tool / visible-skill 状态。
@@ -352,6 +365,7 @@ Maintenance note for parameter-error guidance:
 - 对执行节点和检验节点，还要再区分“当前轮对模型暴露的 callable 合同”和“内部可恢复的完整 callable pool”：前者在无有效阶段时会被收紧到 `submit_next_stage`，后者只保留在本地 `model_visible_tool_selection_trace.full_callable_tool_names` 里供排障。
 - 节点侧的 `runtime frame`、动态 `node_runtime_tool_contract` 与 `runtime-frame-messages:{node_id}` artifact 现在都必须写入同一份收紧后的 callable 列表；如果三者不一致，应按运行时合同分裂排查，而不是先怀疑 prompt 文本。
 - 同理，节点侧的 runtime frame 与重建后的 `node_runtime_tool_contract` 也必须对 skill 候选保持一致：`candidate_skill_ids` 与 `candidate_skill_items` 若在 frame 中存在，就不应因为阶段压缩或 active window 裁剪而在下一轮 contract 中无故清空。
+- 但这条“从 frame 恢复”规则现在有一个前提：frame 本身必须已经是 authoritative skill-contract frame。若当前 frame 只是初始化时写下的默认空 skill 字段，而本轮 message history / runtime context 已经携带 fresh skill 合同，contract rebuild 必须优先保留 fresh skill 合同，而不是把空 frame 当成真相源。
 - 节点执行层的 `stage_gate_error_for_tool()` 仍然保留，它现在是 schema 收紧之外的兜底防线；如果模型通过恢复态或手工构造仍然尝试普通工具，执行层仍应返回 `no active stage` / `current stage budget is exhausted`。
 - 对 CEO/frontdoor，当前 turn 的 callable/candidate tool 合同现在应只存在于 dynamic appendix 和持久状态；不要再从稳定 prompt 前缀或旧 transcript 文本恢复“当前可调用工具”。
 - 对 CEO/frontdoor，turn overlay / repair overlay 也属于 dynamic appendix 一侧的尾部临时内容；它们只能尾部追加，不能回写进已有 stable/request user 消息，否则会把原本 append-only 的稳定前缀变成每轮不同的文本。
@@ -591,14 +605,18 @@ The important rule is that hydration promotion and stage gating should change th
 
 When debugging provider-tool drift, use this decision rule:
 
-- If callable/candidate/hydrated sets changed but no `token_compression` happened, provider-facing `tools[]` should still be the previous active bundle.
-- If `token_compression` happened, the same send may commit `pending_provider_tool_names` and emit a new `provider_tool_exposure_revision`.
+- Ordinary turns may refresh provider-facing `tools[]` immediately from the current RBAC-visible concrete tool set, but only when membership truly changed.
+- If the recomputed provider bundle has the same names in a different order, keep the persisted order exactly as-is instead of rotating schemas for no behavioral gain.
+- If the current send is already doing `token_compression`, keep that send's provider-facing `tools[]` unchanged and defer any later refresh to the first post-compression ordinary turn.
 - If RBAC removed a tool, execution must reject it immediately even if the provider-facing schema has not yet converged.
 
 ## Runtime Contract Format
 
 - CEO/frontdoor no longer sends the model-facing runtime contract as raw JSON inside a user message. The live contract is now an assistant summary block headed `## Runtime Tool Contract`.
 - The provider-native callable schema still lives in provider `tools[]`. The summary block exists only to explain callable tools, hydrated tools, candidate tools, candidate skills, and stage state to the model in compact text form.
+- 对 CEO/frontdoor，这个摘要现在要额外明确两条不对称语义：
+  - `candidate_tools` 是 candidate executor 摘要，通常仍需 `load_tool_context(...)` 后等待下一轮 hydration/promotion
+  - `candidate_skills` 是 loadable skill 摘要，应该把列出的 `skill_id` 直接理解为 `load_skill_context(skill_id="...")` 的正文入口，而不是 hydration/install 阶段
 - The summary block may now also carry dedicated repair lanes:
   - `repair_required_tools`
   - `repair_required_skills`
@@ -613,7 +631,7 @@ The provider-facing bundle is also intentionally minimal:
 - Rich tool and skill descriptions stay in the tail runtime contract.
 - Provider `tools[]` should keep only the smallest callable schema required for function calling.
 - Repair-required tool/skill exposure must not be implemented by churning provider `tools[]`. Maintainers should treat repair-required lists as runtime-summary-only guidance; provider bundle stability still wins for cache continuity.
-- `stage_compaction` must not be used as a shortcut to publish a new provider bundle. If artifacts show a new `actual_tool_schema_hash` together with `history_shrink_reason=stage_compaction` and no `provider_tool_exposure_commit_reason=token_compression`, treat that as exposure-gating regression.
+- `stage_compaction` must not be used as a shortcut to publish a new provider bundle. If artifacts show a new `actual_tool_schema_hash` together with `history_shrink_reason=stage_compaction`, treat that as provider-bundle refresh regression.
 - Provider-facing schemas are now sanitized before transport: descriptive text and unsupported JSON Schema combinators such as `anyOf`, `oneOf`, and `allOf` are stripped or flattened into a simpler supported shape.
 - Runtime-side tool validation remains the authority for argument correctness. Do not assume a provider-facing schema still preserves every branch of the richer internal contract.
 - If cache misses correlate with a large `actual_tool_schema_hash` delta, first check whether provider schemas accidentally regressed from this minimal/stable form.

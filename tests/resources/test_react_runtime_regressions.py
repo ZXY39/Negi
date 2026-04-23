@@ -890,13 +890,13 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
     emitted_tool_names = [item['function']['name'] for item in emitted_tools]
 
     assert emitted_tool_names == [
+        'filesystem',
+        'memory_write',
+        'stop_tool_execution',
         'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
-        'stop_tool_execution',
     ]
-    assert 'filesystem' not in emitted_tool_names
-    assert 'memory_write' not in emitted_tool_names
 
 
 @pytest.mark.asyncio
@@ -1068,9 +1068,13 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
     assert 'load_tool_context_v2' in emitted_tool_names
     assert 'filesystem' not in emitted_tool_names
     assert 'content' not in emitted_tool_names
-    assert 'filesystem_write' not in emitted_tool_names
-    assert 'content_describe' not in emitted_tool_names
-    assert 'memory_write' not in emitted_tool_names
+    assert 'filesystem_write' in emitted_tool_names
+    assert 'filesystem_edit' in emitted_tool_names
+    assert 'filesystem_propose_patch' in emitted_tool_names
+    assert 'content_describe' in emitted_tool_names
+    assert 'content_search' in emitted_tool_names
+    assert 'content_open' in emitted_tool_names
+    assert 'memory_write' in emitted_tool_names
 
 
 @pytest.mark.asyncio
@@ -3169,6 +3173,27 @@ async def test_react_loop_writes_candidate_skill_items_into_before_model_frame()
             }
         ],
         contract_visible_skill_ids=["skill-creator", "tmux"],
+        skill_visibility_diagnostics={
+            "registry_skill_ids": ["skill-creator", "tmux"],
+            "entries": [
+                {
+                    "skill_id": "skill-creator",
+                    "enabled": True,
+                    "available": True,
+                    "allowed_for_actor_role": True,
+                    "policy_effect": "allow",
+                    "included_in_contract_visible": True,
+                },
+                {
+                    "skill_id": "tmux",
+                    "enabled": True,
+                    "available": True,
+                    "allowed_for_actor_role": True,
+                    "policy_effect": "allow",
+                    "included_in_contract_visible": True,
+                },
+            ],
+        },
         stage_payload={},
         hydrated_executor_names=[],
         lightweight_tool_ids=[],
@@ -3187,6 +3212,27 @@ async def test_react_loop_writes_candidate_skill_items_into_before_model_frame()
             ]
             assert frame.get("candidate_skill_ids") == ["tmux"]
             assert frame.get("contract_visible_skill_ids") == ["skill-creator", "tmux"]
+            assert frame.get("skill_visibility_diagnostics") == {
+                "registry_skill_ids": ["skill-creator", "tmux"],
+                "entries": [
+                    {
+                        "skill_id": "skill-creator",
+                        "enabled": True,
+                        "available": True,
+                        "allowed_for_actor_role": True,
+                        "policy_effect": "allow",
+                        "included_in_contract_visible": True,
+                    },
+                    {
+                        "skill_id": "tmux",
+                        "enabled": True,
+                        "available": True,
+                        "allowed_for_actor_role": True,
+                        "policy_effect": "allow",
+                        "included_in_contract_visible": True,
+                    },
+                ],
+            }
             return LLMResponse(
                 content="",
                 tool_calls=[
@@ -3367,6 +3413,200 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_skills_w
 
     assert contract.candidate_skill_ids == []
     assert contract.to_message_payload()["candidate_skills"] == []
+
+
+def test_build_node_dynamic_contract_uses_fresh_message_skill_contract_when_bootstrap_frame_is_empty() -> None:
+    log_service = _FakeLogService()
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+    task_id = "task-bootstrap-empty-skill-frame"
+    node = SimpleNamespace(task_id=task_id, node_id="node-bootstrap-empty-skill-frame", depth=0, node_kind="execution")
+
+    fresh_contract = NodeRuntimeToolContract(
+        node_id=node.node_id,
+        node_kind=node.node_kind,
+        callable_tool_names=["submit_next_stage", "load_skill_context"],
+        candidate_tool_names=["content"],
+        visible_skills=[],
+        candidate_skill_ids=["web-access", "multi-search-engine"],
+        candidate_skill_items=[
+            {"skill_id": "web-access", "description": "browser workflow"},
+            {"skill_id": "multi-search-engine", "description": "search workflow"},
+        ],
+        contract_visible_skill_ids=["web-access", "multi-search-engine"],
+        skill_visibility_diagnostics={
+            "registry_skill_ids": ["web-access", "multi-search-engine"],
+            "entries": [
+                {
+                    "skill_id": "web-access",
+                    "enabled": True,
+                    "available": True,
+                    "allowed_for_actor_role": True,
+                    "policy_effect": "allow",
+                    "included_in_contract_visible": True,
+                },
+                {
+                    "skill_id": "multi-search-engine",
+                    "enabled": True,
+                    "available": True,
+                    "allowed_for_actor_role": True,
+                    "policy_effect": "allow",
+                    "included_in_contract_visible": True,
+                },
+            ],
+        },
+        stage_payload={},
+        hydrated_executor_names=[],
+        lightweight_tool_ids=[],
+        selection_trace={},
+    ).to_message()
+
+    log_service.upsert_frame(
+        task_id,
+        {
+            "node_id": node.node_id,
+            "depth": node.depth,
+            "node_kind": node.node_kind,
+            "phase": "before_model",
+            "messages": [],
+            "callable_tool_names": [],
+            "candidate_tool_names": [],
+            "candidate_tool_items": [],
+            "selected_skill_ids": [],
+            "candidate_skill_ids": [],
+            "candidate_skill_items": [],
+            "contract_visible_skill_ids": [],
+            "skill_visibility_diagnostics": {"registry_skill_ids": [], "entries": []},
+            "hydrated_executor_state": [],
+            "hydrated_executor_names": [],
+        },
+        publish_snapshot=False,
+    )
+
+    contract = loop._build_node_dynamic_contract(
+        node=node,
+        message_history=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"prompt":"demo"}'},
+            fresh_contract,
+        ],
+        tool_schema_selection={
+            "tool_names": ["submit_next_stage", "load_skill_context"],
+            "candidate_tool_names": ["content"],
+            "hydrated_executor_names": [],
+            "lightweight_tool_ids": [],
+            "trace": {},
+        },
+        stage_gate={"has_active_stage": True, "transition_required": False, "active_stage": {"stage_id": "stage-1"}},
+    )
+
+    assert contract.candidate_skill_ids == ["web-access", "multi-search-engine"]
+    assert contract.contract_visible_skill_ids == ["web-access", "multi-search-engine"]
+    assert contract.skill_visibility_diagnostics == {
+        "registry_skill_ids": ["web-access", "multi-search-engine"],
+        "entries": [
+            {
+                "skill_id": "web-access",
+                "enabled": True,
+                "available": True,
+                "allowed_for_actor_role": True,
+                "policy_effect": "allow",
+                "included_in_contract_visible": True,
+            },
+            {
+                "skill_id": "multi-search-engine",
+                "enabled": True,
+                "available": True,
+                "allowed_for_actor_role": True,
+                "policy_effect": "allow",
+                "included_in_contract_visible": True,
+            },
+        ],
+    }
+
+
+def test_build_node_dynamic_contract_prefers_fresh_runtime_seeded_skill_contract_after_prepare_messages_strip() -> None:
+    log_service = _FakeLogService()
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+    task_id = "task-runtime-seeded-skill-contract"
+    node = SimpleNamespace(task_id=task_id, node_id="node-runtime-seeded-skill-contract", depth=0, node_kind="execution")
+
+    prepared_history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": '{"prompt":"demo"}'},
+    ]
+
+    log_service.upsert_frame(
+        task_id,
+        {
+            "node_id": node.node_id,
+            "depth": node.depth,
+            "node_kind": node.node_kind,
+            "phase": "before_model",
+            "messages": [],
+            "callable_tool_names": [],
+            "candidate_tool_names": [],
+            "candidate_tool_items": [],
+            "selected_skill_ids": [],
+            "candidate_skill_ids": [],
+            "candidate_skill_items": [],
+            "contract_visible_skill_ids": [],
+            "skill_visibility_diagnostics": {"registry_skill_ids": [], "entries": []},
+            "hydrated_executor_state": [],
+            "hydrated_executor_names": [],
+        },
+        publish_snapshot=False,
+    )
+
+    contract = loop._build_node_dynamic_contract(
+        node=node,
+        message_history=prepared_history,
+        tool_schema_selection={
+            "tool_names": ["submit_next_stage", "load_skill_context"],
+            "candidate_tool_names": ["content"],
+            "hydrated_executor_names": [],
+            "lightweight_tool_ids": [],
+            "trace": {},
+        },
+        stage_gate={"has_active_stage": True, "transition_required": False, "active_stage": {"stage_id": "stage-1"}},
+        runtime_context={
+            "fresh_node_dynamic_contract_payload": {
+                "message_type": "node_runtime_tool_contract",
+                "candidate_skills": [
+                    {"skill_id": "web-access", "description": "browser workflow"},
+                    {"skill_id": "multi-search-engine", "description": "search workflow"},
+                ],
+                "contract_visible_skill_ids": ["web-access", "multi-search-engine"],
+                "skill_visibility_diagnostics": {
+                    "registry_skill_ids": ["web-access", "multi-search-engine"],
+                    "entries": [
+                        {
+                            "skill_id": "web-access",
+                            "enabled": True,
+                            "available": True,
+                            "allowed_for_actor_role": True,
+                            "policy_effect": "allow",
+                            "included_in_contract_visible": True,
+                        },
+                        {
+                            "skill_id": "multi-search-engine",
+                            "enabled": True,
+                            "available": True,
+                            "allowed_for_actor_role": True,
+                            "policy_effect": "allow",
+                            "included_in_contract_visible": True,
+                        },
+                    ],
+                },
+            }
+        },
+    )
+
+    assert contract.candidate_skill_ids == ["web-access", "multi-search-engine"]
+    assert contract.to_message_payload()["candidate_skills"] == [
+        {"skill_id": "web-access", "description": "browser workflow"},
+        {"skill_id": "multi-search-engine", "description": "search workflow"},
+    ]
+    assert contract.contract_visible_skill_ids == ["web-access", "multi-search-engine"]
 
 
 @pytest.mark.asyncio
@@ -4468,6 +4708,27 @@ async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_sk
         },
     ]
     assert dynamic_payload["contract_visible_skill_ids"] == ["skill-creator", "tmux"]
+    assert dynamic_payload["skill_visibility_diagnostics"] == {
+        "registry_skill_ids": ["skill-creator", "tmux"],
+        "entries": [
+            {
+                "skill_id": "skill-creator",
+                "enabled": True,
+                "available": True,
+                "allowed_for_actor_role": True,
+                "policy_effect": "",
+                "included_in_contract_visible": True,
+            },
+            {
+                "skill_id": "tmux",
+                "enabled": True,
+                "available": True,
+                "allowed_for_actor_role": True,
+                "policy_effect": "",
+                "included_in_contract_visible": True,
+            },
+        ],
+    }
     assert enriched[0]["content"] == "base prompt"
 
 
@@ -6196,7 +6457,7 @@ async def test_node_send_preflight_triggers_compression_at_effective_threshold(
 
 
 @pytest.mark.asyncio
-async def test_node_send_preflight_token_compression_commits_pending_provider_tools(
+async def test_node_send_preflight_token_compression_keeps_prior_provider_tool_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import main.runtime.react_loop as react_loop_module
@@ -6282,21 +6543,19 @@ async def test_node_send_preflight_token_compression_commits_pending_provider_to
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=2)
 
     def _selector(**kwargs):
-        commit_reason = str(dict(kwargs.get("runtime_context") or {}).get("provider_tool_exposure_commit_reason") or "")
-        provider_tool_names = ["submit_final_result", "web_fetch"] if commit_reason == "token_compression" else ["submit_final_result"]
-        pending_names = [] if commit_reason == "token_compression" else ["submit_final_result", "web_fetch"]
         return {
             "tool_names": ["submit_final_result", "web_fetch"],
-            "provider_tool_names": provider_tool_names,
-            "pending_provider_tool_names": pending_names,
-            "provider_tool_exposure_pending": bool(pending_names),
-            "provider_tool_exposure_commit_reason": "token_compression" if commit_reason == "token_compression" else "",
-            "provider_tool_exposure_revision": "pte:committed" if commit_reason == "token_compression" else "pte:active",
+            "provider_tool_names": ["submit_final_result", "web_fetch"],
+            "pending_provider_tool_names": [],
+            "provider_tool_exposure_pending": False,
+            "provider_tool_exposure_commit_reason": "",
+            "provider_tool_exposure_revision": "pte:active",
             "trace": {
                 "full_callable_tool_names": ["submit_final_result", "web_fetch"],
-                "provider_tool_names": provider_tool_names,
-                "pending_provider_tool_names": pending_names,
-                "provider_tool_exposure_commit_reason": "token_compression" if commit_reason == "token_compression" else "",
+                "provider_tool_names": ["submit_final_result", "web_fetch"],
+                "pending_provider_tool_names": [],
+                "provider_tool_exposure_commit_reason": "",
+                "prior_provider_tool_names": ["submit_final_result"],
             },
         }
 
@@ -6326,9 +6585,9 @@ async def test_node_send_preflight_token_compression_commits_pending_provider_to
     assert len(calls) == 1
     emitted_tools = list(calls[0].get("tools") or [])
     emitted_tool_names = [item["function"]["name"] for item in emitted_tools]
-    assert "web_fetch" in emitted_tool_names
-    assert observed_frame.get("provider_tool_names") == ["submit_final_result", "web_fetch"]
-    assert observed_frame.get("provider_tool_exposure_commit_reason") == "token_compression"
+    assert emitted_tool_names == ["submit_final_result"]
+    assert observed_frame.get("provider_tool_names") == ["submit_final_result"]
+    assert observed_frame.get("provider_tool_exposure_commit_reason") == ""
 
 
 @pytest.mark.asyncio

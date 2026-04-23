@@ -79,6 +79,8 @@ def test_ceo_prompt_builder_visible_skills_block_requires_active_stage() -> None
     assert '如果当前还没有活动阶段且你需要使用工具，第一步必须先调用 `submit_next_stage`。' in block
     assert '仅当当前已经存在活动阶段且你确实需要完整工作流正文时' in block
     assert '仅在当前已经存在活动阶段后调用 `load_skill_context(skill_id="find-skills")`。' in block
+    assert 'skill 不走 hydration' in block
+    assert '不要把候选 skill 误当成需要安装或等待下一轮才可读取正文的工具' in block
 
 
 def test_node_runner_runtime_context_and_prompt_contract_include_project_python(monkeypatch) -> None:

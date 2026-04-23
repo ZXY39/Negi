@@ -5260,6 +5260,19 @@ def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_
             "contract_visible_skill_ids": [
                 "memory",
             ],
+            "skill_visibility_diagnostics": {
+                "registry_skill_ids": ["memory"],
+                "entries": [
+                    {
+                        "skill_id": "memory",
+                        "enabled": True,
+                        "available": True,
+                        "allowed_for_actor_role": True,
+                        "policy_effect": "allow",
+                        "included_in_contract_visible": True,
+                    }
+                ],
+            },
             "hydrated_executor_names": [
                 "filesystem_write",
             ],
@@ -5325,6 +5338,43 @@ def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_
                 "multi-search-engine",
                 "web-access",
             ],
+            "skill_visibility_diagnostics": {
+                "registry_skill_ids": ["find-skills", "memory", "multi-search-engine", "web-access"],
+                "entries": [
+                    {
+                        "skill_id": "find-skills",
+                        "enabled": True,
+                        "available": True,
+                        "allowed_for_actor_role": True,
+                        "policy_effect": "allow",
+                        "included_in_contract_visible": False,
+                    },
+                    {
+                        "skill_id": "memory",
+                        "enabled": True,
+                        "available": True,
+                        "allowed_for_actor_role": True,
+                        "policy_effect": "allow",
+                        "included_in_contract_visible": False,
+                    },
+                    {
+                        "skill_id": "multi-search-engine",
+                        "enabled": True,
+                        "available": True,
+                        "allowed_for_actor_role": True,
+                        "policy_effect": "allow",
+                        "included_in_contract_visible": True,
+                    },
+                    {
+                        "skill_id": "web-access",
+                        "enabled": True,
+                        "available": True,
+                        "allowed_for_actor_role": True,
+                        "policy_effect": "allow",
+                        "included_in_contract_visible": True,
+                    },
+                ],
+            },
             "hydrated_executor_names": [
                 "filesystem_edit",
             ],
@@ -5344,6 +5394,43 @@ def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_
 
     assert runtime_frame is not None
     assert runtime_frame["messages"][0]["role"] == "user"
+    assert runtime_frame["skill_visibility_diagnostics"] == {
+        "registry_skill_ids": ["find-skills", "memory", "multi-search-engine", "web-access"],
+        "entries": [
+            {
+                "skill_id": "find-skills",
+                "enabled": True,
+                "available": True,
+                "allowed_for_actor_role": True,
+                "policy_effect": "allow",
+                "included_in_contract_visible": False,
+            },
+            {
+                "skill_id": "memory",
+                "enabled": True,
+                "available": True,
+                "allowed_for_actor_role": True,
+                "policy_effect": "allow",
+                "included_in_contract_visible": False,
+            },
+            {
+                "skill_id": "multi-search-engine",
+                "enabled": True,
+                "available": True,
+                "allowed_for_actor_role": True,
+                "policy_effect": "allow",
+                "included_in_contract_visible": True,
+            },
+            {
+                "skill_id": "web-access",
+                "enabled": True,
+                "available": True,
+                "allowed_for_actor_role": True,
+                "policy_effect": "allow",
+                "included_in_contract_visible": True,
+            },
+        ],
+    }
 
     runtime_artifacts = [
         artifact
@@ -5356,6 +5443,43 @@ def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_
 
     assert payload["messages"][0]["role"] == "user"
     assert payload["contract_visible_skill_ids"] == ["multi-search-engine", "web-access"]
+    assert payload["skill_visibility_diagnostics"] == {
+        "registry_skill_ids": ["find-skills", "memory", "multi-search-engine", "web-access"],
+        "entries": [
+            {
+                "skill_id": "find-skills",
+                "enabled": True,
+                "available": True,
+                "allowed_for_actor_role": True,
+                "policy_effect": "allow",
+                "included_in_contract_visible": False,
+            },
+            {
+                "skill_id": "memory",
+                "enabled": True,
+                "available": True,
+                "allowed_for_actor_role": True,
+                "policy_effect": "allow",
+                "included_in_contract_visible": False,
+            },
+            {
+                "skill_id": "multi-search-engine",
+                "enabled": True,
+                "available": True,
+                "allowed_for_actor_role": True,
+                "policy_effect": "allow",
+                "included_in_contract_visible": True,
+            },
+            {
+                "skill_id": "web-access",
+                "enabled": True,
+                "available": True,
+                "allowed_for_actor_role": True,
+                "policy_effect": "allow",
+                "included_in_contract_visible": True,
+            },
+        ],
+    }
     snapshots = payload["callable_tool_snapshots"]
     assert len(snapshots) == 2
     assert snapshots[0]["snapshot_index"] == 1
@@ -5924,7 +6048,7 @@ async def test_run_node_after_restart_reuses_persisted_actual_request_prefix_for
 
 
 @pytest.mark.asyncio
-async def test_model_visible_tool_selection_keeps_prior_provider_tool_bundle_until_token_compression(
+async def test_model_visible_tool_selection_refreshes_provider_tool_bundle_from_current_visible_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -6015,13 +6139,11 @@ async def test_model_visible_tool_selection_keeps_prior_provider_tool_bundle_unt
         assert selection["provider_tool_names"] == [
             "submit_next_stage",
             "content_open",
-        ]
-        assert selection["trace"]["provider_tool_bundle_seeded"] is True
-        assert selection["trace"]["pending_provider_tool_names"] == [
-            "submit_next_stage",
-            "content_open",
             "web_fetch",
         ]
+        assert selection["trace"]["provider_tool_bundle_seeded"] is True
+        assert selection["trace"]["pending_provider_tool_names"] == []
+        assert selection["trace"]["provider_tool_exposure_pending"] is False
         assert selection["trace"]["provider_tool_exposure_commit_reason"] == ""
         assert selection["trace"]["prior_provider_tool_names"] == [
             "submit_next_stage",
@@ -6039,8 +6161,10 @@ async def test_model_visible_tool_selection_keeps_prior_provider_tool_bundle_unt
         assert repeated_selection["provider_tool_names"] == [
             "submit_next_stage",
             "content_open",
+            "web_fetch",
         ]
         assert repeated_selection["trace"]["provider_tool_exposure_commit_reason"] == ""
+        assert repeated_selection["trace"]["pending_provider_tool_names"] == []
 
         stage_compaction_selection = service._select_model_visible_tool_schema_payload(
             task_id=record.task_id,
@@ -6053,8 +6177,10 @@ async def test_model_visible_tool_selection_keeps_prior_provider_tool_bundle_unt
         assert stage_compaction_selection["provider_tool_names"] == [
             "submit_next_stage",
             "content_open",
+            "web_fetch",
         ]
         assert stage_compaction_selection["trace"]["provider_tool_exposure_commit_reason"] == ""
+        assert stage_compaction_selection["trace"]["pending_provider_tool_names"] == []
 
         token_compaction_selection = service._select_model_visible_tool_schema_payload(
             task_id=record.task_id,
@@ -6070,7 +6196,109 @@ async def test_model_visible_tool_selection_keeps_prior_provider_tool_bundle_unt
             "web_fetch",
         ]
         assert token_compaction_selection["trace"]["pending_provider_tool_names"] == []
-        assert token_compaction_selection["trace"]["provider_tool_exposure_commit_reason"] == "token_compression"
+        assert token_compaction_selection["trace"]["provider_tool_exposure_commit_reason"] == ""
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_model_visible_tool_selection_preserves_prior_provider_order_when_membership_matches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task(
+            "preserve provider bundle order",
+            session_id="web:shared",
+        )
+        root = service.get_node(record.root_node_id)
+
+        assert root is not None
+
+        service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "messages": [
+                    {"role": "system", "content": "system prompt"},
+                    {"role": "user", "content": "user prompt"},
+                ],
+                "model_visible_tool_names": [
+                    "submit_next_stage",
+                    "content_open",
+                    "web_fetch",
+                ],
+                "provider_tool_names": [
+                    "submit_next_stage",
+                    "web_fetch",
+                    "content_open",
+                ],
+                "model_visible_tool_selection_trace": {
+                    "mode": "execution_tool_selection",
+                    "provider_tool_bundle_seeded": False,
+                },
+            },
+            publish_snapshot=False,
+        )
+
+        visible_tools = {
+            "submit_next_stage": _StaticTool("submit_next_stage"),
+            "content_open": _StaticTool("content_open"),
+            "web_fetch": _StaticTool("web_fetch"),
+        }
+        monkeypatch.setattr(
+            "main.service.runtime_service.build_execution_tool_selection",
+            lambda **_kwargs: SimpleNamespace(
+                hydrated_tool_names=[
+                    "submit_next_stage",
+                    "content_open",
+                    "web_fetch",
+                ],
+                candidate_tool_names=[],
+                lightweight_tool_ids=[],
+                schema_chars=0,
+                trace={},
+            ),
+        )
+        monkeypatch.setattr(
+            service,
+            "_model_visible_callable_tool_names_for_node",
+            lambda **_kwargs: [
+                "submit_next_stage",
+                "content_open",
+                "web_fetch",
+            ],
+        )
+
+        selection = service._select_model_visible_tool_schema_payload(
+            task_id=record.task_id,
+            node_id=root.node_id,
+            node_kind=root.node_kind,
+            visible_tools=visible_tools,
+            runtime_context={},
+        )
+
+        assert selection["provider_tool_names"] == [
+            "submit_next_stage",
+            "web_fetch",
+            "content_open",
+        ]
+        assert selection["trace"]["pending_provider_tool_names"] == []
+        assert selection["trace"]["provider_tool_exposure_pending"] is False
+        assert selection["trace"]["provider_tool_exposure_commit_reason"] == ""
     finally:
         await service.close()
 

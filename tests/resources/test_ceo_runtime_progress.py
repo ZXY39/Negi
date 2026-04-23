@@ -7080,7 +7080,7 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     )
 
     assert state_update["tool_names"] == ["create_async_task", "task_list", "filesystem_write"]
-    assert state_update["provider_tool_names"] == ["create_async_task", "task_list", "filesystem_write"]
+    assert state_update["provider_tool_names"] == ["create_async_task", "task_list", "filesystem_write", "web_fetch"]
     assert state_update["candidate_tool_names"] == ["web_fetch"]
     assert state_update["candidate_tool_items"] == [{"tool_id": "web_fetch", "description": "fetch web pages"}]
     assert state_update["hydrated_tool_names"] == ["filesystem_write"]
@@ -7130,7 +7130,8 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     contract_text = str(contract_messages[0]["content"] or "")
     assert "callable_tools: `create_async_task`, `task_list`, `filesystem_write`" in contract_text
     assert "hydrated_tools: `filesystem_write`" in contract_text
-    assert "candidate_skills: `find-skills`" in contract_text
+    assert "candidate_skills (loadable with `load_skill_context`): `find-skills`" in contract_text
+    assert 'Call `load_skill_context(skill_id="<skill_id>")`' in contract_text
     assert "`web_fetch`: fetch web pages" in contract_text
 
 
@@ -7258,7 +7259,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     )
 
     assert state_update["tool_names"] == ["create_async_task", "task_list", "filesystem_write"]
-    assert state_update["provider_tool_names"] == ["create_async_task", "task_list", "filesystem_write"]
+    assert state_update["provider_tool_names"] == ["create_async_task", "task_list", "filesystem_write", "web_fetch"]
     assert state_update["candidate_tool_names"] == ["web_fetch"]
     assert state_update["candidate_tool_items"] == [{"tool_id": "web_fetch", "description": "fetch web pages"}]
     assert state_update["hydrated_tool_names"] == ["filesystem_write"]
@@ -7320,7 +7321,8 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     contract_text = str(contract_messages[0]["content"] or "")
     assert "callable_tools: `create_async_task`, `task_list`, `filesystem_write`" in contract_text
     assert "hydrated_tools: `filesystem_write`" in contract_text
-    assert "candidate_skills: `find-skills`" in contract_text
+    assert "candidate_skills (loadable with `load_skill_context`): `find-skills`" in contract_text
+    assert 'Call `load_skill_context(skill_id="<skill_id>")`' in contract_text
     assert "`web_fetch`: fetch web pages" in contract_text
 
 
@@ -7469,9 +7471,9 @@ async def test_ceo_frontdoor_prepare_turn_internal_turn_without_prior_baseline_f
     ]
     assert captured["builder_kwargs"]["user_content"] == heartbeat_event_bundle
     assert state_update["tool_names"] == ["exec"]
-    assert state_update["provider_tool_names"] == ["filesystem_write"]
-    assert state_update["pending_provider_tool_names"] == ["exec"]
-    assert state_update["provider_tool_exposure_pending"] is True
+    assert state_update["provider_tool_names"] == ["exec"]
+    assert state_update["pending_provider_tool_names"] == []
+    assert state_update["provider_tool_exposure_pending"] is False
     assert state_update["cache_family_revision"] == "frontdoor:v1"
 
 

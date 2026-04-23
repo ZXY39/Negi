@@ -332,6 +332,7 @@ class TaskLogService:
             'candidate_skill_ids': [],
             'candidate_skill_items': [],
             'contract_visible_skill_ids': [],
+            'skill_visibility_diagnostics': {},
             'rbac_visible_tool_names': [],
             'rbac_visible_skill_ids': [],
             'hydrated_executor_state': [],
@@ -360,6 +361,33 @@ class TaskLogService:
             seen.add(normalized)
             ordered.append(normalized)
         return ordered
+
+    @classmethod
+    def _sanitize_skill_visibility_diagnostics(cls, payload: Any) -> dict[str, Any]:
+        diagnostics = dict(payload or {}) if isinstance(payload, dict) else {}
+        entries: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in list(diagnostics.get('entries') or []):
+            if not isinstance(item, dict):
+                continue
+            skill_id = str(item.get('skill_id') or '').strip()
+            if not skill_id or skill_id in seen:
+                continue
+            seen.add(skill_id)
+            entries.append(
+                {
+                    'skill_id': skill_id,
+                    'enabled': bool(item.get('enabled')),
+                    'available': bool(item.get('available')),
+                    'allowed_for_actor_role': bool(item.get('allowed_for_actor_role')),
+                    'policy_effect': str(item.get('policy_effect') or '').strip().lower(),
+                    'included_in_contract_visible': bool(item.get('included_in_contract_visible')),
+                }
+            )
+        return {
+            'registry_skill_ids': cls._normalized_name_list(diagnostics.get('registry_skill_ids') or []),
+            'entries': entries,
+        }
 
     @classmethod
     def _runtime_message_payload(cls, messages: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -3559,12 +3587,17 @@ class TaskLogService:
             if str(item or '').strip()
         ]
         payload['contract_visible_skill_ids'] = contract_visible_skill_ids
-        if messages or callable_tool_snapshots or contract_visible_skill_ids:
+        skill_visibility_diagnostics = self._sanitize_skill_visibility_diagnostics(
+            payload.get('skill_visibility_diagnostics') or {}
+        )
+        payload['skill_visibility_diagnostics'] = skill_visibility_diagnostics
+        if messages or callable_tool_snapshots or contract_visible_skill_ids or skill_visibility_diagnostics:
             serialized = json.dumps(
                 {
                     'messages': messages,
                     'callable_tool_snapshots': callable_tool_snapshots,
                     'contract_visible_skill_ids': contract_visible_skill_ids,
+                    'skill_visibility_diagnostics': skill_visibility_diagnostics,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -3677,6 +3710,9 @@ class TaskLogService:
                     for item in list(next_frame.get('contract_visible_skill_ids') or [])
                     if str(item or '').strip()
                 ],
+                'skill_visibility_diagnostics': self._sanitize_skill_visibility_diagnostics(
+                    next_frame.get('skill_visibility_diagnostics') or {}
+                ),
                 'rbac_visible_tool_names': [
                     str(item or '').strip()
                     for item in list(next_frame.get('rbac_visible_tool_names') or [])
@@ -3758,6 +3794,9 @@ class TaskLogService:
             for item in list(payload.get('contract_visible_skill_ids') or [])
             if str(item or '').strip()
         ]
+        skill_visibility_diagnostics = self._sanitize_skill_visibility_diagnostics(
+            payload.get('skill_visibility_diagnostics') or {}
+        )
         ref = str(payload.get('messages_ref') or '').strip()
         if ref:
             text = self._resolve_content_ref(ref)
@@ -3779,6 +3818,10 @@ class TaskLogService:
                             for item in list(parsed.get('contract_visible_skill_ids') or [])
                             if str(item or '').strip()
                         ]
+                    if not skill_visibility_diagnostics:
+                        skill_visibility_diagnostics = self._sanitize_skill_visibility_diagnostics(
+                            parsed.get('skill_visibility_diagnostics') or {}
+                        )
         return {
             'node_id': record.node_id,
             'depth': int(record.depth or 0),
@@ -3850,6 +3893,7 @@ class TaskLogService:
                 if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
             ],
             'contract_visible_skill_ids': list(contract_visible_skill_ids),
+            'skill_visibility_diagnostics': skill_visibility_diagnostics,
             'rbac_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('rbac_visible_tool_names') or [])
@@ -4450,6 +4494,9 @@ class TaskLogService:
                 for item in list(payload.get('contract_visible_skill_ids') or [])
                 if str(item or '').strip()
             ],
+            'skill_visibility_diagnostics': TaskLogService._sanitize_skill_visibility_diagnostics(
+                payload.get('skill_visibility_diagnostics') or {}
+            ),
             'rbac_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('rbac_visible_tool_names') or [])
@@ -4543,6 +4590,9 @@ class TaskLogService:
                 for item in list(payload.get('contract_visible_skill_ids') or [])
                 if str(item or '').strip()
             ],
+            'skill_visibility_diagnostics': TaskLogService._sanitize_skill_visibility_diagnostics(
+                payload.get('skill_visibility_diagnostics') or {}
+            ),
             'hydrated_executor_state': [
                 str(item or '').strip()
                 for item in list(payload.get('hydrated_executor_state') or payload.get('hydrated_executor_names') or [])

@@ -320,6 +320,7 @@ class NodeRuntimeToolContract:
     lightweight_tool_ids: list[str]
     selection_trace: dict[str, Any]
     contract_visible_skill_ids: list[str] | None = None
+    skill_visibility_diagnostics: dict[str, Any] | None = None
     candidate_tool_items: list[dict[str, str]] | None = None
     candidate_skill_items: list[dict[str, str]] | None = None
     repair_required_tool_items: list[dict[str, str]] | None = None
@@ -351,6 +352,8 @@ class NodeRuntimeToolContract:
             payload['contract_visible_skill_ids'] = _normalized_name_list(
                 list(self.contract_visible_skill_ids or [])
             )
+        if isinstance(self.skill_visibility_diagnostics, dict):
+            payload['skill_visibility_diagnostics'] = dict(self.skill_visibility_diagnostics)
         if isinstance(self.exec_runtime_policy, dict):
             payload['exec_runtime_policy'] = dict(self.exec_runtime_policy)
         return payload

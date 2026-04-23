@@ -1465,7 +1465,9 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
     assert "callable_tools: `submit_next_stage`, `filesystem_write`" in contract_text
     assert "candidate_tools: none" in contract_text
     assert "hydrated_tools: `filesystem_write`" in contract_text
-    assert "candidate_skills: `memory`" in contract_text
+    assert "candidate_skills (loadable with `load_skill_context`): `memory`" in contract_text
+    assert "Skills listed in `candidate_skills` do not hydrate" in contract_text
+    assert 'Call `load_skill_context(skill_id="<skill_id>")`' in contract_text
 
 
 def test_frontdoor_dynamic_appendix_records_require_canonical_tool_state_fields() -> None:
@@ -1542,6 +1544,8 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
     assert '"message_type"' not in str(updated[0]["content"] or "")
     assert "callable_tools: `submit_next_stage`, `filesystem_write`" in str(updated[0]["content"] or "")
     assert "candidate_tools:" in str(updated[0]["content"] or "")
+    assert "candidate_skills (loadable with `load_skill_context`): `memory`" in str(updated[0]["content"] or "")
+    assert "Skills listed in `candidate_skills` do not hydrate" in str(updated[0]["content"] or "")
     assert 'load_tool_context(tool_id="agent_browser")' in str(updated[0]["content"] or "")
     payload = contract.to_message_payload()
     assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]

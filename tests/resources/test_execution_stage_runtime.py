@@ -898,6 +898,185 @@ async def test_prepare_node_context_selection_restores_callable_tools_from_persi
 
 
 @pytest.mark.asyncio
+async def test_prepare_node_context_selection_recomputes_when_cached_skill_visibility_drift_is_detected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = SimpleNamespace(
+        task_id="task-cache-skill-drift",
+        session_id="web:shared",
+        metadata={"core_requirement": "load web skills"},
+    )
+    node = SimpleNamespace(
+        task_id="task-cache-skill-drift",
+        node_id="node-cache-skill-drift",
+        node_kind="execution",
+        prompt="load web skills",
+        goal="load web skills",
+    )
+    visible_skills = [
+        SimpleNamespace(skill_id="web-access", display_name="web-access", description="browser workflow"),
+        SimpleNamespace(
+            skill_id="multi-search-engine",
+            display_name="multi-search-engine",
+            description="search workflow",
+        ),
+    ]
+    service = object.__new__(MainRuntimeService)
+    service._node_context_selection_cache = {
+        ("task-cache-skill-drift", "node-cache-skill-drift"): {
+            "session_key": "web:shared",
+            "actor_role": "execution",
+            "visible_skills": [],
+            "contract_visible_skill_ids": [],
+            "skill_visibility_diagnostics": {"registry_skill_ids": [], "entries": []},
+            "visible_tool_families": [],
+            "visible_tool_names": ["web_fetch"],
+            "prompt": "load web skills",
+            "goal": "load web skills",
+            "core_requirement": "load web skills",
+            "selection": NodeContextSelectionResult(
+                mode="dense_rerank",
+                selected_skill_ids=[],
+                selected_tool_names=["web_fetch"],
+                candidate_skill_ids=[],
+                candidate_tool_names=["web_fetch"],
+                trace={"mode": "dense_rerank"},
+            ),
+        }
+    }
+    service.log_service = SimpleNamespace(read_runtime_frame=lambda task_id, node_id: None)
+    service.list_contract_visible_skill_resources = (
+        lambda *, actor_role, session_id: list(visible_skills)
+    )
+    service.list_visible_tool_families = (
+        lambda *, actor_role, session_id: [_tool_family("web_fetch", "web_fetch")]
+    )
+    service.list_effective_tool_names = (
+        lambda *, actor_role, session_id: ["web_fetch", "load_skill_context", "load_tool_context"]
+    )
+
+    async def _no_refresh(*, session_id: str):
+        _ = session_id
+        return {"refreshed": False, "catalog_synced": False, "skill_ids": [], "tool_ids": []}
+
+    service.maybe_refresh_external_resource_changes = _no_refresh
+
+    selector_calls: list[dict[str, object]] = []
+
+    async def _fake_build_node_context_selection(**kwargs):
+        selector_calls.append(dict(kwargs))
+        return NodeContextSelectionResult(
+            mode="dense_rerank",
+            selected_skill_ids=["web-access"],
+            selected_tool_names=["web_fetch"],
+            candidate_skill_ids=["web-access", "multi-search-engine"],
+            candidate_tool_names=["web_fetch"],
+            trace={"mode": "dense_rerank"},
+        )
+
+    monkeypatch.setattr(
+        runtime_service_module,
+        "build_node_context_selection",
+        _fake_build_node_context_selection,
+    )
+
+    selection = await service._prepare_node_context_selection(task=task, node=node)
+
+    assert selector_calls, "expected stale cached selection to be recomputed"
+    assert selection.candidate_skill_ids == ["web-access", "multi-search-engine"]
+    cached = service._node_context_selection_cache[("task-cache-skill-drift", "node-cache-skill-drift")]
+    assert cached["contract_visible_skill_ids"] == ["web-access", "multi-search-engine"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_node_context_selection_ignores_persisted_frame_when_live_skill_visibility_drift_is_detected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = SimpleNamespace(
+        task_id="task-frame-skill-drift",
+        session_id="web:shared",
+        metadata={"core_requirement": "load web skills"},
+    )
+    node = SimpleNamespace(
+        task_id="task-frame-skill-drift",
+        node_id="node-frame-skill-drift",
+        node_kind="execution",
+        prompt="load web skills",
+        goal="load web skills",
+    )
+    visible_skills = [
+        SimpleNamespace(skill_id="web-access", display_name="web-access", description="browser workflow"),
+    ]
+    service = object.__new__(MainRuntimeService)
+    service._node_context_selection_cache = {}
+    service.log_service = SimpleNamespace(
+        read_runtime_frame=lambda task_id, node_id: {
+            "callable_tool_names": ["web_fetch"],
+            "candidate_tool_names": ["web_fetch"],
+            "selected_skill_ids": [],
+            "candidate_skill_ids": [],
+            "contract_visible_skill_ids": [],
+            "skill_visibility_diagnostics": {"registry_skill_ids": [], "entries": []},
+            "rbac_visible_tool_names": ["web_fetch"],
+            "rbac_visible_skill_ids": [],
+            "messages": [
+                {"role": "system", "content": "base prompt"},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "prompt": "load web skills",
+                            "goal": "load web skills",
+                            "core_requirement": "load web skills",
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+        }
+    )
+    service.list_contract_visible_skill_resources = (
+        lambda *, actor_role, session_id: list(visible_skills)
+    )
+    service.list_visible_tool_families = (
+        lambda *, actor_role, session_id: [_tool_family("web_fetch", "web_fetch")]
+    )
+    service.list_effective_tool_names = (
+        lambda *, actor_role, session_id: ["web_fetch", "load_skill_context", "load_tool_context"]
+    )
+
+    async def _no_refresh(*, session_id: str):
+        _ = session_id
+        return {"refreshed": False, "catalog_synced": False, "skill_ids": [], "tool_ids": []}
+
+    service.maybe_refresh_external_resource_changes = _no_refresh
+
+    selector_calls: list[dict[str, object]] = []
+
+    async def _fake_build_node_context_selection(**kwargs):
+        selector_calls.append(dict(kwargs))
+        return NodeContextSelectionResult(
+            mode="dense_rerank",
+            selected_skill_ids=["web-access"],
+            selected_tool_names=["web_fetch"],
+            candidate_skill_ids=["web-access"],
+            candidate_tool_names=["web_fetch"],
+            trace={"mode": "dense_rerank"},
+        )
+
+    monkeypatch.setattr(
+        runtime_service_module,
+        "build_node_context_selection",
+        _fake_build_node_context_selection,
+    )
+
+    selection = await service._prepare_node_context_selection(task=task, node=node)
+
+    assert selector_calls, "expected stale persisted frame selection to be recomputed"
+    assert selection.candidate_skill_ids == ["web-access"]
+
+
+@pytest.mark.asyncio
 async def test_create_task_assigns_distinct_task_temp_dirs_and_injects_runtime_environment(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

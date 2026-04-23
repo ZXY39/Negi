@@ -1275,9 +1275,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         actual_tool_schemas: list[dict[str, Any]] = []
         if hasattr(self, "_frontdoor_prompt_contract"):
             try:
-                runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
-                    state_for_request,
-                    tool_names=list(state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or []),
+                runtime_visible_tool_names = self._frontdoor_provider_visible_tool_names(
+                    list(state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or [])
                 )
                 try:
                     tool_schemas = self._selected_tool_schemas(list(runtime_visible_tool_names))
@@ -1842,6 +1841,47 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return f"pte:{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
 
     @classmethod
+    def _refresh_frontdoor_provider_tool_bundle(
+        cls,
+        *,
+        prior_provider_tool_names: list[str] | None,
+        desired_provider_tool_names: list[str] | None,
+        prior_history_shrink_reason: str = "",
+    ) -> dict[str, Any]:
+        prior = [
+            str(item or "").strip()
+            for item in list(prior_provider_tool_names or [])
+            if str(item or "").strip()
+        ]
+        desired = [
+            str(item or "").strip()
+            for item in list(desired_provider_tool_names or [])
+            if str(item or "").strip()
+        ]
+        prior_membership = set(prior)
+        desired_membership = set(desired)
+        membership_changed = prior_membership != desired_membership
+        if not prior:
+            active = list(desired)
+        elif membership_changed:
+            active = list(desired)
+        else:
+            # Preserve the persisted order verbatim when the membership is
+            # unchanged so frontdoor prompt-cache prefixes stay stable.
+            active = list(prior)
+        return {
+            "provider_tool_names": list(active),
+            "pending_provider_tool_names": [],
+            "provider_tool_exposure_pending": False,
+            "provider_tool_exposure_revision": cls._provider_tool_exposure_revision(active),
+            "provider_tool_exposure_commit_reason": "",
+            "provider_tool_bundle_seeded": bool((not prior and active) or membership_changed),
+            "desired_provider_tool_names": list(desired),
+            "prior_history_shrink_reason": str(prior_history_shrink_reason or "").strip(),
+            "provider_tool_membership_changed": bool(membership_changed),
+        }
+
+    @classmethod
     def _resolve_frontdoor_provider_tool_exposure(
         cls,
         *,
@@ -1850,48 +1890,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         desired_provider_tool_names: list[str] | None,
         commit_reason: str = "",
     ) -> dict[str, Any]:
-        active = [
-            str(item or "").strip()
-            for item in list(active_provider_tool_names or [])
-            if str(item or "").strip()
-        ]
-        pending = [
-            str(item or "").strip()
-            for item in list(pending_provider_tool_names or [])
-            if str(item or "").strip()
-        ]
-        desired = [
-            str(item or "").strip()
-            for item in list(desired_provider_tool_names or [])
-            if str(item or "").strip()
-        ]
-        normalized_commit_reason = (
-            "token_compression"
-            if str(commit_reason or "").strip() == "token_compression"
-            else ""
+        _ = pending_provider_tool_names, commit_reason
+        return cls._refresh_frontdoor_provider_tool_bundle(
+            prior_provider_tool_names=active_provider_tool_names,
+            desired_provider_tool_names=desired_provider_tool_names,
         )
-        if not active:
-            active = list(desired)
-            pending = []
-            normalized_commit_reason = ""
-        elif normalized_commit_reason == "token_compression":
-            active = list(desired)
-            pending = []
-        elif desired != active:
-            pending = list(desired)
-            normalized_commit_reason = ""
-        else:
-            pending = []
-            normalized_commit_reason = ""
-        return {
-            "provider_tool_names": list(active),
-            "pending_provider_tool_names": list(pending),
-            "provider_tool_exposure_pending": bool(pending),
-            "provider_tool_exposure_revision": cls._provider_tool_exposure_revision(active),
-            "provider_tool_exposure_commit_reason": normalized_commit_reason,
-            "provider_tool_bundle_seeded": bool(desired != active),
-            "desired_provider_tool_names": list(desired),
-        }
 
     @classmethod
     def _fresh_turn_seed_normalized_value(cls, value: Any) -> Any:
@@ -2128,11 +2131,31 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     def _registered_tools_for_state(self, state: CeoGraphState) -> dict[str, Tool]:
         return self._registered_tools(
-            self._frontdoor_runtime_visible_tool_names_for_state(
-                state,
-                tool_names=list(state.get("provider_tool_names") or state.get("tool_names") or []),
+            self._frontdoor_provider_visible_tool_names(
+                list(state.get("provider_tool_names") or state.get("tool_names") or [])
             )
         )
+
+    def _frontdoor_provider_visible_tool_names(
+        self,
+        tool_names: list[str] | None,
+    ) -> list[str]:
+        normalized = self._normalized_tool_name_state_list(tool_names)
+        tools_registry = getattr(self._loop, "tools", None)
+        tool_lookup = getattr(tools_registry, "get", None)
+        if not tools_registry or not callable(tool_lookup):
+            return normalized
+        provider_visible: list[str] = []
+        for name in normalized:
+            tool = tool_lookup(str(name or "").strip())
+            if tool is None:
+                continue
+            try:
+                _provider_visible_tool_contract(tool)
+            except Exception:
+                continue
+            provider_visible.append(str(tool.name or name).strip())
+        return self._normalized_tool_name_state_list(provider_visible) or normalized
 
     def _frontdoor_has_valid_stage(self, state: CeoGraphState | dict[str, Any] | None) -> bool:
         normalized_state = (
@@ -2181,7 +2204,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     def _selected_tool_schemas(self, tool_names: list[str] | None) -> list[dict[str, Any]]:
         schemas: list[dict[str, Any]] = []
-        for name in list(tool_names or []):
+        for name in self._frontdoor_provider_visible_tool_names(tool_names):
             tool = self._loop.tools.get(str(name or "").strip())
             if tool is None:
                 continue
@@ -2636,9 +2659,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             cls._normalized_tool_name_state_list(state.get("provider_tool_names"))
             or list(tool_names)
         )
-        pending_provider_tool_names = cls._normalized_tool_name_state_list(
-            state.get("pending_provider_tool_names")
-        )
         candidate_tool_names = cls._normalized_tool_name_state_list(state.get("candidate_tool_names"))
         candidate_tool_items = cls._normalized_candidate_tool_items(
             state.get("candidate_tool_items"),
@@ -2707,14 +2727,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return {
             "tool_names": list(tool_names),
             "provider_tool_names": list(provider_tool_names),
-            "pending_provider_tool_names": list(pending_provider_tool_names),
-            "provider_tool_exposure_pending": bool(
-                state.get("provider_tool_exposure_pending") or pending_provider_tool_names
-            ),
+            "pending_provider_tool_names": [],
+            "provider_tool_exposure_pending": False,
             "provider_tool_exposure_revision": provider_tool_exposure_revision,
-            "provider_tool_exposure_commit_reason": str(
-                state.get("provider_tool_exposure_commit_reason") or ""
-            ).strip(),
+            "provider_tool_exposure_commit_reason": "",
             "candidate_tool_names": list(candidate_tool_names),
             "candidate_tool_items": list(candidate_tool_items),
             "hydrated_tool_names": list(hydrated_tool_names),
@@ -3403,9 +3419,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: dict[str, Any],
     ) -> dict[str, Any]:
         refreshed = dict(state or {})
-        runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
-            refreshed,
-            tool_names=list(refreshed.get("provider_tool_names") or refreshed.get("tool_names") or []),
+        runtime_visible_tool_names = self._frontdoor_provider_visible_tool_names(
+            list(refreshed.get("provider_tool_names") or refreshed.get("tool_names") or [])
         )
         for legacy_field in ("summary_text", "summary_payload", "summary_model_key", "summary_version"):
             refreshed.pop(legacy_field, None)
@@ -4745,24 +4760,27 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ):
                 messages.append({"role": "user", "content": current_turn_user_content})
             provider_model = str(model_refs[0] if model_refs else "").strip()
-            runtime_visible_tool_names = list(
-                inherited_internal_contract_state.get("provider_tool_names") or []
+            prior_provider_tool_names = self._normalized_tool_name_state_list(
+                state.get("provider_tool_names")
+                or getattr(session, "_frontdoor_provider_tool_schema_names", [])
             )
-            provider_tool_exposure = {
-                "provider_tool_names": list(runtime_visible_tool_names),
-                "pending_provider_tool_names": list(
-                    inherited_internal_contract_state.get("pending_provider_tool_names") or []
-                ),
-                "provider_tool_exposure_pending": bool(
-                    inherited_internal_contract_state.get("provider_tool_exposure_pending")
-                ),
-                "provider_tool_exposure_revision": str(
-                    inherited_internal_contract_state.get("provider_tool_exposure_revision") or ""
+            desired_provider_tool_names = self._frontdoor_provider_visible_tool_names(
+                list(
+                    rbac_visible_tool_names
+                    or inherited_internal_contract_state.get("provider_tool_names")
+                    or []
+                )
+            )
+            provider_tool_exposure = self._refresh_frontdoor_provider_tool_bundle(
+                prior_provider_tool_names=prior_provider_tool_names,
+                desired_provider_tool_names=desired_provider_tool_names,
+                prior_history_shrink_reason=str(
+                    state.get("frontdoor_history_shrink_reason")
+                    or getattr(session, "_frontdoor_history_shrink_reason", "")
+                    or ""
                 ).strip(),
-                "provider_tool_exposure_commit_reason": str(
-                    inherited_internal_contract_state.get("provider_tool_exposure_commit_reason") or ""
-                ).strip(),
-            }
+            )
+            runtime_visible_tool_names = list(provider_tool_exposure.get("provider_tool_names") or [])
             tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
             stable_messages = list(messages)
             dynamic_appendix_messages: list[dict[str, Any]] = []
@@ -4887,29 +4905,28 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 messages.append({"role": "user", "content": current_turn_user_content})
 
             provider_model = str(model_refs[0] if model_refs else "").strip()
-            provider_tool_seed_names = [
-                str(item or "").strip()
-                for item in list(exposure.get("tool_names") or [])
-                if str(item or "").strip()
-            ]
-            runtime_visible_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
-                {
-                    "frontdoor_stage_state": current_frontdoor_stage_state,
-                    "cron_internal": cron_internal,
-                    "heartbeat_internal": heartbeat_internal,
-                },
-                tool_names=provider_tool_seed_names,
+            provider_tool_seed_names = list(
+                rbac_visible_tool_names
+                or [
+                    str(item or "").strip()
+                    for item in list(exposure.get("tool_names") or [])
+                    if str(item or "").strip()
+                ]
             )
-            desired_provider_tool_names = list(runtime_visible_tool_names)
-            provider_tool_exposure = self._resolve_frontdoor_provider_tool_exposure(
-                active_provider_tool_names=self._normalized_tool_name_state_list(
+            desired_provider_tool_names = self._frontdoor_provider_visible_tool_names(
+                provider_tool_seed_names
+            )
+            provider_tool_exposure = self._refresh_frontdoor_provider_tool_bundle(
+                prior_provider_tool_names=self._normalized_tool_name_state_list(
                     state.get("provider_tool_names")
-                ),
-                pending_provider_tool_names=self._normalized_tool_name_state_list(
-                    state.get("pending_provider_tool_names")
+                    or getattr(session, "_frontdoor_provider_tool_schema_names", [])
                 ),
                 desired_provider_tool_names=desired_provider_tool_names,
-                commit_reason="",
+                prior_history_shrink_reason=str(
+                    state.get("frontdoor_history_shrink_reason")
+                    or getattr(session, "_frontdoor_history_shrink_reason", "")
+                    or ""
+                ).strip(),
             )
             runtime_visible_tool_names = list(provider_tool_exposure.get("provider_tool_names") or [])
             tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
@@ -5202,6 +5219,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             raise RuntimeError("CEO frontdoor exceeded maximum iterations")
 
         state_for_request = dict(state or {})
+        normalized_provider_tool_names = self._frontdoor_provider_visible_tool_names(
+            list(state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or [])
+        )
+        if normalized_provider_tool_names:
+            state_for_request = {
+                **state_for_request,
+                "provider_tool_names": list(normalized_provider_tool_names),
+                "pending_provider_tool_names": [],
+                "provider_tool_exposure_pending": False,
+                "provider_tool_exposure_revision": self._provider_tool_exposure_revision(
+                    normalized_provider_tool_names
+                ),
+                "provider_tool_exposure_commit_reason": "",
+            }
         follow_up_update = await self._consume_session_follow_up_messages_before_call_model(
             state=state_for_request,
             runtime=runtime,
@@ -5338,99 +5369,88 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     **dict(preflight.diagnostics or {}),
                 }
                 preflight_shrink_reason = str(preflight.history_shrink_reason or "").strip()
-                if (
-                    preflight_shrink_reason == "token_compression"
-                    and list(state_for_request.get("pending_provider_tool_names") or [])
-                ):
-                    committed_exposure = self._resolve_frontdoor_provider_tool_exposure(
-                        active_provider_tool_names=self._normalized_tool_name_state_list(
-                            state_for_request.get("provider_tool_names")
-                        ),
-                        pending_provider_tool_names=self._normalized_tool_name_state_list(
-                            state_for_request.get("pending_provider_tool_names")
-                        ),
-                        desired_provider_tool_names=self._normalized_tool_name_state_list(
-                            state_for_request.get("pending_provider_tool_names")
-                        ),
-                        commit_reason="token_compression",
+                if preflight_shrink_reason == "token_compression":
+                    current_provider_tool_names = self._frontdoor_provider_visible_tool_names(
+                        list(state_for_request.get("provider_tool_names") or [])
                     )
-                    committed_provider_tool_names = self._frontdoor_runtime_visible_tool_names_for_state(
-                        state_for_request,
-                        tool_names=list(committed_exposure.get("provider_tool_names") or []),
+                    prior_provider_tool_names = self._normalized_tool_name_state_list(
+                        getattr(runtime_session, "_frontdoor_provider_tool_schema_names", [])
+                        or current_provider_tool_names
                     )
-                    committed_tool_schemas = self._selected_tool_schemas(
-                        list(committed_provider_tool_names)
-                    )
-                    committed_state = {
+                    compression_provider_tool_names = self._frontdoor_provider_visible_tool_names(
+                        list(prior_provider_tool_names or current_provider_tool_names)
+                    ) or list(current_provider_tool_names)
+                    compression_state = {
                         **dict(state_for_request or {}),
-                        "provider_tool_names": list(committed_provider_tool_names),
-                        "pending_provider_tool_names": list(
-                            committed_exposure.get("pending_provider_tool_names") or []
+                        "provider_tool_names": list(compression_provider_tool_names),
+                        "pending_provider_tool_names": [],
+                        "provider_tool_exposure_pending": False,
+                        "provider_tool_exposure_revision": self._provider_tool_exposure_revision(
+                            compression_provider_tool_names
                         ),
-                        "provider_tool_exposure_pending": bool(
-                            committed_exposure.get("provider_tool_exposure_pending")
-                        ),
-                        "provider_tool_exposure_revision": str(
-                            committed_exposure.get("provider_tool_exposure_revision") or ""
-                        ),
-                        "provider_tool_exposure_commit_reason": str(
-                            committed_exposure.get("provider_tool_exposure_commit_reason") or ""
-                        ),
+                        "provider_tool_exposure_commit_reason": "",
                         "frontdoor_live_request_messages": list(request_messages),
                     }
-                    committed_contract = self._frontdoor_prompt_contract(
-                        state=committed_state,
-                        provider_model=str((list(committed_state.get("model_refs") or []) or [""])[0] or "").strip(),
-                        tool_schemas=committed_tool_schemas,
-                        overlay_text=str(committed_state.get("turn_overlay_text") or "").strip(),
-                        session_key=str(committed_state.get("session_key") or "").strip(),
-                        overlay_section_count=len(list(committed_state.get("dynamic_appendix_messages") or [])),
-                    )
-                    committed_request_messages = list(committed_contract.request_messages)
-                    committed_prompt_cache_key = str(committed_contract.prompt_cache_key or prompt_cache_key)
-                    committed_prompt_cache_diagnostics = dict(
-                        committed_contract.diagnostics or prompt_cache_diagnostics
-                    )
-                    committed_provider_request_body = self._build_frontdoor_provider_request_body_preview(
-                        request_messages=committed_request_messages,
-                        tool_schemas=committed_tool_schemas,
-                        model_info=model_info,
-                        prompt_cache_key=committed_prompt_cache_key,
-                        parallel_tool_calls=(
-                            bool(state_for_request.get("parallel_enabled")) if list(langchain_tools or []) else None
-                        ),
-                    )
-                    committed_total_tokens = self._estimate_frontdoor_send_total_tokens(
-                        provider_request_body=committed_provider_request_body,
-                        request_messages=committed_request_messages,
-                        tool_schemas=committed_tool_schemas,
-                    )
-                    if int(committed_total_tokens or 0) <= context_window_tokens:
-                        request_messages = list(committed_request_messages)
-                        prompt_cache_key = committed_prompt_cache_key
-                        prompt_cache_diagnostics = committed_prompt_cache_diagnostics
-                        actual_tool_schemas = list(committed_tool_schemas)
-                        state_for_request = committed_state
+                    if compression_provider_tool_names != current_provider_tool_names:
+                        compression_tool_schemas = self._selected_tool_schemas(
+                            list(compression_provider_tool_names)
+                        )
+                        compression_contract = self._frontdoor_prompt_contract(
+                            state=compression_state,
+                            provider_model=str((list(compression_state.get("model_refs") or []) or [""])[0] or "").strip(),
+                            tool_schemas=compression_tool_schemas,
+                            overlay_text=str(compression_state.get("turn_overlay_text") or "").strip(),
+                            session_key=str(compression_state.get("session_key") or "").strip(),
+                            overlay_section_count=len(list(compression_state.get("dynamic_appendix_messages") or [])),
+                        )
+                        compression_request_messages = list(compression_contract.request_messages)
+                        compression_prompt_cache_key = str(
+                            compression_contract.prompt_cache_key or prompt_cache_key
+                        )
+                        compression_prompt_cache_diagnostics = dict(
+                            compression_contract.diagnostics or prompt_cache_diagnostics
+                        )
+                        compression_provider_request_body = self._build_frontdoor_provider_request_body_preview(
+                            request_messages=compression_request_messages,
+                            tool_schemas=compression_tool_schemas,
+                            model_info=model_info,
+                            prompt_cache_key=compression_prompt_cache_key,
+                            parallel_tool_calls=(
+                                bool(state_for_request.get("parallel_enabled")) if list(langchain_tools or []) else None
+                            ),
+                        )
+                        compression_total_tokens = self._estimate_frontdoor_send_total_tokens(
+                            provider_request_body=compression_provider_request_body,
+                            request_messages=compression_request_messages,
+                            tool_schemas=compression_tool_schemas,
+                        )
+                        request_messages = list(compression_request_messages)
+                        prompt_cache_key = compression_prompt_cache_key
+                        prompt_cache_diagnostics = compression_prompt_cache_diagnostics
+                        actual_tool_schemas = list(compression_tool_schemas)
+                        state_for_request = compression_state
                         post_compaction_snapshot = build_runtime_send_token_preflight_snapshot(
                             context_window_tokens=context_window_tokens,
-                            estimated_total_tokens=int(committed_total_tokens or 0),
+                            estimated_total_tokens=int(compression_total_tokens or 0),
                         )
                         preflight_diagnostics = {
                             **dict(preflight_diagnostics or {}),
-                            "estimated_total_tokens": int(committed_total_tokens or 0),
-                            "preview_estimate_tokens": int(committed_total_tokens or 0),
-                            "final_estimate_tokens": int(committed_total_tokens or 0),
-                            "final_request_tokens": int(committed_total_tokens or 0),
+                            "estimated_total_tokens": int(compression_total_tokens or 0),
+                            "preview_estimate_tokens": int(compression_total_tokens or 0),
+                            "final_estimate_tokens": int(compression_total_tokens or 0),
+                            "final_request_tokens": int(compression_total_tokens or 0),
                             "ratio": float(post_compaction_snapshot.ratio or 0.0),
                             "would_exceed_context_window": bool(post_compaction_snapshot.would_exceed_context_window),
                             "would_trigger_token_compression": bool(
                                 post_compaction_snapshot.would_trigger_token_compression
                             ),
-                            "provider_tool_exposure_commit_reason": "token_compression",
+                            "provider_tool_refresh_deferred_due_to": "token_compression",
                         }
+                    else:
+                        state_for_request = compression_state
                 if runtime_session is not None and preflight_shrink_reason:
                     setattr(runtime_session, "_frontdoor_pending_shrink_reason", "")
-                if int(preflight.final_request_tokens or 0) > context_window_tokens:
+                if int(preflight_diagnostics.get("final_request_tokens") or preflight.final_request_tokens or 0) > context_window_tokens:
                     raise self._frontdoor_context_window_exceeded_error(model_info=model_info)
             state_for_request = {
                 **dict(state_for_request or {}),

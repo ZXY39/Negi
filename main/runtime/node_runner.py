@@ -43,6 +43,7 @@ from main.runtime.internal_tools import (
     SubmitMessageDistributionTool,
     SubmitNextStageTool,
 )
+from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
@@ -310,6 +311,15 @@ class NodeRunner:
                 marker='resume_react_state',
                 awaitable=self._resume_react_state(task=task, node=node),
             )
+            if str(react_state.get('message_source') or '').strip() == 'fresh':
+                fresh_contract_payload = extract_node_dynamic_contract_payload(
+                    list(react_state.get('messages') or [])
+                )
+                if isinstance(fresh_contract_payload, dict):
+                    runtime_context = {
+                        **runtime_context,
+                        'fresh_node_dynamic_contract_payload': dict(fresh_contract_payload),
+                    }
             pending_notification_ids = [
                 str(item or '').strip()
                 for item in list(react_state.get('pending_notification_ids') or [])
@@ -428,6 +438,7 @@ class NodeRunner:
             self._close_active_stage_for_message_consumption(task_id=task.task_id, node_id=node.node_id)
             return {
                 'messages': messages,
+                'message_source': 'notice',
                 'pending_notification_ids': [str(item.notification_id or '').strip() for item in notifications],
                 'pending_root_notice_ids': [
                     str(item.get('notification_id') or '').strip()
@@ -440,10 +451,12 @@ class NodeRunner:
         if isinstance(frame.get('messages'), list) and frame.get('messages'):
             return {
                 'messages': list(frame.get('messages') or []),
+                'message_source': 'restored_frame',
                 'request_body_seed_messages': request_body_seed_messages,
             }
         return {
             'messages': await self._build_messages(task=task, node=node),
+            'message_source': 'fresh',
             'request_body_seed_messages': request_body_seed_messages,
         }
 

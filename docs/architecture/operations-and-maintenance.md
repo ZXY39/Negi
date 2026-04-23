@@ -225,10 +225,15 @@ Maintenance note for `task_append_notice` / task message distribution:
 - 如果症状是执行节点/验收节点说“当前没有 candidate skills”或把本应当作 skill 的东西误判成“缺失的 callable 联网工具”，优先同时检查节点 runtime frame 与 `runtime-frame-messages:{node_id}` artifact 里的两组字段：
   - `contract_visible_skill_ids`：回答 `runtime_service._node_context_selection_inputs()` 当轮实际看到了哪些 contract-visible skills
   - `candidate_skill_ids`：回答 selector 最终留下了哪些 canonical skill candidates
+- 如果还需要继续往下拆，再看 `skill_visibility_diagnostics`：
+  - `registry_skill_ids`：回答 live `resource_registry` 当轮到底列出了哪些 skill
+  - `entries[*].allowed_for_actor_role`：回答是不是在 `allowed_roles` 这一层就被挡住了
+  - `entries[*].policy_effect`：回答 role policy 当轮给到的效果是不是 `allow`
+  - `entries[*].included_in_contract_visible`：回答该 skill 最终有没有进入 `contract_visible_skill_ids`
 - 排障顺序应先分层：
   - `contract_visible_skill_ids=[]`：优先怀疑 RBAC / governance / resource visibility 输入层
   - `contract_visible_skill_ids` 非空但 `candidate_skill_ids=[]`：优先怀疑 selector、dense fallback、或 contract/frame 重建链路
-  - 两者都非空但模型文本里 `candidate_skills: none`：优先怀疑动态 contract 重建或 stale frame/消息恢复问题
+  - 两者都非空但模型文本里的前门 contract 已经把 `candidate_skills` 渲染成 `none`（无论文案是旧的 `candidate_skills: none`，还是新的 loadable 提示版本）：优先怀疑动态 contract 重建或 stale frame/消息恢复问题
 
 ### 模型配置不生效
 
@@ -284,6 +289,14 @@ Maintenance note for `task_append_notice` / task message distribution:
 风险：
 
 - 不一定会报错，但会显著改变 agent 行为，是高隐蔽性回归。
+
+### Provider Bundle Refresh
+
+- `provider_tool_names` / provider-facing `tools[]` now track the current RBAC-visible concrete tool set for that path, not an old active-plus-pending exposure state machine.
+- Ordinary turns may refresh the bundle immediately when membership changed. If the recomputed bundle has the same names in a different order, keep the persisted order exactly as-is to protect prompt-cache stability.
+- A send that is already performing `token_compression` must keep the pre-existing provider bundle for that send. The first post-compression ordinary turn is the refresh point.
+- `pending_provider_tool_names` and `provider_tool_exposure_commit_reason` are compatibility fields only on new writes. Expect `[]` and `""`, not a live commit workflow.
+- Provider-facing schemas can now be broader than the callable contract for the round. That does not bypass runtime authorization: `tool_names` / callable contract still decides what the model is allowed to invoke this turn.
 
 ### 修改 China bridge 协议边界
 

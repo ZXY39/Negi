@@ -4309,12 +4309,11 @@ class MainRuntimeService:
             node_kind=normalized_node_kind,
             callable_tool_names=full_callable_tool_names,
         )
-        requested_commit_reason = str(runtime_payload.get('provider_tool_exposure_commit_reason') or '').strip()
         log_service = getattr(self, 'log_service', None)
         read_runtime_frame = getattr(log_service, 'read_runtime_frame', None)
         prior_selected_tool_names: list[str] = []
         prior_provider_tool_names: list[str] = []
-        prior_pending_provider_tool_names: list[str] = []
+        prior_history_shrink_reason = ''
         if callable(read_runtime_frame):
             prior_frame = read_runtime_frame(str(task_id or '').strip(), str(node_id or '').strip())
             if isinstance(prior_frame, dict):
@@ -4332,11 +4331,7 @@ class MainRuntimeService:
                     )
                     if str(item or '').strip()
                 ]
-                prior_pending_provider_tool_names = [
-                    str(item or '').strip()
-                    for item in list(prior_frame.get('pending_provider_tool_names') or [])
-                    if str(item or '').strip()
-                ]
+                prior_history_shrink_reason = str(prior_frame.get('history_shrink_reason') or '').strip()
         selected_tool_names: list[str] = []
         for name in prior_selected_tool_names:
             if name in model_visible_callable_tool_names and name not in selected_tool_names:
@@ -4344,12 +4339,23 @@ class MainRuntimeService:
         for name in model_visible_callable_tool_names:
             if name not in selected_tool_names:
                 selected_tool_names.append(name)
-        desired_provider_tool_names = list(full_callable_tool_names or selected_tool_names)
-        exposure = self._resolve_provider_tool_exposure(
-            active_provider_tool_names=prior_provider_tool_names,
-            pending_provider_tool_names=prior_pending_provider_tool_names,
+        provider_visible_tool_names = [
+            name
+            for name in ordered_visible_tool_names
+            if name not in legacy_monolith_names
+        ]
+        desired_provider_tool_names: list[str] = []
+        provider_visible_tool_name_set = set(provider_visible_tool_names)
+        for name in visible_rbac_tool_names:
+            if name in provider_visible_tool_name_set and name not in desired_provider_tool_names:
+                desired_provider_tool_names.append(name)
+        for name in provider_visible_tool_names:
+            if name not in desired_provider_tool_names:
+                desired_provider_tool_names.append(name)
+        exposure = self._refresh_provider_tool_bundle(
+            prior_provider_tool_names=prior_provider_tool_names,
             desired_provider_tool_names=desired_provider_tool_names,
-            commit_reason=requested_commit_reason,
+            prior_history_shrink_reason=prior_history_shrink_reason,
         )
         provider_tool_names = list(exposure.get('provider_tool_names') or [])
         provider_tool_bundle_seeded = bool(exposure.get('provider_tool_bundle_seeded'))
@@ -4391,6 +4397,7 @@ class MainRuntimeService:
                 'candidate_tool_names': list(candidate_tool_names),
                 'desired_provider_tool_names': list(exposure.get('desired_provider_tool_names') or []),
                 'prior_provider_tool_names': list(prior_provider_tool_names),
+                'prior_history_shrink_reason': str(prior_history_shrink_reason or ''),
                 'provider_tool_names': list(provider_tool_names),
                 'pending_provider_tool_names': list(exposure.get('pending_provider_tool_names') or []),
                 'provider_tool_exposure_pending': bool(exposure.get('provider_tool_exposure_pending')),
@@ -4522,6 +4529,47 @@ class MainRuntimeService:
         return f"pte:{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
 
     @classmethod
+    def _refresh_provider_tool_bundle(
+        cls,
+        *,
+        prior_provider_tool_names: list[str] | None,
+        desired_provider_tool_names: list[str] | None,
+        prior_history_shrink_reason: str = '',
+    ) -> dict[str, Any]:
+        prior = [
+            str(item or '').strip()
+            for item in list(prior_provider_tool_names or [])
+            if str(item or '').strip()
+        ]
+        desired = [
+            str(item or '').strip()
+            for item in list(desired_provider_tool_names or [])
+            if str(item or '').strip()
+        ]
+        prior_membership = set(prior)
+        desired_membership = set(desired)
+        membership_changed = prior_membership != desired_membership
+        if not prior:
+            active = list(desired)
+        elif membership_changed:
+            active = list(desired)
+        else:
+            # Preserve the persisted bundle exactly when membership is unchanged
+            # so prompt-cache prefixes do not churn on harmless reorder noise.
+            active = list(prior)
+        return {
+            'provider_tool_names': list(active),
+            'pending_provider_tool_names': [],
+            'provider_tool_exposure_pending': False,
+            'provider_tool_exposure_revision': cls._provider_tool_exposure_revision(active),
+            'provider_tool_exposure_commit_reason': '',
+            'provider_tool_bundle_seeded': bool((not prior and active) or membership_changed),
+            'desired_provider_tool_names': list(desired),
+            'prior_history_shrink_reason': str(prior_history_shrink_reason or '').strip(),
+            'provider_tool_membership_changed': bool(membership_changed),
+        }
+
+    @classmethod
     def _resolve_provider_tool_exposure(
         cls,
         *,
@@ -4530,48 +4578,11 @@ class MainRuntimeService:
         desired_provider_tool_names: list[str] | None,
         commit_reason: str = '',
     ) -> dict[str, Any]:
-        active = [
-            str(item or '').strip()
-            for item in list(active_provider_tool_names or [])
-            if str(item or '').strip()
-        ]
-        pending = [
-            str(item or '').strip()
-            for item in list(pending_provider_tool_names or [])
-            if str(item or '').strip()
-        ]
-        desired = [
-            str(item or '').strip()
-            for item in list(desired_provider_tool_names or [])
-            if str(item or '').strip()
-        ]
-        normalized_commit_reason = (
-            'token_compression'
-            if str(commit_reason or '').strip() == 'token_compression'
-            else ''
+        _ = pending_provider_tool_names, commit_reason
+        return cls._refresh_provider_tool_bundle(
+            prior_provider_tool_names=active_provider_tool_names,
+            desired_provider_tool_names=desired_provider_tool_names,
         )
-        if not active:
-            active = list(desired)
-            pending = []
-            normalized_commit_reason = ''
-        elif normalized_commit_reason == 'token_compression':
-            active = list(desired)
-            pending = []
-        elif desired != active:
-            pending = list(desired)
-            normalized_commit_reason = ''
-        else:
-            pending = []
-            normalized_commit_reason = ''
-        return {
-            'provider_tool_names': list(active),
-            'pending_provider_tool_names': list(pending),
-            'provider_tool_exposure_pending': bool(pending),
-            'provider_tool_exposure_revision': cls._provider_tool_exposure_revision(active),
-            'provider_tool_exposure_commit_reason': normalized_commit_reason,
-            'provider_tool_bundle_seeded': bool(desired != active),
-            'desired_provider_tool_names': list(desired),
-        }
 
     def _tool_context_hydration_targets(
         self,
@@ -6509,12 +6520,31 @@ class MainRuntimeService:
         return dict(cached) if isinstance(cached, dict) else None
 
     def _tool_provider_selection_entry(self, *, task, node: NodeRecord) -> dict[str, Any] | None:
+        live_visibility_snapshot: dict[str, Any] | None = None
+
+        def _live_snapshot() -> dict[str, Any]:
+            nonlocal live_visibility_snapshot
+            if live_visibility_snapshot is None:
+                live_visibility_snapshot = self._node_context_selection_live_visibility_snapshot(task=task, node=node)
+            return live_visibility_snapshot
+
         cached = self._cached_node_context_selection_entry(task=task, node=node)
         if isinstance(cached, dict) and isinstance(cached.get('selection'), NodeContextSelectionResult):
-            return cached
+            if (
+                self._node_context_selection_entry_has_visibility_snapshot(cached)
+                and self._node_context_selection_entry_is_stale(entry=cached, live_snapshot=_live_snapshot())
+            ):
+                self._clear_node_context_selection(task=task, node=node)
+            else:
+                return cached
 
         restored = self._restore_node_context_selection_entry(task=task, node=node)
         if restored is None:
+            return None
+        if (
+            self._node_context_selection_entry_has_visibility_snapshot(restored)
+            and self._node_context_selection_entry_is_stale(entry=restored, live_snapshot=_live_snapshot())
+        ):
             return None
 
         cache_key = self._node_context_selection_cache_key(task=task, node=node)
@@ -6543,6 +6573,150 @@ class MainRuntimeService:
             seen.add(skill_id)
             ordered.append(skill_id)
         return ordered
+
+    @staticmethod
+    def _normalized_string_list(items: list[Any] | None) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for item in list(items or []):
+            normalized = str(item or '').strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        return ordered
+
+    @classmethod
+    def _node_context_selection_entry_has_visibility_snapshot(cls, entry: dict[str, Any] | None) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        if not isinstance(entry.get('visible_tool_names'), list):
+            return False
+        if not isinstance(entry.get('contract_visible_skill_ids'), list):
+            return False
+        if not isinstance(entry.get('skill_visibility_diagnostics'), dict):
+            return False
+        return bool(str(entry.get('session_key') or '').strip()) and bool(str(entry.get('actor_role') or '').strip())
+
+    @classmethod
+    def _node_context_selection_entry_registry_skill_ids(cls, entry: dict[str, Any] | None) -> list[str]:
+        if not isinstance(entry, dict):
+            return []
+        diagnostics = (
+            dict(entry.get('skill_visibility_diagnostics') or {})
+            if isinstance(entry.get('skill_visibility_diagnostics'), dict)
+            else {}
+        )
+        return cls._normalized_string_list(list(diagnostics.get('registry_skill_ids') or []))
+
+    def _node_context_selection_live_visibility_snapshot(self, *, task, node: NodeRecord) -> dict[str, Any]:
+        session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        actor_role = self._actor_role_for_node(node)
+        visible_skills = list(self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
+        visible_tool_names = self._normalized_tool_name_list(
+            list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_key) or [])
+        )
+        resource_registry = getattr(self, 'resource_registry', None)
+        registry_skills = (
+            list(resource_registry.list_skill_resources() or [])
+            if resource_registry is not None and hasattr(resource_registry, 'list_skill_resources')
+            else list(visible_skills)
+        )
+        return {
+            'session_key': session_key,
+            'actor_role': actor_role,
+            'visible_tool_names': visible_tool_names,
+            'contract_visible_skill_ids': self._normalized_skill_id_list(visible_skills),
+            'registry_skill_ids': self._normalized_skill_id_list(registry_skills),
+        }
+
+    def _node_context_selection_entry_is_stale(
+        self,
+        *,
+        entry: dict[str, Any] | None,
+        live_snapshot: dict[str, Any],
+    ) -> bool:
+        if not self._node_context_selection_entry_has_visibility_snapshot(entry):
+            return False
+        entry = dict(entry or {})
+        if str(entry.get('session_key') or '').strip() != str(live_snapshot.get('session_key') or '').strip():
+            return True
+        if str(entry.get('actor_role') or '').strip() != str(live_snapshot.get('actor_role') or '').strip():
+            return True
+        entry_visible_tool_names = self._normalized_tool_name_list(list(entry.get('visible_tool_names') or []))
+        if entry_visible_tool_names != self._normalized_tool_name_list(list(live_snapshot.get('visible_tool_names') or [])):
+            return True
+        entry_contract_visible_skill_ids = self._normalized_string_list(list(entry.get('contract_visible_skill_ids') or []))
+        if entry_contract_visible_skill_ids != self._normalized_string_list(list(live_snapshot.get('contract_visible_skill_ids') or [])):
+            return True
+        entry_registry_skill_ids = self._node_context_selection_entry_registry_skill_ids(entry)
+        if entry_registry_skill_ids != self._normalized_string_list(list(live_snapshot.get('registry_skill_ids') or [])):
+            return True
+        return False
+
+    def _skill_visibility_diagnostics(
+        self,
+        *,
+        actor_role: str,
+        session_id: str,
+        visible_skills: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        visible_skills = list(visible_skills or [])
+        visible_skill_ids = set(self._normalized_skill_id_list(visible_skills))
+        resource_registry = getattr(self, 'resource_registry', None)
+        policy_engine = getattr(self, 'policy_engine', None)
+        registry_skills = (
+            list(resource_registry.list_skill_resources() or [])
+            if resource_registry is not None and hasattr(resource_registry, 'list_skill_resources')
+            else list(visible_skills)
+        )
+        subject = self._subject(actor_role=actor_role, session_id=session_id)
+        find_role_policy = getattr(policy_engine, '_find_role_policy', None)
+        registry_skill_ids: list[str] = []
+        entries: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for record in list(registry_skills or []):
+            skill_id = str(self._skill_record_value(record, 'skill_id') or '').strip()
+            if not skill_id or skill_id in seen:
+                continue
+            seen.add(skill_id)
+            registry_skill_ids.append(skill_id)
+            allowed_roles = {
+                str(role or '').strip()
+                for role in list(self._skill_record_value(record, 'allowed_roles') or [])
+                if str(role or '').strip()
+            }
+            policy_effect = ''
+            if callable(find_role_policy):
+                policy = find_role_policy(
+                    subject=subject,
+                    resource_kind='skill',
+                    resource_id=skill_id,
+                    action_id='load',
+                )
+                policy_effect = str(getattr(policy, 'effect', '') or '').strip().lower()
+            entries.append(
+                {
+                    'skill_id': skill_id,
+                    'enabled': bool(
+                        True
+                        if self._skill_record_value(record, 'enabled') is None
+                        else self._skill_record_value(record, 'enabled')
+                    ),
+                    'available': bool(
+                        True
+                        if self._skill_record_value(record, 'available') is None
+                        else self._skill_record_value(record, 'available')
+                    ),
+                    'allowed_for_actor_role': str(actor_role or '').strip() in allowed_roles if allowed_roles else True,
+                    'policy_effect': policy_effect,
+                    'included_in_contract_visible': skill_id in visible_skill_ids,
+                }
+            )
+        return {
+            'registry_skill_ids': list(registry_skill_ids),
+            'entries': entries,
+        }
 
     @staticmethod
     def _normalized_reason_values(items: list[Any] | None) -> list[str]:
@@ -6766,11 +6940,21 @@ class MainRuntimeService:
         ]
         if not contract_visible_skill_ids:
             contract_visible_skill_ids = self._normalized_skill_id_list(visible_skills)
+        skill_visibility_diagnostics = (
+            dict(frame.get('skill_visibility_diagnostics') or {})
+            if isinstance(frame.get('skill_visibility_diagnostics'), dict)
+            else self._skill_visibility_diagnostics(
+                actor_role=actor_role,
+                session_id=session_key,
+                visible_skills=visible_skills,
+            )
+        )
         return {
             'session_key': session_key,
             'actor_role': actor_role,
             'visible_skills': visible_skills,
             'contract_visible_skill_ids': contract_visible_skill_ids,
+            'skill_visibility_diagnostics': skill_visibility_diagnostics,
             'candidate_tool_items': candidate_tool_items,
             'candidate_skill_items': candidate_skill_items,
             'visible_tool_families': list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_key) or []),
@@ -6796,6 +6980,11 @@ class MainRuntimeService:
             'actor_role': actor_role,
             'visible_skills': visible_skills,
             'contract_visible_skill_ids': self._normalized_skill_id_list(visible_skills),
+            'skill_visibility_diagnostics': self._skill_visibility_diagnostics(
+                actor_role=actor_role,
+                session_id=session_key,
+                visible_skills=visible_skills,
+            ),
             'visible_tool_families': visible_tool_families,
             'visible_tool_names': visible_tool_names,
             'prompt': prompt,
@@ -6809,18 +6998,40 @@ class MainRuntimeService:
             await self.maybe_refresh_external_resource_changes(session_id=session_id)
         except Exception:
             pass
+        live_visibility_snapshot: dict[str, Any] | None = None
+
+        def _live_snapshot() -> dict[str, Any]:
+            nonlocal live_visibility_snapshot
+            if live_visibility_snapshot is None:
+                live_visibility_snapshot = self._node_context_selection_live_visibility_snapshot(task=task, node=node)
+            return live_visibility_snapshot
+
         cached = self._cached_node_context_selection_entry(task=task, node=node)
         if cached is not None and isinstance(cached.get('selection'), NodeContextSelectionResult):
-            return cached['selection']
+            if (
+                self._node_context_selection_entry_has_visibility_snapshot(cached)
+                and self._node_context_selection_entry_is_stale(entry=cached, live_snapshot=_live_snapshot())
+            ):
+                self._clear_node_context_selection(task=task, node=node)
+            else:
+                return cached['selection']
         restored = self._restore_node_context_selection_entry(task=task, node=node)
         cache_key = self._node_context_selection_cache_key(task=task, node=node)
-        if restored is not None and cache_key is not None:
-            cache = getattr(self, '_node_context_selection_cache', None)
-            if not isinstance(cache, dict):
-                cache = {}
-                self._node_context_selection_cache = cache
-            cache[cache_key] = restored
-            return restored['selection']
+        if restored is not None:
+            if (
+                self._node_context_selection_entry_has_visibility_snapshot(restored)
+                and self._node_context_selection_entry_is_stale(entry=restored, live_snapshot=_live_snapshot())
+            ):
+                restored = None
+            elif cache_key is not None:
+                cache = getattr(self, '_node_context_selection_cache', None)
+                if not isinstance(cache, dict):
+                    cache = {}
+                    self._node_context_selection_cache = cache
+                cache[cache_key] = restored
+                return restored['selection']
+            else:
+                return restored['selection']
         inputs = self._node_context_selection_inputs(task=task, node=node)
         selection = await build_node_context_selection(
             loop=getattr(self, '_react_loop', None),
@@ -7286,6 +7497,11 @@ class MainRuntimeService:
             for item in list(inputs.get('contract_visible_skill_ids') or [])
             if str(item or '').strip()
         ]
+        skill_visibility_diagnostics = (
+            dict(inputs.get('skill_visibility_diagnostics') or {})
+            if isinstance(inputs.get('skill_visibility_diagnostics'), dict)
+            else {}
+        )
         full_callable_tool_names = self._callable_tool_names_for_node(
             task=task,
             node=node,
@@ -7391,6 +7607,7 @@ class MainRuntimeService:
                 candidate_skill_ids=candidate_skill_ids,
                 candidate_skill_items=candidate_skill_items,
                 contract_visible_skill_ids=contract_visible_skill_ids,
+                skill_visibility_diagnostics=skill_visibility_diagnostics,
                 repair_required_tool_items=repair_required_tool_items,
                 repair_required_skill_items=repair_required_skill_items,
                 stage_payload=stage_payload,

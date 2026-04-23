@@ -222,8 +222,8 @@ Maintenance note for `task_append_notice` and task message distribution:
   - `repair_required_tools` 表示这些工具在修复前不能当成普通 callable/candidate 能力使用
   - `repair_required_skills` 表示这些 skill 在修复前不能通过 `load_skill_context` 查看正文
   - 这两个列表服务于模型决策边界，不代表 provider-facing `tools[]` 发生变化
-- 但 provider-facing `tools` schemas 现在不再随着 `transition_required=true` 收紧到只剩 `submit_next_stage`。前门会继续向 provider 发送稳定的 active `provider_tool_names` bundle，以减少阶段切换回合对 prompt cache 前缀命中的破坏。
-- 这条稳定性规则现在还有一个显式提交边界：RBAC、hydration、阶段状态变化会先让当前轮的 desired tool 集发生变化，但最新 provider-facing `tools[]` 只会先写入 `pending_provider_tool_names`；只有当前轮真实进入 `token_compression` 时，pending 集才允许提交成新的 active `provider_tool_names`。
+- 但 provider-facing `tools` schemas 现在不再随着 `transition_required=true` 收紧到只剩 `submit_next_stage`。前门会继续向 provider 发送当前这条路径上 RBAC-visible concrete tools 对应的 `provider_tool_names` bundle，以减少阶段切换回合对 prompt cache 前缀命中的破坏。
+- 这条稳定性规则现在不再依赖 active/pending provider-bundle 状态机：普通轮次直接按当前 RBAC-visible concrete tools 条件刷新 `provider_tool_names`；如果当前 send 已经进入 `token_compression`，这一轮实际发给 provider 的 bundle 必须继续沿用压缩前已持久化的 bundle，而不是在压缩轮里切换 schema。
 - 当前保留的内部-turn 例外是 `heartbeat_internal` 与 `cron_internal`。只要 session 已有权威的 `frontdoor_request_body_messages` / actual-request baseline，且前序 frontdoor contract state 仍在，这类内部轮次就不会被前门 callable-tool helper 收紧到只剩 `submit_next_stage`，也不会重新跑 tool/skill selector；它们会直接继承上一轮的 callable / candidate / hydrated / provider-tool / visible-skill 状态，只在原 baseline 之后追加隐藏内部提示。
 - 这同样意味着 heartbeat / cron 内部轮次从 agent 视角与普通 CEO/frontdoor 轮次一致：模型既可以直接输出内容，也可以立刻开阶段、调用当前已继承的普通工具。若维护时看到到点后的 heartbeat/cron 只能围着 `submit_next_stage` 或 `cron` 自己打转，优先排查 frontdoor contract state 是否在内部轮次开始前被错误清空或重选。
 - 若当前 session 还没有权威 frontdoor baseline，这条“直接继承上一轮 contract”规则不会强行触发；内部轮次会回退到普通 CEO/frontdoor exposure assembly，而 provider-facing schema 稳定性仍由 active/pending provider-tool exposure 状态机保证。
@@ -277,10 +277,12 @@ Additional maintenance note for fixed-builtin resource executors:
 
 - 节点与 CEO/frontdoor 的 `candidate_tool_names` / `candidate_skill_ids` 现在都表示“`RBAC 可见 ∩ 语义召回命中` 的当前候选集合”；语义召回不可用时，候选集合退化为 `RBAC 可见集合`，而不是报错中断。
 - `load_tool_context(tool_id="...")` 的精确工具加载现在接受两条准入路径：当前 canonical `candidate_tool_names`，或当前 `rbac_visible_tool_names` 中仍然 surfaced 的 concrete tool。`load_skill_context` 仍然只认当前 canonical skill candidate 集合。
-- 这次放宽只影响 loader gate，不影响 provider-facing `tools[]` / `provider_tool_names` 的提交语义；如果维护者看到模型可以读 toolskill 却没有新增 provider schema，这属于预期行为。
+- 这次放宽只影响 loader gate，不改变 provider-facing `tools[]` / `provider_tool_names` 的来源语义；如果维护者看到模型可以读 toolskill 却没有新增 provider schema，先确认当前 RBAC-visible concrete tools 是否真的发生了 membership 变化，再判断是否是异常。
 - 对节点与 CEO/frontdoor，`candidate_tool_items` / `candidate_skill_items` 现在都只应被理解为 display cache，而不是第二份候选真相源。只要 canonical `candidate_tool_names` / `candidate_skill_ids` 已为空，agent-facing runtime contract 中的 `candidate_tools` / `candidate_skills` 也必须同步为空，不能再从旧 contract item 列表或旧 frame item 缓存把候选“补回去”。
 - 节点的 hydration canonical state 继续落在 runtime frame：`hydrated_executor_state` / `hydrated_executor_names`。这是节点生命周期级 LRU，跨多轮、阶段切换、pause/resume、restore 保留。
 - 节点的 skill candidate canonical state 也继续落在 runtime frame：至少包括 `candidate_skill_ids`，以及供 dynamic contract 重建使用的 `candidate_skill_items` 显示缓存。阶段切换后的 prompt compaction 可以裁掉旧的 `node_runtime_tool_contract` user 消息，但下一轮 contract 刷新仍应从 frame 恢复这两份 skill 状态，而不是把 skill 候选清空。
+- 但节点首轮还有一个更细的维护边界：`initialize_task()` 先写下的默认空 runtime frame 只是占位快照，不是 skill truth source。若 `_enrich_node_messages()` 已经为当前 turn 注入了 fresh `node_runtime_tool_contract`，后续 `react_loop` contract rebuild 不能再让这份 bootstrap 空 frame 把 `candidate_skill_ids` / `contract_visible_skill_ids` / `skill_visibility_diagnostics` 覆写回空。
+- 为了跨同一 turn 的后续 round 保住这份 fresh skill 合同，NodeRunner 现在会把 fresh `node_runtime_tool_contract` 摘要沿 runtime context 继续传给 `react_loop`。因此就算 `_prepare_messages()` 暂时裁掉了上一轮的动态合同尾部消息，后续 `before_model` rebuild 也应继续沿用这份 fresh skill 值，直到 runtime frame 自己已经写成 authoritative skill-contract frame。
 - CEO/frontdoor 的 hydration canonical state 继续落在 session/frontdoor state：`RuntimeAgentSession._frontdoor_hydrated_tool_names` 加上前门 persistent state 中的 `hydrated_tool_names`。这是 session 生命周期级 LRU，跨 turn 保留，但每轮都会按当前 RBAC 可见集合过滤。
 - 节点与 CEO/frontdoor 都只允许 concrete tool names 进入 hydration LRU；family id 不能进入 promoted callable 集合。
 - execution / acceptance 节点现在也采用与 CEO/frontdoor 对齐的“有效阶段”合同：只要 `has_active_stage=false`，或当前阶段已经 `transition_required=true`，当前轮真正暴露给模型的 callable tool schemas 就只剩 `submit_next_stage`。
@@ -324,6 +326,12 @@ If a maintainer sees a CEO stage trace where a later `exec` appears inside an ea
 
 1. 先看静态协议是否要求“无活动阶段时必须先进入 `submit_next_stage` 所声明的新阶段”；这既可以是单独一轮 `submit_next_stage`，也可以是一个以 `submit_next_stage` 起手、随后紧跟普通工具的 mixed batch
 2. 只有在活动阶段已经存在后，动态 skill/tool 暴露里的 `load_skill_context` / `load_tool_context` 提示才真正进入可执行顺序
+
+同时要把前门 contract 里的 candidate tool 与 candidate skill 分开理解：
+
+- `candidate_tools` 仍然是“可见但默认不能直接执行”的 concrete tool 候选；读完 `load_tool_context` 后，普通 candidate tool 依旧要等下一轮 hydration/promote 才能直接调用
+- `candidate_skills` 则只是“可见且可通过 `load_skill_context(skill_id="...")` 读取正文”的 skill 候选；它们不走 hydration，也不应被模型误读成“还没安装好才不能读”的占位符
+- 因此前门 `## Runtime Tool Contract` 现在会显式把 `candidate_skills` 标成 loadable，并附带 `load_skill_context` 指引；如果线上 artifact 重新退化成只剩名字列表，维护上优先怀疑 contract 摘要文案回退而不是 selector 失效
 
 如果维护者在排查“为什么模型先调用了 `load_skill_context` 却撞上 no active stage”这类问题，不要只盯动态 skill 列表或 candidate tool 列表；要先检查 `ceo_frontdoor.md` 的稳定协议与 `stage_messages.py` 的当前状态 overlay 是否一致，再检查 `prompt_builder.py` / `message_builder.py` 是否把动态提示写成了会与主协议竞争的动作指令。
 
@@ -422,6 +430,7 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 
 - `task_runtime_messages` / `runtime-frame-messages:{node_id}` artifact 不再只是当前 messages 列表；它现在还会在同一个 artifact 里累计 `callable_tool_snapshots`。
 - 同一个 artifact 现在还会保留节点输入层看到的 `contract_visible_skill_ids`，也就是 `runtime_service._node_context_selection_inputs()` 当轮拿到的 contract-visible skill id 快照。
+- 同一个 artifact 现在还会保留 `skill_visibility_diagnostics`，用来解释这些 `contract_visible_skill_ids` 是如何从 live skill registry / role / policy 判断收敛出来的。
 - 每条快照代表一次 `before_model` 轮次下，本地运行时真正记录的 callable/candidate 截面，包括 `callable_tool_names`、`candidate_tool_names`、`candidate_tool_items`、`candidate_skill_ids`、`candidate_skill_items`、`model_visible_tool_names`、`hydrated_executor_names` 和选择 trace。
 - 对 execution / acceptance 节点，如果当轮没有有效阶段，那么这些快照里的 `callable_tool_names` 与 `model_visible_tool_names` 都应只剩 `submit_next_stage`；候选集合仍保留在 `candidate_tool_names`，完整 callable pool 则留在选择 trace 里。
 - 对 execution / acceptance 节点，这些快照里如果 `candidate_tool_names=[]` 或 `candidate_skill_ids=[]`，则同一快照里的 `candidate_tool_items` / `candidate_skill_items` 也应已经被同步清空。若 items 仍保留旧值而 canonical name/id 列表已空，应按运行时 contract 重建分裂排查，而不是先怀疑 `load_tool_context` / `load_skill_context` 自身。
@@ -432,6 +441,8 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - 对节点运行时来说，`before_model` 当轮真正下发给模型的 schema 选择结果才是权威工具来源；runtime frame、restore/recovery 和 runtime messages artifact 都应从这份结果派生，而不是再从旧 bootstrap 文本反推。
 - 对节点运行时来说，skill 可见性也不能只绑定到“当前 prompt 里是否还保留着那条 dynamic contract user 消息”。`node_runtime_tool_contract` 仍是模型可见合同，但 runtime frame 才是 `candidate_skill_ids` / `candidate_skill_items` 的 canonical 恢复来源。
 - 这意味着排查“节点为什么说没有 candidate skills”时，不要只看 dynamic contract 文本。应同时看 `contract_visible_skill_ids` 与 `candidate_skill_ids`：前者回答“runtime_service 这一层当时看到了哪些可见 skills”，后者回答“selector 最终留下了哪些 canonical candidates”。
+- 如果 `contract_visible_skill_ids` 本身已经为空，继续往下看 `skill_visibility_diagnostics`：它能进一步回答“live resource registry 里有没有这些 skill”、“actor role 是否允许”、“policy effect 是否为 allow”，避免把输入层空集和 selector 空集混在一起。
+- 如果事件历史里看到“首轮 `candidate_skill_ids=[]`，但同一 turn 的 fresh contract 本应非空”，先不要直接怀疑 selector 或治理投影。优先判断当前 frame 是不是仍停留在 bootstrap 空 frame，以及 `react_loop` rebuild 是否错误地把这类空 frame 当成了 authoritative skill-contract frame。
 - CEO/frontdoor 也采用同样的分层思想：稳定会话前缀不再承担当前轮 callable/candidate tool 状态，当前轮工具合同放在 dynamic appendix，并随 turn state 刷新。
 - CEO/frontdoor 的普通 turn overlay 与 repair overlay 也应保持 append-only：它们属于当前 request 的尾部临时内容，不能再改写已有 stable/request 消息。维护时如果看到 prompt cache key 没变但缓存命中突然下跌，先检查是否有 overlay 被拼回了已有 user 消息。
 - 对维护者来说，这还意味着前门里的 `extension_tool_top_k` 只约束“最终候选工具数”，不是 dense 检索宽度；排查某个工具为何没进 candidate 时，要把 dense/rerank 命中和最终 top-k 截断分开看。
@@ -457,9 +468,9 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - Each saved frontdoor request artifact now also carries normalized `usage`, `frontdoor_history_shrink_reason`, and `frontdoor_token_preflight_diagnostics`. Maintainers should use those fields to compare "what preflight thought would be sent" against "what the provider actually billed," rather than reconstructing that relation from transcript timing alone.
 - To preserve prefix reuse inside one visible CEO turn, same-turn request growth now follows: previous request body -> newly appended assistant/tool transcript -> newest contract snapshot. This means the actual request may contain multiple contract snapshots during one turn, but the durable post-turn transcript must still strip them back out.
 - `frontdoor_canonical_context` remains durable single-writer state. Turn finalization may merge completed-stage data into it, but session sync and request assembly must not write a visible projection back into the durable chain.
-- Provider-facing `tools[]` now have a separate stability rule from agent-facing callable tools: keep a stable active `provider_tool_names` anchor aligned to the last committed exposure set, keep the schema minimal, and let stage gating or hydration promotion change only the tail runtime contract unless a later `token_compression` commits a new exposure set.
-- In practice this means maintainers now need to track three tool-surface states: desired provider tool names, active `provider_tool_names`, and `pending_provider_tool_names`. Desired may change as soon as RBAC/hydration/stage state changes, but ordinary turns, fresh-turn continuity, pause/resume recovery, and `stage_compaction` must keep sending the active provider bundle.
-- The paired diagnostics fields `provider_tool_exposure_revision` and `provider_tool_exposure_commit_reason` exist to explain these transitions in artifacts. `provider_tool_exposure_commit_reason` must be empty or `token_compression`; any other value means provider schema commit semantics drifted.
+- Provider-facing `tools[]` now have a separate stability rule from agent-facing callable tools: ordinary turns derive `provider_tool_names` from the current RBAC-visible concrete tool set for that path, while callable-stage gates still decide what the model is actually allowed to invoke this round.
+- The provider bundle is refreshed conditionally rather than through an active/pending commit machine. If the current RBAC-visible concrete membership changed, rebuild `provider_tool_names`; if the membership is effectively unchanged, keep the persisted order verbatim so prompt-cache prefixes and `provider_tool_exposure_revision` stay stable.
+- `token_compression` no longer publishes a new provider bundle for the same send. Compression turns keep the pre-existing persisted `provider_tool_names`, and the first post-compression turn is the point where a later ordinary refresh may apply the latest RBAC-visible concrete bundle.
 - `RuntimeAgentSession._frontdoor_request_body_messages` is now the session-owned request-body baseline for CEO/frontdoor continuity. It stores the rebuilt provider request body with dynamic contract messages stripped out, so the next round can append one fresh authoritative tail contract instead of replaying old catalogs as history.
 - Web CEO image uploads add one more boundary to that baseline contract: provider-visible image blocks are allowed only in the live request of the current turn when the selected model binding enables image multimodal input.
 - When that current-turn image expansion is active, the runtime must also replace the provider-visible attachment note with a direct-visual guidance note for the same turn. The model-facing text may describe that the image is attached directly in the request, but it must not expose the upload's local file path or tell the model to inspect local paths first.
@@ -470,7 +481,7 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - That seed is no longer fed back into frontdoor prompt assembly as an ordinary checkpoint history candidate. Visible-turn continuation now treats it as an authoritative request-body prefix, so the next turn appends new user/runtime-tail content directly instead of asking the history selector whether the seed is "semantically complete".
 - The paired `frontdoor_history_shrink_reason` field is now part of the runtime contract between prompt assembly and session persistence. Only `token_compression` and `stage_compaction` are valid reasons for a shorter next-round baseline.
 - In practice, this means a visible CEO/frontdoor turn is now expected to keep growing or stay flat across turns unless the runtime explicitly records one of those two shrink reasons. A shorter baseline without an allowed reason should be treated as a runtime bug, not as normal prompt trimming.
-- Do not conflate those two shrink reasons with provider schema commits: `frontdoor_history_shrink_reason=stage_compaction` may shorten the baseline, but it must not rotate provider-facing `tools[]`. Provider schema rotation is only allowed when the same send also records `provider_tool_exposure_commit_reason=token_compression`.
+- Do not conflate those two shrink reasons with provider schema refresh. `frontdoor_history_shrink_reason=stage_compaction` must not rotate provider-facing `tools[]`, and `frontdoor_history_shrink_reason=token_compression` must also keep that same send's provider bundle unchanged. The refresh point is the next ordinary turn after compression.
 - The authoritative request-body baseline must also survive turn finalization. When a visible CEO turn finishes with a direct assistant reply, that final assistant message is now appended onto `frontdoor_request_body_messages` before session sync, so the next visible turn does not fall back to a shorter transcript/canonical replay view.
 - This visible-output append-back rule is not limited to `direct_reply`. If a visible CEO turn finishes with a user-visible `final_output` after ordinary tools such as `message`, that final assistant text must still be appended onto `frontdoor_request_body_messages`; otherwise the next fresh visible turn reopens from a stripped tool-only baseline and loses the last visible answer from continuity.
 - The same baseline must also cross the restorable snapshot boundary. `inflight_turn_snapshot` / `paused execution context` now need to carry `frontdoor_request_body_messages` together with `frontdoor_history_shrink_reason`; otherwise a recreated `RuntimeAgentSession` would silently fall back to transcript/history replay and shorten the next visible turn outside the allowed shrink paths.
@@ -752,13 +763,13 @@ This is distinct from user-requested cancel/pause behavior. Only sidecar reminde
 Execution and acceptance nodes now keep two separate views of tool visibility:
 
 - `tool_names`: the authoritative per-round callable tool set used by runtime contract enforcement.
-- `provider_tool_names`: the provider-facing schema bundle used when constructing the actual model request.
-- `pending_provider_tool_names`: the latest desired provider bundle that is waiting for a `token_compression` commit boundary.
+- `provider_tool_names`: the provider-facing schema bundle used when constructing the actual model request. On new writes it represents the persisted RBAC-visible concrete-tool bundle for that turn family.
+- `pending_provider_tool_names`: compatibility field only. New writes keep this as `[]`.
 
 Artifacts for node sends now also record:
 
-- `provider_tool_exposure_revision`: a short hash of the active provider bundle that reached the provider.
-- `provider_tool_exposure_commit_reason`: empty string for ordinary reuse, or `token_compression` when the current send is the commit boundary.
+- `provider_tool_exposure_revision`: a short hash of the actually persisted provider bundle that reached the provider.
+- `provider_tool_exposure_commit_reason`: compatibility field only. New writes keep this as `""`.
 
 This separation exists to improve prompt-cache stability without weakening stage gates or tool hydration rules.
 
@@ -790,7 +801,7 @@ Anything else that shortens the next-round request baseline should be treated as
 
 - `token_compression` is an inline same-turn LLM rewrite that runs immediately before the provider send.
 - It keeps the stable system prefix, the latest runtime tool-contract tail, and the most recent body-history tail, then rewrites only the older body-history zone into one `G3KU_TOKEN_COMPACT_V2` marker block.
-- For both CEO/frontdoor and node runtime, this is now the only allowed boundary that may promote `pending_provider_tool_names` into the active provider-facing `tools[]` bundle for the same send.
+- For both CEO/frontdoor and node runtime, `token_compression` is no longer a provider-bundle promotion boundary. The compression send keeps the already persisted `provider_tool_names`, and any later provider-bundle refresh happens on the first post-compression ordinary turn.
 - The trigger threshold is tied to the runtime-selected model's `context_window_tokens`, not to a separate semantic-summary config.
 - If estimated request size is `<= 80%` of the selected model window, frontdoor sends directly.
 - If estimated request size is between `80%` and `100%`, frontdoor attempts one inline compression.
@@ -799,7 +810,7 @@ Anything else that shortens the next-round request baseline should be treated as
 ### `stage_compaction`
 
 - `stage_compaction` may shorten the active history window or stage workset, and it is still a legitimate shrink reason for the next-round baseline.
-- It is not a provider schema commit boundary. If `provider_tool_names` change on a send whose shrink reason is `stage_compaction`, treat that as a bug in the exposure-gating path.
+- It is not a provider schema refresh boundary. If `provider_tool_names` change on a send whose shrink reason is `stage_compaction`, treat that as a bug in the provider-bundle refresh path.
 
 ### Removed Semantic Summary Path
 

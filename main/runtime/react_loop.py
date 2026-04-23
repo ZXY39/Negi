@@ -262,6 +262,7 @@ class ReActToolLoop:
                 message_history=message_history,
                 tool_schema_selection=tool_schema_selection,
                 stage_gate=stage_gate,
+                runtime_context=runtime_context,
             )
             dynamic_contract_payload = dynamic_contract.to_message_payload()
             selected_skill_ids = self._normalized_name_list(
@@ -350,79 +351,89 @@ class ReActToolLoop:
                 parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
             )
             if str(history_shrink_reason or '').strip() == 'token_compression':
-                committed_model_visible_tools, committed_tool_schema_selection = self._model_visible_tools_for_iteration(
-                    task_id=task.task_id,
-                    node_id=node.node_id,
-                    node_kind=node.node_kind,
-                    visible_tools=current_tools,
-                    stage_gate=stage_gate,
-                    runtime_context={
-                        **dict(runtime_context or {}),
-                        'provider_tool_exposure_commit_reason': 'token_compression',
-                    },
+                prior_provider_tool_names = self._normalized_name_list(
+                    list((dict(tool_schema_selection.get('trace') or {})).get('prior_provider_tool_names') or [])
                 )
-                committed_provider_tool_names = self._normalized_name_list(
-                    list(
-                        committed_tool_schema_selection.get('provider_tool_names')
-                        or list(committed_model_visible_tools.keys())
-                    )
+                compression_provider_tool_names = (
+                    list(prior_provider_tool_names)
+                    if prior_provider_tool_names
+                    else list(provider_tool_names)
                 )
-                if committed_provider_tool_names != provider_tool_names:
-                    committed_tool_schemas = [
+                if compression_provider_tool_names != provider_tool_names:
+                    compression_tool_schemas = [
                         current_tools[name].to_model_schema()
-                        for name in committed_provider_tool_names
+                        for name in compression_provider_tool_names
                         if name in current_tools
                     ]
-                    committed_prompt_cache_key = self._execution_prompt_cache_key(
+                    compression_prompt_cache_key = self._execution_prompt_cache_key(
                         model_messages=model_messages,
-                        tool_schemas=committed_tool_schemas,
+                        tool_schemas=compression_tool_schemas,
                         model_refs=current_model_refs,
                     )
-                    committed_estimate_payload = self._estimate_node_send_preflight_tokens(
+                    compression_estimate_payload = self._estimate_node_send_preflight_tokens(
                         task_id=task.task_id,
                         node_id=node.node_id,
                         config=None,
                         model_refs=current_model_refs,
                         provider_model=str(token_preflight_diagnostics.get('provider_model') or ''),
                         request_messages=request_messages,
-                        tool_schemas=committed_tool_schemas,
-                        prompt_cache_key=str(committed_prompt_cache_key or '').strip(),
+                        tool_schemas=compression_tool_schemas,
+                        prompt_cache_key=str(compression_prompt_cache_key or '').strip(),
                         tool_choice=current_tool_choice,
-                        parallel_tool_calls=(self._parallel_tool_calls_enabled if committed_tool_schemas else None),
+                        parallel_tool_calls=(self._parallel_tool_calls_enabled if compression_tool_schemas else None),
                         allow_usage_ground_truth=False,
                     )
-                    committed_final_tokens = int(committed_estimate_payload.get('final_estimate_tokens') or 0)
+                    compression_final_tokens = int(compression_estimate_payload.get('final_estimate_tokens') or 0)
                     context_window_tokens = int(token_preflight_diagnostics.get('context_window_tokens') or 0)
-                    if context_window_tokens <= 0 or committed_final_tokens <= context_window_tokens:
-                        model_visible_tools = committed_model_visible_tools
-                        tool_schema_selection = committed_tool_schema_selection
-                        provider_tool_names = committed_provider_tool_names
-                        tool_schemas = committed_tool_schemas
-                        turn_prompt_cache_key = committed_prompt_cache_key
+                    if context_window_tokens <= 0 or compression_final_tokens <= context_window_tokens:
+                        provider_tool_names = list(compression_provider_tool_names)
+                        tool_schemas = list(compression_tool_schemas)
+                        turn_prompt_cache_key = compression_prompt_cache_key
+                        provider_tool_exposure_revision = self._provider_tool_exposure_revision(
+                            provider_tool_names
+                        )
+                        tool_schema_selection = {
+                            **dict(tool_schema_selection or {}),
+                            'provider_tool_names': list(provider_tool_names),
+                            'pending_provider_tool_names': [],
+                            'provider_tool_exposure_pending': False,
+                            'provider_tool_exposure_revision': provider_tool_exposure_revision,
+                            'provider_tool_exposure_commit_reason': '',
+                            'trace': {
+                                **dict(tool_schema_selection.get('trace') or {}),
+                                'provider_tool_names': list(provider_tool_names),
+                                'pending_provider_tool_names': [],
+                                'provider_tool_exposure_pending': False,
+                                'provider_tool_exposure_revision': provider_tool_exposure_revision,
+                                'provider_tool_exposure_commit_reason': '',
+                                'provider_tool_bundle_seeded': False,
+                                'provider_tool_refresh_deferred_due_to': 'token_compression',
+                            },
+                        }
                         token_preflight_diagnostics = {
                             **dict(token_preflight_diagnostics or {}),
-                            'estimated_total_tokens': committed_final_tokens,
+                            'estimated_total_tokens': compression_final_tokens,
                             'preview_estimate_tokens': int(
-                                committed_estimate_payload.get('preview_estimate_tokens') or 0
+                                compression_estimate_payload.get('preview_estimate_tokens') or 0
                             ),
                             'usage_based_estimate_tokens': int(
-                                committed_estimate_payload.get('usage_based_estimate_tokens') or 0
+                                compression_estimate_payload.get('usage_based_estimate_tokens') or 0
                             ),
                             'delta_estimate_tokens': int(
-                                committed_estimate_payload.get('delta_estimate_tokens') or 0
+                                compression_estimate_payload.get('delta_estimate_tokens') or 0
                             ),
                             'effective_input_tokens': int(
-                                committed_estimate_payload.get('effective_input_tokens') or 0
+                                compression_estimate_payload.get('effective_input_tokens') or 0
                             ),
                             'estimate_source': str(
-                                committed_estimate_payload.get('estimate_source') or 'preview_estimate'
+                                compression_estimate_payload.get('estimate_source') or 'preview_estimate'
                             ),
                             'comparable_to_previous_request': bool(
-                                committed_estimate_payload.get('comparable_to_previous_request')
+                                compression_estimate_payload.get('comparable_to_previous_request')
                             ),
-                            'final_estimate_tokens': committed_final_tokens,
-                            'final_request_tokens': committed_final_tokens,
-                            'provider_tool_exposure_commit_reason': 'token_compression',
+                            'final_estimate_tokens': compression_final_tokens,
+                            'final_request_tokens': compression_final_tokens,
+                            'provider_tool_refresh_deferred_due_to': 'token_compression',
                         }
             actual_request_diagnostics = build_actual_request_diagnostics(
                 request_messages=request_messages,
@@ -467,6 +478,11 @@ class ReActToolLoop:
                     ],
                     'contract_visible_skill_ids': self._normalized_name_list(
                         list(dynamic_contract_payload.get('contract_visible_skill_ids') or [])
+                    ),
+                    'skill_visibility_diagnostics': (
+                        dict(dynamic_contract_payload.get('skill_visibility_diagnostics') or {})
+                        if isinstance(dynamic_contract_payload.get('skill_visibility_diagnostics'), dict)
+                        else {}
                     ),
                     'rbac_visible_tool_names': list(
                         (tool_schema_selection.get('trace') or {}).get('rbac_visible_tool_names') or []
@@ -2076,6 +2092,18 @@ class ReActToolLoop:
         return ordered
 
     @staticmethod
+    def _provider_tool_exposure_revision(tool_names: list[str] | None) -> str:
+        normalized = [
+            str(item or '').strip()
+            for item in list(tool_names or [])
+            if str(item or '').strip()
+        ]
+        if not normalized:
+            return ''
+        payload = json.dumps(normalized, ensure_ascii=False, separators=(',', ':'))
+        return f"pte:{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
+    @staticmethod
     def _candidate_names_from_entries(entries: Any, *, id_key: str) -> list[str]:
         raw_names: list[Any] = []
         for item in list(entries or []):
@@ -2106,6 +2134,27 @@ class ReActToolLoop:
         return projected
 
     @staticmethod
+    def _frame_has_authoritative_skill_contract(frame: dict[str, Any] | None) -> bool:
+        if not isinstance(frame, dict):
+            return False
+        if extract_node_dynamic_contract_payload(list(frame.get('messages') or [])) is not None:
+            return True
+        if ReActToolLoop._normalized_name_list(list(frame.get('selected_skill_ids') or [])):
+            return True
+        if ReActToolLoop._normalized_name_list(list(frame.get('candidate_skill_ids') or [])):
+            return True
+        if ReActToolLoop._normalized_name_list(list(frame.get('contract_visible_skill_ids') or [])):
+            return True
+        if any(isinstance(item, dict) for item in list(frame.get('candidate_skill_items') or [])):
+            return True
+        diagnostics = dict(frame.get('skill_visibility_diagnostics') or {}) if isinstance(frame.get('skill_visibility_diagnostics'), dict) else {}
+        if ReActToolLoop._normalized_name_list(list(diagnostics.get('registry_skill_ids') or [])):
+            return True
+        if any(isinstance(item, dict) for item in list(diagnostics.get('entries') or [])):
+            return True
+        return False
+
+    @staticmethod
     def _stage_prompt_payload_from_gate(stage_gate: dict[str, Any]) -> dict[str, Any]:
         active_stage = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else None
         return {
@@ -2121,12 +2170,20 @@ class ReActToolLoop:
         message_history: list[dict[str, Any]],
         tool_schema_selection: dict[str, Any],
         stage_gate: dict[str, Any],
+        runtime_context: dict[str, Any] | None = None,
     ) -> NodeRuntimeToolContract:
         existing_payload = extract_node_dynamic_contract_payload(message_history) or {}
         current_frame = self._runtime_frame(
             str(getattr(node, 'task_id', '') or '').strip(),
             str(getattr(node, 'node_id', '') or '').strip(),
         ) or {}
+        runtime_context = dict(runtime_context or {}) if isinstance(runtime_context, dict) else {}
+        fresh_payload = (
+            dict(runtime_context.get('fresh_node_dynamic_contract_payload') or {})
+            if isinstance(runtime_context.get('fresh_node_dynamic_contract_payload'), dict)
+            else {}
+        )
+        frame_has_authoritative_skill_contract = self._frame_has_authoritative_skill_contract(current_frame)
         callable_tool_names = self._normalized_name_list(list(tool_schema_selection.get('tool_names') or []))
         candidate_tool_name_entries = tool_schema_selection.get('candidate_tool_names', _UNSET)
         if candidate_tool_name_entries is not _UNSET:
@@ -2162,7 +2219,12 @@ class ReActToolLoop:
             preferred_candidate_tool_items,
             id_key='tool_id',
         )
-        if isinstance(current_frame.get('candidate_skill_ids'), list):
+        if isinstance(fresh_payload.get('candidate_skills'), list):
+            candidate_skill_ids = self._candidate_names_from_entries(
+                fresh_payload.get('candidate_skills'),
+                id_key='skill_id',
+            )
+        elif frame_has_authoritative_skill_contract and isinstance(current_frame.get('candidate_skill_ids'), list):
             candidate_skill_ids = self._candidate_names_from_entries(
                 current_frame.get('candidate_skill_ids'),
                 id_key='skill_id',
@@ -2185,12 +2247,16 @@ class ReActToolLoop:
         else:
             candidate_skill_ids = []
         preferred_candidate_skill_items = (
-            existing_payload.get('candidate_skills')
-            if isinstance(existing_payload.get('candidate_skills'), list)
+            fresh_payload.get('candidate_skills')
+            if isinstance(fresh_payload.get('candidate_skills'), list)
             else (
-                current_frame.get('candidate_skill_items')
-                if isinstance(current_frame.get('candidate_skill_items'), list)
-                else current_frame.get('visible_skills')
+                existing_payload.get('candidate_skills')
+                if isinstance(existing_payload.get('candidate_skills'), list)
+                else (
+                    current_frame.get('candidate_skill_items')
+                    if isinstance(current_frame.get('candidate_skill_items'), list)
+                    else current_frame.get('visible_skills')
+                )
             )
         )
         candidate_skill_items = self._project_candidate_prompt_items(
@@ -2198,7 +2264,11 @@ class ReActToolLoop:
             preferred_candidate_skill_items,
             id_key='skill_id',
         )
-        if isinstance(current_frame.get('contract_visible_skill_ids'), list):
+        if isinstance(fresh_payload.get('contract_visible_skill_ids'), list):
+            contract_visible_skill_ids = self._normalized_name_list(
+                list(fresh_payload.get('contract_visible_skill_ids') or [])
+            )
+        elif frame_has_authoritative_skill_contract and isinstance(current_frame.get('contract_visible_skill_ids'), list):
             contract_visible_skill_ids = self._normalized_name_list(
                 list(current_frame.get('contract_visible_skill_ids') or [])
             )
@@ -2213,6 +2283,14 @@ class ReActToolLoop:
             )
         else:
             contract_visible_skill_ids = []
+        if isinstance(fresh_payload.get('skill_visibility_diagnostics'), dict):
+            skill_visibility_diagnostics = dict(fresh_payload.get('skill_visibility_diagnostics') or {})
+        elif frame_has_authoritative_skill_contract and isinstance(current_frame.get('skill_visibility_diagnostics'), dict):
+            skill_visibility_diagnostics = dict(current_frame.get('skill_visibility_diagnostics') or {})
+        elif isinstance(existing_payload.get('skill_visibility_diagnostics'), dict):
+            skill_visibility_diagnostics = dict(existing_payload.get('skill_visibility_diagnostics') or {})
+        else:
+            skill_visibility_diagnostics = {}
         exec_runtime_policy = None
         if EXEC_TOOL_EXECUTOR_NAME in set(callable_tool_names + candidate_tool_names) or EXEC_TOOL_FAMILY_ID in set(callable_tool_names + candidate_tool_names):
             raw_exec_runtime_policy = current_frame.get('exec_runtime_policy') or existing_payload.get('exec_runtime_policy')
@@ -2228,6 +2306,7 @@ class ReActToolLoop:
             candidate_skill_ids=candidate_skill_ids,
             candidate_skill_items=candidate_skill_items,
             contract_visible_skill_ids=contract_visible_skill_ids,
+            skill_visibility_diagnostics=skill_visibility_diagnostics,
             stage_payload=self._stage_prompt_payload_from_gate(stage_gate),
             hydrated_executor_names=self._normalized_name_list(list(tool_schema_selection.get('hydrated_executor_names') or [])),
             lightweight_tool_ids=self._normalized_name_list(list(tool_schema_selection.get('lightweight_tool_ids') or [])),

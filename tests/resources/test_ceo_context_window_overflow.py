@@ -505,7 +505,7 @@ async def test_graph_call_model_runs_llm_token_compression_before_main_send(
 
 
 @pytest.mark.asyncio
-async def test_graph_call_model_token_compression_commits_pending_provider_tool_schema(
+async def test_graph_call_model_token_compression_keeps_prior_provider_tool_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
@@ -615,13 +615,13 @@ async def test_graph_call_model_token_compression_commits_pending_provider_tool_
     result = await runner._graph_call_model(state, runtime=runtime)
 
     assert result["frontdoor_history_shrink_reason"] == "token_compression"
-    assert "web_fetch" in list(result["provider_tool_names"] or [])
+    assert result["provider_tool_names"] == ["exec"]
     assert result["pending_provider_tool_names"] == []
-    assert result["provider_tool_exposure_commit_reason"] == "token_compression"
+    assert result["provider_tool_exposure_commit_reason"] == ""
     assert persisted_calls
     persisted_tool_schemas = list(persisted_calls[-1].get("tool_schemas") or [])
     persisted_tool_names = [item["function"]["name"] for item in persisted_tool_schemas]
-    assert "web_fetch" in persisted_tool_names
+    assert persisted_tool_names == ["exec"]
 
 
 @pytest.mark.asyncio

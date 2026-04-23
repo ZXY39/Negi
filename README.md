@@ -1,56 +1,30 @@
 # G3KU
 
-## Docker Deployment
-
-G3KU now supports a Docker / Compose deployment path in addition to the existing direct-run scripts.
-
-- `compose.yaml` runs `web` and `worker` as separate services.
-- The `web` service owns the Web UI, heartbeat, cron, and China bridge supervisor.
-- The `worker` service owns the detached task worker only.
-- Copy `.env.docker.example` to `.env` before running `docker compose up --build`.
-
-For persistence, these workspace directories must stay on durable volumes:
-
-- `.g3ku/`
-- `memory/`
-- `sessions/`
-- `temp/`
-- `skills/`
-- `tools/`
-- `externaltools/`
-
-Those paths together cover project config, task runtime state, transcript history, long-term memory, temporary task files, mutable resource copies, and third-party tool payloads. If you recreate containers but keep the volumes, those states should remain available after restart.
-
-The direct-run paths `start-g3ku.ps1` and `start-g3ku.sh` remain supported. Docker is an additional deployment mode, not a replacement for local development.
-
-目录：[项目介绍](#项目介绍) | [1. 配置环境](#1-配置环境) | [2. 启动项目](#2-启动项目) | [3. 配置模型](#3-配置模型) | [4. 通信配置（可选）](#4-通信配置可选) | [5. 功能介绍](#5-功能介绍) | [6. 面向开发者和-agent-的补充说明](#6-面向开发者和-agent-的补充说明) | [7. 致谢与参考](#7-致谢与参考) | [8. 许可证](#8-许可证)
+目录：[项目介绍](#项目介绍) | [1. 配置环境](#1-配置环境) | [2. 启动项目](#2-启动项目) | [3. 配置模型](#3-配置模型) | [4. 通信配置（可选）](#4-通信配置可选) | [5. 功能介绍](#5-功能介绍) | [6. 面向开发者和-agent-的补充说明](#6-面向开发者和-agent-的补充说明) | [部署（Docker / Compose）](#部署docker--compose) | [7. 致谢与参考](#7-致谢与参考) | [8. 许可证](#8-许可证)
 
 ## 项目介绍
 
-G3KU 是一套面向复杂工作流的 Agent Runtime。你可以把它理解成一个能长期运行、持续协作、支持 Web 管理界面、能接入外部通信渠道的智能工作系统，而不只是一个单轮聊天 Demo。
+G3KU 是一套面向复杂工作流的Harness。一个能自主进化，长期运行、扩展能力、外部通信、同时支持 Web 管理界面的智能工作系统。
 
 它的目标不是单纯让模型“回答得更像人”，而是让 Agent 真正具备可长期使用的能力：能记住重要信息、能按需调用工具、能拆解复杂任务、能在长会话里保持稳定、能在高并发下运行，也能在真实环境中把风险控制住。
 
 这个项目的特点，可以从下面 7 个方面来理解：
 
-1. 🧠 自进化体系
+1. 🧠 **自进化体系 **
    系统会在受控边界内沉淀长期记忆、用户偏好和经验，不是每次都从零开始理解你。
-2. 🧩 渐进式加载模式
+2. 🧩  **渐进式加载模式 **
    工具和技能不会一次性全部塞给模型，而是按需展示、按需加载，减少误用和上下文膨胀。
-3. 👥 多 Agent 架构
+3. 👥  **多 Agent 架构 **
    复杂任务可以拆成多个节点或子任务推进，而不是永远依赖单个 Agent 硬扛到底。
-4. 🗺️ 混合 Agent 执行模式
+4. 🗺️  **混合 Agent 执行模式 **
    系统既保留快速响应能力，也会在关键阶段做局部规划、分阶段推进和结果验收。
-5. 🗜️ 多层上下文压缩优化机制
+5. 🗜️  **多层上下文压缩优化机制 **
    长任务里旧历史会逐层压缩，超长内容会外置成引用，避免上下文越跑越大。
-6. ⚡ 高并发下的性能监控与动态放行机制
+6. ⚡  **高并发下的性能监控与动态放行机制 **
    当任务、工具和节点同时增多时，系统会自动限流和调速，尽量保持整体稳定。
-7. 🛡️ 安全机制
+7. 🛡️  **安全机制 **
    系统具备权限控制、人工审批、风险隔离和敏感信息保护，适合进入更真实的业务环境。
 
-如果用一句更直白的话来概括：
-
-**G3KU 不是一个只会聊天的 AI，而是一套能持续推进复杂工作、能长期记忆、能扩展、也能自我保护的 Agent Runtime。**
 
 ## 1. 配置环境
 
@@ -463,20 +437,63 @@ g3ku china-bridge doctor
 
 也就是说，G3KU 不只是一个前端页面加一个聊天后端，而是一整套可以长期运行、可扩展、可运维的 Agent 基础设施。
 
+## 部署（Docker / Compose）
+
+如果你希望把 G3KU 作为长期运行的服务部署，而不是只在本机直接启动，可以使用仓库内置的 Docker / Compose 部署方式。
+
+### 如何启动
+
+1. 复制 `.env.docker.example` 为 `.env`
+2. 在仓库根目录执行：
+
+```bash
+docker compose up --build
+```
+
+### 服务分工
+
+- `compose.yaml` 会启动两个核心服务：`web` 和 `worker`
+- `web` 负责 Web 界面、API、heartbeat、cron，以及 China bridge supervisor
+- `worker` 只负责 detached task worker，也就是后台异步任务执行
+
+这种拆分方式的重点不是把功能切碎，而是让 Web 入口和后台任务执行各自独立运行，同时共享同一份项目状态与资源目录。
+
+### 必须持久化的目录
+
+如果你希望容器重启后，会话、任务、模型配置、skills、tools 和任务临时文件继续保留，下面这些目录必须一起挂载到持久化卷：
+
+- `.g3ku/`
+- `memory/`
+- `sessions/`
+- `temp/`
+- `skills/`
+- `tools/`
+- `externaltools/`
+
+这组目录共同覆盖了项目配置、模型绑定和密钥状态、会话历史、任务运行时数据、长期记忆、任务临时文件、可变技能资源、工具资源以及第三方工具载荷。只保留其中一部分通常是不够的；如果缺少其中任意关键目录，系统虽然可能还能启动，但重启后会出现状态丢失。
+
+### 适用场景
+
+- Docker 部署是新增的部署路径，不会替代 `start-g3ku.ps1` 和 `start-g3ku.sh`
+- 本地开发、调试和单机直接运行，仍然推荐继续使用现有启动脚本
+- Docker / Compose 更适合长期运行、进程隔离和统一管理
+
+如果你在 Docker 部署后发现 Web 正常，但 worker 重启后丢失模型、会话或任务状态，优先检查这些目录是否都已经正确持久化，而不是先怀疑业务逻辑本身。
+
 ## 7. 致谢与参考
 
 G3KU 在设计和迭代过程中，参考了部分优秀开源项目的工程实践与产品思路。在此对相关项目与作者表示感谢。
 
 - [OpenClaw](https://github.com/openclaw/openclaw.git)
-  为 G3KU 的整体项目开发方向和 Agent 工程化实践提供了重要启发。
+  为 G3KU 的整体项目开发方向和 Agent 工程化实践产生了启发。
 - [openclaw-china](https://github.com/BytePioneer-AI/openclaw-china.git)
   `subsystems/china_channels_host` 中的中国渠道运行时整合了该项目的上游运行时代码，并在 G3KU 中通过桥接与包装层接入。
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent.git)
-  为 G3KU 的自主维护记忆、长期记忆沉淀与持续协作能力提供了灵感来源。
+  为 G3KU 的自主维护记忆、长期记忆沉淀与持续协作能力提供了灵感。
 - [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent.git)
-  为 G3KU 的多 Agent 编排、任务拆解与协同推进提供了设计启发。
+  为 G3KU 的多 Agent 编排、任务拆解与协同推进提供了启发。
 - [OpenViking](https://github.com/volcengine/OpenViking.git)
-  为 G3KU 的分层渐进式加载、能力暴露控制与上下文组织方式提供了灵感来源。
+  为 G3KU 的分层渐进式加载、能力暴露控制与上下文组织方式提供了灵感。
 
 说明：G3KU 为结合自身目标、运行时设计与使用场景的独立项目；其中 `subsystems/china_channels_host` 包含已整合并适配的 `openclaw-china` 上游运行时代码。第三方来源与许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 和 [subsystems/china_channels_host/UPSTREAM.md](subsystems/china_channels_host/UPSTREAM.md)。
 

@@ -41,6 +41,7 @@
 - 如果该工具当前只出现在 `candidate_tools` 中，读取后仍需等待下一轮 hydration 后才可直接调用。
 - 对已 callable、已 hydrated 或 fixed builtin 的工具，如果上下文里已经有同版本且未压缩的 toolskill，不要重复调用 `load_tool_context`，直接复用已有说明。
 - 需要 skill 正文时，对当前轮提示中已经列出的候选 `skill_id` 调用 `load_skill_context(skill_id="...")`。
+- 候选 skill 不走 hydration，也不是“还没安装好才不能读”的占位符；只要当前 `load_skill_context` 可调用，就应把列出的 `skill_id` 视为可直接读取正文的入口。
 - 用户提出找/下载skills，而候选的skills不足时，优先创建异步任务，用find-skills和clawhub-skill-manager去找。
 
 ## 2. 创建异步任务规则
@@ -105,6 +106,7 @@
 - 不要假设自己拥有不可见的工具或 Skill。
 - 当你使用 `cron` 创建提醒时，`message` 必须写成给未来自己的提醒动作，而不是写给用户看的成品回复；若用户没有明确要求提醒次数，默认按一次性提醒处理，即 `max_runs=1`。`every_seconds` / `cron_expr` / `at` 三选一；`tz` 只能与 `cron_expr` 一起出现。若使用 `at`，请把时区写进 ISO datetime 本身，不要再额外传 `tz`。
 - 每轮真正可直接调用的只有当前函数工具列表中已经出现的 concrete tools；候选工具和候选 skills 只会出现在提示上下文中，不会自动成为可调用工具。
+- 对候选 tools 与候选 skills 要分开理解：候选 tool 读取说明后仍可能需要等待下一轮 hydration；候选 skill 则不变成工具本身，而是通过 `load_skill_context(skill_id="...")` 直接读取正文。
 - 对所有工具相关动作，优先遵守下面的“阶段优先协议”；后续任何具体 workflow 规则都不能覆盖它。
 - 当用户要求系统长期记住某项稳定规则、偏好、默认值、身份信息或项目事实时，调用 `memory_write(content=...)` 提交记忆请求，再给用户回复。
 - 不要把临时执行状态、处理中标记、暂停/恢复控制信息写入长期记忆。

@@ -2103,7 +2103,8 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_candidate_tools_visi
     contract_text = str(contract_messages[0]["content"] or "")
     assert "callable_tools: `submit_next_stage`" in contract_text
     assert "- `filesystem_write`: Write file content to disk." in contract_text
-    assert "candidate_skills: `memory`" in contract_text
+    assert "candidate_skills (loadable with `load_skill_context`): `memory`" in contract_text
+    assert 'Call `load_skill_context(skill_id="<skill_id>")`' in contract_text
     assert "visible_skill_ids" not in contract_text
     assert "rbac_visible_tool_names" not in contract_text
     assert "rbac_visible_skill_ids" not in contract_text
@@ -3184,7 +3185,7 @@ def test_fresh_turn_tool_schema_seed_does_not_expand_previous_actual_request_sch
     ]
 
 
-def test_frontdoor_provider_tool_exposure_only_commits_on_token_compression() -> None:
+def test_frontdoor_provider_tool_exposure_refreshes_immediately_and_keeps_pending_fields_inert() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
 
     frozen = runner._resolve_frontdoor_provider_tool_exposure(
@@ -3194,9 +3195,9 @@ def test_frontdoor_provider_tool_exposure_only_commits_on_token_compression() ->
         commit_reason="",
     )
 
-    assert frozen["provider_tool_names"] == ["exec", "submit_next_stage"]
-    assert frozen["pending_provider_tool_names"] == ["exec", "web_fetch", "submit_next_stage"]
-    assert frozen["provider_tool_exposure_pending"] is True
+    assert frozen["provider_tool_names"] == ["exec", "web_fetch", "submit_next_stage"]
+    assert frozen["pending_provider_tool_names"] == []
+    assert frozen["provider_tool_exposure_pending"] is False
     assert frozen["provider_tool_exposure_commit_reason"] == ""
 
     stage_compaction = runner._resolve_frontdoor_provider_tool_exposure(
@@ -3206,9 +3207,9 @@ def test_frontdoor_provider_tool_exposure_only_commits_on_token_compression() ->
         commit_reason="stage_compaction",
     )
 
-    assert stage_compaction["provider_tool_names"] == ["exec", "submit_next_stage"]
-    assert stage_compaction["pending_provider_tool_names"] == ["exec", "web_fetch", "submit_next_stage"]
-    assert stage_compaction["provider_tool_exposure_pending"] is True
+    assert stage_compaction["provider_tool_names"] == ["exec", "web_fetch", "submit_next_stage"]
+    assert stage_compaction["pending_provider_tool_names"] == []
+    assert stage_compaction["provider_tool_exposure_pending"] is False
     assert stage_compaction["provider_tool_exposure_commit_reason"] == ""
 
     token_compaction = runner._resolve_frontdoor_provider_tool_exposure(
@@ -3221,7 +3222,7 @@ def test_frontdoor_provider_tool_exposure_only_commits_on_token_compression() ->
     assert token_compaction["provider_tool_names"] == ["exec", "web_fetch", "submit_next_stage"]
     assert token_compaction["pending_provider_tool_names"] == []
     assert token_compaction["provider_tool_exposure_pending"] is False
-    assert token_compaction["provider_tool_exposure_commit_reason"] == "token_compression"
+    assert token_compaction["provider_tool_exposure_commit_reason"] == ""
 
 
 def test_build_frontdoor_request_artifact_payload_includes_provider_tool_exposure_fields() -> None:

@@ -258,6 +258,38 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 - 如果 continuity sidecar 里的 visible tool/skill 集与当前完全一致，第一跳应继续借上一轮的 family/schema anchor
 - 如果 visible 集发生变化，上下文仍应恢复，但 cache miss 可以接受，不应误判成上下文丢失
 
+## 3.9 节点 selection cache / frame restore 漂移，不等于 prompt 自己丢了 skill
+
+这类问题常见于 execution / acceptance 节点：
+
+- 当前节点某一轮先拿到了空的 `contract_visible_skill_ids` / `candidate_skill_ids`
+- 后面外部 resource/governance refresh 已经把 skills 或 tools 刷进了 live runtime
+- 但节点仍然沿用旧的 node-context cache，或者沿用旧的 persisted frame restore
+
+表象通常是：
+
+- `load_skill_context(skill_id="...")` 明明应该可用，却一直报当前候选技能未包含目标 skill
+- `runtime frame` / `runtime-frame-messages` 里的 `candidate_skill_ids` 连续多轮不变
+- 与此同时，live resource/governance 侧已经能看到新的 `contract_visible_skill_ids` 或 `registry_skill_ids`
+
+正确排查顺序：
+
+- 先看当前 live visibility，而不是只看旧 frame：
+  - `visible_tool_names`
+  - `contract_visible_skill_ids`
+  - `skill_visibility_diagnostics.registry_skill_ids`
+- 再看当前节点复用的 selection 来自哪里：
+  - 内存 `node context selection cache`
+  - `persisted_frame_restore`
+- 只有当两边的 visibility snapshot 仍一致时，旧 selection 才应该继续复用
+- 如果 live snapshot 已漂移，而节点还在沿用旧 selection，这属于 runtime freshness gate / cache invalidation 回归，不是 prompt wording 问题
+
+当前维护约束：
+
+- 节点运行时在复用 cached / restored selection 前，必须至少比对 `session_key`、`actor_role`、`visible_tool_names`、`contract_visible_skill_ids`、`registry_skill_ids`
+- 这些字段只要漂移，就应该丢弃旧 selection，回到 `_node_context_selection_inputs()` 与 `build_node_context_selection(...)` 重算
+- 因而“旧 frame 里是空 skill 集”本身并不再自动代表“下一轮也应该继续空”；必须先确认 live visibility 也仍然为空
+
 ## 3.9 request artifact 持久化缺口会污染结论
 
 已踩坑：
