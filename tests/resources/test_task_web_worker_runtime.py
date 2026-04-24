@@ -8748,6 +8748,114 @@ async def test_wait_for_children_recovery_does_not_continue_into_same_turn_model
 
 
 @pytest.mark.asyncio
+async def test_resume_ready_wait_for_children_without_pending_notice_clears_distribution_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+    _install_allow_all_spawn_review(service, monkeypatch)
+
+    try:
+        record = await service.create_task("clear stale resume ready", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy())
+        child = service.node_runner._create_execution_child(task=task, parent=root, spec=spec)
+        _stamp_incomplete_spawn_round(
+            service,
+            root_node_id=root.node_id,
+            round_id="call:spawn-round",
+            spec=spec,
+            child_node_id=child.node_id,
+        )
+        _set_pending_notice_state(
+            service,
+            node_id=root.node_id,
+            resume_mode=RESUME_MODE_WAIT_FOR_CHILDREN,
+            epoch_id="epoch:demo",
+            holding_round_id="call:spawn-round",
+        )
+        service.log_service.replace_runtime_frames(
+            record.task_id,
+            active_node_ids=[root.node_id],
+            runnable_node_ids=[root.node_id],
+            waiting_node_ids=[root.node_id],
+            frames=[
+                {
+                    **service.log_service._default_frame(
+                        node_id=root.node_id,
+                        depth=root.depth,
+                        node_kind=root.node_kind,
+                        phase="waiting_children",
+                    ),
+                    "pending_tool_calls": [],
+                    "tool_calls": [],
+                    "child_pipelines": [],
+                    "pending_child_specs": [],
+                    "partial_child_results": [],
+                    "last_error": "",
+                }
+            ],
+            publish_snapshot=False,
+        )
+        service.log_service.update_task_runtime_meta(
+            record.task_id,
+            distribution={
+                "active_epoch_id": "epoch:demo",
+                "mode": "task_wide_barrier",
+                "state": "resume_ready",
+                "frontier_node_ids": [],
+                "blocked_node_ids": [],
+                "pending_notice_node_ids": [root.node_id],
+                "queued_epoch_count": 0,
+                "pending_mailbox_count": 0,
+            },
+        )
+
+        async def _finish_child(task_id: str, node_id: str):
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary="child done",
+                    answer="child done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "_run_nested_node", _finish_child)
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        root_after = service.get_node(root.node_id)
+        distribution = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("distribution") or {})
+        pending_notice_state = dict((root_after.metadata or {}).get(PENDING_NOTICE_STATE_KEY) or {})
+
+        assert distribution.get("state") in {None, ""}
+        assert distribution.get("active_epoch_id") in {None, ""}
+        assert distribution.get("pending_notice_node_ids") in (None, [])
+        assert pending_notice_state["resume_mode"] == RESUME_MODE_ORDINARY
+        assert pending_notice_state["holding_round_id"] == ""
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_resume_react_state_injects_pending_notice_once_active_round_is_gone(
     tmp_path: Path,
 ):

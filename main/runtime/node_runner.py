@@ -474,6 +474,7 @@ class NodeRunner:
             if (self._store.get_task(task_id) or task).cancel_requested:
                 return self._mark_failed(task_id, node.node_id, reason='canceled')
             if str(result.delivery_status or '').strip() == 'partial':
+                self._refresh_resume_ready_distribution_state(task_id=task_id)
                 self._log_service.refresh_task_view(task_id, mark_unread=True)
                 return result
             return self._mark_finished(task_id, node.node_id, result)
@@ -741,11 +742,18 @@ class NodeRunner:
                 notification_ids=pending_root_notice_ids,
             )
         self._clear_pending_notice_state_if_idle(node_id=node_id)
+        self._refresh_resume_ready_distribution_state(task_id=task_id)
+
+    def _refresh_resume_ready_distribution_state(self, *, task_id: str) -> None:
         distribution = self._distribution_runtime_state(task_id)
         if (
             str(distribution.get('mode') or '').strip() == 'task_wide_barrier'
             and str(distribution.get('state') or '').strip() == 'resume_ready'
         ):
+            for raw_node_id in list(distribution.get('pending_notice_node_ids') or []):
+                node_id = str(raw_node_id or '').strip()
+                if node_id:
+                    self._clear_pending_notice_state_if_idle(node_id=node_id)
             pending_notice_node_ids = self.nodes_with_pending_distribution_notices(task_id=task_id)
             if pending_notice_node_ids:
                 self._log_service.update_task_runtime_meta(
