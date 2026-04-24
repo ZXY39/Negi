@@ -473,6 +473,9 @@ class NodeRunner:
                 return self._mark_failed(task_id, node.node_id, reason=terminal_reason)
             if (self._store.get_task(task_id) or task).cancel_requested:
                 return self._mark_failed(task_id, node.node_id, reason='canceled')
+            if str(result.delivery_status or '').strip() == 'partial':
+                self._log_service.refresh_task_view(task_id, mark_unread=True)
+                return result
             return self._mark_finished(task_id, node.node_id, result)
         except TaskPausedError:
             self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
@@ -1205,6 +1208,26 @@ class NodeRunner:
             updated_at=normalized_created_at,
         )
 
+    def stamp_distribution_target_pending_notice_state(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        epoch_id: str,
+        updated_at: str | None = None,
+    ) -> None:
+        target = self._store.get_node(node_id)
+        if target is None or str(target.task_id or '').strip() != str(task_id or '').strip():
+            return
+        resume_mode, holding_round_id = self._pending_notice_resume_target(node=target)
+        self._update_pending_notice_state(
+            node_id=node_id,
+            resume_mode=resume_mode,
+            epoch_id=str(epoch_id or '').strip(),
+            holding_round_id=holding_round_id,
+            updated_at=str(updated_at or now_iso()).strip(),
+        )
+
     def _persist_distribution_delivery(
         self,
         *,
@@ -1238,6 +1261,12 @@ class NodeRunner:
                 'consumed_at': '',
                 'payload': {},
             }
+        )
+        self.stamp_distribution_target_pending_notice_state(
+            task_id=task_id,
+            node_id=target_node_id,
+            epoch_id=epoch_id,
+            updated_at=_now(),
         )
 
     async def _run_distribution_node(self, *, task, node: NodeRecord) -> NodeFinalResult:
@@ -2129,6 +2158,7 @@ class NodeRunner:
             'user_request': str(getattr(task, 'user_request', '') or ''),
             'core_requirement': self._resolve_core_requirement(task),
             'root_prompt': str(getattr(root, 'prompt', '') or ''),
+            'consumed_distribution_notices': self._spawn_review_consumed_distribution_notices(parent=parent),
             'path_tree_text': self._spawn_review_path_tree_text(task_id=task.task_id, parent=parent),
             'spawn_request': {
                 'call_id': str(cache_key or ''),
@@ -2138,6 +2168,12 @@ class NodeRunner:
                 ],
             },
         }
+
+    @staticmethod
+    def _spawn_review_consumed_distribution_notices(*, parent: NodeRecord) -> list[dict[str, Any]]:
+        metadata = dict(parent.metadata or {}) if isinstance(parent.metadata, dict) else {}
+        context = normalize_append_notice_context(metadata.get(APPEND_NOTICE_CONTEXT_KEY))
+        return [dict(item) for item in list(context.get('notice_records') or []) if isinstance(item, dict)]
 
     def _spawn_review_path_tree_text(self, *, task_id: str, parent: NodeRecord) -> str:
         path_nodes: list[NodeRecord] = []
@@ -2890,13 +2926,12 @@ class NodeRunner:
                         owner_round_id=cache_key,
                         owner_entry_index=index,
                     )
-                self._update_spawn_entry(
+                child = self._log_service.create_child_and_bind_spawn_entry(
                     task_id=task.task_id,
                     parent_node_id=parent.node_id,
                     cache_key=cache_key,
-                    cached_payload=cached_payload,
-                    index=index,
-                    child_node_id=child.node_id,
+                    entry_index=index,
+                    child=child,
                 )
             self._stamp_spawn_owner_metadata(
                 node_id=child.node_id,
@@ -3279,6 +3314,7 @@ class NodeRunner:
         )
         if stop_reason:
             return
+        self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
         entries = list(cached_payload.get('entries') or [])
         allowed_set = {int(item) for item in list(allowed_indexes or [])}
         for index, spec in enumerate(list(specs or [])):
@@ -3304,20 +3340,12 @@ class NodeRunner:
                     owner_round_id=cache_key,
                     owner_entry_index=index,
                 )
-            self._stamp_spawn_owner_metadata(
-                node_id=child.node_id,
-                parent_node_id=parent.node_id,
-                owner_round_id=cache_key,
-                owner_entry_index=index,
-                owner_kind='child',
-            )
-            self._update_spawn_entry(
+            child = self._log_service.create_child_and_bind_spawn_entry(
                 task_id=task.task_id,
                 parent_node_id=parent.node_id,
                 cache_key=cache_key,
-                cached_payload=cached_payload,
-                index=index,
-                child_node_id=child.node_id,
+                entry_index=index,
+                child=child,
             )
             entries = list(cached_payload.get('entries') or [])
 

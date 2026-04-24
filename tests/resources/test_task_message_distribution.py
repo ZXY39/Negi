@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ import pytest
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES, NODE_FIXED_BUILTIN_TOOL_NAMES
-from main.models import NodeFinalResult, SpawnChildSpec, TaskMessageDistributionEpoch, TaskNodeNotification
+from main.models import NodeFinalResult, NodeRecord, SpawnChildSpec, TaskMessageDistributionEpoch, TaskNodeNotification, TokenUsageSummary
 from main.protocol import now_iso
 from main.runtime.pending_notice_state import (
     PENDING_NOTICE_STATE_KEY,
@@ -2461,6 +2462,468 @@ async def test_distribution_barrier_drains_running_tree_before_frontier_propagat
         assert branch_b.node_id in refreshed.live_state.distribution.blocked_node_ids
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_barrier_waits_for_unmaterialized_spawn_children(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("distribution barrier", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        first_spec = SpawnChildSpec(goal="first child", prompt="first prompt", execution_policy={"mode": "focus"})
+        second_spec = SpawnChildSpec(goal="second child", prompt="second prompt", execution_policy={"mode": "focus"})
+        materialized_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=first_spec,
+            owner_round_id="round-live",
+            owner_entry_index=0,
+        )
+        _set_spawn_operations(
+            service,
+            root_node_id=root.node_id,
+            payload={
+                "round-live": {
+                    "specs": [first_spec.model_dump(mode="json"), second_spec.model_dump(mode="json")],
+                    "entries": [
+                        service.node_runner._normalize_spawn_entry(
+                            index=0,
+                            spec=first_spec,
+                            entry={
+                                "child_node_id": materialized_child.node_id,
+                                "review_decision": "allowed",
+                                "status": "running",
+                            },
+                        ),
+                        service.node_runner._normalize_spawn_entry(
+                            index=1,
+                            spec=second_spec,
+                            entry={
+                                "review_decision": "allowed",
+                                "status": "queued",
+                            },
+                        ),
+                    ],
+                    "completed": False,
+                }
+            },
+        )
+        service.log_service.replace_runtime_frames(
+            record.task_id,
+            active_node_ids=[root.node_id, materialized_child.node_id],
+            runnable_node_ids=[materialized_child.node_id],
+            waiting_node_ids=[root.node_id],
+            frames=[
+                {
+                    **service.log_service._default_frame(
+                        node_id=root.node_id,
+                        depth=root.depth,
+                        node_kind=root.node_kind,
+                        phase="waiting_children",
+                    ),
+                    "pending_tool_calls": [],
+                    "tool_calls": [],
+                    "child_pipelines": [],
+                    "pending_child_specs": [],
+                    "partial_child_results": [],
+                    "last_error": "",
+                },
+                {
+                    **service.log_service._default_frame(
+                        node_id=materialized_child.node_id,
+                        depth=materialized_child.depth,
+                        node_kind=materialized_child.node_kind,
+                        phase="before_model",
+                    ),
+                    "pending_tool_calls": [],
+                    "tool_calls": [],
+                    "child_pipelines": [],
+                    "pending_child_specs": [],
+                    "partial_child_results": [],
+                    "last_error": "",
+                },
+            ],
+            publish_snapshot=False,
+        )
+
+        await service.task_append_notice(
+            task_ids=[record.task_id],
+            node_ids=[],
+            message="new requirement",
+            session_id=record.session_id,
+        )
+
+        await service.task_actor_service._run_distribution_epoch(record.task_id)
+
+        epoch = service.store.list_active_task_message_distribution_epochs(record.task_id)[0]
+        progress = service.query_service.view_progress(record.task_id, mark_read=False)
+
+        assert epoch.state == "barrier_draining"
+        assert root.node_id in list(epoch.payload.get("drain_pending_node_ids") or [])
+        assert epoch.payload.get("materialize_pending_entries") == [
+            {
+                "parent_node_id": root.node_id,
+                "round_id": "round-live",
+                "entry_index": 1,
+                "goal": "second child",
+                "status": "queued",
+            }
+        ]
+        assert progress is not None
+        assert progress.live_state is not None
+        assert progress.live_state.distribution.state == "barrier_draining"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_barrier_waits_when_spawn_entry_references_missing_child_row(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("distribution barrier missing child row", session_id="web:ceo-demo")
+        root = service.store.get_node(record.root_node_id)
+        assert root is not None
+
+        spec = SpawnChildSpec(goal="late child", prompt="late prompt", execution_policy={"mode": "focus"})
+        _set_spawn_operations(
+            service,
+            root_node_id=root.node_id,
+            payload={
+                "round-live": {
+                    "specs": [spec.model_dump(mode="json")],
+                    "entries": [
+                        service.node_runner._normalize_spawn_entry(
+                            index=0,
+                            spec=spec,
+                            entry={
+                                "child_node_id": "node:missing-child",
+                                "review_decision": "allowed",
+                                "status": "running",
+                            },
+                        ),
+                    ],
+                    "completed": False,
+                }
+            },
+        )
+        service.log_service.replace_runtime_frames(
+            record.task_id,
+            active_node_ids=[root.node_id],
+            runnable_node_ids=[],
+            waiting_node_ids=[root.node_id],
+            frames=[
+                {
+                    **service.log_service._default_frame(
+                        node_id=root.node_id,
+                        depth=root.depth,
+                        node_kind=root.node_kind,
+                        phase="waiting_children",
+                    ),
+                    "pending_tool_calls": [],
+                    "tool_calls": [],
+                    "child_pipelines": [],
+                    "pending_child_specs": [],
+                    "partial_child_results": [],
+                    "last_error": "",
+                }
+            ],
+            publish_snapshot=False,
+        )
+
+        await service.task_append_notice(
+            task_ids=[record.task_id],
+            node_ids=[],
+            message="new requirement",
+            session_id=record.session_id,
+        )
+
+        await service.task_actor_service._run_distribution_epoch(record.task_id)
+
+        epoch = service.store.list_active_task_message_distribution_epochs(record.task_id)[0]
+        assert epoch.state == "barrier_draining"
+        assert epoch.payload.get("materialize_pending_entries") == [
+            {
+                "parent_node_id": root.node_id,
+                "round_id": "round-live",
+                "entry_index": 0,
+                "goal": "late child",
+                "status": "running",
+            }
+        ]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_barrier_waits_when_child_owner_metadata_does_not_match_spawn_entry(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("distribution barrier owner mismatch", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(goal="late child", prompt="late prompt", execution_policy={"mode": "focus"})
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=spec,
+            owner_round_id="different-round",
+            owner_entry_index=0,
+        )
+        _set_spawn_operations(
+            service,
+            root_node_id=root.node_id,
+            payload={
+                "round-live": {
+                    "specs": [spec.model_dump(mode="json")],
+                    "entries": [
+                        service.node_runner._normalize_spawn_entry(
+                            index=0,
+                            spec=spec,
+                            entry={
+                                "child_node_id": child.node_id,
+                                "review_decision": "allowed",
+                                "status": "running",
+                            },
+                        ),
+                    ],
+                    "completed": False,
+                }
+            },
+        )
+
+        await service.task_append_notice(
+            task_ids=[record.task_id],
+            node_ids=[],
+            message="new requirement",
+            session_id=record.session_id,
+        )
+
+        await service.task_actor_service._run_distribution_epoch(record.task_id)
+
+        epoch = service.store.list_active_task_message_distribution_epochs(record.task_id)[0]
+        assert epoch.state == "barrier_draining"
+        assert epoch.payload.get("materialize_pending_entries") == [
+            {
+                "parent_node_id": root.node_id,
+                "round_id": "round-live",
+                "entry_index": 0,
+                "goal": "late child",
+                "status": "running",
+            }
+        ]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_delivery_sets_wait_for_children_resume_mode_for_child_target(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("child mailbox resume mode", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        parent_spec = SpawnChildSpec(goal="branch", prompt="branch prompt", execution_policy={"mode": "focus"})
+        branch = service.node_runner._create_execution_child(task=task, parent=root, spec=parent_spec)
+        _set_spawn_operations(
+            service,
+            root_node_id=root.node_id,
+            payload={
+                "root-round": {
+                    "specs": [parent_spec.model_dump(mode="json")],
+                    "entries": [
+                        service.node_runner._normalize_spawn_entry(
+                            index=0,
+                            spec=parent_spec,
+                            entry={
+                                "child_node_id": branch.node_id,
+                                "review_decision": "allowed",
+                                "status": "running",
+                            },
+                        ),
+                    ],
+                    "completed": False,
+                }
+            },
+        )
+
+        child_spec = SpawnChildSpec(goal="leaf", prompt="leaf prompt", execution_policy={"mode": "focus"})
+        leaf = service.node_runner._create_execution_child(
+            task=task,
+            parent=branch,
+            spec=child_spec,
+            owner_round_id="branch-round",
+            owner_entry_index=0,
+        )
+        _set_spawn_operations(
+            service,
+            root_node_id=branch.node_id,
+            payload={
+                "branch-round": {
+                    "specs": [child_spec.model_dump(mode="json")],
+                    "entries": [
+                        service.node_runner._normalize_spawn_entry(
+                            index=0,
+                            spec=child_spec,
+                            entry={
+                                "child_node_id": leaf.node_id,
+                                "review_decision": "allowed",
+                                "status": "running",
+                            },
+                        ),
+                    ],
+                    "completed": False,
+                }
+            },
+        )
+
+        service._deliver_distribution_message(
+            task_id=record.task_id,
+            epoch_id="epoch:demo",
+            source_node_id=root.node_id,
+            target_node_id=branch.node_id,
+            message="new requirement",
+        )
+
+        branch_after = service.get_node(branch.node_id)
+        assert branch_after is not None
+        pending_notice_state = dict((branch_after.metadata or {}).get(PENDING_NOTICE_STATE_KEY) or {})
+        assert pending_notice_state["resume_mode"] == RESUME_MODE_WAIT_FOR_CHILDREN
+        assert pending_notice_state["holding_round_id"] == "branch-round"
+        assert pending_notice_state["epoch_id"] == "epoch:demo"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_ready_recovery_dispatch_targets_pending_notice_nodes_not_root_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("resume ready recovery fanout", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(goal="branch", prompt="branch prompt", execution_policy={"mode": "focus"})
+        branch = service.node_runner._create_execution_child(task=task, parent=root, spec=spec)
+
+        service.log_service.update_task_runtime_meta(
+            record.task_id,
+            distribution={
+                "active_epoch_id": "epoch:demo",
+                "state": "resume_ready",
+                "mode": "task_wide_barrier",
+                "frontier_node_ids": [],
+                "blocked_node_ids": [],
+                "pending_notice_node_ids": [branch.node_id],
+                "queued_epoch_count": 0,
+                "pending_mailbox_count": 1,
+            },
+        )
+
+        dispatched: list[str] = []
+
+        async def _capture_run_node(task_id: str, node_id: str):
+            dispatched.append(node_id)
+            return NodeFinalResult(
+                status="success",
+                delivery_status="blocked",
+                summary=f"captured {node_id}",
+                answer="",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="",
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _capture_run_node)
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        assert dispatched == [branch.node_id]
+    finally:
+        await service.close()
+
+
+def test_atomic_child_bind_creates_node_and_updates_spawn_entry_under_same_task_lock(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    record = asyncio.run(service.create_task("atomic bind", session_id="web:ceo-demo"))
+    try:
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(goal="child", prompt="prompt", execution_policy={"mode": "focus"})
+        _set_spawn_operations(
+            service,
+            root_node_id=root.node_id,
+            payload={
+                "call:spawn-round": {
+                    "specs": [spec.model_dump(mode="json")],
+                    "entries": [
+                        service.node_runner._normalize_spawn_entry(
+                            index=0,
+                            spec=spec,
+                            entry={"status": "queued"},
+                        )
+                    ],
+                    "completed": False,
+                }
+            },
+        )
+
+        child = NodeRecord(
+            node_id="node:atomic-child",
+            task_id=task.task_id,
+            parent_node_id=root.node_id,
+            root_node_id=root.root_node_id,
+            depth=root.depth + 1,
+            node_kind="execution",
+            status="in_progress",
+            goal="child",
+            prompt="prompt",
+            input="prompt",
+            output=[],
+            check_result="",
+            final_output="",
+            can_spawn_children=True,
+            created_at=now_iso(),
+            updated_at=now_iso(),
+            token_usage=TokenUsageSummary(tracked=False),
+            token_usage_by_model=[],
+            metadata={},
+        )
+
+        service.log_service.create_child_and_bind_spawn_entry(
+            task_id=task.task_id,
+            parent_node_id=root.node_id,
+            cache_key="call:spawn-round",
+            entry_index=0,
+            child=child,
+        )
+
+        child_after = service.get_node("node:atomic-child")
+        parent_after = service.get_node(root.node_id)
+        assert child_after is not None
+        assert parent_after is not None
+        operation = dict(((parent_after.metadata or {}).get("spawn_operations") or {}).get("call:spawn-round") or {})
+        entries = list(operation.get("entries") or [])
+        assert entries[0]["child_node_id"] == "node:atomic-child"
+    finally:
+        asyncio.run(service.close())
 
 
 @pytest.mark.asyncio

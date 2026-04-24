@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Any
 
 from main.errors import TaskPausedError, describe_exception
 from main.models import NodeFinalResult, normalize_final_acceptance_metadata
@@ -350,6 +351,27 @@ class TaskActorService:
         if asyncio.iscoroutine(result):
             await result
 
+    async def _resume_pending_notice_nodes(self, task_id: str) -> bool:
+        distribution = self._distribution_runtime_state(task_id)
+        if str(distribution.get('state') or '').strip() != 'resume_ready':
+            return False
+        pending_node_ids = [
+            str(item or '').strip()
+            for item in list(distribution.get('pending_notice_node_ids') or [])
+            if str(item or '').strip()
+        ]
+        if not pending_node_ids:
+            return False
+        for node_id in pending_node_ids:
+            await self._execute_node(task_id, node_id)
+        refreshed = self._distribution_runtime_state(task_id)
+        if (
+            str(refreshed.get('state') or '').strip() == 'resume_ready'
+            and any(str(item or '').strip() for item in list(refreshed.get('pending_notice_node_ids') or []))
+        ):
+            await self._resume_distribution_if_needed(task_id)
+        return True
+
     def configure_node_dispatch_limits(self, *, execution: int | None, inspection: int | None) -> None:
         self._node_dispatch_limits = {
             'execution': _normalize_dispatch_limit(execution, default=_DEFAULT_NODE_DISPATCH_LIMITS['execution']),
@@ -391,6 +413,11 @@ class TaskActorService:
                 if str(distribution.get('state') or '').strip() in {'pause_requested', 'barrier_requested', 'paused', 'distributing'}:
                     distribution_result = await self._run_distribution_epoch(task_id)
                     if distribution_result is not None:
+                        control_only_return = True
+                        return
+                if str(distribution.get('state') or '').strip() == 'resume_ready':
+                    resumed_pending_notices = await self._resume_pending_notice_nodes(task_id)
+                    if resumed_pending_notices:
                         control_only_return = True
                         return
                 result = await dispatcher.execute_node(task_id, root_node.node_id)
@@ -522,6 +549,96 @@ class TaskActorService:
                 pending_node_ids.append(node_id)
         return pending_node_ids
 
+    def _barrier_materialize_pending_entries(
+        self,
+        *,
+        task_id: str,
+        barrier_node_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return []
+        pending_entries: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, int]] = set()
+        for raw_node_id in list(barrier_node_ids or []):
+            node_id = str(raw_node_id or '').strip()
+            if not node_id:
+                continue
+            node = self._store.get_node(node_id)
+            if node is None or str(node.task_id or '').strip() != str(task.task_id or '').strip():
+                continue
+            if str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                continue
+            operations = (node.metadata or {}).get('spawn_operations') if isinstance(node.metadata, dict) else {}
+            if not isinstance(operations, dict):
+                continue
+            for round_id, payload in reversed(list(operations.items())):
+                if not isinstance(payload, dict) or bool(payload.get('completed')):
+                    continue
+                for entry_index, entry in enumerate(list(payload.get('entries') or [])):
+                    if not isinstance(entry, dict):
+                        continue
+                    review_decision = str(entry.get('review_decision') or '').strip().lower()
+                    if review_decision == 'blocked':
+                        continue
+                    status = str(entry.get('status') or '').strip().lower()
+                    if status not in {'queued', 'running'}:
+                        continue
+                    normalized_round_id = str(round_id or '').strip()
+                    normalized_index = int(entry.get('index') or entry_index)
+                    if self._spawn_entry_child_is_fully_materialized(
+                        task_id=task.task_id,
+                        parent_node_id=node_id,
+                        round_id=normalized_round_id,
+                        entry_index=normalized_index,
+                        entry=entry,
+                    ):
+                        continue
+                    key = (node_id, normalized_round_id, normalized_index)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    pending_entries.append(
+                        {
+                            'parent_node_id': node_id,
+                            'round_id': normalized_round_id,
+                            'entry_index': normalized_index,
+                            'goal': str(entry.get('goal') or '').strip(),
+                            'status': status,
+                        }
+                    )
+        return pending_entries
+
+    def _spawn_entry_child_is_fully_materialized(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        round_id: str,
+        entry_index: int,
+        entry: dict[str, Any],
+    ) -> bool:
+        child_node_id = str(entry.get('child_node_id') or '').strip()
+        if not child_node_id:
+            return False
+        child = self._store.get_node(child_node_id)
+        if child is None or str(child.task_id or '').strip() != str(task_id or '').strip():
+            return False
+        metadata = dict(child.metadata or {}) if isinstance(child.metadata, dict) else {}
+        if str(metadata.get('spawn_owner_kind') or '').strip().lower() != 'child':
+            return False
+        if str(metadata.get('spawn_owner_parent_node_id') or '').strip() != str(parent_node_id or '').strip():
+            return False
+        if str(metadata.get('spawn_owner_round_id') or '').strip() != str(round_id or '').strip():
+            return False
+        try:
+            owner_entry_index = int(metadata.get('spawn_owner_entry_index'))
+        except (TypeError, ValueError):
+            return False
+        if owner_entry_index != int(entry_index):
+            return False
+        return bool(self._node_runner.node_is_in_live_distribution_tree(task_id=task_id, node_id=child_node_id))
+
     def _queue_root_distribution_notices(self, *, epoch, created_at: str) -> None:
         self._node_runner._queue_pending_root_distribution_notices(epoch=epoch, created_at=created_at)
 
@@ -558,11 +675,20 @@ class TaskActorService:
             if str(item or '').strip()
         ]
         if barrier_node_ids and state in {'pause_requested', 'barrier_requested', 'paused', 'barrier_draining'}:
+            materialize_pending_entries = self._barrier_materialize_pending_entries(
+                task_id=task_id,
+                barrier_node_ids=barrier_node_ids,
+            )
             drain_pending_node_ids = self._barrier_drain_pending_node_ids(
                 task_id=task_id,
                 barrier_node_ids=barrier_node_ids,
             )
+            for item in materialize_pending_entries:
+                parent_node_id = str(item.get('parent_node_id') or '').strip()
+                if parent_node_id and parent_node_id not in drain_pending_node_ids:
+                    drain_pending_node_ids.append(parent_node_id)
             payload['drain_pending_node_ids'] = list(drain_pending_node_ids)
+            payload['materialize_pending_entries'] = [dict(item) for item in materialize_pending_entries]
             if drain_pending_node_ids:
                 self._store.upsert_task_message_distribution_epoch(
                     epoch.model_copy(update={'state': 'barrier_draining', 'payload': payload})

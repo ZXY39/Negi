@@ -1054,6 +1054,7 @@ async def test_run_due_batch_once_records_successful_processed_batch_with_usage_
         assert (tmp_path / "memory" / "queue.jsonl").read_text(encoding="utf-8").strip() == ""
         assert len(processed) == 1
         assert processed[0]["op"] == "write"
+        assert processed[0]["write_mode"] == "add"
         assert processed[0]["model_chain"] == ["memory-primary"]
         assert processed[0]["request_ids"] == ["write_1"]
         assert processed[0]["usage"] == {
@@ -1062,6 +1063,77 @@ async def test_run_due_batch_once_records_successful_processed_batch_with_usage_
             "cache_read_tokens": 2,
         }
         assert processed[0]["note_refs_written"] == ["note_policy"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_run_due_batch_once_records_rewrite_write_mode_for_processed_batch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        (tmp_path / "memory" / "MEMORY.md").write_text(
+            "---\nid:Ab12Z9\n2026/4/16-user：\n创建 Markdown 文档时，默认使用 [G3KU]-时间-前缀命名。\n",
+            encoding="utf-8",
+        )
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="创建 Markdown 文档时，改为使用时间-内容格式命名，不要默认添加 [G3KU]-时间-前缀。",
+                created_at="2026-04-17T10:00:00+08:00",
+                request_id="write_rewrite_1",
+            )
+        )
+        fake_model = _FakeToolCallingModel(
+            [
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "name": "memory_apply_batch",
+                            "args": {
+                                "rewrites": [
+                                    {
+                                        "id": "Ab12Z9",
+                                        "content": "创建 Markdown 文档时，要使用时间-内容格式命名，不要默认添加 [G3KU]-时间-前缀。",
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                    usage={"input_tokens": 6, "output_tokens": 2, "cache_read_tokens": 0},
+                ),
+                _fake_response(
+                    content="done",
+                    usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0},
+                ),
+            ]
+        )
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/17", raising=False)
+        monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-17T10:00:04+08:00")
+        processed = _read_jsonl(tmp_path / "memory" / "ops.jsonl")
+
+        assert report["ok"] is True
+        assert report["status"] == "applied"
+        assert len(processed) == 1
+        assert processed[0]["op"] == "write"
+        assert processed[0]["write_mode"] == "rewrite"
+        assert processed[0]["request_ids"] == ["write_rewrite_1"]
+        assert "id:Ab12Z9" in manager.snapshot_text()
+        assert "时间-内容格式命名" in manager.snapshot_text()
+        assert "[G3KU]-时间-" in manager.snapshot_text()
     finally:
         manager.close()
 

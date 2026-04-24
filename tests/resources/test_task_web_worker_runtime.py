@@ -27,7 +27,9 @@ from main.models import (
     normalize_final_acceptance_metadata,
 )
 from main.monitoring.query_service import TaskQueryService
+from main.prompts import load_prompt
 from main.protocol import now_iso
+from main.runtime.append_notice_context import APPEND_NOTICE_CONTEXT_KEY
 from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
 from main.runtime.pending_notice_state import (
@@ -8612,6 +8614,140 @@ async def test_resume_ready_pending_notice_wait_for_children_allows_waiting_chil
 
 
 @pytest.mark.asyncio
+async def test_wait_for_children_recovery_does_not_continue_into_same_turn_model_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+    _install_allow_all_spawn_review(service, monkeypatch)
+
+    try:
+        record = await service.create_task("recovery only", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(
+            goal="child goal",
+            prompt="child prompt",
+            execution_policy=_execution_policy(),
+        )
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=spec,
+        )
+        assert child is not None
+
+        _stamp_incomplete_spawn_round(
+            service,
+            root_node_id=root.node_id,
+            round_id="call:spawn-round",
+            spec=spec,
+            child_node_id=child.node_id,
+        )
+        _set_pending_notice_state(
+            service,
+            node_id=root.node_id,
+            resume_mode=RESUME_MODE_WAIT_FOR_CHILDREN,
+            epoch_id="epoch:demo",
+            holding_round_id="call:spawn-round",
+        )
+        service.log_service.update_node_metadata(
+            root.node_id,
+            lambda metadata: {
+                **metadata,
+                "pending_append_notice_records": [
+                    {
+                        "notification_id": "root-notice:demo:1",
+                        "epoch_id": "epoch:demo",
+                        "source_node_id": root.node_id,
+                        "message": "new constraint",
+                        "created_at": now_iso(),
+                        "order_index": 1,
+                    }
+                ],
+            },
+        )
+        service.log_service.replace_runtime_frames(
+            record.task_id,
+            active_node_ids=[root.node_id],
+            runnable_node_ids=[root.node_id],
+            waiting_node_ids=[root.node_id],
+            frames=[
+                {
+                    **service.log_service._default_frame(
+                        node_id=root.node_id,
+                        depth=root.depth,
+                        node_kind=root.node_kind,
+                        phase="waiting_children",
+                    ),
+                    "pending_tool_calls": [],
+                    "tool_calls": [],
+                    "child_pipelines": [],
+                    "pending_child_specs": [],
+                    "partial_child_results": [],
+                    "last_error": "",
+                }
+            ],
+            publish_snapshot=False,
+        )
+        service.log_service.update_task_runtime_meta(
+            record.task_id,
+            distribution={
+                "active_epoch_id": "epoch:demo",
+                "mode": "task_wide_barrier",
+                "state": "resume_ready",
+                "frontier_node_ids": [],
+                "blocked_node_ids": [],
+                "pending_notice_node_ids": [root.node_id],
+                "queued_epoch_count": 0,
+                "pending_mailbox_count": 0,
+            },
+        )
+
+        async def _finish_child(task_id: str, node_id: str):
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary="child done",
+                    answer="child done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "_run_nested_node", _finish_child)
+
+        result = await service.node_runner.run_node(record.task_id, root.node_id)
+
+        root_after = service.get_node(root.node_id)
+        assert root_after is not None
+        operation = dict(((root_after.metadata or {}).get("spawn_operations") or {}).get("call:spawn-round") or {})
+        entries = list(operation.get("entries") or [])
+
+        assert result.delivery_status == "partial"
+        assert root_after.status == "in_progress"
+        assert operation.get("completed") is True
+        assert entries[0]["status"] == "success"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_resume_react_state_injects_pending_notice_once_active_round_is_gone(
     tmp_path: Path,
 ):
@@ -9302,6 +9438,117 @@ async def test_spawn_review_request_uses_root_to_parent_path_tree_and_stage_goal
         assert existing_child.node_id not in payload["path_tree_text"]
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_review_request_includes_consumed_distribution_notices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    backend = _SpawnReviewToolCallChatBackend(
+        arguments={"allowed_indexes": [0], "blocked_specs": []}
+    )
+    service = MainRuntimeService(
+        chat_backend=backend,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task(
+            "female ranking task",
+            session_id="web:shared",
+            max_depth=3,
+            metadata={"core_requirement": "female characters top 20"},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        parent = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(goal="parent branch", prompt="parent prompt", execution_policy=_execution_policy()),
+        )
+        service.log_service.update_node_metadata(
+            parent.node_id,
+            lambda metadata: {
+                **dict(metadata or {}),
+                APPEND_NOTICE_CONTEXT_KEY: {
+                    "notice_records": [
+                        {
+                            "notification_id": "notif:1",
+                            "epoch_id": "epoch:1",
+                            "source_node_id": root.node_id,
+                            "message": "requirement changed to male characters top 20",
+                            "received_at": "2026-04-24T20:54:00+08:00",
+                            "consumed_at": "2026-04-24T20:54:32+08:00",
+                            "compression_stage_id": "",
+                        }
+                    ],
+                    "compression_segments": [],
+                },
+            },
+        )
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            node = service.get_node(node_id)
+            assert node is not None
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary=f"{node.goal} done",
+                    answer=f"{node.goal} done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=parent.node_id,
+            specs=[SpawnChildSpec(goal="new child", prompt="new child prompt", execution_policy=_execution_policy())],
+            call_id="notice-aware-review",
+        )
+
+        assert backend.calls
+        call = next(
+            candidate
+            for candidate in backend.calls
+            if len(list(candidate.get("messages") or [])) >= 2
+            and '"parent_node_id"' in str((candidate.get("messages") or [None, {}])[1].get("content") or "")
+        )
+        payload = json.loads(str(call["messages"][1]["content"]))
+        assert payload["core_requirement"] == "female characters top 20"
+        assert payload["consumed_distribution_notices"] == [
+            {
+                "notification_id": "notif:1",
+                "epoch_id": "epoch:1",
+                "source_node_id": root.node_id,
+                "message": "requirement changed to male characters top 20",
+                "received_at": "2026-04-24T20:54:00+08:00",
+                "consumed_at": "2026-04-24T20:54:32+08:00",
+                "compression_stage_id": "",
+            }
+        ]
+    finally:
+        await service.close()
+
+
+def test_spawn_review_prompt_prioritizes_consumed_distribution_notices() -> None:
+    prompt = load_prompt("spawn_child_review.md")
+
+    assert "consumed_distribution_notices" in prompt
+    assert "Priority rule:" in prompt
+    assert "use the latest consumed distribution notice as the effective current requirement" in prompt
 
 
 @pytest.mark.asyncio

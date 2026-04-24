@@ -555,6 +555,7 @@ class _MemoryValidatedWrite:
     note_refs_written: list[str]
     memory_chars_after: int
     document_preview: str
+    write_mode: str = ""
     noop_reason: str = ""
 
 
@@ -2169,6 +2170,9 @@ class MemoryManager:
             payload["memory_chars_after"] = int(validated.memory_chars_after)
             payload["note_refs_written"] = list(validated.note_refs_written)
             payload["document_preview"] = validated.document_preview
+            normalized_write_mode = str(validated.write_mode or "").strip().lower()
+            if normalized_write_mode:
+                payload["write_mode"] = normalized_write_mode
             normalized_noop_reason = str(validated.noop_reason or "").strip()
             if normalized_noop_reason:
                 payload["noop_reason"] = normalized_noop_reason
@@ -2756,8 +2760,38 @@ class MemoryManager:
             note_refs_written=sorted(note_writes.keys()),
             memory_chars_after=len(self._normalize_document_text(document_text)),
             document_preview=self._document_preview(document_text),
+            write_mode=self._validated_write_mode(
+                adds=adds,
+                rewrites=rewrites,
+                deletes=deletes,
+                note_upserts=note_upserts,
+                noop_reason=noop_reason,
+            ),
             noop_reason=noop_reason,
         )
+
+    @staticmethod
+    def _validated_write_mode(
+        *,
+        adds: list[Any],
+        rewrites: list[Any],
+        deletes: list[Any],
+        note_upserts: dict[str, Any],
+        noop_reason: str,
+    ) -> str:
+        if str(noop_reason or "").strip():
+            return ""
+        has_adds = bool(list(adds or []))
+        has_rewrites_or_deletes = bool(list(rewrites or []) or list(deletes or []))
+        has_note_only_mutation = bool(dict(note_upserts or {})) and not has_adds and not has_rewrites_or_deletes
+        has_existing_mutations = has_rewrites_or_deletes or has_note_only_mutation
+        if has_adds and has_existing_mutations:
+            return "mixed"
+        if has_adds:
+            return "add"
+        if has_existing_mutations:
+            return "rewrite"
+        return ""
 
     @staticmethod
     def _extract_note_ref(text: str) -> str:

@@ -2577,6 +2577,12 @@ class MainRuntimeService:
             execution_node_id=target_node_id,
             epoch_id=epoch_id,
         )
+        self.node_runner.stamp_distribution_target_pending_notice_state(
+            task_id=task_id,
+            node_id=target_node_id,
+            epoch_id=epoch_id,
+            updated_at=now_iso(),
+        )
         self.log_service.update_task_runtime_meta(
             task_id,
             **self._distribution_runtime_meta_payload(task_id=task_id),

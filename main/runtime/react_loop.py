@@ -218,6 +218,10 @@ class ReActToolLoop:
                 supplied_tools = tools_supplier()
                 if isinstance(supplied_tools, dict):
                     current_tools = dict(supplied_tools)
+            waiting_children_recovery_only = self._wait_for_children_recovery_only(
+                runtime_context=runtime_context,
+                node=node,
+            )
             resumed_history = await self._resume_pending_tool_turn_if_needed(
                 task=task,
                 node=node,
@@ -225,6 +229,7 @@ class ReActToolLoop:
                 tools=current_tools,
                 runtime_context=runtime_context,
             )
+            resumed_waiting_children = False
             if resumed_history is None:
                 resumed_history = await self._resume_waiting_children_turn_if_needed(
                     task=task,
@@ -233,8 +238,13 @@ class ReActToolLoop:
                     tools=current_tools,
                     runtime_context=runtime_context,
                 )
+                resumed_waiting_children = resumed_history is not None
             if resumed_history is not None:
                 message_history = resumed_history
+                if resumed_waiting_children and waiting_children_recovery_only:
+                    return self._recovery_only_result(
+                        summary='waiting_children recovery completed; held notice remains pending',
+                    )
                 fresh_turn_request_seed_messages = []
                 attempts = max(0, attempts - 1)
                 continue
@@ -1549,6 +1559,28 @@ class ReActToolLoop:
         if str(pending_notice_state.get('resume_mode') or '').strip() == RESUME_MODE_WAIT_FOR_CHILDREN:
             return False
         return True
+
+    @staticmethod
+    def _wait_for_children_recovery_only(*, runtime_context: dict[str, Any], node) -> bool:
+        distribution = dict((runtime_context or {}).get('distribution_state') or {})
+        if str(distribution.get('state') or '').strip() != 'resume_ready':
+            return False
+        metadata = dict(getattr(node, 'metadata', None) or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
+        pending_notice_state = normalize_pending_notice_state(metadata.get(PENDING_NOTICE_STATE_KEY))
+        return str(pending_notice_state.get('resume_mode') or '').strip() == RESUME_MODE_WAIT_FOR_CHILDREN
+
+    @staticmethod
+    def _recovery_only_result(*, summary: str) -> NodeFinalResult:
+        text = str(summary or 'recovery-only pass completed').strip() or 'recovery-only pass completed'
+        return NodeFinalResult(
+            status='success',
+            delivery_status='partial',
+            summary=text,
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason='',
+        )
 
     async def _resume_waiting_children_turn_if_needed(
         self,

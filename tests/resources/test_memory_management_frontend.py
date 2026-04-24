@@ -737,3 +737,99 @@ def test_memory_processed_detail_preview_uses_noop_reason_in_summary_slot() -> N
     assert str(result["secondaryTitle"]) == "无变更原因"
     assert "现有长期记忆无需改写或补充" in str(result["secondaryText"])
     assert "---\nid:demo\n已有记忆预览" not in str(result["secondaryText"])
+def test_memory_processed_card_uses_write_mode_to_render_rewrite_as_modify() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+
+        class StubElement {}
+        class StubHTMLElement extends StubElement {}
+        class StubHTMLButtonElement extends StubHTMLElement {}
+        class StubHTMLInputElement extends StubHTMLElement {}
+        class StubHTMLTextAreaElement extends StubHTMLElement {}
+        class StubHTMLSelectElement extends StubHTMLElement {}
+
+        class StubDocument {
+          getElementById() { return null; }
+          querySelector() { return null; }
+          querySelectorAll() { return []; }
+          addEventListener() {}
+          createElement() { return {}; }
+        }
+
+        const context = {
+          console,
+          setTimeout,
+          clearTimeout,
+          setInterval,
+          clearInterval,
+          queueMicrotask,
+          navigator: { clipboard: { writeText: async () => {} } },
+          location: { protocol: "http:", host: "localhost", pathname: "/org_graph.html" },
+          localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+          sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+          document: new StubDocument(),
+          window: {},
+          Element: StubElement,
+          HTMLElement: StubHTMLElement,
+          HTMLButtonElement: StubHTMLButtonElement,
+          HTMLInputElement: StubHTMLInputElement,
+          HTMLTextAreaElement: StubHTMLTextAreaElement,
+          HTMLSelectElement: StubHTMLSelectElement,
+          URLSearchParams,
+          URL,
+          AbortController,
+          fetch: async () => ({ ok: true, json: async () => ({}) }),
+          lucide: { createIcons() {} },
+          marked: { parse: (value) => String(value) },
+          DOMPurify: { sanitize: (value) => String(value) },
+          structuredClone: global.structuredClone,
+          performance: { now: () => 0 },
+          requestAnimationFrame: (callback) => { callback(); return 1; },
+          cancelAnimationFrame: () => {},
+          WebSocket: function WebSocket() {},
+          addEventListener() {},
+          removeEventListener() {},
+        };
+        context.window = context;
+
+        vm.createContext(context);
+        vm.runInContext(
+          `${appCode}\\nthis.__testExports = { renderMemoryProcessedCard, memoryProcessedOpLabel };`,
+          context,
+        );
+
+        const rewriteItem = {
+          batch_id: "rewrite_demo",
+          op: "write",
+          source_op: "write",
+          write_mode: "rewrite",
+          status: "applied",
+          processed_at: "2026-04-20T03:26:45+08:00",
+        };
+        const addItem = {
+          batch_id: "add_demo",
+          op: "write",
+          source_op: "write",
+          write_mode: "add",
+          status: "applied",
+          processed_at: "2026-04-20T03:26:45+08:00",
+        };
+
+        console.log(JSON.stringify({
+          rewriteLabel: context.__testExports.memoryProcessedOpLabel(rewriteItem),
+          addLabel: context.__testExports.memoryProcessedOpLabel(addItem),
+          rewriteHtml: context.__testExports.renderMemoryProcessedCard(rewriteItem),
+          addHtml: context.__testExports.renderMemoryProcessedCard(addItem),
+        }));
+        """
+    )
+
+    assert str(result["rewriteLabel"]) == "修改"
+    assert str(result["addLabel"]) == "增加"
+    assert "修改" in str(result["rewriteHtml"])
+    assert "增加" in str(result["addHtml"])
+    assert "已应用" not in str(result["rewriteHtml"])

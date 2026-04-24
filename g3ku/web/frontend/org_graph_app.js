@@ -8638,6 +8638,14 @@ function memoryOpLabel(op) {
     return String(op || "").trim().toLowerCase() === "delete" ? "删除" : "增加";
 }
 
+function memoryProcessedWriteModeLabel(item) {
+    const normalized = String(item?.write_mode || "").trim().toLowerCase();
+    if (normalized === "rewrite") return "修改";
+    if (normalized === "mixed") return "混合变更";
+    if (normalized === "add") return "增加";
+    return "";
+}
+
 function memoryProcessedNoopReason(item) {
     return String(item?.noop_reason || "").trim();
 }
@@ -8666,6 +8674,8 @@ function memoryProcessedBadgeStatus(item) {
 
 function memoryProcessedOpLabel(item) {
     if (memoryProcessedIsNoChange(item)) return "无变更";
+    const writeModeLabel = memoryProcessedWriteModeLabel(item);
+    if (writeModeLabel) return writeModeLabel;
     const opLabels = [item?.source_op, item?.op]
         .map((value) => String(value || "").trim().toLowerCase())
         .map((value) => {
@@ -8677,13 +8687,6 @@ function memoryProcessedOpLabel(item) {
     const uniqueLabels = [...new Set(opLabels)];
     if (uniqueLabels.length) return uniqueLabels.join(" / ");
     return memoryProcessedStatusLabel(item);
-    const normalizedStatus = String(item?.status || "").trim().toLowerCase();
-    const normalizedOp = String(item?.op || "").trim().toLowerCase();
-    const normalizedSourceOp = String(item?.source_op || "").trim().toLowerCase();
-    if (normalizedStatus === "discarded" && (normalizedOp === "assess" || normalizedSourceOp === "assess")) {
-        return "评估";
-    }
-    return memoryOpLabel(normalizedOp);
 }
 
 const NOTE_REF_RE = /\bref:(note_[a-z0-9_]+)\b/g;

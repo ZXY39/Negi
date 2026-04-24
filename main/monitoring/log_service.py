@@ -753,6 +753,68 @@ class TaskLogService:
             self.refresh_task_view(task_id, mark_unread=True)
             return node
 
+    def create_child_and_bind_spawn_entry(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+        entry_index: int,
+        child: NodeRecord,
+    ) -> NodeRecord:
+        normalized_task_id = str(task_id or '').strip()
+        normalized_parent_node_id = str(parent_node_id or '').strip()
+        normalized_cache_key = str(cache_key or '').strip()
+        normalized_entry_index = int(entry_index)
+        with self._task_lock(normalized_task_id):
+            task = self._store.get_task(normalized_task_id)
+            parent = self._store.get_node(normalized_parent_node_id)
+            if task is None or parent is None or str(parent.task_id or '').strip() != normalized_task_id:
+                raise ValueError('parent node missing during child bind')
+
+            child_metadata = dict(child.metadata or {})
+            child_metadata['spawn_owner_parent_node_id'] = normalized_parent_node_id
+            child_metadata['spawn_owner_round_id'] = normalized_cache_key
+            child_metadata['spawn_owner_entry_index'] = normalized_entry_index
+            child_metadata['spawn_owner_kind'] = 'child'
+            persisted_child = child.model_copy(
+                update={
+                    'task_id': normalized_task_id,
+                    'parent_node_id': normalized_parent_node_id,
+                    'updated_at': now_iso(),
+                    'metadata': child_metadata,
+                }
+            )
+            self._store.upsert_node(persisted_child)
+
+            operations = dict((parent.metadata or {}).get('spawn_operations') or {})
+            payload = dict(operations.get(normalized_cache_key) or {})
+            entries = list(payload.get('entries') or [])
+            if normalized_entry_index < 0 or normalized_entry_index >= len(entries) or not isinstance(entries[normalized_entry_index], dict):
+                raise ValueError('spawn entry missing during child bind')
+            entry = dict(entries[normalized_entry_index] or {})
+            entry['child_node_id'] = persisted_child.node_id
+            entries[normalized_entry_index] = entry
+            payload['entries'] = entries
+            operations[normalized_cache_key] = payload
+            next_parent_metadata = dict(parent.metadata or {})
+            next_parent_metadata['spawn_operations'] = operations
+            persisted_parent = self._store.update_node(
+                normalized_parent_node_id,
+                lambda record: record.model_copy(update={'metadata': next_parent_metadata, 'updated_at': now_iso()}),
+            )
+
+            self._sync_node_read_models_locked(persisted_child)
+            self._sync_task_node_rounds_locked(persisted_child)
+            if persisted_parent is not None:
+                self._sync_node_read_models_locked(persisted_parent)
+                self._sync_task_node_rounds_locked(persisted_parent)
+            self._publish_task_node_patch_locked(task=task, node=persisted_child)
+            if persisted_parent is not None:
+                self._publish_task_node_patch_locked(task=task, node=persisted_parent)
+            self.refresh_task_view(normalized_task_id, mark_unread=True)
+            return persisted_child
+
     def update_node_input(self, task_id: str, node_id: str, content: str) -> NodeRecord | None:
         with self._task_lock(task_id):
             text, ref = self._summarize_node_input(task_id=task_id, node_id=node_id, content=content)
