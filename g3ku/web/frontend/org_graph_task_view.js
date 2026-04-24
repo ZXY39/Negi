@@ -1455,11 +1455,17 @@ function summarizeMessageDeliveries(deliveries = []) {
             const targetTitle = String(item?.target_title || item?.target_node_id || "").trim() || "未命名节点";
             const targetNodeId = String(item?.target_node_id || "").trim();
             const message = String(item?.message || "").trim();
+            const reason = String(item?.reason || "").trim();
+            const decision = String(item?.decision || "").trim();
             const status = String(item?.status || "").trim();
-            const parts = [targetTitle];
+            const parts = [decision === "skipped" ? "不分发" : "分发", targetTitle];
             if (targetNodeId) parts.push(`(${targetNodeId})`);
-            if (message) parts.push(`: ${message}`);
-            if (status) parts.push(` [${status}]`);
+            if (decision === "skipped") {
+                if (reason) parts.push(`: ${reason}`);
+            } else {
+                if (message) parts.push(`: ${message}`);
+                if (status) parts.push(` [${status}]`);
+            }
             return parts.join("");
         })
         .filter(Boolean);

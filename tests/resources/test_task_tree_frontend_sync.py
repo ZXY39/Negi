@@ -3383,6 +3383,13 @@ def test_build_node_message_list_steps_renders_message_and_distribution_details(
                   target_title: "child one",
                   message: "改成男性角色Top20并补充证据",
                   status: "delivered",
+                  decision: "distributed",
+                },
+                {
+                  target_node_id: "node:child-2",
+                  target_title: "child two",
+                  reason: "该子节点不受影响",
+                  decision: "skipped",
                 },
               ],
             },
@@ -3403,6 +3410,9 @@ def test_build_node_message_list_steps_renders_message_and_distribution_details(
     assert result["status"] == "warning"
     assert "改成男性角色Top20" in result["bodyHtml"]
     assert "child one" in result["bodyHtml"]
+    assert "不分发" in result["bodyHtml"]
+    assert "child two" in result["bodyHtml"]
+    assert "该子节点不受影响" in result["bodyHtml"]
     assert "改成男性角色Top20并补充证据" in result["bodyHtml"]
 
 

@@ -232,6 +232,7 @@ The backend contract behind that UI behavior is:
 - Node detail now receives a backend-owned message list contract instead of rendering appended messages as a pseudo execution stage. The frontend must not reconstruct these entries from raw mailbox tables or by parsing prompt tail blocks.
 - That same rule applies to root-node appended messages: the backend may expose them through the node detail message list even when the root has no `task_node_notifications` row, because root delivery uses node-local pending notice metadata rather than mailbox storage.
 - In the node detail drawer, the message list appears as its own section before `派生记录`. Each entry shows received time plus pending/consumed state, expands to the full message body, and includes the per-node distribution result from the epoch `decision_records` / child deliveries for that source turn.
+- That distribution result is backend-owned and may now contain both delivered child notices and explicit skipped-child decisions. Frontend rendering should show both: delivered targets with the propagated message, and skipped targets with the recorded non-distribution reason. The browser must not infer skipped decisions by diffing the child tree against mailbox rows.
 
 ### Task Depth Default Contract
 

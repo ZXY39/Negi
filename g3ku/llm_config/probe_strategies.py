@@ -11,7 +11,7 @@ from g3ku.utils.api_keys import parse_api_keys, should_switch_api_key_for_http_s
 from .enums import AuthMode, ProbeStatus, ProtocolAdapter
 from .models import NormalizedProviderConfig, ProbeResult
 
-_PROBE_TIMEOUT_SECONDS = 8
+_PROBE_TIMEOUT_SECONDS = 30
 
 
 def _join_url(base_url: str, suffix: str) -> str:

@@ -1342,13 +1342,29 @@ async def test_distribution_turn_uses_runtime_child_snapshot_and_persists_decisi
         assert decision_records[0]["source_node_id"] == root.node_id
         assert decision_records[0]["local_notice_kept"] is True
         assert decision_records[0]["delivered_child_ids"] == [branch_a.node_id]
+        assert decision_records[0]["skipped_child_decisions"] == [
+            {
+                "target_node_id": branch_b.node_id,
+                "reason": "branch b can continue unchanged",
+            }
+        ]
 
         detail = service.query_service.get_node_detail(record.task_id, root.node_id, detail_level="full")
         assert detail is not None
         assert detail.message_list[0]["status"] == "pending"
         assert detail.message_list[0]["deliveries"][0]["target_node_id"] == branch_a.node_id
+        assert detail.message_list[0]["deliveries"][0]["decision"] == "distributed"
+        assert detail.message_list[0]["deliveries"][1]["target_node_id"] == branch_b.node_id
+        assert detail.message_list[0]["deliveries"][1]["decision"] == "skipped"
+        assert detail.message_list[0]["deliveries"][1]["reason"] == "branch b can continue unchanged"
+        assert detail.message_list[0]["deliveries"][1]["status"] == ""
+        assert detail.message_list[0]["deliveries"][1]["message"] == ""
+        assert detail.message_list[0]["deliveries"][1]["received_at"] == ""
+        assert detail.message_list[0]["deliveries"][1]["notification_id"] == ""
         assert branch_b.node_id not in {
-            item["target_node_id"] for item in list(detail.message_list[0]["deliveries"] or [])
+            item["target_node_id"]
+            for item in list(detail.message_list[0]["deliveries"] or [])
+            if item.get("decision") == "distributed"
         }
     finally:
         await service.close()

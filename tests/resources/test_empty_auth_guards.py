@@ -11,6 +11,7 @@ import g3ku.providers.responses_provider as responses_provider_module
 import main.runtime.chat_backend as chat_backend_module
 from g3ku.llm_config.enums import AuthMode, Capability, ProbeStatus, ProtocolAdapter
 from g3ku.llm_config.models import NormalizedProviderConfig
+import g3ku.llm_config.probe_strategies as probe_strategies_module
 from g3ku.llm_config.probe_strategies import _build_openai_headers, probe_config, probe_config_for_concurrency
 from g3ku.providers.custom_provider import CustomProvider
 from g3ku.providers.provider_factory import ProviderTarget
@@ -1518,6 +1519,38 @@ def test_probe_config_falls_back_when_model_catalog_returns_500() -> None:
     assert result.diagnostics["fallback_used"] is True
     assert result.diagnostics["api_key_count"] == 1
     assert result.diagnostics["api_key_attempts"] == 1
+
+
+def test_probe_config_uses_30_second_timeout(monkeypatch) -> None:
+    config = _config(
+        provider_id="custom",
+        protocol_adapter=ProtocolAdapter.CUSTOM_DIRECT,
+        base_url="https://example.com/v1",
+        default_model="custom-model",
+        api_key="test-key",
+    )
+
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None):
+            return httpx.Response(200, json={"data": []})
+
+    monkeypatch.setattr(probe_strategies_module.httpx, "Client", _FakeClient)
+
+    result = probe_config(config)
+
+    assert result.success is True
+    assert captured["timeout"] == 30
 
 
 def test_probe_config_for_concurrency_uses_minimal_inference_request_for_openai_compatible() -> None:

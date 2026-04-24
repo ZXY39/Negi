@@ -87,26 +87,61 @@ class TaskQueryService:
         if not normalized_epoch_id or not normalized_source_node_id:
             return []
         deliveries: list[dict[str, Any]] = []
+        delivered_target_ids: set[str] = set()
         for item in list(self._store.list_task_epoch_notifications(task_id, normalized_epoch_id) or []):
             if str(item.source_node_id or '').strip() != normalized_source_node_id:
                 continue
             target_node_id = str(item.node_id or '').strip()
             if not target_node_id or target_node_id == normalized_source_node_id:
                 continue
+            delivered_target_ids.add(target_node_id)
             deliveries.append(
                 {
                     'notification_id': str(item.notification_id or '').strip(),
                     'target_node_id': target_node_id,
                     'target_title': str(node_titles.get(target_node_id) or target_node_id).strip(),
                     'message': str(item.message or '').strip(),
+                    'reason': '',
+                    'decision': 'distributed',
                     'status': str(item.status or '').strip(),
                     'received_at': str(item.delivered_at or item.created_at or '').strip(),
                 }
             )
+        epoch = self._store.get_task_message_distribution_epoch(task_id, normalized_epoch_id)
+        if epoch is not None and isinstance(epoch.payload, dict):
+            for record in list(epoch.payload.get('decision_records') or []):
+                if not isinstance(record, dict):
+                    continue
+                if str(record.get('source_node_id') or '').strip() != normalized_source_node_id:
+                    continue
+                for skipped in list(record.get('skipped_child_decisions') or []):
+                    if not isinstance(skipped, dict):
+                        continue
+                    target_node_id = str(skipped.get('target_node_id') or '').strip()
+                    if (
+                        not target_node_id
+                        or target_node_id == normalized_source_node_id
+                        or target_node_id in delivered_target_ids
+                    ):
+                        continue
+                    deliveries.append(
+                        {
+                            'notification_id': '',
+                            'target_node_id': target_node_id,
+                            'target_title': str(node_titles.get(target_node_id) or target_node_id).strip(),
+                            'message': '',
+                            'reason': str(skipped.get('reason') or '').strip(),
+                            'decision': 'skipped',
+                            'status': '',
+                            'received_at': '',
+                        }
+                    )
         deliveries.sort(
             key=lambda item: (
+                0 if str(item.get('decision') or '').strip() == 'distributed' else 1,
                 str(item.get('received_at') or ''),
                 str(item.get('notification_id') or ''),
+                str(item.get('target_node_id') or ''),
             )
         )
         return deliveries
