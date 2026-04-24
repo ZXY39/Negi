@@ -634,6 +634,7 @@ When node cache hits are still low after schema churn stops, compare consecutive
 - If `actual_tool_schema_hash` is stable but cache hits stay low, inspect whether `provider_request_body.input` stopped being append-only.
 - If early `function_call` / `function_call_output` records are being replaced instead of appended, treat it as a node request-scaffold regression rather than a pure tool-schema issue.
 - If `prompt_cache_key_hash` stays the same but `actual_request_message_count` drops sharply on the first node request after restart/resume, compare `runtime_frame.messages` against the latest node `actual_request_ref.request_messages` first. That pattern usually means the resumed first hop rebuilt from projected history instead of from the persisted actual-request scaffold.
+- If cache hits drop on the first node request that consumes an append-notice, verify that the new `provider_request_body.input` begins with the previous artifact's `provider_request_body.input` byte-for-byte after JSON normalization. The expected behavior is append-only notice delivery: old provider-visible context remains the prefix, and the new parent notice is appended after it. A rebuild from `request_messages` or `runtime_frame.messages` can preserve semantic history while still destroying provider prompt-cache reuse.
 
 Steady-state validation target for this repair:
 

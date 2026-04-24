@@ -544,7 +544,10 @@ class NodeRunner:
                     'message_source': 'fresh',
                     'request_body_seed_messages': request_body_seed_messages,
                 }
-            messages = await self._base_messages_for_reactivated_or_live_node(task=task, node=node)
+            messages = (
+                [dict(item) for item in list(request_body_seed_messages or []) if isinstance(item, dict)]
+                or await self._base_messages_for_reactivated_or_live_node(task=task, node=node)
+            )
             messages = self._append_notice_messages(messages=messages, notices=notifications)
             messages = self._append_notice_messages(messages=messages, notices=pending_root_notice_records)
             self._close_active_stage_for_message_consumption(task_id=task.task_id, node_id=node.node_id)
@@ -610,6 +613,16 @@ class NodeRunner:
                 return [dict(item) for item in value if isinstance(item, dict)]
         return []
 
+    @staticmethod
+    def _provider_input_messages_from_payload(payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, dict):
+            provider_request_body = payload.get('provider_request_body')
+            if isinstance(provider_request_body, dict):
+                value = provider_request_body.get('input')
+                if isinstance(value, list):
+                    return [dict(item) for item in value if isinstance(item, dict)]
+        return []
+
     def _latest_actual_request_seed_messages(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
         frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
         metadata = dict(node.metadata or {})
@@ -626,6 +639,9 @@ class NodeRunner:
                 parsed = json.loads(resolved)
             except Exception:
                 parsed = None
+            message_list = self._provider_input_messages_from_payload(parsed)
+            if message_list:
+                return message_list
             message_list = self._request_messages_from_payload(parsed)
             if message_list:
                 return message_list
@@ -647,6 +663,10 @@ class NodeRunner:
                 parsed = json.loads(resolved)
             except Exception:
                 parsed = None
+            if key == 'latest_runtime_actual_request_ref':
+                message_list = self._provider_input_messages_from_payload(parsed)
+                if message_list:
+                    return message_list
             message_list = self._message_list_from_payload(parsed)
             if message_list:
                 return message_list

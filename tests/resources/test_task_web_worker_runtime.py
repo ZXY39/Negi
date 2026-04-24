@@ -6407,6 +6407,181 @@ async def test_run_node_after_restart_reuses_persisted_actual_request_prefix_for
 
 
 @pytest.mark.asyncio
+async def test_pending_notice_appends_after_persisted_provider_input_prefix(tmp_path: Path):
+    store_path = tmp_path / "runtime.sqlite3"
+    tasks_dir = tmp_path / "tasks"
+    artifacts_dir = tmp_path / "artifacts"
+    governance_path = tmp_path / "governance.sqlite3"
+
+    seed_service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=store_path,
+        files_base_dir=tasks_dir,
+        artifact_dir=artifacts_dir,
+        governance_store_path=governance_path,
+        execution_mode="web",
+        execution_model_refs=["fake"],
+        acceptance_model_refs=["fake"],
+    )
+
+    previous_provider_input = [
+        {"role": "user", "content": [{"type": "input_text", "text": "node system prompt"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "projected user prompt"}]},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call:stage",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call:stage",
+            "name": "submit_next_stage",
+            "content": [{"type": "output_text", "text": '{"status":"success"}'}],
+        },
+    ]
+    previous_request_messages = [
+        {"role": "system", "content": "node system prompt"},
+        {"role": "user", "content": "projected user prompt"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call:stage",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call:stage",
+            "name": "submit_next_stage",
+            "content": '{"status":"success"}',
+        },
+    ]
+
+    try:
+        record = await _create_web_task(seed_service)
+        root = seed_service.get_node(record.root_node_id)
+        assert root is not None
+        seed_service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "messages": previous_request_messages[:2],
+                "actual_request_hash": "legacy-provider-input-hash",
+                "actual_request_message_count": len(previous_provider_input),
+            },
+            publish_snapshot=False,
+        )
+        seed_service.log_service.append_node_output(
+            record.task_id,
+            root.node_id,
+            content="prior assistant",
+            tool_calls=[],
+            usage_attempts=[
+                LLMModelAttempt(
+                    model_key="sub gpt-5.4",
+                    provider_id="openai",
+                    provider_model="gpt-5.4",
+                    usage={"input_tokens": 14, "output_tokens": 6},
+                )
+            ],
+            model_messages=previous_request_messages[:2],
+            request_messages=previous_request_messages,
+            prompt_cache_key="stable-family-key-for-notice",
+            request_message_count=len(previous_request_messages),
+            request_message_chars=321,
+            actual_tool_schemas=[{"name": "submit_next_stage", "parameters": {"type": "object"}}],
+            provider_request_meta={"provider": "openai"},
+            provider_request_body={"input": previous_provider_input},
+        )
+        seed_service.log_service.update_node_metadata(
+            root.node_id,
+            lambda metadata: {
+                **metadata,
+                "pending_append_notice_records": [
+                    {
+                        "notification_id": "root-notice:cache:1",
+                        "epoch_id": "epoch:cache",
+                        "source_node_id": root.node_id,
+                        "message": "new parent constraint",
+                        "created_at": now_iso(),
+                        "order_index": 1,
+                    }
+                ],
+            },
+        )
+    finally:
+        await seed_service.close()
+
+    backend = _CapturedRequestFinalResultChatBackend()
+    restarted = MainRuntimeService(
+        chat_backend=backend,
+        store_path=store_path,
+        files_base_dir=tasks_dir,
+        artifact_dir=artifacts_dir,
+        governance_store_path=governance_path,
+        execution_mode="web",
+        execution_model_refs=["fake"],
+        acceptance_model_refs=["fake"],
+    )
+
+    try:
+        task = restarted.get_task(record.task_id)
+        root = restarted.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        react_state = await restarted.node_runner._resume_react_state(task=task, node=root)
+        tools = {
+            "submit_next_stage": SubmitNextStageTool(
+                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs, final: restarted.node_runner._submit_next_stage(
+                    task_id=task.task_id,
+                    node_id=root.node_id,
+                    stage_goal=stage_goal,
+                    tool_round_budget=tool_round_budget,
+                    completed_stage_summary=completed_stage_summary,
+                    key_refs=key_refs,
+                    final=final,
+                )
+            ),
+            "submit_final_result": SubmitFinalResultTool(
+                lambda payload: restarted.node_runner._submit_final_result(payload),
+                node_kind=root.node_kind,
+            ),
+        }
+        result = await restarted.node_runner._react_loop.run(
+            task=task,
+            node=root,
+            messages=list(react_state.get("messages") or []),
+            request_body_seed_messages=list(react_state.get("request_body_seed_messages") or []),
+            tools=tools,
+            model_refs=["fake"],
+            runtime_context=restarted.node_runner._runtime_context(task=task, node=root),
+            max_iterations=4,
+        )
+
+        assert result.status == "success"
+        assert backend.calls
+        captured_provider_input = list(backend.calls[0].get("messages") or [])
+        assert captured_provider_input[: len(previous_provider_input)] == previous_provider_input
+        assert any("new parent constraint" in str(item) for item in captured_provider_input[len(previous_provider_input) :])
+    finally:
+        await restarted.close()
+
+
+@pytest.mark.asyncio
 async def test_model_visible_tool_selection_refreshes_provider_tool_bundle_from_current_visible_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
