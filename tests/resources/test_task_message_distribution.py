@@ -2659,6 +2659,149 @@ async def test_distribution_barrier_waits_when_spawn_entry_references_missing_ch
 
 
 @pytest.mark.asyncio
+async def test_reconcile_spawn_entry_bindings_marks_duplicate_children_and_unblocks_barrier(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("distribution duplicate child reconcile", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        first_spec = SpawnChildSpec(goal="first child", prompt="first prompt", execution_policy={"mode": "focus"})
+        second_spec = SpawnChildSpec(goal="second child", prompt="second prompt", execution_policy={"mode": "focus"})
+        older_first = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=first_spec,
+            owner_round_id="round-live",
+            owner_entry_index=0,
+        )
+        canonical_first = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=first_spec,
+            owner_round_id="round-live",
+            owner_entry_index=0,
+        )
+        older_second = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=second_spec,
+            owner_round_id="round-live",
+            owner_entry_index=1,
+        )
+        canonical_second = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=second_spec,
+            owner_round_id="round-live",
+            owner_entry_index=1,
+        )
+        _set_spawn_operations(
+            service,
+            root_node_id=root.node_id,
+            payload={
+                "round-live": {
+                    "specs": [first_spec.model_dump(mode="json"), second_spec.model_dump(mode="json")],
+                    "entries": [
+                        service.node_runner._normalize_spawn_entry(
+                            index=0,
+                            spec=first_spec,
+                            entry={"review_decision": "allowed", "status": "running"},
+                        ),
+                        service.node_runner._normalize_spawn_entry(
+                            index=1,
+                            spec=second_spec,
+                            entry={
+                                "child_node_id": canonical_second.node_id,
+                                "review_decision": "allowed",
+                                "status": "running",
+                            },
+                        ),
+                    ],
+                    "completed": False,
+                }
+            },
+        )
+        service.log_service.replace_runtime_frames(
+            record.task_id,
+            active_node_ids=[root.node_id, canonical_first.node_id, canonical_second.node_id],
+            runnable_node_ids=[canonical_first.node_id, canonical_second.node_id],
+            waiting_node_ids=[root.node_id],
+            frames=[
+                {
+                    **service.log_service._default_frame(
+                        node_id=root.node_id,
+                        depth=root.depth,
+                        node_kind=root.node_kind,
+                        phase="waiting_children",
+                    ),
+                    "pending_tool_calls": [],
+                    "tool_calls": [],
+                    "child_pipelines": [],
+                    "pending_child_specs": [],
+                    "partial_child_results": [],
+                    "last_error": "",
+                },
+                {
+                    **service.log_service._default_frame(
+                        node_id=canonical_first.node_id,
+                        depth=canonical_first.depth,
+                        node_kind=canonical_first.node_kind,
+                        phase="before_model",
+                    ),
+                    "pending_tool_calls": [],
+                    "tool_calls": [],
+                    "child_pipelines": [],
+                    "pending_child_specs": [],
+                    "partial_child_results": [],
+                    "last_error": "",
+                },
+                {
+                    **service.log_service._default_frame(
+                        node_id=canonical_second.node_id,
+                        depth=canonical_second.depth,
+                        node_kind=canonical_second.node_kind,
+                        phase="before_model",
+                    ),
+                    "pending_tool_calls": [],
+                    "tool_calls": [],
+                    "child_pipelines": [],
+                    "pending_child_specs": [],
+                    "partial_child_results": [],
+                    "last_error": "",
+                },
+            ],
+            publish_snapshot=False,
+        )
+
+        changed = service.node_runner.reconcile_spawn_entry_child_bindings(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+        )
+
+        refreshed_root = service.store.get_node(root.node_id)
+        assert refreshed_root is not None
+        entries = refreshed_root.metadata["spawn_operations"]["round-live"]["entries"]
+        assert changed is True
+        assert entries[0]["child_node_id"] == canonical_first.node_id
+        assert entries[1]["child_node_id"] == canonical_second.node_id
+        assert service.store.get_node(older_first.node_id).metadata["duplicate_spawn_child"] is True
+        assert service.store.get_node(older_second.node_id).metadata["duplicate_spawn_child"] is True
+        assert service.node_runner.live_distribution_child_node_ids(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+        ) == [canonical_first.node_id, canonical_second.node_id]
+        assert service.task_actor_service._barrier_materialize_pending_entries(
+            task_id=record.task_id,
+            barrier_node_ids=[root.node_id],
+        ) == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_distribution_barrier_waits_when_child_owner_metadata_does_not_match_spawn_entry(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:

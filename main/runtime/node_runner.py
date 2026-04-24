@@ -1867,6 +1867,12 @@ class NodeRunner:
             raise ValueError('spawn_child_nodes is not available for this node')
         self._log_service.mark_execution_stage_contains_spawn(task.task_id, parent.node_id)
         cache_key = str(call_id or f'call:{len(specs)}')
+        self.reconcile_spawn_entry_child_bindings(
+            task_id=task.task_id,
+            parent_node_id=parent.node_id,
+            round_id=cache_key,
+        )
+        parent = self._store.get_node(parent_node_id) or parent
         if self._pending_notice_waits_for_children(node=parent):
             existing = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
             existing_incomplete_round = isinstance(existing, dict) and not bool(existing.get('completed'))
@@ -2868,6 +2874,16 @@ class NodeRunner:
         cached_payload: dict[str, Any],
         index: int,
     ) -> SpawnChildResult:
+        self.reconcile_spawn_entry_child_bindings(
+            task_id=task.task_id,
+            parent_node_id=parent.node_id,
+            round_id=cache_key,
+        )
+        parent = self._store.get_node(parent.node_id) or parent
+        cached_round = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
+        if isinstance(cached_round, dict):
+            cached_payload.clear()
+            cached_payload.update(copy.deepcopy(cached_round))
         entries = list(cached_payload.get('entries') or [])
         entry = dict(entries[index] or {})
         if str(entry.get('status') or '').strip().lower() in {'success', 'error'}:
@@ -3200,6 +3216,173 @@ class NodeRunner:
         self._sync_parent_child_pipelines_frame(task_id, parent_node_id)
         self._log_service.refresh_task_view(task_id, mark_unread=True)
 
+    def reconcile_spawn_entry_child_bindings(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        round_id: str | None = None,
+    ) -> bool:
+        task = self._store.get_task(task_id)
+        parent = self._store.get_node(parent_node_id)
+        if task is None or parent is None or str(parent.task_id or '').strip() != str(task.task_id or '').strip():
+            return False
+        operations = (parent.metadata or {}).get('spawn_operations') if isinstance(parent.metadata, dict) else {}
+        if not isinstance(operations, dict):
+            return False
+        normalized_round_filter = str(round_id or '').strip()
+        frame_by_node_id = {
+            str(item.node_id or '').strip(): item
+            for item in list(self._store.list_task_runtime_frames(task.task_id) or [])
+            if str(item.node_id or '').strip()
+        }
+        changed = False
+        next_operations = copy.deepcopy(operations)
+        for raw_round_id, raw_payload in list(next_operations.items()):
+            current_round_id = str(raw_round_id or '').strip()
+            if normalized_round_filter and current_round_id != normalized_round_filter:
+                continue
+            if not isinstance(raw_payload, dict) or bool(raw_payload.get('completed')):
+                continue
+            entries = list(raw_payload.get('entries') or [])
+            for entry_index, raw_entry in enumerate(entries):
+                if not isinstance(raw_entry, dict):
+                    continue
+                entry = dict(raw_entry or {})
+                if str(entry.get('review_decision') or '').strip().lower() == 'blocked':
+                    continue
+                normalized_entry_index = int(entry.get('index') or entry_index)
+                candidates = self._spawn_owner_child_candidates(
+                    task_id=task.task_id,
+                    parent_node_id=parent.node_id,
+                    round_id=current_round_id,
+                    entry_index=normalized_entry_index,
+                )
+                if not candidates:
+                    continue
+                canonical = self._canonical_spawn_child_for_entry(
+                    entry=entry,
+                    candidates=candidates,
+                    frame_by_node_id=frame_by_node_id,
+                )
+                if canonical is None:
+                    continue
+                if str(entry.get('child_node_id') or '').strip() != str(canonical.node_id or '').strip():
+                    entry['child_node_id'] = canonical.node_id
+                    entries[entry_index] = entry
+                    raw_payload['entries'] = entries
+                    changed = True
+                for duplicate in candidates:
+                    if str(duplicate.node_id or '').strip() == str(canonical.node_id or '').strip():
+                        self._clear_duplicate_spawn_child_marker(duplicate.node_id)
+                        continue
+                    if self._mark_duplicate_spawn_child(duplicate.node_id, duplicate_of_node_id=canonical.node_id):
+                        changed = True
+        if changed:
+            self._log_service.update_node_metadata(parent.node_id, lambda metadata: {**metadata, 'spawn_operations': next_operations})
+            self._sync_parent_child_pipelines_frame(task.task_id, parent.node_id)
+            self._log_service.refresh_task_view(task.task_id, mark_unread=True)
+        return changed
+
+    def _spawn_owner_child_candidates(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        round_id: str,
+        entry_index: int,
+    ) -> list[NodeRecord]:
+        candidates: list[NodeRecord] = []
+        for node in list(self._store.list_children(parent_node_id) or []):
+            if str(node.task_id or '').strip() != str(task_id or '').strip():
+                continue
+            if str(node.node_kind or '').strip().lower() != KIND_EXECUTION:
+                continue
+            metadata = dict(node.metadata or {}) if isinstance(node.metadata, dict) else {}
+            if str(metadata.get('spawn_owner_kind') or '').strip().lower() != 'child':
+                continue
+            if str(metadata.get('spawn_owner_parent_node_id') or '').strip() != str(parent_node_id or '').strip():
+                continue
+            if str(metadata.get('spawn_owner_round_id') or '').strip() != str(round_id or '').strip():
+                continue
+            try:
+                owner_entry_index = int(metadata.get('spawn_owner_entry_index'))
+            except (TypeError, ValueError):
+                continue
+            if owner_entry_index != int(entry_index):
+                continue
+            candidates.append(node)
+        return candidates
+
+    def _canonical_spawn_child_for_entry(
+        self,
+        *,
+        entry: dict[str, Any],
+        candidates: list[NodeRecord],
+        frame_by_node_id: dict[str, Any],
+    ) -> NodeRecord | None:
+        if not candidates:
+            return None
+        by_id = {str(item.node_id or '').strip(): item for item in candidates if str(item.node_id or '').strip()}
+        bound_node_id = str(entry.get('child_node_id') or '').strip()
+        bound = by_id.get(bound_node_id)
+        if bound is not None and not self._duplicate_spawn_child_marker(bound):
+            return bound
+
+        def _score(node: NodeRecord) -> tuple[int, int, str, str, str]:
+            node_id = str(node.node_id or '').strip()
+            status = str(node.status or '').strip().lower()
+            metadata = dict(node.metadata or {}) if isinstance(node.metadata, dict) else {}
+            frame = frame_by_node_id.get(node_id)
+            has_runtime_frame = 1 if frame is not None else 0
+            is_nonterminal = 1 if status not in {STATUS_SUCCESS, STATUS_FAILED} else 0
+            is_unmarked_duplicate = 1 if not bool(metadata.get('duplicate_spawn_child')) else 0
+            return (has_runtime_frame, is_nonterminal, str(node.updated_at or ''), str(node.created_at or ''), node_id if is_unmarked_duplicate else '')
+
+        return sorted(candidates, key=_score, reverse=True)[0]
+
+    @staticmethod
+    def _duplicate_spawn_child_marker(node: NodeRecord) -> bool:
+        metadata = dict(node.metadata or {}) if isinstance(node.metadata, dict) else {}
+        return bool(metadata.get('duplicate_spawn_child') or metadata.get('duplicate_spawn_child_of'))
+
+    def _mark_duplicate_spawn_child(self, node_id: str, *, duplicate_of_node_id: str) -> bool:
+        node = self._store.get_node(node_id)
+        if node is None:
+            return False
+        metadata = dict(node.metadata or {}) if isinstance(node.metadata, dict) else {}
+        if (
+            bool(metadata.get('duplicate_spawn_child'))
+            and str(metadata.get('duplicate_spawn_child_of') or '').strip() == str(duplicate_of_node_id or '').strip()
+        ):
+            return False
+
+        def _mutate(current: dict[str, Any]) -> dict[str, Any]:
+            current['duplicate_spawn_child'] = True
+            current['duplicate_spawn_child_of'] = str(duplicate_of_node_id or '').strip()
+            current['duplicate_spawn_child_reason'] = 'duplicate spawn child for same parent round entry'
+            return current
+
+        self._log_service.update_node_metadata(node_id, _mutate)
+        return True
+
+    def _clear_duplicate_spawn_child_marker(self, node_id: str) -> bool:
+        node = self._store.get_node(node_id)
+        if node is None:
+            return False
+        metadata = dict(node.metadata or {}) if isinstance(node.metadata, dict) else {}
+        if not any(key in metadata for key in ('duplicate_spawn_child', 'duplicate_spawn_child_of', 'duplicate_spawn_child_reason')):
+            return False
+
+        def _mutate(current: dict[str, Any]) -> dict[str, Any]:
+            current.pop('duplicate_spawn_child', None)
+            current.pop('duplicate_spawn_child_of', None)
+            current.pop('duplicate_spawn_child_reason', None)
+            return current
+
+        self._log_service.update_node_metadata(node_id, _mutate)
+        return True
+
     def _sync_parent_child_pipelines_frame(self, task_id: str, parent_node_id: str) -> None:
         parent = self._store.get_node(parent_node_id)
         if parent is None:
@@ -3315,6 +3498,16 @@ class NodeRunner:
         if stop_reason:
             return
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
+        self.reconcile_spawn_entry_child_bindings(
+            task_id=task.task_id,
+            parent_node_id=parent.node_id,
+            round_id=cache_key,
+        )
+        parent = self._store.get_node(parent.node_id) or parent
+        cached_round = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
+        if isinstance(cached_round, dict):
+            cached_payload.clear()
+            cached_payload.update(copy.deepcopy(cached_round))
         entries = list(cached_payload.get('entries') or [])
         allowed_set = {int(item) for item in list(allowed_indexes or [])}
         for index, spec in enumerate(list(specs or [])):
@@ -3733,6 +3926,8 @@ class NodeRunner:
         if str(node.node_id or '').strip() == str(task.root_node_id or '').strip():
             return True
         metadata = dict(node.metadata or {})
+        if bool(metadata.get('duplicate_spawn_child') or metadata.get('duplicate_spawn_child_of')):
+            return False
         if str(metadata.get('spawn_owner_kind') or '').strip().lower() != 'child':
             return False
         owner_parent_node_id = str(metadata.get('spawn_owner_parent_node_id') or '').strip()

@@ -569,6 +569,8 @@ class TaskActorService:
                 continue
             if str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}:
                 continue
+            self._node_runner.reconcile_spawn_entry_child_bindings(task_id=task.task_id, parent_node_id=node_id)
+            node = self._store.get_node(node_id) or node
             operations = (node.metadata or {}).get('spawn_operations') if isinstance(node.metadata, dict) else {}
             if not isinstance(operations, dict):
                 continue
