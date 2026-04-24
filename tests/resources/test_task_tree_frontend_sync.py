@@ -3357,6 +3357,86 @@ def test_governance_panel_collapsed_summary_only_shows_record_title_and_count() 
     assert result["isExpanded"] is False
 
 
+def test_apply_task_payload_does_not_carry_governance_history_across_task_switch() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          currentTask: { task_id: "task:alpha" },
+          taskGovernance: {
+            enabled: true,
+            frozen: true,
+            review_inflight: false,
+            hard_limited_depth: 4,
+            latest_limit_reason: "depth threshold",
+            supervision_disabled_after_limit: false,
+            history: [
+              {
+                triggered_at: "2026-04-12T10:00:00+08:00",
+                trigger_reason: "depth threshold",
+                trigger_snapshot: { max_depth: 4, total_nodes: 18 },
+                decision: "cap_current_depth",
+                decision_reason: "too deep",
+                decision_evidence: ["depth=4"],
+                limited_depth: 4,
+                error_text: "",
+              },
+            ],
+          },
+          taskNodeDetails: {},
+          treeSelectedRoundByNodeId: {},
+        };
+        global.U = {
+          tree: { innerHTML: "" },
+          taskTokenButton: { disabled: false },
+        };
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.esc = (value) => String(value ?? "");
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+        global.resetTaskTreeSnapshotState = () => {};
+        global.renderTaskDetailHeader = () => {};
+        global.renderTaskGovernancePanel = () => {};
+        global.renderTaskTokenStats = () => {};
+        global.syncTaskTreeHeaderState = () => {};
+        global.setTaskSelectionEmptyVisible = () => {};
+        global.hideAgent = () => {};
+        global.indexTaskLiveFrames = (frames) => frames || {};
+
+        applyTaskPayload({
+          task: { task_id: "task:beta" },
+          summary: { task_id: "task:beta" },
+          runtime_summary: {},
+          governance: {
+            enabled: false,
+            frozen: false,
+            review_inflight: false,
+            history: [],
+          },
+          root_node: null,
+          frontier: [],
+          recent_model_calls: [],
+        });
+
+        console.log(JSON.stringify({
+          currentTaskId: String(global.S.currentTask?.task_id || ""),
+          governanceEnabled: !!global.S.taskGovernance?.enabled,
+          historyCount: Array.isArray(global.S.taskGovernance?.history) ? global.S.taskGovernance.history.length : -1,
+          latestLimitReason: String(global.S.taskGovernance?.latest_limit_reason || ""),
+        }));
+        """
+    )
+
+    assert result["currentTaskId"] == "task:beta"
+    assert result["governanceEnabled"] is False
+    assert result["historyCount"] == 0
+    assert result["latestLimitReason"] == ""
+
+
 def test_governance_panel_css_uses_edge_ring_for_collapsed_and_expanded_breathing() -> None:
     css_text = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
 

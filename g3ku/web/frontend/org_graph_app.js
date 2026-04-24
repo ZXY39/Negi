@@ -1832,6 +1832,13 @@ function resolvePreferredCeoCanonicalContext(context = null, previousContext = n
         || null;
 }
 
+function resolvePreferredCeoTraceContext(deltaContext = null, fullContext = null, previousContext = null) {
+    return normalizeCeoSnapshotCanonicalContext(deltaContext)
+        || normalizeCeoSnapshotCanonicalContext(fullContext)
+        || normalizeCeoSnapshotCanonicalContext(previousContext)
+        || null;
+}
+
 function normalizeCeoSnapshotToolEvents() {
     return [];
 }
@@ -1865,9 +1872,11 @@ function normalizeCeoSnapshotMessage(message = {}) {
     if (role === "assistant") {
         const status = String(message?.status || "").trim().toLowerCase();
         const canonicalContext = normalizeCeoSnapshotCanonicalContext(message?.canonical_context);
+        const canonicalContextDelta = normalizeCeoSnapshotCanonicalContext(message?.canonical_context_delta);
         if (status) next.status = status;
         if (canonicalContext) next.canonical_context = canonicalContext;
-        if (!String(next.content || "").trim() && !canonicalContext && status !== "paused") return null;
+        if (canonicalContextDelta) next.canonical_context_delta = canonicalContextDelta;
+        if (!String(next.content || "").trim() && !canonicalContext && !canonicalContextDelta && status !== "paused") return null;
         return next;
     }
     if (role === "user" && !String(next.content || "").trim() && !attachments.length) return null;
@@ -1925,11 +1934,13 @@ function normalizeCeoSnapshotInflight(snapshot = null) {
         }
     }
     const canonicalContext = normalizeCeoSnapshotCanonicalContext(snapshot?.canonical_context);
+    const canonicalContextDelta = normalizeCeoSnapshotCanonicalContext(snapshot?.canonical_context_delta);
     const compression = normalizeCeoSnapshotCompression(snapshot?.compression);
     const errorMessage = String(snapshot?.last_error?.message || "").trim();
     const runtimeUsageDiagnostics = normalizeCeoRuntimeUsageDiagnostics(snapshot?.frontdoor_token_preflight_diagnostics);
     const actualRequestMessageCount = Number(snapshot?.actual_request_message_count ?? snapshot?.actualRequestMessageCount);
     if (canonicalContext) next.canonical_context = canonicalContext;
+    if (canonicalContextDelta) next.canonical_context_delta = canonicalContextDelta;
     if (compression) next.compression = compression;
     if (errorMessage) next.last_error = { message: errorMessage };
     if (runtimeUsageDiagnostics) next.frontdoor_token_preflight_diagnostics = runtimeUsageDiagnostics;
@@ -2167,6 +2178,7 @@ function appendCeoSessionSnapshotMessage(messages = [], message = null) {
         && sameTurnId
     ) {
         if (nextMessage.canonical_context) previous.canonical_context = nextMessage.canonical_context;
+        if (nextMessage.canonical_context_delta) previous.canonical_context_delta = nextMessage.canonical_context_delta;
         return trimCeoSessionSnapshotMessages(next);
     }
     next.push(nextMessage);
@@ -3900,7 +3912,8 @@ function ceoInflightTurnHasVisibleAssistantState(snapshot = null) {
     const assistantText = String(snapshot.assistant_text || "").trim();
     const turnId = String(snapshot?.turn_id || "").trim();
     const canonicalContext = normalizeCeoSnapshotCanonicalContext(snapshot.canonical_context);
-    return !!assistantText || !!canonicalContext || status === "paused" || status === "error";
+    const canonicalContextDelta = normalizeCeoSnapshotCanonicalContext(snapshot?.canonical_context_delta);
+    return !!assistantText || !!canonicalContext || !!canonicalContextDelta || status === "paused" || status === "error";
 }
 
 function ceoNeedsAssistantTurn(snapshot = null) {
@@ -4101,7 +4114,8 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
     }
     if (!turn?.textEl || !turn?.flowEl) return false;
     if (turnId) turn.turnId = turnId;
-    const preferredCanonicalContext = resolvePreferredCeoCanonicalContext(
+    const preferredCanonicalContext = resolvePreferredCeoTraceContext(
+        snapshot?.canonical_context_delta || null,
         snapshot?.canonical_context || null,
         turn?.lastExecutionTraceSummary || null
     );
@@ -4122,7 +4136,11 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         const inflightTurn = dedupeInflightUserMessageAgainstMessages(
             getCeoSessionSnapshotCache(targetSessionId)?.messages || [],
             preferredCanonicalContext
-            ? { ...(snapshot || {}), canonical_context: preferredCanonicalContext }
+            ? {
+                ...(snapshot || {}),
+                canonical_context: normalizeCeoSnapshotCanonicalContext(snapshot?.canonical_context || null),
+                canonical_context_delta: preferredCanonicalContext,
+            }
             : snapshot
         );
         setCeoSessionSnapshotCache(targetSessionId, { [cacheField]: inflightTurn });
@@ -4277,7 +4295,11 @@ restoreCeoInflightTurn = function approvalAwareRestoreCeoInflightTurn(
 };
 
 function renderPersistedCeoAssistantTurn(item = {}) {
-    const canonicalContext = normalizeCeoSnapshotCanonicalContext(item?.canonical_context);
+    const canonicalContext = resolvePreferredCeoTraceContext(
+        item?.canonical_context_delta || null,
+        item?.canonical_context || null,
+        null,
+    );
     const content = String(item?.content || "");
     const status = String(item?.status || "").trim().toLowerCase();
     if (status !== "paused" && !canonicalContext) {
@@ -5461,6 +5483,11 @@ function finalizeCeoTurn(text, meta = {}) {
     const normalizedSource = normalizeCeoTurnSource(meta?.source || "user");
     const normalizedTurnId = normalizeCeoTurnId(meta?.turn_id || "");
     const finalCanonicalContext = normalizeCeoSnapshotCanonicalContext(meta?.canonical_context || null);
+    const finalCanonicalContextDelta = resolvePreferredCeoTraceContext(
+        meta?.canonical_context_delta || null,
+        meta?.canonical_context || null,
+        null,
+    );
     const finalUserMessages = normalizeCeoSnapshotUserMessages(meta?.user_messages, meta?.user_message);
     const turn = pullActiveCeoTurn(normalizedSource, normalizedTurnId);
     if (finalUserMessages.length) {
@@ -5486,6 +5513,7 @@ function finalizeCeoTurn(text, meta = {}) {
                 role: "assistant",
                 content: String(text || "").trim() || "Done.",
                 canonical_context: persistedCanonicalContext,
+                canonical_context_delta: finalCanonicalContextDelta,
             });
             return {
                 ...(entry || {}),
@@ -5534,6 +5562,7 @@ function finalizeCeoTurn(text, meta = {}) {
                 role: "assistant",
                 content: String(text || "").trim() || "Done.",
                 canonical_context: persistedCanonicalContext,
+                canonical_context_delta: finalCanonicalContextDelta,
                 }
             );
             return {
@@ -5551,7 +5580,9 @@ function finalizeCeoTurn(text, meta = {}) {
         turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
         turn.textEl.classList.remove("pending");
         turn.textEl.classList.add("markdown-content");
-        if (finalCanonicalContext) renderCeoStageTraceIntoTurn(turn, finalCanonicalContext);
+        if (finalCanonicalContextDelta || finalCanonicalContext) {
+            renderCeoStageTraceIntoTurn(turn, finalCanonicalContextDelta || finalCanonicalContext);
+        }
         if (turn.steps > 0) {
             const hasRunningStep = hasRunningCeoToolStep(turn);
             turn.flowEl.hidden = false;
@@ -5597,6 +5628,7 @@ function finalizeCeoTurn(text, meta = {}) {
             role: "assistant",
             content: String(text || "").trim() || "Done.",
             canonical_context: persistedCanonicalContext,
+            canonical_context_delta: finalCanonicalContextDelta,
         });
         return {
             ...(entry || {}),

@@ -6190,6 +6190,50 @@ async def test_react_loop_retries_provider_chain_exhaustion_until_success(monkey
 
 
 @pytest.mark.asyncio
+async def test_react_loop_stops_retrying_provider_chain_exhaustion_after_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[dict[str, object]] = []
+    sleep_calls: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_calls.append(float(delay))
+        await real_sleep(0)
+
+    monkeypatch.setattr('main.runtime.react_loop.asyncio.sleep', _fake_sleep)
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            requests.append(dict(kwargs))
+            raise RuntimeError('Model provider call failed after exhausting the configured fallback chain.')
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
+    result = await asyncio.wait_for(
+        loop.run(
+            task=SimpleNamespace(task_id='task-provider-retry-limit'),
+            node=SimpleNamespace(node_id='node-provider-retry-limit', depth=0, node_kind='execution'),
+            messages=[
+                {'role': 'system', 'content': 'system'},
+                {'role': 'user', 'content': '{"task_id":"task-provider-retry-limit","goal":"demo"}'},
+            ],
+            tools={'submit_final_result': _submit_final_result_tool()},
+            model_refs=['fake'],
+            runtime_context={'task_id': 'task-provider-retry-limit', 'node_id': 'node-provider-retry-limit'},
+            max_iterations=3,
+        ),
+        timeout=0.2,
+    )
+
+    assert result.status == 'failed'
+    assert result.delivery_status == 'blocked'
+    assert 'provider' in result.summary.lower()
+    assert 'exhausting the configured fallback chain' in result.blocking_reason
+    assert len(requests) == 3
+    assert sleep_calls == [1.0, 2.0]
+
+
+@pytest.mark.asyncio
 async def test_react_loop_restarts_provider_retry_with_refreshed_model_refs_after_runtime_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

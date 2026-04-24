@@ -206,7 +206,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, S, U };`,
         context
     );
     context.__testExports.U.ceoCompressionToast = new StubHTMLElement();
@@ -281,6 +281,42 @@ test("ceo stage trace with no stages keeps a readable waiting meta", () => {
 
     assert.equal(rendered, 0);
     assert.equal(turn.metaEl.textContent, "等待工具开始...");
+});
+
+test("ceo trace resolver prefers canonical_context_delta over full canonical_context", () => {
+    const { resolvePreferredCeoTraceContext } = loadApp();
+
+    const resolved = resolvePreferredCeoTraceContext(
+        {
+            stages: [
+                {
+                    stage_id: "frontdoor-stage-delta",
+                    stage_goal: "delta stage only",
+                    status: "completed",
+                    rounds: [],
+                },
+            ],
+        },
+        {
+            stages: [
+                {
+                    stage_id: "frontdoor-stage-old",
+                    stage_goal: "old stage",
+                    status: "completed",
+                    rounds: [],
+                },
+                {
+                    stage_id: "frontdoor-stage-delta",
+                    stage_goal: "delta stage only",
+                    status: "completed",
+                    rounds: [],
+                },
+            ],
+        },
+        null,
+    );
+
+    assert.deepEqual(resolved.stages.map((stage) => stage.stage_id), ["frontdoor-stage-delta"]);
 });
 
 test("ceo stage trace renders real stage goal and budget from true frontdoor stage data", () => {
@@ -399,7 +435,8 @@ test("ceo legacy tool flow hides submit_next_stage events until stage trace arri
         },
     ]);
 
-    assert.deepEqual(events, []);
+    assert.equal(Array.isArray(events), true);
+    assert.equal(events.length, 0);
 });
 
 test("ceo loader tool events stack tool and skill notices in separate columns for ten seconds", () => {
@@ -651,7 +688,7 @@ test("ceo snapshot tool normalization preserves distinct tool_call_id values for
         },
     ]);
 
-    assert.deepEqual(events.map((item) => item.tool_call_id), ["filesystem:1", "filesystem:2"]);
+    assert.deepEqual(Array.from(events, (item) => item.tool_call_id), ["filesystem:1", "filesystem:2"]);
 });
 
 test("ceo tool rows stay distinct for same-name events with different tool_call_id values", () => {
@@ -678,11 +715,11 @@ test("ceo tool rows stay distinct for same-name events with different tool_call_
     assert.equal(rendered, 2);
     assert.equal(turn.listEl.children.length, 2);
     assert.deepEqual(
-        Array.from(turn.listEl.children).map((item) => item.dataset.toolCallId),
+        Array.from(turn.listEl.children, (item) => item.dataset.toolCallId),
         ["filesystem:1", "filesystem:2"]
     );
     assert.deepEqual(
-        Array.from(turn.listEl.children).map((item) => item.dataset.detailText),
+        Array.from(turn.listEl.children, (item) => item.dataset.detailText),
         ['{"path": "alpha"}', '{"path": "beta"}']
     );
 });

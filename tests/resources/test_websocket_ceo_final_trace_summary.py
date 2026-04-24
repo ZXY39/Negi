@@ -73,3 +73,51 @@ def test_resolve_final_canonical_context_does_not_reuse_previous_assistant_conte
     )
 
     assert context == {}
+
+
+def test_resolve_final_canonical_context_delta_uses_previous_persisted_assistant_context() -> None:
+    persisted_session = SimpleNamespace(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "older reply",
+                "canonical_context": {
+                    "stages": [
+                        {
+                            "stage_id": "frontdoor-stage-old",
+                            "stage_goal": "old stage",
+                            "completed_stage_summary": "old complete",
+                            "rounds": [],
+                        }
+                    ]
+                },
+            }
+        ]
+    )
+    session = SimpleNamespace(
+        _frontdoor_visible_canonical_context_snapshot=lambda: {
+            "active_stage_id": "frontdoor-stage-new",
+            "stages": [
+                {
+                    "stage_id": "frontdoor-stage-old",
+                    "stage_goal": "old stage",
+                    "completed_stage_summary": "old complete",
+                    "rounds": [],
+                },
+                {
+                    "stage_id": "frontdoor-stage-new",
+                    "stage_goal": "new stage",
+                    "completed_stage_summary": "new complete",
+                    "rounds": [],
+                },
+            ],
+        }
+    )
+
+    context = websocket_ceo._resolve_final_canonical_context_delta(
+        payload={"text": "reply with new stage"},
+        session=session,
+        persisted_session=persisted_session,
+    )
+
+    assert [stage["stage_id"] for stage in context["stages"]] == ["frontdoor-stage-new"]

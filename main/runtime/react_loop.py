@@ -91,6 +91,7 @@ _READ_ONLY_REPEAT_SOFT_REJECT_LIMIT = 3
 _INVALID_FINAL_SUBMISSION_LIMIT = 5
 _INVALID_STAGE_SUBMISSION_LIMIT = 5
 _STAGE_ONLY_TRANSITION_LIMIT = 5
+_PROVIDER_RETRY_LIMIT = 3
 _DEFAULT_MODEL_RESPONSE_TIMEOUT_SECONDS = 120.0
 _NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS = 25000
 _NODE_TOKEN_COMPACT_MARKER = "[G3KU_TOKEN_COMPACT_V2]"
@@ -623,6 +624,21 @@ class ReActToolLoop:
                             restart_with_refreshed_runtime = True
                             break
                         provider_retry_count += 1
+                        if provider_retry_count >= _PROVIDER_RETRY_LIMIT:
+                            exhausted_message = (
+                                f'{PUBLIC_PROVIDER_FAILURE_MESSAGE} '
+                                f'Automatic retries exhausted after {provider_retry_count} attempts.'
+                            )
+                            self._log_service.update_frame(
+                                task.task_id,
+                                node.node_id,
+                                lambda frame: {
+                                    **frame,
+                                    'last_error': exhausted_message,
+                                },
+                                publish_snapshot=True,
+                            )
+                            return self._provider_retry_failure(attempt_count=provider_retry_count)
                         delay_seconds = self._provider_retry_delay_seconds(provider_retry_count)
                         self._log_service.update_frame(
                             task.task_id,
@@ -3513,6 +3529,22 @@ class ReActToolLoop:
             evidence=[],
             remaining_work=[],
             blocking_reason=normalized_reason,
+        )
+
+    @staticmethod
+    def _provider_retry_failure(*, attempt_count: int) -> NodeFinalResult:
+        attempts = max(1, int(attempt_count or 0))
+        return NodeFinalResult(
+            status='failed',
+            delivery_status='blocked',
+            summary='model provider retry limit reached',
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason=(
+                f'{PUBLIC_PROVIDER_FAILURE_MESSAGE} '
+                f'Automatic retries exhausted after {attempts} attempts.'
+            ),
         )
 
     @staticmethod

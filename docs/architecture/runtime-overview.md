@@ -502,6 +502,8 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - The intended rule is: a request already in flight is not hot-swapped mid-attempt, but if the runtime enters provider-failure or empty-response retry sleep and the runtime model revision changes before the next retry, the old retry loop is invalidated and the current round restarts with freshly resolved model refs.
 - For CEO/frontdoor, that restart happens inside the current `call_model` round and the updated `model_refs` are written back into graph state for later rounds in the same visible turn.
 - For node execution, the same invalidation restarts the current `ReActToolLoop` model round so `model_refs_supplier()` can re-read the latest execution/inspection model chain before the next dispatch.
+- The outer provider-exhaustion retry lane is now intentionally bounded. After the inner provider/key/model-chain fallback already reports `PUBLIC_PROVIDER_FAILURE_MESSAGE`, CEO/frontdoor and node runtime each allow only 3 additional outer retries for the same round before surfacing the failure instead of staying in `before_model` / provider-retry sleep forever.
+- This means a task or session that still shows `is_paused=true` after such a stall is no longer "still retrying the provider". Treat that as a separate control action such as an explicit pause command, not as proof that the retry lane is still live.
 
 ## 7. 新人阅读顺序建议
 

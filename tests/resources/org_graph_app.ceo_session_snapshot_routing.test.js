@@ -3,7 +3,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
+const TASK_VIEW_PATH = "g3ku/web/frontend/org_graph_task_view.js";
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
+const TASK_VIEW_CODE = fs.readFileSync(TASK_VIEW_PATH, "utf8");
 const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
 
 class StubElement {}
@@ -96,7 +98,8 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}
+        `${TASK_VIEW_CODE}
+        ${APP_CODE}
         this.__testExports = {
             S,
             initCeoWs,
@@ -207,6 +210,62 @@ test("snapshot.ceo caches messages under the payload session id", () => {
 
     assert.equal(targetEntry?.messages?.[0]?.content, "persisted reply");
     assert.equal(sharedEntry, null);
+});
+
+test("snapshot.ceo preserves canonical_context_delta in cached assistant messages and inflight turns", () => {
+    const { S, initCeoWs, getCeoSessionSnapshotCache, __socket } = loadApp();
+
+    S.activeSessionId = "web:shared";
+    initCeoWs();
+
+    const socket = __socket();
+    assert.ok(socket);
+
+    socket.onmessage({
+        data: JSON.stringify({
+            type: "snapshot.ceo",
+            session_id: "web:shared",
+            data: {
+                messages: [
+                    {
+                        role: "assistant",
+                        content: "persisted reply",
+                        canonical_context: {
+                            stages: [
+                                { stage_id: "frontdoor-stage-1", stage_goal: "full stage", status: "completed", rounds: [] },
+                            ],
+                        },
+                        canonical_context_delta: {
+                            stages: [
+                                { stage_id: "frontdoor-stage-1", stage_goal: "delta stage", status: "completed", rounds: [] },
+                            ],
+                        },
+                    },
+                ],
+                inflight_turn: {
+                    source: "user",
+                    turn_id: "turn-1",
+                    status: "running",
+                    assistant_text: "working",
+                    canonical_context: {
+                        stages: [
+                            { stage_id: "frontdoor-stage-1", stage_goal: "full stage", status: "completed", rounds: [] },
+                            { stage_id: "frontdoor-stage-2", stage_goal: "current full stage", status: "running", rounds: [] },
+                        ],
+                    },
+                    canonical_context_delta: {
+                        stages: [
+                            { stage_id: "frontdoor-stage-2", stage_goal: "current delta stage", status: "running", rounds: [] },
+                        ],
+                    },
+                },
+            },
+        }),
+    });
+
+    const entry = getCeoSessionSnapshotCache("web:shared");
+    assert.equal(entry?.messages?.[0]?.canonical_context_delta?.stages?.[0]?.stage_id, "frontdoor-stage-1");
+    assert.equal(entry?.inflight_turn?.canonical_context_delta?.stages?.[0]?.stage_id, "frontdoor-stage-2");
 });
 
 test("snapshot.ceo for a different session does not render into the active feed", () => {
@@ -407,6 +466,46 @@ test("ceo.turn.patch syncs approval flow from preserved_turn interrupts", () => 
     assert.equal(__context.__approvalSyncCalls[0].authoritative, true);
     assert.equal(__context.__approvalSyncCalls[0].interrupts[0].value.kind, "frontdoor_tool_approval_batch");
     assert.equal(__context.__approvalRefreshCalls.length, 0);
+});
+
+test("ceo.turn.patch preserves canonical_context_delta on cached inflight turn", () => {
+    const { S, initCeoWs, __socket, getCeoSessionSnapshotCache } = loadApp();
+
+    S.activeSessionId = "web:active";
+    initCeoWs();
+
+    const socket = __socket();
+    assert.ok(socket);
+
+    socket.onmessage({
+        data: JSON.stringify({
+            type: "ceo.turn.patch",
+            session_id: "web:other",
+            data: {
+                inflight_turn: {
+                    source: "user",
+                    turn_id: "turn-1",
+                    status: "running",
+                    assistant_text: "working",
+                    canonical_context: {
+                        stages: [
+                            { stage_id: "frontdoor-stage-1", stage_goal: "full stage", status: "completed", rounds: [] },
+                            { stage_id: "frontdoor-stage-2", stage_goal: "current full stage", status: "running", rounds: [] },
+                        ],
+                    },
+                    canonical_context_delta: {
+                        stages: [
+                            { stage_id: "frontdoor-stage-2", stage_goal: "current delta stage", status: "running", rounds: [] },
+                        ],
+                    },
+                },
+                preserved_turn: null,
+            },
+        }),
+    });
+
+    const entry = getCeoSessionSnapshotCache("web:other");
+    assert.equal(entry?.inflight_turn?.canonical_context_delta?.stages?.[0]?.stage_id, "frontdoor-stage-2");
 });
 
 test("optimistic session switch syncs approval flow from cached preserved_turn interrupts", () => {

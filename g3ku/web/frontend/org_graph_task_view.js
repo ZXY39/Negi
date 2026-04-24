@@ -2588,6 +2588,7 @@ function applyTaskPayload(payload) {
     if (!payload || !payload.task) return;
     const previousTaskId = String(S.currentTask?.task_id || "").trim();
     const nextTaskId = String(payload.task?.task_id || "").trim();
+    const taskChanged = previousTaskId !== nextTaskId;
     const rootNode = payload.root_node || null;
     const frontier = Array.isArray(payload.frontier) ? payload.frontier : [];
     const recentModelCalls = Array.isArray(payload.recent_model_calls) ? payload.recent_model_calls : [];
@@ -2596,23 +2597,23 @@ function applyTaskPayload(payload) {
     S.taskRuntimeSummary = payload.runtime_summary || null;
     S.taskGovernance = mergeTaskGovernance(
         payload.governance || payload.runtime_summary?.governance || {},
-        S.taskGovernance || {},
+        taskChanged ? {} : (S.taskGovernance || {}),
     );
-    if (previousTaskId !== nextTaskId) S.taskGovernanceExpanded = false;
+    if (taskChanged) S.taskGovernanceExpanded = false;
     S.rootNode = rootNode;
     S.frontier = frontier;
     S.recentModelCalls = recentModelCalls;
     S.taskModelCallsPageSize = typeof TASK_MODEL_CALLS_PAGE_SIZE === "number" && TASK_MODEL_CALLS_PAGE_SIZE > 0
         ? TASK_MODEL_CALLS_PAGE_SIZE
         : 100;
-    if (previousTaskId !== nextTaskId) S.taskModelCallsPage = 1;
+    if (taskChanged) S.taskModelCallsPage = 1;
     S.liveFrameMap = indexTaskLiveFrames(frontier);
     if (rootNode && String(rootNode?.node_id || "").trim()) {
         S.taskNodeDetails = { ...(S.taskNodeDetails || {}), [String(rootNode.node_id || "").trim()]: rootNode };
     }
     resetTaskTreeSnapshotState();
     S.treeSelectedRoundByNodeId = {};
-    renderTaskDetailHeader({ resetPromptDisclosure: previousTaskId !== nextTaskId });
+    renderTaskDetailHeader({ resetPromptDisclosure: taskChanged });
     renderTaskGovernancePanel();
     if (U.taskTokenButton) U.taskTokenButton.disabled = !S.currentTask;
     renderTaskTokenStats();

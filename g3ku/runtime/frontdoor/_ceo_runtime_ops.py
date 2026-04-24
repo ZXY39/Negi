@@ -121,6 +121,7 @@ _OPENAI_DEFAULT_IMAGE_HIGH_TILE_TOKENS = 140
 _OPENAI_DEFAULT_IMAGE_TILE_SIZE = 512
 _OPENAI_DEFAULT_IMAGE_MAX_SIDE = 2048
 _OPENAI_DEFAULT_IMAGE_TARGET_SHORT_SIDE = 768
+_PROVIDER_RETRY_LIMIT = 3
 
 
 @dataclass(slots=True)
@@ -5506,6 +5507,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         restart_with_refreshed_runtime = True
                         break
                     provider_retry_count += 1
+                    if provider_retry_count >= _PROVIDER_RETRY_LIMIT:
+                        raise RuntimeError(PUBLIC_PROVIDER_FAILURE_MESSAGE) from exc
                     await asyncio.sleep(float(min(10, max(1, provider_retry_count))))
                     continue
                 response_view = self._model_response_view(message)

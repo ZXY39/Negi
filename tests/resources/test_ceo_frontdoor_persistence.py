@@ -82,6 +82,153 @@ def test_ceo_snapshot_keeps_canonical_context_and_compression_payloads() -> None
     assert "tool_events" not in snapshot[0]
 
 
+def test_ceo_snapshot_includes_message_local_canonical_context_delta() -> None:
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [
+            {
+                "role": "assistant",
+                "content": "first reply",
+                "canonical_context": {
+                    "active_stage_id": "frontdoor-stage-1",
+                    "transition_required": False,
+                    "stages": [
+                        {
+                            "stage_id": "frontdoor-stage-1",
+                            "stage_goal": "collect sources",
+                            "completed_stage_summary": "stage one complete",
+                            "rounds": [
+                                {
+                                    "round_id": "round-1",
+                                    "tools": [
+                                        {"tool_call_id": "filesystem:1", "tool_name": "filesystem", "status": "success"}
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            {
+                "role": "assistant",
+                "content": "second reply",
+                "canonical_context": {
+                    "active_stage_id": "frontdoor-stage-2",
+                    "transition_required": False,
+                    "stages": [
+                        {
+                            "stage_id": "frontdoor-stage-1",
+                            "stage_goal": "collect sources",
+                            "completed_stage_summary": "stage one complete",
+                            "rounds": [
+                                {
+                                    "round_id": "round-1",
+                                    "tools": [
+                                        {"tool_call_id": "filesystem:1", "tool_name": "filesystem", "status": "success"}
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "stage_id": "frontdoor-stage-2",
+                            "stage_goal": "rank candidates",
+                            "completed_stage_summary": "stage two complete",
+                            "rounds": [
+                                {
+                                    "round_id": "round-2",
+                                    "tools": [
+                                        {"tool_call_id": "web_search:2", "tool_name": "web_search", "status": "success"}
+                                    ],
+                                }
+                            ],
+                        },
+                    ],
+                },
+            },
+        ]
+    )
+
+    assert "canonical_context_delta" in snapshot[0]
+    assert snapshot[0]["canonical_context_delta"]["stages"][0]["stage_id"] == "frontdoor-stage-1"
+    assert "canonical_context_delta" in snapshot[1]
+    delta_stages = snapshot[1]["canonical_context_delta"]["stages"]
+    assert [stage["stage_id"] for stage in delta_stages] == ["frontdoor-stage-2"]
+
+
+def test_ceo_live_turn_payload_includes_inflight_canonical_context_delta() -> None:
+    persisted_session = SimpleNamespace(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "older reply",
+                "canonical_context": {
+                    "active_stage_id": "frontdoor-stage-1",
+                    "transition_required": False,
+                    "stages": [
+                        {
+                            "stage_id": "frontdoor-stage-1",
+                            "stage_goal": "collect sources",
+                            "completed_stage_summary": "stage one complete",
+                            "rounds": [
+                                {
+                                    "round_id": "round-1",
+                                    "tools": [
+                                        {"tool_call_id": "filesystem:1", "tool_name": "filesystem", "status": "success"}
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ]
+    )
+    session = SimpleNamespace(
+        inflight_turn_snapshot=lambda: {
+            "turn_id": "turn-current",
+            "source": "user",
+            "status": "running",
+            "assistant_text": "working",
+            "canonical_context": {
+                "active_stage_id": "frontdoor-stage-2",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_goal": "collect sources",
+                        "completed_stage_summary": "stage one complete",
+                        "rounds": [
+                            {
+                                "round_id": "round-1",
+                                "tools": [
+                                    {"tool_call_id": "filesystem:1", "tool_name": "filesystem", "status": "success"}
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "stage_id": "frontdoor-stage-2",
+                        "stage_goal": "rank candidates",
+                        "completed_stage_summary": "stage two complete",
+                        "rounds": [
+                            {
+                                "round_id": "round-2",
+                                "tools": [
+                                    {"tool_call_id": "web_search:2", "tool_name": "web_search", "status": "success"}
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            },
+        }
+    )
+
+    payload = websocket_ceo._build_live_turn_payload(session, "web:shared", persisted_session)
+
+    assert payload["inflight_turn"]["canonical_context"]["stages"][1]["stage_id"] == "frontdoor-stage-2"
+    assert payload["inflight_turn"]["canonical_context_delta"]["stages"][0]["stage_id"] == "frontdoor-stage-2"
+
+
 def test_ceo_snapshot_ignores_legacy_tool_events_without_canonical_context() -> None:
     snapshot = websocket_ceo._build_ceo_snapshot(
         [

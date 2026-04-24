@@ -456,12 +456,14 @@ If operators report "the image has the new built-in skill/tool but the running p
 
 ## CEO Canonical Context UI Contract
 
-The CEO browser/runtime integration now uses `canonical_context` as the only stage-trace protocol field.
+The CEO browser/runtime integration now uses a two-lane stage-trace payload: full `canonical_context` plus UI-oriented `canonical_context_delta`.
 
 - Assistant transcript messages, `snapshot.ceo`, `ceo.turn.patch`, preserved-turn payloads, paused snapshots, and `ceo.reply.final` should carry a turn-scoped `canonical_context`.
+- Those same assistant-facing websocket payloads may now also carry `canonical_context_delta`. This is a UI-only trace lane that contains only the stage/round/tool delta that belongs to the current assistant bubble when compared against the previous persisted assistant canonical context.
 - The frontend should not read or reconstruct CEO stage flow from `execution_trace_summary` or flat `tool_events`.
 - `canonical_context.stages[].rounds[].tools[]` is the authoritative render source for the stage trace.
-- The frontend should treat live/current-turn `canonical_context` as bubble-local trace data, not as the session's full durable stage history.
+- The frontend should treat full `canonical_context` as the durable turn/runtime truth source, but it should prefer `canonical_context_delta` when deciding what to render under one visible assistant bubble. If the delta lane is absent, falling back to full `canonical_context` is allowed for compatibility.
+- Because `canonical_context_delta` is computed server-side from message order, refresh/reconnect should rebuild the same per-bubble trace slices without relying on a browser-local cursor.
 
 Tool output rendering should follow the canonical payload directly:
 

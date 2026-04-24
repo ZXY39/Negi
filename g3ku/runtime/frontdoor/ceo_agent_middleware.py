@@ -13,6 +13,8 @@ from langgraph.types import Command, interrupt
 from g3ku.json_schema_utils import get_attached_raw_parameters_schema
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 
+_PROVIDER_RETRY_LIMIT = 3
+
 
 def _message_role(value: Any) -> str:
     if isinstance(value, dict):
@@ -163,6 +165,8 @@ class CeoPromptAssemblyMiddleware(AgentMiddleware):
                 if PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):
                     raise
                 provider_retry_count += 1
+                if provider_retry_count >= _PROVIDER_RETRY_LIMIT:
+                    raise RuntimeError(PUBLIC_PROVIDER_FAILURE_MESSAGE) from exc
                 await self._runner._emit_progress(
                     progress,
                     f"模型调用失败，正在重试（第{provider_retry_count}次）...",

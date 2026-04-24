@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -6803,6 +6804,59 @@ async def test_create_agent_prompt_middleware_emits_analysis_progress_for_model_
 
 
 @pytest.mark.asyncio
+async def test_create_agent_prompt_middleware_stops_retrying_provider_chain_exhaustion_after_limit(
+    monkeypatch,
+) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    progress_calls: list[tuple[str, str | None, dict[str, object]]] = []
+    sleep_calls: list[float] = []
+    attempts = {"count": 0}
+    real_sleep = asyncio.sleep
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_calls.append(float(delay))
+        await real_sleep(0)
+
+    async def _on_progress(content: str, *, event_kind=None, event_data=None, **kwargs):
+        _ = kwargs
+        progress_calls.append((str(content), event_kind, dict(event_data or {})))
+
+    monkeypatch.setattr(ceo_agent_middleware.asyncio, "sleep", _fake_sleep)
+
+    middleware = ceo_agent_middleware.CeoPromptAssemblyMiddleware(runner=runner)
+
+    async def _handler(request):
+        _ = request
+        attempts["count"] += 1
+        raise RuntimeError(ceo_agent_middleware.PUBLIC_PROVIDER_FAILURE_MESSAGE)
+
+    with pytest.raises(RuntimeError, match="configured fallback chain"):
+        await asyncio.wait_for(
+            middleware.awrap_model_call(
+                ModelRequest(
+                    model=SimpleNamespace(),
+                    system_message=SystemMessage(content="You are the CEO frontdoor agent."),
+                    messages=[HumanMessage(content="hello")],
+                    tools=[],
+                    state=_canonical_frontdoor_state(messages=[{"role": "user", "content": "hello"}]),
+                    runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared", on_progress=_on_progress)),
+                ),
+                _handler,
+            ),
+            timeout=0.2,
+        )
+
+    assert attempts["count"] == 3
+    assert sleep_calls == [1.0, 2.0]
+    assert [item[2].get("phase") for item in progress_calls] == [
+        "model_call",
+        "provider_retry",
+        "provider_retry",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_graph_call_model_restarts_with_refreshed_model_refs_after_runtime_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6885,6 +6939,75 @@ async def test_graph_call_model_restarts_with_refreshed_model_refs_after_runtime
     assert seen_model_refs == [["old-model"], ["new-model"]]
     assert result["model_refs"] == ["new-model"]
     assert result["prompt_cache_key"] == "pk:new-model"
+
+
+@pytest.mark.asyncio
+async def test_graph_call_model_stops_retrying_provider_chain_exhaustion_after_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = SimpleNamespace(main_task_service=None, _runtime_model_revision=1)
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=loop)
+    seen_model_refs: list[list[str]] = []
+    sleep_calls: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_calls.append(float(delay))
+        await real_sleep(0)
+
+    monkeypatch.setattr(ceo_runtime_ops.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_prompt_contract",
+        lambda **kwargs: SimpleNamespace(
+            request_messages=list(kwargs["state"].get("messages") or []),
+            prompt_cache_key="pk:old-model",
+            diagnostics={},
+        ),
+    )
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["old-model"])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **kwargs: {
+            "model_key": str((kwargs.get("model_refs") or [""])[0] or ""),
+            "provider_model": str((kwargs.get("model_refs") or [""])[0] or ""),
+            "context_window_tokens": 128000,
+        },
+    )
+    monkeypatch.setattr(ceo_runtime_ops, "refresh_loop_runtime_config", lambda *_args, **_kwargs: False)
+
+    async def _call_model_with_tools(**kwargs):
+        model_refs = list(kwargs.get("model_refs") or [])
+        seen_model_refs.append(model_refs)
+        raise RuntimeError(ceo_runtime_ops.PUBLIC_PROVIDER_FAILURE_MESSAGE)
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+
+    state = _canonical_frontdoor_state(
+        messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "hello"},
+        ],
+        model_refs=["old-model"],
+        prompt_cache_key="",
+        prompt_cache_diagnostics={},
+        session_key="web:shared",
+        parallel_enabled=False,
+    )
+
+    with pytest.raises(RuntimeError, match="configured fallback chain"):
+        await asyncio.wait_for(
+            runner._graph_call_model(
+                state,
+                runtime=SimpleNamespace(context=SimpleNamespace(session_key="web:shared", session=SimpleNamespace())),
+            ),
+            timeout=0.2,
+        )
+
+    assert seen_model_refs == [["old-model"], ["old-model"], ["old-model"]]
+    assert sleep_calls == [1.0, 2.0]
 
 
 @pytest.mark.asyncio

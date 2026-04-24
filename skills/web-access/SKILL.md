@@ -214,6 +214,32 @@ Proxy 持续运行，不建议主动停止——重启后需要在 Chrome 中重
 
 **找不到官网时**：权威媒体的原创报道（非转载）可作为次级依据，但需向用户说明："未找到官方原文，以下核实来自[媒体名]报道，存在转述误差可能。"单一来源时同样向用户声明。
 
+## Google Trends 实战经验（2026-04）
+
+- 不要优先用静态抓取 `web_fetch` 直拉 Google Trends explore 页做核心证据：高概率遇到 `429 Too Many Requests`。若任务要求可复核趋势数据，应优先走 **CDP 打开页面 -> 触发真实请求 -> 从浏览器性能日志/资源列表提取接口 URL** 的路线。
+- “能在搜索框输入关键词并跳到 `q=` 页面”不等于“能拿到可用趋势数据”。真正目标是拿到 `widgetdata/multiline` 等接口响应，或稳定导出 CSV，而不是只确认标题/URL 变化。
+- 推荐稳定流程：
+  1. 用 CDP 打开 `https://trends.google.com/trends/explore?date=today%2012-m` 或目标 explore 页；
+  2. 必要时先处理 cookie/consent 弹窗；
+  3. 在页面中输入关键词并提交；
+  4. 若 widget DOM 为空，先滚动到底部再回顶部，等待异步组件加载；
+  5. 不强依赖复杂 `/eval` 去读取图表内部状态，优先从 `performance.getEntriesByType('resource')` 中捕捉 `/trends/api/widgetdata/multiline`、`relatedsearches`、`comparedgeo` 等真实请求 URL；
+  6. 对捕捉到的 URL，再用 `curl.exe` 拉取响应并落地保存，解析 `timelineData` / 峰值时间点。
+- PowerShell 下必须优先使用 `curl.exe`，不要写 `curl`。`curl` 常是 `Invoke-WebRequest` 别名，容易产生与网络问题混淆的假错误。
+- 对 Trends 接口的浏览器外拉取，默认加稳态参数：建议至少使用 `curl.exe --http1.1 --retry 3 --retry-delay 1`。实测同一类 `widgetdata/multiline` URL 可能一次成功、一次 `curl exit 56`，加 `--http1.1` 与重试后可恢复。不要把单次成功误判成稳定方案。
+- 允许“页面 DOM 空但性能日志已有 API 请求”这种情况存在。若 `.widget-container` 的 `textContent` 为空，不代表没有数据；先看 resource/performance 中是否已经出现 `/trends/api/...` 请求。
+- Consent/同意弹窗会影响渲染与交互。遇到 widget 为空、按钮缺失时，先检查并关闭弹窗，再滚动触发加载。
+- 导出/接口响应落地后要注意编码：某些通过重定向保存的 `/eval` 输出文件可能是 UTF-16 LE（带 BOM）；直接按 UTF-8 读取会误判为解析失败。
+- Google Trends 接口常带 anti-XSSI 前缀：响应正文形如 `)]}',
+{json...}`。解析前需要先去掉第一行前缀，再对 JSON 体做解析。
+- 优先保存原始响应文件，再做解析。页面上的 `formattedTime`、可见文本、按钮文案都可能因语言、渲染时机而不稳定；而 `timelineData[].time` 与 `value` 足够用于计算峰值周与序列。
+- 批量任务务必加节流：对多关键词轮询请求时，建议在每次请求/关键词切换之间增加 1~3 秒等待，并内置失败重试，降低间歇性错误与触发风控的概率。
+
+- `check-deps.mjs` 若在短时限内超时，不要立刻把它等同于“skill 不可用”；先区分“脚本慢/卡住”和“CDP 不可用”。至少补做快速验证：Chrome 是否开启 remote debugging、9222 端口是否监听、proxy 是否已启动、是否能访问其健康接口/targets。若这些快速验证通过，可继续排查脚本耗时来源；若关键项不通过，再判定为前置依赖未满足。
+- 当任务强制要求依赖 web-access/CDP 时，`check-deps.mjs` 超时本身就是高风险信号。除非后续用其他等价验证手段明确确认 Chrome remote-debugging、CDP proxy 与基础页面连接都正常，否则不要臆测继续产出结果。
+- Chrome 侧的关键排障点要明确写入：在 `chrome://inspect/#remote-debugging` 中启用 **Allow remote debugging for this browser instance**，必要时重启 Chrome；若任务失败原因是 CDP 可用性未验证，应优先提示这一项。
+- 建议把“快速复核”作为 check-deps 超时后的固定补救动作：检查 Node 可用、9222 端口、proxy 存活、是否能列出 targets；仅确认脚本文件存在不算验证通过。
+
 ## 站点经验
 
 操作中积累的特定网站经验，按域名存储在 `references/site-patterns/` 下。
