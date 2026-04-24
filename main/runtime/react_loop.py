@@ -56,6 +56,11 @@ from main.runtime.node_prompt_contract import (
     strip_node_dynamic_contract_messages,
     upsert_node_dynamic_contract_message,
 )
+from main.runtime.pending_notice_state import (
+    PENDING_NOTICE_STATE_KEY,
+    RESUME_MODE_WAIT_FOR_CHILDREN,
+    normalize_pending_notice_state,
+)
 from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
 from g3ku.config.live_runtime import get_runtime_config
@@ -1286,7 +1291,7 @@ class ReActToolLoop:
             return None
         if self._distribution_priority_blocks_recovery(
             runtime_context=runtime_context,
-            node_id=str(node.node_id or '').strip(),
+            node=node,
         ):
             return None
         pending_tool_calls = [
@@ -1518,11 +1523,11 @@ class ReActToolLoop:
         return prepared_history
 
     @staticmethod
-    def _distribution_priority_blocks_recovery(*, runtime_context: dict[str, Any], node_id: str) -> bool:
+    def _distribution_priority_blocks_recovery(*, runtime_context: dict[str, Any], node) -> bool:
         distribution = dict((runtime_context or {}).get('distribution_state') or {})
         if str(distribution.get('mode') or '').strip() != 'task_wide_barrier':
             return False
-        normalized_node_id = str(node_id or '').strip()
+        normalized_node_id = str(getattr(node, 'node_id', '') or '').strip()
         if not normalized_node_id:
             return False
         blocked_node_ids = {
@@ -1537,7 +1542,13 @@ class ReActToolLoop:
             for item in list(distribution.get('pending_notice_node_ids') or [])
             if str(item or '').strip()
         }
-        return normalized_node_id in pending_notice_node_ids
+        if normalized_node_id not in pending_notice_node_ids:
+            return False
+        metadata = dict(getattr(node, 'metadata', None) or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
+        pending_notice_state = normalize_pending_notice_state(metadata.get(PENDING_NOTICE_STATE_KEY))
+        if str(pending_notice_state.get('resume_mode') or '').strip() == RESUME_MODE_WAIT_FOR_CHILDREN:
+            return False
+        return True
 
     async def _resume_waiting_children_turn_if_needed(
         self,
@@ -1553,7 +1564,7 @@ class ReActToolLoop:
             return None
         if self._distribution_priority_blocks_recovery(
             runtime_context=runtime_context,
-            node_id=str(node.node_id or '').strip(),
+            node=node,
         ):
             return None
         if str(frame.get('phase') or '').strip() != 'waiting_children':

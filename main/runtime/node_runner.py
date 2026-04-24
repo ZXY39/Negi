@@ -45,6 +45,14 @@ from main.runtime.internal_tools import (
     SubmitNextStageTool,
 )
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
+from main.runtime.pending_notice_state import (
+    clear_pending_notice_state,
+    PENDING_NOTICE_STATE_KEY,
+    RESUME_MODE_ORDINARY,
+    RESUME_MODE_WAIT_FOR_CHILDREN,
+    normalize_pending_notice_state,
+    set_pending_notice_state,
+)
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
@@ -519,6 +527,19 @@ class NodeRunner:
         pending_root_notice_records = self._pending_root_notice_records(node=node)
         request_body_seed_messages = self._latest_actual_request_seed_messages(task=task, node=node)
         if notifications or pending_root_notice_records:
+            if self._pending_notice_waits_for_children(node=node):
+                frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
+                if isinstance(frame.get('messages'), list) and frame.get('messages'):
+                    return {
+                        'messages': list(frame.get('messages') or []),
+                        'message_source': 'restored_frame',
+                        'request_body_seed_messages': request_body_seed_messages,
+                    }
+                return {
+                    'messages': await self._build_messages(task=task, node=node),
+                    'message_source': 'fresh',
+                    'request_body_seed_messages': request_body_seed_messages,
+                }
             messages = await self._base_messages_for_reactivated_or_live_node(task=task, node=node)
             messages = self._append_notice_messages(messages=messages, notices=notifications)
             messages = self._append_notice_messages(messages=messages, notices=pending_root_notice_records)
@@ -716,6 +737,7 @@ class NodeRunner:
                 node_id=node_id,
                 notification_ids=pending_root_notice_ids,
             )
+        self._clear_pending_notice_state_if_idle(node_id=node_id)
         distribution = self._distribution_runtime_state(task_id)
         if (
             str(distribution.get('mode') or '').strip() == 'task_wide_barrier'
@@ -751,9 +773,75 @@ class NodeRunner:
                     },
                 )
 
+    def _clear_pending_notice_state_if_idle(self, *, node_id: str) -> None:
+        node = self._store.get_node(node_id)
+        if node is None:
+            return
+        if self._pending_root_notice_records(node=node):
+            return
+        if any(
+            str(item.status or '').strip() == 'delivered'
+            for item in list(self._store.list_task_node_notifications(node.task_id, node_id) or [])
+        ):
+            return
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            metadata[PENDING_NOTICE_STATE_KEY] = clear_pending_notice_state(
+                metadata.get(PENDING_NOTICE_STATE_KEY)
+            )
+            return metadata
+
+        self._log_service.update_node_metadata(node_id, _mutate)
+
     def _pending_root_notice_records(self, *, node: NodeRecord) -> list[dict[str, Any]]:
         metadata = dict(node.metadata or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
         return normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
+
+    def _pending_notice_state(self, *, node: NodeRecord) -> dict[str, str]:
+        metadata = dict(node.metadata or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
+        return normalize_pending_notice_state(metadata.get(PENDING_NOTICE_STATE_KEY))
+
+    def _pending_notice_waits_for_children(self, *, node: NodeRecord) -> bool:
+        state = self._pending_notice_state(node=node)
+        if str(state.get('resume_mode') or '').strip() != RESUME_MODE_WAIT_FOR_CHILDREN:
+            return False
+        latest_round = self._latest_incomplete_spawn_round(parent=node)
+        if latest_round is None:
+            self._update_pending_notice_state(
+                node_id=node.node_id,
+                resume_mode=RESUME_MODE_ORDINARY,
+                epoch_id='',
+                holding_round_id='',
+                updated_at=now_iso(),
+            )
+            return False
+        return True
+
+    def _update_pending_notice_state(
+        self,
+        *,
+        node_id: str,
+        resume_mode: str,
+        epoch_id: str,
+        holding_round_id: str,
+        updated_at: str | None = None,
+    ) -> None:
+        normalized_node_id = str(node_id or '').strip()
+        if not normalized_node_id:
+            return
+        normalized_updated_at = str(updated_at or now_iso()).strip()
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            metadata[PENDING_NOTICE_STATE_KEY] = set_pending_notice_state(
+                metadata.get(PENDING_NOTICE_STATE_KEY),
+                resume_mode=resume_mode,
+                epoch_id=epoch_id,
+                holding_round_id=holding_round_id,
+                updated_at=normalized_updated_at,
+            )
+            return metadata
+
+        self._log_service.update_node_metadata(normalized_node_id, _mutate)
 
     def pending_distribution_mailbox_count(self, *, task_id: str) -> int:
         count = 0
@@ -960,7 +1048,7 @@ class NodeRunner:
             )
         return payloads
 
-    def _root_distribution_notice_records(self, *, epoch) -> list[dict[str, Any]]:
+    def _root_distribution_notice_records(self, *, epoch, created_at: str | None = None) -> list[dict[str, Any]]:
         payload = dict(epoch.payload or {})
         queued_root_messages = [
             str(item or '').strip()
@@ -971,7 +1059,7 @@ class NodeRunner:
             queued_root_messages = [str(epoch.root_message or '').strip()]
         epoch_id = str(epoch.epoch_id or '').strip()
         root_node_id = str(epoch.root_node_id or '').strip()
-        created_at = now_iso()
+        normalized_created_at = str(created_at or now_iso()).strip()
         records: list[dict[str, Any]] = []
         for index, message in enumerate(queued_root_messages, start=1):
             if not message:
@@ -982,19 +1070,25 @@ class NodeRunner:
                     'epoch_id': epoch_id,
                     'source_node_id': root_node_id,
                     'message': message,
-                    'created_at': created_at,
+                    'created_at': normalized_created_at,
                     'order_index': index,
                 }
             )
         return records
 
-    def _queue_pending_root_distribution_notices(self, *, epoch) -> None:
+    def _queue_pending_root_distribution_notices(self, *, epoch, created_at: str | None = None) -> None:
         root_node_id = str(epoch.root_node_id or '').strip()
         if not root_node_id:
             return
-        records = self._root_distribution_notice_records(epoch=epoch)
+        normalized_created_at = str(created_at or now_iso()).strip()
+        records = self._root_distribution_notice_records(epoch=epoch, created_at=normalized_created_at)
         if not records:
             return
+        root_node = self._store.get_node(root_node_id)
+        resume_mode = RESUME_MODE_ORDINARY
+        holding_round_id = ''
+        if root_node is not None:
+            resume_mode, holding_round_id = self._pending_notice_resume_target(node=root_node)
 
         def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
             updated = record_pending_append_notice_records(
@@ -1008,6 +1102,13 @@ class NodeRunner:
             return metadata
 
         self._log_service.update_node_metadata(root_node_id, _mutate)
+        self._update_pending_notice_state(
+            node_id=root_node_id,
+            resume_mode=resume_mode,
+            epoch_id=str(epoch.epoch_id or '').strip(),
+            holding_round_id=holding_round_id,
+            updated_at=normalized_created_at,
+        )
 
     def _persist_distribution_delivery(
         self,
@@ -1560,6 +1661,13 @@ class NodeRunner:
             raise ValueError('spawn_child_nodes is not available for this node')
         self._log_service.mark_execution_stage_contains_spawn(task.task_id, parent.node_id)
         cache_key = str(call_id or f'call:{len(specs)}')
+        if self._pending_notice_waits_for_children(node=parent):
+            existing = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
+            existing_incomplete_round = isinstance(existing, dict) and not bool(existing.get('completed'))
+            if not existing_incomplete_round:
+                raise RuntimeError(
+                    'pending local notice must wait for the active child round to finish before starting a new spawn round'
+                )
         await self._settle_superseded_spawn_operations(
             task=task,
             parent=parent,
@@ -3368,6 +3476,17 @@ class NodeRunner:
                 continue
             return str(round_id or '').strip(), copy.deepcopy(payload)
         return None
+
+    def _pending_notice_resume_target(self, *, node: NodeRecord) -> tuple[str, str]:
+        if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_EXECUTION:
+            return RESUME_MODE_ORDINARY, ''
+        latest_round = self._latest_incomplete_spawn_round(parent=node)
+        if latest_round is None:
+            return RESUME_MODE_ORDINARY, ''
+        round_id, _payload = latest_round
+        if not round_id:
+            return RESUME_MODE_ORDINARY, ''
+        return RESUME_MODE_WAIT_FOR_CHILDREN, round_id
 
     def live_distribution_child_node_ids(self, *, task_id: str, parent_node_id: str) -> list[str]:
         task = self._store.get_task(task_id)
