@@ -11,6 +11,7 @@ docs/*
 docs/maintenance/*
 !docs/maintenance/openclaw-china-sync.md
 docs/superpowers/
+research/
 *.egg-info/
 *.egg
 *.pyc
