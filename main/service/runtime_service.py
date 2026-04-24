@@ -2004,6 +2004,15 @@ class MainRuntimeService:
             if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress'
         ]
 
+    def _refresh_task_store_read_snapshot(self) -> None:
+        refresher = getattr(self.store, 'refresh_read_snapshot', None)
+        if not callable(refresher):
+            return
+        try:
+            refresher()
+        except Exception:
+            logger.debug('task store read snapshot refresh skipped')
+
     @staticmethod
     def _normalize_async_task_target_text(value: Any) -> str:
         text = str(value or '').strip().casefold()
@@ -2032,6 +2041,7 @@ class MainRuntimeService:
         return tuple(unique_tokens)
 
     def _async_task_precheck_pool(self, session_id: str) -> list[dict[str, Any]]:
+        self._refresh_task_store_read_snapshot()
         pool: list[dict[str, Any]] = []
         for task in self.list_unfinished_tasks_for_session(session_id):
             metadata = task.metadata if isinstance(task.metadata, dict) else {}
@@ -2240,6 +2250,27 @@ class MainRuntimeService:
                 'decision_source': 'fallback',
             }
         return llm_decision
+
+    def revalidate_async_task_creation_before_create(
+        self,
+        *,
+        session_id: str,
+        task_text: str,
+        core_requirement: str,
+        execution_policy: dict[str, Any] | None,
+        requires_final_acceptance: bool,
+        final_acceptance_prompt: str,
+    ) -> dict[str, Any]:
+        normalized_session_id = self._normalize_session_key(session_id)
+        self._refresh_task_store_read_snapshot()
+        return self._rule_precheck_async_task_creation(
+            session_id=normalized_session_id,
+            task_text=task_text,
+            core_requirement=core_requirement,
+            execution_policy=dict(execution_policy or {}),
+            requires_final_acceptance=bool(requires_final_acceptance),
+            final_acceptance_prompt=str(final_acceptance_prompt or '').strip(),
+        )
 
     async def task_append_notice(
         self,
@@ -8690,6 +8721,26 @@ class CreateAsyncTaskTool(Tool):
                 f'任务未创建：现有任务 {matched_task_id} 需要追加通知而不是新建。'
                 f'请改用 task_append_notice。原因：{reason}'
             )
+        revalidate = getattr(self._service, 'revalidate_async_task_creation_before_create', None)
+        if callable(revalidate):
+            create_guard = revalidate(
+                session_id=session_id,
+                task_text=str(task or '').strip(),
+                core_requirement=normalized_core_requirement,
+                execution_policy=normalized_execution_policy.model_dump(mode='json'),
+                requires_final_acceptance=requires_final_acceptance,
+                final_acceptance_prompt=final_acceptance_prompt,
+            )
+            guard_decision = str((create_guard or {}).get('decision') or '').strip()
+            guard_task_id = str((create_guard or {}).get('matched_task_id') or '').strip()
+            guard_reason = str((create_guard or {}).get('reason') or '').strip()
+            if guard_decision == 'reject_duplicate':
+                return f'任务未创建：与进行中任务 {guard_task_id} 高度重复。原因：{guard_reason}'
+            if guard_decision == 'reject_use_append_notice':
+                return (
+                    f'任务未创建：现有任务 {guard_task_id} 需要追加通知而不是新建。'
+                    f'请改用 task_append_notice。原因：{guard_reason}'
+                )
         record = await self._service.create_task(
             str(task or ''),
             session_id=session_id,

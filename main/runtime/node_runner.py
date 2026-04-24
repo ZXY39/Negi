@@ -5,6 +5,7 @@ import copy
 import json
 import os
 import platform
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -124,6 +125,90 @@ class NodeRunner:
         if status == STATUS_SUCCESS:
             return 'task already completed'
         return ''
+
+    @staticmethod
+    def _trim_diagnostic_text(value: Any, *, max_chars: int = 4000) -> str:
+        text = str(value or '').strip()
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 3].rstrip() + '...'
+
+    def _capture_memory_error_diagnostics(self, *, task_id: str, node_id: str, exc: MemoryError) -> None:
+        task = self._store.get_task(task_id)
+        node = self._store.get_node(node_id)
+        frame: dict[str, Any] = {}
+        reader = getattr(self._log_service, 'read_runtime_frame', None)
+        if callable(reader):
+            try:
+                frame = dict(reader(task_id, node_id) or {})
+            except Exception:
+                frame = {}
+        metadata = dict(getattr(node, 'metadata', {}) or {}) if node is not None else {}
+        execution_stages = dict(metadata.get('execution_stages') or {})
+        stages = list(execution_stages.get('stages') or [])
+        active_stage_id = str(execution_stages.get('active_stage_id') or '').strip()
+        active_stage = next(
+            (
+                dict(stage or {})
+                for stage in stages
+                if str((stage or {}).get('stage_id') or '').strip() == active_stage_id
+            ),
+            {},
+        )
+        diagnostics = {
+            'recorded_at': now_iso(),
+            'task_id': str(task_id or '').strip(),
+            'session_id': str(getattr(task, 'session_id', '') or '').strip(),
+            'node_id': str(node_id or '').strip(),
+            'node_kind': str(getattr(node, 'node_kind', '') or '').strip(),
+            'phase': str(frame.get('phase') or '').strip(),
+            'await_marker': str(frame.get('await_marker') or '').strip(),
+            'stage_goal': self._trim_diagnostic_text(
+                frame.get('stage_goal') or active_stage.get('stage_goal') or ''
+            ),
+            'active_stage_id': active_stage_id,
+            'execution_stage_count': len(stages),
+            'exception_type': type(exc).__name__,
+            'exception_text': self._trim_diagnostic_text(str(exc or '')),
+            'traceback_tail': self._trim_diagnostic_text(traceback.format_exc(), max_chars=6000),
+            'memory_error_probe': dict(frame.get('memory_error_probe') or {}),
+            'latest_runtime_actual_request_ref': str(
+                metadata.get('latest_runtime_actual_request_ref') or ''
+            ).strip(),
+            'latest_runtime_actual_request_message_count': int(
+                metadata.get('latest_runtime_actual_request_message_count') or 0
+            ),
+            'latest_runtime_observed_input_truth': dict(
+                metadata.get('latest_runtime_observed_input_truth') or {}
+            ),
+            'frame_message_count': len(list(frame.get('messages') or [])),
+            'frame_tool_call_count': len(list(frame.get('tool_calls') or [])),
+            'frame_child_pipeline_count': len(list(frame.get('child_pipelines') or [])),
+        }
+
+        updater = getattr(self._store, 'update_node', None)
+        if callable(updater):
+            try:
+                def _mutate(current: NodeRecord) -> NodeRecord:
+                    next_metadata = dict(getattr(current, 'metadata', {}) or {})
+                    next_metadata['memory_error_diagnostics'] = diagnostics
+                    return current.model_copy(update={'metadata': next_metadata, 'updated_at': now_iso()})
+
+                updater(node_id, _mutate)
+            except Exception:
+                pass
+
+        frame_updater = getattr(self._log_service, 'update_frame', None)
+        if callable(frame_updater):
+            try:
+                def _mutate_frame(current: dict[str, Any]) -> dict[str, Any]:
+                    next_frame = dict(current or {})
+                    next_frame['memory_error_diagnostics'] = dict(diagnostics)
+                    return next_frame
+
+                frame_updater(task_id, node_id, _mutate_frame, publish_snapshot=False)
+            except Exception:
+                pass
 
     def _node_terminal_reason(self, node: NodeRecord | None, *, default_failed: str, default_success: str) -> str:
         if node is None:
@@ -391,6 +476,8 @@ class NodeRunner:
                 raise TaskPausedError(task_id)
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         except Exception as exc:
+            if isinstance(exc, MemoryError):
+                self._capture_memory_error_diagnostics(task_id=task_id, node_id=node.node_id, exc=exc)
             return self._mark_failed(task_id, node.node_id, reason=describe_exception(exc))
         finally:
             if self._context_finalizer is not None:

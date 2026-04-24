@@ -158,6 +158,7 @@ Maintenance note for `create_async_task` duplicate precheck:
 - Before creating a new task, the service compares the candidate request against the current session's unfinished task pool.
 - The deterministic rule layer only blocks exact duplicates, using normalized target text and exact keyword fingerprint matching.
 - If the exact-rule layer allows the request and unfinished tasks exist, an inspection-model review may still return `approve_new`, `reject_duplicate`, or `reject_use_append_notice`.
+- The create path now also reruns the deterministic exact-duplicate check immediately before `create_task(...)` is allowed to persist a new record. Maintainers should treat this as a create-time race/stale-read guard, not as a replacement for the earlier hybrid precheck.
 - `reject_use_append_notice` means the new request is really an update to an existing unfinished task rather than a new detached work item. The rejection now points explicitly at CEO/frontdoor builtin `task_append_notice`.
 - Frontdoor dispatch bookkeeping must therefore distinguish "tool call happened" from "new task was actually created". A rejection message may still mention an old `task:...` id, but that does not count as a fresh dispatch.
 

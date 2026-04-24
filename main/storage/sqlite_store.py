@@ -100,6 +100,13 @@ class SQLiteTaskStore:
             conn.execute('PRAGMA query_only=ON')
         return conn
 
+    def refresh_read_snapshot(self) -> None:
+        with self._read_lock:
+            try:
+                self._read_conn.rollback()
+            except sqlite3.Error:
+                pass
+
     def _setup(self) -> None:
         statements = [
             '''

@@ -103,6 +103,7 @@ Maintenance note for CEO/frontdoor task lifecycle tools:
   - a deterministic exact-match layer for normalized target text and exact keyword fingerprints
   - an inspection-model review for fuzzy duplicates and "this should update an existing task instead" cases
 - The inspection-model review may return `approve_new`, `reject_duplicate`, or `reject_use_append_notice`.
+- The tool path now also performs one last deterministic exact-duplicate revalidation immediately before `create_task(...)`. This create-time guard exists specifically to catch stale read views or replay races after the earlier precheck already returned `approve_new`.
 - `reject_use_append_notice` means the caller should update an existing unfinished task instead of creating a new detached task. The rejection wording and frontdoor parser now point explicitly at `task_append_notice`.
 - Tool-result parsing on the frontdoor side must only treat the explicit success form `创建任务成功task:...` as a verified dispatch. A rejection message may still mention an existing `task:...` id, but that text must not be treated as a newly created task.
 - `task_append_notice` success text must stay in the "updated existing task" lane, for example `已向任务 task:xxx 追加通知。`; it must not look like detached task creation and must not create `verified_task_ids` / `route_kind=task_dispatch`.

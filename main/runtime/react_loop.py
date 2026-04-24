@@ -7,6 +7,7 @@ import inspect
 import json
 import re
 import time
+import traceback
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
@@ -4526,6 +4527,55 @@ class ReActToolLoop:
             runtime=runtime_context,
         )
 
+    @staticmethod
+    def _approx_message_history_chars(messages: list[dict[str, Any]]) -> int:
+        total = 0
+        for message in list(messages or []):
+            if not isinstance(message, dict):
+                total += len(str(message or ""))
+                continue
+            total += len(str(message.get("role") or ""))
+            total += len(str(message.get("name") or ""))
+            content = message.get("content")
+            if isinstance(content, str):
+                total += len(content)
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict):
+                        total += len(str(item.get("type") or ""))
+                        total += len(str(item.get("text") or ""))
+                        total += len(str(item.get("image_url") or ""))
+                    else:
+                        total += len(str(item or ""))
+            elif content is not None:
+                total += len(str(content))
+        return total
+
+    def _record_memory_error_probe(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        probe: dict[str, Any],
+    ) -> None:
+        task_key = str(task_id or "").strip()
+        node_key = str(node_id or "").strip()
+        if not task_key or not node_key:
+            return
+        updater = getattr(self._log_service, "update_frame", None)
+        if not callable(updater):
+            return
+
+        def _mutate(frame: dict[str, Any]) -> dict[str, Any]:
+            next_frame = dict(frame or {})
+            next_frame["memory_error_probe"] = dict(probe or {})
+            return next_frame
+
+        try:
+            updater(task_key, node_key, _mutate, publish_snapshot=False)
+        except Exception:
+            return
+
     @classmethod
     def _latest_load_tool_context_messages_by_tool_id(
         cls,
@@ -4568,6 +4618,14 @@ class ReActToolLoop:
         normalized_kind = str(getattr(node, "node_kind", "") or "").strip().lower()
         if normalized_kind not in _STAGE_BUDGET_NODE_KINDS:
             return []
+        requested_tool_ids = [
+            str(
+                self._normalize_tool_call_arguments(getattr(call, "arguments", {})).get("tool_id") or ""
+            ).strip()
+            for call in list(response_tool_calls or [])
+            if str(getattr(call, "name", "") or "").strip() in {"load_tool_context", "load_tool_context_v2"}
+        ]
+        requested_tool_ids = [tool_id for tool_id in requested_tool_ids if tool_id]
         current_frame = self._runtime_frame(str(getattr(task, "task_id", "") or ""), str(getattr(node, "node_id", "") or "")) or {}
         candidate_tool_names = set(
             self._normalized_name_list(
@@ -4604,54 +4662,85 @@ class ReActToolLoop:
             )
         )
         latest_messages = self._latest_load_tool_context_messages_by_tool_id(message_history)
+        base_probe = {
+            "recorded_at": now_iso(),
+            "stage": "load_tool_context_direct_read_violations",
+            "message_history_count": len(list(message_history or [])),
+            "message_history_chars": self._approx_message_history_chars(message_history),
+            "response_tool_call_count": len(list(response_tool_calls or [])),
+            "requested_tool_ids": requested_tool_ids[:8],
+            "latest_load_tool_context_message_count": len(latest_messages),
+            "candidate_tool_count": len(candidate_tool_names),
+            "callable_tool_count": len(callable_tool_names),
+            "hydrated_tool_count": len(hydrated_tool_names),
+            "full_callable_tool_count": len(full_callable_tool_names),
+            "visible_tool_count": len(visible_tool_names),
+        }
+        self._record_memory_error_probe(
+            task_id=str(getattr(task, "task_id", "") or ""),
+            node_id=str(getattr(node, "node_id", "") or ""),
+            probe=base_probe,
+        )
         violations: list[dict[str, Any]] = []
-        for call in list(response_tool_calls or []):
-            tool_name = str(getattr(call, "name", "") or "").strip()
-            if tool_name not in {"load_tool_context", "load_tool_context_v2"}:
-                continue
-            arguments = self._normalize_tool_call_arguments(getattr(call, "arguments", {}))
-            requested_tool_id = str(arguments.get("tool_id") or "").strip()
-            if not requested_tool_id or str(arguments.get("search_query") or "").strip():
-                continue
-            if requested_tool_id not in visible_tool_names and requested_tool_id not in candidate_tool_names:
-                continue
-            if requested_tool_id in candidate_tool_names:
-                continue
-            if (
-                requested_tool_id not in callable_tool_names
-                and requested_tool_id not in hydrated_tool_names
-                and requested_tool_id not in full_callable_tool_names
-            ):
-                continue
-            current_payload = await self._load_tool_context_runtime_payload(
-                tools=tools,
-                tool_name=tool_name,
-                requested_tool_id=requested_tool_id,
-                runtime_context={
-                    **dict(runtime_context or {}),
-                    "candidate_tool_names": list(candidate_tool_names),
-                    "callable_tool_names": list(callable_tool_names),
-                    "hydrated_executor_names": list(hydrated_tool_names),
-                    "full_callable_tool_names": list(full_callable_tool_names),
-                    "rbac_visible_tool_names": list(visible_tool_names),
+        try:
+            for call in list(response_tool_calls or []):
+                tool_name = str(getattr(call, "name", "") or "").strip()
+                if tool_name not in {"load_tool_context", "load_tool_context_v2"}:
+                    continue
+                arguments = self._normalize_tool_call_arguments(getattr(call, "arguments", {}))
+                requested_tool_id = str(arguments.get("tool_id") or "").strip()
+                if not requested_tool_id or str(arguments.get("search_query") or "").strip():
+                    continue
+                if requested_tool_id not in visible_tool_names and requested_tool_id not in candidate_tool_names:
+                    continue
+                if requested_tool_id in candidate_tool_names:
+                    continue
+                if (
+                    requested_tool_id not in callable_tool_names
+                    and requested_tool_id not in hydrated_tool_names
+                    and requested_tool_id not in full_callable_tool_names
+                ):
+                    continue
+                current_payload = await self._load_tool_context_runtime_payload(
+                    tools=tools,
+                    tool_name=tool_name,
+                    requested_tool_id=requested_tool_id,
+                    runtime_context={
+                        **dict(runtime_context or {}),
+                        "candidate_tool_names": list(candidate_tool_names),
+                        "callable_tool_names": list(callable_tool_names),
+                        "hydrated_executor_names": list(hydrated_tool_names),
+                        "full_callable_tool_names": list(full_callable_tool_names),
+                        "rbac_visible_tool_names": list(visible_tool_names),
+                    },
+                )
+                if not isinstance(current_payload, dict) or not bool(current_payload.get("ok")):
+                    continue
+                resolved_tool_id = str(current_payload.get("tool_id") or requested_tool_id).strip()
+                current_fingerprint = str(current_payload.get("tool_context_fingerprint") or "").strip()
+                latest_tool_message = latest_messages.get(resolved_tool_id)
+                if not latest_tool_message or not current_fingerprint:
+                    continue
+                latest_payload = self._tool_message_json_payload(latest_tool_message)
+                if str(latest_payload.get("tool_context_fingerprint") or "").strip() != current_fingerprint:
+                    continue
+                violations.append(
+                    {
+                        "signature": f"{tool_name}:{resolved_tool_id}:{current_fingerprint}",
+                        "repair_text": self._load_tool_context_repeat_repair_message(),
+                    }
+                )
+        except MemoryError:
+            self._record_memory_error_probe(
+                task_id=str(getattr(task, "task_id", "") or ""),
+                node_id=str(getattr(node, "node_id", "") or ""),
+                probe={
+                    **base_probe,
+                    "stage": "load_tool_context_direct_read_violations.memory_error",
+                    "traceback_tail": traceback.format_exc()[-4000:],
                 },
             )
-            if not isinstance(current_payload, dict) or not bool(current_payload.get("ok")):
-                continue
-            resolved_tool_id = str(current_payload.get("tool_id") or requested_tool_id).strip()
-            current_fingerprint = str(current_payload.get("tool_context_fingerprint") or "").strip()
-            latest_tool_message = latest_messages.get(resolved_tool_id)
-            if not latest_tool_message or not current_fingerprint:
-                continue
-            latest_payload = self._tool_message_json_payload(latest_tool_message)
-            if str(latest_payload.get("tool_context_fingerprint") or "").strip() != current_fingerprint:
-                continue
-            violations.append(
-                {
-                    "signature": f"{tool_name}:{resolved_tool_id}:{current_fingerprint}",
-                    "repair_text": self._load_tool_context_repeat_repair_message(),
-                }
-            )
+            raise
         return violations
 
     @classmethod

@@ -58,6 +58,10 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 - Task-terminal heartbeat only repairs or produces the session reply for an existing terminal event.
 - It no longer auto-runs `continue_task`, no longer creates replacement tasks, and no longer retries failed tasks in place.
 - If a task still needs more work after terminalization, that must come from a later explicit frontdoor/user decision, typically via `create_async_task`.
+- Task-terminal callback persistence and heartbeat queueing now have separate duplicate boundaries:
+  - the outbox row is the durable callback boundary,
+  - the heartbeat event queue only dedupes currently enqueued in-memory events.
+- Because in-memory dedupe is transient, `/api/internal/task-terminal` must now also reject a repeated callback when the same outbox row is already `accepted=true` even if it is not yet `delivery_state=delivered`. Maintainers debugging "same failed task spawned two heartbeat replies" should inspect the task-terminal outbox row before blaming prompt behavior.
 - The task-terminal event payload now has two result lanes that maintainers should keep separate:
   - `terminal_*` still describes the true terminal node for the task-terminal event. When final acceptance fails, this remains the acceptance node result.
   - `root_output` / `root_output_ref` carries the root execution deliverable separately so heartbeat can still show the main agent the full root-node final output even while the terminal node is `acceptance`.

@@ -425,6 +425,63 @@ def test_internal_task_terminal_callback_persists_pending_outbox_and_dedupes(tmp
     assert len(heartbeat.payloads) == 1
 
 
+def test_internal_task_terminal_callback_rejects_already_accepted_pending_outbox(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    heartbeat = _HeartbeatRecorder()
+    payload = normalize_task_terminal_payload(
+        {
+            "task_id": "task:demo-accepted",
+            "session_id": "web:demo",
+            "title": "demo",
+            "status": "failed",
+            "brief_text": "done",
+            "finished_at": now_iso(),
+        }
+    )
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
+    monkeypatch.setattr("main.api.internal_rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    monkeypatch.setattr("main.api.internal_rest.get_web_heartbeat_service", lambda _agent=None: heartbeat)
+
+    async def _ensure_services(_agent=None) -> None:
+        return None
+
+    monkeypatch.setattr("main.api.internal_rest.ensure_web_runtime_services", _ensure_services)
+
+    client = TestClient(_build_app())
+    response = client.post(
+        "/api/internal/task-terminal",
+        json=payload,
+        headers={"x-g3ku-internal-token": "secret-token"},
+    )
+    assert response.status_code == 200
+    assert response.json()["duplicate"] is False
+
+    heartbeat._dedupe_keys.clear()
+
+    duplicate = client.post(
+        "/api/internal/task-terminal",
+        json=payload,
+        headers={"x-g3ku-internal-token": "secret-token"},
+    )
+    assert duplicate.status_code == 200
+    assert duplicate.json()["duplicate"] is True
+    assert duplicate.json()["accepted"] is False
+    assert duplicate.json()["rejected_reason"] == "already_accepted"
+
+    entry = service.store.get_task_terminal_outbox(str(payload.get("dedupe_key") or ""))
+    assert entry is not None
+    assert entry["delivery_state"] == "pending"
+    assert entry["accepted"] is True
+    assert len(heartbeat.payloads) == 1
+
+
 def test_internal_task_terminal_callback_records_heartbeat_rejection_reason(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

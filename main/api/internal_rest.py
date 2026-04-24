@@ -101,13 +101,22 @@ async def post_task_terminal_callback(
         created_at=str(normalized.get('finished_at') or now_iso()).strip() or now_iso(),
         payload=normalized,
     )
-    if str(entry.get('delivery_state') or '').strip().lower() == 'delivered':
+    delivery_state = str(entry.get('delivery_state') or '').strip().lower()
+    if delivery_state == 'delivered':
         return {
             'ok': True,
             'duplicate': True,
             'accepted': False,
             'dedupe_key': dedupe_key,
             'rejected_reason': 'already_delivered',
+        }
+    if entry.get('accepted') is True:
+        return {
+            'ok': True,
+            'duplicate': True,
+            'accepted': False,
+            'dedupe_key': dedupe_key,
+            'rejected_reason': 'already_accepted',
         }
 
     accepted = heartbeat.enqueue_task_terminal_payload(normalized)
