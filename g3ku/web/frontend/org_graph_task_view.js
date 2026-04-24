@@ -2033,7 +2033,7 @@ function renderTree() {
     if (layoutDensity.mode === "dense") {
         wrapper.classList.add("execution-tree--dense");
     }
-    if (distributionState) {
+    if (distributionState?.ui_mode === "distribution") {
         wrapper.classList.add("execution-tree--distribution-active");
     }
     const rootList = document.createElement("ul");

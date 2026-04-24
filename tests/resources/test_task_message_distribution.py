@@ -1976,8 +1976,8 @@ async def test_distribution_epoch_completes_and_task_resumes_ordinary_execution(
         assert updated_root.failure_reason == ""
         assert updated_epoch is not None
         assert updated_epoch.state == "completed"
-        assert distribution["state"] == "resume_ready"
-        assert distribution["mode"] == "task_wide_barrier"
+        assert distribution["state"] == ""
+        assert distribution["mode"] == ""
         assert distribution["frontier_node_ids"] == []
         assert distribution["pending_notice_node_ids"] == [record.root_node_id]
     finally:
@@ -1985,7 +1985,7 @@ async def test_distribution_epoch_completes_and_task_resumes_ordinary_execution(
 
 
 @pytest.mark.asyncio
-async def test_distribution_epoch_enters_resume_ready_while_root_notice_is_still_pending(tmp_path: Path) -> None:
+async def test_distribution_epoch_keeps_node_level_pending_notice_after_global_distribution_finishes(tmp_path: Path) -> None:
     backend = _QueuedChatBackend(
         [
             SimpleNamespace(
@@ -2024,8 +2024,8 @@ async def test_distribution_epoch_enters_resume_ready_while_root_notice_is_still
         assert list((updated_root.metadata or {}).get("pending_append_notice_records") or [])
         assert progress is not None
         assert progress.live_state is not None
-        assert progress.live_state.distribution.state == "resume_ready"
-        assert progress.live_state.distribution.mode == "task_wide_barrier"
+        assert progress.live_state.distribution.state == ""
+        assert progress.live_state.distribution.mode == ""
         assert progress.live_state.distribution.pending_notice_node_ids == [record.root_node_id]
     finally:
         await service.close()

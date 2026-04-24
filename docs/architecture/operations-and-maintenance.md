@@ -150,7 +150,7 @@
 
 Maintenance note for `task_append_notice` / task message distribution:
 
-- If a task appears stuck in `barrier_requested`, `barrier_draining`, `distributing`, or `resume_ready`, inspect these together before blaming the model:
+- If a task appears stuck in `barrier_requested`, `barrier_draining`, or `distributing`, inspect these together before blaming the model:
   - `task_message_distribution_epochs` rows for the task
   - `task_node_notifications` rows for the task
   - `task_runtime_meta.distribution`
@@ -166,14 +166,14 @@ Maintenance note for `task_append_notice` / task message distribution:
 - If `barrier_draining` persists while every known node frame already looks safe, inspect `materialize_pending_entries` in the epoch payload. That means the runtime is intentionally waiting for an active spawn round to finish creating child nodes before it snapshots the next distribution frontier. A non-empty `child_node_id` is no longer enough by itself; also verify that the child row exists and that its spawn-owner metadata matches the parent round entry.
 - If a parent appears to have spawned duplicate child rows for one spawn entry, inspect the child metadata owner tuple: `spawn_owner_parent_node_id`, `spawn_owner_round_id`, and `spawn_owner_entry_index`. Runtime reconcile should bind one canonical child into `spawn_operations.entries[*].child_node_id` and mark the other rows with `duplicate_spawn_child=true`; marked duplicates are intentionally excluded from live distribution and should not keep `barrier_draining` alive.
 - `distributing` means the active frontier is currently being processed through the ordinary task/node dispatcher. This is still queue-controlled node work, not a sidecar lane.
-- `resume_ready` means distribution decisions are finished, but at least one node still has an unconsumed local notice or delivered mailbox row. Treat this as a recovery-first phase, not as permission to jump straight back into ordinary root execution. The append-notice transaction is not complete until `pending_notice_node_ids` becomes empty.
-- If `resume_ready` remains visible after all node notification rows are `consumed` and no node has `pending_append_notice_records`, treat it as stale runtime metadata. The backend should revalidate `pending_notice_node_ids`, clear idle `pending_notice_state` markers, and reset `runtime_meta.distribution`; a lone `resume_mode=wait_for_children` marker is not enough to keep the frontend in yellow pending-notice mode.
+- After the distribution epoch reaches `completed`, global distribution should no longer appear as active. `runtime_meta.distribution.state`, `mode`, and `active_epoch_id` should be empty even when `pending_notice_node_ids` or `pending_mailbox_count` remain non-empty. Those remaining fields are node-local pending-notice bookkeeping only.
+- If the frontend still paints the whole tree yellow after epoch completion, first check whether it is incorrectly treating non-empty `pending_notice_node_ids` or `pending_mailbox_count` as active global distribution. Only `barrier_requested`, `barrier_draining`, and `distributing` should drive whole-tree yellow distribution styling.
 - If root remains in `waiting_children` while `runtime_meta.distribution.mode == "task_wide_barrier"` still blocks that node, treat that as a barrier-priority regression before changing prompt logic.
 - If a parent shows pending local notice metadata but continues running child work, that can now be expected. Check the node metadata `pending_notice_state.resume_mode`:
   - `ordinary` means the next resumed node turn may consume the notice immediately.
   - `wait_for_children` means the notice is durable but intentionally held out of the prompt until the parent no longer owns an incomplete child round.
 - The same `pending_notice_state.resume_mode` contract now applies to child mailbox deliveries as well; child nodes are no longer allowed to bypass the `wait_for_children` boundary just because the notice arrived through `task_node_notifications`.
-- If the epoch is already in `resume_ready` and the same node is still listed in `pending_notice_node_ids`, inspect `pending_notice_state.resume_mode` before calling it a regression:
+- If a node is listed in `pending_notice_node_ids` after the epoch completed, inspect `pending_notice_state.resume_mode` before calling it a regression:
   - `ordinary` means interrupted-turn recovery such as `pending_tool_turn` or `waiting_children` replay should still stay blocked until the pending local notice or mailbox delivery is consumed.
   - `wait_for_children` means `waiting_children` replay is allowed to continue the existing child round, but that recovery pass must still stop before the next ordinary model turn. The held notice must stay out of the ordinary prompt and must not open a new spawn round yet.
 - If operators report `distribution finished but the parent stayed waiting`, inspect both:

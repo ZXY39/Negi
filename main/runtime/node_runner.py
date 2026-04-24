@@ -746,43 +746,27 @@ class NodeRunner:
 
     def _refresh_resume_ready_distribution_state(self, *, task_id: str) -> None:
         distribution = self._distribution_runtime_state(task_id)
-        if (
-            str(distribution.get('mode') or '').strip() == 'task_wide_barrier'
-            and str(distribution.get('state') or '').strip() == 'resume_ready'
-        ):
-            for raw_node_id in list(distribution.get('pending_notice_node_ids') or []):
-                node_id = str(raw_node_id or '').strip()
-                if node_id:
-                    self._clear_pending_notice_state_if_idle(node_id=node_id)
-            pending_notice_node_ids = self.nodes_with_pending_distribution_notices(task_id=task_id)
-            if pending_notice_node_ids:
-                self._log_service.update_task_runtime_meta(
-                    task_id,
-                    distribution={
-                        'active_epoch_id': str(distribution.get('active_epoch_id') or '').strip(),
-                        'state': 'resume_ready',
-                        'mode': 'task_wide_barrier',
-                        'frontier_node_ids': [],
-                        'blocked_node_ids': [],
-                        'pending_notice_node_ids': list(pending_notice_node_ids),
-                        'queued_epoch_count': int(distribution.get('queued_epoch_count') or 0),
-                        'pending_mailbox_count': self.pending_distribution_mailbox_count(task_id=task_id),
-                    },
-                )
-            else:
-                self._log_service.update_task_runtime_meta(
-                    task_id,
-                    distribution={
-                        'active_epoch_id': '',
-                        'state': '',
-                        'mode': '',
-                        'frontier_node_ids': [],
-                        'blocked_node_ids': [],
-                        'pending_notice_node_ids': [],
-                        'queued_epoch_count': 0,
-                        'pending_mailbox_count': 0,
-                    },
-                )
+        state = str(distribution.get('state') or '').strip()
+        if state in {'pause_requested', 'barrier_requested', 'paused', 'barrier_draining', 'distributing'}:
+            return
+        for raw_node_id in list(distribution.get('pending_notice_node_ids') or []):
+            node_id = str(raw_node_id or '').strip()
+            if node_id:
+                self._clear_pending_notice_state_if_idle(node_id=node_id)
+        pending_notice_node_ids = self.nodes_with_pending_distribution_notices(task_id=task_id)
+        self._log_service.update_task_runtime_meta(
+            task_id,
+            distribution={
+                'active_epoch_id': '',
+                'state': '',
+                'mode': '',
+                'frontier_node_ids': [],
+                'blocked_node_ids': [],
+                'pending_notice_node_ids': list(pending_notice_node_ids),
+                'queued_epoch_count': 0,
+                'pending_mailbox_count': self.pending_distribution_mailbox_count(task_id=task_id),
+            },
+        )
 
     def _clear_pending_notice_state_if_idle(self, *, node_id: str) -> None:
         node = self._store.get_node(node_id)

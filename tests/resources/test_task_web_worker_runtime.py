@@ -8856,6 +8856,79 @@ async def test_resume_ready_wait_for_children_without_pending_notice_clears_dist
 
 
 @pytest.mark.asyncio
+async def test_completed_distribution_with_delayed_child_mailbox_is_node_pending_not_global_distribution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+    _install_allow_all_spawn_review(service, monkeypatch)
+
+    try:
+        record = await service.create_task("delayed mailbox", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        child_spec = SpawnChildSpec(goal="child", prompt="child prompt", execution_policy=_execution_policy())
+        child = service.node_runner._create_execution_child(task=task, parent=root, spec=child_spec)
+        grandchild_spec = SpawnChildSpec(goal="grandchild", prompt="grandchild prompt", execution_policy=_execution_policy())
+        grandchild = service.node_runner._create_execution_child(task=task, parent=child, spec=grandchild_spec)
+        _stamp_incomplete_spawn_round(
+            service,
+            root_node_id=child.node_id,
+            round_id="call:child-round",
+            spec=grandchild_spec,
+            child_node_id=grandchild.node_id,
+        )
+        service._deliver_distribution_message(
+            task_id=record.task_id,
+            epoch_id="epoch:done",
+            source_node_id=root.node_id,
+            target_node_id=child.node_id,
+            message="new constraint",
+        )
+        service.log_service.update_task_runtime_meta(
+            record.task_id,
+            distribution={
+                "active_epoch_id": "",
+                "mode": "",
+                "state": "",
+                "frontier_node_ids": [],
+                "blocked_node_ids": [],
+                "pending_notice_node_ids": [child.node_id],
+                "queued_epoch_count": 0,
+                "pending_mailbox_count": 1,
+            },
+        )
+
+        progress = service.query_service.view_progress(record.task_id, mark_read=False)
+        snapshot = service.query_service.get_tree_snapshot(record.task_id)
+
+        assert progress is not None
+        assert progress.live_state is not None
+        assert progress.live_state.distribution.state == ""
+        assert progress.live_state.distribution.mode == ""
+        assert progress.live_state.distribution.pending_notice_node_ids == [child.node_id]
+        assert progress.live_state.distribution.pending_mailbox_count == 1
+        assert snapshot is not None
+        assert snapshot.nodes_by_id[child.node_id].pending_notice_count == 1
+        assert snapshot.nodes_by_id[root.node_id].distribution_status == ""
+        assert snapshot.nodes_by_id[child.node_id].distribution_status == ""
+        assert snapshot.nodes_by_id[grandchild.node_id].distribution_status == ""
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_resume_react_state_injects_pending_notice_once_active_round_is_gone(
     tmp_path: Path,
 ):

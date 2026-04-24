@@ -353,7 +353,8 @@ class TaskActorService:
 
     async def _resume_pending_notice_nodes(self, task_id: str) -> bool:
         distribution = self._distribution_runtime_state(task_id)
-        if str(distribution.get('state') or '').strip() != 'resume_ready':
+        state = str(distribution.get('state') or '').strip()
+        if state in {'pause_requested', 'barrier_requested', 'paused', 'barrier_draining', 'distributing'}:
             return False
         pending_node_ids = [
             str(item or '').strip()
@@ -365,10 +366,7 @@ class TaskActorService:
         for node_id in pending_node_ids:
             await self._execute_node(task_id, node_id)
         refreshed = self._distribution_runtime_state(task_id)
-        if (
-            str(refreshed.get('state') or '').strip() == 'resume_ready'
-            and any(str(item or '').strip() for item in list(refreshed.get('pending_notice_node_ids') or []))
-        ):
+        if any(str(item or '').strip() for item in list(refreshed.get('pending_notice_node_ids') or [])):
             await self._resume_distribution_if_needed(task_id)
         return True
 
@@ -415,11 +413,10 @@ class TaskActorService:
                     if distribution_result is not None:
                         control_only_return = True
                         return
-                if str(distribution.get('state') or '').strip() == 'resume_ready':
-                    resumed_pending_notices = await self._resume_pending_notice_nodes(task_id)
-                    if resumed_pending_notices:
-                        control_only_return = True
-                        return
+                resumed_pending_notices = await self._resume_pending_notice_nodes(task_id)
+                if resumed_pending_notices:
+                    control_only_return = True
+                    return
                 result = await dispatcher.execute_node(task_id, root_node.node_id)
                 if result.status == 'success':
                     result = await self._run_final_acceptance_if_needed(task_id)
@@ -799,34 +796,19 @@ class TaskActorService:
         self._queue_root_distribution_notices(epoch=completed_epoch, created_at=completed_at)
         self.clear_pause(task_id)
         pending_notice_node_ids = list(self._node_runner.nodes_with_pending_distribution_notices(task_id=task_id))
-        if pending_notice_node_ids:
-            self._log_service.update_task_runtime_meta(
-                task_id,
-                distribution={
-                    'active_epoch_id': epoch_id,
-                    'state': 'resume_ready',
-                    'mode': 'task_wide_barrier',
-                    'frontier_node_ids': [],
-                    'blocked_node_ids': [],
-                    'pending_notice_node_ids': pending_notice_node_ids,
-                    'queued_epoch_count': 0,
-                    'pending_mailbox_count': self._node_runner.pending_distribution_mailbox_count(task_id=task_id),
-                },
-            )
-        else:
-            self._log_service.update_task_runtime_meta(
-                task_id,
-                distribution={
-                    'active_epoch_id': '',
-                    'state': '',
-                    'mode': '',
-                    'frontier_node_ids': [],
-                    'blocked_node_ids': [],
-                    'pending_notice_node_ids': [],
-                    'queued_epoch_count': 0,
-                    'pending_mailbox_count': 0,
-                },
-            )
+        self._log_service.update_task_runtime_meta(
+            task_id,
+            distribution={
+                'active_epoch_id': '',
+                'state': '',
+                'mode': '',
+                'frontier_node_ids': [],
+                'blocked_node_ids': [],
+                'pending_notice_node_ids': pending_notice_node_ids,
+                'queued_epoch_count': 0,
+                'pending_mailbox_count': self._node_runner.pending_distribution_mailbox_count(task_id=task_id),
+            },
+        )
         await self._resume_distribution_if_needed(task_id)
         return True
 

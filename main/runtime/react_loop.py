@@ -1563,7 +1563,8 @@ class ReActToolLoop:
     @staticmethod
     def _wait_for_children_recovery_only(*, runtime_context: dict[str, Any], node) -> bool:
         distribution = dict((runtime_context or {}).get('distribution_state') or {})
-        if str(distribution.get('state') or '').strip() != 'resume_ready':
+        blocked_states = {'pause_requested', 'barrier_requested', 'paused', 'barrier_draining', 'distributing'}
+        if str(distribution.get('state') or '').strip() in blocked_states:
             return False
         metadata = dict(getattr(node, 'metadata', None) or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
         pending_notice_state = normalize_pending_notice_state(metadata.get(PENDING_NOTICE_STATE_KEY))
