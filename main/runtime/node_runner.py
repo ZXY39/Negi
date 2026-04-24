@@ -975,22 +975,79 @@ class NodeRunner:
         ]
 
     @staticmethod
-    def _distribution_response_arguments(response: Any) -> dict[str, Any]:
+    def _distribution_response_tool_calls(response: Any) -> list[dict[str, Any]]:
         tool_calls = getattr(response, 'tool_calls', None)
         if isinstance(response, dict):
             tool_calls = response.get('tool_calls')
+        normalized: list[dict[str, Any]] = []
         for item in list(tool_calls or []):
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get('name') or '').strip()
-            function = item.get('function') if isinstance(item.get('function'), dict) else {}
+            if isinstance(item, dict):
+                function = item.get('function') if isinstance(item.get('function'), dict) else {}
+                name = str(item.get('name') or function.get('name') or '').strip()
+                arguments = function.get('arguments') if isinstance(function, dict) else None
+                if arguments is None:
+                    arguments = item.get('arguments')
+                call_id = str(item.get('id') or '').strip()
+            else:
+                function = getattr(item, 'function', None)
+                function_payload = function if isinstance(function, dict) else {}
+                name = str(getattr(item, 'name', '') or function_payload.get('name') or '').strip()
+                arguments = getattr(item, 'arguments', None)
+                if arguments is None:
+                    arguments = function_payload.get('arguments')
+                call_id = str(getattr(item, 'id', '') or '').strip()
             if not name:
-                name = str(function.get('name') or '').strip()
+                continue
+            payload: dict[str, Any] = {
+                'name': name,
+                'arguments': arguments,
+            }
+            if call_id:
+                payload['id'] = call_id
+            normalized.append(payload)
+        return normalized
+
+    @staticmethod
+    def _distribution_debug_trace_entries(payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        return [dict(item) for item in list(payload.get('debug_trace') or []) if isinstance(item, dict)]
+
+    @classmethod
+    def _distribution_append_debug_trace(
+        cls,
+        payload: Any,
+        *,
+        event: str,
+        **fields: Any,
+    ) -> dict[str, Any]:
+        next_payload = dict(payload or {}) if isinstance(payload, dict) else {}
+        debug_trace = cls._distribution_debug_trace_entries(next_payload)
+        entry: dict[str, Any] = {
+            'event': str(event or '').strip(),
+            'created_at': now_iso(),
+        }
+        for key, value in fields.items():
+            if value is None:
+                continue
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    continue
+                entry[key] = text
+                continue
+            entry[key] = value
+        debug_trace.append(entry)
+        next_payload['debug_trace'] = debug_trace
+        return next_payload
+
+    @classmethod
+    def _distribution_response_arguments(cls, response: Any) -> dict[str, Any]:
+        for item in cls._distribution_response_tool_calls(response):
+            name = str(item.get('name') or '').strip()
             if name != 'submit_message_distribution':
                 continue
-            arguments = function.get('arguments') if isinstance(function, dict) else None
-            if arguments is None:
-                arguments = item.get('arguments')
+            arguments = item.get('arguments')
             if isinstance(arguments, str):
                 try:
                     parsed = json.loads(arguments)
@@ -1188,9 +1245,10 @@ class NodeRunner:
         if active_epoch is None:
             return NodeFinalResult(status='success', summary='distribution epoch missing')
         epoch_id, distribution, epoch = active_epoch
+        epoch_payload = dict(epoch.payload or {})
         already_distributed = {
             str(item or '').strip()
-            for item in list((epoch.payload or {}).get('distributed_node_ids') or [])
+            for item in list(epoch_payload.get('distributed_node_ids') or [])
             if str(item or '').strip()
         }
         if str(node.node_id or '').strip() in already_distributed:
@@ -1198,6 +1256,13 @@ class NodeRunner:
         incoming_message = self._distribution_node_message(task_id=task.task_id, node=node, epoch=epoch)
         live_child_node_ids = self.live_distribution_child_node_ids(task_id=task.task_id, parent_node_id=node.node_id)
         child_payloads = self._distribution_child_sidecar(task_id=task.task_id, child_node_ids=live_child_node_ids)
+        epoch_payload = self._distribution_append_debug_trace(
+            epoch_payload,
+            event='control_turn_start',
+            source_node_id=str(node.node_id or '').strip(),
+            live_child_node_ids=list(live_child_node_ids),
+            incoming_message=str(incoming_message or '').strip(),
+        )
         prompt_messages = [
             {'role': 'system', 'content': load_prompt('node_message_distribution.md').strip()},
             {
@@ -1253,7 +1318,21 @@ class NodeRunner:
             },
             publish_snapshot=True,
         )
+        epoch_payload = self._distribution_append_debug_trace(
+            epoch_payload,
+            event='control_turn_preflight',
+            token_preflight_diagnostics=dict(token_preflight_diagnostics or {}),
+            history_shrink_reason=str(history_shrink_reason or '').strip(),
+            failure_reason=str(preflight_failure_reason or '').strip(),
+        )
         if str(preflight_failure_reason or '').strip():
+            self._store.upsert_task_message_distribution_epoch(
+                epoch.model_copy(
+                    update={
+                        'payload': epoch_payload,
+                    }
+                )
+            )
             return NodeFinalResult(
                 status='failed',
                 delivery_status='blocked',
@@ -1271,6 +1350,21 @@ class NodeRunner:
             tool_choice=tool_choice,
             parallel_tool_calls=False,
         )
+        normalized_tool_calls = self._distribution_response_tool_calls(response)
+        epoch_payload = self._distribution_append_debug_trace(
+            epoch_payload,
+            event='control_turn_response',
+            tool_call_names=[
+                str(item.get('name') or '').strip()
+                for item in normalized_tool_calls
+                if str(item.get('name') or '').strip()
+            ],
+            tool_call_ids=[
+                str(item.get('id') or '').strip()
+                for item in normalized_tool_calls
+                if str(item.get('id') or '').strip()
+            ],
+        )
         arguments = self._distribution_response_arguments(response)
         submitted = await decision_tool.execute(
             children=list(arguments.get('children') or []),
@@ -1282,6 +1376,18 @@ class NodeRunner:
             live_child_node_ids=live_child_node_ids,
         )
         if validation_error:
+            epoch_payload = self._distribution_append_debug_trace(
+                epoch_payload,
+                event='control_turn_validation_failed',
+                blocking_reason=str(validation_error or '').strip(),
+            )
+            self._store.upsert_task_message_distribution_epoch(
+                epoch.model_copy(
+                    update={
+                        'payload': epoch_payload,
+                    }
+                )
+            )
             return NodeFinalResult(
                 status='failed',
                 delivery_status='blocked',
@@ -1333,7 +1439,6 @@ class NodeRunner:
             },
             publish_snapshot=True,
         )
-        epoch_payload = dict(epoch.payload or {})
         if str(node.node_id or '').strip() == str(epoch.root_node_id or '').strip():
             self._queue_pending_root_distribution_notices(epoch=epoch)
         decision_records = list(epoch_payload.get('decision_records') or [])

@@ -5,9 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 import pytest
 
+from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES, NODE_FIXED_BUILTIN_TOOL_NAMES
-from main.models import SpawnChildSpec, TaskMessageDistributionEpoch, TaskNodeNotification
+from main.models import NodeFinalResult, SpawnChildSpec, TaskMessageDistributionEpoch, TaskNodeNotification
 from main.protocol import now_iso
 from main.runtime.pending_notice_state import (
     PENDING_NOTICE_STATE_KEY,
@@ -236,6 +237,10 @@ async def test_task_append_notice_requests_pause_then_creates_distribution_epoch
 async def test_node_detail_exposes_consumed_append_notice_messages(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:
+        resumed_task_ids: list[str] = []
+        service.task_actor_service.distribution_resume_callback = (
+            lambda task_id: resumed_task_ids.append(str(task_id or "").strip())
+        )
         record = await service.create_task("鏁寸悊閲嶇偣瀹㈡埛娴佸け淇″彿", session_id="web:ceo-demo")
         root = service.store.get_node(record.root_node_id)
         assert root is not None
@@ -950,6 +955,98 @@ async def test_distribution_turn_requires_explicit_decision_for_each_live_child(
 
 
 @pytest.mark.asyncio
+async def test_distribution_response_tool_calls_normalize_tool_call_request_objects(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        response = LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call:distribution",
+                    name="submit_message_distribution",
+                    arguments={"children": [], "notes": "normalized"},
+                )
+            ],
+        )
+
+        normalized = service.node_runner._distribution_response_tool_calls(response)
+
+        assert normalized == [
+            {
+                "id": "call:distribution",
+                "name": "submit_message_distribution",
+                "arguments": {"children": [], "notes": "normalized"},
+            }
+        ]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_turn_accepts_tool_call_request_objects(tmp_path: Path) -> None:
+    response = LLMResponse(
+        content="",
+        tool_calls=[
+            ToolCallRequest(
+                id="call:distribution",
+                name="submit_message_distribution",
+                arguments={
+                    "children": [
+                        {
+                            "target_node_id": "CHILD_ONE",
+                            "should_distribute": True,
+                            "message": "branch-a update",
+                            "reason": "candidate-pool branch must switch to male characters",
+                        },
+                        {
+                            "target_node_id": "CHILD_TWO",
+                            "should_distribute": False,
+                            "message": "",
+                            "reason": "heat-source design branch stays reusable without gender-specific assumptions",
+                        },
+                    ],
+                    "notes": "only the candidate-pool branch needs the requirement change",
+                },
+            )
+        ],
+    )
+    backend = _QueuedChatBackend([response])
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
+        await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="榜单对象改成二次元男角色Top20",
+            frontier_node_ids=[root.node_id],
+        )
+        response.tool_calls[0].arguments["children"][0]["target_node_id"] = branch_a.node_id
+        response.tool_calls[0].arguments["children"][1]["target_node_id"] = branch_b.node_id
+
+        task = service.get_task(record.task_id)
+        assert task is not None
+
+        result = await service.node_runner._run_distribution_node(task=task, node=root)
+        refreshed_epoch = service.store.list_active_task_message_distribution_epochs(record.task_id)[0]
+
+        assert result.status == "success"
+        assert [item.message for item in service.store.list_task_node_notifications(record.task_id, branch_a.node_id)] == [
+            "branch-a update"
+        ]
+        assert service.store.list_task_node_notifications(record.task_id, branch_b.node_id) == []
+        assert refreshed_epoch.payload["decision_records"][0]["delivered_child_ids"] == [branch_a.node_id]
+        assert refreshed_epoch.payload["decision_records"][0]["skipped_child_decisions"] == [
+            {
+                "target_node_id": branch_b.node_id,
+                "reason": "heat-source design branch stays reusable without gender-specific assumptions",
+            }
+        ]
+        assert refreshed_epoch.payload["debug_trace"][2]["tool_call_names"] == ["submit_message_distribution"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_distribution_turn_uses_responses_compatible_flat_function_tool_choice(tmp_path: Path) -> None:
     backend = _QueuedChatBackend(
         [
@@ -1082,6 +1179,95 @@ async def test_distribution_turn_runs_through_task_dispatcher_and_persists_child
         assert len(second_notifications) == 1
         assert second_notifications[0].message == "second child update"
         assert distribution["frontier_node_ids"] == [first_child.node_id, second_child.node_id]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_turn_requeues_task_when_next_frontier_exists(tmp_path: Path) -> None:
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_message_distribution",
+                        "arguments": {
+                            "children": [
+                                {
+                                    "target_node_id": "CHILD_ONE",
+                                    "should_distribute": True,
+                                    "message": "first child update",
+                                    "reason": "focus",
+                                },
+                                {
+                                    "target_node_id": "CHILD_TWO",
+                                    "should_distribute": True,
+                                    "message": "second child update",
+                                    "reason": "coverage",
+                                },
+                            ],
+                            "notes": "forward to both active children",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        resumed_task_ids: list[str] = []
+        service.task_actor_service.distribution_resume_callback = (
+            lambda task_id: resumed_task_ids.append(str(task_id or "").strip())
+        )
+        record = await service.create_task("distribution requeue", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        first_spec = SpawnChildSpec(goal="first child", prompt="first prompt", execution_policy={"mode": "focus"})
+        second_spec = SpawnChildSpec(goal="second child", prompt="second prompt", execution_policy={"mode": "focus"})
+        first_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=first_spec,
+            owner_round_id="round-1",
+            owner_entry_index=0,
+        )
+        second_child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=second_spec,
+            owner_round_id="round-1",
+            owner_entry_index=1,
+        )
+        _set_spawn_operations(
+            service,
+            root_node_id=root.node_id,
+            payload={
+                "round-1": {
+                    "specs": [first_spec.model_dump(mode="json"), second_spec.model_dump(mode="json")],
+                    "entries": [
+                        {"index": 0, "goal": "first child", "child_node_id": first_child.node_id},
+                        {"index": 1, "goal": "second child", "child_node_id": second_child.node_id},
+                    ],
+                    "completed": False,
+                },
+            },
+        )
+        await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="new requirement",
+            frontier_node_ids=[root.node_id],
+        )
+        backend._responses[0].tool_calls[0]["arguments"]["children"][0]["target_node_id"] = first_child.node_id
+        backend._responses[0].tool_calls[0]["arguments"]["children"][1]["target_node_id"] = second_child.node_id
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        assert resumed_task_ids == [record.task_id]
     finally:
         await service.close()
 

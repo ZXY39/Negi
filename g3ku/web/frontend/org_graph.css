@@ -221,6 +221,9 @@ textarea {
 .brand-icon {
     width: 28px;
     height: 28px;
+    display: block;
+    flex-shrink: 0;
+    object-fit: contain;
     color: var(--brand-primary);
 }
 

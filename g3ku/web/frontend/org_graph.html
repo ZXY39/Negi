@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>G3KU</title>
+    <link rel="icon" href="/favicon.ico">
     <link rel="stylesheet" href="vendor/fonts/google-fonts.css">
     <link rel="stylesheet" href="org_graph.css">
     <script src="vendor/lucide.min.js"></script>
@@ -34,14 +35,16 @@
                 </label>
                 <label class="resource-field">
                     <span class="resource-field-label">确认口令</span>
-                    <input id="boot-setup-password-confirm" class="resource-search" type="password" autocomplete="new-password">
+                    <input id="boot-setup-password-confirm" class="resource-search" type="password"
+                        autocomplete="new-password">
                 </label>
                 <button id="boot-setup-submit" class="btn-primary" type="submit">初始化并进入项目</button>
             </form>
             <form id="boot-unlock-form" class="boot-form" hidden>
                 <label class="resource-field">
                     <span class="resource-field-label">输入口令</span>
-                    <input id="boot-unlock-password" class="resource-search" type="password" autocomplete="current-password">
+                    <input id="boot-unlock-password" class="resource-search" type="password"
+                        autocomplete="current-password">
                 </label>
                 <button id="boot-unlock-submit" class="btn-primary" type="submit">解锁项目</button>
             </form>
@@ -50,7 +53,7 @@
     <div id="app-layout" class="app-layout boot-hidden">
         <nav class="sidebar">
             <div class="brand">
-                <i data-lucide="layout-dashboard" class="brand-icon"></i>
+                <img class="brand-icon" src="favicon.ico" alt="G3KU">
                 <span class="brand-text">G3KU</span>
             </div>
 
@@ -100,22 +103,28 @@
                     <aside id="ceo-session-panel" class="ceo-session-panel" aria-label="会话列表">
                         <div class="ceo-session-panel-header">
                             <div class="ceo-session-panel-controls">
-                                <button id="ceo-session-panel-toggle" class="icon-btn ceo-session-panel-toggle" type="button" aria-expanded="false" aria-label="展开会话列表">
+                                <button id="ceo-session-panel-toggle" class="icon-btn ceo-session-panel-toggle"
+                                    type="button" aria-expanded="false" aria-label="展开会话列表">
                                     <i data-lucide="chevrons-right"></i>
                                 </button>
-                                <button id="ceo-new-session-btn" class="toolbar-btn ceo-new-session-btn" type="button" aria-label="新建会话">
+                                <button id="ceo-new-session-btn" class="toolbar-btn ceo-new-session-btn" type="button"
+                                    aria-label="新建会话">
                                     <i data-lucide="plus"></i>
                                 </button>
                             </div>
                             <div class="ceo-session-toolbar-row">
                                 <div id="ceo-session-tabs" class="ceo-session-tabs" role="tablist" aria-label="会话视图">
-                                    <button id="ceo-session-tab-local" class="ceo-session-tab" type="button" aria-pressed="true">本地</button>
-                                    <button id="ceo-session-tab-channel" class="ceo-session-tab" type="button" aria-pressed="false">渠道</button>
+                                    <button id="ceo-session-tab-local" class="ceo-session-tab" type="button"
+                                        aria-pressed="true">本地</button>
+                                    <button id="ceo-session-tab-channel" class="ceo-session-tab" type="button"
+                                        aria-pressed="false">渠道</button>
                                 </div>
-                                <button id="ceo-session-bulk-toggle" class="toolbar-btn ghost ceo-session-bulk-toggle" type="button" aria-pressed="false" hidden>多选</button>
+                                <button id="ceo-session-bulk-toggle" class="toolbar-btn ghost ceo-session-bulk-toggle"
+                                    type="button" aria-pressed="false" hidden>多选</button>
                             </div>
                         </div>
-                        <div id="ceo-session-bulk-actions" class="ceo-session-bulk-actions" role="group" aria-label="会话批量操作" hidden>
+                        <div id="ceo-session-bulk-actions" class="ceo-session-bulk-actions" role="group"
+                            aria-label="会话批量操作" hidden>
                             <button id="ceo-session-bulk-select-all" class="toolbar-btn ghost" type="button">全选</button>
                             <button id="ceo-session-bulk-delete" class="toolbar-btn danger" type="button">删除</button>
                         </div>
@@ -131,36 +140,40 @@
                         </div>
 
                         <div class="chat-input-area">
-                            <div id="ceo-approval-viewport" class="ceo-approval-viewport" aria-live="polite" aria-atomic="true" hidden></div>
-                            <div id="ceo-context-load-notice" class="ceo-context-load-notice" role="status" aria-live="polite" aria-hidden="true" hidden></div>
+                            <div id="ceo-approval-viewport" class="ceo-approval-viewport" aria-live="polite"
+                                aria-atomic="true" hidden></div>
+                            <div id="ceo-context-load-notice" class="ceo-context-load-notice" role="status"
+                                aria-live="polite" aria-hidden="true" hidden></div>
                             <div class="ceo-composer">
                                 <div id="ceo-upload-list" class="ceo-upload-list" hidden aria-live="polite"></div>
-                                <div id="ceo-compression-toast" class="ceo-compression-toast" role="status" aria-live="polite" aria-hidden="true" hidden>
+                                <div id="ceo-compression-toast" class="ceo-compression-toast" role="status"
+                                    aria-live="polite" aria-hidden="true" hidden>
                                     <span class="ceo-compression-toast-dot" aria-hidden="true"></span>
-                                    <span id="ceo-compression-toast-text" class="ceo-compression-toast-text">上下文压缩中</span>
+                                    <span id="ceo-compression-toast-text"
+                                        class="ceo-compression-toast-text">上下文压缩中</span>
                                 </div>
-                                <div id="ceo-follow-up-queue" class="ceo-follow-up-queue" hidden aria-live="polite"></div>
+                                <div id="ceo-follow-up-queue" class="ceo-follow-up-queue" hidden aria-live="polite">
+                                </div>
                                 <div class="ceo-input-row">
                                     <input id="ceo-file-input" type="file" multiple hidden>
                                     <div class="ceo-input-leading-group">
-                                        <div
-                                            id="ceo-context-usage-brain"
-                                            class="ceo-context-usage-brain"
-                                            role="img"
-                                            aria-label="等待 Leader 上下文预估"
-                                            title="等待 Leader 上下文预估">
+                                        <div id="ceo-context-usage-brain" class="ceo-context-usage-brain" role="img"
+                                            aria-label="等待 Leader 上下文预估" title="等待 Leader 上下文预估">
                                             <span class="ceo-context-usage-brain-iconbox" aria-hidden="true">
-                                                <span id="ceo-context-usage-brain-base" class="ceo-context-usage-brain-layer ceo-context-usage-brain-base">
+                                                <span id="ceo-context-usage-brain-base"
+                                                    class="ceo-context-usage-brain-layer ceo-context-usage-brain-base">
                                                     <i data-lucide="brain"></i>
                                                 </span>
-                                                <span id="ceo-context-usage-brain-fill" class="ceo-context-usage-brain-layer ceo-context-usage-brain-fill">
+                                                <span id="ceo-context-usage-brain-fill"
+                                                    class="ceo-context-usage-brain-layer ceo-context-usage-brain-fill">
                                                     <span class="ceo-context-usage-brain-fill-inner">
                                                         <i data-lucide="brain"></i>
                                                     </span>
                                                 </span>
                                             </span>
                                         </div>
-                                        <button id="ceo-attach-btn" class="ceo-attach-btn" type="button" aria-label="上传附件">
+                                        <button id="ceo-attach-btn" class="ceo-attach-btn" type="button"
+                                            aria-label="上传附件">
                                             <i data-lucide="paperclip"></i>
                                         </button>
                                     </div>
@@ -176,7 +189,7 @@
                 </div>
             </section>
 
-<section id="view-tasks-list" class="view-section" style="display: none;">
+            <section id="view-tasks-list" class="view-section" style="display: none;">
                 <header class="content-header task-list-header">
                     <div class="task-header-main">
                         <h1>任务大厅</h1>
@@ -187,8 +200,10 @@
                             aria-pressed="false">多选</button>
                         <div class="task-toolbar-preferences">
                             <div class="task-session-scope" role="group" aria-label="任务范围">
-                                <button id="task-session-current-btn" class="task-session-scope-btn" type="button" aria-pressed="false">当前会话</button>
-                                <button id="task-session-all-btn" class="task-session-scope-btn" type="button" aria-pressed="true">全部</button>
+                                <button id="task-session-current-btn" class="task-session-scope-btn" type="button"
+                                    aria-pressed="false">当前会话</button>
+                                <button id="task-session-all-btn" class="task-session-scope-btn" type="button"
+                                    aria-pressed="true">全部</button>
                             </div>
                             <div class="task-depth-setting">
                                 <label class="task-depth-setting-main" for="task-depth-select">
@@ -197,9 +212,9 @@
                                         aria-label="全局任务树深度"></select>
                                 </label>
                                 <div id="task-depth-custom-wrap" class="task-depth-custom" hidden>
-                                    <input id="task-depth-custom-input" class="task-depth-custom-input spinless-number-input" type="number"
-                                        min="0" step="1" inputmode="numeric" aria-label="自定义全局任务树深度"
-                                        placeholder="非负整数">
+                                    <input id="task-depth-custom-input"
+                                        class="task-depth-custom-input spinless-number-input" type="number" min="0"
+                                        step="1" inputmode="numeric" aria-label="自定义全局任务树深度" placeholder="非负整数">
                                     <button id="task-depth-custom-save" class="toolbar-btn ghost small"
                                         type="button">应用</button>
                                 </div>
@@ -331,8 +346,10 @@
                         <button id="tool-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
                         <div id="tool-governance-banner" class="tool-governance-banner" role="group" aria-label="监管模式">
                             <span class="tool-governance-banner-title">监管模式</span>
-                            <button id="tool-governance-switch" class="tool-governance-switch" type="button" aria-pressed="false" aria-label="切换监管模式">
-                                <span id="tool-governance-switch-track" class="tool-governance-switch-track" aria-hidden="true">
+                            <button id="tool-governance-switch" class="tool-governance-switch" type="button"
+                                aria-pressed="false" aria-label="切换监管模式">
+                                <span id="tool-governance-switch-track" class="tool-governance-switch-track"
+                                    aria-hidden="true">
                                     <span class="tool-governance-switch-thumb"></span>
                                 </span>
                                 <span id="tool-governance-switch-label" class="tool-governance-switch-label">关闭</span>
@@ -421,7 +438,8 @@
                         </div>
                         <div id="memory-processed-list" class="memory-list"></div>
                         <div class="memory-footer">
-                            <div id="memory-processed-info" class="resource-page-indicator" aria-live="polite">共 0 项</div>
+                            <div id="memory-processed-info" class="resource-page-indicator" aria-live="polite">共 0 项
+                            </div>
                             <button id="memory-processed-more-btn" class="toolbar-btn ghost" type="button">加载更多</button>
                         </div>
                     </section>
@@ -498,10 +516,12 @@
             </section>
             <section id="view-task-details" class="view-section" style="display: none;">
                 <header class="content-header project-header task-detail-header">
-                    <button class="icon-btn back-btn task-detail-back-btn" id="back-to-tasks" type="button" title="返回任务大厅">
+                    <button class="icon-btn back-btn task-detail-back-btn" id="back-to-tasks" type="button"
+                        title="返回任务大厅">
                         <i data-lucide="arrow-left"></i>
                     </button>
-                    <span class="status-badge task-detail-pill task-detail-status" id="td-status-pill" data-status="unknown">
+                    <span class="status-badge task-detail-pill task-detail-status" id="td-status-pill"
+                        data-status="unknown">
                         <span id="td-status" class="task-detail-pill-value">UNKNOWN</span>
                     </span>
                     <details id="td-prompt-disclosure" class="task-detail-pill task-prompt-disclosure">
@@ -523,13 +543,15 @@
                         <div id="task-governance-panel" class="task-tree-floating-governance" hidden>
                             <button id="task-governance-toggle" type="button" class="task-governance-toggle">
                                 <span id="task-governance-summary" class="task-governance-summary">监管记录</span>
-                                <span id="task-governance-count" class="task-governance-chip task-governance-count">0次</span>
+                                <span id="task-governance-count"
+                                    class="task-governance-chip task-governance-count">0次</span>
                             </button>
                             <div id="task-governance-history" class="task-governance-history" hidden></div>
                         </div>
                         <div class="task-tree-floating-tools" aria-live="polite">
-                            <button id="task-tree-reset-rounds-btn" class="toolbar-btn ghost small task-tree-floating-reset"
-                                type="button" hidden disabled>回到最新树</button>
+                            <button id="task-tree-reset-rounds-btn"
+                                class="toolbar-btn ghost small task-tree-floating-reset" type="button" hidden
+                                disabled>回到最新树</button>
                         </div>
                         <div class="tree-container" id="org-tree-container">
                             <div class="empty-state">正在加载任务树...</div>
@@ -633,7 +655,8 @@
                         <p id="ceo-approval-args-subtitle" class="subtitle">完整参数仅供审批查看，不会在这里修改。</p>
                     </div>
                     <div class="detail-modal-actions">
-                        <button id="ceo-approval-args-close" type="button" class="toolbar-btn ghost" data-modal-close>关闭</button>
+                        <button id="ceo-approval-args-close" type="button" class="toolbar-btn ghost"
+                            data-modal-close>关闭</button>
                     </div>
                 </div>
                 <div class="detail-modal-body">
@@ -647,7 +670,8 @@
                         <h2>重命名会话</h2>
                     </div>
                     <div style="padding: 16px;">
-                        <input type="text" id="rename-session-input" class="resource-search" style="width: 100%; box-sizing: border-box;" placeholder="输入新的会话名称">
+                        <input type="text" id="rename-session-input" class="resource-search"
+                            style="width: 100%; box-sizing: border-box;" placeholder="输入新的会话名称">
                     </div>
                     <div class="confirm-actions">
                         <button id="rename-session-cancel" class="toolbar-btn ghost" type="button">取消</button>

@@ -155,9 +155,11 @@ Maintenance note for `task_append_notice` / task message distribution:
   - `task_node_notifications` rows for the task
   - `task_runtime_meta.distribution`
   - the current runtime frames for the barrier / frontier nodes
-  - epoch payload fields such as `barrier_node_ids`, `drain_pending_node_ids`, and `decision_records`
+  - epoch payload fields such as `barrier_node_ids`, `drain_pending_node_ids`, `decision_records`, and `debug_trace`
   - the target node's `append_notice_context` metadata when the symptom is “notice vanished after compaction/compression”
 - `decision_records` now separate delivered children from explicit skipped-child decisions. A frontier node with live children must account for every live child: delivered targets appear in `delivered_child_ids`, while non-delivered targets should appear in `skipped_child_decisions` with a reason. If a distribution turn fails with `distribution_decision_missing_child_decisions`, `distribution_decision_missing_should_distribute`, `distribution_decision_missing_reason`, or `distribution_decision_missing_message`, inspect the provider response/tool-call payload before treating the epoch as complete.
+- `debug_trace` is the fastest historical entrypoint when a frontier node looks like it “never distributed”. The trace should tell you whether the control turn reached send preflight, which tool-call names came back from the provider, and whether validation failed before any child delivery was persisted.
+- If `runtime_meta.distribution.state == "distributing"` and `frontier_node_ids` is still non-empty long after the previous frontier finished, check whether the runtime actually re-enqueued the task after writing `next_frontier_node_ids`. A successful root control turn plus durable child mailbox rows is not enough by itself; the next frontier still needs a fresh scheduler wakeup.
 - `barrier_requested` means the append-notice transaction has captured the live tree and requested the task-wide barrier, but the tree has not started draining yet.
 - `barrier_draining` means some live node is still outside a safe boundary. Check whether that node is waiting on model/tool IO or whether a runtime-frame phase is unexpectedly stuck.
 - `distributing` means the active frontier is currently being processed through the ordinary task/node dispatcher. This is still queue-controlled node work, not a sidecar lane.

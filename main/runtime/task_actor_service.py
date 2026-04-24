@@ -342,6 +342,14 @@ class TaskActorService:
         self._node_runner.nested_node_executor = self._execute_nested_node
         self._node_runner.cancel_node_subtree_executor = self._cancel_node_subtree
 
+    async def _resume_distribution_if_needed(self, task_id: str) -> None:
+        resume_callback = self.distribution_resume_callback
+        if not callable(resume_callback):
+            return
+        result = resume_callback(task_id)
+        if asyncio.iscoroutine(result):
+            await result
+
     def configure_node_dispatch_limits(self, *, execution: int | None, inspection: int | None) -> None:
         self._node_dispatch_limits = {
             'execution': _normalize_dispatch_limit(execution, default=_DEFAULT_NODE_DISPATCH_LIMITS['execution']),
@@ -619,6 +627,7 @@ class TaskActorService:
                     'pending_mailbox_count': int(distribution.get('pending_mailbox_count') or 0),
                 },
             )
+            await self._resume_distribution_if_needed(task_id)
             return True
         queued_epochs = [
             item
@@ -690,11 +699,7 @@ class TaskActorService:
                     'pending_mailbox_count': 0,
                 },
             )
-        resume_callback = self.distribution_resume_callback
-        if callable(resume_callback):
-            result = resume_callback(task_id)
-            if asyncio.iscoroutine(result):
-                await result
+        await self._resume_distribution_if_needed(task_id)
         return True
 
     async def _run_final_acceptance_if_needed(self, task_id: str) -> NodeFinalResult:
