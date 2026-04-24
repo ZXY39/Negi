@@ -319,10 +319,11 @@ class SubmitMessageDistributionTool(Tool):
                         'type': 'object',
                         'properties': {
                             'target_node_id': {'type': 'string'},
+                            'should_distribute': {'type': 'boolean'},
                             'message': {'type': 'string'},
                             'reason': {'type': 'string'},
                         },
-                        'required': ['target_node_id', 'message'],
+                        'required': ['target_node_id', 'should_distribute', 'reason'],
                     },
                 },
                 'notes': {'type': 'string'},

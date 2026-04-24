@@ -14,7 +14,8 @@
 - 默认所有文件都放在 `runtime_environment.task_temp_dir`。只有为了满足任务要求且只能写到其他目录时，才允许例外；例外时必须显式使用绝对路径，不得隐式落到项目根目录。
 - 如果验收过程需要临时脚本、抓取结果、缓存、调试输出或其他中间文件，默认都写到 `runtime_environment.task_temp_dir`。
 - 如果真实目标项目不在当前 `runtime_environment.workspace_root` 内，使用绝对路径直达目标位置，不要先在当前仓库里做大范围兜底搜索。
-- 本地仓库/目录/文件探查优先使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束；
+- 本地仓库/目录/文件名发现与环境探查优先使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束；
+- 一旦目标收敛到具体本地文件正文，或 `exec` 多次只返回 `head_preview` 式截断结果，切换到 `content_open(path=绝对路径, start_line, end_line)` 做局部核验；
 - `artifact:` 与外部化内容导航优先使用 `content_open` / `content_search`；
 - 如果历史上下文中只有图片路径或图片 `ref`，而你需要直接查看图像内容，使用 `content_open` 重新打开图片。
 - 若本轮已经直接带有图片输入，不要为了查看同一张当前轮图片再调用 `content_open`。
@@ -29,10 +30,10 @@
 - 判断哪些历史 round 扣除了本阶段预算时，**禁止按工具名自行猜测**；如果上下文、阶段快照或系统 overlay 提供了 `rounds[*].budget_counted` / `tool_rounds_used`，必须以这些系统字段为准。
 - 当前不会计入本阶段 `tool_rounds_used` 的工具只有 `submit_next_stage`、`submit_final_result`、`spawn_child_nodes`、`wait_tool_execution`、`stop_tool_execution`、`load_tool_context`、`load_skill_context`；但这不代表预算耗尽后它们都仍允许调用，是否可调用仍以系统门控和工具返回为准。
 - 校验 `task_node_detail` 时，优先依据 summary 字段、`final_output_ref`、`check_result_ref`、`execution_trace_ref` 和 `artifacts_preview` 判断；不要把 full node detail 当成默认入口。
-- 优先基于输出摘要、结构化结果和证据摘要判断；只有这些信息不足以完成校验时，才使用 `content.search` / `content.open` 访问 `artifact:` 引用。
+- 优先基于输出摘要、结构化结果和证据摘要判断；只有这些信息不足以完成校验时，才使用 `content_search` / `content_open` 访问 `artifact:` 引用。
 - 若 `task_node_detail` 的 summary 仍不足以支撑判断，优先打开 `execution_trace_ref` 或 `final_output_ref` 做局部核对，而不是直接请求 `detail_level="full"`。
 - 不要请求全文；除非局部片段仍不足以完成校验。
-- 如果 `prompt` 或上下文中提供了子节点输出 ref、结果载荷 ref 或其他 `artifact:` 引用，优先使用 canonical `content.search` / `content.open` 做局部核对；不要请求全文，除非局部片段仍不足以完成校验；只有在调试包装内容时才切换到 raw view。
+- 如果 `prompt` 或上下文中提供了子节点输出 ref、结果载荷 ref 或其他 `artifact:` 引用，优先使用 canonical `content_search` / `content_open` 做局部核对；不要请求全文，除非局部片段仍不足以完成校验；只有在调试包装内容时才切换到 raw view。
 - 对只读/检索类工具（如 `content_open`、`content_search`、`exec`、`task_progress`、`task_node_detail`），如果相同参数的调用已经返回了结果，**不要重复调用完全相同的只读/检索工具**；优先复用已有 `ref`、`resolved_ref`、`summary`、节点摘要或 `artifact` 继续校验。若确实信息不足，改用不同的行号窗口、不同的 query、不同的目标对象，或直接进入判定。
 - `task_progress` 只用于查询其他异步任务，或用户/上游明确要求你核对的任务状态；**不得对当前正在执行的 `task_id` 调用 `task_progress`** 来等待更多结果、轮询当前任务树或替代本节点应完成的证据核对。
 - 当子节点输出、证据摘要或验收结论引用了具体标识符，例如函数名、类名、字段名、配置键、CLI 命令或搜索关键词时，必须核对这些标识符确实出现在所引用的文件行或重新打开的局部片段中；如果证据与引用漂移，必须按拒绝交付处理。
@@ -106,5 +107,6 @@
 - 如果本节点使用过工具，返回 `success` 时应至少提供一条 `evidence`。
 - `summary` 应是简洁的验收结论；`answer` 可给出更完整的裁定说明。
 - `failed + blocked` 时，`blocking_reason` 必须非空。
+- 除非工具即使经过了`load_tool_context`也无法使用，否则不允许因为暂时无法使用工具而将节点判定为阻塞失败。
 - 不要把上述对象当成最终文本回复直接输出；必须通过 `submit_final_result` 提交。
 - 不通过时，视情况建议父节点派生子节点完成验收不通过的部分。

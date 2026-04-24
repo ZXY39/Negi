@@ -14,7 +14,8 @@
 - 默认所有文件都放在 `runtime_environment.task_temp_dir`。只有为了满足任务要求且只能写到其他目录时，才允许例外；例外时必须显式使用绝对路径，不得隐式落到项目根目录。
 - 如果需要新建脚本、抓取结果、缓存、调试输出或其他中间文件，默认都写到 `runtime_environment.task_temp_dir`。
 - 如果真实目标项目不在当前 `runtime_environment.workspace_root` 内，使用绝对路径直达目标位置，不要先在当前仓库里做大范围兜底搜索。
-- 本地仓库/目录/文件探查优先使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束；
+- 本地仓库/目录/文件名发现与环境探查优先使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束；
+- 一旦目标收敛到具体本地文件正文，或 `exec` 多次只返回 `head_preview` 式截断结果，切换到 `content_open(path=绝对路径, start_line, end_line)` 获取稳定证据；
 - `artifact:` 与外部化内容导航优先使用 `content_open` / `content_search`；
 - 如果历史上下文中只有图片路径或图片 `ref`，而你需要直接查看图像内容，使用 `content_open` 重新打开图片。
 - 若本轮已经直接带有图片输入，不要为了查看同一张当前轮图片再调用 `content_open`。
@@ -26,10 +27,10 @@
 - 当工具能帮助你完成节点目标时，优先使用工具。
 - 汇总子节点时，优先使用 `final_output_ref`、`check_result_ref`、`execution_trace_ref` 和 `artifacts_preview`；不要为了“看起来更完整”而反复请求 full `task_node_detail`。
 - `task_node_detail` 默认返回 lightweight summary；只有 summary 信息不足以支撑当前判断、且你确实需要补充关键证据时，才请求 `detail_level="full"`。
-- 对 `artifact:` 引用，默认使用 canonical `content.search` / `content.open` 做局部核对；只有在明确需要调试包装内容、确认 wrapper 行为或排查 canonical 视图无法解释的问题时，才使用 raw view。
+- 对 `artifact:` 引用，默认使用 canonical `content_search` / `content_open` 做局部核对；只有在明确需要调试包装内容、确认 wrapper 行为或排查 canonical 视图无法解释的问题时，才使用 raw view。
 - 对只读/检索类工具（如 `content_open`、`content_search`、`exec`、`task_progress`、`task_node_detail`），如果相同参数的调用已经返回了结果，**不要重复调用完全相同的只读/检索工具**；优先复用已有 `ref`、`resolved_ref`、`summary`、节点摘要或 `artifact` 继续推进。若确实信息不足，改用不同的行号窗口、不同的 query、不同的目标对象，或直接进入汇总 / 下一阶段。
 - `task_progress` 只用于查询其他异步任务，或用户/上游明确要求你核对的任务状态；**不得对当前正在执行的 `task_id` 调用 `task_progress`** 来等待子节点、轮询当前任务树或汇总派生结果。
-- 如果刚调用过 `spawn_child_nodes`，优先基于它返回的 `ref`、`children[*].node_output_summary`、`check_result`、`failure_info.summary`、`failure_info.remaining_work` 推进；需要核对局部内容时，先用 `content.search` / `content.open` 打开返回的 `ref`，不要改用 `task_progress` 轮询当前任务。
+- 如果刚调用过 `spawn_child_nodes`，优先基于它返回的 `ref`、`children[*].node_output_summary`、`check_result`、`failure_info.summary`、`failure_info.remaining_work` 推进；需要核对局部内容时，先用 `content_search` / `content_open` 打开返回的 `ref`，不要改用 `task_progress` 轮询当前任务。
 - 你必须按阶段推进当前执行节点。
 - 推进采用第一性原理，避免无边界反复检索。
 - `execution_policy` 适用于信息收集、内容编写、工具执行、代码处理等各种任务，而不只是一类特定任务。
@@ -83,7 +84,7 @@
 
 ### 3.3 处理 `spawn_child_nodes` 的返回结果
 
-`spawn_child_nodes` 返回后，先消费它返回的顶层 `ref` 或各 child 的 `node_output_ref` / `node_output_summary`，必要时用 `content.search` / `content.open` 做局部核对；不要把 `task_progress(current task_id)` 当作等待子节点或汇总结果的手段。
+`spawn_child_nodes` 返回后，先消费它返回的顶层 `ref` 或各 child 的 `node_output_ref` / `node_output_summary`，必要时用 `content_search` / `content_open` 做局部核对；不要把 `task_progress(current task_id)` 当作等待子节点或汇总结果的手段。
 
 当 `spawn_child_nodes` 返回的某个 child 含有 `failure_info` 时，必须先判断该分支是否实质已基本满足分支 goal，不再需要重新派生。判断时至少同时参考以下信息：
 - `node_output_summary`
@@ -155,6 +156,7 @@
 - `summary` 必须是简短结论；`answer` 是最终正文。
 - 用户或上游要求你“输出”的文件路径、结论、结构化清单、证据摘要、维护要点，都应放进 `answer` 字段。
 - `failed + blocked` 时，`blocking_reason` 必须非空。
+- 除非工具即使经过了`load_tool_context`也无法使用，否则不允许因为暂时无法使用工具而将节点判定为阻塞失败。
 - 不要把上述对象当成最终文本回复直接输出；必须通过 `submit_final_result` 提交。
 
 示例：

@@ -3047,6 +3047,141 @@ def test_render_tree_shows_pending_notice_banner_for_resume_ready_barrier() -> N
     assert result["noticeText"] == "鎺ユ敹鍒版柊娑堟伅锛岀瓑寰呰妭鐐瑰鐞?"
 
 
+def test_render_tree_shows_pending_notice_banner_for_resume_ready_without_mode() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        class StubElement {
+          constructor(tag = "div") {
+            this.tagName = tag.toUpperCase();
+            this.children = [];
+            this.className = "";
+            this.dataset = {};
+            this.style = {};
+            this.hidden = false;
+            this.attributes = {};
+            this.parentNode = null;
+            this.textContent = "";
+            this.classList = {
+              add: (...tokens) => {
+                const set = new Set(String(this.className || "").split(/\\s+/).filter(Boolean));
+                tokens.forEach((token) => set.add(String(token || "")));
+                this.className = [...set].join(" ");
+              },
+              remove: (...tokens) => {
+                const blocked = new Set(tokens.map((token) => String(token || "")));
+                this.className = String(this.className || "")
+                  .split(/\\s+/)
+                  .filter((token) => token && !blocked.has(token))
+                  .join(" ");
+              },
+              contains: (token) => String(this.className || "").split(/\\s+/).includes(String(token || "")),
+              toggle: (token, force) => {
+                const shouldAdd = force == null ? !this.classList.contains(token) : !!force;
+                if (shouldAdd) this.classList.add(token);
+                else this.classList.remove(token);
+                return shouldAdd;
+              },
+            };
+          }
+          appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
+          setAttribute(name, value) { this.attributes[name] = String(value); }
+          querySelector() { return null; }
+          querySelectorAll() { return []; }
+          addEventListener() {}
+          closest() { return null; }
+        }
+        global.Element = StubElement;
+        global.HTMLElement = StubElement;
+        global.document = {
+          createElement: (tag) => new StubElement(tag),
+        };
+        global.S = {
+          currentTaskId: "task:test",
+          currentTask: { metadata: {} },
+          taskSummary: { active_node_count: 0, runnable_node_count: 0, waiting_node_count: 0 },
+          taskRuntimeSummary: {
+            distribution: {
+              active_epoch_id: "epoch:demo",
+              state: "resume_ready",
+              frontier_node_ids: [],
+              blocked_node_ids: [],
+              pending_notice_node_ids: ["root"],
+              queued_epoch_count: 0,
+              pending_mailbox_count: 0,
+            },
+          },
+          treeRootNodeId: "root",
+          treeNodesById: {
+            root: {
+              node_id: "root",
+              title: "Root",
+              status: "in_progress",
+              node_kind: "execution",
+              rounds: [],
+              auxiliary_child_ids: [],
+              default_round_id: "",
+              pending_notice_count: 1,
+            },
+          },
+          treeView: null,
+          treeSelectedRoundByNodeId: {},
+          treePan: {
+            offsetX: 0,
+            offsetY: 0,
+            scale: 1,
+            suppressClickNodeId: null,
+          },
+          selectedNodeId: null,
+          taskNodeDetails: {},
+          treeLargeMode: false,
+        };
+        global.U = {
+          tree: new StubElement("div"),
+          tdActiveCount: new StubElement("span"),
+          taskTreeResetRounds: new StubElement("button"),
+          taskSelectionEmpty: new StubElement("div"),
+          detail: new StubElement("div"),
+          nodeEmpty: new StubElement("div"),
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        global.treeNormalizeInt = global.normalizeInt;
+        global.esc = (value) => String(value ?? "");
+        global.icons = () => {};
+        global.setTaskDetailOpen = () => {};
+        global.captureTaskDetailViewState = () => ({});
+        global.stashTaskDetailViewState = () => {};
+        global.scheduleTaskDetailSessionPersist = () => {};
+        global.findTreeNode = () => null;
+        global.resolveExecutionTreeDensity = () => ({ mode: "default", stats: { totalItems: 1, maxBreadth: 1 } });
+        global.hasManualTreeRoundSelections = () => false;
+        global.showAgent = () => Promise.resolve();
+        global.enhanceResourceSelects = () => {};
+        global.formatTokenCount = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        renderTree();
+
+        const notice = U.tree.children.find((item) => item instanceof StubElement && String(item.className || "").includes("task-tree-distribution-bubble"));
+        console.log(JSON.stringify({
+          noticeText: notice?.textContent || "",
+        }));
+        """
+    )
+
+    assert result["noticeText"] == "\u63a5\u6536\u5230\u65b0\u6d88\u606f\uff0c\u7b49\u5f85\u8282\u70b9\u5904\u7406"
+
+
 def test_render_tree_marks_barrier_blocked_nodes() -> None:
     result = _run_node_script(
         """

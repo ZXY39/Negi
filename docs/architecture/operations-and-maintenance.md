@@ -157,6 +157,7 @@ Maintenance note for `task_append_notice` / task message distribution:
   - the current runtime frames for the barrier / frontier nodes
   - epoch payload fields such as `barrier_node_ids`, `drain_pending_node_ids`, and `decision_records`
   - the target node's `append_notice_context` metadata when the symptom is “notice vanished after compaction/compression”
+- `decision_records` now separate delivered children from explicit skipped-child decisions. A frontier node with live children must account for every live child: delivered targets appear in `delivered_child_ids`, while non-delivered targets should appear in `skipped_child_decisions` with a reason. If a distribution turn fails with `distribution_decision_missing_child_decisions`, `distribution_decision_missing_should_distribute`, `distribution_decision_missing_reason`, or `distribution_decision_missing_message`, inspect the provider response/tool-call payload before treating the epoch as complete.
 - `barrier_requested` means the append-notice transaction has captured the live tree and requested the task-wide barrier, but the tree has not started draining yet.
 - `barrier_draining` means some live node is still outside a safe boundary. Check whether that node is waiting on model/tool IO or whether a runtime-frame phase is unexpectedly stuck.
 - `distributing` means the active frontier is currently being processed through the ordinary task/node dispatcher. This is still queue-controlled node work, not a sidecar lane.

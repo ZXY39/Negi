@@ -3300,7 +3300,7 @@ async def test_current_task_progress_after_spawn_fails_after_three_ignored_repai
                 json.dumps(
                     {
                         'ref': 'artifact:artifact:test-spawn',
-                        'summary': 'Use content.open/search with ref=artifact:artifact:test-spawn',
+                        'summary': 'Use content_search/content_open with ref=artifact:artifact:test-spawn',
                     },
                     ensure_ascii=False,
                 ),
@@ -3482,7 +3482,7 @@ async def test_repeated_content_open_fails_after_three_ignored_repair_guidances(
                     {
                         'ref': 'artifact:artifact:test-content',
                         'resolved_ref': r'path:D:\repo\cli.tsx',
-                        'summary': 'Use content.search/open with ref=artifact:artifact:test-content',
+                        'summary': 'Use content_search/content_open with ref=artifact:artifact:test-content',
                     },
                     ensure_ascii=False,
                 ),
@@ -3643,7 +3643,7 @@ async def test_read_only_repeat_counts_are_tracked_per_signature(tmp_path: Path)
                     {
                         'ref': 'artifact:artifact:test-content',
                         'resolved_ref': r'path:D:\repo\cli.tsx',
-                        'summary': 'Use content.search/open with ref=artifact:artifact:test-content',
+                        'summary': 'Use content_search/content_open with ref=artifact:artifact:test-content',
                     },
                     ensure_ascii=False,
                 ),

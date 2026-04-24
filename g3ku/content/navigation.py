@@ -128,7 +128,7 @@ def _content_summary(handle: ContentHandle, *, include_preview: bool = True) -> 
     summary = (
         f"Externalized {label} "
         f"({int(handle.line_count or 0)} lines, {int(handle.char_count or 0)} chars). "
-        f"Use content.search/open with ref={content_ref}. Do not pass this ref as filesystem path."
+        f"Use content_search/content_open with ref={content_ref}. Do not pass this ref as filesystem path."
     )
     if str(handle.invocation_text or "").strip():
         summary = f"{summary}\nInvocation: {str(handle.invocation_text or '').strip()}"

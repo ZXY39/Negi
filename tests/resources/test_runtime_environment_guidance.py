@@ -183,15 +183,39 @@ def test_execution_and_acceptance_prompts_forbid_self_task_progress_polling(monk
     assert '不得对当前正在执行的 `task_id` 调用' in execution_prompt
     assert '`task_progress`' in execution_prompt
     assert 'spawn_child_nodes' in execution_prompt
-    assert 'content.search' in execution_prompt
-    assert 'content.open' in execution_prompt
+    assert 'content_search' in execution_prompt
+    assert 'content_open' in execution_prompt
+    assert 'content.search' not in execution_prompt
+    assert 'content.open' not in execution_prompt
     assert '不要重复调用完全相同的只读/检索工具' in execution_prompt
 
     assert '当前正在执行的 `task_id`' in acceptance_prompt
     assert '不得对当前正在执行的 `task_id` 调用 `task_progress`' in acceptance_prompt
-    assert 'content.search' in acceptance_prompt
-    assert 'content.open' in acceptance_prompt
+    assert 'content_search' in acceptance_prompt
+    assert 'content_open' in acceptance_prompt
+    assert 'content.search' not in acceptance_prompt
+    assert 'content.open' not in acceptance_prompt
     assert '不要重复调用完全相同的只读/检索工具' in acceptance_prompt
+
+
+def test_execution_and_acceptance_prompts_do_not_allow_blocked_failure_for_temporarily_unavailable_tools(monkeypatch) -> None:
+    monkeypatch.setattr(node_runner_module, 'current_project_environment', lambda **kwargs: _fake_project_environment())
+    runner = NodeRunner(
+        store=None,
+        log_service=None,
+        react_loop=None,
+        tool_provider=None,
+        execution_model_refs=['execution_model'],
+        acceptance_model_refs=['acceptance_model'],
+    )
+
+    execution_prompt = runner._build_system_prompt(node=SimpleNamespace(node_kind='execution'))
+    acceptance_prompt = runner._build_system_prompt(node=SimpleNamespace(node_kind='acceptance'))
+
+    expected = '除非工具即使经过了`load_tool_context`也无法使用，否则不允许因为暂时无法使用工具而将节点判定为阻塞失败'
+
+    assert expected in execution_prompt
+    assert expected in acceptance_prompt
 
 
 def test_node_execution_prompt_mentions_spawn_interception_guidance(monkeypatch) -> None:

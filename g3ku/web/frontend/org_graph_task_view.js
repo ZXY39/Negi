@@ -1946,10 +1946,10 @@ function activeTaskDistributionState() {
         const activeEpochId = String(distribution.active_epoch_id || "").trim();
         const state = String(distribution.state || "").trim();
         const mode = String(distribution.mode || "").trim();
+        if (state === "resume_ready") {
+            return { ...distribution, ui_mode: "pending_notice" };
+        }
         if (mode === "task_wide_barrier") {
-            if (state === "resume_ready") {
-                return { ...distribution, ui_mode: "pending_notice" };
-            }
             if (
                 activeEpochId
                 || state

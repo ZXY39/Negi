@@ -1948,7 +1948,8 @@ def test_content_navigation_reuses_identical_artifacts_and_tracks_origin_ref(tmp
     assert first is not None
     assert second is not None
     assert first.ref == second.ref
-    assert 'Use content.search/open with ref=' in first.summary
+    assert 'Use content_search/content_open with ref=' in first.summary
+    assert first.next_actions == ['content_search', 'content_open']
     assert 'Do not pass this ref as filesystem path.' in first.summary
     assert len(store.list_artifacts('task:test')) == 1
 
@@ -2303,7 +2304,8 @@ def test_externalizes_to_summary_and_ref_for_large_non_opt_in_tool_result(tmp_pa
     envelope = parse_content_envelope(rendered)
     assert envelope is not None
     assert envelope.ref.startswith('artifact:')
-    assert 'Use content.search/open with ref=' in envelope.summary
+    assert 'Use content_search/content_open with ref=' in envelope.summary
+    assert envelope.next_actions == ['content_search', 'content_open']
 
     store.close()
 

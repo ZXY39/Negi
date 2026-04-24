@@ -890,8 +890,63 @@ def test_submit_message_distribution_tool_schema_uses_explicit_child_targets() -
     item = schema["properties"]["children"]["items"]
 
     assert "target_node_id" in item["properties"]
+    assert "should_distribute" in item["properties"]
     assert "message" in item["properties"]
     assert "reason" in item["properties"]
+    assert "should_distribute" in item["required"]
+    assert "reason" in item["required"]
+
+
+@pytest.mark.asyncio
+async def test_distribution_turn_requires_explicit_decision_for_each_live_child(tmp_path: Path) -> None:
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_message_distribution",
+                        "arguments": {
+                            "children": [
+                                {
+                                    "target_node_id": "CHILD_ONE",
+                                    "should_distribute": True,
+                                    "message": "branch-a update",
+                                    "reason": "affected",
+                                }
+                            ],
+                            "notes": "missed branch b",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
+        epoch = await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="new global constraint",
+            frontier_node_ids=[root.node_id],
+        )
+        backend._responses[0].tool_calls[0]["arguments"]["children"][0]["target_node_id"] = branch_a.node_id
+
+        task = service.get_task(record.task_id)
+        assert task is not None
+
+        result = await service.node_runner._run_distribution_node(task=task, node=root)
+
+        refreshed_epoch = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
+        assert result.status == "failed"
+        assert result.blocking_reason == "distribution_decision_missing_child_decisions"
+        assert service.store.list_task_node_notifications(record.task_id, branch_a.node_id) == []
+        assert service.store.list_task_node_notifications(record.task_id, branch_b.node_id) == []
+        assert refreshed_epoch is not None
+        assert refreshed_epoch.payload.get("distributed_node_ids") == []
+    finally:
+        await service.close()
 
 
 @pytest.mark.asyncio
@@ -943,8 +998,18 @@ async def test_distribution_turn_runs_through_task_dispatcher_and_persists_child
                         "name": "submit_message_distribution",
                         "arguments": {
                             "children": [
-                                {"target_node_id": "CHILD_ONE", "message": "first child update", "reason": "focus"},
-                                {"target_node_id": "CHILD_TWO", "message": "second child update", "reason": "coverage"},
+                                {
+                                    "target_node_id": "CHILD_ONE",
+                                    "should_distribute": True,
+                                    "message": "first child update",
+                                    "reason": "focus",
+                                },
+                                {
+                                    "target_node_id": "CHILD_TWO",
+                                    "should_distribute": True,
+                                    "message": "second child update",
+                                    "reason": "coverage",
+                                },
                             ],
                             "notes": "forward to both active children",
                         },
@@ -1137,7 +1202,18 @@ async def test_distribution_turn_omits_non_targeted_children(tmp_path: Path) -> 
                         "name": "submit_message_distribution",
                         "arguments": {
                             "children": [
-                                {"target_node_id": "CHILD_TWO", "message": "second child update", "reason": "only this child needs the new constraint"},
+                                {
+                                    "target_node_id": "CHILD_ONE",
+                                    "should_distribute": False,
+                                    "message": "",
+                                    "reason": "this child is not affected by the new constraint",
+                                },
+                                {
+                                    "target_node_id": "CHILD_TWO",
+                                    "should_distribute": True,
+                                    "message": "second child update",
+                                    "reason": "only this child needs the new constraint",
+                                },
                             ],
                             "notes": "leave the other child unchanged",
                         },
@@ -1191,7 +1267,8 @@ async def test_distribution_turn_omits_non_targeted_children(tmp_path: Path) -> 
             message="新增董事会验收格式",
             frontier_node_ids=[root.node_id],
         )
-        backend._responses[0].tool_calls[0]["arguments"]["children"][0]["target_node_id"] = second_child.node_id
+        backend._responses[0].tool_calls[0]["arguments"]["children"][0]["target_node_id"] = first_child.node_id
+        backend._responses[0].tool_calls[0]["arguments"]["children"][1]["target_node_id"] = second_child.node_id
 
         await service.task_actor_service.run_task(record.task_id)
 
@@ -1213,7 +1290,18 @@ async def test_distribution_turn_uses_runtime_child_snapshot_and_persists_decisi
                         "name": "submit_message_distribution",
                         "arguments": {
                             "children": [
-                                {"target_node_id": "CHILD_ONE", "message": "branch-a specific notice"},
+                                {
+                                    "target_node_id": "CHILD_ONE",
+                                    "should_distribute": True,
+                                    "message": "branch-a specific notice",
+                                    "reason": "branch a is affected",
+                                },
+                                {
+                                    "target_node_id": "CHILD_TWO",
+                                    "should_distribute": False,
+                                    "message": "",
+                                    "reason": "branch b can continue unchanged",
+                                },
                             ],
                             "notes": "keep one local notice on root",
                         },
@@ -1233,6 +1321,7 @@ async def test_distribution_turn_uses_runtime_child_snapshot_and_persists_decisi
             frontier_node_ids=[root.node_id],
         )
         backend._responses[0].tool_calls[0]["arguments"]["children"][0]["target_node_id"] = branch_a.node_id
+        backend._responses[0].tool_calls[0]["arguments"]["children"][1]["target_node_id"] = branch_b.node_id
 
         task = service.get_task(record.task_id)
         assert task is not None

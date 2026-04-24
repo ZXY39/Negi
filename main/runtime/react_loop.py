@@ -4899,13 +4899,13 @@ class ReActToolLoop:
         if latest_spawn_ref:
             return (
                 f'{base} 最近一次 `spawn_child_nodes` 返回的 ref 是 `{latest_spawn_ref}`；'
-                '请先用 `content.open` / `content.search` 查看该 ref，'
+                '请先用 `content_open` / `content_search` 查看该 ref，'
                 '再基于 `node_output_summary`、`check_result`、`failure_info.summary`、'
                 '`failure_info.remaining_work` 判断应直接吸收结果，还是只对失败分支再次 `spawn_child_nodes`。'
             )
         return (
             f'{base} 请回看最近的 `spawn_child_nodes` 输出、已有 `artifact:` 引用和失败分支的 `failure_info`，'
-            '优先用 `content.open` / `content.search` 做局部核对，再决定吸收结果、重派失败分支，或推进下一阶段。'
+            '优先用 `content_open` / `content_search` 做局部核对，再决定吸收结果、重派失败分支，或推进下一阶段。'
         )
 
     @classmethod

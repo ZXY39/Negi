@@ -1000,6 +1000,44 @@ class NodeRunner:
             return dict(arguments or {}) if isinstance(arguments, dict) else {}
         return {}
 
+    @staticmethod
+    def _validate_distribution_child_decisions(
+        *,
+        submitted_children: list[Any],
+        live_child_node_ids: list[str],
+    ) -> str:
+        expected_child_ids = [
+            str(item or '').strip()
+            for item in list(live_child_node_ids or [])
+            if str(item or '').strip()
+        ]
+        if not expected_child_ids:
+            return ''
+        if not submitted_children:
+            return 'distribution_decision_missing_child_decisions'
+        expected = set(expected_child_ids)
+        seen: set[str] = set()
+        for item in list(submitted_children or []):
+            if not isinstance(item, dict):
+                return 'distribution_decision_invalid_child_decision'
+            target_node_id = str(item.get('target_node_id') or '').strip()
+            if not target_node_id or target_node_id not in expected:
+                return 'distribution_decision_invalid_child_target'
+            if target_node_id in seen:
+                return 'distribution_decision_duplicate_child_decision'
+            seen.add(target_node_id)
+            if not isinstance(item.get('should_distribute'), bool):
+                return 'distribution_decision_missing_should_distribute'
+            reason = str(item.get('reason') or '').strip()
+            if not reason:
+                return 'distribution_decision_missing_reason'
+            message = str(item.get('message') or '').strip()
+            if bool(item.get('should_distribute')) and not message:
+                return 'distribution_decision_missing_message'
+        if seen != expected:
+            return 'distribution_decision_missing_child_decisions'
+        return ''
+
     def _distribution_root_message(self, *, epoch) -> str:
         payload = dict(epoch.payload or {})
         queued_root_messages = [
@@ -1238,13 +1276,38 @@ class NodeRunner:
             children=list(arguments.get('children') or []),
             notes=str(arguments.get('notes') or ''),
         )
+        submitted_children = [item for item in list(submitted.get('children') or []) if isinstance(item, dict)]
+        validation_error = self._validate_distribution_child_decisions(
+            submitted_children=submitted_children,
+            live_child_node_ids=live_child_node_ids,
+        )
+        if validation_error:
+            return NodeFinalResult(
+                status='failed',
+                delivery_status='blocked',
+                summary='message distribution decision invalid',
+                answer='',
+                evidence=[],
+                remaining_work=[],
+                blocking_reason=validation_error,
+            )
         valid_child_ids = set(live_child_node_ids)
         delivered_child_ids: list[str] = []
-        for item in list(submitted.get('children') or []):
+        skipped_child_decisions: list[dict[str, str]] = []
+        for item in submitted_children:
             if not isinstance(item, dict):
                 continue
             target_node_id = str(item.get('target_node_id') or '').strip()
             child_message = str(item.get('message') or '').strip()
+            if not bool(item.get('should_distribute')):
+                if target_node_id and target_node_id in valid_child_ids:
+                    skipped_child_decisions.append(
+                        {
+                            'target_node_id': target_node_id,
+                            'reason': str(item.get('reason') or '').strip(),
+                        }
+                    )
+                continue
             if not target_node_id or not child_message or target_node_id not in valid_child_ids:
                 continue
             self._persist_distribution_delivery(
@@ -1280,6 +1343,7 @@ class NodeRunner:
                 'notes': str(submitted.get('notes') or '').strip(),
                 'local_notice_kept': str(node.node_id or '').strip() == str(epoch.root_node_id or '').strip(),
                 'delivered_child_ids': list(delivered_child_ids),
+                'skipped_child_decisions': list(skipped_child_decisions),
                 'created_at': now_iso(),
             }
         )
@@ -1593,13 +1657,21 @@ class NodeRunner:
                     '使用绝对路径。默认把新建脚本、抓取结果、缓存、调试输出和其他中间文件写到 '
                     'runtime_environment.task_temp_dir；只有为了满足任务要求且只能写到其他目录时才允许例外。'
                 ),
-                'content': '单个内容体优先用 ref 导航或绝对文件路径；不要把它当成目录搜索工具。',
+                'content': (
+                    '单个内容体优先用 ref 导航或绝对文件路径；'
+                    '需要本地文件正文证据时，优先用 '
+                    '`content_open(path=绝对路径, start_line, end_line)`；'
+                    '不要把它当成目录搜索工具。'
+                ),
                 'exec': (
                     'Windows 上的 exec 运行在 PowerShell 中，其他系统运行在宿主 shell 中。'
                     '未传 working_dir 时，默认在 runtime_environment.task_temp_dir 执行，并优先把所有中间文件写到该目录。'
                     '它会继承当前 G3KU 进程使用的同一套 Python 环境，并把该解释器注入 PATH。'
                     '不要假设 bash heredoc、rg 或 `true` 这类 Unix shell 内建一定可用。'
                     '需要特定目录时，显式传入 working_dir。'
+                    '它更适合目录发现、文件名发现和环境探查；如果结果反复退化成 `head_preview`，'
+                    '不要继续用它抽取本地文件正文，应改用 '
+                    '`content_open(path=绝对路径, start_line, end_line)`。'
                     f"当解释器选择必须精确一致时，优先使用 `{project_environment.get('project_python_hint') or 'python'}`，"
                     '不要假设裸 `python` 一定会解析到正确解释器。'
                 ),

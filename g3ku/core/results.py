@@ -56,7 +56,7 @@ class ContentEnvelope:
     resolved_ref: str = ""
     wrapper_ref: str = ""
     handle: ContentHandle | None = None
-    next_actions: list[str] = field(default_factory=lambda: ["content.search", "content.open"])
+    next_actions: list[str] = field(default_factory=lambda: ["content_search", "content_open"])
 
     def to_dict(
         self,

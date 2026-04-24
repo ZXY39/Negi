@@ -7,3 +7,8 @@
 - 只能提交分发决策。
 - 只针对输入中列出的当前正在运行的子节点。
 - 基于每个子节点的任务，可对应调整补充的消息。
+- 如果输入中存在 live_children，必须对每一个子节点提交一条 children 决策记录，不能省略任何子节点。
+- 每条 children 决策必须包含 target_node_id、should_distribute 和 reason。
+- should_distribute=true 时，message 必须填写要下发给该子节点的补充消息。
+- should_distribute=false 时，reason 必须说明为什么该子节点可以安全不接收本次消息。
+- 如果最新消息改变时间范围、对象性别/类型、范围、交付物、验收标准或其他全局口径，而子节点任务可能受影响，必须选择 should_distribute=true。

@@ -12,9 +12,10 @@
 - 不要假设 Bash、Unix heredoc、`true`、`false` 或 `rg` 这类 Unix shell 语法一定可用；命令语法必须匹配当前节点拿到的 OS / shell 信息。
 - 如果调用方开启了 `restrict_to_workspace`，`working_dir` 必须留在允许的工作区范围内。
 - `exec` 会继承当前 G3KU 进程的 Python 环境；做 Python 验证时，优先使用运行时提供的 `G3KU_PROJECT_PYTHON` 或 `G3KU_PROJECT_PYTHON_HINT`。
+- `exec` 更适合目录发现、文件名发现、环境探查和一次性命令执行；当目标变成具体本地文件正文时，优先切换到 `content_open(path=绝对路径, start_line, end_line)`。
 - 对超长或复杂的 Python 命令，不要优先裸写 `python -c "..."`。尤其当命令包含大量中文、多层引号、花括号、三引号、Markdown 片段、长 JSON 或长字符串模板时，优先先用 `filesystem_write` / `filesystem_edit` 在任务级临时目录落一个临时 `.py` 文件，再用 `exec` 执行该脚本。
 - 在 Windows + PowerShell 下，上述规则优先级更高：`python -c` 的一层命令行转义很容易把“真正的 Python 错误”混成 PowerShell 解析错误。若目标是稳定执行复杂逻辑，应把“写脚本”和“执行脚本”拆成两个动作。
-- 结果过长时，先看 `stdout_ref` / `stderr_ref`，再用 `content.search` 和 `content.open` 做局部定位。
+- 结果过长时，`exec` 通常只会返回 `head_preview`。不要把它当成稳定的本地文件正文证据；若需要引用具体本地文件片段，改用 `content_open(path=绝对路径, start_line, end_line)`。
 
 ## 路径规则
 
