@@ -14,23 +14,21 @@ def test_memory_write_schema_exposes_content_only() -> None:
     assert tool.parameters["required"] == ["content"]
 
 
-def test_memory_delete_schema_exposes_id_or_ids() -> None:
+def test_memory_delete_schema_exposes_content_only() -> None:
     tool = MemoryDeleteTool(manager=object())
 
-    assert set(tool.parameters["properties"].keys()) == {"id", "ids"}
-    assert tool.parameters["anyOf"] == [{"required": ["id"]}, {"required": ["ids"]}]
+    assert list(tool.parameters["properties"].keys()) == ["content"]
+    assert tool.parameters["required"] == ["content"]
 
 
-def test_memory_delete_provider_visible_schema_strips_schema_combinators() -> None:
+def test_memory_delete_provider_visible_schema_uses_content_only() -> None:
     tool = MemoryDeleteTool(manager=object())
 
     _description, schema = _provider_visible_tool_contract(tool)
 
     assert isinstance(schema, dict)
-    assert "anyOf" not in schema
-    assert "oneOf" not in schema
-    assert "allOf" not in schema
-    assert set((schema.get("properties") or {}).keys()) == {"id", "ids"}
+    assert list((schema.get("properties") or {}).keys()) == ["content"]
+    assert schema.get("required") == ["content"]
 
 
 def test_frontdoor_selected_tool_schemas_strip_provider_unsupported_combinators() -> None:
@@ -44,3 +42,4 @@ def test_frontdoor_selected_tool_schemas_strip_provider_unsupported_combinators(
     assert "anyOf" not in parameters
     assert "oneOf" not in parameters
     assert "allOf" not in parameters
+    assert list((parameters.get("properties") or {}).keys()) == ["content"]

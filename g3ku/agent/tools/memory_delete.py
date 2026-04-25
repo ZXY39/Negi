@@ -1,4 +1,4 @@
-"""Queued tool for id-based long-term memory deletions."""
+"""Queued tool for natural-language long-term memory deletions."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from g3ku.agent.tools.base import Tool
 
 
 class MemoryDeleteTool(Tool):
-    """Queue durable memory deletion requests using visible memory ids."""
+    """Queue durable memory deletion requests using natural-language descriptions."""
 
     def __init__(self, *, manager: Any):
         self._manager = manager
@@ -21,7 +21,7 @@ class MemoryDeleteTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Queue a durable long-term memory delete request using ids visible in the current memory snapshot.\n"
+            "Queue a durable long-term memory delete request using a natural-language memory description.\n"
             "Use this when the user explicitly asks the system to forget a remembered rule, preference, or fact."
         )
 
@@ -30,55 +30,38 @@ class MemoryDeleteTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "id": {
+                "content": {
                     "type": "string",
-                    "description": "A single memory id to remove from the current MEMORY snapshot.",
-                },
-                "ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "A list of memory ids to remove from the current MEMORY snapshot.",
+                    "description": "Natural-language description of the remembered content that should be forgotten.",
                 },
             },
-            "anyOf": [
-                {"required": ["id"]},
-                {"required": ["ids"]},
-            ],
+            "required": ["content"],
         }
 
     @staticmethod
-    def _normalize_ids(params: dict[str, Any] | None) -> list[str]:
+    def _normalize_content(params: dict[str, Any] | None) -> str:
         payload = dict(params or {})
-        direct_id = str(payload.get("id") or "").strip()
-        if direct_id:
-            return [direct_id]
-        normalized_ids: list[str] = []
-        for raw in list(payload.get("ids") or []):
-            item = str(raw or "").strip()
-            if item:
-                normalized_ids.append(item)
-        return normalized_ids
+        return str(payload.get("content") or "").strip()
 
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         errors = super().validate_params(params)
-        if not self._normalize_ids(params):
-            errors.append("id or ids must not be empty")
+        if not self._normalize_content(params):
+            errors.append("content must not be empty")
         return errors
 
     async def execute(
         self,
-        id: str = "",
-        ids: list[str] | None = None,
+        content: str = "",
         **kwargs: Any,
     ) -> str:
         runtime_raw = kwargs.pop("__g3ku_runtime", None)
         runtime = runtime_raw if isinstance(runtime_raw, dict) else {}
         session_key = str(runtime.get("session_key") or "")
-        normalized_ids = self._normalize_ids({"id": id, "ids": ids})
+        normalized_content = self._normalize_content({"content": content})
         result = await self._manager.enqueue_delete_request(
             session_key=session_key,
             decision_source="user",
-            payload_text=json.dumps(normalized_ids, ensure_ascii=False),
+            payload_text=normalized_content,
             trigger_source="memory_delete_tool",
         )
         return json.dumps(result, ensure_ascii=False)

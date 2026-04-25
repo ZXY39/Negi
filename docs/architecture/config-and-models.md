@@ -109,7 +109,7 @@
 
 - 配置刷新仍然不会把一个“已经发出去的单次 provider 请求”中途热切换到新模型。
 - 但对于已经进入 provider-failure retry 或 empty-response retry 的当前轮次，CEO/frontdoor 与节点运行时现在都会在下一次重试前检查 runtime revision。
-- Memory queue 内部的 memory agent 现在也遵循同样的 revision 边界，但它看的不是 CEO/node 的 provider retry，而是 memory 自己的修复边界：`assess -> apply` 交接点，以及同一批次里的 validation/repair 重试点。
+- Memory queue 内部的 memory agent 现在也遵循同样的 revision 边界，但它看的不是 CEO/node 的 provider retry，而是 memory 自己的同批次 validation/repair 重试点；普通 review window 已不再经过单独的 `assess -> apply` 交接。
 - 如果 revision 已变化，旧模型链的重试会失效，当前轮会用新的 model refs 重新开始，而不是继续无限重试旧链。
 
 维护上要把这理解成“重试边界上的重建”，而不是“请求中途热切模型”。如果用户反馈“改完模型链后旧重试还在跑”，重点检查：
@@ -307,6 +307,7 @@ If an operator reports frontdoor send failures after a model or chain change, ch
 
 - `document.*` now controls the Markdown notebook layout, including `memory/MEMORY.md`, `memory/notes/`, the summary character limit, and the full document character ceiling.
   - The current default `document.summary_max_chars` is `250`. When a memory candidate cannot be expressed within that one-line limit, the intended writer behavior is to compress it or switch to a one-line summary plus `note` pattern rather than overflowing the notebook line.
+  - `document.compress_trigger_chars` and `document.compress_target_chars` now define the post-commit snapshot compaction thresholds. The runtime rebuilds `MEMORY.md` from SQLite first, then starts compression only after the regenerated snapshot exceeds the trigger.
 - `queue.*` now controls the single durable queue, including `memory/queue.jsonl`, `memory/ops.jsonl`, batch size, max wait time, and the ordinary-turn review window size.
 - `agent.*` now controls the dedicated memory-maintenance worker behavior.
 - Older `store.*`, `retrieval.*`, and `embedding.*` sections still matter for the catalog bridge because tool/skill semantic narrowing still relies on that catalog-only projection, even though long-term memory正文 no longer depends on the old `rag_memory` runtime.
@@ -334,7 +335,7 @@ When debugging "memory queue stuck" reports, check both layers in order:
 Two specific memory-runtime config semantics changed again:
 
 - `queue.review_interval_turns` now means the per-session ordinary-turn review window size, defaulting to `5`, not the earlier hashed sampling interval.
-- The internal memory prompts are now file-backed runtime assets under `main/prompts/memory_agent.md` and `main/prompts/memory_assessor.md`. If memory processing behavior looks wrong after prompt edits, inspect those files before changing Python code.
+- The active internal memory writer prompt is the file-backed runtime asset `main/prompts/memory_agent.md`. The old assessor prompt file may still exist for compatibility, but ordinary queued review windows no longer use a separate assessor lane.
 - The current writer prompt contract is intentionally stricter than the original rollout:
   - admission is narrowed to durable dissatisfaction signals, reusable user suggestions, explicit remember requests, and repeated-mistake lessons
   - memory summaries should read like `condition + requirement`

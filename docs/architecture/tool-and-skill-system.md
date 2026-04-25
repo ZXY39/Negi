@@ -173,12 +173,13 @@ Maintenance note for surfaced fixed builtins:
 Maintenance note for the memory tool family:
 
 - `memory_search` is removed from the agent-facing contract.
-- CEO/frontdoor now receives committed long-term memory through the injected `MEMORY.md` snapshot, not through a retrieval tool call.
+- CEO/frontdoor now receives committed long-term memory through the injected `MEMORY.md` snapshot, not through a retrieval tool call. The surfaced snapshot is display-only: it strips memory ids and date/source headers and keeps only the remembered text blocks separated by `---`.
 - `memory_note(ref)` is the only on-demand detailed-memory loader.
 - Node execution and acceptance paths no longer inject extra memory retrieval blocks; they only use the catalog bridge for tool/skill narrowing.
 - That catalog bridge is now catalog-only: it owns context-record storage and dense/sparse tool-skill narrowing data, but it no longer delegates through the old `rag_memory` long-term memory runtime.
 - `memory_write` and `memory_delete` are queue-submit tools. They ask the memory runtime to process a later batch; they do not synchronously rewrite committed memory during the current turn.
-- The actual rewrite/delete decision is now delegated to a dedicated internal memory agent with a restricted tool surface. That internal agent is not part of the normal agent-facing tool catalog and should not be debugged as if it were a surfaced Tool Admin family.
+- `memory_delete(content=...)` now takes a natural-language description of the remembered content to forget; surfaced agents no longer pass memory ids.
+- The actual rewrite/delete decision is now delegated to a dedicated internal memory agent with a restricted tool surface. That internal agent is not part of the normal agent-facing tool catalog and should not be debugged as if it were a surfaced Tool Admin family. It resolves delete descriptions to concrete SQLite ids and may report `inspired_memory_ids` for rows that materially affected the batch.
 
 - `candidate_tool_names` / `candidate_skill_ids` 现在都采用同一语义：`RBAC 可见 ∩ 语义召回命中` 的当前候选集合。
 - 如果语义召回不可用，候选集合直接退化为 `RBAC 可见集合`，而不是停止运行。

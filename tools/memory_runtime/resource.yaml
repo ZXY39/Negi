@@ -29,7 +29,9 @@ settings:
   arch_version: v2
   document:
     summary_max_chars: 250
-    document_max_chars: 10000
+    document_max_chars: 20000
+    compress_trigger_chars: 16000
+    compress_target_chars: 13000
     memory_file: memory/MEMORY.md
     notes_dir: memory/notes
   queue:

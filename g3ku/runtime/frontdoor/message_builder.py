@@ -10,6 +10,7 @@ from typing import Any
 
 from loguru import logger
 
+from g3ku.agent.markdown_memory import parse_memory_document
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.runtime.context.semantic_scope import semantic_catalog_rankings
@@ -227,6 +228,13 @@ class CeoMessageBuilder:
         snapshot_text = str(memory_snapshot_text or '').strip()
         if not snapshot_text:
             return None
+        parsed_entries = parse_memory_document(snapshot_text)
+        if parsed_entries:
+            snapshot_text = '\n'.join(
+                f"---\n{str(entry.summary or '').strip()}".strip()
+                for entry in parsed_entries
+                if str(entry.summary or '').strip()
+            ).strip()
         return {
             "role": "assistant",
             "content": f"## 长期记忆\n{snapshot_text}".strip(),

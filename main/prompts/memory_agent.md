@@ -36,25 +36,31 @@
 - 必须且只能调用一次
 
 参数：
-- `adds?: Array<{ content: string, decision_source: "user" | "self" }>`
+- `adds?: Array<{ content: string, minimal_memory: string, decision_source: "user" | "self" }>`
   - 仅用于“独立的新记忆”
   - 当现有记忆与旧记忆重复时，禁止单独使用 add，可选择以下任意一种处理方式：
     1. `rewrites` 覆盖旧记忆
     2. `deletes` 旧记忆后再 `add` 新记忆
-- `rewrites?: Array<{ id: string, content: string }>`
+- `rewrites?: Array<{ id: string, content: string, minimal_memory: string }>`
   - 用于改写已有记忆
   - 会保留原记忆 id 和原 source，并由系统刷新日期
   - 当候选与旧记忆同槽位但新表述更准确、更规范、更完整时，优先使用 rewrite
 - `deletes?: string[]`
   - 传入要删除的已有记忆 id，会自动删除记忆中的 note
   - 用于删除已过时、被更高质量记忆覆盖、或与保留规则冲突的旧记忆
+  - 如果收到的是自然语言删除请求，先解析成精确的记忆 id，再把这些 id 提交到 `deletes`
 - `note_upserts?: Record<string, string>`
   - 仅写入需要新增或改写的 note
   - 不要为不再被任何记忆引用的 note 继续保留内容
+- `inspired_memory_ids?: string[]`
+  - 列出当前完整 memory snapshot 中，对本批判断有实质帮助的 memory id
 - `noop_reason?: string`
   - 仅用于“本轮经判断不应对记忆正文做任何修改”的情况
   - 只能单独使用，不能与 `adds`、`rewrites`、`deletes`、`note_upserts` 混用
   - 适用于候选与已有记忆语义相同、旧记忆已足够好、或候选经审查应被忽略的情况
+- `minimal_memory`
+  - 写成 `条件->要求关键词` 的形式
+  - 需要引用 note 时，优先附加 `见noteid:<id>`，并兼容历史写法 `ref:<id>`
 
 ## 处理规则
 
