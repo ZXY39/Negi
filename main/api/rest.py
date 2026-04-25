@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 
 from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error
 
@@ -191,6 +191,21 @@ async def delete_task(task_id: str):
     if record is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, 'deleted': True, 'task': record.model_dump(mode='json')}
+
+
+@router.post('/tasks/bulk-delete')
+async def bulk_delete_tasks(payload: dict | None = Body(default=None)):
+    service = _service()
+    await service.startup()
+    try:
+        raw_task_ids = (payload or {}).get('task_ids')
+        if not isinstance(raw_task_ids, list):
+            raise ValueError('task_ids must be an array')
+        normalized_task_ids = [service.normalize_task_id(str(task_id or '').strip()) for task_id in list(raw_task_ids or [])]
+        result = await service.bulk_delete_tasks(normalized_task_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'ok': True, **result}
 
 
 @router.get('/tasks/{task_id}/artifacts')

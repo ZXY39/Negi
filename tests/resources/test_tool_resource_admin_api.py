@@ -2291,6 +2291,190 @@ def test_channel_ceo_session_delete_removes_persisted_transcript_and_cached_sess
     assert state.channel_id not in state.session_manager._sessions
 
 
+def test_ceo_session_bulk_delete_check_aggregates_related_task_ids(tmp_path: Path, monkeypatch):
+    _mock_ceo_catalog_config(monkeypatch)
+
+    from g3ku.runtime.api import ceo_sessions
+
+    class _SessionManager:
+        def __init__(self, sessions: list[Session], paths: dict[str, Path]):
+            self._sessions = {session.key: session for session in sessions}
+            self._paths = dict(paths)
+
+        def get_path(self, key: str) -> Path:
+            return self._paths[key]
+
+        def get_or_create(self, key: str):
+            return self._sessions[key]
+
+        def save(self, session) -> None:
+            self._sessions[session.key] = session
+
+        def list_sessions(self) -> list[dict[str, str]]:
+            return [{'key': key} for key in self._sessions]
+
+    class _TaskService:
+        async def startup(self) -> None:
+            return None
+
+        def list_tasks_for_session(self, session_id: str):
+            if session_id == 'web:ceo-bulk-a':
+                return [
+                    SimpleNamespace(task_id='task:done-1', title='Done 1', status='success', is_paused=False),
+                    SimpleNamespace(task_id='task:busy-1', title='Busy 1', status='in_progress', is_paused=False),
+                ]
+            if session_id == 'web:ceo-bulk-b':
+                return [
+                    SimpleNamespace(task_id='task:done-1', title='Done 1', status='success', is_paused=False),
+                    SimpleNamespace(task_id='task:paused-2', title='Paused 2', status='in_progress', is_paused=True),
+                ]
+            return []
+
+        def get_session_task_counts(self, session_id: str) -> dict[str, int]:
+            if session_id == 'web:ceo-bulk-a':
+                return {'total': 2, 'unfinished': 1, 'in_progress': 1, 'paused': 0, 'terminal': 1, 'deletable': 1}
+            if session_id == 'web:ceo-bulk-b':
+                return {'total': 2, 'unfinished': 0, 'in_progress': 0, 'paused': 1, 'terminal': 1, 'deletable': 2}
+            return {'total': 0, 'unfinished': 0, 'in_progress': 0, 'paused': 0, 'terminal': 0, 'deletable': 0}
+
+    current = Session(key='web:ceo-bulk-current', metadata={'title': 'Current'})
+    first = Session(key='web:ceo-bulk-a', metadata={'title': 'Bulk A'})
+    second = Session(key='web:ceo-bulk-b', metadata={'title': 'Bulk B'})
+    base_dir = tmp_path / 'sessions'
+    base_dir.mkdir(parents=True, exist_ok=True)
+    paths = {}
+    for session in (current, first, second):
+        path = base_dir / f"{session.key.replace(':', '_')}.jsonl"
+        path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+        paths[session.key] = path
+    manager = _SessionManager([current, first, second], paths)
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix='/api')
+    monkeypatch.setattr(ceo_sessions, 'get_agent', lambda: SimpleNamespace(sessions=manager, main_task_service=_TaskService()))
+    monkeypatch.setattr(ceo_sessions, 'get_runtime_manager', lambda _agent: SimpleNamespace(get=lambda _session_id: None))
+    monkeypatch.setattr(ceo_sessions, 'workspace_path', lambda: tmp_path)
+
+    ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(current.key)
+    client = TestClient(app)
+
+    response = client.post(
+        '/api/ceo/sessions/delete-check',
+        json={'session_ids': [first.key, second.key]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['session_ids'] == [first.key, second.key]
+    assert payload['related_tasks']['total'] == 3
+    assert payload['related_tasks']['deletable'] == 2
+    assert [item['task_id'] for item in payload['usage']['completed_tasks']] == ['task:done-1']
+    assert [item['task_id'] for item in payload['usage']['paused_tasks']] == ['task:paused-2']
+    assert [item['task_id'] for item in payload['usage']['in_progress_tasks']] == ['task:busy-1']
+
+
+def test_ceo_session_bulk_delete_executes_selected_sessions_in_one_request(tmp_path: Path, monkeypatch):
+    _mock_ceo_catalog_config(monkeypatch)
+
+    from g3ku.runtime.api import ceo_sessions
+
+    class _SessionManager:
+        def __init__(self, sessions: list[Session], paths: dict[str, Path]):
+            self._sessions = {session.key: session for session in sessions}
+            self._paths = dict(paths)
+
+        def get_path(self, key: str) -> Path:
+            return self._paths[key]
+
+        def get_or_create(self, key: str):
+            return self._sessions[key]
+
+        def save(self, session) -> None:
+            self._sessions[session.key] = session
+
+        def invalidate(self, key: str) -> None:
+            self._sessions.pop(key, None)
+            self._paths.pop(key, None)
+
+        def list_sessions(self) -> list[dict[str, str]]:
+            return [{'key': key} for key in self._sessions]
+
+    class _TaskService:
+        async def startup(self) -> None:
+            return None
+
+        async def delete_task_records_for_session(self, session_id: str) -> int:
+            return {'web:ceo-bulk-a': 1, 'web:ceo-bulk-b': 2}.get(session_id, 0)
+
+        def list_tasks_for_session(self, session_id: str):
+            _ = session_id
+            return []
+
+        def get_session_task_counts(self, session_id: str) -> dict[str, int]:
+            _ = session_id
+            return {'total': 0, 'unfinished': 0, 'in_progress': 0, 'paused': 0, 'terminal': 0, 'deletable': 0}
+
+    current = Session(key='web:ceo-bulk-current', metadata={'title': 'Current'})
+    first = Session(key='web:ceo-bulk-a', metadata={'title': 'Bulk A'})
+    second = Session(key='web:ceo-bulk-b', metadata={'title': 'Bulk B'})
+    base_dir = tmp_path / 'sessions'
+    base_dir.mkdir(parents=True, exist_ok=True)
+    paths = {}
+    for session in (current, first, second):
+        path = base_dir / f"{session.key.replace(':', '_')}.jsonl"
+        path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+        paths[session.key] = path
+    manager = _SessionManager([current, first, second], paths)
+    captured: dict[str, object] = {'removed': [], 'cancelled': []}
+
+    class _RuntimeManager:
+        def get(self, session_id: str):
+            _ = session_id
+            return None
+
+        def remove(self, session_id: str):
+            captured['removed'].append(session_id)
+            return None
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        captured['cancelled'].append(session_key)
+        return 0
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix='/api')
+    monkeypatch.setattr(
+        ceo_sessions,
+        'get_agent',
+        lambda: SimpleNamespace(
+            sessions=manager,
+            main_task_service=_TaskService(),
+            cancel_session_tasks=_cancel_session_tasks,
+        ),
+    )
+    monkeypatch.setattr(ceo_sessions, 'get_runtime_manager', lambda _agent: _RuntimeManager())
+    monkeypatch.setattr(ceo_sessions, 'get_web_heartbeat_service', lambda _agent: None)
+    monkeypatch.setattr(ceo_sessions, 'workspace_path', lambda: tmp_path)
+
+    ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(current.key)
+    client = TestClient(app)
+
+    response = client.post(
+        '/api/ceo/sessions/bulk-delete',
+        json={'session_ids': [first.key, second.key], 'delete_task_records': True},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['deleted_count'] == 2
+    assert payload['failed_count'] == 0
+    assert [item['session_id'] for item in payload['results']] == [first.key, second.key]
+    assert [item['deleted_task_count'] for item in payload['results']] == [1, 2]
+    assert captured == {
+        'removed': [first.key, second.key],
+        'cancelled': [first.key, second.key],
+    }
+
+
 @pytest.mark.asyncio
 async def test_ceo_session_delete_with_task_record_cleanup_deletes_task_disk_footprint(tmp_path: Path, monkeypatch):
     _mock_ceo_catalog_config(monkeypatch)
@@ -2443,6 +2627,41 @@ def test_task_rest_endpoint_normalizes_short_task_id():
     assert response.status_code == 200
     assert captured == {'normalized_from': 'demo', 'detail_task_id': 'task:demo'}
     assert response.json()['task']['task_id'] == 'task:demo'
+
+
+def test_task_bulk_delete_rest_endpoint_normalizes_each_task_id():
+    captured: dict[str, object] = {}
+
+    class _StubService:
+        async def startup(self) -> None:
+            return None
+
+        def normalize_task_id(self, task_id: str) -> str:
+            return f'task:{task_id}' if ':' not in str(task_id or '') else str(task_id or '')
+
+        async def bulk_delete_tasks(self, task_ids: list[str]):
+            captured['task_ids'] = list(task_ids)
+            return {
+                'items': [
+                    {'task_id': task_id, 'result': 'deleted'}
+                    for task_id in list(task_ids)
+                ],
+            }
+
+    from main.api import rest as task_rest
+
+    app = FastAPI()
+    app.include_router(task_rest.router, prefix='/api')
+    task_rest.get_agent = lambda: SimpleNamespace(main_task_service=_StubService())
+
+    client = TestClient(app)
+    response = client.post('/api/tasks/bulk-delete', json={'task_ids': ['demo', 'task:done']})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert captured['task_ids'] == ['task:demo', 'task:done']
+    assert [item['task_id'] for item in payload['items']] == ['task:demo', 'task:done']
+    assert [item['result'] for item in payload['items']] == ['deleted', 'deleted']
 
 
 def test_task_retry_rest_endpoint_is_removed():

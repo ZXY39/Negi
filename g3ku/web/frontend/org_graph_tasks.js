@@ -11,7 +11,9 @@ function taskStatusLabel(task) {
 function statusBucketMatches(task, bucketKey) {
     const status = taskStatusKey(task);
     if (bucketKey === "paused") return status === "blocked";
+    if (bucketKey === "completed") return status === "success";
     if (bucketKey === "failed") return status === "failed";
+    if (bucketKey === "unpassed") return status === "unpassed";
     if (bucketKey === "unread") return !!task?.is_unread;
     if (bucketKey === "running") return status === "in_progress";
     return false;
@@ -786,10 +788,49 @@ function taskActionRequiresWorker(action) {
     return ["pause", "resume"].includes(String(action || "").trim().toLowerCase());
 }
 
-async function requestTaskAction(taskId, action) {
-    if (action === "pause") return ApiClient.pauseTask(taskId);
-    if (action === "resume") return ApiClient.resumeTask(taskId);
-    if (action === "delete") return ApiClient.deleteTask(taskId);
+function taskActionRequestOptions(action, options = {}) {
+    const normalized = options && typeof options === "object" && !Array.isArray(options) ? { ...options } : {};
+    if (action === "delete" && !Number.isFinite(normalized.timeoutMs)) normalized.timeoutMs = 30000;
+    return normalized;
+}
+
+function taskBatchActionConcurrency(action) {
+    if (action === "delete") return 2;
+    return 4;
+}
+
+async function settleTaskActionBatch(items, worker, { concurrency = 1 } = {}) {
+    const normalizedItems = Array.isArray(items) ? items : [];
+    const results = new Array(normalizedItems.length);
+    let nextIndex = 0;
+    const workerCount = Math.max(1, Math.min(normalizedItems.length || 1, Number(concurrency) || 1));
+    async function runNext() {
+        while (true) {
+            const currentIndex = nextIndex;
+            nextIndex += 1;
+            if (currentIndex >= normalizedItems.length) return;
+            try {
+                results[currentIndex] = {
+                    status: "fulfilled",
+                    value: await worker(normalizedItems[currentIndex], currentIndex),
+                };
+            } catch (error) {
+                results[currentIndex] = {
+                    status: "rejected",
+                    reason: error,
+                };
+            }
+        }
+    }
+    await Promise.all(Array.from({ length: workerCount }, () => runNext()));
+    return results;
+}
+
+async function requestTaskAction(taskId, action, options = {}) {
+    const requestOptions = taskActionRequestOptions(action, options);
+    if (action === "pause") return ApiClient.pauseTask(taskId, requestOptions);
+    if (action === "resume") return ApiClient.resumeTask(taskId, requestOptions);
+    if (action === "delete") return ApiClient.deleteTask(taskId, requestOptions);
     throw new Error(`Unsupported task action: ${action}`);
 }
 
@@ -874,13 +915,49 @@ async function performTaskBatchAction(action, eligible) {
     S.taskBusy = true;
     renderTasksIfVisible();
     try {
-        const results = await Promise.allSettled(eligible.map((task) => requestTaskAction(task.task_id, action)));
-        const succeeded = results
-            .map((result, index) => (result.status === "fulfilled" ? eligible[index].task_id : ""))
-            .filter(Boolean);
-        const failed = results
-            .map((result, index) => (result.status === "rejected" ? { taskId: eligible[index].task_id, error: result.reason } : null))
-            .filter(Boolean);
+        let succeeded = [];
+        let failed = [];
+        if (action === "delete") {
+            const payload = await ApiClient.bulkDeleteTasks(
+                eligible.map((task) => task.task_id),
+                taskActionRequestOptions(action),
+            );
+            const items = Array.isArray(payload?.items) ? payload.items : [];
+            const itemById = new Map(
+                items
+                    .map((item) => {
+                        const taskId = String(item?.task_id || "").trim();
+                        return taskId ? [taskId, item] : null;
+                    })
+                    .filter(Boolean)
+            );
+            succeeded = eligible
+                .map((task) => {
+                    const item = itemById.get(task.task_id);
+                    return String(item?.result || "").trim().toLowerCase() === "deleted" ? task.task_id : "";
+                })
+                .filter(Boolean);
+            failed = eligible
+                .map((task) => {
+                    const item = itemById.get(task.task_id);
+                    if (String(item?.result || "").trim().toLowerCase() === "deleted") return null;
+                    const error = new Error(String(item?.error || item?.result || "delete_failed").trim() || "delete_failed");
+                    return { taskId: task.task_id, error };
+                })
+                .filter(Boolean);
+        } else {
+            const results = await settleTaskActionBatch(
+                eligible,
+                (task) => requestTaskAction(task.task_id, action),
+                { concurrency: taskBatchActionConcurrency(action) },
+            );
+            succeeded = results
+                .map((result, index) => (result.status === "fulfilled" ? eligible[index].task_id : ""))
+                .filter(Boolean);
+            failed = results
+                .map((result, index) => (result.status === "rejected" ? { taskId: eligible[index].task_id, error: result.reason } : null))
+                .filter(Boolean);
+        }
         await loadTasks();
         if (action === "delete") {
             handleDeletedTasks(succeeded);

@@ -10,6 +10,8 @@ function loadTasksModule({ requestTaskAction } = {}) {
     const context = {
         console,
         Promise,
+        setTimeout,
+        clearTimeout,
         window: {},
         S: {
             view: "tasks",
@@ -29,9 +31,10 @@ function loadTasksModule({ requestTaskAction } = {}) {
             context.__toasts.push(payload);
         },
         ApiClient: {
-            pauseTask: async (taskId) => (requestTaskAction || (async () => ({ ok: true })))(taskId, "pause"),
-            resumeTask: async (taskId) => (requestTaskAction || (async () => ({ ok: true })))(taskId, "resume"),
-            deleteTask: async (taskId) => (requestTaskAction || (async () => ({ ok: true })))(taskId, "delete"),
+            pauseTask: async (taskId, options) => (requestTaskAction || (async () => ({ ok: true })))(taskId, "pause", options),
+            resumeTask: async (taskId, options) => (requestTaskAction || (async () => ({ ok: true })))(taskId, "resume", options),
+            deleteTask: async (taskId, options) => (requestTaskAction || (async () => ({ ok: true })))(taskId, "delete", options),
+            bulkDeleteTasks: async (taskIds, options) => (requestTaskAction || (async () => ({ items: [] })))(taskIds, "bulk-delete", options),
         },
         loadTasks: async () => {
             context.__loadTasksCalls += 1;
@@ -55,7 +58,18 @@ function loadTasksModule({ requestTaskAction } = {}) {
 }
 
 test("performTaskBatchAction shows a readable delete success toast", async () => {
-    const context = loadTasksModule();
+    const context = loadTasksModule({
+        requestTaskAction: async (taskIds, action) => {
+            assert.equal(action, "bulk-delete");
+            assert.deepEqual(taskIds, ["task:1", "task:2"]);
+            return {
+                items: [
+                    { task_id: "task:1", result: "deleted" },
+                    { task_id: "task:2", result: "deleted" },
+                ],
+            };
+        },
+    });
 
     await context.performTaskBatchAction("delete", [
         { task_id: "task:1" },
@@ -64,8 +78,8 @@ test("performTaskBatchAction shows a readable delete success toast", async () =>
 
     assert.deepEqual(context.__deletedTaskIds, ["task:1", "task:2"]);
     assert.equal(context.__loadTasksCalls, 1);
-    assert.equal(context.__toasts.at(-1)?.title, "删除成功");
-    assert.equal(context.__toasts.at(-1)?.text, "已删除 2 个任务");
+    assert.equal(context.__toasts.at(-1)?.title, "\u5220\u9664\u6210\u529f");
+    assert.equal(context.__toasts.at(-1)?.text, "\u5df2\u5220\u9664 2 \u4e2a\u4efb\u52a1");
     assert.equal(context.__toasts.at(-1)?.kind, "success");
 });
 
@@ -80,7 +94,35 @@ test("performTaskBatchAction shows a readable pause success toast", async () => 
     assert.equal(context.__loadTasksCalls, 1);
     assert.equal(context.__loadTaskDetailCalls, 0);
     assert.equal(context.__loadTaskArtifactsCalls, 0);
-    assert.equal(context.__toasts.at(-1)?.title, "暂停成功");
-    assert.equal(context.__toasts.at(-1)?.text, "2 个任务已暂停");
+    assert.equal(context.__toasts.at(-1)?.title, "\u6682\u505c\u6210\u529f");
+    assert.equal(context.__toasts.at(-1)?.text, "2 \u4e2a\u4efb\u52a1\u5df2\u6682\u505c");
+    assert.equal(context.__toasts.at(-1)?.kind, "success");
+});
+
+test("performTaskBatchAction sends one bulk delete request for all eligible tasks", async () => {
+    const calls = [];
+    const context = loadTasksModule({
+        requestTaskAction: async (taskIds, action, options) => {
+            calls.push({ taskIds, action, options });
+            return {
+                items: taskIds.map((taskId) => ({ task_id: taskId, result: "deleted" })),
+            };
+        },
+    });
+
+    await context.performTaskBatchAction("delete", [
+        { task_id: "task:1" },
+        { task_id: "task:2" },
+        { task_id: "task:3" },
+        { task_id: "task:4" },
+    ]);
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].action, "bulk-delete");
+    assert.deepEqual(calls[0].taskIds, ["task:1", "task:2", "task:3", "task:4"]);
+    assert.deepEqual(context.__deletedTaskIds, ["task:1", "task:2", "task:3", "task:4"]);
+    assert.equal(context.__loadTasksCalls, 1);
+    assert.equal(context.__toasts.at(-1)?.title, "\u5220\u9664\u6210\u529f");
+    assert.equal(context.__toasts.at(-1)?.text, "\u5df2\u5220\u9664 4 \u4e2a\u4efb\u52a1");
     assert.equal(context.__toasts.at(-1)?.kind, "success");
 });

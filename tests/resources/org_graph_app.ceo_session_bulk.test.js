@@ -59,6 +59,22 @@ function loadApp() {
         ApiClient: {
             getActiveSessionId: () => "",
             getCeoSessionDeleteCheck: async () => ({ related_tasks: { total: 0, deletable: 0, in_progress: 0 } }),
+            getCeoSessionsBulkDeleteCheck: async () => ({
+                session_ids: [],
+                items: [],
+                related_tasks: { total: 0, deletable: 0, in_progress: 0 },
+                usage: { completed_tasks: [], paused_tasks: [], in_progress_tasks: [] },
+            }),
+            bulkDeleteCeoSessions: async () => ({
+                results: [],
+                deleted_count: 0,
+                failed_count: 0,
+                active_session_id: "",
+                active_session_family: "local",
+                items: [],
+                channel_groups: [],
+            }),
+            deleteCeoSession: async () => ({ items: [], channel_groups: [], active_session_id: "" }),
             getBootstrapExitCheck: async () => ({ has_running_work: false, summary_text: "" }),
         },
         fetch: async () => ({ ok: true, json: async () => ({}) }),
@@ -321,25 +337,41 @@ test("requestDeleteSelectedCeoSessions opens one aggregated confirm dialog", asy
         { session_id: "web:1", title: "Local Alpha", session_family: "local" },
         { session_id: "china:1", title: "Channel Beta", session_family: "channel", session_origin: "china" },
     ];
-    __context.ApiClient.getCeoSessionDeleteCheck = async (sessionId) => (
-        sessionId === "web:1"
-            ? {
-                related_tasks: { total: 1, deletable: 1, in_progress: 0 },
-                usage: {
-                    completed_tasks: ["task:1"],
-                    paused_tasks: [],
-                    in_progress_tasks: [],
+    let bulkDeleteCheckCalls = 0;
+    let receivedSessionIds = null;
+    __context.ApiClient.getCeoSessionsBulkDeleteCheck = async (sessionIds) => {
+        bulkDeleteCheckCalls += 1;
+        receivedSessionIds = [...sessionIds];
+        return {
+            session_ids: ["web:1", "china:1"],
+            items: [
+                {
+                    session_id: "web:1",
+                    related_tasks: { total: 1, deletable: 1, in_progress: 0 },
+                    usage: {
+                        completed_tasks: ["task:1"],
+                        paused_tasks: [],
+                        in_progress_tasks: [],
+                    },
                 },
-            }
-            : {
-                related_tasks: { total: 2, deletable: 1, in_progress: 1 },
-                usage: {
-                    completed_tasks: ["task:1"],
-                    paused_tasks: ["task:2"],
-                    in_progress_tasks: [],
+                {
+                    session_id: "china:1",
+                    related_tasks: { total: 2, deletable: 1, in_progress: 1 },
+                    usage: {
+                        completed_tasks: ["task:1"],
+                        paused_tasks: ["task:2"],
+                        in_progress_tasks: [],
+                    },
                 },
-            }
-    );
+            ],
+            related_tasks: { total: 2, deletable: 2, in_progress: 0 },
+            usage: {
+                completed_tasks: ["task:1"],
+                paused_tasks: ["task:2"],
+                in_progress_tasks: [],
+            },
+        };
+    };
     vm.runInContext(
         "openConfirm = (payload) => { this.__capturedConfirm = payload; };",
         __context
@@ -349,6 +381,8 @@ test("requestDeleteSelectedCeoSessions opens one aggregated confirm dialog", asy
 
     confirmPayload = __context.__capturedConfirm;
 
+    assert.equal(bulkDeleteCheckCalls, 1);
+    assert.deepEqual(receivedSessionIds, ["web:1", "china:1"]);
     assert.ok(confirmPayload);
     assert.equal(confirmPayload.title, "批量清理会话");
     assert.match(confirmPayload.text, /将删除所选 1 个本地会话的聊天记录与附件。/);
@@ -368,7 +402,9 @@ test("requestDeleteSelectedCeoSessions hides task checkbox when no selected sess
     S.ceoSessions = [
         { session_id: "web:1", title: "Local Alpha", session_family: "local" },
     ];
-    __context.ApiClient.getCeoSessionDeleteCheck = async () => ({
+    __context.ApiClient.getCeoSessionsBulkDeleteCheck = async () => ({
+        session_ids: ["web:1"],
+        items: [],
         related_tasks: { total: 0, deletable: 0, in_progress: 0 },
         usage: {
             completed_tasks: [],
@@ -385,4 +421,75 @@ test("requestDeleteSelectedCeoSessions hides task checkbox when no selected sess
 
     assert.ok(__context.__capturedConfirm);
     assert.equal(__context.__capturedConfirm.checkbox, null);
+});
+
+test("requestDeleteSelectedCeoSessions confirm callback uses one bulk delete request", async () => {
+    const { S, requestDeleteSelectedCeoSessions, __context, __makeSet } = loadApp();
+
+    S.ceoSelectedSessionIds = __makeSet(["web:1", "web:2"]);
+    S.ceoSessions = [
+        { session_id: "web:1", title: "Local Alpha", session_family: "local" },
+        { session_id: "web:2", title: "Local Beta", session_family: "local" },
+    ];
+    __context.ApiClient.getCeoSessionsBulkDeleteCheck = async () => ({
+        session_ids: ["web:1", "web:2"],
+        items: [
+            {
+                session_id: "web:1",
+                related_tasks: { total: 0, deletable: 0, in_progress: 0 },
+                usage: { completed_tasks: [], paused_tasks: [], in_progress_tasks: [] },
+            },
+            {
+                session_id: "web:2",
+                related_tasks: { total: 0, deletable: 0, in_progress: 0 },
+                usage: { completed_tasks: [], paused_tasks: [], in_progress_tasks: [] },
+            },
+        ],
+        related_tasks: { total: 0, deletable: 0, in_progress: 0 },
+        usage: { completed_tasks: [], paused_tasks: [], in_progress_tasks: [] },
+    });
+    let bulkDeleteCalls = 0;
+    let receivedDeleteSessionIds = null;
+    let receivedDeletePayload = null;
+    __context.ApiClient.bulkDeleteCeoSessions = async (sessionIds, payload) => {
+        bulkDeleteCalls += 1;
+        receivedDeleteSessionIds = [...sessionIds];
+        receivedDeletePayload = { ...(payload || {}) };
+        return {
+            results: [
+                { session_id: "web:1", deleted: true, deleted_task_count: 0 },
+                { session_id: "web:2", deleted: true, deleted_task_count: 0 },
+            ],
+            deleted_count: 2,
+            failed_count: 0,
+            active_session_id: "",
+            active_session_family: "local",
+            items: [],
+            channel_groups: [],
+        };
+    };
+    vm.runInContext(
+        `
+        openConfirm = (payload) => { this.__capturedConfirm = payload; };
+        applyCeoSessionsPayload = (payload) => payload.active_session_id || "";
+        clearCeoSessionSnapshotCache = () => {};
+        closeCeoWs = () => {};
+        resetCeoSessionState = () => {};
+        clearCeoComposerDraft = () => {};
+        clearCeoBulkSelection = () => { this.__clearBulkSelectionCalls = (this.__clearBulkSelectionCalls || 0) + 1; S.ceoSelectedSessionIds = new Set(); };
+        showToast = (payload) => { this.__lastToast = payload; };
+        renderCeoSessions = () => {};
+        syncCeoSessionActions = () => {};
+        syncCeoPrimaryButton = () => {};
+        `,
+        __context
+    );
+
+    await requestDeleteSelectedCeoSessions();
+    await __context.__capturedConfirm.onConfirm({ checked: true });
+
+    assert.equal(bulkDeleteCalls, 1);
+    assert.deepEqual(receivedDeleteSessionIds, ["web:1", "web:2"]);
+    assert.deepEqual(receivedDeletePayload, { delete_task_records: true });
+    assert.equal(__context.__lastToast.title, "删除完成");
 });

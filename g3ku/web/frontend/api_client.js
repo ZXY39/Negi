@@ -394,8 +394,27 @@ class ApiClient {
         return this.get(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/delete-check`);
     }
 
+    static async getCeoSessionsBulkDeleteCheck(sessionIds = []) {
+        const data = await this._request("POST", "/api/ceo/sessions/delete-check", {
+            body: { session_ids: Array.isArray(sessionIds) ? sessionIds : [] },
+            timeoutMs: 30000,
+        });
+        return data || {};
+    }
+
     static async deleteCeoSession(sessionId, payload = {}) {
         return this.delete(`/api/ceo/sessions/${encodeURIComponent(sessionId)}`, { body: payload || {} });
+    }
+
+    static async bulkDeleteCeoSessions(sessionIds = [], payload = {}) {
+        const data = await this._request("POST", "/api/ceo/sessions/bulk-delete", {
+            body: {
+                session_ids: Array.isArray(sessionIds) ? sessionIds : [],
+                ...(payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {}),
+            },
+            timeoutMs: 30000,
+        });
+        return data || {};
     }
 
     static async uploadCeoFiles(files = [], sessionId = this.getActiveSessionId()) {
@@ -480,8 +499,20 @@ class ApiClient {
         return data.task || null;
     }
 
-    static async deleteTask(taskId) {
-        return this.delete(`/api/tasks/${taskId}`);
+    static async deleteTask(taskId, options = {}) {
+        const normalized = options && typeof options === "object" && !Array.isArray(options) ? options : {};
+        return this._request("DELETE", `/api/tasks/${taskId}`, normalized);
+    }
+
+    static async bulkDeleteTasks(taskIds = [], options = {}) {
+        const normalized = options && typeof options === "object" && !Array.isArray(options) ? options : {};
+        const body = {
+            task_ids: Array.isArray(taskIds) ? taskIds : [],
+        };
+        return this._request("POST", "/api/tasks/bulk-delete", {
+            ...normalized,
+            body,
+        });
     }
 
     static async getTaskArtifacts(taskId) {

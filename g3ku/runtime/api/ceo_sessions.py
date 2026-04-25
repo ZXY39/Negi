@@ -284,6 +284,140 @@ def _session_task_delete_payload(service, session_id: str) -> dict:
     }
 
 
+def _normalize_bulk_session_ids(raw_session_ids) -> list[str]:
+    if not isinstance(raw_session_ids, list):
+        raise HTTPException(status_code=400, detail='session_ids must be an array')
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_session_id in list(raw_session_ids or []):
+        session_id = str(raw_session_id or '').strip()
+        if not session_id or session_id in seen:
+            continue
+        seen.add(session_id)
+        normalized.append(session_id)
+    if not normalized:
+        raise HTTPException(status_code=400, detail='session_ids must not be empty')
+    return normalized
+
+
+def _resolve_bulk_session_key(session_manager, runtime_manager, state_store, session_id: str) -> tuple[str, bool]:
+    if _is_channel_session_id(session_id):
+        resolved_session_id, _catalog = _assert_known_catalog_session(
+            session_manager,
+            runtime_manager,
+            state_store,
+            session_id,
+        )
+        return resolved_session_id, True
+    session = _assert_known_session(session_manager, session_id)
+    return session.key, False
+
+
+def _aggregate_session_delete_payloads(items: list[dict]) -> dict:
+    completed_by_id: dict[str, dict] = {}
+    paused_by_id: dict[str, dict] = {}
+    in_progress_by_id: dict[str, dict] = {}
+
+    def _merge(target: dict[str, dict], values) -> None:
+        for item in list(values or []):
+            if not isinstance(item, dict):
+                continue
+            task_id = str(item.get('task_id') or '').strip()
+            if not task_id or task_id in target:
+                continue
+            target[task_id] = dict(item)
+
+    for item in list(items or []):
+        usage = item.get('usage') if isinstance(item, dict) else {}
+        if not isinstance(usage, dict):
+            usage = {}
+        _merge(completed_by_id, usage.get('completed_tasks'))
+        _merge(paused_by_id, usage.get('paused_tasks'))
+        _merge(in_progress_by_id, usage.get('in_progress_tasks') or usage.get('tasks'))
+
+    total_task_ids = set(completed_by_id) | set(paused_by_id) | set(in_progress_by_id)
+    deletable_task_ids = set(completed_by_id) | set(paused_by_id)
+    return {
+        'session_ids': [str(item.get('session_id') or '').strip() for item in list(items or []) if str(item.get('session_id') or '').strip()],
+        'items': items,
+        'related_tasks': {
+            'total': len(total_task_ids),
+            'unfinished': len(in_progress_by_id),
+            'in_progress': len(in_progress_by_id),
+            'paused': len(paused_by_id),
+            'terminal': len(deletable_task_ids),
+            'deletable': len(deletable_task_ids),
+        },
+        'usage': {
+            'tasks': list(in_progress_by_id.values()),
+            'completed_tasks': list(completed_by_id.values()),
+            'paused_tasks': list(paused_by_id.values()),
+            'in_progress_tasks': list(in_progress_by_id.values()),
+        },
+    }
+
+
+async def _delete_single_ceo_session(
+    agent,
+    session_manager,
+    runtime_manager,
+    service,
+    *,
+    session_key: str,
+    is_channel_session: bool,
+    delete_task_records: bool,
+) -> dict:
+    stopped_background_tool_count = 0
+    tool_execution_manager = getattr(agent, 'tool_execution_manager', None)
+    if tool_execution_manager is not None and hasattr(tool_execution_manager, 'stop_session_executions'):
+        stopped_results = await tool_execution_manager.stop_session_executions(
+            session_key,
+            reason='session_cleared' if is_channel_session else 'session_deleted',
+        )
+        stopped_background_tool_count = len(list(stopped_results or []))
+    heartbeat = get_web_heartbeat_service(agent)
+    if heartbeat is not None:
+        heartbeat.clear_session(session_key)
+    deleted_task_count = 0
+    if delete_task_records:
+        deleted_task_count = await service.delete_task_records_for_session(session_key)
+    memory_manager = getattr(agent, 'memory_manager', None) if agent is not None else None
+    if memory_manager is not None:
+        try:
+            memory_manager.clear_review_window(session_key=session_key)
+        except Exception:
+            pass
+    delete_web_ceo_session_artifacts(
+        session_manager=session_manager,
+        session_id=session_key,
+        task_service=service,
+    )
+    remover = getattr(runtime_manager, "remove", None)
+    if callable(remover):
+        remover(session_key)
+    cancel = getattr(agent, "cancel_session_tasks", None)
+    if callable(cancel):
+        await cancel(session_key)
+    purge_checkpointer_thread = getattr(agent, "purge_checkpointer_thread", None)
+    if callable(purge_checkpointer_thread):
+        try:
+            await purge_checkpointer_thread(session_key)
+        except Exception as exc:
+            logger.warning(
+                "Failed to purge SQLite checkpointer thread during CEO session delete "
+                "(session_key={}): {}",
+                session_key,
+                exc,
+            )
+    return {
+        "session_id": session_key,
+        "deleted": not is_channel_session,
+        "cleared": is_channel_session,
+        "deleted_task_count": deleted_task_count,
+        "stopped_background_tool_count": stopped_background_tool_count,
+    }
+
+
 def _task_defaults_response(session) -> dict:
     depth_limits = main_runtime_depth_limits()
     metadata = getattr(session, "metadata", None) or {}
@@ -556,75 +690,46 @@ async def get_ceo_session_delete_check(session_id: str):
     return _session_task_delete_payload(service, session.key)
 
 
-@router.delete("/ceo/sessions/{session_id}")
-async def delete_ceo_session(session_id: str, payload: dict | None = Body(default=None)):
+@router.post('/ceo/sessions/delete-check')
+async def get_ceo_sessions_bulk_delete_check(payload: dict | None = Body(default=None)):
     agent, session_manager, runtime_manager, state_store = _sessions()
     service = await _task_service(agent)
-    is_channel_session = _is_channel_session_id(session_id)
-    if is_channel_session:
-        resolved_session_id, _catalog = _assert_known_catalog_session(
+    session_ids = _normalize_bulk_session_ids((payload or {}).get('session_ids'))
+    items: list[dict] = []
+    for session_id in session_ids:
+        session_key, _is_channel_session = _resolve_bulk_session_key(
             session_manager,
             runtime_manager,
             state_store,
             session_id,
         )
-        session_key = resolved_session_id
-    else:
-        session = _assert_known_session(session_manager, session_id)
-        session_key = session.key
-    stopped_background_tool_count = 0
-    tool_execution_manager = getattr(agent, 'tool_execution_manager', None)
-    if tool_execution_manager is not None and hasattr(tool_execution_manager, 'stop_session_executions'):
-        stopped_results = await tool_execution_manager.stop_session_executions(
-            session_key,
-            reason='session_cleared' if is_channel_session else 'session_deleted',
-        )
-        stopped_background_tool_count = len(list(stopped_results or []))
-    heartbeat = get_web_heartbeat_service(agent)
-    if heartbeat is not None:
-        heartbeat.clear_session(session_key)
+        items.append(_session_task_delete_payload(service, session_key))
+    return {'ok': True, **_aggregate_session_delete_payloads(items)}
+
+
+@router.delete("/ceo/sessions/{session_id}")
+async def delete_ceo_session(session_id: str, payload: dict | None = Body(default=None)):
+    agent, session_manager, runtime_manager, state_store = _sessions()
+    service = await _task_service(agent)
+    session_key, is_channel_session = _resolve_bulk_session_key(
+        session_manager,
+        runtime_manager,
+        state_store,
+        session_id,
+    )
     delete_task_records = bool((payload or {}).get('delete_task_records'))
-    deleted_task_count = 0
-    if delete_task_records:
-        try:
-            deleted_task_count = await service.delete_task_records_for_session(session_key)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    memory_manager = getattr(agent, 'memory_manager', None) if agent is not None else None
-    if memory_manager is not None:
-        try:
-            memory_manager.clear_review_window(session_key=session_key)
-        except Exception:
-            pass
-    if is_channel_session:
-        delete_web_ceo_session_artifacts(
-            session_manager=session_manager,
-            session_id=session_key,
-            task_service=service,
+    try:
+        result = await _delete_single_ceo_session(
+            agent,
+            session_manager,
+            runtime_manager,
+            service,
+            session_key=session_key,
+            is_channel_session=is_channel_session,
+            delete_task_records=delete_task_records,
         )
-    else:
-        delete_web_ceo_session_artifacts(
-            session_manager=session_manager,
-            session_id=session_key,
-            task_service=service,
-        )
-    remover = getattr(runtime_manager, "remove", None)
-    if callable(remover):
-        remover(session_key)
-    cancel = getattr(agent, "cancel_session_tasks", None)
-    if callable(cancel):
-        await cancel(session_key)
-    purge_checkpointer_thread = getattr(agent, "purge_checkpointer_thread", None)
-    if callable(purge_checkpointer_thread):
-        try:
-            await purge_checkpointer_thread(session_key)
-        except Exception as exc:
-            logger.warning(
-                "Failed to purge SQLite checkpointer thread during CEO session delete "
-                "(session_key={}): {}",
-                session_key,
-                exc,
-            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
     state_store.set_active_session_id(active_session_id)
     catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
@@ -638,13 +743,83 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
     )
     return {
         "ok": True,
-        "deleted": not is_channel_session,
-        "cleared": is_channel_session,
-        "session_id": session_key,
-        "deleted_task_count": deleted_task_count,
-        "stopped_background_tool_count": stopped_background_tool_count,
+        **result,
         "items": catalog.get("items") or [],
         "channel_groups": catalog.get("channel_groups") or [],
         "active_session_id": active_session_id,
         "active_session_family": catalog.get("active_session_family") or "local",
+    }
+
+
+@router.post("/ceo/sessions/bulk-delete")
+async def bulk_delete_ceo_sessions(payload: dict | None = Body(default=None)):
+    agent, session_manager, runtime_manager, state_store = _sessions()
+    service = await _task_service(agent)
+    session_ids = _normalize_bulk_session_ids((payload or {}).get('session_ids'))
+    delete_task_records = bool((payload or {}).get('delete_task_records'))
+    results: list[dict] = []
+    deleted_count = 0
+    failed_count = 0
+    for session_id in session_ids:
+        try:
+            session_key, is_channel_session = _resolve_bulk_session_key(
+                session_manager,
+                runtime_manager,
+                state_store,
+                session_id,
+            )
+            result = await _delete_single_ceo_session(
+                agent,
+                session_manager,
+                runtime_manager,
+                service,
+                session_key=session_key,
+                is_channel_session=is_channel_session,
+                delete_task_records=delete_task_records,
+            )
+            result['result'] = 'deleted' if result.get('deleted') else 'cleared'
+            results.append(result)
+            deleted_count += 1
+        except HTTPException as exc:
+            failed_count += 1
+            results.append({
+                'session_id': session_id,
+                'result': 'failed',
+                'error': str(exc.detail or 'session_delete_failed'),
+                'deleted': False,
+                'cleared': False,
+                'deleted_task_count': 0,
+                'stopped_background_tool_count': 0,
+            })
+        except ValueError as exc:
+            failed_count += 1
+            results.append({
+                'session_id': session_id,
+                'result': 'failed',
+                'error': str(exc or 'session_delete_failed').strip() or 'session_delete_failed',
+                'deleted': False,
+                'cleared': False,
+                'deleted_task_count': 0,
+                'stopped_background_tool_count': 0,
+            })
+    active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
+    state_store.set_active_session_id(active_session_id)
+    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
+    _publish_ceo_sessions_snapshot(
+        agent,
+        session_manager,
+        runtime_manager,
+        state_store,
+        catalog=catalog,
+        active_session_id=active_session_id,
+    )
+    return {
+        'ok': True,
+        'results': results,
+        'deleted_count': deleted_count,
+        'failed_count': failed_count,
+        'items': catalog.get('items') or [],
+        'channel_groups': catalog.get('channel_groups') or [],
+        'active_session_id': active_session_id,
+        'active_session_family': catalog.get('active_session_family') or 'local',
     }

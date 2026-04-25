@@ -222,6 +222,10 @@ The backend contract behind that UI behavior is:
 - The browser task hall now only exposes `pause`, `resume`, and `delete` task actions.
 - `retry`, `continue-evaluate`, and `open continuation` actions are removed from both the UI flow and the REST surface.
 - Task list and task detail status pills now derive from the current task `status` plus final-acceptance state; legacy continuation metadata fields are ignored even if older task records still carry them.
+- The task-hall multi-select `閫夋嫨` menu now has six backend-aligned buckets: `宸叉殏鍋? / `瀹屾垚` / `鏈` / `澶辫触` / `鏈€氳繃` / `杩涜涓?`.
+- `瀹屾垚` means strict `taskStatusKey(task) === "success"`, while `鏈€氳繃` means strict `taskStatusKey(task) === "unpassed"`. Maintainers should not fold `unpassed` into the failed bucket just because final acceptance ended in a business rejection.
+- Task-hall batch delete is now a backend-owned contract: the browser sends one `POST /api/tasks/bulk-delete` request with `task_ids` instead of fanning out one `DELETE /api/tasks/{task_id}` call per selected row.
+- The batch-delete response is per-task, not all-or-nothing. Frontend code should interpret each returned `items[]` row's `result` (`deleted`, `not_found`, `failed`) before choosing success/warn/error toast behavior.
 
 ### Task Message Distribution UI Contract
 
@@ -264,6 +268,12 @@ The backend contract behind that UI behavior is:
 - The session list distinguishes between "session switch is still settling" and "session catalog is being mutated".
 - Frontend `ceoSessionBusy` means the active-session switch is still waiting for the new CEO websocket snapshot / connection state to settle. This is a session-view readiness flag, not a general catalog lock.
 - Frontend `ceoSessionCatalogBusy` means the session catalog itself is being refreshed or mutated by create / rename / delete / bulk-delete checks.
+- Browser-side bulk session delete-check is now its own backend contract: `POST /api/ceo/sessions/delete-check` with `session_ids`.
+- Browser-side bulk session delete execution is also backend-owned: `POST /api/ceo/sessions/bulk-delete` with `session_ids` plus one shared `delete_task_records` flag for the whole confirmed batch.
+- Those batch session endpoints must return two different lanes in one payload:
+  - per-session delete results (`results[]`) for success/failure accounting
+  - the refreshed session catalog (`items`, `channel_groups`, `active_session_id`) for normal sidebar rebuild
+- The frontend should no longer loop `getCeoSessionDeleteCheck(...)` or `deleteCeoSession(...)` once per selected session when doing a bulk action. If an operator reports partial bulk-delete weirdness, inspect the batch routes first rather than assuming a frontend sequencing bug.
 
 The intended operator-visible behavior is:
 
@@ -285,6 +295,7 @@ Do not treat `ceoSessionBusy` as equivalent to "all session-list mutations must 
 
 - In the CEO session UI, deleting a local session and deleting a channel session are intentionally different operations.
 - Deleting a local session removes the session record itself. Deleting a channel session is a clear operation: the channel/account entry remains available, but the next reopened conversation must start from empty session context.
+- In the batch-delete contract, mixed local and channel selections are allowed in one request. Result rows therefore distinguish `deleted=true` local removals from `cleared=true` channel clears even though the refreshed catalog still arrives as one post-mutation snapshot.
 - Backend clear handling for channel sessions must remove the persisted `SessionManager` transcript for that `china:*` session key, invalidate any in-memory cached session object, and clear the same side artifacts that local-session deletion clears for that session id, including inflight snapshots, paused execution context, completed continuity sidecars, uploads, and frontdoor stage-archive artifacts.
 - Both local-session delete and channel-session clear now also ask the runtime to purge SQLite checkpointer rows for that exact session key. If the transcript is gone but old state still appears to resurrect after reopen, inspect the checkpointer purge path before blaming frontend cache.
 - For DM channel rows, the catalog entry may still remain visible after clear because it is synthesized from enabled channel-account configuration rather than from transcript persistence alone.

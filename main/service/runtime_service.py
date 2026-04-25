@@ -1191,6 +1191,41 @@ class MainRuntimeService:
         await self.registry.forget_task(task.session_id, task_id)
         return task
 
+    async def bulk_delete_tasks(self, task_ids: list[str] | None) -> dict[str, Any]:
+        normalized_task_ids = self._normalize_task_id_list(task_ids, allow_empty=False)
+        items: list[dict[str, Any]] = []
+        deleted_count = 0
+        failed_count = 0
+        for task_id in normalized_task_ids:
+            try:
+                deleted = await self.delete_task(task_id)
+            except ValueError as exc:
+                items.append({
+                    'task_id': task_id,
+                    'result': 'failed',
+                    'error': str(exc or 'delete_failed').strip() or 'delete_failed',
+                })
+                failed_count += 1
+                continue
+            if deleted is None:
+                items.append({
+                    'task_id': task_id,
+                    'result': 'not_found',
+                    'error': 'task_not_found',
+                })
+                failed_count += 1
+                continue
+            items.append({
+                'task_id': task_id,
+                'result': 'deleted',
+            })
+            deleted_count += 1
+        return {
+            'items': items,
+            'deleted_count': deleted_count,
+            'failed_count': failed_count,
+        }
+
     async def _delete_task_with_task_delete_semantics(self, task_id: str) -> TaskRecord | None:
         task = self.get_task(task_id)
         if task is None:

@@ -385,6 +385,59 @@ def test_task_status_helpers_treat_unpassed_as_non_failed_without_continue_actio
     assert result["actions"] == ["delete"]
 
 
+def test_task_selection_menu_exposes_completed_and_unpassed_buckets() -> None:
+    html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
+
+    assert 'data-select-bucket="completed"' in html
+    assert 'data-select-bucket="unpassed"' in html
+
+
+def test_task_status_helpers_match_completed_and_unpassed_selection_buckets() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {};
+        global.U = {};
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const pStatusStart = appCode.indexOf("const pStatus");
+        const helperStart = appCode.indexOf("const canPause");
+        const helperEnd = appCode.indexOf("function normalizeTokenUsage");
+        vm.runInThisContext(appCode.slice(pStatusStart, helperStart));
+        vm.runInThisContext(appCode.slice(helperStart, helperEnd));
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const labelStart = tasksCode.indexOf("function taskStatusLabel");
+        const labelEnd = tasksCode.indexOf("function getSelectedTasks");
+        vm.runInThisContext(tasksCode.slice(labelStart, labelEnd));
+
+        const completed = {
+          task_id: "task:done",
+          status: "success",
+        };
+        const unpassed = {
+          task_id: "task:unpassed",
+          status: "success",
+          failure_class: "business_unpassed",
+          final_acceptance: { status: "failed" },
+        };
+
+        console.log(JSON.stringify({
+          completedBucket: statusBucketMatches(completed, "completed"),
+          completedFailedBucket: statusBucketMatches(completed, "failed"),
+          unpassedBucket: statusBucketMatches(unpassed, "unpassed"),
+          unpassedCompletedBucket: statusBucketMatches(unpassed, "completed"),
+        }));
+        """
+    )
+
+    assert result["completedBucket"] is True
+    assert result["completedFailedBucket"] is False
+    assert result["unpassedBucket"] is True
+    assert result["unpassedCompletedBucket"] is False
+
+
 def test_task_status_helpers_ignore_legacy_continuation_metadata() -> None:
     result = _run_node_script(
         """

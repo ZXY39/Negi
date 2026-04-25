@@ -8063,12 +8063,45 @@ async function requestDeleteCeoSession(sessionId) {
 async function performDeleteSelectedCeoSessions(sessionIds = [], { deleteTaskRecords = false } = {}) {
     const ids = [...new Set((Array.isArray(sessionIds) ? sessionIds : []).map((sessionId) => String(sessionId || "").trim()).filter(Boolean))];
     if (!ids.length) return;
+    const previousActiveId = activeSessionId();
+    S.ceoSessionCatalogBusy = true;
+    renderCeoSessions();
+    syncCeoPrimaryButton();
     let successCount = 0;
     let failureCount = 0;
-    for (const sessionId of ids) {
-        const success = await performDeleteCeoSession(sessionId, { deleteTaskRecords, refreshTasks: false });
-        if (success) successCount += 1;
-        else failureCount += 1;
+    try {
+        const payload = await ApiClient.bulkDeleteCeoSessions(ids, { delete_task_records: !!deleteTaskRecords });
+        const results = Array.isArray(payload?.results) ? payload.results : [];
+        const succeededIds = results
+            .map((item) => {
+                const result = String(item?.result || "").trim().toLowerCase();
+                return (result === "deleted" || result === "cleared") ? String(item?.session_id || "").trim() : "";
+            })
+            .filter(Boolean);
+        successCount = Number.isFinite(Number(payload?.deleted_count)) ? Number(payload.deleted_count) : succeededIds.length;
+        failureCount = Number.isFinite(Number(payload?.failed_count))
+            ? Number(payload.failed_count)
+            : Math.max(0, ids.length - successCount);
+        succeededIds.forEach((sessionId) => {
+            clearCeoSessionSnapshotCache(sessionId);
+            clearCeoComposerDraft(sessionId);
+        });
+        const nextActiveId = applyCeoSessionsPayload(payload);
+        if (succeededIds.includes(previousActiveId)) {
+            closeCeoWs();
+            resetCeoSessionState({ scrollToLatest: true });
+            if (nextActiveId) {
+                S.ceoSessionBusy = true;
+                initCeoWs();
+            }
+        }
+    } catch (e) {
+        showToast({ title: "删除失败", text: e.message || "Unknown error", kind: "error" });
+        return;
+    } finally {
+        S.ceoSessionCatalogBusy = false;
+        renderCeoSessions();
+        syncCeoPrimaryButton();
     }
     clearCeoBulkSelection();
     if (S.view === "tasks" && successCount > 0) await loadTasks();
@@ -8109,11 +8142,16 @@ async function requestDeleteSelectedCeoSessions() {
     syncCeoPrimaryButton();
     let entries = [];
     try {
-        entries = await Promise.all(selectedItems.map(async (item) => ({
-            item,
-            session_id: String(item?.session_id || "").trim(),
-            deleteCheck: await ApiClient.getCeoSessionDeleteCheck(String(item?.session_id || "").trim()),
-        })));
+        const payload = await ApiClient.getCeoSessionsBulkDeleteCheck(selectedIds);
+        const deleteCheckItems = Array.isArray(payload?.items) ? payload.items : [];
+        const selectedById = new Map(
+            selectedItems.map((item) => [String(item?.session_id || "").trim(), item]).filter((entry) => !!entry[0])
+        );
+        entries = deleteCheckItems.map((deleteCheck) => ({
+            item: selectedById.get(String(deleteCheck?.session_id || "").trim()) || null,
+            session_id: String(deleteCheck?.session_id || "").trim(),
+            deleteCheck,
+        }));
     } catch (e) {
         S.ceoSessionCatalogBusy = false;
         renderCeoSessions();
