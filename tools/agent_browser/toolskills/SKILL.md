@@ -42,7 +42,7 @@ $env:PLAYWRIGHT_BROWSERS_PATH = "<workspace>\\externaltools\\agent_browser\\brow
 
 - 更新时不要做全局安装，也不要写入 `tools/agent_browser/`。
 - 先把临时下载 / 缓存放到 `temp/agent_browser/`，再在 `externaltools/agent_browser/` 内原地升级。
-- 当前清单锁定的上游版本是 `v0.22.2`；若升级版本，必须同时更新：
+- 当前清单锁定的上游版本是 `v0.26.0`；若升级版本，必须同时更新：
   - `tools/agent_browser/resource.yaml -> source.ref`
   - `tools/agent_browser/resource.yaml -> current_version`
   - 本文件中的安装 / 更新说明

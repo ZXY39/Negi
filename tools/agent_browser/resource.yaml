@@ -8,9 +8,9 @@ tool_type: internal
 source:
   type: git
   url: https://github.com/vercel-labs/agent-browser
-  ref: v0.22.2
+  ref: v0.26.0
 current_version:
-  summary: Internal wrapper plus pinned upstream agent-browser CLI v0.22.2, installed under externaltools/agent_browser.
+  summary: Internal wrapper plus pinned upstream agent-browser CLI v0.26.0, installed under externaltools/agent_browser.
   compare_rule: Update when the wrapper interface, settings, local install contract, or pinned upstream CLI version changes.
   source_of_truth: This manifest plus tools/agent_browser/main/tool.py and tools/agent_browser/toolskills/SKILL.md.
 protocol: mcp

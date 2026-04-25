@@ -1973,39 +1973,53 @@ function buildTaskTreeRecoveryBubble(text) {
     return bubble;
 }
 
+function taskDistributionPendingNoticeNodeIds(distribution = null) {
+    if (!distribution || typeof distribution !== "object") return [];
+    return (Array.isArray(distribution.pending_notice_node_ids) ? distribution.pending_notice_node_ids : [])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean);
+}
+
+function taskDistributionPendingNoticeAlreadyVisible(distribution = null) {
+    const pendingNodeIds = taskDistributionPendingNoticeNodeIds(distribution);
+    if (!pendingNodeIds.length) return false;
+    return pendingNodeIds.every((nodeId) => {
+        const snapshotNode = treeSnapshotNode(nodeId);
+        return Math.max(0, treeNormalizeInt(snapshotNode?.pending_notice_count, 0)) > 0;
+    });
+}
+
 function activeTaskDistributionState() {
     const distribution = S.taskRuntimeSummary?.distribution;
     if (distribution && typeof distribution === "object") {
         const activeEpochId = String(distribution.active_epoch_id || "").trim();
         const state = String(distribution.state || "").trim();
         const mode = String(distribution.mode || "").trim();
+        const hasBlockedNodes = Array.isArray(distribution.blocked_node_ids) && distribution.blocked_node_ids.length > 0;
+        const pendingNoticeAlreadyVisible = taskDistributionPendingNoticeAlreadyVisible(distribution);
         if (state === "resume_ready") {
+            if (pendingNoticeAlreadyVisible) return null;
             return { ...distribution, ui_mode: "pending_notice" };
         }
         if (mode === "task_wide_barrier") {
             if (
                 activeEpochId
-                || state
-                || (Array.isArray(distribution.blocked_node_ids) && distribution.blocked_node_ids.length)
-                || (Array.isArray(distribution.pending_notice_node_ids) && distribution.pending_notice_node_ids.length)
+                || state === "barrier_requested"
+                || state === "barrier_draining"
+                || state === "distributing"
+                || hasBlockedNodes
             ) {
                 return { ...distribution, ui_mode: "distribution" };
             }
         }
-        if (activeEpochId || state) {
+        if (
+            activeEpochId
+            || state === "barrier_requested"
+            || state === "barrier_draining"
+            || state === "distributing"
+        ) {
             return { ...distribution, ui_mode: "distribution" };
         }
-    }
-    const rootNode = treeSnapshotNode(S.treeRootNodeId);
-    const pendingNoticeCount = Math.max(0, treeNormalizeInt(rootNode?.pending_notice_count, 0));
-    if (pendingNoticeCount > 0) {
-        return {
-            active_epoch_id: "",
-            state: "",
-            frontier_node_ids: [],
-            pending_notice_count: pendingNoticeCount,
-            ui_mode: "pending_notice",
-        };
     }
     return null;
 }

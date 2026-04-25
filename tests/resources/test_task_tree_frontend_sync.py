@@ -2785,7 +2785,7 @@ def test_render_tree_shows_distribution_notice_and_forces_yellow_connector_mode(
     assert result["noticeText"] == "接收到新消息，分发中"
 
 
-def test_render_tree_shows_pending_notice_banner_when_distribution_already_completed() -> None:
+def test_render_tree_hides_distribution_notice_when_only_node_pending_notice_remains() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -2904,7 +2904,7 @@ def test_render_tree_shows_pending_notice_banner_when_distribution_already_compl
         """
     )
 
-    assert result["noticeText"] == "接收到新消息，等待节点处理"
+    assert result["noticeText"] == ""
 
 
 def test_build_execution_trace_steps_no_longer_inserts_notice_pseudo_stage() -> None:
@@ -2961,7 +2961,7 @@ def test_build_execution_trace_steps_no_longer_inserts_notice_pseudo_stage() -> 
     assert "消息通知" not in result["titles"]
 
 
-def test_render_tree_shows_pending_notice_banner_for_resume_ready_barrier() -> None:
+def test_render_tree_hides_resume_ready_notice_after_pending_message_lands_on_node() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -3094,10 +3094,7 @@ def test_render_tree_shows_pending_notice_banner_for_resume_ready_barrier() -> N
         """
     )
 
-    assert result["noticeText"] == "\u63a5\u6536\u5230\u65b0\u6d88\u606f\uff0c\u7b49\u5f85\u8282\u70b9\u5904\u7406"
-    return
-
-    assert result["noticeText"] == "鎺ユ敹鍒版柊娑堟伅锛岀瓑寰呰妭鐐瑰鐞?"
+    assert result["noticeText"] == ""
 
 
 def test_render_tree_shows_pending_notice_banner_for_resume_ready_without_mode() -> None:
@@ -3176,7 +3173,7 @@ def test_render_tree_shows_pending_notice_banner_for_resume_ready_without_mode()
               rounds: [],
               auxiliary_child_ids: [],
               default_round_id: "",
-              pending_notice_count: 1,
+              pending_notice_count: 0,
             },
           },
           treeView: null,
