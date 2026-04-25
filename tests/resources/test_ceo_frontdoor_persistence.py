@@ -1046,8 +1046,10 @@ async def test_ceo_frontdoor_call_model_returns_json_safe_response_payload(
         },
         "provider_request_body": {
             "model": "gpt-5.4-mini",
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": "list files"}]}],
             "tool_choice": "auto",
+            "input_count": 1,
+            "tools_count": 0,
+            "contains_multimodal": False,
         },
     }
     json.dumps(update["response_payload"])
@@ -1779,6 +1781,66 @@ def test_memory_assembly_config_exposes_frontdoor_runtime_defaults() -> None:
     assert not hasattr(config, "frontdoor_summarizer_keep_message_count")
     assert config.frontdoor_interrupt_approval_enabled is False
     assert config.frontdoor_interrupt_tool_names == ["create_async_task"]
+
+
+def test_checkpoint_safe_model_response_payload_summarizes_provider_request_body() -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    payload = runner._checkpoint_safe_model_response_payload(
+        AIMessage(
+            content="ok",
+            response_metadata={
+                "provider_request_meta": {"provider": "responses"},
+                "provider_request_body": {
+                    "model": "gpt-5.4-mini",
+                    "input": [
+                        {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_image",
+                                    "image_url": "data:image/jpeg;base64," + ("A" * 2000),
+                                }
+                            ],
+                        },
+                    ],
+                    "tools": [{"type": "function", "name": "exec"}],
+                    "prompt_cache_key": "cache-key",
+                    "tool_choice": "auto",
+                },
+            },
+        )
+    )
+
+    body = dict(payload["provider_request_body"] or {})
+    assert body["model"] == "gpt-5.4-mini"
+    assert body["input_count"] == 2
+    assert body["tools_count"] == 1
+    assert body["contains_multimodal"] is True
+    assert body["prompt_cache_key"] == "cache-key"
+    assert "input" not in body
+    assert "tools" not in body
+
+
+def test_checkpoint_safe_stable_messages_strip_multimodal_payloads() -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look at this"},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + ("B" * 2000)}},
+            ],
+        },
+    ]
+
+    durable = runner._checkpoint_safe_stable_messages(messages)
+
+    assert durable[0]["content"] == "SYSTEM"
+    serialized = json.dumps(durable, ensure_ascii=False)
+    assert "data:image" not in serialized
+    assert "base64" not in serialized
 
 
 @pytest.mark.asyncio

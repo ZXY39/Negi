@@ -1904,6 +1904,9 @@ def test_ceo_session_delete_stops_detached_background_tool_executions(tmp_path: 
         captured['cancelled_session'] = session_key
         return 0
 
+    async def _purge_checkpointer_thread(session_key: str) -> None:
+        captured['purged_checkpointer_thread'] = session_key
+
     from g3ku.runtime.api import ceo_sessions
 
     app = FastAPI()
@@ -1913,6 +1916,7 @@ def test_ceo_session_delete_stops_detached_background_tool_executions(tmp_path: 
         main_task_service=_TaskService(),
         tool_execution_manager=_ToolExecutionManager(),
         cancel_session_tasks=_cancel_session_tasks,
+        purge_checkpointer_thread=_purge_checkpointer_thread,
     )
     ceo_sessions.get_runtime_manager = lambda _agent: _RuntimeManager()
     ceo_sessions.get_web_heartbeat_service = lambda _agent: _Heartbeat()
@@ -1933,6 +1937,7 @@ def test_ceo_session_delete_stops_detached_background_tool_executions(tmp_path: 
         'heartbeat_cleared': current.key,
         'removed_session': current.key,
         'cancelled_session': current.key,
+        'purged_checkpointer_thread': current.key,
     }
 
 

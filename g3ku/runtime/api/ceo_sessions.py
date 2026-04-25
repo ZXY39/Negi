@@ -5,6 +5,7 @@ from inspect import isawaitable
 from types import SimpleNamespace
 
 from fastapi import APIRouter, Body, HTTPException, Query
+from loguru import logger
 
 from g3ku.runtime.frontdoor.checkpoint_inspection import (
     get_frontdoor_checkpoint,
@@ -613,6 +614,17 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
     cancel = getattr(agent, "cancel_session_tasks", None)
     if callable(cancel):
         await cancel(session_key)
+    purge_checkpointer_thread = getattr(agent, "purge_checkpointer_thread", None)
+    if callable(purge_checkpointer_thread):
+        try:
+            await purge_checkpointer_thread(session_key)
+        except Exception as exc:
+            logger.warning(
+                "Failed to purge SQLite checkpointer thread during CEO session delete "
+                "(session_key={}): {}",
+                session_key,
+                exc,
+            )
     active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
     state_store.set_active_session_id(active_session_id)
     catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
