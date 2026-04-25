@@ -557,10 +557,7 @@ class NodeRunner:
                     'message_source': 'fresh',
                     'request_body_seed_messages': request_body_seed_messages,
                 }
-            messages = (
-                [dict(item) for item in list(request_body_seed_messages or []) if isinstance(item, dict)]
-                or await self._base_messages_for_reactivated_or_live_node(task=task, node=node)
-            )
+            messages = await self._notice_resume_messages(task=task, node=node)
             messages = self._append_notice_messages(messages=messages, notices=notifications)
             messages = self._append_notice_messages(messages=messages, notices=pending_root_notice_records)
             self._close_active_stage_for_message_consumption(task_id=task.task_id, node_id=node.node_id)
@@ -659,6 +656,24 @@ class NodeRunner:
             if message_list:
                 return message_list
         return []
+
+    async def _notice_resume_messages(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
+        frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
+        if isinstance(frame.get('messages'), list) and frame.get('messages'):
+            return [dict(item) for item in list(frame.get('messages') or []) if isinstance(item, dict)]
+        metadata = dict(node.metadata or {})
+        ref = str(metadata.get('latest_runtime_messages_ref') or '').strip()
+        if ref:
+            resolved = str(self._log_service.resolve_content_ref(ref) or '').strip()
+            if resolved:
+                try:
+                    parsed = json.loads(resolved)
+                except Exception:
+                    parsed = None
+                message_list = self._message_list_from_payload(parsed)
+                if message_list:
+                    return message_list
+        return await self._build_messages(task=task, node=node)
 
     async def _base_messages_for_reactivated_or_live_node(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
         frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}

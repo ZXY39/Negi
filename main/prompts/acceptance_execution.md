@@ -7,7 +7,7 @@
 - 用户消息包含 JSON 格式的验收上下文。
 - 用户消息中的稳定 JSON 上下文至少包含 `prompt`、`goal`、`core_requirement`、`execution_policy`、`runtime_environment`。
 {{> node_runtime_contract_shared.md}}
-- `prompt` 是当前验收任务；`core_requirement` 是整棵任务树的核心需求。验收时不能只看局部结论而忽略 `core_requirement`。
+- `prompt` 是当前验收任务；`core_requirement` 是整棵任务树的核心需求。验收时可作为任务方向是否跑偏的判断依据，即完成的任务是否在为核心需求服务。
 - `runtime_environment` 是当前节点的权威运行环境和工具约束；涉及路径、工作目录、解释器、shell 行为时，优先遵循其中的 `path_policy` 与 `tool_guidance`。
 - 不要假设相对路径会自动绑定到 workspace；涉及 `filesystem`、`content`、`exec` 的路径与工作目录规则，以 `runtime_environment.path_policy` 为准。
 - 当解释器选择必须精确一致时，优先使用 `runtime_environment.project_python_hint`。

@@ -7229,7 +7229,7 @@ async def test_run_node_after_restart_reuses_persisted_actual_request_prefix_for
 
 
 @pytest.mark.asyncio
-async def test_pending_notice_appends_after_persisted_provider_input_prefix(tmp_path: Path):
+async def test_pending_notice_keeps_provider_seed_messages_while_request_history_appends_notice(tmp_path: Path):
     store_path = tmp_path / "runtime.sqlite3"
     tasks_dir = tmp_path / "tasks"
     artifacts_dir = tmp_path / "artifacts"
@@ -7366,6 +7366,7 @@ async def test_pending_notice_appends_after_persisted_provider_input_prefix(tmp_
         assert root is not None
 
         react_state = await restarted.node_runner._resume_react_state(task=task, node=root)
+        assert react_state["request_body_seed_messages"] == previous_provider_input
         tools = {
             "submit_next_stage": SubmitNextStageTool(
                 lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs, final: restarted.node_runner._submit_next_stage(
@@ -7396,9 +7397,183 @@ async def test_pending_notice_appends_after_persisted_provider_input_prefix(tmp_
 
         assert result.status == "success"
         assert backend.calls
-        captured_provider_input = list(backend.calls[0].get("messages") or [])
-        assert captured_provider_input[: len(previous_provider_input)] == previous_provider_input
-        assert any("new parent constraint" in str(item) for item in captured_provider_input[len(previous_provider_input) :])
+        events = restarted.store.list_task_events(task_id=record.task_id, limit=20)
+        model_call = [item for item in events if item["event_type"] == "task.model.call"][-1]["payload"]
+        actual_request_ref = str(model_call.get("actual_request_ref") or "")
+
+        assert actual_request_ref.startswith("artifact:")
+
+        actual_request_payload = json.loads(restarted.log_service.resolve_content_ref(actual_request_ref))
+        captured_provider_input = list((actual_request_payload.get("provider_request_body") or {}).get("input") or [])
+        if captured_provider_input:
+            assert captured_provider_input[: len(previous_provider_input)] == previous_provider_input
+            trailing_messages = captured_provider_input[len(previous_provider_input) :]
+        else:
+            captured_request_messages = list(actual_request_payload.get("request_messages") or [])
+            assert captured_request_messages[:2] == previous_request_messages[:2]
+            trailing_messages = captured_request_messages[2:]
+        assert any("new parent constraint" in str(item) for item in trailing_messages)
+    finally:
+        await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_react_state_keeps_canonical_messages_separate_from_provider_seed_when_notice_pending(
+    tmp_path: Path,
+):
+    store_path = tmp_path / "runtime.sqlite3"
+    tasks_dir = tmp_path / "tasks"
+    artifacts_dir = tmp_path / "artifacts"
+    governance_path = tmp_path / "governance.sqlite3"
+
+    seed_service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=store_path,
+        files_base_dir=tasks_dir,
+        artifact_dir=artifacts_dir,
+        governance_store_path=governance_path,
+        execution_mode="web",
+        execution_model_refs=["fake"],
+        acceptance_model_refs=["fake"],
+    )
+
+    previous_provider_input = [
+        {"role": "user", "content": [{"type": "input_text", "text": "[SYSTEM] execution node prompt"}]},
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": '{"task_id":"task:demo","node_id":"node:leaf","goal":"demo"}'}],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": '[G3KU_STAGE_COMPACT_V1]\n{"stage_goal":"old stage","status":"完成"}',
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `submit_next_stage`",
+                }
+            ],
+        },
+        {"type": "function_call", "call_id": "call:stage", "name": "submit_next_stage", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call:stage", "output": '{"status":"success"}'},
+    ]
+    canonical_messages = [
+        {"role": "system", "content": "[SYSTEM] execution node prompt"},
+        {"role": "user", "content": '{"task_id":"task:demo","node_id":"node:leaf","goal":"demo"}'},
+        {"role": "user", "content": "System note for this turn only:\n当前阶段【自主执行 | 进行中】目标：canonical stage goal"},
+    ]
+    previous_request_messages = [
+        {"role": "system", "content": "[SYSTEM] execution node prompt"},
+        {"role": "user", "content": '{"task_id":"task:demo","node_id":"node:leaf","goal":"demo"}'},
+        {"role": "assistant", "content": '[G3KU_STAGE_COMPACT_V1]\n{"stage_goal":"old stage","status":"完成"}'},
+        {
+            "role": "assistant",
+            "content": "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `submit_next_stage`",
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call:stage",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call:stage", "name": "submit_next_stage", "content": '{"status":"success"}'},
+    ]
+
+    try:
+        record = await _create_web_task(seed_service)
+        root = seed_service.get_node(record.root_node_id)
+        assert root is not None
+        seed_service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "stage_status": "active",
+                "stage_goal": "canonical stage goal",
+                "messages": canonical_messages,
+                "actual_request_hash": "notice-seed-canonical-hash",
+                "actual_request_message_count": len(previous_provider_input),
+            },
+            publish_snapshot=False,
+        )
+        seed_service.log_service.append_node_output(
+            record.task_id,
+            root.node_id,
+            content="prior assistant",
+            tool_calls=[],
+            usage_attempts=[
+                LLMModelAttempt(
+                    model_key="sub fake",
+                    provider_id="openai",
+                    provider_model="fake",
+                    usage={"input_tokens": 12, "output_tokens": 4},
+                )
+            ],
+            model_messages=canonical_messages[:2],
+            request_messages=previous_request_messages,
+            prompt_cache_key="stable-key-canonical-notice",
+            request_message_count=len(previous_request_messages),
+            request_message_chars=456,
+            actual_tool_schemas=[{"name": "submit_next_stage", "parameters": {"type": "object"}}],
+            provider_request_meta={"provider": "openai"},
+            provider_request_body={"input": previous_provider_input},
+        )
+        seed_service.log_service.update_node_metadata(
+            root.node_id,
+            lambda metadata: {
+                **metadata,
+                "pending_append_notice_records": [
+                    {
+                        "notification_id": "root-notice:canonical:1",
+                        "epoch_id": "epoch:canonical",
+                        "source_node_id": root.node_id,
+                        "message": "new parent constraint",
+                        "created_at": now_iso(),
+                        "order_index": 1,
+                    }
+                ],
+            },
+        )
+    finally:
+        await seed_service.close()
+
+    restarted = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=store_path,
+        files_base_dir=tasks_dir,
+        artifact_dir=artifacts_dir,
+        governance_store_path=governance_path,
+        execution_mode="web",
+        execution_model_refs=["fake"],
+        acceptance_model_refs=["fake"],
+    )
+
+    try:
+        task = restarted.get_task(record.task_id)
+        root = restarted.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        react_state = await restarted.node_runner._resume_react_state(task=task, node=root)
+
+        assert react_state["message_source"] == "notice"
+        assert react_state["messages"][: len(canonical_messages)] == canonical_messages
+        assert react_state["messages"][-1] == {"role": "user", "content": "new parent constraint"}
+        assert react_state["request_body_seed_messages"] == previous_provider_input
     finally:
         await restarted.close()
 
