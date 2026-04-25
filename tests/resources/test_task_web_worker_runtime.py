@@ -26,6 +26,14 @@ from main.models import (
     normalize_execution_stage_metadata,
     normalize_final_acceptance_metadata,
 )
+from main.runtime.acceptance_handshake import (
+    ACCEPTANCE_HANDSHAKE_KEY,
+    ACCEPTANCE_STATE_IDLE,
+    ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+    ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
+    normalize_acceptance_handshake,
+    set_acceptance_handshake_state,
+)
 from main.monitoring.query_service import TaskQueryService
 from main.prompts import load_prompt
 from main.protocol import now_iso
@@ -331,6 +339,55 @@ def _record_enqueue_calls(target: list[str]):
         target.append(str(task_id))
 
     return _enqueue
+
+
+def test_normalize_acceptance_handshake_defaults() -> None:
+    assert normalize_acceptance_handshake(None) == {
+        "state": ACCEPTANCE_STATE_IDLE,
+        "acceptance_node_id": "",
+        "rejection_count": 0,
+        "max_rejections": 2,
+        "latest_execution_result_ref": "",
+        "latest_execution_result_summary": "",
+        "latest_rejection_feedback_ref": "",
+        "latest_rejection_feedback_summary": "",
+        "updated_at": "",
+    }
+
+
+def test_set_acceptance_handshake_state_overwrites_runtime_fields() -> None:
+    updated = set_acceptance_handshake_state(
+        {},
+        state=ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+        acceptance_node_id="node:acceptance",
+        rejection_count=1,
+        max_rejections=2,
+        latest_execution_result_ref="artifact:result",
+        latest_execution_result_summary="draft answer",
+        latest_rejection_feedback_ref="",
+        latest_rejection_feedback_summary="",
+        updated_at="2026-04-25T08:00:00+08:00",
+    )
+
+    assert updated["state"] == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
+    assert updated["acceptance_node_id"] == "node:acceptance"
+    assert updated["rejection_count"] == 1
+    assert updated["max_rejections"] == 2
+
+
+def test_normalize_final_acceptance_metadata_allows_handshake_statuses() -> None:
+    payload = normalize_final_acceptance_metadata(
+        {
+            "required": True,
+            "prompt": "verify output",
+            "node_id": "node:acceptance",
+            "status": "waiting_execution_retry",
+        }
+    )
+
+    assert payload.required is True
+    assert payload.node_id == "node:acceptance"
+    assert payload.status == "waiting_execution_retry"
 
 
 def _create_pending_tool_round(

@@ -5,11 +5,11 @@
   "bundle": "lucide.min.js",
   "source_url": "https://registry.npmjs.org/lucide/latest",
   "installed_version": "1.7.0",
-  "latest_version": "1.8.0",
+  "latest_version": "1.11.0",
   "update_available": true,
   "update_mode": "notify",
   "check_interval_days": 7,
-  "checked_at": "2026-04-18T04:07:38Z",
+  "checked_at": "2026-04-25T07:41:04Z",
   "installed_at": "2026-03-28T01:54:36Z",
   "last_error": ""
 }
