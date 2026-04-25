@@ -103,7 +103,6 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
         f'当前 CEO 阶段目标：{goal}。'
         f'当前普通工具轮次使用：{used}/{budget}。'
         '本轮任何工具调用都必须直接服务于当前阶段目标。'
-        f'{final_note}'
         f'{reminder}'
     )
 
@@ -185,7 +184,6 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
             f'如果上一阶段仍未收敛，应根据剩余工作适当放大预算，但不能超过 {STAGE_TOOL_ROUND_BUDGET_MAX}；'
             '在此之前不能继续使用普通工具，也不能继续派生子节点。'
             f'{_execution_stage_budget_accounting_note(active)}'
-            f'{final_note}'
         )
     if normalized_kind == 'acceptance':
         return (
@@ -205,7 +203,6 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
         f'当前普通工具轮次使用 {used}/{budget}。'
         '除创建新阶段外，其余所有思考、工具调用和派生行为都必须只服务于当前阶段目标。'
         f'{_execution_stage_budget_accounting_note(active)}'
-        f'{final_note}'
         f'{reminder}'
     )
 

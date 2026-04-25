@@ -1704,7 +1704,7 @@ async def test_failed_execution_node_is_reactivated_on_delivery(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_acceptance_nodes_are_never_direct_distribution_targets(tmp_path: Path) -> None:
+async def test_acceptance_nodes_can_receive_distribution_messages_directly(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:
         record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
@@ -1732,14 +1732,91 @@ async def test_acceptance_nodes_are_never_direct_distribution_targets(tmp_path: 
             owner_entry_index=0,
         )
 
-        with pytest.raises(ValueError, match="distribution_target_must_be_execution_node"):
-            service._deliver_distribution_message(
-                task_id=record.task_id,
-                epoch_id="epoch:reject-acceptance",
-                source_node_id=root.node_id,
-                target_node_id=acceptance.node_id,
-                message="新增董事会验收格式",
-            )
+        service._deliver_distribution_message(
+            task_id=record.task_id,
+            epoch_id="epoch:acceptance-target",
+            source_node_id=root.node_id,
+            target_node_id=acceptance.node_id,
+            message="新增董事会验收格式",
+        )
+        notifications = service.store.list_task_node_notifications(record.task_id, acceptance.node_id)
+        updated_acceptance = service.store.get_node(acceptance.node_id)
+
+        assert len(notifications) == 1
+        assert notifications[0].message == "新增董事会验收格式"
+        assert updated_acceptance is not None
+        assert updated_acceptance.status == "in_progress"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_recipients_hide_waiting_acceptance_execution_and_include_unfinished_acceptance(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("distribution acceptance recipients", session_id="web:ceo-demo")
+        task = service.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy={"mode": "focus"}, acceptance_prompt="check child")
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=spec,
+            owner_round_id="round-1",
+            owner_entry_index=0,
+        )
+        acceptance = service.node_runner.create_acceptance_node(
+            task=task,
+            accepted_node=child,
+            goal="accept:child goal",
+            acceptance_prompt="check child",
+            parent_node_id=child.node_id,
+            owner_parent_node_id=root.node_id,
+            owner_round_id="round-1",
+            owner_entry_index=0,
+        )
+        _set_spawn_operations(
+            service,
+            root_node_id=root.node_id,
+            payload={
+                "round-1": {
+                    "specs": [spec.model_dump(mode="json")],
+                    "entries": [
+                        {
+                            "index": 0,
+                            "goal": "child goal",
+                            "child_node_id": child.node_id,
+                            "acceptance_node_id": acceptance.node_id,
+                            "check_status": "pending",
+                        }
+                    ],
+                    "completed": False,
+                },
+            },
+        )
+        service.node_runner._set_execution_waiting_acceptance_state(
+            task_id=record.task_id,
+            execution_node_id=child.node_id,
+            acceptance_node_id=acceptance.node_id,
+            result_ref="artifact:child",
+            result_summary="child draft",
+        )
+
+        recipients = service.node_runner.distribution_recipient_node_ids(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+        )
+        snapshot = service.query_service.get_tree_snapshot(record.task_id)
+
+        assert child.node_id not in recipients
+        assert acceptance.node_id in recipients
+        assert snapshot is not None
+        assert snapshot.nodes_by_id[child.node_id].parent_visible is False
+        assert snapshot.nodes_by_id[child.node_id].acceptance_handshake_state == "waiting_acceptance"
+        assert snapshot.nodes_by_id[acceptance.node_id].parent_visible is True
     finally:
         await service.close()
 

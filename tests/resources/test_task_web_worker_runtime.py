@@ -38,6 +38,15 @@ from main.runtime.pending_notice_state import (
     RESUME_MODE_WAIT_FOR_CHILDREN,
     set_pending_notice_state,
 )
+from main.runtime.acceptance_handshake import (
+    ACCEPTANCE_STATE_ACCEPTED,
+    ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
+    ACCEPTANCE_STATE_IDLE,
+    ACCEPTANCE_STATE_REJECTED_TERMINAL,
+    ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+    normalize_acceptance_handshake,
+    set_acceptance_handshake_state,
+)
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 from main.service.runtime_service import MainRuntimeService
@@ -174,6 +183,18 @@ class _SpawnReviewExceptionChatBackend:
         raise RuntimeError(self._message)
 
 
+class _QueuedChatBackend:
+    def __init__(self, responses: list[object]) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._responses = list(responses)
+
+    async def chat(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        if not self._responses:
+            raise AssertionError("queued chat backend exhausted")
+        return self._responses.pop(0)
+
+
 class _StaticTool(Tool):
     def __init__(self, name: str, result: str = "ok") -> None:
         self._name = name
@@ -267,6 +288,25 @@ def _receive_until_type(ws, expected_type: str, predicate=None) -> dict[str, obj
 async def _create_web_task(service: MainRuntimeService):
     _mark_worker_online(service)
     return await service.create_task("test task", session_id="web:shared")
+
+
+def _build_service_with_backend(tmp_path: Path, *, chat_backend) -> MainRuntimeService:
+    service = MainRuntimeService(
+        chat_backend=chat_backend,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+        execution_model_refs=["fake"],
+        acceptance_model_refs=["fake"],
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+    return service
+
+
+def _build_service(tmp_path: Path) -> MainRuntimeService:
+    return _build_service_with_backend(tmp_path, chat_backend=_DummyChatBackend())
 
 
 def _execution_policy(mode: str = "focus") -> dict[str, str]:
@@ -6042,6 +6082,673 @@ def test_failed_final_acceptance_node_preserves_root_status_and_marks_task_busin
     assert len(items) == 1
     assert items[0].failure_class == "business_unpassed"
     assert items[0].final_acceptance.get("status") == "failed"
+
+
+@pytest.mark.asyncio
+async def test_spawn_materialization_creates_acceptance_node_before_child_finishes(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("child acceptance eager create", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(
+            goal="draft announcement",
+            prompt="write announcement",
+            execution_policy=_execution_policy(),
+            acceptance_prompt="verify announcement",
+        )
+        cached_payload = {
+            "specs": [spec.model_dump(mode="json")],
+            "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
+            "completed": False,
+        }
+
+        service.node_runner._materialize_spawn_batch_children(
+            task=task,
+            parent=root,
+            specs=[spec],
+            allowed_indexes=[0],
+            cache_key="round-live",
+            cached_payload=cached_payload,
+        )
+
+        refreshed_root = service.store.get_node(root.node_id)
+        assert refreshed_root is not None
+        entry = refreshed_root.metadata["spawn_operations"]["round-live"]["entries"][0]
+        assert entry["acceptance_node_id"].startswith("node:")
+        acceptance = service.store.get_node(entry["acceptance_node_id"])
+        assert acceptance is not None
+        assert acceptance.node_kind == "acceptance"
+        assert acceptance.status == "in_progress"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_create_task_eagerly_creates_root_final_acceptance_node(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "root acceptance eager create",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+
+        task = service.get_task(record.task_id)
+        assert task is not None
+        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance"))
+        acceptance = service.store.get_node(final_acceptance.node_id)
+
+        assert final_acceptance.required is True
+        assert final_acceptance.node_id.startswith("node:")
+        assert final_acceptance.status == "pending"
+        assert acceptance is not None
+        assert acceptance.node_kind == "acceptance"
+        assert acceptance.metadata.get("final_acceptance") is True
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_success_with_required_acceptance_returns_partial_and_stays_live(tmp_path: Path) -> None:
+    backend = _QueuedChatBackend(
+        [
+            LLMResponse(
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "draft ready",
+                            "answer": "draft ready",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                content="",
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record = await service.create_task(
+            "root handshake",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        result = await service.node_runner.run_node(task.task_id, root.node_id)
+        latest_root = service.store.get_node(root.node_id)
+
+        assert latest_root is not None
+        assert result.delivery_status == "partial"
+        assert latest_root.status == "in_progress"
+        assert dict((latest_root.metadata or {}).get("acceptance_handshake") or {})["state"] == "waiting_acceptance"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_first_acceptance_rejection_keeps_acceptance_live_and_feeds_back_execution(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "feedback loop",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        acceptance_id = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance")).node_id
+        acceptance = service.store.get_node(acceptance_id)
+
+        assert task is not None
+        assert root is not None
+        assert acceptance is not None
+
+        service.node_runner._set_execution_waiting_acceptance_state(
+            task_id=task.task_id,
+            execution_node_id=root.node_id,
+            acceptance_node_id=acceptance.node_id,
+            result_ref="artifact:result",
+            result_summary="draft answer",
+        )
+
+        rejection = NodeFinalResult(
+            status="failed",
+            delivery_status="final",
+            summary="missing board format",
+            answer="missing board format",
+            evidence=[],
+            remaining_work=[],
+            blocking_reason="missing board format",
+        )
+
+        partial = service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
+        latest_acceptance = service.store.get_node(acceptance.node_id)
+        latest_root = service.store.get_node(root.node_id)
+        notifications = service.store.list_task_node_notifications(task.task_id, root.node_id)
+
+        assert latest_acceptance is not None
+        assert latest_root is not None
+        assert partial.delivery_status == "partial"
+        assert latest_acceptance.status == "in_progress"
+        assert dict((latest_root.metadata or {}).get("acceptance_handshake") or {})["state"] == "waiting_execution_retry"
+        assert [item.message for item in notifications] == ["missing board format"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_second_acceptance_rejection_terminalizes_pair_and_preserves_root_output(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "second rejection",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        acceptance_id = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance")).node_id
+        acceptance = service.store.get_node(acceptance_id)
+
+        assert task is not None
+        assert root is not None
+        assert acceptance is not None
+
+        service.log_service.update_node_status(record.task_id, root.node_id, status="in_progress", final_output="board draft")
+        service.node_runner._set_execution_waiting_acceptance_state(
+            task_id=task.task_id,
+            execution_node_id=root.node_id,
+            acceptance_node_id=acceptance.node_id,
+            result_ref="artifact:result",
+            result_summary="board draft",
+            rejection_count=1,
+        )
+
+        rejection = NodeFinalResult(
+            status="failed",
+            delivery_status="final",
+            summary="still missing board format",
+            answer="still missing board format",
+            evidence=[],
+            remaining_work=[],
+            blocking_reason="still missing board format",
+        )
+
+        terminal = service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
+        latest_task = service.get_task(record.task_id)
+        latest_acceptance = service.store.get_node(acceptance.node_id)
+
+        assert latest_task is not None
+        assert latest_acceptance is not None
+        assert terminal.status == "failed"
+        assert latest_acceptance.status == "failed"
+        assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "failed"
+        assert latest_task.metadata.get("final_execution_output") == "board draft"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_retry_failure_cancels_waiting_acceptance_pair(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "retry failure cancel",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        acceptance_id = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance")).node_id
+        acceptance = service.store.get_node(acceptance_id)
+
+        assert task is not None
+        assert root is not None
+        assert acceptance is not None
+
+        service.node_runner._set_execution_waiting_acceptance_state(
+            task_id=task.task_id,
+            execution_node_id=root.node_id,
+            acceptance_node_id=acceptance.node_id,
+            result_ref="artifact:result",
+            result_summary="draft answer",
+        )
+        partial = service.node_runner._handle_acceptance_node_result(
+            task=task,
+            acceptance=acceptance,
+            result=NodeFinalResult(
+                status="failed",
+                delivery_status="final",
+                summary="missing board format",
+                answer="missing board format",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="missing board format",
+            ),
+        )
+
+        terminal = service.node_runner._mark_finished(
+            record.task_id,
+            root.node_id,
+            NodeFinalResult(
+                status="failed",
+                delivery_status="blocked",
+                summary="execution retry crashed",
+                answer="",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="execution retry crashed",
+            ),
+        )
+        latest_task = service.get_task(record.task_id)
+        latest_root = service.store.get_node(root.node_id)
+        latest_acceptance = service.store.get_node(acceptance.node_id)
+
+        assert latest_task is not None
+        assert latest_root is not None
+        assert latest_acceptance is not None
+        assert partial.delivery_status == "partial"
+        assert terminal.status == "failed"
+        assert latest_root.status == "failed"
+        assert latest_acceptance.status == "failed"
+        assert latest_acceptance.failure_reason == "execution retry crashed"
+        assert dict((latest_root.metadata or {}).get("acceptance_handshake") or {})["state"] == ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE
+        assert (
+            normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status
+            == ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE
+        )
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_retry_failure_does_not_overwrite_successful_acceptance(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "retry failure success guard",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        acceptance_id = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance")).node_id
+        acceptance = service.store.get_node(acceptance_id)
+
+        assert task is not None
+        assert root is not None
+        assert acceptance is not None
+
+        service.node_runner._set_execution_waiting_acceptance_state(
+            task_id=task.task_id,
+            execution_node_id=root.node_id,
+            acceptance_node_id=acceptance.node_id,
+            result_ref="artifact:result",
+            result_summary="draft answer",
+        )
+        partial = service.node_runner._handle_acceptance_node_result(
+            task=task,
+            acceptance=acceptance,
+            result=NodeFinalResult(
+                status="failed",
+                delivery_status="final",
+                summary="missing board format",
+                answer="missing board format",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="missing board format",
+            ),
+        )
+        service.log_service.update_node_status(
+            record.task_id,
+            acceptance.node_id,
+            status="success",
+            final_output="accepted",
+        )
+
+        service.node_runner._mark_finished(
+            record.task_id,
+            root.node_id,
+            NodeFinalResult(
+                status="failed",
+                delivery_status="blocked",
+                summary="execution retry crashed",
+                answer="",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="execution retry crashed",
+            ),
+        )
+        latest_task = service.get_task(record.task_id)
+        latest_acceptance = service.store.get_node(acceptance.node_id)
+
+        assert latest_task is not None
+        assert latest_acceptance is not None
+        assert partial.delivery_status == "partial"
+        assert latest_acceptance.status == "success"
+        assert latest_acceptance.final_output == "accepted"
+        assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "passed"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_run_final_acceptance_avoids_duplicate_task_state_rewrites_after_shared_handler(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "final acceptance duplication guard",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        service.log_service.update_node_status(
+            record.task_id,
+            root.node_id,
+            status="success",
+            final_output="board draft",
+        )
+
+        async def _execute_node(_task_id: str, _node_id: str) -> NodeFinalResult:
+            return NodeFinalResult(
+                status="failed",
+                delivery_status="final",
+                summary="still missing board format",
+                answer="still missing board format",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="still missing board format",
+            )
+
+        def _shared_handler(*, task, acceptance, result: NodeFinalResult) -> NodeFinalResult:
+            assert result.status == "failed"
+            service.log_service.update_task_metadata(
+                task.task_id,
+                lambda metadata: {
+                    **dict(metadata or {}),
+                    "final_acceptance": {
+                        **normalize_final_acceptance_metadata((metadata or {}).get("final_acceptance")).model_dump(mode="json"),
+                        "node_id": acceptance.node_id,
+                        "status": "failed",
+                    },
+                    "final_execution_output": "board draft",
+                },
+                mark_unread=True,
+            )
+            return result
+
+        original_update_final_acceptance_state = service.task_actor_service._update_final_acceptance_state
+
+        def _guarded_update_final_acceptance_state(task_id: str, *, node_id: str | None = None, status: str | None = None) -> None:
+            if status in {"passed", "failed"}:
+                raise AssertionError("duplicate final_acceptance terminal rewrite")
+            return original_update_final_acceptance_state(task_id, node_id=node_id, status=status)
+
+        def _forbid_record_final_execution_output(*args, **kwargs) -> None:
+            raise AssertionError("duplicate final_execution_output rewrite")
+
+        monkeypatch.setattr(service.task_actor_service, "_execute_node", _execute_node)
+        monkeypatch.setattr(service.task_actor_service, "_update_final_acceptance_state", _guarded_update_final_acceptance_state)
+        monkeypatch.setattr(service.task_actor_service, "_record_final_execution_output", _forbid_record_final_execution_output)
+        monkeypatch.setattr(service.node_runner, "_handle_acceptance_node_result", _shared_handler)
+
+        result = await service.task_actor_service._run_final_acceptance_if_needed(record.task_id)
+        latest_task = service.get_task(record.task_id)
+
+        assert latest_task is not None
+        assert result.status == "failed"
+        assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "failed"
+        assert latest_task.metadata.get("final_execution_output") == "board draft"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_child_acceptance_refreshes_eager_prompt_before_acceptance_run(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("child acceptance prompt refresh", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(
+            goal="draft announcement",
+            prompt="write announcement",
+            execution_policy=_execution_policy(),
+            acceptance_prompt="verify announcement",
+        )
+        cached_payload = {
+            "specs": [spec.model_dump(mode="json")],
+            "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
+            "completed": False,
+        }
+
+        service.node_runner._materialize_spawn_batch_children(
+            task=task,
+            parent=root,
+            specs=[spec],
+            allowed_indexes=[0],
+            cache_key="round-live",
+            cached_payload=cached_payload,
+        )
+
+        refreshed_root = service.store.get_node(root.node_id)
+        assert refreshed_root is not None
+        entry = refreshed_root.metadata["spawn_operations"]["round-live"]["entries"][0]
+        eager_acceptance = service.store.get_node(str(entry["acceptance_node_id"]))
+
+        assert eager_acceptance is not None
+        assert "(empty)" in eager_acceptance.prompt
+
+        captured_prompt: dict[str, str] = {}
+
+        async def _nested_executor(task_id: str, node_id: str) -> NodeFinalResult:
+            target = service.store.get_node(node_id)
+            assert target is not None
+            if target.node_kind == "execution":
+                service.log_service.update_node_status(
+                    task_id,
+                    node_id,
+                    status="success",
+                    final_output="announcement complete",
+                )
+                return NodeFinalResult(status="success", summary="child complete", output="announcement complete")
+            if target.node_kind == "acceptance":
+                captured_prompt["prompt"] = str(target.prompt or "")
+                return NodeFinalResult(status="success", summary="accepted", output="accepted")
+            raise AssertionError(f"unexpected nested node {node_id}")
+
+        service.node_runner.nested_node_executor = _nested_executor
+
+        result = await service.node_runner._run_child_pipeline(
+            task=task,
+            parent=root,
+            spec=spec,
+            cache_key="round-live",
+            cached_payload=cached_payload,
+            index=0,
+        )
+
+        assert result.check_result == "accepted"
+        assert "announcement complete" in captured_prompt["prompt"]
+        assert "(empty)" not in captured_prompt["prompt"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_root_final_acceptance_refreshes_eager_prompt_from_root_output(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "root acceptance refresh",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance"))
+        acceptance = service.store.get_node(final_acceptance.node_id)
+
+        assert acceptance is not None
+        assert "(empty)" in acceptance.prompt
+
+        service.log_service.update_node_status(
+            record.task_id,
+            root.node_id,
+            status="success",
+            final_output="root deliverable ready",
+        )
+
+        refreshed = service.node_runner._refresh_acceptance_node_prompt(task=task, node=acceptance)
+
+        assert "root deliverable ready" in refreshed.prompt
+        assert refreshed.input == refreshed.prompt
+        assert "(empty)" not in refreshed.prompt
+    finally:
+        await service.close()
+
+
+def test_normalize_acceptance_handshake_defaults() -> None:
+    assert normalize_acceptance_handshake(None) == {
+        "state": ACCEPTANCE_STATE_IDLE,
+        "acceptance_node_id": "",
+        "rejection_count": 0,
+        "max_rejections": 2,
+        "latest_execution_result_ref": "",
+        "latest_execution_result_summary": "",
+        "latest_rejection_feedback_ref": "",
+        "latest_rejection_feedback_summary": "",
+        "updated_at": "",
+    }
+
+
+def test_set_acceptance_handshake_state_overwrites_runtime_fields() -> None:
+    updated = set_acceptance_handshake_state(
+        {},
+        state=ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+        acceptance_node_id="node:acceptance",
+        rejection_count=1,
+        max_rejections=2,
+        latest_execution_result_ref="artifact:result",
+        latest_execution_result_summary="draft answer",
+        latest_rejection_feedback_ref="",
+        latest_rejection_feedback_summary="",
+        updated_at="2026-04-25T08:00:00+08:00",
+    )
+
+    assert updated["state"] == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
+    assert updated["acceptance_node_id"] == "node:acceptance"
+    assert updated["rejection_count"] == 1
+    assert updated["max_rejections"] == 2
+
+
+def test_acceptance_handshake_numeric_fields_fall_back_safely() -> None:
+    normalized = normalize_acceptance_handshake(
+        {
+            "state": "waiting_acceptance",
+            "rejection_count": "nope",
+            "max_rejections": "still nope",
+            "acceptance_node_id": " node:acceptance ",
+        }
+    )
+
+    updated = set_acceptance_handshake_state(
+        {
+            "state": "waiting_execution_retry",
+            "rejection_count": "nope",
+            "max_rejections": "still nope",
+        },
+        state="waiting_acceptance",
+        acceptance_node_id=" node:acceptance ",
+        rejection_count="nope",
+        max_rejections="still nope",
+        latest_execution_result_ref="artifact:result",
+        latest_execution_result_summary="draft answer",
+        latest_rejection_feedback_ref="",
+        latest_rejection_feedback_summary="",
+        updated_at="2026-04-25T08:00:00+08:00",
+    )
+
+    assert normalized["state"] == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
+    assert normalized["rejection_count"] == 0
+    assert normalized["max_rejections"] == 2
+    assert updated["state"] == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
+    assert updated["rejection_count"] == 0
+    assert updated["max_rejections"] == 2
+
+
+def test_normalize_final_acceptance_metadata_allows_handshake_statuses() -> None:
+    payload = normalize_final_acceptance_metadata(
+        {
+            "required": True,
+            "prompt": "verify output",
+            "node_id": "node:acceptance",
+            "status": "waiting_execution_retry",
+        }
+    )
+
+    assert payload.required is True
+    assert payload.node_id == "node:acceptance"
+    assert payload.status == "waiting_execution_retry"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (ACCEPTANCE_STATE_ACCEPTED, ACCEPTANCE_STATE_ACCEPTED),
+        (ACCEPTANCE_STATE_REJECTED_TERMINAL, ACCEPTANCE_STATE_REJECTED_TERMINAL),
+        (ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE, ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE),
+        ("waiting_acceptance", "waiting_acceptance"),
+        ("waiting_execution_retry", "waiting_execution_retry"),
+    ],
+)
+def test_normalize_final_acceptance_metadata_preserves_handshake_statuses(
+    status: str,
+    expected: str,
+) -> None:
+    payload = normalize_final_acceptance_metadata(
+        {
+            "required": True,
+            "prompt": "verify output",
+            "node_id": "node:acceptance",
+            "status": status,
+        }
+    )
+
+    assert payload.status == expected
 
 
 @pytest.mark.asyncio

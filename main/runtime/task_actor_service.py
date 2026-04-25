@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from main.errors import TaskPausedError, describe_exception
-from main.models import NodeFinalResult, normalize_final_acceptance_metadata
+from main.models import NodeFinalResult, normalize_final_acceptance_metadata, normalize_result_payload
 from main.protocol import now_iso
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 
@@ -418,8 +418,16 @@ class TaskActorService:
                     control_only_return = True
                     return
                 result = await dispatcher.execute_node(task_id, root_node.node_id)
+                if str(result.delivery_status or '').strip() == 'partial':
+                    await self._enqueue_acceptance_followup_if_needed(task_id)
+                    control_only_return = True
+                    return
                 if result.status == 'success':
                     result = await self._run_final_acceptance_if_needed(task_id)
+                    if str(result.delivery_status or '').strip() == 'partial':
+                        await self._enqueue_acceptance_followup_if_needed(task_id)
+                        control_only_return = True
+                        return
         except TaskPausedError:
             self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
             return
@@ -505,6 +513,14 @@ class TaskActorService:
 
     async def _execute_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         return await self._execute_nested_node(task_id, node_id)
+
+    async def _enqueue_acceptance_followup_if_needed(self, task_id: str) -> None:
+        resume_callback = self.distribution_resume_callback
+        if not callable(resume_callback):
+            return
+        result = resume_callback(task_id)
+        if asyncio.iscoroutine(result):
+            await result
 
     def _create_dispatcher(self, task_id: str) -> TaskNodeDispatcher:
         return TaskNodeDispatcher(
@@ -850,6 +866,8 @@ class TaskActorService:
                 remaining_work=[],
                 blocking_reason='missing root node',
             )
+        if str(final_acceptance.status or '').strip().lower() in {'waiting_acceptance', 'waiting_execution_retry'}:
+            return self._result_from_node(root)
 
         acceptance = await self._get_or_create_final_acceptance_node(
             task_id=task_id,
@@ -859,16 +877,19 @@ class TaskActorService:
         )
         acceptance_result = await self._execute_node(task_id, acceptance.node_id)
         acceptance = self._store.get_node(acceptance.node_id) or acceptance
+        acceptance_result = self._node_runner._handle_acceptance_node_result(
+            task=task,
+            acceptance=acceptance,
+            result=acceptance_result,
+        )
+        if str(acceptance_result.delivery_status or '').strip() == 'partial':
+            return acceptance_result
+        acceptance = self._store.get_node(acceptance.node_id) or acceptance
+        root = self._store.get_node(root.node_id) or root
         execution_output = str(root.final_output or '').strip()
         check_result = str(acceptance_result.summary or acceptance_result.output or acceptance.failure_reason or '').strip() or SKIPPED_CHECK_RESULT
         self._log_service.update_node_check_result(task_id, root.node_id, check_result)
-        self._update_final_acceptance_state(
-            task_id,
-            node_id=acceptance.node_id,
-            status='passed' if acceptance_result.status == 'success' else 'failed',
-        )
         if acceptance_result.status == 'success':
-            self._record_final_execution_output(task_id, '')
             return NodeFinalResult(
                 status='success',
                 delivery_status='final',
@@ -879,7 +900,6 @@ class TaskActorService:
                 blocking_reason='',
             )
 
-        self._record_final_execution_output(task_id, execution_output)
         failure_reason = acceptance_result.failure_text or check_result
         self._log_service.refresh_task_view(task_id, mark_unread=True)
         return NodeFinalResult(
@@ -933,6 +953,9 @@ class TaskActorService:
 
     @staticmethod
     def _result_from_node(node) -> NodeFinalResult:
+        payload = normalize_result_payload((getattr(node, 'metadata', None) or {}).get('result_payload'))
+        if payload is not None:
+            return payload
         final_output = str(node.final_output or '').strip()
         failure_reason = str(node.failure_reason or '').strip()
         return NodeFinalResult(

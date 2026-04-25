@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -339,3 +341,37 @@ async def test_task_node_dispatcher_runs_final_acceptance_via_inspection_role(tm
     assert call_order[0] == root.node_id
     assert call_order[1] == acceptance_nodes[0].node_id
     assert roles == ["execution", "inspection"]
+
+
+@pytest.mark.asyncio
+async def test_task_actor_service_requeues_partial_root_acceptance_handshake(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    record = await service.create_task(
+        "root partial handshake",
+        session_id="web:shared",
+        metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+    )
+    scheduled: list[str] = []
+
+    result = NodeFinalResult(
+        status="success",
+        delivery_status="partial",
+        summary="waiting for acceptance",
+        answer="draft",
+        evidence=[],
+        remaining_work=[],
+        blocking_reason="",
+    )
+
+    service.task_actor_service._create_dispatcher = lambda task_id: SimpleNamespace(  # type: ignore[method-assign]
+        execute_node=AsyncMock(return_value=result),
+        close=AsyncMock(return_value=None),
+    )
+    service.task_actor_service.distribution_resume_callback = lambda task_id: scheduled.append(str(task_id))
+
+    await service.task_actor_service.run_task(record.task_id)
+
+    latest = service.get_task(record.task_id)
+    assert latest is not None
+    assert latest.status == "in_progress"
+    assert scheduled == [record.task_id]

@@ -37,6 +37,11 @@ from main.monitoring.models import (
     TaskTreeSnapshotNode,
     TaskTreeSnapshotRound,
 )
+from main.runtime.acceptance_handshake import (
+    ACCEPTANCE_HANDSHAKE_KEY,
+    ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+    normalize_acceptance_handshake,
+)
 
 
 _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
@@ -1038,11 +1043,26 @@ class TaskQueryService:
             for round_record in parent_rounds
             if self._projection_round_visible_in_snapshot(round_record)
         ]
+        payload = dict(getattr(record, 'payload', {}) or {})
+        runtime_node = self._store.get_node(node_id)
+        metadata = dict(runtime_node.metadata or {}) if runtime_node is not None and isinstance(runtime_node.metadata, dict) else {}
+        node_kind = str(getattr(record, 'node_kind', '') or 'execution').strip() or 'execution'
+        status = str(getattr(record, 'status', '') or 'in_progress').strip() or 'in_progress'
+        handshake_state = str(payload.get('acceptance_handshake_state') or '').strip()
+        if not handshake_state:
+            acceptance_handshake = normalize_acceptance_handshake(metadata.get(ACCEPTANCE_HANDSHAKE_KEY))
+            handshake_state = str(acceptance_handshake.get('state') or '').strip()
+        parent_visible = True
+        if str(getattr(record, 'parent_node_id', '') or '').strip():
+            if node_kind in {'execution', 'acceptance'} and status in {'success', 'failed'}:
+                parent_visible = False
+            elif node_kind == 'execution' and handshake_state == ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
+                parent_visible = False
         return TaskTreeSnapshotNode(
             node_id=node_id,
             parent_node_id=str(getattr(record, 'parent_node_id', '') or '').strip() or None,
-            node_kind=str(getattr(record, 'node_kind', '') or 'execution').strip() or 'execution',
-            status=str(getattr(record, 'status', '') or 'in_progress').strip() or 'in_progress',
+            node_kind=node_kind,
+            status=status,
             title=str(getattr(record, 'title', '') or node_id).strip() or node_id,
             updated_at=str(getattr(record, 'updated_at', '') or '').strip(),
             children_fingerprint=str(getattr(record, 'children_fingerprint', '') or '').strip(),
@@ -1050,6 +1070,8 @@ class TaskQueryService:
             rounds=snapshot_rounds,
             auxiliary_child_ids=auxiliary_child_ids,
             pending_notice_count=self._node_pending_notice_count(task_id=str(getattr(record, 'task_id', '') or '').strip(), node_id=node_id),
+            parent_visible=parent_visible,
+            acceptance_handshake_state=handshake_state,
         )
 
     def _build_tree_snapshot(

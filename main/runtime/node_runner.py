@@ -38,6 +38,16 @@ from main.runtime.append_notice_context import (
     record_pending_append_notice_records,
     record_consumed_notifications,
 )
+from main.runtime.acceptance_handshake import (
+    ACCEPTANCE_HANDSHAKE_KEY,
+    ACCEPTANCE_STATE_ACCEPTED,
+    ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
+    ACCEPTANCE_STATE_REJECTED_TERMINAL,
+    ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+    ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
+    normalize_acceptance_handshake,
+    set_acceptance_handshake_state,
+)
 from main.runtime.internal_tools import (
     SpawnChildNodesTool,
     SubmitFinalResultTool,
@@ -376,6 +386,8 @@ class NodeRunner:
         node = self._store.get_node(node_id)
         if task is None or node is None:
             raise ValueError(f'missing task or node: {task_id} / {node_id}')
+        if node.node_kind == KIND_ACCEPTANCE:
+            node = self._refresh_acceptance_node_prompt(task=task, node=node)
         if node.status in {STATUS_SUCCESS, STATUS_FAILED}:
             return self._result_from_record(node)
         if self._distribution_mode_active(task_id=task_id, node_id=node.node_id):
@@ -473,6 +485,7 @@ class NodeRunner:
                 return self._mark_failed(task_id, node.node_id, reason=terminal_reason)
             if (self._store.get_task(task_id) or task).cancel_requested:
                 return self._mark_failed(task_id, node.node_id, reason='canceled')
+            result = self._maybe_start_acceptance_handshake(task=task, node=node, result=result) or result
             if str(result.delivery_status or '').strip() == 'partial':
                 self._refresh_resume_ready_distribution_state(task_id=task_id)
                 self._log_service.refresh_task_view(task_id, mark_unread=True)
@@ -786,6 +799,459 @@ class NodeRunner:
                 'queued_epoch_count': 0,
                 'pending_mailbox_count': self.pending_distribution_mailbox_count(task_id=task_id),
             },
+        )
+
+    def _required_acceptance_node(self, *, task, node: NodeRecord) -> NodeRecord | None:
+        if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_EXECUTION:
+            return None
+        if str(getattr(node, 'node_id', '') or '').strip() != str(getattr(task, 'root_node_id', '') or '').strip():
+            return None
+        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance'))
+        if not bool(final_acceptance.required):
+            return None
+        acceptance_node_id = str(final_acceptance.node_id or '').strip()
+        acceptance = self._store.get_node(acceptance_node_id) if acceptance_node_id else None
+        if acceptance is None:
+            for candidate in list(self._store.list_children(node.node_id) or []):
+                if str(getattr(candidate, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
+                    continue
+                if not bool(dict(getattr(candidate, 'metadata', {}) or {}).get('final_acceptance')):
+                    continue
+                acceptance = candidate
+                break
+        if acceptance is None:
+            return None
+        if str(getattr(acceptance, 'task_id', '') or '').strip() != str(getattr(task, 'task_id', '') or '').strip():
+            return None
+        if str(getattr(acceptance, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
+            return None
+        return acceptance
+
+    def _persist_acceptance_candidate_result(self, *, task_id: str, node_id: str, result: NodeFinalResult) -> str:
+        self._persist_result_payload(task_id, node_id, result)
+        latest = self._log_service.ensure_node_result_payload_externalized(task_id, node_id) or self._store.get_node(node_id)
+        if latest is None:
+            return ''
+        return str((latest.metadata or {}).get('result_payload_ref') or '').strip()
+
+    @staticmethod
+    def _acceptance_feedback_text(result: NodeFinalResult) -> str:
+        return str(result.blocking_reason or result.summary or result.answer or '').strip()
+
+    def _accepted_execution_node(self, *, task_id: str, acceptance: NodeRecord) -> NodeRecord | None:
+        metadata = dict(getattr(acceptance, 'metadata', {}) or {})
+        accepted_node_id = str(metadata.get('accepted_node_id') or acceptance.parent_node_id or '').strip()
+        if not accepted_node_id:
+            return None
+        execution = self._store.get_node(accepted_node_id)
+        if execution is None:
+            return None
+        if str(getattr(execution, 'task_id', '') or '').strip() != str(task_id or '').strip():
+            return None
+        if str(getattr(execution, 'node_kind', '') or '').strip().lower() != KIND_EXECUTION:
+            return None
+        return execution
+
+    def _acceptance_updates_task_final_acceptance(self, *, task, execution: NodeRecord | None, acceptance: NodeRecord) -> bool:
+        if execution is None:
+            return False
+        if str(getattr(execution, 'node_id', '') or '').strip() != str(getattr(task, 'root_node_id', '') or '').strip():
+            return False
+        metadata = dict(getattr(acceptance, 'metadata', {}) or {})
+        if bool(metadata.get('final_acceptance')):
+            return True
+        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance'))
+        return str(final_acceptance.node_id or '').strip() == str(getattr(acceptance, 'node_id', '') or '').strip()
+
+    def _set_task_final_acceptance_state(
+        self,
+        *,
+        task_id: str,
+        acceptance_node_id: str,
+        status: str,
+        final_execution_output: str | None = None,
+    ) -> None:
+        normalized_node_id = str(acceptance_node_id or '').strip()
+        normalized_status = str(status or '').strip().lower()
+        normalized_output = None if final_execution_output is None else str(final_execution_output or '').strip()
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            final_acceptance = normalize_final_acceptance_metadata(metadata.get('final_acceptance')).model_dump(mode='json')
+            if normalized_node_id:
+                final_acceptance['node_id'] = normalized_node_id
+            if normalized_status:
+                final_acceptance['status'] = normalized_status
+            metadata['final_acceptance'] = final_acceptance
+            if normalized_output is None:
+                return metadata
+            if normalized_output:
+                metadata['final_execution_output'] = normalized_output
+            else:
+                metadata.pop('final_execution_output', None)
+            return metadata
+
+        self._log_service.update_task_metadata(task_id, _mutate, mark_unread=True)
+
+    def _update_execution_acceptance_handshake(
+        self,
+        *,
+        node_id: str,
+        state: str,
+        acceptance_node_id: str,
+        rejection_count: int,
+        max_rejections: int,
+        latest_execution_result_ref: str,
+        latest_execution_result_summary: str,
+        latest_rejection_feedback_ref: str,
+        latest_rejection_feedback_summary: str,
+    ) -> None:
+        updated_at = now_iso()
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            current = normalize_acceptance_handshake(metadata.get(ACCEPTANCE_HANDSHAKE_KEY))
+            metadata[ACCEPTANCE_HANDSHAKE_KEY] = set_acceptance_handshake_state(
+                current,
+                state=state,
+                acceptance_node_id=str(acceptance_node_id or '').strip(),
+                rejection_count=int(rejection_count or 0),
+                max_rejections=int(max_rejections or 2),
+                latest_execution_result_ref=str(latest_execution_result_ref or '').strip(),
+                latest_execution_result_summary=str(latest_execution_result_summary or '').strip(),
+                latest_rejection_feedback_ref=str(latest_rejection_feedback_ref or '').strip(),
+                latest_rejection_feedback_summary=str(latest_rejection_feedback_summary or '').strip(),
+                updated_at=updated_at,
+            )
+            return metadata
+
+        self._log_service.update_node_metadata(node_id, _mutate)
+
+    def _reactivate_node_for_retry(self, *, node_id: str) -> NodeRecord | None:
+        return self._store.update_node(
+            node_id,
+            lambda record: record.model_copy(
+                update={
+                    'status': 'in_progress',
+                    'final_output': '',
+                    'final_output_ref': '',
+                    'failure_reason': '',
+                    'finished_at': '',
+                    'updated_at': now_iso(),
+                }
+            ),
+        )
+
+    def _persist_rejection_feedback_and_keep_acceptance_live(
+        self,
+        *,
+        task,
+        execution: NodeRecord | None,
+        acceptance: NodeRecord,
+        feedback_text: str,
+        rejection_count: int,
+    ) -> None:
+        if execution is None:
+            return
+        current = normalize_acceptance_handshake(((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)))
+        self._update_execution_acceptance_handshake(
+            node_id=execution.node_id,
+            state=ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
+            acceptance_node_id=acceptance.node_id,
+            rejection_count=int(rejection_count or 0),
+            max_rejections=int(current.get('max_rejections') or 2),
+            latest_execution_result_ref=str(current.get('latest_execution_result_ref') or '').strip(),
+            latest_execution_result_summary=str(current.get('latest_execution_result_summary') or '').strip(),
+            latest_rejection_feedback_ref='',
+            latest_rejection_feedback_summary=str(feedback_text or '').strip(),
+        )
+        self._reactivate_node_for_retry(node_id=acceptance.node_id)
+        self._reactivate_node_for_retry(node_id=execution.node_id)
+        self._persist_node_notification_direct(
+            task_id=task.task_id,
+            epoch_id='',
+            source_node_id=acceptance.node_id,
+            target_node_id=execution.node_id,
+            message=str(feedback_text or '').strip(),
+        )
+        if self._acceptance_updates_task_final_acceptance(task=task, execution=execution, acceptance=acceptance):
+            self._set_task_final_acceptance_state(
+                task_id=task.task_id,
+                acceptance_node_id=acceptance.node_id,
+                status=ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
+                final_execution_output='',
+            )
+        self._log_service.refresh_task_view(task.task_id, mark_unread=True)
+
+    def _finalize_acceptance_pass(
+        self,
+        *,
+        task,
+        execution: NodeRecord | None,
+        acceptance: NodeRecord,
+        result: NodeFinalResult,
+    ) -> None:
+        if str(getattr(acceptance, 'status', '') or '').strip().lower() != STATUS_SUCCESS:
+            self._log_service.update_node_status(
+                task.task_id,
+                acceptance.node_id,
+                status=STATUS_SUCCESS,
+                final_output=str(result.output or '').strip(),
+                failure_reason='',
+            )
+        if execution is None:
+            return
+        current = normalize_acceptance_handshake(((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)))
+        self._update_execution_acceptance_handshake(
+            node_id=execution.node_id,
+            state=ACCEPTANCE_STATE_ACCEPTED,
+            acceptance_node_id=acceptance.node_id,
+            rejection_count=int(current.get('rejection_count') or 0),
+            max_rejections=int(current.get('max_rejections') or 2),
+            latest_execution_result_ref=str(current.get('latest_execution_result_ref') or '').strip(),
+            latest_execution_result_summary=str(current.get('latest_execution_result_summary') or '').strip(),
+            latest_rejection_feedback_ref='',
+            latest_rejection_feedback_summary='',
+        )
+        if self._acceptance_updates_task_final_acceptance(task=task, execution=execution, acceptance=acceptance):
+            self._set_task_final_acceptance_state(
+                task_id=task.task_id,
+                acceptance_node_id=acceptance.node_id,
+                status='passed',
+                final_execution_output='',
+            )
+        self._log_service.refresh_task_view(task.task_id, mark_unread=True)
+
+    def _finalize_acceptance_failure(
+        self,
+        *,
+        task,
+        execution: NodeRecord | None,
+        acceptance: NodeRecord,
+        result: NodeFinalResult,
+        rejection_count: int,
+    ) -> None:
+        if str(getattr(acceptance, 'status', '') or '').strip().lower() != STATUS_FAILED:
+            self._log_service.update_node_status(
+                task.task_id,
+                acceptance.node_id,
+                status=STATUS_FAILED,
+                final_output=str(result.output or '').strip(),
+                failure_reason=str(result.failure_text or '').strip(),
+            )
+        if execution is None:
+            return
+        current = normalize_acceptance_handshake(((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)))
+        self._update_execution_acceptance_handshake(
+            node_id=execution.node_id,
+            state=ACCEPTANCE_STATE_REJECTED_TERMINAL,
+            acceptance_node_id=acceptance.node_id,
+            rejection_count=int(rejection_count or 0),
+            max_rejections=int(current.get('max_rejections') or 2),
+            latest_execution_result_ref=str(current.get('latest_execution_result_ref') or '').strip(),
+            latest_execution_result_summary=str(current.get('latest_execution_result_summary') or '').strip(),
+            latest_rejection_feedback_ref='',
+            latest_rejection_feedback_summary=self._acceptance_feedback_text(result),
+        )
+        if self._acceptance_updates_task_final_acceptance(task=task, execution=execution, acceptance=acceptance):
+            execution_output = str(getattr(execution, 'final_output', '') or '').strip()
+            self._set_task_final_acceptance_state(
+                task_id=task.task_id,
+                acceptance_node_id=acceptance.node_id,
+                status='failed',
+                final_execution_output=execution_output,
+            )
+        self._log_service.refresh_task_view(task.task_id, mark_unread=True)
+
+    def _cancel_waiting_acceptance_for_execution_failure(
+        self,
+        *,
+        task_id: str,
+        execution_node_id: str,
+        reason: str,
+    ) -> None:
+        execution = self._store.get_node(execution_node_id)
+        if execution is None:
+            return
+        handshake = normalize_acceptance_handshake(((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)))
+        if str(handshake.get('state') or '').strip() != ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY:
+            return
+        acceptance_node_id = str(handshake.get('acceptance_node_id') or '').strip()
+        if not acceptance_node_id:
+            return
+        acceptance = self._store.get_node(acceptance_node_id)
+        if self._normalized_status(getattr(acceptance, 'status', '')) in {STATUS_SUCCESS, STATUS_FAILED}:
+            return
+        if acceptance is not None:
+            self._store.update_node(
+                acceptance.node_id,
+                lambda record: record.model_copy(
+                    update={
+                        'status': STATUS_FAILED,
+                        'final_output': '',
+                        'final_output_ref': '',
+                        'failure_reason': str(reason or 'canceled by execution failure').strip() or 'canceled by execution failure',
+                        'finished_at': now_iso(),
+                        'updated_at': now_iso(),
+                    }
+                ),
+            )
+        self._update_execution_acceptance_handshake(
+            node_id=execution.node_id,
+            state=ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
+            acceptance_node_id=acceptance_node_id,
+            rejection_count=int(handshake.get('rejection_count') or 0),
+            max_rejections=int(handshake.get('max_rejections') or 2),
+            latest_execution_result_ref=str(handshake.get('latest_execution_result_ref') or '').strip(),
+            latest_execution_result_summary=str(handshake.get('latest_execution_result_summary') or '').strip(),
+            latest_rejection_feedback_ref='',
+            latest_rejection_feedback_summary=str(reason or '').strip(),
+        )
+        task = self._store.get_task(task_id)
+        if (
+            task is not None
+            and str(getattr(execution, 'node_id', '') or '').strip() == str(getattr(task, 'root_node_id', '') or '').strip()
+            and str(normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance')).node_id or '').strip() == acceptance_node_id
+        ):
+            self._set_task_final_acceptance_state(
+                task_id=task_id,
+                acceptance_node_id=acceptance_node_id,
+                status=ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
+                final_execution_output='',
+            )
+        self._log_service.refresh_task_view(task_id, mark_unread=True)
+
+    def _handle_acceptance_node_result(
+        self,
+        *,
+        task,
+        acceptance: NodeRecord,
+        result: NodeFinalResult,
+    ) -> NodeFinalResult:
+        execution = self._accepted_execution_node(task_id=task.task_id, acceptance=acceptance)
+        handshake = normalize_acceptance_handshake(((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) if execution is not None else {}))
+        if str(result.status or '').strip() == STATUS_SUCCESS:
+            self._finalize_acceptance_pass(task=task, execution=execution, acceptance=acceptance, result=result)
+            return NodeFinalResult(
+                status=STATUS_SUCCESS,
+                delivery_status='final',
+                summary=str(result.summary or ''),
+                answer=str(result.answer or ''),
+                evidence=list(result.evidence or []),
+                remaining_work=[],
+                blocking_reason='',
+            )
+
+        next_rejection_count = int(handshake.get('rejection_count') or 0) + 1
+        if next_rejection_count < int(handshake.get('max_rejections') or 2):
+            feedback_text = self._acceptance_feedback_text(result)
+            self._persist_rejection_feedback_and_keep_acceptance_live(
+                task=task,
+                execution=execution,
+                acceptance=acceptance,
+                feedback_text=feedback_text,
+                rejection_count=next_rejection_count,
+            )
+            return NodeFinalResult(
+                status=STATUS_SUCCESS,
+                delivery_status='partial',
+                summary='waiting for execution retry',
+                answer=feedback_text,
+                evidence=[],
+                remaining_work=[],
+                blocking_reason='',
+            )
+
+        self._finalize_acceptance_failure(
+            task=task,
+            execution=execution,
+            acceptance=acceptance,
+            result=result,
+            rejection_count=next_rejection_count,
+        )
+        return NodeFinalResult(
+            status=STATUS_FAILED,
+            delivery_status='final',
+            summary=str(result.summary or ''),
+            answer=str(result.answer or ''),
+            evidence=list(result.evidence or []),
+            remaining_work=[],
+            blocking_reason=str(result.blocking_reason or result.summary or ''),
+        )
+
+    def _set_execution_waiting_acceptance_state(
+        self,
+        *,
+        task_id: str,
+        execution_node_id: str,
+        acceptance_node_id: str,
+        result_ref: str,
+        result_summary: str,
+        rejection_count: int = 0,
+    ) -> None:
+        execution = self._store.get_node(execution_node_id)
+        current = normalize_acceptance_handshake(
+            ((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) if execution is not None else {})
+        )
+        self._update_execution_acceptance_handshake(
+            node_id=execution_node_id,
+            state=ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+            acceptance_node_id=acceptance_node_id,
+            rejection_count=int(rejection_count if rejection_count is not None else current.get('rejection_count') or 0),
+            max_rejections=int(current.get('max_rejections') or 2),
+            latest_execution_result_ref=str(result_ref or '').strip(),
+            latest_execution_result_summary=str(result_summary or '').strip(),
+            latest_rejection_feedback_ref='',
+            latest_rejection_feedback_summary='',
+        )
+        task = self._store.get_task(task_id)
+        acceptance = self._store.get_node(acceptance_node_id)
+        if task is not None and acceptance is not None and self._acceptance_updates_task_final_acceptance(task=task, execution=execution, acceptance=acceptance):
+            self._set_task_final_acceptance_state(
+                task_id=task_id,
+                acceptance_node_id=acceptance_node_id,
+                status=ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+                final_execution_output='',
+            )
+
+    def _maybe_start_acceptance_handshake(
+        self,
+        *,
+        task,
+        node: NodeRecord,
+        result: NodeFinalResult,
+    ) -> NodeFinalResult | None:
+        if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_EXECUTION:
+            return None
+        if str(result.status or '').strip() != STATUS_SUCCESS:
+            return None
+        if str(result.delivery_status or '').strip() != 'final':
+            return None
+        acceptance = self._required_acceptance_node(task=task, node=node)
+        if acceptance is None:
+            return None
+        result_ref = self._persist_acceptance_candidate_result(task_id=task.task_id, node_id=node.node_id, result=result)
+        self._set_execution_waiting_acceptance_state(
+            task_id=task.task_id,
+            execution_node_id=node.node_id,
+            acceptance_node_id=acceptance.node_id,
+            result_ref=result_ref,
+            result_summary=str(result.summary or '').strip(),
+        )
+        self._persist_node_notification_direct(
+            task_id=task.task_id,
+            epoch_id='',
+            source_node_id=node.node_id,
+            target_node_id=acceptance.node_id,
+            message=f"新的被检验节点输出如下，请继续在当前验收上下文中核验：{str(result.answer or '').strip()}",
+        )
+        self._log_service.refresh_task_view(task.task_id, mark_unread=True)
+        return NodeFinalResult(
+            status=STATUS_SUCCESS,
+            delivery_status='partial',
+            summary='waiting for acceptance',
+            answer=str(result.answer or ''),
+            evidence=list(result.evidence or []),
+            remaining_work=[],
+            blocking_reason='',
         )
 
     def _clear_pending_notice_state_if_idle(self, *, node_id: str) -> None:
@@ -1148,6 +1614,7 @@ class NodeRunner:
             payloads.append(
                 {
                     'node_id': child.node_id,
+                    'node_kind': str(child.node_kind or ''),
                     'status': str(child.status or ''),
                     'goal': str(child.goal or ''),
                     'prompt_summary': prompt_summary,
@@ -1259,6 +1726,68 @@ class NodeRunner:
                 message=message,
             )
             return
+        self._persist_node_notification_direct(
+            task_id=task_id,
+            epoch_id=epoch_id,
+            source_node_id=source_node_id,
+            target_node_id=target_node_id,
+            message=message,
+        )
+
+    def distribution_recipient_node_ids(self, *, task_id: str, parent_node_id: str) -> list[str]:
+        task = self._store.get_task(task_id)
+        parent = self._store.get_node(parent_node_id)
+        if task is None or parent is None or str(parent.task_id or '').strip() != str(task.task_id or '').strip():
+            return []
+        if str(parent.node_kind or '').strip().lower() != KIND_EXECUTION:
+            return []
+        latest_round = self._latest_incomplete_spawn_round(parent=parent)
+        if latest_round is None:
+            return []
+        _round_id, payload = latest_round
+        recipient_ids: list[str] = []
+        seen: set[str] = set()
+        for raw_entry in list(payload.get('entries') or []):
+            entry = dict(raw_entry or {}) if isinstance(raw_entry, dict) else {}
+            if str(entry.get('review_decision') or '').strip().lower() == 'blocked':
+                continue
+            child_id = str(entry.get('child_node_id') or '').strip()
+            acceptance_id = str(entry.get('acceptance_node_id') or '').strip()
+            if child_id:
+                child = self._store.get_node(child_id)
+                if (
+                    child is not None
+                    and str(child.task_id or '').strip() == str(task.task_id or '').strip()
+                    and str(child.node_kind or '').strip().lower() == KIND_EXECUTION
+                    and self._normalized_status(getattr(child, 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}
+                ):
+                    handshake = normalize_acceptance_handshake((child.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
+                    if str(handshake.get('state') or '').strip() != ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
+                        if child_id not in seen:
+                            seen.add(child_id)
+                            recipient_ids.append(child_id)
+            if acceptance_id:
+                acceptance = self._store.get_node(acceptance_id)
+                if (
+                    acceptance is not None
+                    and str(acceptance.task_id or '').strip() == str(task.task_id or '').strip()
+                    and str(acceptance.node_kind or '').strip().lower() == KIND_ACCEPTANCE
+                    and self._normalized_status(getattr(acceptance, 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}
+                    and acceptance_id not in seen
+                ):
+                    seen.add(acceptance_id)
+                    recipient_ids.append(acceptance_id)
+        return recipient_ids
+
+    def _persist_node_notification_direct(
+        self,
+        *,
+        task_id: str,
+        epoch_id: str,
+        source_node_id: str,
+        target_node_id: str,
+        message: str,
+    ) -> None:
         self._store.upsert_task_node_notification(
             {
                 'notification_id': new_command_id().replace('command:', 'notif:', 1),
@@ -1295,13 +1824,13 @@ class NodeRunner:
         if str(node.node_id or '').strip() in already_distributed:
             return NodeFinalResult(status='success', summary=f'distribution turn already completed for {node.node_id}')
         incoming_message = self._distribution_node_message(task_id=task.task_id, node=node, epoch=epoch)
-        live_child_node_ids = self.live_distribution_child_node_ids(task_id=task.task_id, parent_node_id=node.node_id)
-        child_payloads = self._distribution_child_sidecar(task_id=task.task_id, child_node_ids=live_child_node_ids)
+        recipient_node_ids = self.distribution_recipient_node_ids(task_id=task.task_id, parent_node_id=node.node_id)
+        child_payloads = self._distribution_child_sidecar(task_id=task.task_id, child_node_ids=recipient_node_ids)
         epoch_payload = self._distribution_append_debug_trace(
             epoch_payload,
             event='control_turn_start',
             source_node_id=str(node.node_id or '').strip(),
-            live_child_node_ids=list(live_child_node_ids),
+            live_child_node_ids=list(recipient_node_ids),
             incoming_message=str(incoming_message or '').strip(),
         )
         prompt_messages = [
@@ -1414,7 +1943,7 @@ class NodeRunner:
         submitted_children = [item for item in list(submitted.get('children') or []) if isinstance(item, dict)]
         validation_error = self._validate_distribution_child_decisions(
             submitted_children=submitted_children,
-            live_child_node_ids=live_child_node_ids,
+            live_child_node_ids=recipient_node_ids,
         )
         if validation_error:
             epoch_payload = self._distribution_append_debug_trace(
@@ -1438,7 +1967,7 @@ class NodeRunner:
                 remaining_work=[],
                 blocking_reason=validation_error,
             )
-        valid_child_ids = set(live_child_node_ids)
+        valid_child_ids = set(recipient_node_ids)
         delivered_child_ids: list[str] = []
         skipped_child_decisions: list[dict[str, str]] = []
         for item in submitted_children:
@@ -1506,6 +2035,8 @@ class NodeRunner:
             if str(item or '').strip()
         ]
         for child_node_id in delivered_child_ids:
+            if not self.node_is_in_live_distribution_tree(task_id=task.task_id, node_id=child_node_id):
+                continue
             if child_node_id not in next_frontier_node_ids:
                 next_frontier_node_ids.append(child_node_id)
         self._store.upsert_task_message_distribution_epoch(
@@ -3037,56 +3568,92 @@ class NodeRunner:
                 )
                 return result
 
-            acceptance_id = str(entry.get('acceptance_node_id') or '').strip()
-            acceptance = self._store.get_node(acceptance_id) if acceptance_id else None
-            if acceptance is None:
-                await self._admit_spawn_expansion(
-                    task_id=task.task_id,
-                    parent_node_id=parent.node_id,
-                    cache_key=cache_key,
-                    index=index,
-                    phase='acceptance',
-                )
-                acceptance_goal = f'accept:{spec.goal}'
-                acceptance_prompt = str(spec.acceptance_prompt or '')
-                acceptance = self._find_reusable_acceptance_node(
-                    task=task,
-                    accepted_node=child,
-                    goal=acceptance_goal,
-                    acceptance_prompt=acceptance_prompt,
-                    parent_node_id=child.node_id,
-                    exclude_node_ids=self._claimed_spawn_node_ids(entries=entries, field='acceptance_node_id', skip_index=index),
-                )
-                if acceptance is None:
-                    acceptance = self.create_acceptance_node(
-                        task=task,
-                        accepted_node=child,
-                        goal=acceptance_goal,
-                        acceptance_prompt=acceptance_prompt,
-                        parent_node_id=child.node_id,
-                        owner_parent_node_id=parent.node_id,
-                        owner_round_id=cache_key,
-                        owner_entry_index=index,
-                    )
-                self._update_spawn_entry(
-                    task_id=task.task_id,
-                    parent_node_id=parent.node_id,
-                    cache_key=cache_key,
-                    cached_payload=cached_payload,
-                    index=index,
-                    acceptance_node_id=acceptance.node_id,
-                    check_status='running',
-                )
-            self._stamp_spawn_owner_metadata(
-                node_id=acceptance.node_id,
+            acceptance = self._ensure_spawn_acceptance_node(
+                task=task,
+                parent=parent,
+                child=child,
+                spec=spec,
+                cache_key=cache_key,
+                cached_payload=cached_payload,
+                index=index,
+            )
+            acceptance = self._refresh_acceptance_node_prompt(task=task, node=acceptance)
+            self._update_spawn_entry(
+                task_id=task.task_id,
                 parent_node_id=parent.node_id,
-                owner_round_id=cache_key,
-                owner_entry_index=index,
-                owner_kind='acceptance',
+                cache_key=cache_key,
+                cached_payload=cached_payload,
+                index=index,
+                check_status='running',
+            )
+            self._set_execution_waiting_acceptance_state(
+                task_id=task.task_id,
+                execution_node_id=child.node_id,
+                acceptance_node_id=acceptance.node_id,
+                result_ref=str(child_handoff.get('result_payload_ref') or ''),
+                result_summary=child_summary,
             )
 
             acceptance_result = await self._run_nested_node(task.task_id, acceptance.node_id)
             acceptance = self._store.get_node(acceptance.node_id) or acceptance
+            acceptance_result = self._handle_acceptance_node_result(
+                task=task,
+                acceptance=acceptance,
+                result=acceptance_result,
+            )
+            if str(acceptance_result.delivery_status or '').strip() == 'partial':
+                child_result = await self.run_node(task.task_id, child.node_id)
+                child = self._store.get_node(child.node_id) or child
+                child_handoff = self._child_handoff_payload(
+                    task_id=task.task_id,
+                    node=child,
+                    fallback_output=child_result.output,
+                )
+                child_summary = str(child_handoff.get('summary') or '')
+                child_ref = str(child_handoff.get('output_ref') or '')
+                if child_result.status != STATUS_SUCCESS:
+                    self._log_service.update_node_check_result(task.task_id, child.node_id, SKIPPED_CHECK_RESULT)
+                    result = SpawnChildResult(
+                        goal=spec.goal,
+                        check_result=SKIPPED_CHECK_RESULT,
+                        node_output=child_summary,
+                        node_output_summary=child_summary,
+                        node_output_ref=child_ref,
+                        failure_info=self._spawn_failure_info_from_node(
+                            task_id=task.task_id,
+                            node=child,
+                            fallback_output=child_result.output,
+                            source='execution',
+                        ),
+                    )
+                    self._update_spawn_entry(
+                        task_id=task.task_id,
+                        parent_node_id=parent.node_id,
+                        cache_key=cache_key,
+                        cached_payload=cached_payload,
+                        index=index,
+                        status='error',
+                        finished_at=_now(),
+                        check_status='skipped',
+                        runtime_error_text='',
+                    )
+                    return result
+                acceptance = self._refresh_acceptance_node_prompt(task=task, node=acceptance)
+                self._set_execution_waiting_acceptance_state(
+                    task_id=task.task_id,
+                    execution_node_id=child.node_id,
+                    acceptance_node_id=acceptance.node_id,
+                    result_ref=str(child_handoff.get('result_payload_ref') or ''),
+                    result_summary=child_summary,
+                    rejection_count=1,
+                )
+                acceptance_result = await self.run_node(task.task_id, acceptance.node_id)
+                acceptance = self._store.get_node(acceptance.node_id) or acceptance
+                acceptance_result = self._handle_acceptance_node_result(
+                    task=task,
+                    acceptance=acceptance,
+                    result=acceptance_result,
+                )
             check_result = str(acceptance_result.summary or acceptance_result.output or acceptance.failure_reason or '').strip() or SKIPPED_CHECK_RESULT
             self._log_service.update_node_check_result(task.task_id, child.node_id, check_result)
             result = SpawnChildResult(
@@ -3552,7 +4119,83 @@ class NodeRunner:
                 entry_index=index,
                 child=child,
             )
+            self._stamp_spawn_owner_metadata(
+                node_id=child.node_id,
+                parent_node_id=parent.node_id,
+                owner_round_id=cache_key,
+                owner_entry_index=index,
+                owner_kind='child',
+            )
+            if self._requires_acceptance(spec):
+                self._ensure_spawn_acceptance_node(
+                    task=task,
+                    parent=parent,
+                    child=child,
+                    spec=spec,
+                    cache_key=cache_key,
+                    cached_payload=cached_payload,
+                    index=index,
+                )
             entries = list(cached_payload.get('entries') or [])
+
+    def _ensure_spawn_acceptance_node(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        child: NodeRecord,
+        spec: SpawnChildSpec,
+        cache_key: str,
+        cached_payload: dict[str, Any],
+        index: int,
+    ) -> NodeRecord:
+        entries = list(cached_payload.get('entries') or [])
+        entry = dict((entries or [])[index] or {})
+        acceptance_id = str(entry.get('acceptance_node_id') or '').strip()
+        acceptance = self._store.get_node(acceptance_id) if acceptance_id else None
+        if acceptance is None:
+            acceptance_goal = f'accept:{spec.goal}'
+            acceptance_prompt = str(spec.acceptance_prompt or '')
+            acceptance = self._find_reusable_acceptance_node(
+                task=task,
+                accepted_node=child,
+                goal=acceptance_goal,
+                acceptance_prompt=acceptance_prompt,
+                parent_node_id=child.node_id,
+                exclude_node_ids=self._claimed_spawn_node_ids(
+                    entries=entries,
+                    field='acceptance_node_id',
+                    skip_index=index,
+                ),
+            )
+            if acceptance is None:
+                acceptance = self.create_acceptance_node(
+                    task=task,
+                    accepted_node=child,
+                    goal=acceptance_goal,
+                    acceptance_prompt=acceptance_prompt,
+                    parent_node_id=child.node_id,
+                    owner_parent_node_id=parent.node_id,
+                    owner_round_id=cache_key,
+                    owner_entry_index=index,
+                )
+            self._update_spawn_entry(
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                cached_payload=cached_payload,
+                index=index,
+                acceptance_node_id=acceptance.node_id,
+                check_status='pending',
+            )
+        self._stamp_spawn_owner_metadata(
+            node_id=acceptance.node_id,
+            parent_node_id=parent.node_id,
+            owner_round_id=cache_key,
+            owner_entry_index=index,
+            owner_kind='acceptance',
+        )
+        return acceptance
 
     async def _admit_spawn_expansion(
         self,
@@ -3818,6 +4461,7 @@ class NodeRunner:
         )
         base_metadata = {
             'accepted_node_id': accepted_node.node_id,
+            'acceptance_prompt_template': str(acceptance_prompt or ''),
             'execution_policy': execution_policy.model_dump(mode='json'),
             _RECOVERY_FINGERPRINT_KEY: self._acceptance_node_recovery_fingerprint(
                 parent_node_id=parent_node_id or accepted_node.node_id,
@@ -3852,6 +4496,77 @@ class NodeRunner:
             metadata={**base_metadata, **dict(metadata or {})},
         )
         return self._log_service.create_node(task.task_id, acceptance)
+
+    def _refresh_acceptance_node_prompt(self, *, task, node: NodeRecord) -> NodeRecord:
+        if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
+            return node
+        metadata = dict(getattr(node, 'metadata', {}) or {})
+        accepted_node_id = str(metadata.get('accepted_node_id') or '').strip()
+        if not accepted_node_id:
+            return node
+        accepted_node = self._store.get_node(accepted_node_id)
+        if accepted_node is None or str(getattr(accepted_node, 'task_id', '') or '').strip() != str(task.task_id or '').strip():
+            return node
+        acceptance_prompt = str(metadata.get('acceptance_prompt_template') or '').strip()
+        if not acceptance_prompt and bool(metadata.get('final_acceptance')):
+            final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance'))
+            acceptance_prompt = str(final_acceptance.prompt or '').strip()
+        child_handoff = self._child_handoff_payload(
+            task_id=task.task_id,
+            node=accepted_node,
+            fallback_output='',
+        )
+        prompt = self._compose_acceptance_prompt(
+            acceptance_prompt=acceptance_prompt,
+            node_output=str(child_handoff.get('summary') or ''),
+            node_output_ref=str(child_handoff.get('output_ref') or ''),
+            result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
+            evidence_summary=str(child_handoff.get('evidence_summary') or ''),
+        )
+        next_metadata = {
+            **metadata,
+            'accepted_node_id': accepted_node.node_id,
+            'acceptance_prompt_template': acceptance_prompt,
+            _RECOVERY_FINGERPRINT_KEY: self._acceptance_node_recovery_fingerprint(
+                parent_node_id=str(node.parent_node_id or accepted_node.node_id).strip() or accepted_node.node_id,
+                goal=str(node.goal or ''),
+                prompt=prompt,
+                accepted_node_id=accepted_node.node_id,
+            ),
+        }
+        if (
+            str(node.prompt or '') == prompt
+            and str(node.input or '') == prompt
+            and dict(metadata or {}) == next_metadata
+        ):
+            return node
+        updater = getattr(self._store, 'update_node', None)
+        updated = None
+        if callable(updater):
+            updated = updater(
+                node.node_id,
+                lambda record: record.model_copy(
+                    update={
+                        'prompt': prompt,
+                        'input': prompt,
+                        'updated_at': _now(),
+                        'metadata': next_metadata,
+                    }
+                ),
+            )
+        if updated is not None:
+            sync_read_model = getattr(self._log_service, 'sync_node_read_model', None)
+            if callable(sync_read_model):
+                sync_read_model(task.task_id, node.node_id)
+            self._log_service.refresh_task_view(task.task_id, mark_unread=True)
+            return updated
+        return node.model_copy(
+            update={
+                'prompt': prompt,
+                'input': prompt,
+                'metadata': next_metadata,
+            }
+        )
 
     def _stamp_spawn_owner_metadata(
         self,
@@ -4078,7 +4793,7 @@ class NodeRunner:
             tool_round_budget=int(tool_round_budget or 0),
             completed_stage_summary=str(completed_stage_summary or '').strip(),
             key_refs=[dict(item) for item in list(key_refs or []) if isinstance(item, dict)],
-            final=bool(final),
+            final=False,
         )
         return {
             'stage_id': str(stage.get('stage_id') or ''),
@@ -4109,6 +4824,17 @@ class NodeRunner:
                     capture_retry_snapshot(task_id, node_id, failure_reason=result.failure_text)
                 except Exception:
                     pass
+        node = self._store.get_node(node_id)
+        if (
+            node is not None
+            and str(getattr(node, 'node_kind', '') or '').strip().lower() == KIND_EXECUTION
+            and result.status == STATUS_FAILED
+        ):
+            self._cancel_waiting_acceptance_for_execution_failure(
+                task_id=task_id,
+                execution_node_id=node_id,
+                reason=result.failure_text,
+            )
         status = STATUS_SUCCESS if result.status == STATUS_SUCCESS else STATUS_FAILED
         self._log_service.finalize_execution_stage(task_id, node_id, status=status)
         if status == STATUS_SUCCESS:

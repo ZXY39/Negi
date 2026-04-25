@@ -2105,7 +2105,7 @@ def test_execution_stage_overlay_exposes_budget_accounting_rules_and_latest_roun
 
 
 @pytest.mark.asyncio
-async def test_final_execution_stage_does_not_require_transition_when_budget_is_exhausted(tmp_path: Path):
+async def test_execution_stage_still_requires_transition_when_budget_is_exhausted_even_with_final_flag(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / 'runtime.sqlite3',
@@ -2117,14 +2117,14 @@ async def test_final_execution_stage_does_not_require_transition_when_budget_is_
     try:
         record = await _create_web_task(service)
         service.log_service.submit_next_stage(
-            record.task_id,
-            record.root_node_id,
-            stage_goal='final synthesis for current evidence only',
-            tool_round_budget=5,
-            completed_stage_summary='',
-            key_refs=[],
-            final=True,
-        )
+                record.task_id,
+                record.root_node_id,
+                stage_goal='final synthesis for current evidence only',
+                tool_round_budget=1,
+                completed_stage_summary='',
+                key_refs=[],
+                final=True,
+            )
         service.log_service.record_execution_stage_round(
             record.task_id,
             record.root_node_id,
@@ -2133,14 +2133,14 @@ async def test_final_execution_stage_does_not_require_transition_when_budget_is_
         )
         snapshot = service.log_service.execution_stage_gate_snapshot(record.task_id, record.root_node_id)
         assert snapshot is not None
-        assert snapshot['transition_required'] is False
-        assert snapshot['active_stage']['final_stage'] is True
+        assert snapshot['transition_required'] is True
+        assert snapshot['active_stage']['final_stage'] is False
     finally:
         await service.close()
 
 
 @pytest.mark.asyncio
-async def test_final_execution_stage_blocks_spawn_child_nodes(tmp_path: Path):
+async def test_execution_stage_allows_spawn_child_nodes_even_with_final_flag(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / 'runtime.sqlite3',
@@ -2173,7 +2173,7 @@ async def test_final_execution_stage_blocks_spawn_child_nodes(tmp_path: Path):
             arguments={'children': []},
             runtime_context=runtime_context,
         )
-        assert blocked.startswith('Error: final stage forbids spawn_child_nodes')
+        assert blocked == 'ok'
     finally:
         await service.close()
 

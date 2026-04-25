@@ -64,6 +64,10 @@ from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
     build_runtime_observed_input_truth,
 )
+from main.runtime.acceptance_handshake import (
+    ACCEPTANCE_HANDSHAKE_KEY,
+    normalize_acceptance_handshake,
+)
 from main.token_usage import aggregate_node_token_usage, build_token_usage_from_attempts, merge_token_usage_by_model, merge_token_usage_records
 
 
@@ -2317,7 +2321,7 @@ class TaskLogService:
                 status=_EXECUTION_STAGE_STATUS_ACTIVE,
                 stage_goal=normalized_goal,
                 completed_stage_summary='',
-                final_stage=bool(final),
+                final_stage=False,
                 key_refs=[],
                 archive_ref='',
                 archive_stage_index_start=0,
@@ -2394,7 +2398,6 @@ class TaskLogService:
                 active_stage_id=str(state.active_stage_id or '').strip(),
                 transition_required=bool(
                     latest_active is not None
-                    and not bool(getattr(latest_active, 'final_stage', False))
                     and int(latest_active.tool_round_budget or 0) > 0
                     and int(latest_active.tool_rounds_used or 0) >= int(latest_active.tool_round_budget or 0)
                 ),
@@ -3243,6 +3246,8 @@ class TaskLogService:
         rounds = self._task_projection_round_records(node)
         default_round_id = str(rounds[-1].round_id or '') if rounds else ''
         children_fingerprint = self._task_projection_node_children_fingerprint(node, rounds=rounds)
+        acceptance_handshake = normalize_acceptance_handshake((node.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
+        acceptance_handshake_state = str(acceptance_handshake.get('state') or '').strip()
         return TaskProjectionNodeRecord(
             node_id=node.node_id,
             task_id=node.task_id,
@@ -3270,6 +3275,7 @@ class TaskLogService:
                 'selected_round_id': default_round_id,
                 'round_options_count': len(rounds),
                 'children_fingerprint': children_fingerprint,
+                'acceptance_handshake_state': acceptance_handshake_state,
             },
         )
 
