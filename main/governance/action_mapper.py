@@ -75,7 +75,7 @@ DEFAULT_TOOL_FAMILIES: dict[str, dict[str, Any]] = {
     'memory_delete': {
         'tool_id': 'memory',
         'display_name': 'Memory',
-        'description': 'Delete visible memory ids from the committed MEMORY.md snapshot.',
+        'description': 'Delete remembered content from the committed MEMORY.md snapshot using a natural-language description.',
         'actions': [
             {
                 'id': 'delete',

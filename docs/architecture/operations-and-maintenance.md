@@ -103,7 +103,7 @@
 
 - `memory/`
   Maintenance note:
-  For the queued Markdown memory runtime, inspect `memory/MEMORY.md`, `memory/notes/`, `memory/queue.jsonl`, and `memory/ops.jsonl` first. Dense store or checkpoint files are now secondary catalog/runtime projections rather than the primary long-term memory source.
+  For the queued Markdown memory runtime, inspect `memory/memory_state.sqlite3`, `memory/MEMORY.md`, `memory/notes/`, `memory/queue.jsonl`, and `memory/ops.jsonl` first. Dense store or checkpoint files are now secondary catalog/runtime projections rather than the primary long-term memory source.
   The queue is now model-driven: a stuck queue head usually means the dedicated memory agent route, provider call, or runtime validation is failing, not that a synchronous tool write failed inline.
   记忆相关文件、qdrant、checkpoint 等
 
@@ -413,17 +413,18 @@ Provider retry troubleshooting note:
 
 For the queued Markdown memory runtime, the first operator checks should now be:
 
-1. Inspect `memory/MEMORY.md` for the currently committed long-term memory snapshot.
-2. Inspect `memory/queue.jsonl` for pending `write` / `delete` / `assess` requests.
-3. Inspect `memory/ops.jsonl` for the latest terminal batch history, including both applied rows and durable discarded rows.
-4. If a processed row exposes `request_artifact_paths`, inspect the referenced files under `.g3ku/memory-requests/` before blaming prompt assembly or the provider adapter.
-5. Use `g3ku memory current`, `g3ku memory queue`, and `g3ku memory flush` when you need a quick operator view without manually opening files.
-6. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend or the catalog bridge.
+1. Inspect `memory/memory_state.sqlite3` for the authoritative memory rows, `refresh_count`, `passed_count`, `is_compressed`, and `from_user` state.
+2. Inspect `memory/MEMORY.md` for the regenerated prompt snapshot currently injected into CEO/frontdoor.
+3. Inspect `memory/queue.jsonl` for pending `write` / `delete` requests.
+4. Inspect `memory/ops.jsonl` for the latest terminal batch history, including both applied rows and durable discarded rows plus final compression metadata.
+5. If a processed row exposes `request_artifact_paths`, inspect the referenced files under `.g3ku/memory-requests/` before blaming prompt assembly or the provider adapter.
+6. Use `g3ku memory current`, `g3ku memory queue`, and `g3ku memory flush` when you need a quick operator view without manually opening files.
+7. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend or the catalog bridge.
 
 The important maintenance boundary is:
 
 - queue files are runtime metadata, not user memory content
-- `MEMORY.md` is the only committed long-term memory source
+- `memory_state.sqlite3` is the authoritative long-term memory state; `MEMORY.md` is the regenerated prompt snapshot
 - `notes/` contains optional detail bodies and should stay small and human-readable
 - `review_state.json` is per-session buffering metadata for the 5-turn ordinary review window; it is not committed user memory
 - `ops.jsonl` is terminal history, not an in-flight retry log: applied rows and durable discarded outcomes belong there, while queue-head error fields remain authoritative for engineering failures that are still retryable
@@ -500,8 +501,7 @@ Two queue-head recovery caveats matter during operations:
 Operator interpretation of the three queue entry types:
 
 - `write`: explicit or already-refined memory text waiting for real memory processing
-- `delete`: id-based memory deletion waiting for real memory processing
-- `assess`: buffered ordinary-turn/compression window waiting for the assessor lane; if the assessor returns `null`, rejects the batch, or the batch fails runtime precheck, no committed memory change follows and the runtime records a durable discarded row in `memory/ops.jsonl`
+- `delete`: natural-language memory deletion request waiting for the internal memory agent to resolve it to concrete ids
 
 ## Docker / Compose Startup
 

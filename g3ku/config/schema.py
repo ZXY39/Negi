@@ -677,7 +677,9 @@ class MemoryDocumentConfig(Base):
     """Markdown memory document limits and paths."""
 
     summary_max_chars: int = Field(default=250, ge=1)
-    document_max_chars: int = Field(default=10000, ge=1)
+    document_max_chars: int = Field(default=20000, ge=1)
+    compress_trigger_chars: int = Field(default=16000, ge=1)
+    compress_target_chars: int = Field(default=13000, ge=1)
     memory_file: str = "memory/MEMORY.md"
     notes_dir: str = "memory/notes"
 

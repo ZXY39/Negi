@@ -3253,5 +3253,6 @@ async def test_ceo_context_assembly_keeps_memory_snapshot_out_of_turn_overlay_an
     assert len(stable_messages) >= 2
     assert stable_messages[0]["role"] == "system"
     assert stable_messages[1]["role"] == "assistant"
-    assert "id:Ab12Z9" in str(stable_messages[1]["content"] or "")
+    assert "id:Ab12Z9" not in str(stable_messages[1]["content"] or "")
+    assert "2026/4/18-user" not in str(stable_messages[1]["content"] or "")
     assert "Prefer concise answers" in str(stable_messages[1]["content"] or "")

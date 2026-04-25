@@ -1,6 +1,6 @@
 # memory_delete
 
-Queue a durable long-term memory delete request using memory ids visible in the current `MEMORY.md` snapshot.
+Queue a durable long-term memory delete request using a natural-language description of the memory to forget.
 
 ## Must Use
 
@@ -8,8 +8,8 @@ Queue a durable long-term memory delete request using memory ids visible in the 
 
 ## Input
 
-- Pass one visible memory id as `id`.
-- Or pass multiple visible memory ids as `ids=[...]`.
+- Pass the remembered content as `content`.
+- Describe the memory naturally, for example: `忘掉我喜欢简洁回答这条偏好`.
 
 ## Do Not Use
 

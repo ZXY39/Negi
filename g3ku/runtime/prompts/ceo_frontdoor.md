@@ -111,7 +111,7 @@
 - 当用户要求系统长期记住某项稳定规则、偏好、默认值、身份信息或项目事实时，调用 `memory_write(content=...)` 提交记忆请求，再给用户回复。
 - 不要把临时执行状态、处理中标记、暂停/恢复控制信息写入长期记忆。
 - 如果当前上下文的记忆中引用了 `ref:note_xxxx`，可以调用 `memory_note(ref="note_xxxx")` 读取详细笔记。
-- 需要删除长期记忆时，直接使用当前上下文的记忆里展示的记忆 `id`，调用 `memory_delete(id=...)` 或 `memory_delete(ids=[...])`；禁止凭猜测删除未展示的记忆。
+- 需要删除长期记忆时，调用 `memory_delete(content=...)`，用自然语言描述要忘掉的那条已展示记忆；禁止凭猜测删除未展示的记忆。
 - 本地仓库或目录内容的探查统一使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束；
 - `artifact:` 或外部化内容导航使用 `content_open` / `content_search`；
 - 任何文件创建、修改、复制、移动、删除或补丁提案优先通过 `filesystem_write`、`filesystem_edit`、`filesystem_copy`、`filesystem_move`、`filesystem_delete`、`filesystem_propose_patch` 完成，只有在exec允许非只读操作而上述工具无法完成时，才可使用exec完成。

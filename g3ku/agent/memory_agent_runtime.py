@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import string
 import threading
 import uuid
@@ -34,7 +35,7 @@ from g3ku.providers.chatmodels import build_chat_model
 from main.runtime.chat_backend import build_actual_request_diagnostics
 from main.prompts import load_prompt
 
-_NOTE_REF_RE = re.compile(r"\bref:(?P<ref>[a-z0-9_]+)\b")
+_NOTE_REF_RE = re.compile(r"(?:\bref:|见noteid:)(?P<ref>[a-z0-9_]+)\b")
 _STAGED_DOCUMENT_UNSET = object()
 _LEGACY_CLEANUP_RELATIVE_PATHS: tuple[str, ...] = (
     "memory/HISTORY.md",
@@ -136,7 +137,7 @@ class MemoryStrategyV2:
     def __init__(self, config: Any):
         self.config = config
         self._review_interval_turns = max(int(getattr(config.queue, "review_interval_turns", 10) or 10), 1)
-        self._document_max_chars = max(int(getattr(config.document, "document_max_chars", 10000) or 10000), 1)
+        self._document_max_chars = max(int(getattr(config.document, "document_max_chars", 20000) or 20000), 1)
 
     def classify_memory_payload(
         self,
@@ -442,6 +443,7 @@ class _MemoryToolSession:
         rewrites: list[dict[str, Any]] | None = None,
         deletes: list[str] | None = None,
         note_upserts: dict[str, str] | None = None,
+        inspired_memory_ids: list[str] | None = None,
         noop_reason: str | None = None,
     ) -> dict[str, Any]:
         errors: dict[str, str] = {}
@@ -449,6 +451,7 @@ class _MemoryToolSession:
         normalized_rewrites: list[dict[str, str]] = []
         normalized_deletes: list[str] = []
         normalized_note_upserts: dict[str, str] = {}
+        normalized_inspired_memory_ids: list[str] = []
         normalized_noop_reason = str(noop_reason or "").strip()
 
         raw_adds = list(adds or [])
@@ -460,15 +463,19 @@ class _MemoryToolSession:
                     errors[f"adds[{index}]"] = "add item must be an object"
                     continue
                 content = str(item.get("content") or "").strip()
+                minimal_memory = str(item.get("minimal_memory") or "").strip()
                 decision_source = str(item.get("decision_source") or "").strip().lower()
                 if not content:
                     errors[f"adds[{index}].content"] = "content must not be empty"
+                if content and not minimal_memory:
+                    errors[f"adds[{index}].minimal_memory"] = "minimal_memory must not be empty"
                 if decision_source not in {"user", "self"}:
                     errors[f"adds[{index}].decision_source"] = "decision_source must be user or self"
-                if content and decision_source in {"user", "self"}:
+                if content and minimal_memory and decision_source in {"user", "self"}:
                     normalized_adds.append(
                         {
                             "content": content,
+                            "minimal_memory": minimal_memory,
                             "decision_source": decision_source,
                         }
                     )
@@ -483,15 +490,19 @@ class _MemoryToolSession:
                     continue
                 memory_id = str(item.get("id") or "").strip()
                 content = str(item.get("content") or "").strip()
+                minimal_memory = str(item.get("minimal_memory") or "").strip()
                 if not memory_id:
                     errors[f"rewrites[{index}].id"] = "id must not be empty"
                 if not content:
                     errors[f"rewrites[{index}].content"] = "content must not be empty"
-                if memory_id and content:
+                if content and not minimal_memory:
+                    errors[f"rewrites[{index}].minimal_memory"] = "minimal_memory must not be empty"
+                if memory_id and content and minimal_memory:
                     normalized_rewrites.append(
                         {
                             "id": memory_id,
                             "content": content,
+                            "minimal_memory": minimal_memory,
                         }
                     )
 
@@ -520,6 +531,23 @@ class _MemoryToolSession:
                     continue
                 normalized_note_upserts[ref] = body
 
+        raw_inspired_memory_ids = inspired_memory_ids
+        if raw_inspired_memory_ids is None:
+            raw_inspired_memory_ids = []
+        elif not isinstance(raw_inspired_memory_ids, list):
+            errors["inspired_memory_ids"] = "inspired_memory_ids must be a list"
+        else:
+            seen_inspired_ids: set[str] = set()
+            for index, item in enumerate(raw_inspired_memory_ids):
+                memory_id = str(item or "").strip()
+                if not memory_id:
+                    errors[f"inspired_memory_ids[{index}]"] = "memory id must not be empty"
+                    continue
+                if memory_id in seen_inspired_ids:
+                    continue
+                seen_inspired_ids.add(memory_id)
+                normalized_inspired_memory_ids.append(memory_id)
+
         has_mutation = bool(normalized_adds or normalized_rewrites or normalized_deletes or normalized_note_upserts)
         if normalized_noop_reason and has_mutation:
             errors["noop_reason"] = "noop_reason may not be combined with add, rewrite, delete, or note_upsert"
@@ -535,6 +563,7 @@ class _MemoryToolSession:
             "rewrites": normalized_rewrites,
             "deletes": normalized_deletes,
             "note_upserts": normalized_note_upserts,
+            "inspired_memory_ids": normalized_inspired_memory_ids,
             "noop_reason": normalized_noop_reason,
         }
         return {"ok": True, "status": "batch_staged"}
@@ -555,8 +584,16 @@ class _MemoryValidatedWrite:
     note_refs_written: list[str]
     memory_chars_after: int
     document_preview: str
+    adds: list[dict[str, str]] = field(default_factory=list)
+    rewrites: list[dict[str, str]] = field(default_factory=list)
+    deletes: list[str] = field(default_factory=list)
+    note_upserts: dict[str, str] = field(default_factory=dict)
+    inspired_memory_ids: list[str] = field(default_factory=list)
     write_mode: str = ""
     noop_reason: str = ""
+    compression_triggered: bool = False
+    compressed_memory_ids: list[str] = field(default_factory=list)
+    deleted_by_compression_ids: list[str] = field(default_factory=list)
 
 
 class _MemoryAgentValidationError(ValueError):
@@ -565,6 +602,348 @@ class _MemoryAgentValidationError(ValueError):
 
 class _MemoryAgentRuntimeError(RuntimeError):
     pass
+
+
+class _MemorySqliteRepository:
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _ensure_schema(self) -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memories (
+                    memory_id TEXT PRIMARY KEY,
+                    memory_body TEXT NOT NULL,
+                    minimal_memory TEXT NOT NULL,
+                    source TEXT NOT NULL CHECK(source IN ('user', 'self')),
+                    from_user INTEGER NOT NULL DEFAULT 0,
+                    refresh_count INTEGER NOT NULL DEFAULT 0,
+                    passed_count INTEGER NOT NULL DEFAULT 0,
+                    is_compressed INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memories_compression
+                ON memories(passed_count DESC, refresh_count ASC)
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _generate_id(self, conn: sqlite3.Connection) -> str:
+        alphabet = string.ascii_letters + string.digits
+        for _ in range(2048):
+            candidate = "".join(secrets.choice(alphabet) for _ in range(6))
+            exists = conn.execute(
+                "SELECT 1 FROM memories WHERE memory_id = ?",
+                (candidate,),
+            ).fetchone()
+            if exists is None:
+                return candidate
+        raise RuntimeError("unable to allocate unique memory id")
+
+    @staticmethod
+    def _row_dict(row: sqlite3.Row) -> dict[str, Any]:
+        payload = dict(row)
+        payload["from_user"] = bool(payload.get("from_user"))
+        payload["is_compressed"] = bool(payload.get("is_compressed"))
+        return payload
+
+    @staticmethod
+    def _normalize_source_and_user_flag(source: str, from_user: bool) -> tuple[str, bool]:
+        normalized_source = str(source or "").strip().lower()
+        if normalized_source not in {"user", "self"}:
+            raise ValueError("source must be user or self")
+        normalized_from_user = normalized_source == "user"
+        if bool(from_user) != normalized_from_user:
+            raise ValueError("from_user must match source")
+        return normalized_source, normalized_from_user
+
+    def create_memory(
+        self,
+        *,
+        memory_body: str,
+        minimal_memory: str,
+        source: str,
+        from_user: bool,
+        now_iso: str,
+    ) -> dict[str, Any]:
+        normalized_source, normalized_from_user = self._normalize_source_and_user_flag(source, from_user)
+        conn = self._connect()
+        try:
+            memory_id = self._generate_id(conn)
+            conn.execute(
+                """
+                INSERT INTO memories(
+                    memory_id,
+                    memory_body,
+                    minimal_memory,
+                    source,
+                    from_user,
+                    refresh_count,
+                    passed_count,
+                    is_compressed,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?)
+                """,
+                (
+                    memory_id,
+                    memory_body,
+                    minimal_memory,
+                    normalized_source,
+                    1 if normalized_from_user else 0,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM memories WHERE memory_id = ?",
+                (memory_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"failed to read back memory row: {memory_id}")
+            return self._row_dict(row)
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _mutation_timestamp(now_iso: str, offset: int = 0) -> str:
+        base = datetime.fromisoformat(str(now_iso).strip())
+        if int(offset or 0) <= 0:
+            return base.isoformat()
+        return (base + timedelta(microseconds=int(offset))).isoformat()
+
+    @classmethod
+    def _snapshot_timestamp(cls, date_text: str, fallback_iso: str, offset: int = 0) -> str:
+        stripped = str(date_text or "").strip()
+        try:
+            year_text, month_text, day_text = stripped.split("/", 2)
+            base = datetime(int(year_text), int(month_text), int(day_text))
+        except Exception:
+            return cls._mutation_timestamp(fallback_iso, offset)
+        if int(offset or 0) <= 0:
+            return base.isoformat()
+        return (base + timedelta(microseconds=int(offset))).isoformat()
+
+    def replace_all_from_document(self, *, document_text: str, now_iso: str) -> None:
+        entries = parse_memory_document(str(document_text or ""))
+        conn = self._connect()
+        try:
+            existing_rows = {
+                str(row["memory_id"]): self._row_dict(row)
+                for row in conn.execute("SELECT * FROM memories").fetchall()
+            }
+            with conn:
+                conn.execute("DELETE FROM memories")
+                for index, entry in enumerate(entries):
+                    normalized_source, normalized_from_user = self._normalize_source_and_user_flag(
+                        str(entry.source or ""),
+                        str(entry.source or "").strip().lower() == "user",
+                    )
+                    existing_row = dict(existing_rows.get(str(entry.memory_id or "").strip()) or {})
+                    summary = str(entry.summary or "").strip()
+                    timestamp = self._snapshot_timestamp(str(entry.date_text or ""), now_iso, index)
+                    conn.execute(
+                        """
+                        INSERT INTO memories(
+                            memory_id,
+                            memory_body,
+                            minimal_memory,
+                            source,
+                            from_user,
+                            refresh_count,
+                            passed_count,
+                            is_compressed,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(entry.memory_id or "").strip(),
+                            summary,
+                            summary,
+                            normalized_source,
+                            1 if normalized_from_user else 0,
+                            int(existing_row.get("refresh_count", 0) or 0),
+                            int(existing_row.get("passed_count", 0) or 0),
+                            1 if bool(existing_row.get("is_compressed")) else 0,
+                            str(existing_row.get("created_at") or timestamp),
+                            timestamp,
+                        ),
+                    )
+        finally:
+            conn.close()
+
+    def apply_mutation(
+        self,
+        *,
+        adds: list[dict[str, Any]] | None,
+        rewrites: list[dict[str, Any]] | None,
+        deletes: list[str] | None,
+        inspired_memory_ids: list[str] | None,
+        now_iso: str,
+    ) -> None:
+        normalized_adds = list(adds or [])
+        normalized_rewrites = list(rewrites or [])
+        delete_ids = {str(item or "").strip() for item in list(deletes or []) if str(item or "").strip()}
+        rewrite_ids = {str(item.get("id") or "").strip() for item in normalized_rewrites if str(item.get("id") or "").strip()}
+        refreshed_ids = {
+            str(item or "").strip()
+            for item in list(inspired_memory_ids or [])
+            if str(item or "").strip()
+        } | rewrite_ids
+        conn = self._connect()
+        try:
+            with conn:
+                added_ids: set[str] = set()
+                for index, item in enumerate(normalized_adds):
+                    decision_source = str(item.get("decision_source") or "").strip().lower()
+                    normalized_source, normalized_from_user = self._normalize_source_and_user_flag(
+                        decision_source,
+                        decision_source == "user",
+                    )
+                    memory_id = str(item.get("id") or item.get("memory_id") or "").strip() or self._generate_id(conn)
+                    timestamp = self._mutation_timestamp(now_iso, index)
+                    conn.execute(
+                        """
+                        INSERT INTO memories(
+                            memory_id,
+                            memory_body,
+                            minimal_memory,
+                            source,
+                            from_user,
+                            refresh_count,
+                            passed_count,
+                            is_compressed,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?)
+                        """,
+                        (
+                            memory_id,
+                            str(item.get("content") or ""),
+                            str(item.get("minimal_memory") or ""),
+                            normalized_source,
+                            1 if normalized_from_user else 0,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    added_ids.add(memory_id)
+
+                for item in normalized_rewrites:
+                    memory_id = str(item.get("id") or "").strip()
+                    if not memory_id:
+                        continue
+                    conn.execute(
+                        """
+                        UPDATE memories
+                        SET
+                            memory_body = ?,
+                            minimal_memory = ?,
+                            refresh_count = refresh_count + 1,
+                            passed_count = 0,
+                            is_compressed = 0,
+                            updated_at = ?
+                        WHERE memory_id = ?
+                        """,
+                        (
+                            str(item.get("content") or ""),
+                            str(item.get("minimal_memory") or ""),
+                            now_iso,
+                            memory_id,
+                        ),
+                    )
+
+                for memory_id in delete_ids:
+                    conn.execute("DELETE FROM memories WHERE memory_id = ?", (memory_id,))
+
+                refresh_only_ids = sorted(refreshed_ids - rewrite_ids - delete_ids)
+                if refresh_only_ids:
+                    placeholders = ", ".join("?" for _ in refresh_only_ids)
+                    conn.execute(
+                        f"""
+                        UPDATE memories
+                        SET
+                            refresh_count = refresh_count + 1,
+                            passed_count = 0
+                        WHERE memory_id IN ({placeholders})
+                        """,
+                        tuple(refresh_only_ids),
+                    )
+
+                passed_exclusions = sorted(refreshed_ids | delete_ids | added_ids)
+                if passed_exclusions:
+                    placeholders = ", ".join("?" for _ in passed_exclusions)
+                    conn.execute(
+                        f"UPDATE memories SET passed_count = passed_count + 1 WHERE memory_id NOT IN ({placeholders})",
+                        tuple(passed_exclusions),
+                    )
+                else:
+                    conn.execute("UPDATE memories SET passed_count = passed_count + 1")
+        finally:
+            conn.close()
+
+    def list_memories(self) -> list[dict[str, Any]]:
+        conn = self._connect()
+        try:
+            rows = conn.execute("SELECT * FROM memories ORDER BY created_at, memory_id").fetchall()
+            return [self._row_dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def compression_candidates(self) -> list[dict[str, Any]]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT * FROM memories
+                ORDER BY passed_count DESC, refresh_count ASC, created_at ASC, memory_id ASC
+                """
+            ).fetchall()
+            return [self._row_dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def mark_compressed(self, memory_id: str) -> bool:
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                "UPDATE memories SET is_compressed = 1 WHERE memory_id = ? AND is_compressed = 0",
+                (str(memory_id or "").strip(),),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0) > 0
+        finally:
+            conn.close()
+
+    def delete_memory(self, memory_id: str) -> bool:
+        conn = self._connect()
+        try:
+            cursor = conn.execute("DELETE FROM memories WHERE memory_id = ?", (str(memory_id or "").strip(),))
+            conn.commit()
+            return int(cursor.rowcount or 0) > 0
+        finally:
+            conn.close()
 
 
 class MemoryManager:
@@ -593,6 +972,8 @@ class MemoryManager:
         self._catalog_bridge = MemoryCatalogBridge(self.workspace, config)
         self.store = getattr(self._catalog_bridge, "store", None)
         self._ensure_layout()
+        memory_state_db_path = str(getattr(config, "state_db_path", "") or "memory/memory_state.sqlite3")
+        self._memory_repo = _MemorySqliteRepository(self.workspace / memory_state_db_path)
         self._restore_preserved_memory_state(
             document_text=preserved_document,
             note_bodies=preserved_notes,
@@ -657,6 +1038,43 @@ class MemoryManager:
             return ""
         return self.memory_file.read_text(encoding="utf-8").strip()
 
+    def _document_text_from_sqlite_rows(self, rows: list[dict[str, Any]], *, now_iso: str | None = None) -> str:
+        entries: list[MemoryEntry] = []
+        for row in rows:
+            updated_at = str(row.get("updated_at") or now_iso or self._now_iso())
+            date_text = self._memory_date_text(updated_at)
+            memory_body = str(row.get("memory_body") or "").strip()
+            minimal_memory = str(row.get("minimal_memory") or "").strip()
+            note_ref = self._extract_note_ref(minimal_memory) or self._extract_note_ref(memory_body)
+            summary = minimal_memory if row.get("is_compressed") else memory_body
+            summary = self._summary_with_note_ref(summary, note_ref)
+            entries.append(
+                MemoryEntry(
+                    memory_id=str(row["memory_id"]),
+                    date_text=date_text,
+                    source=str(row["source"]),
+                    summary=summary,
+                    note_ref=note_ref,
+                )
+            )
+        return self._normalize_document_text("".join(format_memory_entry(entry) for entry in entries))
+
+    def _sync_sqlite_from_snapshot_if_needed_locked(self, *, now_iso: str) -> None:
+        current_snapshot = self._normalize_document_text(self.snapshot_text())
+        sqlite_snapshot = self._document_text_from_sqlite_rows(self._memory_repo.list_memories(), now_iso=now_iso)
+        if sqlite_snapshot == current_snapshot:
+            return
+        self._memory_repo.replace_all_from_document(document_text=current_snapshot, now_iso=now_iso)
+
+    def _rebuild_memory_snapshot_from_sqlite(self, *, now_iso: str | None = None) -> None:
+        document_text = self._document_text_from_sqlite_rows(self._memory_repo.list_memories(), now_iso=now_iso)
+        validate_memory_document(
+            document_text,
+            summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 250) or 250),
+            document_max_chars=max(int(getattr(self.config.document, "document_max_chars", 20000) or 20000), 1),
+        )
+        self.memory_file.write_text(document_text, encoding="utf-8")
+
     async def _append_queue_request(self, request: MemoryQueueRequest) -> None:
         rows = self._read_queue_requests()
         rows.append(self._normalize_queue_request(request))
@@ -699,7 +1117,7 @@ class MemoryManager:
     ) -> dict[str, Any]:
         snapshot_text = self.snapshot_text()
         summary_limit = int(getattr(self.config.document, "summary_max_chars", 250) or 250)
-        document_limit = int(getattr(self.config.document, "document_max_chars", 10000) or 10000)
+        document_limit = int(getattr(self.config.document, "document_max_chars", 20000) or 20000)
         document_error = ""
         document_valid = True
         try:
@@ -1482,7 +1900,7 @@ class MemoryManager:
         validate_memory_document(
             document_text,
             summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 250) or 250),
-            document_max_chars=int(getattr(self.config.document, "document_max_chars", 10000) or 10000),
+            document_max_chars=int(getattr(self.config.document, "document_max_chars", 20000) or 20000),
         )
         note_refs = self._collect_note_refs(document_text)
         missing_refs = sorted(ref for ref in note_refs if ref not in note_writes and ref not in self._note_file_refs())
@@ -1671,6 +2089,7 @@ class MemoryManager:
             rewrites: list[dict[str, Any]] | None = None,
             deletes: list[str] | None = None,
             note_upserts: dict[str, str] | None = None,
+            inspired_memory_ids: list[str] | None = None,
             noop_reason: str | None = None,
         ) -> dict[str, Any]:
             """Stage one complete memory mutation batch."""
@@ -1680,6 +2099,7 @@ class MemoryManager:
                 rewrites=rewrites,
                 deletes=deletes,
                 note_upserts=note_upserts,
+                inspired_memory_ids=inspired_memory_ids,
                 noop_reason=noop_reason,
             )
 
@@ -1836,13 +2256,91 @@ class MemoryManager:
         return text[:237].rstrip() + "..."
 
     def _commit_validated_write(self, validated: _MemoryValidatedWrite) -> None:
+        now_iso = self._now_iso()
         with self._io_lock:
+            current_snapshot = self._normalize_document_text(self.snapshot_text())
             for ref, body in validated.note_writes.items():
                 note_path = self.notes_dir / note_file_name(ref)
                 note_path.parent.mkdir(parents=True, exist_ok=True)
                 note_path.write_text(body, encoding="utf-8")
-            self.memory_file.write_text(validated.document_text, encoding="utf-8")
-            self._cleanup_orphan_notes_locked(validated.document_text)
+            self._sync_sqlite_from_snapshot_if_needed_locked(now_iso=now_iso)
+            has_structured_mutation = bool(
+                list(validated.adds or [])
+                or list(validated.rewrites or [])
+                or list(validated.deletes or [])
+                or list(validated.inspired_memory_ids or [])
+            )
+            if has_structured_mutation:
+                self._memory_repo.apply_mutation(
+                    adds=validated.adds,
+                    rewrites=validated.rewrites,
+                    deletes=validated.deletes,
+                    inspired_memory_ids=validated.inspired_memory_ids,
+                    now_iso=now_iso,
+                )
+            elif self._normalize_document_text(validated.document_text) != current_snapshot:
+                self._memory_repo.replace_all_from_document(
+                    document_text=validated.document_text,
+                    now_iso=now_iso,
+                )
+            self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+            self._cleanup_orphan_notes_locked(self.snapshot_text())
+            compression_result = self._run_post_commit_compression_locked(now_iso=now_iso)
+            final_snapshot = self.snapshot_text()
+            self._cleanup_orphan_notes_locked(final_snapshot)
+            validated.memory_chars_after = len(final_snapshot)
+            validated.document_preview = self._document_preview(final_snapshot)
+            validated.compression_triggered = bool(compression_result.get("compression_triggered"))
+            validated.compressed_memory_ids = list(compression_result.get("compressed_memory_ids") or [])
+            validated.deleted_by_compression_ids = list(compression_result.get("deleted_by_compression_ids") or [])
+
+    def _run_post_commit_compression_locked(self, *, now_iso: str) -> dict[str, Any]:
+        return self._compress_memory_snapshot_if_needed(now_iso=now_iso)
+
+    def _compress_memory_snapshot_if_needed(self, *, now_iso: str | None = None) -> dict[str, Any]:
+        effective_now = str(now_iso or self._now_iso()).strip()
+        trigger = int(getattr(self.config.document, "compress_trigger_chars", 16000) or 16000)
+        target = int(getattr(self.config.document, "compress_target_chars", 13000) or 13000)
+        compressed_memory_ids: list[str] = []
+        deleted_by_compression_ids: list[str] = []
+        if len(self.snapshot_text()) <= trigger:
+            return {
+                "compression_triggered": False,
+                "compressed_memory_ids": compressed_memory_ids,
+                "deleted_by_compression_ids": deleted_by_compression_ids,
+            }
+
+        compression_triggered = False
+        while len(self.snapshot_text()) > target:
+            mutated_in_pass = False
+            for row in self._memory_repo.compression_candidates():
+                if len(self.snapshot_text()) <= target:
+                    break
+                memory_id = str(row.get("memory_id") or "").strip()
+                if not memory_id:
+                    continue
+                mutated = False
+                if not bool(row.get("is_compressed")):
+                    mutated = self._memory_repo.mark_compressed(memory_id)
+                    if mutated:
+                        compressed_memory_ids.append(memory_id)
+                elif not bool(row.get("from_user")):
+                    mutated = self._memory_repo.delete_memory(memory_id)
+                    if mutated:
+                        deleted_by_compression_ids.append(memory_id)
+                if not mutated:
+                    continue
+                compression_triggered = True
+                mutated_in_pass = True
+                self._rebuild_memory_snapshot_from_sqlite(now_iso=effective_now)
+            if not mutated_in_pass:
+                break
+
+        return {
+            "compression_triggered": compression_triggered,
+            "compressed_memory_ids": compressed_memory_ids,
+            "deleted_by_compression_ids": deleted_by_compression_ids,
+        }
 
     def _cleanup_orphan_notes_locked(self, document_text: str) -> None:
         active_refs = set(self._collect_note_refs(document_text))
@@ -1926,6 +2424,18 @@ class MemoryManager:
             raise _MemoryAgentValidationError("memory content must not be empty")
         if "\n" in normalized or "\r" in normalized:
             raise _MemoryAgentValidationError("memory content must be one line")
+        return normalized
+
+    def _normalize_minimal_memory_text(self, text: str, *, summary_max_chars: int) -> str:
+        normalized = self._normalize_memory_content_text(text)
+        if len(normalized) > max(int(summary_max_chars or 0), 1):
+            raise _MemoryAgentValidationError(f"minimal_memory exceeds {summary_max_chars} chars")
+        normalized_core = re.sub(r"\s+", " ", _NOTE_REF_RE.sub("", normalized)).strip()
+        if normalized_core.count("->") != 1:
+            raise _MemoryAgentValidationError("minimal_memory must use 条件->要求关键词")
+        condition_text, keyword_text = [part.strip() for part in normalized_core.split("->", 1)]
+        if not condition_text or not keyword_text:
+            raise _MemoryAgentValidationError("minimal_memory must use 条件->要求关键词")
         return normalized
 
     @staticmethod
@@ -2167,9 +2677,13 @@ class MemoryManager:
         if normalized_error:
             payload["error"] = normalized_error
         if validated is not None:
-            payload["memory_chars_after"] = int(validated.memory_chars_after)
+            payload["memory_chars_after"] = len(self.snapshot_text())
             payload["note_refs_written"] = list(validated.note_refs_written)
-            payload["document_preview"] = validated.document_preview
+            payload["document_preview"] = self._document_preview(self.snapshot_text())
+            payload["inspired_memory_ids"] = list(validated.inspired_memory_ids)
+            payload["compression_triggered"] = bool(validated.compression_triggered)
+            payload["compressed_memory_ids"] = list(validated.compressed_memory_ids)
+            payload["deleted_by_compression_ids"] = list(validated.deleted_by_compression_ids)
             normalized_write_mode = str(validated.write_mode or "").strip().lower()
             if normalized_write_mode:
                 payload["write_mode"] = normalized_write_mode
@@ -2304,11 +2818,11 @@ class MemoryManager:
             }
         payload = self._review_window_payload(session_key=normalized_session, pending_turns=pending_turns)
         request = MemoryQueueRequest(
-            op="assess",
+            op="write",
             decision_source="self",
             payload_text=payload,
             created_at=self._now_iso(),
-            request_id=self._request_id("assess"),
+            request_id=self._request_id("write"),
             session_key=normalized_session,
             trigger_source="ordinary_turn_window",
         )
@@ -2349,11 +2863,11 @@ class MemoryManager:
             return {"ok": True, "status": "idle", "reason": "no_pending_turns"}
         payload = self._review_window_payload(session_key=normalized_session, pending_turns=pending_turns)
         request = MemoryQueueRequest(
-            op="assess",
+            op="write",
             decision_source="self",
             payload_text=payload,
             created_at=self._now_iso(),
-            request_id=self._request_id("assess"),
+            request_id=self._request_id("write"),
             session_key=normalized_session,
             trigger_source=normalized_trigger,
         )
@@ -2492,6 +3006,7 @@ class MemoryManager:
             rewrites: list[dict[str, Any]] | None = None,
             deletes: list[str] | None = None,
             note_upserts: dict[str, str] | None = None,
+            inspired_memory_ids: list[str] | None = None,
             noop_reason: str | None = None,
         ) -> dict[str, Any]:
             """Stage one complete memory mutation batch."""
@@ -2501,6 +3016,7 @@ class MemoryManager:
                 rewrites=rewrites,
                 deletes=deletes,
                 note_upserts=note_upserts,
+                inspired_memory_ids=inspired_memory_ids,
                 noop_reason=noop_reason,
             )
 
@@ -2534,10 +3050,12 @@ class MemoryManager:
             f"待处理请求：\n{json.dumps(requests, ensure_ascii=False, indent=2)}\n"
             "提交要求：\n"
             "- 只允许使用一次 memory_apply_batch 完成所有修改。\n"
-            "- 新增记忆必须通过 adds 提交，并显式给出 decision_source。\n"
-            "- rewrite 只传 id 和 content；系统会保留原 source 并刷新日期。\n"
-            "- delete 传记忆 id 列表。\n"
+            "- adds 条目必须包含 content、minimal_memory 和 decision_source。\n"
+            "- rewrites 条目必须包含 id、content 和 minimal_memory；系统会保留原 source 并刷新日期。\n"
+            "- delete 请求要解析成精确的记忆 id，并把这些 id 放进 deletes。\n"
             "- note_upserts 只写需要新增或改写的 note。\n"
+            "- inspired_memory_ids 可选，用于列出当前完整 snapshot 里对本批判断有实质帮助的 memory id。\n"
+            "- minimal_memory 格式应写成 `条件->要求关键词`，必要时优先附加 `见noteid:<id>`，并兼容 `ref:<id>`。\n"
             "- 当本轮无需任何记忆或 note 变更时，可单独提交 noop_reason。\n"
             f"{repair_block}"
         )
@@ -2654,6 +3172,13 @@ class MemoryManager:
         rewrites = list(payload.get("rewrites") or [])
         deletes = list(payload.get("deletes") or [])
         note_upserts = dict(payload.get("note_upserts") or {})
+        raw_inspired_memory_ids = payload.get("inspired_memory_ids")
+        if raw_inspired_memory_ids is None:
+            inspired_memory_ids: list[str] = []
+        elif not isinstance(raw_inspired_memory_ids, list):
+            raise _MemoryAgentValidationError("inspired_memory_ids must be a list")
+        else:
+            inspired_memory_ids = list(raw_inspired_memory_ids)
         noop_reason = str(payload.get("noop_reason") or "").strip()
 
         if batch.op == "delete" and (adds or rewrites):
@@ -2674,74 +3199,126 @@ class MemoryManager:
             raise _MemoryAgentValidationError(f"delete ids not found: {', '.join(missing_delete_ids)}")
 
         rewrite_by_id: dict[str, str] = {}
+        rewrite_minimal_by_id: dict[str, str] = {}
+        rewrite_note_ref_by_id: dict[str, str] = {}
+        effective_rewrites: list[dict[str, str]] = []
+        minimal_note_refs: set[str] = set()
+        summary_limit = int(getattr(self.config.document, "summary_max_chars", 250) or 250)
         for item in rewrites:
             if not isinstance(item, dict):
                 raise _MemoryAgentValidationError("rewrite item must be an object")
             memory_id = str(item.get("id") or "").strip()
             content = self._normalize_memory_content_text(str(item.get("content") or ""))
+            minimal_memory = self._normalize_minimal_memory_text(
+                str(item.get("minimal_memory") or ""),
+                summary_max_chars=summary_limit,
+            )
             if memory_id not in existing_by_id:
                 raise _MemoryAgentValidationError(f"rewrite id not found: {memory_id}")
             rewrite_by_id[memory_id] = content
+            rewrite_minimal_by_id[memory_id] = minimal_memory
+            rewrite_note_ref = self._extract_note_ref(minimal_memory)
+            if rewrite_note_ref:
+                rewrite_note_ref_by_id[memory_id] = rewrite_note_ref
+                minimal_note_refs.add(rewrite_note_ref)
+
+        snapshot_memory_ids = {
+            str(entry.memory_id or "").strip()
+            for entry in before_entries
+            if str(entry.memory_id or "").strip()
+        }
+        missing_inspired_ids = sorted(memory_id for memory_id in inspired_memory_ids if memory_id not in snapshot_memory_ids)
+        if missing_inspired_ids:
+            raise _MemoryAgentValidationError(f"inspired ids not found: {', '.join(missing_inspired_ids)}")
 
         existing_ids = set(existing_by_id)
         date_text = self._memory_date_text()
         after_entries: list[MemoryEntry] = []
+        after_entry_ids: set[str] = set()
         seen_summary_keys: set[tuple[str, str]] = set()
         for entry in before_entries:
             if entry.memory_id in delete_ids:
                 continue
             if entry.memory_id in rewrite_by_id:
-                updated_summary = rewrite_by_id[entry.memory_id]
+                updated_note_ref = rewrite_note_ref_by_id.get(entry.memory_id, "") or self._extract_note_ref(rewrite_by_id[entry.memory_id])
+                updated_summary = self._summary_with_note_ref(rewrite_by_id[entry.memory_id], updated_note_ref)
                 updated = MemoryEntry(
                     memory_id=entry.memory_id,
                     date_text=date_text,
                     source=entry.source,
                     summary=updated_summary,
-                    note_ref=(self._extract_note_ref(updated_summary)),
+                    note_ref=updated_note_ref,
                 )
                 summary_key = (updated.source, updated.summary)
                 if summary_key in seen_summary_keys:
                     continue
                 seen_summary_keys.add(summary_key)
                 after_entries.append(updated)
+                after_entry_ids.add(updated.memory_id)
+                effective_rewrites.append(
+                    {
+                        "id": entry.memory_id,
+                        "content": rewrite_by_id[entry.memory_id],
+                        "minimal_memory": rewrite_minimal_by_id[entry.memory_id],
+                    }
+                )
                 continue
             summary_key = (entry.source, entry.summary)
             if summary_key in seen_summary_keys:
                 continue
             seen_summary_keys.add(summary_key)
             after_entries.append(entry)
+            after_entry_ids.add(entry.memory_id)
 
+        effective_adds: list[dict[str, str]] = []
         for item in adds:
             if not isinstance(item, dict):
                 raise _MemoryAgentValidationError("add item must be an object")
             content = self._normalize_memory_content_text(str(item.get("content") or ""))
+            minimal_memory = self._normalize_minimal_memory_text(
+                str(item.get("minimal_memory") or ""),
+                summary_max_chars=summary_limit,
+            )
             decision_source = str(item.get("decision_source") or "").strip().lower()
             if decision_source not in {"user", "self"}:
                 raise _MemoryAgentValidationError("add decision_source must be user or self")
-            summary_key = (decision_source, content)
+            add_note_ref = self._extract_note_ref(minimal_memory)
+            if add_note_ref:
+                minimal_note_refs.add(add_note_ref)
+            summary = self._summary_with_note_ref(content, add_note_ref)
+            summary_key = (decision_source, summary)
             if summary_key in seen_summary_keys:
                 continue
             seen_summary_keys.add(summary_key)
             memory_id = self._generate_memory_id(existing_ids)
             existing_ids.add(memory_id)
+            after_entry_ids.add(memory_id)
             after_entries.append(
                 MemoryEntry(
                     memory_id=memory_id,
                     date_text=date_text,
                     source=decision_source,
-                    summary=content,
-                    note_ref=(self._extract_note_ref(content)),
+                    summary=summary,
+                    note_ref=(self._extract_note_ref(summary)),
                 )
+            )
+            effective_adds.append(
+                {
+                    "id": memory_id,
+                    "content": content,
+                    "minimal_memory": minimal_memory,
+                    "decision_source": decision_source,
+                }
             )
 
         document_text = "".join(format_memory_entry(entry) for entry in after_entries)
         validate_memory_document(
             document_text,
-            summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 250) or 250),
-            document_max_chars=int(getattr(self.config.document, "document_max_chars", 10000) or 10000),
+            summary_max_chars=summary_limit,
+            document_max_chars=int(getattr(self.config.document, "document_max_chars", 20000) or 20000),
         )
         existing_refs = {path.stem for path in self.notes_dir.glob("*.md")}
-        note_writes = {
+        normalized_note_upserts = {
             str(ref): self._normalize_note_text(content)
             for ref, content in note_upserts.items()
             if str(ref or "").strip()
@@ -2751,15 +3328,28 @@ class MemoryManager:
             for entry in after_entries
             if str(entry.note_ref or "").strip()
         }
-        missing_refs = sorted(ref for ref in note_refs if ref not in existing_refs and ref not in note_writes)
+        note_refs.update(minimal_note_refs)
+        missing_refs = sorted(ref for ref in note_refs if ref not in existing_refs and ref not in normalized_note_upserts)
         if missing_refs:
             raise _MemoryAgentValidationError(f"missing note refs: {', '.join(missing_refs)}")
+        effective_delete_ids = sorted(
+            {
+                str(entry.memory_id or "").strip()
+                for entry in before_entries
+                if str(entry.memory_id or "").strip() and str(entry.memory_id or "").strip() not in after_entry_ids
+            }
+        )
         return _MemoryValidatedWrite(
             document_text=self._normalize_document_text(document_text),
-            note_writes=note_writes,
-            note_refs_written=sorted(note_writes.keys()),
+            note_writes=normalized_note_upserts,
+            note_refs_written=sorted(normalized_note_upserts.keys()),
             memory_chars_after=len(self._normalize_document_text(document_text)),
             document_preview=self._document_preview(document_text),
+            adds=effective_adds,
+            rewrites=effective_rewrites,
+            deletes=effective_delete_ids,
+            note_upserts=normalized_note_upserts,
+            inspired_memory_ids=list(inspired_memory_ids),
             write_mode=self._validated_write_mode(
                 adds=adds,
                 rewrites=rewrites,
@@ -2798,6 +3388,19 @@ class MemoryManager:
         match = _NOTE_REF_RE.search(str(text or "").strip())
         return str(match.group("ref") or "").strip() if match else ""
 
+    @staticmethod
+    def _summary_with_note_ref(summary: str, note_ref: str) -> str:
+        normalized_ref = str(note_ref or "").strip()
+        normalized_summary = str(summary or "").strip()
+        if normalized_ref:
+            normalized_summary = re.sub(r"\s+", " ", _NOTE_REF_RE.sub("", normalized_summary)).strip()
+            return f"{normalized_summary} ref:{normalized_ref}".strip()
+        normalized_summary = _NOTE_REF_RE.sub(
+            lambda match: f"ref:{str(match.group('ref') or '').strip()}",
+            normalized_summary,
+        )
+        return normalized_summary
+
     def _validate_candidate_state(
         self,
         *,
@@ -2828,57 +3431,26 @@ class MemoryManager:
         current_runtime_revision = int(runtime_revision or 0)
         current_model_chain = list(model_chain or [])
         processing_batch = batch
-        if batch.op == "assess":
-            assess_result = await self._run_memory_assessor_batch(
-                batch=batch,
-                runtime_config=current_runtime_config,
-                model_chain=current_model_chain,
-                queue_request_ids=queue_request_ids,
-            )
-            self._merge_usage(total_usage, assess_result["usage"])
-            request_artifacts.extend(list(assess_result.get("request_artifacts") or []))
-            if str(assess_result.get("discard_reason") or "").strip():
-                return {
-                    "validated": None,
-                    "usage": total_usage,
-                    "attempt_count": 1,
-                    "assessed_text": None,
-                    "discard_reason": str(assess_result.get("discard_reason") or "").strip(),
-                    "error": str(assess_result.get("error") or "").strip(),
-                    "model_chain": list(current_model_chain),
-                    "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
-                    "request_artifact_paths": self._request_artifact_paths(request_artifacts),
-                }
-            assessed_text = assess_result.get("assessed_text")
-            if assessed_text is None:
-                return {
-                    "validated": None,
-                    "usage": total_usage,
-                    "attempt_count": 1,
-                    "assessed_text": None,
-                    "discard_reason": "assessed_null",
-                    "model_chain": list(current_model_chain),
-                    "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
-                    "request_artifact_paths": self._request_artifact_paths(request_artifacts),
-                }
+        if str(batch.op or "").strip().lower() == "assess":
             processing_batch = MemoryBatch(
                 op="write",
                 items=[
                     MemoryQueueRequest(
                         op="write",
-                        decision_source="self",
-                        payload_text=str(assessed_text or "").strip(),
-                        created_at=self._now_iso(),
-                        request_id=self._request_id("assessed"),
-                        trigger_source=f"assess:{batch.items[0].request_id if batch.items else 'window'}",
-                        session_key=str(batch.items[0].session_key or "").strip() if batch.items else "",
+                        decision_source=item.decision_source,
+                        payload_text=item.payload_text,
+                        created_at=item.created_at,
+                        request_id=item.request_id,
+                        trigger_source=item.trigger_source,
+                        session_key=item.session_key,
+                        status=item.status,
+                        processing_started_at=item.processing_started_at,
+                        last_error_text=item.last_error_text,
+                        last_error_at=item.last_error_at,
+                        retry_after=item.retry_after,
                     )
+                    for item in batch.items
                 ],
-            )
-            current_runtime_config, current_runtime_revision, current_model_chain = self._reload_runtime_config_for_memory_retry(
-                runtime_config=current_runtime_config,
-                runtime_revision=current_runtime_revision,
-                model_chain=current_model_chain,
             )
 
         total_attempts = 3
@@ -2911,7 +3483,7 @@ class MemoryManager:
                     "validated": validated,
                     "usage": total_usage,
                     "attempt_count": attempt_index + 1,
-                    "assessed_text": None if batch.op != "assess" else processing_batch.items[0].payload_text,
+                    "assessed_text": None,
                     "model_chain": list(current_model_chain),
                     "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                     "request_artifact_paths": self._request_artifact_paths(request_artifacts),
@@ -2923,7 +3495,7 @@ class MemoryManager:
             "validated": None,
             "usage": total_usage,
             "attempt_count": total_attempts,
-            "assessed_text": None if batch.op != "assess" else processing_batch.items[0].payload_text,
+            "assessed_text": None,
             "discard_reason": "rejected",
             "error": last_error,
             "model_chain": list(current_model_chain),
