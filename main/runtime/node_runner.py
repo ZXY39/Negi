@@ -925,8 +925,8 @@ class NodeRunner:
 
         self._log_service.update_node_metadata(node_id, _mutate)
 
-    def _reactivate_node_for_retry(self, *, node_id: str) -> NodeRecord | None:
-        return self._store.update_node(
+    def _reactivate_node_for_retry(self, *, task_id: str, node_id: str) -> NodeRecord | None:
+        updated = self._store.update_node(
             node_id,
             lambda record: record.model_copy(
                 update={
@@ -939,6 +939,9 @@ class NodeRunner:
                 }
             ),
         )
+        if updated is not None:
+            self._log_service.sync_node_read_model(task_id, node_id)
+        return updated
 
     def _persist_rejection_feedback_and_keep_acceptance_live(
         self,
@@ -963,8 +966,8 @@ class NodeRunner:
             latest_rejection_feedback_ref='',
             latest_rejection_feedback_summary=str(feedback_text or '').strip(),
         )
-        self._reactivate_node_for_retry(node_id=acceptance.node_id)
-        self._reactivate_node_for_retry(node_id=execution.node_id)
+        self._reactivate_node_for_retry(task_id=task.task_id, node_id=acceptance.node_id)
+        self._reactivate_node_for_retry(task_id=task.task_id, node_id=execution.node_id)
         self._persist_node_notification_direct(
             task_id=task.task_id,
             epoch_id='',

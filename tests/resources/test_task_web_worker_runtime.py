@@ -6311,6 +6311,64 @@ async def test_first_acceptance_rejection_keeps_acceptance_live_and_feeds_back_e
 
 
 @pytest.mark.asyncio
+async def test_reactivated_acceptance_syncs_task_node_projection_after_rejection(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "projection sync after rejection",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        acceptance_id = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance")).node_id
+        acceptance = service.store.get_node(acceptance_id)
+
+        assert task is not None
+        assert root is not None
+        assert acceptance is not None
+
+        service.node_runner._set_execution_waiting_acceptance_state(
+            task_id=task.task_id,
+            execution_node_id=root.node_id,
+            acceptance_node_id=acceptance.node_id,
+            result_ref="artifact:result",
+            result_summary="draft answer",
+        )
+        service.log_service.update_node_status(
+            record.task_id,
+            acceptance.node_id,
+            status="failed",
+            final_output="missing board format",
+            failure_reason="missing board format",
+        )
+
+        service.node_runner._handle_acceptance_node_result(
+            task=task,
+            acceptance=acceptance,
+            result=NodeFinalResult(
+                status="failed",
+                delivery_status="final",
+                summary="missing board format",
+                answer="missing board format",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="missing board format",
+            ),
+        )
+
+        projected_root = service.store.get_task_node(root.node_id)
+        projected_acceptance = service.store.get_task_node(acceptance.node_id)
+
+        assert projected_root is not None
+        assert projected_acceptance is not None
+        assert projected_root.status == "in_progress"
+        assert projected_acceptance.status == "in_progress"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_second_acceptance_rejection_terminalizes_pair_and_preserves_root_output(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:

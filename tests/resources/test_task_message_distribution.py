@@ -1815,8 +1815,11 @@ async def test_distribution_recipients_hide_waiting_acceptance_execution_and_inc
         assert acceptance.node_id in recipients
         assert snapshot is not None
         assert snapshot.nodes_by_id[child.node_id].parent_visible is False
+        assert snapshot.nodes_by_id[child.node_id].tree_visible is True
         assert snapshot.nodes_by_id[child.node_id].acceptance_handshake_state == "waiting_acceptance"
         assert snapshot.nodes_by_id[acceptance.node_id].parent_visible is True
+        assert snapshot.nodes_by_id[acceptance.node_id].tree_visible is True
+        assert snapshot.nodes_by_id[acceptance.node_id].acceptance_display_phase == "checking"
     finally:
         await service.close()
 

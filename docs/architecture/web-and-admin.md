@@ -239,7 +239,12 @@ The backend contract behind that UI behavior is:
 - That same rule applies to root-node appended messages: the backend may expose them through the node detail message list even when the root has no `task_node_notifications` row, because root delivery uses node-local pending notice metadata rather than mailbox storage.
 - In the node detail drawer, the message list appears as its own section before `派生记录`. Each entry shows received time plus pending/consumed state, expands to the full message body, and includes the per-node distribution result from the epoch `decision_records` / child deliveries for that source turn.
 - That distribution result is backend-owned and may now contain both delivered child notices and explicit skipped-child decisions. Frontend rendering should show both: delivered targets with the propagated message, and skipped targets with the recorded non-distribution reason. The browser must not infer skipped decisions by diffing the child tree against mailbox rows.
-- Backend tree snapshots now also expose a parent-facing visibility contract through `parent_visible` plus `acceptance_handshake_state`. Frontend tree construction must hide execution nodes in `waiting_acceptance`, keep unfinished acceptance nodes visible even when their paired execution node is hidden, and continue hiding terminal execution / acceptance nodes from the parent-facing tree.
+- Backend tree snapshots now expose two different visibility contracts that maintainers must not collapse back together:
+  - `parent_visible` / related handshake fields remain the distribution-oriented recipient projection
+  - frontend tree rendering must instead follow the browser-tree visibility fields
+- Browser task-tree execution nodes now stay visible in every status, including `waiting_acceptance` and terminal states.
+- Browser task-tree acceptance nodes stay hidden until activation. Once activated, they remain visible through checking, waiting-for-retry, and later terminal/retry outcomes.
+- When task-wide distribution is active, browser tree rendering may force-show all nodes for operator visibility, but that must not be treated as proof that all of those nodes were valid distribution recipients.
 - Acceptance nodes may appear in the tree before they are active and may receive distributed messages while still inactive. The browser must treat that as normal backend state rather than inferring that the tree is inconsistent or that the acceptance node has already finished.
 
 ### Task Depth Default Contract

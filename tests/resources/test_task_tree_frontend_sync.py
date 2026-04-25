@@ -3772,7 +3772,7 @@ def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() ->
     assert result["hasStatusBadge"] is False
 
 
-def test_build_execution_tree_from_snapshot_hides_waiting_acceptance_execution_and_keeps_acceptance_node() -> None:
+def test_build_execution_tree_from_snapshot_keeps_execution_visible_while_waiting_acceptance() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -3790,6 +3790,7 @@ def test_build_execution_tree_from_snapshot_hides_waiting_acceptance_execution_a
               rounds: [{ round_id: "round-1", is_latest: true, child_ids: ["node:child"] }],
               auxiliary_child_ids: ["node:acceptance"],
               parent_visible: true,
+              tree_visible: true,
             },
             "node:child": {
               node_id: "node:child",
@@ -3800,6 +3801,7 @@ def test_build_execution_tree_from_snapshot_hides_waiting_acceptance_execution_a
               rounds: [],
               auxiliary_child_ids: [],
               parent_visible: false,
+              tree_visible: true,
               acceptance_handshake_state: "waiting_acceptance",
             },
             "node:acceptance": {
@@ -3811,9 +3813,12 @@ def test_build_execution_tree_from_snapshot_hides_waiting_acceptance_execution_a
               rounds: [],
               auxiliary_child_ids: [],
               parent_visible: true,
+              tree_visible: false,
+              acceptance_display_phase: "inactive",
             },
           },
           liveFrameMap: {},
+          taskRuntimeSummary: null,
         };
         global.U = {};
         global.ApiClient = {};
@@ -3835,8 +3840,169 @@ def test_build_execution_tree_from_snapshot_hides_waiting_acceptance_execution_a
         """
     )
 
-    assert result["childIds"] == []
+    assert result["childIds"] == ["node:child"]
+    assert result["inspectionIds"] == []
+
+
+def test_build_execution_tree_from_snapshot_keeps_activated_acceptance_visible_after_rejection() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          treeRootNodeId: "node:root",
+          treeSelectedRoundByNodeId: {},
+          treeNodesById: {
+            "node:root": {
+              node_id: "node:root",
+              node_kind: "execution",
+              status: "in_progress",
+              title: "root",
+              rounds: [{ round_id: "round-1", is_latest: true, child_ids: ["node:child"] }],
+              auxiliary_child_ids: [],
+              parent_visible: true,
+              tree_visible: true,
+            },
+            "node:child": {
+              node_id: "node:child",
+              parent_node_id: "node:root",
+              node_kind: "execution",
+              status: "in_progress",
+              title: "child",
+              rounds: [],
+              auxiliary_child_ids: ["node:acceptance"],
+              parent_visible: false,
+              tree_visible: true,
+              acceptance_handshake_state: "waiting_execution_retry",
+            },
+            "node:acceptance": {
+              node_id: "node:acceptance",
+              parent_node_id: "node:child",
+              node_kind: "acceptance",
+              status: "in_progress",
+              title: "acceptance",
+              rounds: [],
+              auxiliary_child_ids: [],
+              parent_visible: false,
+              tree_visible: true,
+              acceptance_display_phase: "waiting_retry",
+            },
+          },
+          liveFrameMap: {},
+          taskRuntimeSummary: null,
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+        const tree = buildExecutionTreeFromSnapshot("node:root");
+        const child = Array.isArray(tree?.children) ? tree.children.find((item) => item.node_id === "node:child") : null;
+        console.log(JSON.stringify({
+          childIds: Array.isArray(tree?.children) ? tree.children.map((item) => item.node_id) : [],
+          inspectionIds: Array.isArray(child?.inspectionNodes) ? child.inspectionNodes.map((item) => item.node_id) : [],
+          inspectionStates: Array.isArray(child?.inspectionNodes) ? child.inspectionNodes.map((item) => item.display_state) : [],
+        }));
+        """
+    )
+
+    assert result["childIds"] == ["node:child"]
     assert result["inspectionIds"] == ["node:acceptance"]
+    assert result["inspectionStates"] != ["检验中"]
+
+
+def test_build_execution_tree_from_snapshot_force_shows_all_nodes_during_distribution_mode() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          treeRootNodeId: "node:root",
+          treeSelectedRoundByNodeId: {},
+          treeNodesById: {
+            "node:root": {
+              node_id: "node:root",
+              node_kind: "execution",
+              status: "in_progress",
+              title: "root",
+              rounds: [{ round_id: "round-1", is_latest: true, child_ids: ["node:child"] }],
+              auxiliary_child_ids: ["node:acceptance"],
+              parent_visible: true,
+              tree_visible: true,
+            },
+            "node:child": {
+              node_id: "node:child",
+              parent_node_id: "node:root",
+              node_kind: "execution",
+              status: "in_progress",
+              title: "child",
+              rounds: [],
+              auxiliary_child_ids: [],
+              parent_visible: false,
+              tree_visible: false,
+              acceptance_handshake_state: "waiting_acceptance",
+            },
+            "node:acceptance": {
+              node_id: "node:acceptance",
+              parent_node_id: "node:child",
+              node_kind: "acceptance",
+              status: "in_progress",
+              title: "acceptance",
+              rounds: [],
+              auxiliary_child_ids: [],
+              parent_visible: false,
+              tree_visible: false,
+              acceptance_display_phase: "inactive",
+            },
+          },
+          liveFrameMap: {},
+          taskRuntimeSummary: {
+            distribution: {
+              active_epoch_id: "epoch:test",
+              state: "distributing",
+              mode: "task_wide_barrier",
+            },
+          },
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+        const tree = buildExecutionTreeFromSnapshot("node:root");
+        const visibleIds = [];
+        const walk = (node) => {
+          if (!node) return;
+          visibleIds.push(node.node_id);
+          (Array.isArray(node.inspectionNodes) ? node.inspectionNodes : []).forEach(walk);
+          (Array.isArray(node.children) ? node.children : []).forEach(walk);
+        };
+        walk(tree);
+        console.log(JSON.stringify({
+          visibleIds: visibleIds.sort(),
+          inspectionStates: Array.isArray(tree?.inspectionNodes) ? tree.inspectionNodes.map((item) => item.display_state) : [],
+        }));
+        """
+    )
+
+    assert result["visibleIds"] == ["node:acceptance", "node:child", "node:root"]
+    assert result["inspectionStates"] != ["检验中"]
 
 
 def test_build_execution_trace_steps_excludes_spawn_review_rounds() -> None:
