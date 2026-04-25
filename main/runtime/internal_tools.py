@@ -93,13 +93,6 @@ class SubmitNextStageTool(Tool):
                         'required': ['ref', 'note'],
                     },
                 },
-                'final': {
-                    'type': 'boolean',
-                    'description': (
-                        'Optional final convergence stage flag. Use true only when this next stage should finish synthesis '
-                        'with the existing evidence and must not spawn child nodes.'
-                    ),
-                },
             },
             'required': ['stage_goal', 'tool_round_budget'],
         }
@@ -137,10 +130,6 @@ class SubmitNextStageTool(Tool):
                         },
                         'required': ['ref', 'note'],
                     },
-                },
-                'final': {
-                    'type': 'boolean',
-                    'description': 'Whether the next stage is the final convergence stage.',
                 },
             },
             'required': ['stage_goal', 'tool_round_budget'],
@@ -367,18 +356,20 @@ class SubmitFinalResultTool(Tool):
         if self._node_kind == 'acceptance':
             return (
                 'Submit the final structured acceptance result for the current node. '
-                'Use this only when you are ready to end the node, and make it the only tool call in the turn.'
+                'Use this only when you are ready to end the node, and make it the only tool call in the turn. '
+                'If you reject the delivery, the tool may return a revised execution output for another acceptance pass instead of ending immediately.'
             )
         return (
             'Submit the final structured result for the current execution node. '
-            'Use this only when you are ready to end the node, and make it the only tool call in the turn.'
+            'Use this only when you are ready to end the node, and make it the only tool call in the turn. '
+            'If acceptance rejects the submission, the tool returns the rejection feedback and you must continue from that feedback.'
         )
 
     @property
     def model_description(self) -> str:
         if self._node_kind == 'acceptance':
-            return 'End the node with the final acceptance result.'
-        return 'End the node with the final result.'
+            return 'Submit the current acceptance result; rejection may trigger another acceptance pass with revised execution output.'
+        return 'Submit the current result; rejection returns acceptance feedback instead of ending the node.'
 
     @property
     def parameters(self) -> dict[str, Any]:

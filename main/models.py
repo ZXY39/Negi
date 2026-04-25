@@ -308,7 +308,9 @@ def normalize_final_acceptance_metadata(value: Any) -> FinalAcceptanceState:
     raw_required = payload.get('required')
     required = bool(raw_required) or (raw_required in {None, ''} and bool(prompt))
     status = str(payload.get('status') or 'pending').strip().lower()
-    if status not in {'pending', 'running', 'passed', 'failed'}:
+    from main.runtime.acceptance_handshake import FINAL_ACCEPTANCE_STATUS_VALUES
+
+    if status not in FINAL_ACCEPTANCE_STATUS_VALUES:
         status = 'pending'
     return FinalAcceptanceState(
         required=required,

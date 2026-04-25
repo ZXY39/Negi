@@ -120,7 +120,6 @@ def _active_stage_prompt_view(active_stage: dict[str, Any] | None) -> dict[str, 
         'stage_goal': str(active_stage.get('stage_goal') or '').strip(),
         'tool_round_budget': max(0, int(active_stage.get('tool_round_budget') or 0)),
         'stage_kind': str(active_stage.get('stage_kind') or 'normal').strip() or 'normal',
-        'final_stage': bool(active_stage.get('final_stage', False)),
     }
 
 
@@ -248,8 +247,6 @@ def _render_stage_summary(stage_payload: dict[str, Any] | None) -> str:
     stage_kind = str(active_stage.get('stage_kind') or '').strip()
     if stage_kind:
         parts.append(f'stage_kind={stage_kind}')
-    if 'final_stage' in active_stage:
-        parts.append(f'final_stage={bool(active_stage.get("final_stage"))}')
     return 'stage_summary: ' + '; '.join(parts)
 
 

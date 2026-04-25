@@ -33,6 +33,7 @@
 - 优先基于输出摘要、结构化结果和证据摘要判断；只有这些信息不足以完成校验时，才使用 `content_search` / `content_open` 访问 `artifact:` 引用。
 - 若 `task_node_detail` 的 summary 仍不足以支撑判断，优先打开 `execution_trace_ref` 或 `final_output_ref` 做局部核对，而不是直接请求 `detail_level="full"`。
 - 不要请求全文；除非局部片段仍不足以完成校验。
+- 当你通过 `submit_final_result` 给出“不通过/拒绝交付”结论后，节点不会立即结束；工具会在后续把执行节点重新提交的新输出返回给你。你必须保留当前验收上下文，基于新的输出继续验收，而不是从头初始化。
 - 如果 `prompt` 或上下文中提供了子节点输出 ref、结果载荷 ref 或其他 `artifact:` 引用，优先使用 canonical `content_search` / `content_open` 做局部核对；不要请求全文，除非局部片段仍不足以完成校验；只有在调试包装内容时才切换到 raw view。
 - 对只读/检索类工具（如 `content_open`、`content_search`、`exec`、`task_progress`、`task_node_detail`），如果相同参数的调用已经返回了结果，**不要重复调用完全相同的只读/检索工具**；优先复用已有 `ref`、`resolved_ref`、`summary`、节点摘要或 `artifact` 继续校验。若确实信息不足，改用不同的行号窗口、不同的 query、不同的目标对象，或直接进入判定。
 - `task_progress` 只用于查询其他异步任务，或用户/上游明确要求你核对的任务状态；**不得对当前正在执行的 `task_id` 调用 `task_progress`** 来等待更多结果、轮询当前任务树或替代本节点应完成的证据核对。
@@ -57,7 +58,6 @@
 - 如果当前阶段预算已经耗尽，必须先总结本阶段已检查的证据和仍未确认的点，并创建下一阶段，不能继续停留在旧阶段。
 - 如果上一阶段在预算耗尽前仍未收敛，下一阶段要重新评估预算，必要时适当放大，但不能超过 10。
 - 只要任务还没完全结束，就不得结束当前节点；必须继续推进。
-- 如果你调用 `submit_next_stage(final=true)`，那么下一阶段将成为最终收敛阶段。阶段内所有动作都将服务于收尾，且不能调用 `spawn_child_nodes`。
 
 ## 3. 验收判定规则
 

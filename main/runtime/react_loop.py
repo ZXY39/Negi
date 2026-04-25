@@ -3150,11 +3150,6 @@ class ReActToolLoop:
         if not bool(stage_gate.get('enabled')):
             return ''
         active_stage = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
-        if (
-            normalized_tool_name == _STAGE_SPAWN_TOOL_NAME
-            and bool((active_stage or {}).get('final_stage'))
-        ):
-            return 'final stage forbids spawn_child_nodes; finish synthesis with existing evidence or submit the final result'
         if bool(runtime_context.get('stage_turn_granted')):
             return ''
         if normalized_tool_name == _STAGE_SPAWN_TOOL_NAME and bool(stage_gate.get('transition_required')):

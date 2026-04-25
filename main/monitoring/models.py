@@ -39,10 +39,17 @@ class TaskTreeSnapshotNode(Model):
     auxiliary_child_ids: list[str] = Field(default_factory=list)
     pending_notice_count: int = 0
     distribution_status: str = ''
+    parent_visible: bool = True
+    acceptance_handshake_state: str = ''
 
     @field_validator('distribution_status', mode='before')
     @classmethod
     def _normalize_distribution_status(cls, value: Any) -> str:
+        return normalize_optional_text(value)
+
+    @field_validator('acceptance_handshake_state', mode='before')
+    @classmethod
+    def _normalize_acceptance_handshake_state(cls, value: Any) -> str:
         return normalize_optional_text(value)
 
 

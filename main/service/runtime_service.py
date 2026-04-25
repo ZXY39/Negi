@@ -1049,6 +1049,32 @@ class MainRuntimeService:
             metadata=metadata,
         )
         record, root = self.log_service.initialize_task(record, root)
+        final_acceptance = normalize_final_acceptance_metadata((record.metadata or {}).get('final_acceptance'))
+        if final_acceptance.required and not str(final_acceptance.node_id or '').strip():
+            acceptance = self.node_runner.create_acceptance_node(
+                task=record,
+                accepted_node=root,
+                goal=f'最终验收:{root.goal}',
+                acceptance_prompt=final_acceptance.prompt,
+                parent_node_id=root.node_id,
+                metadata={'final_acceptance': True},
+            )
+            self.log_service.update_task_metadata(
+                record.task_id,
+                lambda current_metadata: {
+                    **dict(current_metadata or {}),
+                    'final_acceptance': {
+                        **normalize_final_acceptance_metadata(
+                            (current_metadata or {}).get('final_acceptance')
+                        ).model_dump(mode='json'),
+                        'node_id': acceptance.node_id,
+                        'status': 'pending',
+                    },
+                },
+                mark_unread=True,
+            )
+            record = self.store.get_task(record.task_id) or record
+            root = self.store.get_node(root.node_id) or root
         self.log_service.update_task_runtime_meta(
             record.task_id,
             task_temp_dir=str(self._task_temp_dir(record.task_id)),
@@ -2541,8 +2567,9 @@ class MainRuntimeService:
         target = self.store.get_node(target_node_id)
         if target is None or str(target.task_id or '').strip() != str(task_id or '').strip():
             raise ValueError('distribution_target_missing')
-        if str(target.node_kind or '').strip().lower() != 'execution':
-            raise ValueError('distribution_target_must_be_execution_node')
+        target_kind = str(target.node_kind or '').strip().lower()
+        if target_kind not in {'execution', 'acceptance'}:
+            raise ValueError('distribution_target_must_be_execution_or_acceptance_node')
         notification = self.store.upsert_task_node_notification(
             next(
                 (
@@ -2567,16 +2594,17 @@ class MainRuntimeService:
                 ),
             )
         )
-        self._reactivate_execution_node_for_distribution(
-            task_id=task_id,
-            node_id=target_node_id,
-            epoch_id=epoch_id,
-        )
-        self._invalidate_acceptance_for_reactivated_execution_node(
-            task_id=task_id,
-            execution_node_id=target_node_id,
-            epoch_id=epoch_id,
-        )
+        if target_kind == 'execution':
+            self._reactivate_execution_node_for_distribution(
+                task_id=task_id,
+                node_id=target_node_id,
+                epoch_id=epoch_id,
+            )
+            self._invalidate_acceptance_for_reactivated_execution_node(
+                task_id=task_id,
+                execution_node_id=target_node_id,
+                epoch_id=epoch_id,
+            )
         self.node_runner.stamp_distribution_target_pending_notice_state(
             task_id=task_id,
             node_id=target_node_id,

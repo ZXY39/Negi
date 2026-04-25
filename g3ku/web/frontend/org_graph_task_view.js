@@ -56,6 +56,8 @@ function normalizeTaskTreeSnapshotNode(value = {}, existing = null) {
             .filter(Boolean),
         pending_notice_count: Math.max(0, treeNormalizeInt(value?.pending_notice_count ?? prior?.pending_notice_count, 0)),
         distribution_status: String(value?.distribution_status || prior?.distribution_status || "").trim(),
+        parent_visible: value?.parent_visible ?? prior?.parent_visible ?? true,
+        acceptance_handshake_state: String(value?.acceptance_handshake_state || prior?.acceptance_handshake_state || "").trim(),
     };
 }
 
@@ -87,6 +89,8 @@ function snapshotNodeVisibleChildIds(node, selections = S.treeSelectedRoundByNod
     const out = [];
     (Array.isArray(node?.auxiliary_child_ids) ? node.auxiliary_child_ids : []).forEach((childId) => {
         const normalized = String(childId || "").trim();
+        const childNode = treeSnapshotNode(normalized);
+        if (childNode && childNode.parent_visible === false) return;
         if (!normalized || seen.has(normalized)) return;
         seen.add(normalized);
         out.push(normalized);
@@ -97,6 +101,8 @@ function snapshotNodeVisibleChildIds(node, selections = S.treeSelectedRoundByNod
     const selectedRound = rounds.find((round) => round.round_id === selectedRoundId) || null;
     (Array.isArray(selectedRound?.child_ids) ? selectedRound.child_ids : []).forEach((childId) => {
         const normalized = String(childId || "").trim();
+        const childNode = treeSnapshotNode(normalized);
+        if (childNode && childNode.parent_visible === false) return;
         if (!normalized || seen.has(normalized)) return;
         seen.add(normalized);
         out.push(normalized);
@@ -515,6 +521,8 @@ function buildExecutionTreeFromSnapshot(nodeId = S.treeRootNodeId, selections = 
         children: childNodes,
         activeNodeCount,
         distribution_status: String(snapshotNode.distribution_status || "").trim(),
+        parent_visible: snapshotNode.parent_visible !== false,
+        acceptance_handshake_state: String(snapshotNode.acceptance_handshake_state || "").trim(),
     };
 }
 
