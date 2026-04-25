@@ -441,6 +441,8 @@ class NodeRunner:
                 nonlocal inflight_notice_consumed
                 if inflight_notice_consumed:
                     return
+                if not pending_notification_ids and not pending_root_notice_ids:
+                    return
                 inflight_notice_consumed = True
                 self._consume_inflight_notice_ids(
                     task_id=task.task_id,
@@ -449,11 +451,38 @@ class NodeRunner:
                     pending_root_notice_ids=pending_root_notice_ids,
                 )
 
-            if pending_notification_ids or pending_root_notice_ids:
-                runtime_context = {
-                    **runtime_context,
-                    'consume_inflight_notice_callback': _consume_inflight_notices_once,
-                }
+            def _refresh_inflight_notices(
+                current_message_history: list[dict[str, Any]],
+                current_pending_request_delta_messages: list[dict[str, Any]],
+            ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+                nonlocal pending_notification_ids, pending_root_notice_ids, inflight_notice_consumed
+                previous_notification_ids = list(pending_notification_ids)
+                previous_root_notice_ids = list(pending_root_notice_ids)
+                (
+                    refreshed_history,
+                    pending_notification_ids,
+                    pending_root_notice_ids,
+                    refreshed_request_delta_messages,
+                ) = self._refresh_inflight_notice_messages(
+                    task=task,
+                    node=node,
+                    message_history=current_message_history,
+                    pending_notification_ids=pending_notification_ids,
+                    pending_root_notice_ids=pending_root_notice_ids,
+                    pending_request_delta_messages=current_pending_request_delta_messages,
+                )
+                if (
+                    len(pending_notification_ids) > len(previous_notification_ids)
+                    or len(pending_root_notice_ids) > len(previous_root_notice_ids)
+                ):
+                    inflight_notice_consumed = False
+                return refreshed_history, refreshed_request_delta_messages
+
+            runtime_context = {
+                **runtime_context,
+                'consume_inflight_notice_callback': _consume_inflight_notices_once,
+                'refresh_inflight_notice_callback': _refresh_inflight_notices,
+            }
             result = await self._await_with_runtime_marker(
                 task_id=task_id,
                 node_id=node.node_id,
@@ -721,6 +750,106 @@ class NodeRunner:
             appended.append({'role': 'user', 'content': text})
         return appended
 
+    @staticmethod
+    def _notice_delta_messages(*, notices: list[Any]) -> list[dict[str, Any]]:
+        delta_messages: list[dict[str, Any]] = []
+        for notice in list(notices or []):
+            if isinstance(notice, dict):
+                text = str(notice.get('message') or '').strip()
+            else:
+                text = str(getattr(notice, 'message', '') or '').strip()
+            if not text:
+                continue
+            delta_messages.append({'role': 'user', 'content': text})
+        return delta_messages
+
+    def _refresh_inflight_notice_messages(
+        self,
+        *,
+        task,
+        node: NodeRecord,
+        message_history: list[dict[str, Any]],
+        pending_notification_ids: list[str],
+        pending_root_notice_ids: list[str],
+        pending_request_delta_messages: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[str], list[str], list[dict[str, Any]]]:
+        updated_history = [dict(item) for item in list(message_history or []) if isinstance(item, dict)]
+        updated_notification_ids = [
+            str(item or '').strip()
+            for item in list(pending_notification_ids or [])
+            if str(item or '').strip()
+        ]
+        updated_root_notice_ids = [
+            str(item or '').strip()
+            for item in list(pending_root_notice_ids or [])
+            if str(item or '').strip()
+        ]
+        updated_request_delta_messages = [
+            dict(item)
+            for item in list(pending_request_delta_messages or [])
+            if isinstance(item, dict)
+        ]
+        latest_node = self._store.get_node(str(getattr(node, 'node_id', '') or '').strip()) or node
+        if latest_node is None:
+            return (
+                updated_history,
+                updated_notification_ids,
+                updated_root_notice_ids,
+                updated_request_delta_messages,
+            )
+        if self._pending_notice_waits_for_children(node=latest_node):
+            return (
+                updated_history,
+                updated_notification_ids,
+                updated_root_notice_ids,
+                updated_request_delta_messages,
+            )
+        known_notification_ids = set(updated_notification_ids)
+        known_root_notice_ids = set(updated_root_notice_ids)
+        new_notifications = [
+            item
+            for item in self._pending_node_notifications(task_id=task.task_id, node_id=latest_node.node_id)
+            if str(getattr(item, 'notification_id', '') or '').strip() not in known_notification_ids
+        ]
+        new_root_notice_records = [
+            dict(item)
+            for item in list(self._pending_root_notice_records(node=latest_node) or [])
+            if str(item.get('notification_id') or '').strip() not in known_root_notice_ids
+        ]
+        if not new_notifications and not new_root_notice_records:
+            return (
+                updated_history,
+                updated_notification_ids,
+                updated_root_notice_ids,
+                updated_request_delta_messages,
+            )
+        updated_history = self._append_notice_messages(messages=updated_history, notices=new_notifications)
+        updated_history = self._append_notice_messages(messages=updated_history, notices=new_root_notice_records)
+        if updated_request_delta_messages:
+            updated_request_delta_messages.extend(
+                self._notice_delta_messages(notices=[*list(new_notifications), *list(new_root_notice_records)])
+            )
+        updated_notification_ids.extend(
+            str(getattr(item, 'notification_id', '') or '').strip()
+            for item in list(new_notifications or [])
+            if str(getattr(item, 'notification_id', '') or '').strip()
+        )
+        updated_root_notice_ids.extend(
+            str(item.get('notification_id') or '').strip()
+            for item in list(new_root_notice_records or [])
+            if str(item.get('notification_id') or '').strip()
+        )
+        self._close_active_stage_for_message_consumption(
+            task_id=task.task_id,
+            node_id=latest_node.node_id,
+        )
+        return (
+            updated_history,
+            updated_notification_ids,
+            updated_root_notice_ids,
+            updated_request_delta_messages,
+        )
+
     def _consume_node_notifications(self, *, task_id: str, node_id: str, notification_ids: list[str]) -> None:
         ids = {str(item or '').strip() for item in list(notification_ids or []) if str(item or '').strip()}
         if not ids:
@@ -929,7 +1058,7 @@ class NodeRunner:
                 state=state,
                 acceptance_node_id=str(acceptance_node_id or '').strip(),
                 rejection_count=int(rejection_count or 0),
-                max_rejections=int(max_rejections or 2),
+                max_rejections=int(max_rejections or 3),
                 latest_execution_result_ref=str(latest_execution_result_ref or '').strip(),
                 latest_execution_result_summary=str(latest_execution_result_summary or '').strip(),
                 latest_rejection_feedback_ref=str(latest_rejection_feedback_ref or '').strip(),
@@ -975,7 +1104,7 @@ class NodeRunner:
             state=ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
             acceptance_node_id=acceptance.node_id,
             rejection_count=int(rejection_count or 0),
-            max_rejections=int(current.get('max_rejections') or 2),
+            max_rejections=int(current.get('max_rejections') or 3),
             latest_execution_result_ref=str(current.get('latest_execution_result_ref') or '').strip(),
             latest_execution_result_summary=str(current.get('latest_execution_result_summary') or '').strip(),
             latest_rejection_feedback_ref='',
@@ -1023,7 +1152,7 @@ class NodeRunner:
             state=ACCEPTANCE_STATE_ACCEPTED,
             acceptance_node_id=acceptance.node_id,
             rejection_count=int(current.get('rejection_count') or 0),
-            max_rejections=int(current.get('max_rejections') or 2),
+            max_rejections=int(current.get('max_rejections') or 3),
             latest_execution_result_ref=str(current.get('latest_execution_result_ref') or '').strip(),
             latest_execution_result_summary=str(current.get('latest_execution_result_summary') or '').strip(),
             latest_rejection_feedback_ref='',
@@ -1063,7 +1192,7 @@ class NodeRunner:
             state=ACCEPTANCE_STATE_REJECTED_TERMINAL,
             acceptance_node_id=acceptance.node_id,
             rejection_count=int(rejection_count or 0),
-            max_rejections=int(current.get('max_rejections') or 2),
+            max_rejections=int(current.get('max_rejections') or 3),
             latest_execution_result_ref=str(current.get('latest_execution_result_ref') or '').strip(),
             latest_execution_result_summary=str(current.get('latest_execution_result_summary') or '').strip(),
             latest_rejection_feedback_ref='',
@@ -1117,7 +1246,7 @@ class NodeRunner:
             state=ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
             acceptance_node_id=acceptance_node_id,
             rejection_count=int(handshake.get('rejection_count') or 0),
-            max_rejections=int(handshake.get('max_rejections') or 2),
+            max_rejections=int(handshake.get('max_rejections') or 3),
             latest_execution_result_ref=str(handshake.get('latest_execution_result_ref') or '').strip(),
             latest_execution_result_summary=str(handshake.get('latest_execution_result_summary') or '').strip(),
             latest_rejection_feedback_ref='',
@@ -1159,7 +1288,7 @@ class NodeRunner:
             )
 
         next_rejection_count = int(handshake.get('rejection_count') or 0) + 1
-        if next_rejection_count < int(handshake.get('max_rejections') or 2):
+        if next_rejection_count < int(handshake.get('max_rejections') or 3):
             feedback_text = self._acceptance_feedback_text(result)
             self._persist_rejection_feedback_and_keep_acceptance_live(
                 task=task,
@@ -1214,7 +1343,7 @@ class NodeRunner:
             state=ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
             acceptance_node_id=acceptance_node_id,
             rejection_count=int(rejection_count if rejection_count is not None else current.get('rejection_count') or 0),
-            max_rejections=int(current.get('max_rejections') or 2),
+            max_rejections=int(current.get('max_rejections') or 3),
             latest_execution_result_ref=str(result_ref or '').strip(),
             latest_execution_result_summary=str(result_summary or '').strip(),
             latest_rejection_feedback_ref='',
@@ -3604,22 +3733,28 @@ class NodeRunner:
                 index=index,
                 check_status='running',
             )
-            self._set_execution_waiting_acceptance_state(
-                task_id=task.task_id,
-                execution_node_id=child.node_id,
-                acceptance_node_id=acceptance.node_id,
-                result_ref=str(child_handoff.get('result_payload_ref') or ''),
-                result_summary=child_summary,
-            )
+            while True:
+                acceptance = self._refresh_acceptance_node_prompt(task=task, node=acceptance)
+                handshake = normalize_acceptance_handshake((child.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
+                self._set_execution_waiting_acceptance_state(
+                    task_id=task.task_id,
+                    execution_node_id=child.node_id,
+                    acceptance_node_id=acceptance.node_id,
+                    result_ref=str(child_handoff.get('result_payload_ref') or ''),
+                    result_summary=child_summary,
+                    rejection_count=int(handshake.get('rejection_count') or 0),
+                )
 
-            acceptance_result = await self._run_nested_node(task.task_id, acceptance.node_id)
-            acceptance = self._store.get_node(acceptance.node_id) or acceptance
-            acceptance_result = self._handle_acceptance_node_result(
-                task=task,
-                acceptance=acceptance,
-                result=acceptance_result,
-            )
-            if str(acceptance_result.delivery_status or '').strip() == 'partial':
+                acceptance_result = await self._run_nested_node(task.task_id, acceptance.node_id)
+                acceptance = self._store.get_node(acceptance.node_id) or acceptance
+                acceptance_result = self._handle_acceptance_node_result(
+                    task=task,
+                    acceptance=acceptance,
+                    result=acceptance_result,
+                )
+                if str(acceptance_result.delivery_status or '').strip() != 'partial':
+                    break
+
                 child_result = await self.run_node(task.task_id, child.node_id)
                 child = self._store.get_node(child.node_id) or child
                 child_handoff = self._child_handoff_payload(
@@ -3656,22 +3791,6 @@ class NodeRunner:
                         runtime_error_text='',
                     )
                     return result
-                acceptance = self._refresh_acceptance_node_prompt(task=task, node=acceptance)
-                self._set_execution_waiting_acceptance_state(
-                    task_id=task.task_id,
-                    execution_node_id=child.node_id,
-                    acceptance_node_id=acceptance.node_id,
-                    result_ref=str(child_handoff.get('result_payload_ref') or ''),
-                    result_summary=child_summary,
-                    rejection_count=1,
-                )
-                acceptance_result = await self.run_node(task.task_id, acceptance.node_id)
-                acceptance = self._store.get_node(acceptance.node_id) or acceptance
-                acceptance_result = self._handle_acceptance_node_result(
-                    task=task,
-                    acceptance=acceptance,
-                    result=acceptance_result,
-                )
             check_result = str(acceptance_result.summary or acceptance_result.output or acceptance.failure_reason or '').strip() or SKIPPED_CHECK_RESULT
             self._log_service.update_node_check_result(task.task_id, child.node_id, check_result)
             result = SpawnChildResult(

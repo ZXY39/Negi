@@ -248,6 +248,28 @@ class ReActToolLoop:
                 fresh_turn_request_seed_messages = []
                 attempts = max(0, attempts - 1)
                 continue
+            refresh_inflight_notice_callback = runtime_context.get('refresh_inflight_notice_callback')
+            if callable(refresh_inflight_notice_callback):
+                refreshed_payload = refresh_inflight_notice_callback(
+                    message_history,
+                    pending_request_delta_messages,
+                )
+                if isinstance(refreshed_payload, tuple) and len(refreshed_payload) == 2:
+                    refreshed_history, refreshed_delta_messages = refreshed_payload
+                    if isinstance(refreshed_delta_messages, list):
+                        pending_request_delta_messages = [
+                            dict(item)
+                            for item in list(refreshed_delta_messages or [])
+                            if isinstance(item, dict)
+                        ]
+                else:
+                    refreshed_history = refreshed_payload
+                if isinstance(refreshed_history, list):
+                    message_history = [
+                        dict(item)
+                        for item in list(refreshed_history or [])
+                        if isinstance(item, dict)
+                    ]
             stage_gate = self._execution_stage_gate(
                 task_id=task.task_id,
                 node_id=node.node_id,

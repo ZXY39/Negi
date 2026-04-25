@@ -635,10 +635,16 @@ When node cache hits are still low after schema churn stops, compare consecutive
 - If early `function_call` / `function_call_output` records are being replaced instead of appended, treat it as a node request-scaffold regression rather than a pure tool-schema issue.
 - If `prompt_cache_key_hash` stays the same but `actual_request_message_count` drops sharply on the first node request after restart/resume, compare `runtime_frame.messages` against the latest node `actual_request_ref.request_messages` first. That pattern usually means the resumed first hop rebuilt from projected history instead of from the persisted actual-request scaffold.
 - If cache hits drop on the first node request that consumes an append-notice, verify that the new `provider_request_body.input` begins with the previous artifact's `provider_request_body.input` byte-for-byte after JSON normalization. The expected behavior is append-only notice delivery: old provider-visible context remains the prefix, and the new parent notice is appended after it.
+- Debug delayed append-notice pickup in two separate lanes:
+  - initial resume pickup inside `_resume_react_state(...)` before the first ordinary send of a resumed `run_node(...)`
+  - same-run refresh inside `react_loop.run(...)` at the next ordinary `before_model` boundary when a long-running node turn receives a new delivered notice after an earlier model response
+  If a notice was delivered mid-run and the node kept iterating, check the second lane before assuming resume logic dropped the message.
 - A common regression is mixing the two resume lanes:
   - canonical history for prompt assembly (`runtime_frame.messages` / `latest_runtime_messages_ref` / durable rebuild)
   - send-side seed scaffold from the latest actual request (`provider_request_body.input`)
   If `_resume_react_state(...)` feeds the provider-shaped seed back into ordinary prompt assembly as if it were canonical node history, stage-compaction blocks, runtime-contract tails, and tool-call records can be reordered even when semantics still look correct. That pattern usually shows up as a huge cache-hit drop without `token_compression` or `stage_compaction`.
+- The same caution now applies to late same-run refreshes. When a notice arrives after an earlier model response, the safe fix is to append the new notice as an incremental delta onto the current send-side scaffold. Do not rebuild the whole request from stripped message history alone, and do not splice the notice in front of an already recovered `spawn_child_nodes` or tool-result round; both mistakes can preserve semantics while still breaking prompt-cache prefix reuse.
+- If `resume_mode=wait_for_children` is still active, the refresh path must not append the notice yet. The expected behavior is "durable but held": the notice stays pending until the active child round is gone, then appears after that recovered spawn/tool round on the next eligible ordinary send.
 
 Steady-state validation target for this repair:
 

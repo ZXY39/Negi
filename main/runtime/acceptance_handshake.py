@@ -48,11 +48,11 @@ def normalize_acceptance_handshake(payload: Any) -> dict[str, Any]:
     if state not in _KNOWN_ACCEPTANCE_STATES:
         state = ACCEPTANCE_STATE_IDLE
     rejection_count = max(0, _coerce_int(current.get("rejection_count"), default=0))
-    max_rejections = _coerce_int(current.get("max_rejections"), default=2)
+    max_rejections = _coerce_int(current.get("max_rejections"), default=3)
     if rejection_count < 0:
         rejection_count = 0
     if max_rejections <= 0:
-        max_rejections = 2
+        max_rejections = 3
     return {
         "state": state,
         "acceptance_node_id": str(current.get("acceptance_node_id") or "").strip(),
@@ -83,9 +83,9 @@ def set_acceptance_handshake_state(
     current["state"] = state if state in _KNOWN_ACCEPTANCE_STATES else ACCEPTANCE_STATE_IDLE
     current["acceptance_node_id"] = str(acceptance_node_id or "").strip()
     current["rejection_count"] = max(0, _coerce_int(rejection_count, default=0))
-    current["max_rejections"] = _coerce_int(max_rejections, default=2)
+    current["max_rejections"] = _coerce_int(max_rejections, default=3)
     if current["max_rejections"] <= 0:
-        current["max_rejections"] = 2
+        current["max_rejections"] = 3
     current["latest_execution_result_ref"] = str(latest_execution_result_ref or "").strip()
     current["latest_execution_result_summary"] = str(latest_execution_result_summary or "").strip()
     current["latest_rejection_feedback_ref"] = str(latest_rejection_feedback_ref or "").strip()

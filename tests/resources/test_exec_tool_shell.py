@@ -9,6 +9,38 @@ import g3ku.agent.tools.shell as shell_module
 from g3ku.agent.tools.shell import ExecTool
 
 
+class _ChunkedStream:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+
+    async def read(self, _n: int = -1) -> bytes:
+        if not self._chunks:
+            return b''
+        return self._chunks.pop(0)
+
+
+class _StreamingStubProcess:
+    def __init__(
+        self,
+        *,
+        stdout_chunks: list[bytes] | None = None,
+        stderr_chunks: list[bytes] | None = None,
+        returncode: int = 0,
+    ) -> None:
+        self.returncode = returncode
+        self.stdout = _ChunkedStream(list(stdout_chunks or []))
+        self.stderr = _ChunkedStream(list(stderr_chunks or []))
+
+    async def communicate(self):
+        raise MemoryError('communicate should not be used for large exec output')
+
+    async def wait(self):
+        return self.returncode
+
+    def kill(self):
+        return None
+
+
 def test_windows_shell_argv_uses_powershell(monkeypatch, tmp_path) -> None:
     system_root = tmp_path / 'Windows'
     powershell_exe = system_root / 'System32' / 'WindowsPowerShell' / 'v1.0' / 'powershell.exe'
@@ -326,6 +358,52 @@ async def test_exec_tool_windows_decodes_legacy_codepage_output(monkeypatch, tmp
 
     assert payload['status'] == 'error'
     assert '站点经验' in payload['head_preview']
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_emits_tail_preview_for_long_output(monkeypatch, tmp_path) -> None:
+    lines = [f'line-{i:03d}' for i in range(10)]
+    stdout_text = '\n'.join(lines) + '\n'
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        return _StreamingStubProcess(stdout_chunks=[stdout_text.encode('utf-8')], returncode=0)
+
+    tool = ExecTool(workspace_root=str(tmp_path))
+
+    monkeypatch.setattr(shell_module.os, 'name', 'nt', raising=False)
+    monkeypatch.setattr(shell_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    payload = json.loads(await tool.execute(command='echo ok', __g3ku_runtime={'session_key': 'web:shared'}))
+
+    assert payload['status'] == 'success'
+    assert payload['head_preview'].startswith('line-000')
+    assert payload['tail_preview'].endswith('line-009')
+    assert 'line-009' not in payload['head_preview']
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_streaming_reader_keeps_output_bounded(monkeypatch, tmp_path) -> None:
+    stdout_chunks = [
+        b'first-line\n',
+        b'middle-line\n' * 10000,
+        b'last-line\n',
+    ]
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        return _StreamingStubProcess(stdout_chunks=stdout_chunks, returncode=0)
+
+    tool = ExecTool(workspace_root=str(tmp_path))
+
+    monkeypatch.setattr(shell_module.os, 'name', 'nt', raising=False)
+    monkeypatch.setattr(shell_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    payload = json.loads(await tool.execute(command='echo ok', __g3ku_runtime={'session_key': 'web:shared'}))
+
+    assert payload['status'] == 'success'
+    assert payload['head_preview'].startswith('first-line')
+    assert payload['tail_preview'].endswith('last-line')
+    assert payload['stdout_truncated'] is True
+    assert payload['stdout_captured_bytes'] > 0
 
 
 def test_exec_tool_model_description_reflects_full_access_mode() -> None:

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,44 @@ from main.governance.exec_tool_policy import (
     normalize_exec_execution_mode,
     resolve_exec_execution_mode,
 )
+
+
+_STREAM_READ_CHUNK_SIZE = 4096
+_STREAM_CAPTURE_BYTE_LIMIT = 64 * 1024
+
+
+@dataclass
+class _BoundedStreamCapture:
+    byte_limit: int = _STREAM_CAPTURE_BYTE_LIMIT
+    total_bytes: int = 0
+    truncated: bool = False
+    _head: bytearray = field(default_factory=bytearray)
+    _tail: bytearray = field(default_factory=bytearray)
+
+    def append(self, chunk: bytes | None) -> None:
+        if not chunk:
+            return
+        data = bytes(chunk)
+        self.total_bytes += len(data)
+        head_remaining = self.byte_limit - len(self._head)
+        if head_remaining > 0:
+            self._head.extend(data[:head_remaining])
+        self._tail.extend(data)
+        if len(self._tail) > self.byte_limit:
+            del self._tail[:-self.byte_limit]
+        self.truncated = self.total_bytes > self.byte_limit
+
+    @classmethod
+    def from_bytes(cls, data: bytes | None, *, byte_limit: int = _STREAM_CAPTURE_BYTE_LIMIT) -> "_BoundedStreamCapture":
+        capture = cls(byte_limit=byte_limit)
+        capture.append(data or b"")
+        return capture
+
+    def head_text(self) -> str:
+        return decode_subprocess_output(bytes(self._head))
+
+    def tail_text(self) -> str:
+        return decode_subprocess_output(bytes(self._tail))
 
 
 class ExecTool(Tool):
@@ -147,11 +186,11 @@ class ExecTool(Tool):
                     cwd=cwd,
                     env=env,
                 )
-            
+
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=self.timeout
+                stdout_capture, stderr_capture = await self._collect_process_output(
+                    process,
+                    timeout=self.timeout,
                 )
             except asyncio.CancelledError:
                 process.kill()
@@ -168,21 +207,21 @@ class ExecTool(Tool):
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
                     pass
+                stdout_capture, stderr_capture = await self._collect_terminated_process_output(process)
                 return self._build_payload(
                     status="error",
                     exit_code=None,
-                    stdout_text="",
+                    stdout_capture=stdout_capture,
+                    stderr_capture=stderr_capture,
                     stderr_text=f"Command timed out after {self.timeout} seconds",
                     error=f"Command timed out after {self.timeout} seconds",
                 )
 
-            stdout_text = decode_subprocess_output(stdout)
-            stderr_text = decode_subprocess_output(stderr)
             return self._build_payload(
                 status="success" if process.returncode == 0 else "error",
                 exit_code=process.returncode,
-                stdout_text=stdout_text,
-                stderr_text=stderr_text,
+                stdout_capture=stdout_capture,
+                stderr_capture=stderr_capture,
                 error="" if process.returncode == 0 else f"Exit code: {process.returncode}",
             )
 
@@ -196,6 +235,76 @@ class ExecTool(Tool):
             )
         finally:
             self._notify_resource_change(resource_state, runtime=runtime, trigger="tool:exec")
+
+    async def _collect_process_output(
+        self,
+        process: Any,
+        *,
+        timeout: float,
+    ) -> tuple[_BoundedStreamCapture, _BoundedStreamCapture]:
+        if getattr(process, "stdout", None) is None and getattr(process, "stderr", None) is None:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            return (
+                _BoundedStreamCapture.from_bytes(stdout),
+                _BoundedStreamCapture.from_bytes(stderr),
+            )
+        stdout_task = asyncio.create_task(self._capture_stream(process.stdout))
+        stderr_task = asyncio.create_task(self._capture_stream(process.stderr))
+        try:
+            await asyncio.wait_for(process.wait(), timeout=timeout)
+        except BaseException:
+            await self._cancel_capture_tasks(stdout_task, stderr_task)
+            raise
+        return await self._await_capture_tasks(stdout_task, stderr_task)
+
+    async def _collect_terminated_process_output(self, process: Any) -> tuple[_BoundedStreamCapture, _BoundedStreamCapture]:
+        if getattr(process, "stdout", None) is None and getattr(process, "stderr", None) is None:
+            return _BoundedStreamCapture(), _BoundedStreamCapture()
+        stdout_task = asyncio.create_task(self._capture_stream(process.stdout))
+        stderr_task = asyncio.create_task(self._capture_stream(process.stderr))
+        return await self._await_capture_tasks(stdout_task, stderr_task, timeout=5.0)
+
+    async def _capture_stream(self, stream: Any) -> _BoundedStreamCapture:
+        capture = _BoundedStreamCapture()
+        if stream is None:
+            return capture
+        try:
+            while True:
+                chunk = await stream.read(_STREAM_READ_CHUNK_SIZE)
+                if not chunk:
+                    break
+                capture.append(chunk)
+        except asyncio.CancelledError:
+            return capture
+        return capture
+
+    async def _await_capture_tasks(
+        self,
+        stdout_task: "asyncio.Task[_BoundedStreamCapture]",
+        stderr_task: "asyncio.Task[_BoundedStreamCapture]",
+        *,
+        timeout: float | None = None,
+    ) -> tuple[_BoundedStreamCapture, _BoundedStreamCapture]:
+        gather = asyncio.gather(stdout_task, stderr_task)
+        try:
+            if timeout is None:
+                stdout_capture, stderr_capture = await gather
+            else:
+                stdout_capture, stderr_capture = await asyncio.wait_for(gather, timeout=timeout)
+        except asyncio.TimeoutError:
+            stdout_task.cancel()
+            stderr_task.cancel()
+            stdout_capture, stderr_capture = await asyncio.gather(stdout_task, stderr_task)
+        return stdout_capture, stderr_capture
+
+    async def _cancel_capture_tasks(
+        self,
+        stdout_task: "asyncio.Task[_BoundedStreamCapture]",
+        stderr_task: "asyncio.Task[_BoundedStreamCapture]",
+    ) -> tuple[_BoundedStreamCapture, _BoundedStreamCapture]:
+        stdout_task.cancel()
+        stderr_task.cancel()
+        return await asyncio.gather(stdout_task, stderr_task)
 
     def _resolve_execution_mode(self) -> str:
         service = getattr(self, "main_task_service", None)
@@ -611,17 +720,40 @@ class ExecTool(Tool):
         *,
         status: str,
         exit_code: int | None,
-        stdout_text: str,
-        stderr_text: str,
+        stdout_text: str = "",
+        stderr_text: str = "",
         error: str = "",
+        stdout_capture: _BoundedStreamCapture | None = None,
+        stderr_capture: _BoundedStreamCapture | None = None,
     ) -> str:
-        combined = stdout_text.strip()
-        if stderr_text.strip():
-            combined = f"{combined}\nSTDERR:\n{stderr_text.strip()}".strip()
+        def _merge(primary: str, fallback: str) -> str:
+            normalized_primary = str(primary or "").strip()
+            normalized_fallback = str(fallback or "").strip()
+            if normalized_primary and normalized_fallback and normalized_fallback not in normalized_primary:
+                return f"{normalized_primary}\n{normalized_fallback}".strip()
+            return normalized_primary or normalized_fallback
+
+        stdout_head = _merge(stdout_capture.head_text() if stdout_capture is not None else "", stdout_text)
+        stderr_head = _merge(stderr_capture.head_text() if stderr_capture is not None else "", stderr_text)
+        stdout_tail = _merge(stdout_capture.tail_text() if stdout_capture is not None else "", stdout_text)
+        stderr_tail = _merge(stderr_capture.tail_text() if stderr_capture is not None else "", stderr_text)
+
+        combined_head = stdout_head
+        if stderr_head:
+            combined_head = f"{combined_head}\nSTDERR:\n{stderr_head}".strip()
+        combined_tail = stdout_tail
+        if stderr_tail:
+            combined_tail = f"{combined_tail}\nSTDERR:\n{stderr_tail}".strip()
+
         payload = {
             "status": status,
             "exit_code": exit_code,
-            "head_preview": self._preview(combined, from_tail=False),
+            "head_preview": self._preview(combined_head, from_tail=False),
+            "tail_preview": self._preview(combined_tail, from_tail=True),
+            "stdout_truncated": bool(stdout_capture and stdout_capture.truncated),
+            "stderr_truncated": bool(stderr_capture and stderr_capture.truncated),
+            "stdout_captured_bytes": int(stdout_capture.total_bytes if stdout_capture is not None else len(stdout_text.encode('utf-8'))),
+            "stderr_captured_bytes": int(stderr_capture.total_bytes if stderr_capture is not None else len(stderr_text.encode('utf-8'))),
         }
         if error:
             payload["error"] = error

@@ -20,8 +20,10 @@ from main.api.rest import router as rest_router
 from main.api.websocket_task import router as task_ws_router
 from main.models import (
     NodeFinalResult,
+    NodeRecord,
     SpawnChildResult,
     SpawnChildSpec,
+    TaskNodeNotification,
     TaskRecord,
     normalize_execution_stage_metadata,
     normalize_final_acceptance_metadata,
@@ -139,6 +141,55 @@ class _CapturedRequestFinalResultChatBackend:
                         "summary": "done",
                         "answer": "done",
                         "evidence": [{"kind": "artifact", "note": "captured resumed request"}],
+                        "remaining_work": [],
+                        "blocking_reason": "",
+                    },
+                )
+            ],
+            finish_reason="tool_calls",
+            usage={"input_tokens": 12, "output_tokens": 4, "cache_hit_tokens": 0},
+        )
+
+
+class _InjectedNoticeStageThenFinalChatBackend:
+    def __init__(self, *, inject_notice_callback=None) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.call_count = 0
+        self._inject_notice_callback = inject_notice_callback
+
+    async def chat(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        self.call_count += 1
+        if self.call_count == 1:
+            if callable(self._inject_notice_callback):
+                self._inject_notice_callback()
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:stage",
+                        name="submit_next_stage",
+                        arguments={
+                            "stage_goal": "notice-adjusted stage",
+                            "tool_round_budget": 5,
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 12, "output_tokens": 4, "cache_hit_tokens": 0},
+            )
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call:final",
+                    name="submit_final_result",
+                    arguments={
+                        "status": "success",
+                        "delivery_status": "final",
+                        "summary": "done",
+                        "answer": "done",
+                        "evidence": [{"kind": "artifact", "note": "captured inflight notice request"}],
                         "remaining_work": [],
                         "blocking_reason": "",
                     },
@@ -386,7 +437,7 @@ def test_normalize_acceptance_handshake_defaults() -> None:
         "state": ACCEPTANCE_STATE_IDLE,
         "acceptance_node_id": "",
         "rejection_count": 0,
-        "max_rejections": 2,
+        "max_rejections": 3,
         "latest_execution_result_ref": "",
         "latest_execution_result_summary": "",
         "latest_rejection_feedback_ref": "",
@@ -6369,11 +6420,11 @@ async def test_reactivated_acceptance_syncs_task_node_projection_after_rejection
 
 
 @pytest.mark.asyncio
-async def test_second_acceptance_rejection_terminalizes_pair_and_preserves_root_output(tmp_path: Path) -> None:
+async def test_second_acceptance_rejection_still_requests_execution_retry(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:
         record = await service.create_task(
-            "second rejection",
+            "second rejection retry",
             session_id="web:shared",
             metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
         )
@@ -6406,14 +6457,74 @@ async def test_second_acceptance_rejection_terminalizes_pair_and_preserves_root_
             blocking_reason="still missing board format",
         )
 
-        terminal = service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
+        partial = service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
         latest_task = service.get_task(record.task_id)
+        latest_root = service.store.get_node(root.node_id)
         latest_acceptance = service.store.get_node(acceptance.node_id)
 
         assert latest_task is not None
+        assert latest_root is not None
+        assert latest_acceptance is not None
+        assert partial.delivery_status == "partial"
+        assert latest_acceptance.status == "in_progress"
+        assert dict((latest_root.metadata or {}).get("acceptance_handshake") or {})["state"] == "waiting_execution_retry"
+        assert dict((latest_root.metadata or {}).get("acceptance_handshake") or {})["rejection_count"] == 2
+        assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "waiting_execution_retry"
+        assert latest_task.metadata.get("final_execution_output") in {None, ""}
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_third_acceptance_rejection_terminalizes_pair_and_preserves_root_output(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "third rejection",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        acceptance_id = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance")).node_id
+        acceptance = service.store.get_node(acceptance_id)
+
+        assert task is not None
+        assert root is not None
+        assert acceptance is not None
+
+        service.log_service.update_node_status(record.task_id, root.node_id, status="in_progress", final_output="board draft")
+        service.node_runner._set_execution_waiting_acceptance_state(
+            task_id=task.task_id,
+            execution_node_id=root.node_id,
+            acceptance_node_id=acceptance.node_id,
+            result_ref="artifact:result",
+            result_summary="board draft",
+            rejection_count=2,
+        )
+
+        rejection = NodeFinalResult(
+            status="failed",
+            delivery_status="final",
+            summary="still missing board format",
+            answer="still missing board format",
+            evidence=[],
+            remaining_work=[],
+            blocking_reason="still missing board format",
+        )
+
+        terminal = service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
+        latest_task = service.get_task(record.task_id)
+        latest_root = service.store.get_node(root.node_id)
+        latest_acceptance = service.store.get_node(acceptance.node_id)
+
+        assert latest_task is not None
+        assert latest_root is not None
         assert latest_acceptance is not None
         assert terminal.status == "failed"
         assert latest_acceptance.status == "failed"
+        assert dict((latest_root.metadata or {}).get("acceptance_handshake") or {})["state"] == ACCEPTANCE_STATE_REJECTED_TERMINAL
+        assert dict((latest_root.metadata or {}).get("acceptance_handshake") or {})["rejection_count"] == 3
         assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "failed"
         assert latest_task.metadata.get("final_execution_output") == "board draft"
     finally:
@@ -6720,6 +6831,116 @@ async def test_spawn_child_acceptance_refreshes_eager_prompt_before_acceptance_r
 
 
 @pytest.mark.asyncio
+async def test_run_child_pipeline_loops_until_third_acceptance_rejection_is_terminal(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("child acceptance retry loop", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(
+            goal="announce child",
+            prompt="draft announcement",
+            execution_policy=_execution_policy(),
+            acceptance_prompt="verify announcement",
+        )
+        cached_payload = {
+            "specs": [spec.model_dump(mode="json")],
+            "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
+            "completed": False,
+        }
+
+        service.node_runner._materialize_spawn_batch_children(
+            task=task,
+            parent=root,
+            specs=[spec],
+            allowed_indexes=[0],
+            cache_key="round-loop",
+            cached_payload=cached_payload,
+        )
+
+        refreshed_root = service.store.get_node(root.node_id)
+        assert refreshed_root is not None
+        entry = refreshed_root.metadata["spawn_operations"]["round-loop"]["entries"][0]
+        acceptance = service.store.get_node(str(entry["acceptance_node_id"]))
+
+        assert acceptance is not None
+
+        execution_call_count = 0
+        acceptance_call_count = 0
+
+        async def _mock_run_node(task_id: str, node_id: str) -> NodeFinalResult:
+            nonlocal execution_call_count, acceptance_call_count
+
+            target = service.store.get_node(node_id)
+            assert target is not None
+            if target.node_kind == "execution":
+                execution_call_count += 1
+                output = f"draft attempt {execution_call_count}"
+                service.log_service.update_node_status(
+                    task_id,
+                    node_id,
+                    status="success",
+                    final_output=output,
+                )
+                return NodeFinalResult(status="success", summary=output, answer=output)
+            if target.node_kind == "acceptance":
+                acceptance_call_count += 1
+                feedback = f"reject attempt {acceptance_call_count}"
+                service.log_service.update_node_status(
+                    task_id,
+                    node_id,
+                    status="failed",
+                    final_output=feedback,
+                    failure_reason=feedback,
+                )
+                return NodeFinalResult(
+                    status="failed",
+                    delivery_status="final",
+                    summary=feedback,
+                    answer=feedback,
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason=feedback,
+                )
+            raise AssertionError(f"unexpected node kind: {target.node_kind}")
+
+        service.node_runner.run_node = _mock_run_node  # type: ignore[method-assign]
+
+        result = await service.node_runner._run_child_pipeline(
+            task=task,
+            parent=root,
+            spec=spec,
+            cache_key="round-loop",
+            cached_payload=cached_payload,
+            index=0,
+        )
+
+        latest_root = service.store.get_node(root.node_id)
+        assert latest_root is not None
+        latest_entry = latest_root.metadata["spawn_operations"]["round-loop"]["entries"][0]
+        child = service.store.get_node(str(latest_entry["child_node_id"]))
+        assert child is not None
+        latest_child = service.store.get_node(child.node_id)
+        latest_acceptance = service.store.get_node(acceptance.node_id)
+        handshake = dict((latest_child.metadata or {}).get("acceptance_handshake") or {}) if latest_child is not None else {}
+        assert execution_call_count == 3
+        assert acceptance_call_count == 3
+        assert result.check_result == "reject attempt 3"
+        assert result.failure_info is not None
+        assert result.failure_info.source == "acceptance"
+        assert latest_acceptance is not None
+        assert latest_acceptance.status == "failed"
+        assert handshake["state"] == ACCEPTANCE_STATE_REJECTED_TERMINAL
+        assert handshake["rejection_count"] == 3
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_root_final_acceptance_refreshes_eager_prompt_from_root_output(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:
@@ -6761,7 +6982,7 @@ def test_normalize_acceptance_handshake_defaults() -> None:
         "state": ACCEPTANCE_STATE_IDLE,
         "acceptance_node_id": "",
         "rejection_count": 0,
-        "max_rejections": 2,
+        "max_rejections": 3,
         "latest_execution_result_ref": "",
         "latest_execution_result_summary": "",
         "latest_rejection_feedback_ref": "",
@@ -6819,10 +7040,10 @@ def test_acceptance_handshake_numeric_fields_fall_back_safely() -> None:
 
     assert normalized["state"] == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
     assert normalized["rejection_count"] == 0
-    assert normalized["max_rejections"] == 2
+    assert normalized["max_rejections"] == 3
     assert updated["state"] == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
     assert updated["rejection_count"] == 0
-    assert updated["max_rejections"] == 2
+    assert updated["max_rejections"] == 3
 
 
 def test_normalize_final_acceptance_metadata_allows_handshake_statuses() -> None:
@@ -7415,6 +7636,158 @@ async def test_pending_notice_keeps_provider_seed_messages_while_request_history
         assert any("new parent constraint" in str(item) for item in trailing_messages)
     finally:
         await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_run_node_appends_notice_delivered_after_first_model_response_before_next_send(tmp_path: Path):
+    holder: dict[str, object] = {}
+
+    def _inject_notice() -> None:
+        service = holder["service"]
+        record = holder["record"]
+        root = holder["root"]
+        assert isinstance(service, MainRuntimeService)
+        assert hasattr(record, "task_id")
+        assert isinstance(root, NodeRecord)
+        service.store.upsert_task_node_notification(
+            TaskNodeNotification(
+                notification_id="notif:late-inflight",
+                task_id=str(record.task_id),
+                node_id=str(root.node_id),
+                epoch_id="epoch:late-inflight",
+                source_node_id=str(root.node_id),
+                message="late notice delivered after first model response",
+                status="delivered",
+                created_at=now_iso(),
+                delivered_at=now_iso(),
+                consumed_at="",
+                payload={},
+            )
+        )
+
+    backend = _InjectedNoticeStageThenFinalChatBackend(inject_notice_callback=_inject_notice)
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+
+    try:
+        record = await _create_web_task(service)
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+        holder.update({"service": service, "record": record, "root": root})
+
+        result = await service.node_runner.run_node(record.task_id, root.node_id)
+
+        assert result.status == "success"
+        assert len(backend.calls) == 2
+        first_messages = list(backend.calls[0].get("messages") or [])
+        second_messages = list(backend.calls[1].get("messages") or [])
+        assert second_messages[: len(first_messages)] == first_messages
+
+        notice_indexes = [
+            index
+            for index, item in enumerate(second_messages)
+            if "late notice delivered after first model response" in json.dumps(item, ensure_ascii=False)
+        ]
+        assert notice_indexes
+
+        stage_round_indexes = [
+            index
+            for index, item in enumerate(second_messages)
+            if "call:stage" in json.dumps(item, ensure_ascii=False)
+        ]
+        assert stage_round_indexes
+        assert notice_indexes[0] > max(stage_round_indexes)
+
+        notifications = service.store.list_task_node_notifications(record.task_id, root.node_id)
+        target = next(item for item in notifications if item.notification_id == "notif:late-inflight")
+        assert target.status == "consumed"
+        assert str(target.consumed_at or "").strip()
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_refresh_inflight_notice_messages_appends_after_spawn_round_history(tmp_path: Path):
+    service = _build_service(tmp_path)
+
+    try:
+        record = await service.create_task("append after spawn history", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        message_history = [
+            {"role": "system", "content": "system seed"},
+            {"role": "user", "content": "historic request"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call:spawn",
+                        "type": "function",
+                        "function": {"name": "spawn_child_nodes", "arguments": '{"children":[]}'},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call:spawn",
+                "name": "spawn_child_nodes",
+                "content": '{"children":[]}',
+            },
+        ]
+
+        service.store.upsert_task_node_notification(
+            TaskNodeNotification(
+                notification_id="notif:after-spawn",
+                task_id=record.task_id,
+                node_id=root.node_id,
+                epoch_id="epoch:after-spawn",
+                source_node_id=root.node_id,
+                message="append after spawn round",
+                status="delivered",
+                created_at=now_iso(),
+                delivered_at=now_iso(),
+                consumed_at="",
+                payload={},
+            )
+        )
+
+        (
+            refreshed_history,
+            refreshed_notification_ids,
+            refreshed_root_notice_ids,
+            refreshed_delta_messages,
+        ) = service.node_runner._refresh_inflight_notice_messages(
+            task=task,
+            node=root,
+            message_history=message_history,
+            pending_notification_ids=[],
+            pending_root_notice_ids=[],
+            pending_request_delta_messages=[],
+        )
+
+        assert refreshed_root_notice_ids == []
+        assert refreshed_notification_ids == ["notif:after-spawn"]
+        assert refreshed_delta_messages == []
+
+        notice_indexes = [
+            index
+            for index, item in enumerate(refreshed_history)
+            if "append after spawn round" in json.dumps(item, ensure_ascii=False)
+        ]
+        assert notice_indexes == [len(refreshed_history) - 1]
+
+        spawn_indexes = [
+            index
+            for index, item in enumerate(refreshed_history)
+            if "call:spawn" in json.dumps(item, ensure_ascii=False)
+        ]
+        assert spawn_indexes
+        assert notice_indexes[0] > max(spawn_indexes)
+    finally:
+        await service.close()
 
 
 @pytest.mark.asyncio
