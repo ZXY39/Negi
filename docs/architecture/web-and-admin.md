@@ -284,6 +284,7 @@ Do not treat `ceoSessionBusy` as equivalent to "all session-list mutations must 
 - In the CEO session UI, deleting a local session and deleting a channel session are intentionally different operations.
 - Deleting a local session removes the session record itself. Deleting a channel session is a clear operation: the channel/account entry remains available, but the next reopened conversation must start from empty session context.
 - Backend clear handling for channel sessions must remove the persisted `SessionManager` transcript for that `china:*` session key, invalidate any in-memory cached session object, and clear the same side artifacts that local-session deletion clears for that session id, including inflight snapshots, paused execution context, completed continuity sidecars, uploads, and frontdoor stage-archive artifacts.
+- Both local-session delete and channel-session clear now also ask the runtime to purge SQLite checkpointer rows for that exact session key. If the transcript is gone but old state still appears to resurrect after reopen, inspect the checkpointer purge path before blaming frontend cache.
 - For DM channel rows, the catalog entry may still remain visible after clear because it is synthesized from enabled channel-account configuration rather than from transcript persistence alone.
 
 If an operator reports “the channel conversation was deleted but old context came back,” inspect these layers in order:
@@ -329,6 +330,7 @@ CEO/frontdoor now follows a parallel debugging pattern, but with session-scoped 
 - Inflight / paused CEO snapshots expose only the latest `actual_request_path`, `prompt_cache_key_hash`, `actual_request_hash`, `actual_request_message_count`, `actual_tool_schema_hash`, and a short `actual_request_history`.
 - Reopened completed sessions also have a compact recovery sidecar at `.g3ku/web-ceo-continuity/<session>.json`. That file is the authority for “what baseline/stage/compression state should be restored before the first new visible turn after restart,” but it is not a replacement for the full request JSON when doing request forensics.
 - When debugging CEO prompt shrinkage or cache drops, inspect the saved request JSON first rather than inferring the request from `canonical_context`, stage rounds, or transcript-visible assistant/tool bubbles.
+- Checkpoint-side helper fields are intentionally lossy now. `stable_messages` strips multimodal blocks back to their text projection, and `response_payload.provider_request_body` stores only a compact summary. Use the saved actual request JSON whenever you need the exact provider-facing request body.
 - The corresponding session-state projection now has two different meanings:
   - `dynamic_appendix_messages` keeps only the latest authoritative contract for rebuild purposes.
   - The active-turn `messages` / saved actual request may still include earlier same-turn contract snapshots so the provider-facing body can remain append-only.

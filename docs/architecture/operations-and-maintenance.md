@@ -105,6 +105,7 @@
   Maintenance note:
   For the queued Markdown memory runtime, inspect `memory/memory_state.sqlite3`, `memory/MEMORY.md`, `memory/notes/`, `memory/queue.jsonl`, and `memory/ops.jsonl` first. Dense store or checkpoint files are now secondary catalog/runtime projections rather than the primary long-term memory source.
   The queue is now model-driven: a stuck queue head usually means the dedicated memory agent route, provider call, or runtime validation is failing, not that a synchronous tool write failed inline.
+  `memory/checkpoints.sqlite3` is now treated as a bounded short-term cache rather than an append-forever archive. The runtime trims older checkpoint rows per `(thread_id, checkpoint_ns)` automatically and CEO session deletion also purges that session key from the checkpointer. If file size stays high after deletes, inspect active threads and whether WAL truncation actually ran before assuming transcript cleanup failed.
   记忆相关文件、qdrant、checkpoint 等
 
 - `sessions/`

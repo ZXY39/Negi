@@ -4413,6 +4413,51 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         response_metadata = dict(getattr(message, "response_metadata", {}) or {})
         return normalize_usage_payload(response_metadata.get("usage") or getattr(message, "usage", None))
 
+    def _checkpoint_safe_provider_request_body(
+        self,
+        provider_request_body: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(provider_request_body, dict):
+            return _checkpoint_safe_value(provider_request_body)
+        payload = dict(provider_request_body or {})
+        input_payload = payload.get("input")
+        tool_payload = payload.get("tools")
+        input_count = 0
+        if isinstance(input_payload, list):
+            input_count = len(input_payload)
+        elif input_payload not in (None, "", [], {}):
+            input_count = 1
+        tools_count = 0
+        if isinstance(tool_payload, list):
+            tools_count = len(tool_payload)
+        elif tool_payload not in (None, "", [], {}):
+            tools_count = 1
+        summary: dict[str, Any] = {
+            "input_count": int(input_count),
+            "tools_count": int(tools_count),
+            "contains_multimodal": bool(_extract_image_blocks(payload)),
+        }
+        for key, value in payload.items():
+            normalized_key = str(key or "").strip()
+            if not normalized_key or normalized_key in {"input", "tools"}:
+                continue
+            if value is None:
+                continue
+            if isinstance(value, str | int | float | bool):
+                summary[normalized_key] = value
+                continue
+            if normalized_key in {"text", "reasoning", "metadata"} and isinstance(value, dict):
+                summary[normalized_key] = _checkpoint_safe_value(_payload_without_inline_images(value))
+        return dict(_checkpoint_safe_value(summary) or {})
+
+    def _checkpoint_safe_stable_messages(
+        self,
+        messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        return strip_multimodal_blocks_from_message_records(
+            self._prompt_message_records(messages)
+        )
+
     def _checkpoint_safe_model_response_payload(self, message: AIMessage) -> dict[str, Any]:
         response_view = self._model_response_view(message)
         return {
@@ -4425,7 +4470,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "reasoning_content": _checkpoint_safe_value(response_view.reasoning_content),
             "thinking_blocks": _checkpoint_safe_value(response_view.thinking_blocks),
             "provider_request_meta": _checkpoint_safe_value(response_view.provider_request_meta),
-            "provider_request_body": _checkpoint_safe_value(response_view.provider_request_body),
+            "provider_request_body": self._checkpoint_safe_provider_request_body(response_view.provider_request_body),
         }
 
     @staticmethod
@@ -5136,7 +5181,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "heartbeat_internal": heartbeat_internal,
             "cron_internal": cron_internal,
             "model_refs": model_refs,
-            "stable_messages": stable_messages,
+            "stable_messages": self._checkpoint_safe_stable_messages(stable_messages),
             "dynamic_appendix_messages": persisted_dynamic_appendix_messages,
             "frontdoor_live_request_messages": list(live_request_messages),
             "frontdoor_request_body_messages": persisted_messages,

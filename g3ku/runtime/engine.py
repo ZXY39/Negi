@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,9 @@ from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.frontdoor.inline_tool_reminder import CeoToolReminderService, InlineToolExecutionRegistry
 from g3ku.runtime.manager import SessionRuntimeManager
 from g3ku.runtime.tool_watchdog import ToolExecutionManager
+
+_DEFAULT_CHECKPOINTER_MAX_CHECKPOINTS_PER_THREAD = 200
+_DEFAULT_CHECKPOINTER_TRIM_INTERVAL_SECONDS = 300.0
 
 
 class AgentRuntimeEngine:
@@ -93,6 +97,9 @@ class AgentRuntimeEngine:
         self._checkpointer_path = None
         self._checkpointer = None
         self._checkpointer_cm = None
+        self._checkpointer_max_checkpoints_per_thread = _DEFAULT_CHECKPOINTER_MAX_CHECKPOINTS_PER_THREAD
+        self._checkpointer_trim_interval_seconds = _DEFAULT_CHECKPOINTER_TRIM_INTERVAL_SECONDS
+        self._checkpointer_last_trim_monotonic = 0.0
         self._store = None
         self._store_enabled = False
         self._memory_runtime_settings = None
@@ -233,6 +240,8 @@ class AgentRuntimeEngine:
             return True
         try:
             _ = getattr(connection, "_conn")
+        except AttributeError:
+            return True
         except ValueError as exc:
             if "no active connection" in str(exc).strip().lower():
                 return False
@@ -266,6 +275,161 @@ class AgentRuntimeEngine:
         self._checkpointer = None
         self._checkpointer_cm = None
 
+    async def _checkpoint_wal_truncate(self, checkpointer: Any) -> None:
+        connection = getattr(checkpointer, "conn", None)
+        if connection is None or not hasattr(connection, "execute"):
+            return None
+        maybe = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if inspect.isawaitable(maybe):
+            await maybe
+        commit = getattr(connection, "commit", None)
+        if callable(commit):
+            maybe_commit = commit()
+            if inspect.isawaitable(maybe_commit):
+                await maybe_commit
+        return None
+
+    async def _trim_checkpointer_history_locked(self, *, force: bool) -> int:
+        if not self._checkpointer_enabled:
+            return 0
+        backend = str(getattr(self, '_checkpointer_backend', 'disabled') or 'disabled').lower()
+        if backend != 'sqlite' or not self._checkpointer_path:
+            return 0
+        max_checkpoints = int(
+            getattr(
+                self,
+                '_checkpointer_max_checkpoints_per_thread',
+                _DEFAULT_CHECKPOINTER_MAX_CHECKPOINTS_PER_THREAD,
+            )
+            or 0
+        )
+        if max_checkpoints <= 0:
+            return 0
+        trim_interval_seconds = float(
+            getattr(
+                self,
+                '_checkpointer_trim_interval_seconds',
+                _DEFAULT_CHECKPOINTER_TRIM_INTERVAL_SECONDS,
+            )
+            or 0.0
+        )
+        now = time.monotonic()
+        last_trim = float(getattr(self, '_checkpointer_last_trim_monotonic', 0.0) or 0.0)
+        if not force and trim_interval_seconds > 0 and last_trim > 0 and (now - last_trim) < trim_interval_seconds:
+            return 0
+        checkpointer = getattr(self, "_checkpointer", None)
+        connection = getattr(checkpointer, "conn", None)
+        if connection is None or not hasattr(connection, "execute"):
+            self._checkpointer_last_trim_monotonic = now
+            return 0
+        cursor = await self._maybe_await(
+            connection.execute(
+                """
+                SELECT thread_id, checkpoint_ns, checkpoint_id
+                FROM checkpoints
+                ORDER BY thread_id ASC, checkpoint_ns ASC, rowid DESC
+                """
+            )
+        )
+        fetchall = getattr(cursor, "fetchall", None)
+        rows = await self._maybe_await(fetchall()) if callable(fetchall) else []
+        close_cursor = getattr(cursor, "close", None)
+        if callable(close_cursor):
+            await self._maybe_await(close_cursor())
+        retained_per_thread: dict[tuple[str, str], int] = {}
+        victims: list[tuple[str, str, str]] = []
+        for row in list(rows or []):
+            thread_id = str(row[0] or "")
+            checkpoint_ns = str(row[1] or "")
+            checkpoint_id = str(row[2] or "")
+            key = (thread_id, checkpoint_ns)
+            retained = retained_per_thread.get(key, 0) + 1
+            retained_per_thread[key] = retained
+            if retained > max_checkpoints:
+                victims.append((thread_id, checkpoint_ns, checkpoint_id))
+        if not victims:
+            self._checkpointer_last_trim_monotonic = now
+            return 0
+        executemany = getattr(connection, "executemany", None)
+        if callable(executemany):
+            await self._maybe_await(
+                executemany(
+                    """
+                    DELETE FROM writes
+                    WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+                    """,
+                    victims,
+                )
+            )
+            await self._maybe_await(
+                executemany(
+                    """
+                    DELETE FROM checkpoints
+                    WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+                    """,
+                    victims,
+                )
+            )
+        else:
+            for params in victims:
+                await self._maybe_await(
+                    connection.execute(
+                        """
+                        DELETE FROM writes
+                        WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+                        """,
+                        params,
+                    )
+                )
+                await self._maybe_await(
+                    connection.execute(
+                        """
+                        DELETE FROM checkpoints
+                        WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+                        """,
+                        params,
+                    )
+                )
+        commit = getattr(connection, "commit", None)
+        if callable(commit):
+            await self._maybe_await(commit())
+        await self._checkpoint_wal_truncate(checkpointer)
+        self._checkpointer_last_trim_monotonic = now
+        logger.info(
+            "Trimmed SQLite checkpointer history at {} (deleted_checkpoints={}, retained_per_thread={})",
+            self._checkpointer_path,
+            len(victims),
+            max_checkpoints,
+        )
+        return len(victims)
+
+    async def _trim_checkpointer_history(self, *, force: bool = True) -> int:
+        if not self._checkpointer_enabled:
+            return 0
+        await self._ensure_checkpointer_ready()
+        async with self._checkpointer_lock:
+            return await self._trim_checkpointer_history_locked(force=force)
+
+    async def _purge_checkpointer_thread(self, session_key: str) -> None:
+        key = str(session_key or "").strip()
+        if not key or not self._checkpointer_enabled:
+            return None
+        checkpointer = getattr(self, "_checkpointer", None)
+        if checkpointer is None or not self._sqlite_checkpointer_is_active(checkpointer):
+            await self._ensure_checkpointer_ready()
+        async with self._checkpointer_lock:
+            checkpointer = getattr(self, "_checkpointer", None)
+            delete_thread = getattr(checkpointer, "adelete_thread", None)
+            if checkpointer is None or not callable(delete_thread):
+                return None
+            await self._maybe_await(delete_thread(key))
+            await self._checkpoint_wal_truncate(checkpointer)
+        return None
+
+    async def purge_checkpointer_thread(self, session_key: str) -> None:
+        await self._purge_checkpointer_thread(session_key)
+        return None
+
     async def _ensure_checkpointer_ready(self) -> None:
         if not self._checkpointer_enabled:
             return None
@@ -278,6 +442,14 @@ class AgentRuntimeEngine:
                 return None
             if self._checkpointer is not None:
                 if self._sqlite_checkpointer_is_active(self._checkpointer):
+                    try:
+                        await self._trim_checkpointer_history_locked(force=False)
+                    except Exception as exc:
+                        logger.warning(
+                            'SQLite checkpointer maintenance skipped at {}: {}',
+                            self._checkpointer_path,
+                            exc,
+                        )
                     return None
                 logger.warning(
                     'SQLite checkpointer connection inactive; rebuilding at {}',
@@ -297,6 +469,14 @@ class AgentRuntimeEngine:
                     if inspect.isawaitable(maybe):
                         await maybe
                 logger.info('SQLite checkpointer ready at {}', cp_path)
+                try:
+                    await self._trim_checkpointer_history_locked(force=False)
+                except Exception as exc:
+                    logger.warning(
+                        'SQLite checkpointer maintenance skipped at {}: {}',
+                        cp_path,
+                        exc,
+                    )
             except Exception as exc:
                 logger.warning(
                     'SQLite checkpointer bootstrap failed; fallback to session-file history: {}',
