@@ -997,12 +997,14 @@ async def test_runtime_agent_session_preserves_previewed_round_through_real_midd
 ) -> None:
     from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
     from g3ku.runtime.frontdoor.prompt_cache_contract import FrontdoorPromptContract
+    from g3ku.runtime import web_ceo_sessions
 
     async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
         _ = force, reason
         return None
 
     monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
 
     class _CancelToken:
         def cancel(self, *, reason: str = "") -> None:
@@ -7918,6 +7920,7 @@ def test_websocket_build_ceo_snapshot_keeps_archived_paused_assistant_status_for
             "turn_id": "paused-turn-1",
             "status": "paused",
             "canonical_context": summary,
+            "canonical_context_delta": summary,
         }
     ]
 

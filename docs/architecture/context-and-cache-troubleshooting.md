@@ -251,10 +251,11 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 
 正确分类：
 
-- inflight 恢复优先看 inflight snapshot
-- 技术性 paused / interrupt 恢复优先看 paused snapshot
-- reopened completed session 优先看 `.g3ku/web-ceo-continuity/<session>.json`
-- 只有这些都没有时，才退回 transcript/history fallback
+- paused / interrupt restore should check the paused snapshot first
+- if paused does not carry a usable `frontdoor_request_body_messages` baseline, check inflight next
+- reopened completed session should then check `.g3ku/web-ceo-continuity/<session>.json`
+- if those sidecars do not carry a usable baseline, fall back to the latest actual-request artifact before transcript/history rebuild
+- only after all of those fail should maintainers blame transcript/history fallback
 
 - 如果 continuity sidecar 里的 visible tool/skill 集与当前完全一致，第一跳应继续借上一轮的 family/schema anchor
 - 如果 visible 集发生变化，上下文仍应恢复，但 cache miss 可以接受，不应误判成上下文丢失
@@ -318,6 +319,7 @@ This changes the troubleshooting rule:
 - If heartbeat/cron request shape becomes shorter, it must still be explained by the same allowed shrink reasons as ordinary turns, mainly `token_compression` or `stage_compaction`.
 - The hidden heartbeat/cron rule and event-bundle messages are durable prompt history. They should appear in actual-request artifacts, completed continuity sidecars, and prompt assembly even though UI transcript surfaces hide them with `ui_visible=false`.
 - When debugging cache misses, compare the previous actual request with the new heartbeat/cron request as an append-only continuation. A large prefix break now usually means baseline restoration, tool-schema seeding, or compression changed, not that runtime intentionally switched to a separate heartbeat lane.
+- New repair boundary: an internal heartbeat/cron artifact may be persisted for forensics but still be rejected as the next durable baseline. If the candidate body is heartbeat-dominated, materially poorer than the existing baseline, and has no legal shrink reason, treat it as a blocked baseline overwrite rather than as a valid continuity update.
 
 ## 4. 排查流程
 

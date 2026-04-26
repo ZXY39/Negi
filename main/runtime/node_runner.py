@@ -4257,6 +4257,14 @@ class NodeRunner:
                 entry_index=index,
                 child=child,
             )
+            self._update_spawn_entry(
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                cached_payload=cached_payload,
+                index=index,
+                child_node_id=child.node_id,
+            )
             self._stamp_spawn_owner_metadata(
                 node_id=child.node_id,
                 parent_node_id=parent.node_id,

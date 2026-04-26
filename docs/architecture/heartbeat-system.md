@@ -21,6 +21,7 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 - Each internal activation now resumes from the same session-owned `frontdoor_request_body_messages` / actual-request scaffold used by the next visible CEO turn.
 - When that authoritative frontdoor baseline already carries prior frontdoor contract state, heartbeat and cron inherit the previous callable/candidate/hydrated/provider-tool/visible-skill state directly instead of rerunning tool or skill selection.
 - If no authoritative frontdoor baseline exists yet, internal turns fall back to the ordinary CEO/frontdoor exposure assembly path for that round.
+- Recovery of that baseline now follows one strict restore order before a heartbeat turn runs: paused snapshot, then inflight snapshot, then completed continuity sidecar, then latest actual-request artifact. A stale sidecar file that lacks `frontdoor_request_body_messages` is not enough to block recovery from a richer later source.
 - Heartbeat still appends two hidden durable messages before the model call:
   - a `system` rule message
   - a `user` event-bundle message
@@ -37,6 +38,7 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 - Frontend transcript views, session preview text, session message counts, and `snapshot.ceo.messages` must hide those internal prompt messages by filtering `ui_visible=false`, not by assuming every internal turn is transcript-hidden.
 - Heartbeat/cron assistant replies, tool calls, tool results, and stage/compression traces remain ordinary visible turn output unless the turn ends with the silent `HEARTBEAT_OK` ACK path.
 - Manual pause during a running heartbeat/cron turn still goes through the ordinary `client.pause_turn` path. The backend should treat that internal turn as the current active turn rather than as a side lane.
+- Maintenance boundary: an internal heartbeat/cron request artifact may be authoritative for billing and request forensics without being allowed to replace the session-owned baseline. If the new durable body is mostly heartbeat rule/event text, shorter/poorer than the existing baseline, and not explained by `token_compression` or `stage_compaction`, runtime must keep the richer baseline for the next turn instead of promoting the internal-only body into completed continuity.
 
 ## Cron Reminder Contract
 

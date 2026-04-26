@@ -2946,9 +2946,25 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ]
                 if raw_messages:
                     request_body_messages = self._durable_frontdoor_request_body_messages(raw_messages)
-            if has_authoritative_actual_request and (
+            heartbeat_internal = bool(state.get("heartbeat_internal"))
+            cron_internal = bool(state.get("cron_internal"))
+            frontdoor_history_shrink_reason = str(state.get("frontdoor_history_shrink_reason") or "").strip()
+            existing_request_body_messages = self._existing_frontdoor_request_body_reference(target_session)
+            baseline_sync_decision = "allowed"
+            should_apply_request_body_messages = has_authoritative_actual_request and (
                 "frontdoor_request_body_messages" in state or request_body_messages
+            )
+            if should_apply_request_body_messages and self._looks_like_internal_only_heartbeat_regression(
+                candidate_messages=request_body_messages,
+                reference_messages=existing_request_body_messages,
+                shrink_reason=frontdoor_history_shrink_reason,
+                heartbeat_internal=heartbeat_internal,
+                cron_internal=cron_internal,
             ):
+                should_apply_request_body_messages = False
+                baseline_sync_decision = "blocked_internal_only_regression"
+            setattr(target_session, "_frontdoor_baseline_sync_decision", baseline_sync_decision)
+            if should_apply_request_body_messages:
                 setattr(target_session, "_frontdoor_request_body_messages", request_body_messages)
             if "frontdoor_history_shrink_reason" in state:
                 setattr(
@@ -2966,6 +2982,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         or "frontdoor_history_shrink_reason" in state
                     )
                 )
+                if baseline_sync_decision == "blocked_internal_only_regression":
+                    should_sync_continuity = False
                 if should_sync_continuity:
                     sync_completed_continuity(
                         source_reason=(
@@ -3070,6 +3088,174 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return paused_baseline, paused_shrink_reason
         return baseline, shrink_reason
 
+    @staticmethod
+    def _frontdoor_message_text_for_regression_guard(content: Any) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, str) and block.strip():
+                    parts.append(block.strip())
+                    continue
+                if not isinstance(block, dict):
+                    continue
+                text_value = block.get("text", block.get("content", ""))
+                if isinstance(text_value, str) and text_value.strip():
+                    parts.append(text_value.strip())
+            return "\n".join(parts).strip()
+        return ""
+
+    @classmethod
+    def _frontdoor_messages_have_prefix(
+        cls,
+        candidate_messages: list[dict[str, Any]] | None,
+        reference_messages: list[dict[str, Any]] | None,
+    ) -> bool:
+        candidate = [
+            dict(item)
+            for item in list(candidate_messages or [])
+            if isinstance(item, dict)
+        ]
+        reference = [
+            dict(item)
+            for item in list(reference_messages or [])
+            if isinstance(item, dict)
+        ]
+        if not candidate or not reference or len(candidate) < len(reference):
+            return False
+        return candidate[: len(reference)] == reference
+
+    @classmethod
+    def _frontdoor_internal_only_message_count(cls, messages: list[dict[str, Any]] | None) -> int:
+        markers = (
+            "This is a background heartbeat.",
+            "## EVENT BUNDLE",
+            "# Heartbeat Rules",
+        )
+        count = 0
+        for item in list(messages or []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("role") or "").strip().lower() != "user":
+                continue
+            text = cls._frontdoor_message_text_for_regression_guard(item.get("content"))
+            if not text:
+                continue
+            if any(marker in text for marker in markers):
+                continue
+            count += 1
+        return count
+
+    @classmethod
+    def _frontdoor_message_weight_for_regression_guard(
+        cls,
+        messages: list[dict[str, Any]] | None,
+    ) -> tuple[int, int, int]:
+        items = [
+            dict(item)
+            for item in list(messages or [])
+            if isinstance(item, dict)
+        ]
+        total_chars = sum(
+            len(cls._frontdoor_message_text_for_regression_guard(item.get("content"))) for item in items
+        )
+        ordinary_user_messages = cls._frontdoor_internal_only_message_count(items)
+        return len(items), ordinary_user_messages, total_chars
+
+    @classmethod
+    def _looks_like_internal_only_heartbeat_regression(
+        cls,
+        *,
+        candidate_messages: list[dict[str, Any]] | None,
+        reference_messages: list[dict[str, Any]] | None,
+        shrink_reason: str,
+        heartbeat_internal: bool,
+        cron_internal: bool,
+    ) -> bool:
+        if not (heartbeat_internal or cron_internal):
+            return False
+        if shrink_reason in {"token_compression", "stage_compaction"}:
+            return False
+        candidate = [
+            dict(item)
+            for item in list(candidate_messages or [])
+            if isinstance(item, dict)
+        ]
+        reference = [
+            dict(item)
+            for item in list(reference_messages or [])
+            if isinstance(item, dict)
+        ]
+        if not candidate or not reference:
+            return False
+        if cls._frontdoor_messages_have_prefix(candidate, reference):
+            return False
+        first_text = cls._frontdoor_message_text_for_regression_guard(candidate[0].get("content"))
+        first_user_text = ""
+        for item in candidate:
+            if str(item.get("role") or "").strip().lower() == "user":
+                first_user_text = cls._frontdoor_message_text_for_regression_guard(item.get("content"))
+                break
+        markers = (
+            "This is a background heartbeat.",
+            "## EVENT BUNDLE",
+            "# Heartbeat Rules",
+        )
+        if not any(marker in first_text or marker in first_user_text for marker in markers):
+            return False
+        candidate_weight = cls._frontdoor_message_weight_for_regression_guard(candidate)
+        reference_weight = cls._frontdoor_message_weight_for_regression_guard(reference)
+        return candidate_weight < reference_weight
+
+    @classmethod
+    def _frontdoor_request_body_messages_from_actual_request_record(
+        cls,
+        request_path: str,
+    ) -> list[dict[str, Any]]:
+        path = Path(str(request_path or "").strip())
+        if not path.exists():
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        raw_messages = [
+            dict(item)
+            for item in list(payload.get("request_messages") or payload.get("frontdoor_request_body_messages") or [])
+            if isinstance(item, dict)
+        ]
+        if not raw_messages:
+            return []
+        return cls._durable_frontdoor_request_body_messages(raw_messages)
+
+    @classmethod
+    def _existing_frontdoor_request_body_reference(cls, session: Any) -> list[dict[str, Any]]:
+        baseline = [
+            dict(item)
+            for item in list(getattr(session, "_frontdoor_request_body_messages", []) or [])
+            if isinstance(item, dict)
+        ]
+        if baseline:
+            return baseline
+        actual_request_path = str(getattr(session, "_frontdoor_actual_request_path", "") or "").strip()
+        if actual_request_path:
+            artifact_messages = cls._frontdoor_request_body_messages_from_actual_request_record(actual_request_path)
+            if artifact_messages:
+                return artifact_messages
+        actual_request_history = [
+            dict(item)
+            for item in list(getattr(session, "_frontdoor_actual_request_history", []) or [])
+            if isinstance(item, dict)
+        ]
+        if actual_request_history:
+            artifact_messages = cls._frontdoor_request_body_messages_from_actual_request_record(
+                str(actual_request_history[-1].get("path") or "").strip()
+            )
+            if artifact_messages:
+                return artifact_messages
+        return []
+
     def _persist_frontdoor_actual_request(
         self,
         *,
@@ -3112,6 +3298,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             request_kind="frontdoor_actual_request",
             request_lane="visible_frontdoor",
         )
+        if target_session is not None:
+            restore_source = str(getattr(target_session, "_frontdoor_restore_source", "none") or "none").strip() or "none"
+            if restore_source != "none":
+                payload["frontdoor_restore_source"] = restore_source
+            baseline_sync_decision = str(
+                getattr(target_session, "_frontdoor_baseline_sync_decision", "") or ""
+            ).strip()
+            if baseline_sync_decision:
+                payload["frontdoor_baseline_sync_decision"] = baseline_sync_decision
         record = persist_frontdoor_actual_request(
             session_key,
             payload=payload,

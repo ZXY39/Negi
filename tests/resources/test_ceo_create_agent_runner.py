@@ -2533,6 +2533,174 @@ def test_runtime_agent_session_persists_paused_repair_required_lists(
     assert restored_snapshot["repair_required_skill_items"] == session._frontdoor_repair_required_skill_items
 
 
+def test_runtime_agent_session_restore_prefers_paused_over_inflight_over_completed_continuity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    session_key = "web:shared"
+    paused_baseline = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "paused question"},
+    ]
+    inflight_baseline = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "inflight question"},
+    ]
+    continuity_baseline = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "continuity question"},
+    ]
+
+    web_ceo_sessions.write_completed_continuity_snapshot(
+        session_key,
+        {
+            "frontdoor_request_body_messages": list(continuity_baseline),
+            "frontdoor_history_shrink_reason": "stage_compaction",
+            "frontdoor_token_preflight_diagnostics": {"final_request_tokens": 42},
+            "frontdoor_actual_request_path": "D:/tmp/continuity-request.json",
+            "frontdoor_actual_request_history": [
+                {
+                    "path": "D:/tmp/continuity-request.json",
+                    "turn_id": "turn-continuity",
+                    "actual_request_hash": "continuity-hash",
+                    "actual_request_message_count": 2,
+                    "actual_tool_schema_hash": "tool-continuity",
+                    "prompt_cache_key_hash": "family-continuity",
+                }
+            ],
+            "hydrated_tool_names": ["filesystem_write"],
+            "visible_tool_ids": ["filesystem_write"],
+            "visible_skill_ids": ["writing-skills"],
+            "provider_tool_schema_names": ["filesystem_write"],
+            "capability_snapshot_exposure_revision": "exp:continuity",
+            "source_reason": "actual_request_sync",
+        },
+    )
+    web_ceo_sessions.write_inflight_turn_snapshot(
+        session_key,
+        {
+            "status": "running",
+            "frontdoor_request_body_messages": list(inflight_baseline),
+            "frontdoor_history_shrink_reason": "token_compression",
+            "frontdoor_token_preflight_diagnostics": {"final_request_tokens": 64},
+            "actual_request_path": "D:/tmp/inflight-request.json",
+            "actual_request_history": [
+                {
+                    "path": "D:/tmp/inflight-request.json",
+                    "turn_id": "turn-inflight",
+                    "actual_request_hash": "inflight-hash",
+                    "actual_request_message_count": 2,
+                    "actual_tool_schema_hash": "tool-inflight",
+                    "prompt_cache_key_hash": "family-inflight",
+                }
+            ],
+            "hydrated_tool_names": ["exec"],
+            "visible_tool_ids": ["exec"],
+            "visible_skill_ids": ["find-skills"],
+            "provider_tool_schema_names": ["exec"],
+            "capability_snapshot_exposure_revision": "exp:inflight",
+        },
+    )
+    web_ceo_sessions.write_paused_execution_context(
+        session_key,
+        {
+            "status": "paused",
+            "frontdoor_request_body_messages": list(paused_baseline),
+            "frontdoor_history_shrink_reason": "stage_compaction",
+            "frontdoor_token_preflight_diagnostics": {"final_request_tokens": 80},
+            "actual_request_path": "D:/tmp/paused-request.json",
+            "actual_request_history": [
+                {
+                    "path": "D:/tmp/paused-request.json",
+                    "turn_id": "turn-paused",
+                    "actual_request_hash": "paused-hash",
+                    "actual_request_message_count": 2,
+                    "actual_tool_schema_hash": "tool-paused",
+                    "prompt_cache_key_hash": "family-paused",
+                }
+            ],
+            "hydrated_tool_names": ["agent_browser"],
+            "visible_tool_ids": ["agent_browser"],
+            "visible_skill_ids": ["writing-plans"],
+            "provider_tool_schema_names": ["agent_browser"],
+            "capability_snapshot_exposure_revision": "exp:paused",
+        },
+    )
+
+    restored = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None, sessions=SimpleNamespace()),
+        session_key=session_key,
+        channel="web",
+        chat_id="shared",
+    )
+
+    assert restored._frontdoor_request_body_messages == paused_baseline
+    assert restored._frontdoor_history_shrink_reason == "stage_compaction"
+    assert restored._frontdoor_token_preflight_diagnostics == {"final_request_tokens": 80}
+    assert restored._frontdoor_actual_request_path == "D:/tmp/paused-request.json"
+    assert restored._frontdoor_actual_request_history == [
+        {
+            "path": "D:/tmp/paused-request.json",
+            "turn_id": "turn-paused",
+            "actual_request_hash": "paused-hash",
+            "actual_request_message_count": 2,
+            "actual_tool_schema_hash": "tool-paused",
+            "prompt_cache_key_hash": "family-paused",
+        }
+    ]
+    assert restored._frontdoor_hydrated_tool_names == ["agent_browser"]
+    assert restored._frontdoor_visible_tool_ids == ["agent_browser"]
+    assert restored._frontdoor_visible_skill_ids == ["writing-plans"]
+    assert restored._frontdoor_provider_tool_schema_names == ["agent_browser"]
+    assert restored._frontdoor_capability_snapshot_exposure_revision == "exp:paused"
+
+
+def test_runtime_agent_session_restores_frontdoor_baseline_from_latest_actual_request_artifact(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    session_key = "web:shared"
+    record = web_ceo_sessions.persist_frontdoor_actual_request(
+        session_key,
+        payload={
+            "turn_id": "turn-artifact",
+            "request_messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "older user"},
+                {"role": "assistant", "content": "older answer"},
+                {
+                    "role": "assistant",
+                    "content": "## Runtime Tool Contract\nkind: frontdoor_runtime_tool_contract",
+                },
+            ],
+            "frontdoor_history_shrink_reason": "stage_compaction",
+            "frontdoor_token_preflight_diagnostics": {"final_request_tokens": 91},
+            "prompt_cache_key_hash": "family-artifact",
+            "actual_request_hash": "artifact-hash",
+            "actual_request_message_count": 4,
+            "actual_tool_schema_hash": "tool-artifact",
+            "provider_model": "responses:gpt-test",
+        },
+    )
+
+    restored = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None, sessions=SimpleNamespace()),
+        session_key=session_key,
+        channel="web",
+        chat_id="shared",
+    )
+
+    assert restored._frontdoor_request_body_messages == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "older user"},
+        {"role": "assistant", "content": "older answer"},
+    ]
+    assert restored._frontdoor_actual_request_path == record["path"]
+    assert restored._frontdoor_actual_request_history == [record]
+
+
 @pytest.mark.asyncio
 async def test_graph_finalize_turn_appends_direct_reply_after_runtime_context_assistant() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
@@ -2863,6 +3031,151 @@ def test_create_agent_runner_sync_allows_finalize_to_extend_existing_actual_requ
     assert session._frontdoor_actual_request_hash == "request-hash-current"
     assert session._frontdoor_actual_request_message_count == 3
     assert session._frontdoor_actual_tool_schema_hash == "tool-hash-current"
+
+
+def test_create_agent_runner_sync_blocks_internal_only_heartbeat_baseline_regression() -> None:
+    session = SimpleNamespace(
+        _frontdoor_request_body_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "original user request"},
+            {"role": "assistant", "content": "original assistant answer"},
+        ],
+        _frontdoor_actual_request_path="D:/tmp/existing-frontdoor-request.json",
+        _frontdoor_actual_request_history=[
+            {
+                "path": "D:/tmp/existing-frontdoor-request.json",
+                "turn_id": "turn-existing",
+                "actual_request_hash": "existing-hash",
+                "actual_request_message_count": 3,
+                "actual_tool_schema_hash": "existing-tool-hash",
+                "prompt_cache_key_hash": "existing-family-hash",
+            }
+        ],
+        _frontdoor_prompt_cache_key_hash="existing-family-hash",
+        _frontdoor_actual_request_hash="existing-hash",
+        _frontdoor_actual_request_message_count=3,
+        _frontdoor_actual_tool_schema_hash="existing-tool-hash",
+        _frontdoor_history_shrink_reason="",
+        _sync_completed_continuity_snapshot=lambda *, source_reason: continuity_syncs.append(source_reason),
+    )
+    continuity_syncs: list[str] = []
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    runner._sync_runtime_session_frontdoor_state(
+        state={
+            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
+            "semantic_context_state": {},
+            "hydrated_tool_names": [],
+            "heartbeat_internal": True,
+            "frontdoor_request_body_messages": [
+                {
+                    "role": "system",
+                    "content": "This is a background heartbeat. Do not explain internal mechanics.",
+                },
+                {
+                    "role": "user",
+                    "content": "This is a background heartbeat. Do not explain internal mechanics.\n\n## EVENT BUNDLE",
+                },
+            ],
+            "frontdoor_actual_request_path": "D:/tmp/heartbeat-request.json",
+            "frontdoor_actual_request_history": [
+                {
+                    "path": "D:/tmp/heartbeat-request.json",
+                    "turn_id": "turn-heartbeat",
+                    "actual_request_hash": "heartbeat-hash",
+                    "actual_request_message_count": 2,
+                    "actual_tool_schema_hash": "heartbeat-tool-hash",
+                    "prompt_cache_key_hash": "heartbeat-family-hash",
+                }
+            ],
+            "prompt_cache_diagnostics": {
+                "prompt_cache_key_hash": "heartbeat-family-hash",
+                "actual_request_hash": "heartbeat-hash",
+                "actual_request_message_count": 2,
+                "actual_tool_schema_hash": "heartbeat-tool-hash",
+            },
+        },
+        session=session,
+    )
+
+    assert session._frontdoor_request_body_messages == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "original user request"},
+        {"role": "assistant", "content": "original assistant answer"},
+    ]
+    assert continuity_syncs == []
+
+
+def test_create_agent_runner_sync_allows_appending_legitimate_heartbeat_continuation() -> None:
+    session = SimpleNamespace(
+        _frontdoor_request_body_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "original user request"},
+            {"role": "assistant", "content": "original assistant answer"},
+        ],
+        _frontdoor_actual_request_path="D:/tmp/existing-frontdoor-request.json",
+        _frontdoor_actual_request_history=[
+            {
+                "path": "D:/tmp/existing-frontdoor-request.json",
+                "turn_id": "turn-existing",
+                "actual_request_hash": "existing-hash",
+                "actual_request_message_count": 3,
+                "actual_tool_schema_hash": "existing-tool-hash",
+                "prompt_cache_key_hash": "existing-family-hash",
+            }
+        ],
+        _frontdoor_prompt_cache_key_hash="existing-family-hash",
+        _frontdoor_actual_request_hash="existing-hash",
+        _frontdoor_actual_request_message_count=3,
+        _frontdoor_actual_tool_schema_hash="existing-tool-hash",
+        _frontdoor_history_shrink_reason="",
+        _sync_completed_continuity_snapshot=lambda *, source_reason: continuity_syncs.append(source_reason),
+    )
+    continuity_syncs: list[str] = []
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    updated_baseline = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "original user request"},
+        {"role": "assistant", "content": "original assistant answer"},
+        {
+            "role": "system",
+            "content": "This is a background heartbeat. Do not explain internal mechanics.",
+        },
+        {"role": "user", "content": "## EVENT BUNDLE\n- task completed"},
+    ]
+
+    runner._sync_runtime_session_frontdoor_state(
+        state={
+            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
+            "semantic_context_state": {},
+            "hydrated_tool_names": [],
+            "heartbeat_internal": True,
+            "frontdoor_request_body_messages": list(updated_baseline),
+            "frontdoor_actual_request_path": "D:/tmp/heartbeat-request.json",
+            "frontdoor_actual_request_history": [
+                {
+                    "path": "D:/tmp/heartbeat-request.json",
+                    "turn_id": "turn-heartbeat",
+                    "actual_request_hash": "heartbeat-hash",
+                    "actual_request_message_count": 5,
+                    "actual_tool_schema_hash": "heartbeat-tool-hash",
+                    "prompt_cache_key_hash": "heartbeat-family-hash",
+                }
+            ],
+            "prompt_cache_diagnostics": {
+                "prompt_cache_key_hash": "heartbeat-family-hash",
+                "actual_request_hash": "heartbeat-hash",
+                "actual_request_message_count": 5,
+                "actual_tool_schema_hash": "heartbeat-tool-hash",
+            },
+        },
+        session=session,
+    )
+
+    assert session._frontdoor_request_body_messages == updated_baseline
+    assert continuity_syncs == ["actual_request_sync"]
 
 
 def test_runtime_agent_session_preserves_previous_actual_request_trace_for_next_visible_turn() -> None:

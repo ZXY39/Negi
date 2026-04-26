@@ -22,6 +22,7 @@ from g3ku.llm_config.facade import LLMConfigFacade
 from g3ku.resources import ResourceManager
 from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
 from g3ku.security import get_bootstrap_security_service
+from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import Session
 from main.api import admin_rest
 from main.governance.models import ToolActionRecord, ToolFamilyRecord
@@ -2037,6 +2038,93 @@ def test_ceo_session_delete_accepts_inflight_only_session(tmp_path: Path, monkey
         'cancelled_session': target_id,
     }
     assert not inflight_path.exists()
+
+
+def test_ensure_runtime_session_restores_frontdoor_baseline_from_inflight_snapshot(tmp_path: Path, monkeypatch):
+    _mock_ceo_catalog_config(monkeypatch)
+
+    from g3ku.runtime.api import ceo_sessions
+
+    monkeypatch.setattr(web_ceo_sessions, 'workspace_path', lambda: tmp_path)
+    monkeypatch.setattr(ceo_sessions, 'workspace_path', lambda: tmp_path)
+    session = Session(key='web:ceo-inflight-restore', metadata={'title': 'Inflight Restore'})
+    session_path = tmp_path / 'sessions' / 'web_ceo_inflight_restore.jsonl'
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path.write_text('{"_type":"metadata"}\n', encoding='utf-8')
+
+    inflight_baseline = [
+        {'role': 'system', 'content': 'SYSTEM'},
+        {'role': 'user', 'content': 'restore from inflight'},
+    ]
+    web_ceo_sessions.write_inflight_turn_snapshot(
+        session.key,
+        {
+            'status': 'running',
+            'frontdoor_request_body_messages': list(inflight_baseline),
+            'frontdoor_history_shrink_reason': 'stage_compaction',
+        },
+    )
+
+    class _RuntimeManager:
+        def get(self, _session_id: str):
+            return None
+
+        def get_or_create(self, **kwargs):
+            return RuntimeAgentSession(
+                SimpleNamespace(model='demo', reasoning_effort=None, multi_agent_runner=None, sessions=SimpleNamespace()),
+                session_key=kwargs['session_key'],
+                channel=kwargs['channel'],
+                chat_id=kwargs['chat_id'],
+                memory_channel=kwargs.get('memory_channel'),
+                memory_chat_id=kwargs.get('memory_chat_id'),
+            )
+
+    runtime_session = ceo_sessions._ensure_runtime_session(_RuntimeManager(), session)
+
+    assert runtime_session._frontdoor_request_body_messages == inflight_baseline
+    assert runtime_session._frontdoor_history_shrink_reason == 'stage_compaction'
+
+
+def test_recreate_runtime_session_accepts_completed_continuity_only_session(tmp_path: Path, monkeypatch):
+    _mock_ceo_catalog_config(monkeypatch)
+
+    from g3ku.runtime.api import ceo_sessions
+
+    monkeypatch.setattr(web_ceo_sessions, 'workspace_path', lambda: tmp_path)
+    monkeypatch.setattr(ceo_sessions, 'workspace_path', lambda: tmp_path)
+    session = Session(key='web:ceo-continuity-only', metadata={'title': 'Continuity Restore'})
+    continuity_baseline = [
+        {'role': 'system', 'content': 'SYSTEM'},
+        {'role': 'user', 'content': 'restore from continuity'},
+    ]
+    web_ceo_sessions.write_completed_continuity_snapshot(
+        session.key,
+        {
+            'frontdoor_request_body_messages': list(continuity_baseline),
+            'frontdoor_history_shrink_reason': 'stage_compaction',
+            'source_reason': 'actual_request_sync',
+        },
+    )
+
+    class _RuntimeManager:
+        def get(self, _session_id: str):
+            return None
+
+        def get_or_create(self, **kwargs):
+            return RuntimeAgentSession(
+                SimpleNamespace(model='demo', reasoning_effort=None, multi_agent_runner=None, sessions=SimpleNamespace()),
+                session_key=kwargs['session_key'],
+                channel=kwargs['channel'],
+                chat_id=kwargs['chat_id'],
+                memory_channel=kwargs.get('memory_channel'),
+                memory_chat_id=kwargs.get('memory_chat_id'),
+            )
+
+    runtime_session = ceo_sessions._recreate_runtime_session(_RuntimeManager(), session)
+
+    assert runtime_session is not None
+    assert runtime_session._frontdoor_request_body_messages == continuity_baseline
+    assert runtime_session._frontdoor_history_shrink_reason == 'stage_compaction'
 
 
 def _build_channel_ceo_session_delete_client(tmp_path: Path, monkeypatch, *, persist_channel_session: bool = False):
