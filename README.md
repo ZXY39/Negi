@@ -53,7 +53,7 @@
 
 ```bash
 git clone <your-repo-url>
-cd G3KU
+cd G3KU-Agent
 ```
 
 2. 普通用户通常不需要手动创建虚拟环境。
