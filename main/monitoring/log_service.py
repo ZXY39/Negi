@@ -1647,6 +1647,144 @@ class TaskLogService:
         except Exception:
             return str(value)
 
+    @staticmethod
+    def _artifact_safe_text(value: Any, *, max_chars: int = 512) -> str:
+        text = str(value or '')
+        if text.strip().lower().startswith('data:image/'):
+            return '[inline image omitted]'
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 3].rstrip() + '...'
+
+    @classmethod
+    def _artifact_safe_value(cls, value: Any, *, max_chars: int = 512) -> Any:
+        if isinstance(value, str):
+            return cls._artifact_safe_text(value, max_chars=max_chars)
+        if isinstance(value, dict):
+            return {
+                str(key): cls._artifact_safe_value(item, max_chars=max_chars)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._artifact_safe_value(item, max_chars=max_chars) for item in value]
+        return value
+
+    @classmethod
+    def _contains_inline_multimodal_payload(cls, value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower().startswith('data:image/')
+        if isinstance(value, list):
+            return any(cls._contains_inline_multimodal_payload(item) for item in value)
+        if not isinstance(value, dict):
+            return False
+        block_type = str(value.get('type') or '').strip().lower()
+        if block_type in {'image_url', 'input_image', 'file', 'input_file'}:
+            return True
+        return any(cls._contains_inline_multimodal_payload(item) for item in value.values())
+
+    @staticmethod
+    def _payload_item_count(value: Any) -> int:
+        if isinstance(value, list):
+            return len(value)
+        if value in (None, '', [], {}):
+            return 0
+        return 1
+
+    @classmethod
+    def _summarize_actual_request_message_records(cls, values: Any) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        for raw in list(values or []):
+            if not isinstance(raw, dict):
+                continue
+            item: dict[str, Any] = {}
+            for key in ('role', 'name', 'tool_call_id'):
+                text = str(raw.get(key) or '').strip()
+                if text:
+                    item[key] = text
+            content = raw.get('content')
+            if content not in (None, '', [], {}):
+                item['content'] = cls._artifact_safe_value(content)
+            tool_calls = raw.get('tool_calls')
+            if tool_calls not in (None, '', [], {}):
+                item['tool_calls'] = cls._artifact_safe_value(tool_calls)
+            summaries.append(item)
+        return summaries
+
+    @classmethod
+    def _summarize_provider_request_body_for_actual_request_artifact(
+        cls,
+        value: Any,
+    ) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        payload = dict(value or {})
+        summary: dict[str, Any] = {
+            'input_count': cls._payload_item_count(payload.get('input')),
+            'tools_count': cls._payload_item_count(payload.get('tools')),
+            'contains_multimodal': cls._contains_inline_multimodal_payload(payload),
+        }
+        for key in ('model', 'prompt_cache_key', 'tool_choice', 'parallel_tool_calls', 'store'):
+            raw = payload.get(key)
+            if raw in (None, '', [], {}):
+                continue
+            summary[str(key)] = cls._artifact_safe_value(raw, max_chars=160)
+        return summary
+
+    @classmethod
+    def _degraded_actual_request_artifact_payload(
+        cls,
+        payload: dict[str, Any],
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        degraded = dict(payload or {})
+        degraded['artifact_persistence_mode'] = 'memory_guard_degraded'
+        degraded['artifact_persistence_reason'] = str(reason or 'memory_error').strip() or 'memory_error'
+        degraded['model_messages_summary'] = cls._summarize_actual_request_message_records(
+            degraded.get('model_messages')
+        )
+        degraded['request_messages_summary'] = cls._summarize_actual_request_message_records(
+            degraded.get('request_messages')
+        )
+        degraded['provider_request_body_summary'] = cls._summarize_provider_request_body_for_actual_request_artifact(
+            degraded.get('provider_request_body')
+        )
+        degraded['model_messages'] = []
+        degraded['request_messages'] = []
+        degraded['provider_request_body'] = {}
+        return degraded
+
+    @classmethod
+    def _minimal_actual_request_artifact_payload(
+        cls,
+        payload: dict[str, Any],
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        return {
+            'task_id': str(payload.get('task_id') or '').strip(),
+            'node_id': str(payload.get('node_id') or '').strip(),
+            'call_index': int(payload.get('call_index') or 0),
+            'created_at': str(payload.get('created_at') or '').strip(),
+            'prompt_cache_key_hash': str(payload.get('prompt_cache_key_hash') or '').strip(),
+            'actual_request_hash': str(payload.get('actual_request_hash') or '').strip(),
+            'actual_request_message_count': int(payload.get('actual_request_message_count') or 0),
+            'actual_tool_schema_hash': str(payload.get('actual_tool_schema_hash') or '').strip(),
+            'tool_signature_hash': str(payload.get('tool_signature_hash') or '').strip(),
+            'callable_tool_names': cls._artifact_safe_value(payload.get('callable_tool_names') or []),
+            'provider_tool_names': cls._artifact_safe_value(payload.get('provider_tool_names') or []),
+            'provider_request_meta': cls._artifact_safe_value(payload.get('provider_request_meta') or {}),
+            'provider_request_body_summary': cls._summarize_provider_request_body_for_actual_request_artifact(
+                payload.get('provider_request_body')
+            ),
+            'request_messages_summary': cls._summarize_actual_request_message_records(
+                payload.get('request_messages')
+            ),
+            'artifact_persistence_mode': 'memory_guard_minimal',
+            'artifact_persistence_reason': str(reason or 'memory_error_minimal').strip()
+            or 'memory_error_minimal',
+        }
+
     @classmethod
     def _build_observed_input_truth_from_attempts(
         cls,
@@ -1806,16 +1944,76 @@ class TaskLogService:
     ) -> str:
         if not isinstance(payload, dict) or not payload:
             return ''
-        serialized = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
-        _summary, ref = self._summarize_content(
-            serialized,
-            task_id=task_id,
-            node_id=node_id,
-            display_name=f'node-actual-request:{node_id}:{call_index}',
-            source_kind='task_actual_request',
-            force=True,
-        )
-        return str(ref or '').strip()
+        payload_with_mode = {
+            **dict(payload or {}),
+            'artifact_persistence_mode': 'full',
+        }
+        content_store = self._content_store
+        artifact_store = getattr(content_store, '_artifact_store', None) if content_store is not None else None
+        create_json_artifact = getattr(artifact_store, 'create_json_artifact', None) if artifact_store is not None else None
+        display_name = f'node-actual-request:{node_id}:{call_index}'
+        if callable(create_json_artifact):
+            try:
+                artifact = create_json_artifact(
+                    task_id=task_id,
+                    node_id=node_id,
+                    kind='task_actual_request',
+                    title=display_name,
+                    payload=payload_with_mode,
+                    extension='.json',
+                    mime_type='application/json',
+                    preview_text=display_name,
+                )
+                return f'artifact:{artifact.artifact_id}' if artifact is not None else ''
+            except MemoryError:
+                degraded_payload = self._degraded_actual_request_artifact_payload(
+                    payload_with_mode,
+                    reason='memory_error',
+                )
+                try:
+                    artifact = create_json_artifact(
+                        task_id=task_id,
+                        node_id=node_id,
+                        kind='task_actual_request',
+                        title=display_name,
+                        payload=degraded_payload,
+                        extension='.json',
+                        mime_type='application/json',
+                        preview_text=f'{display_name} (degraded)',
+                    )
+                    return f'artifact:{artifact.artifact_id}' if artifact is not None else ''
+                except MemoryError:
+                    minimal_payload = self._minimal_actual_request_artifact_payload(
+                        payload_with_mode,
+                        reason='memory_error_minimal',
+                    )
+                    try:
+                        artifact = create_json_artifact(
+                            task_id=task_id,
+                            node_id=node_id,
+                            kind='task_actual_request',
+                            title=display_name,
+                            payload=minimal_payload,
+                            extension='.json',
+                            mime_type='application/json',
+                            preview_text=f'{display_name} (minimal)',
+                        )
+                        return f'artifact:{artifact.artifact_id}' if artifact is not None else ''
+                    except MemoryError:
+                        return ''
+        try:
+            serialized = json.dumps(payload_with_mode, ensure_ascii=False, indent=2, default=str)
+            _summary, ref = self._summarize_content(
+                serialized,
+                task_id=task_id,
+                node_id=node_id,
+                display_name=display_name,
+                source_kind='task_actual_request',
+                force=True,
+            )
+            return str(ref or '').strip()
+        except MemoryError:
+            return ''
 
     @staticmethod
     def _model_call_payload(

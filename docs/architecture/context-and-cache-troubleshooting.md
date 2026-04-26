@@ -639,6 +639,8 @@ This addendum records the April 2026 node-cache repair boundary.
 - `provider_tool_exposure_commit_reason` must be empty or `token_compression`.
 - Same-turn node requests now prefer an append-only scaffold:
   previous actual request body + last-round assistant/tool delta + newest overlay / tool-contract tail.
+- Node actual-request persistence now also has a memory guard similar in spirit to CEO/frontdoor, but the repair boundary is narrower: the normal path writes a dedicated JSON artifact directly, and only if that write still hits `MemoryError` does runtime fall back to degraded / minimal forensic payloads.
+- When a node artifact carries `artifact_persistence_mode=memory_guard_degraded` or `memory_guard_minimal`, treat it as proof that the send happened but not as proof that the saved JSON still contains the exact provider-facing body. In that case, `provider_request_body` may be intentionally empty and the large request lanes may have moved into summarized fields such as `request_messages_summary` or `provider_request_body_summary`.
 - After node restart/resume, the first rebuilt provider request must keep using that persisted append-only scaffold even if durable `runtime_frame.messages` is shorter. `runtime_frame.messages` is the projected-history lens; `actual_request_ref.request_messages` is the authority for first-hop request reconstruction.
 - This scaffold must not weaken stage gating or hydration rules.
 - RBAC withdrawal still takes effect immediately at execution time even if the active provider schema has not yet converged. Schema lag until `token_compression` is expected; side effects after revoke are not.

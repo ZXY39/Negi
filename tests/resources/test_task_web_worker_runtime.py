@@ -2636,6 +2636,95 @@ def test_task_model_call_event_persists_dedicated_actual_request_artifact(tmp_pa
     assert actual_request_payload["tool_signature_hash"] == model_call["actual_tool_schema_hash"]
 
 
+def test_task_model_call_actual_request_artifact_degrades_after_memory_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    image_data = "data:image/png;base64," + ("A" * 4096)
+    provider_request_body = {
+        "model": "gpt-5.4-mini",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Please inspect this image"},
+                    {"type": "input_image", "image_url": image_data},
+                ],
+            }
+        ],
+        "tools": [{"name": "submit_next_stage"}],
+        "prompt_cache_key": "stable-cache-key",
+    }
+
+    original_create_json_artifact = service.artifact_store.create_json_artifact
+    call_count = {"value": 0}
+
+    def _flaky_create_json_artifact(*args, **kwargs):
+        call_count["value"] += 1
+        if call_count["value"] == 1:
+            raise MemoryError()
+        return original_create_json_artifact(*args, **kwargs)
+
+    monkeypatch.setattr(service.artifact_store, "create_json_artifact", _flaky_create_json_artifact)
+
+    service.log_service.append_node_output(
+        record.task_id,
+        record.root_node_id,
+        content='{"status":"success"}',
+        tool_calls=[],
+        usage_attempts=[
+            LLMModelAttempt(
+                model_key="sub gpt-5.4",
+                provider_id="openai",
+                provider_model="gpt-5.4",
+                usage={"input_tokens": 10, "output_tokens": 5},
+            )
+        ],
+        model_messages=[
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "Please inspect this image"},
+        ],
+        request_messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Please inspect this image"},
+                    {"type": "image_url", "image_url": {"url": image_data}},
+                ],
+            }
+        ],
+        prompt_cache_key="stable-cache-key",
+        provider_request_body=provider_request_body,
+    )
+
+    events = service.store.list_task_events(task_id=record.task_id, limit=20)
+    model_call = [item for item in events if item["event_type"] == "task.model.call"][-1]["payload"]
+    actual_request_ref = str(model_call.get("actual_request_ref") or "")
+
+    assert actual_request_ref.startswith("artifact:")
+
+    actual_request_payload = json.loads(service.log_service.resolve_content_ref(actual_request_ref))
+    assert call_count["value"] == 2
+    assert actual_request_payload["artifact_persistence_mode"] == "memory_guard_degraded"
+    assert actual_request_payload["artifact_persistence_reason"] == "memory_error"
+    assert actual_request_payload["provider_request_body"] == {}
+    assert actual_request_payload["provider_request_body_summary"]["contains_multimodal"] is True
+    assert actual_request_payload["provider_request_body_summary"]["input_count"] == 1
+    assert actual_request_payload["provider_request_body_summary"]["tools_count"] == 1
+    assert actual_request_payload["request_messages_summary"][0]["role"] == "user"
+    assert "data:image" not in service.log_service.resolve_content_ref(actual_request_ref)
+
+
 def test_node_actual_request_artifact_persists_effective_input_tokens(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

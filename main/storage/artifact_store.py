@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 from pathlib import Path
 
@@ -32,12 +33,7 @@ class TaskArtifactStore:
         if existing is not None:
             self._content_index[(task_id, content_hash)] = existing
             return existing
-        artifact_id = new_artifact_id()
-        safe_task_id = task_id.replace(':', '_').replace('/', '_').replace('\\', '_')
-        task_dir = self._artifact_dir / safe_task_id
-        task_dir.mkdir(parents=True, exist_ok=True)
-        safe_artifact_id = artifact_id.replace(':', '_').replace('/', '_').replace('\\', '_')
-        path = task_dir / f'{safe_artifact_id}{extension}'
+        artifact_id, path = self._allocate_artifact_path(task_id=task_id, extension=extension)
         path.write_text(content, encoding='utf-8')
         record = TaskArtifactRecord(
             artifact_id=artifact_id,
@@ -52,20 +48,37 @@ class TaskArtifactStore:
         )
         persisted = self._store.upsert_artifact(record)
         self._content_index[(task_id, content_hash)] = persisted
-        append_event = getattr(self._store, 'append_task_event', None)
-        if callable(append_event):
-            try:
-                task_record = self._store.get_task(task_id)
-                session_id = str(getattr(task_record, 'session_id', '') or 'web:shared').strip() or 'web:shared'
-                append_event(
-                    task_id=task_id,
-                    session_id=session_id,
-                    event_type='task.artifact.added',
-                    created_at=record.created_at,
-                    payload={'artifact': persisted.model_dump(mode='json')},
-                )
-            except Exception:
-                pass
+        self._emit_artifact_added_event(task_id=task_id, record=persisted)
+        return persisted
+
+    def create_json_artifact(
+        self,
+        *,
+        task_id: str,
+        node_id: str | None,
+        kind: str,
+        title: str,
+        payload,
+        extension: str = '.json',
+        mime_type: str = 'application/json',
+        preview_text: str = '',
+    ) -> TaskArtifactRecord:
+        artifact_id, path = self._allocate_artifact_path(task_id=task_id, extension=extension)
+        with path.open('w', encoding='utf-8') as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, default=str)
+        record = TaskArtifactRecord(
+            artifact_id=artifact_id,
+            task_id=task_id,
+            node_id=node_id,
+            kind=kind,
+            title=title,
+            path=str(path),
+            mime_type=mime_type,
+            preview_text=str(preview_text or title or '')[:400],
+            created_at=now_iso(),
+        )
+        persisted = self._store.upsert_artifact(record)
+        self._emit_artifact_added_event(task_id=task_id, record=persisted)
         return persisted
 
     def create_or_replace_singleton_text_artifact(
@@ -121,6 +134,32 @@ class TaskArtifactStore:
         content_hash = hashlib.sha256(str(content or '').encode('utf-8')).hexdigest()
         self._content_index[(normalized_task_id, content_hash)] = persisted
         return persisted
+
+    def _allocate_artifact_path(self, *, task_id: str, extension: str) -> tuple[str, Path]:
+        artifact_id = new_artifact_id()
+        safe_task_id = task_id.replace(':', '_').replace('/', '_').replace('\\', '_')
+        task_dir = self._artifact_dir / safe_task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+        safe_artifact_id = artifact_id.replace(':', '_').replace('/', '_').replace('\\', '_')
+        path = task_dir / f'{safe_artifact_id}{extension}'
+        return artifact_id, path
+
+    def _emit_artifact_added_event(self, *, task_id: str, record: TaskArtifactRecord) -> None:
+        append_event = getattr(self._store, 'append_task_event', None)
+        if not callable(append_event):
+            return
+        try:
+            task_record = self._store.get_task(task_id)
+            session_id = str(getattr(task_record, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+            append_event(
+                task_id=task_id,
+                session_id=session_id,
+                event_type='task.artifact.added',
+                created_at=record.created_at,
+                payload={'artifact': record.model_dump(mode='json')},
+            )
+        except Exception:
+            return
 
     def list_artifacts(self, task_id: str) -> list[TaskArtifactRecord]:
         return self._store.list_artifacts(task_id)
