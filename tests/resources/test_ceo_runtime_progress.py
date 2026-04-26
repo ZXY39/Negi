@@ -4806,6 +4806,118 @@ def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monke
     assert final_events[0]["data"]["text"] == "I will keep waiting for the install."
 
 
+def test_ceo_websocket_forwards_reply_delta_without_turn_patch_spam(tmp_path: Path, monkeypatch) -> None:
+    _mock_workspace(monkeypatch, tmp_path)
+
+    async def _ensure_services(_agent) -> None:
+        return None
+
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
+    session_id = "web:ceo-live-stream"
+
+    class _FakeStreamingReplySession:
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(status="idle", is_running=False)
+            self._listeners = set()
+            self._assistant_text = ""
+
+        def subscribe(self, listener):
+            self._listeners.add(listener)
+
+            def _unsubscribe() -> None:
+                self._listeners.discard(listener)
+
+            return _unsubscribe
+
+        def state_dict(self) -> dict[str, object]:
+            return {"status": self.state.status, "is_running": self.state.is_running}
+
+        def inflight_turn_snapshot(self):
+            if not self.state.is_running:
+                return None
+            return {
+                "turn_id": "turn-stream-1",
+                "source": "user",
+                "status": "running",
+                "user_message": {"content": "Stream the answer"},
+                "assistant_text": self._assistant_text,
+            }
+
+        async def _emit(self, event_type: str, **payload) -> None:
+            event = AgentEvent(type=event_type, timestamp="2026-04-26T12:00:00", payload=payload)
+            for listener in list(self._listeners):
+                result = listener(event)
+                if hasattr(result, "__await__"):
+                    await result
+
+        async def prompt(self, user_message) -> SimpleNamespace:
+            _ = user_message
+            self.state.status = "running"
+            self.state.is_running = True
+            await self._emit("state_snapshot", state=self.state_dict())
+            self._assistant_text = "O"
+            await self._emit(
+                "assistant_stream_delta",
+                turn_id="turn-stream-1",
+                source="user",
+                text="O",
+                seq=1,
+            )
+            self._assistant_text = "OK"
+            await self._emit(
+                "assistant_stream_delta",
+                turn_id="turn-stream-1",
+                source="user",
+                text="OK",
+                seq=2,
+            )
+            await self._emit(
+                "message_end",
+                role="assistant",
+                text="OK",
+                source="user",
+                turn_id="turn-stream-1",
+            )
+            self.state.status = "completed"
+            self.state.is_running = False
+            await self._emit("state_snapshot", state=self.state_dict())
+            return SimpleNamespace(output="OK")
+
+    session_manager = SessionManager(tmp_path)
+    live_session = _FakeStreamingReplySession()
+    agent = SimpleNamespace(
+        sessions=session_manager,
+        main_task_service=_TaskService(),
+    )
+    monkeypatch.setattr(websocket_ceo, "get_agent", lambda: agent)
+    monkeypatch.setattr(websocket_ceo, "get_runtime_manager", lambda _agent=None: _RuntimeManager(live_session))
+
+    client = TestClient(_build_app())
+    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        assert ws.receive_json()["type"] == "snapshot.ceo"
+        assert ws.receive_json()["type"] == "ceo.state"
+
+        ws.send_json({"type": "client.user_message", "text": "Stream the answer"})
+
+        messages = []
+        for _ in range(8):
+            payload = ws.receive_json()
+            messages.append(payload)
+            if payload.get("type") == "ceo.reply.final":
+                break
+
+    delta_events = [item for item in messages if item["type"] == "ceo.reply.delta"]
+    turn_patch_events = [item for item in messages if item["type"] == "ceo.turn.patch"]
+    final_events = [item for item in messages if item["type"] == "ceo.reply.final"]
+
+    assert [item["data"]["seq"] for item in delta_events] == [1, 2]
+    assert [item["data"]["text"] for item in delta_events] == ["O", "OK"]
+    assert len(turn_patch_events) == 1
+    assert len(final_events) == 1
+    assert final_events[0]["data"]["text"] == "OK"
+
+
 def test_ceo_websocket_final_reply_includes_current_turn_user_messages(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 

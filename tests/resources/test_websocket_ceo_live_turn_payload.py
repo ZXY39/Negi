@@ -73,3 +73,22 @@ def test_build_live_turn_payload_keeps_preserved_turn_when_assistant_turn_not_pe
 
     assert payload["inflight_turn"]["turn_id"] == "turn-heartbeat-current"
     assert payload["preserved_turn"]["turn_id"] == "turn-user-preserved"
+
+
+def test_build_live_turn_payload_preserves_streamed_assistant_text_for_reconnect_bootstrap() -> None:
+    session = SimpleNamespace(
+        inflight_turn_snapshot=lambda: {
+            "source": "user",
+            "turn_id": "turn-stream-current",
+            "status": "running",
+            "user_message": {"content": "Explain the change"},
+            "assistant_text": "Partial streamed answer",
+        },
+        preserved_inflight_turn_snapshot=lambda: None,
+    )
+    persisted_session = SimpleNamespace(messages=[])
+
+    payload = websocket_ceo._build_live_turn_payload(session, "web:shared", persisted_session)
+
+    assert payload["inflight_turn"]["turn_id"] == "turn-stream-current"
+    assert payload["inflight_turn"]["assistant_text"] == "Partial streamed answer"

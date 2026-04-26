@@ -4832,6 +4832,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         model_refs: list[str],
         parallel_tool_calls: bool | None,
         prompt_cache_key: str,
+        on_text_delta: Any = None,
     ) -> AIMessage:
         chat_model = G3kuChatModelAdapter(
             chat_backend=self._resolve_chat_backend(),
@@ -4842,6 +4843,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             convert_to_messages(messages),
             parallel_tool_calls=parallel_tool_calls,
             prompt_cache_key=prompt_cache_key,
+            on_text_delta=on_text_delta,
         )
 
     async def _graph_prepare_turn(
@@ -5477,6 +5479,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             raise RuntimeError("CEO frontdoor exceeded maximum iterations")
 
         state_for_request = dict(state or {})
+        runtime_session = getattr(getattr(runtime, "context", None), "session", None)
+        assistant_text_delta_handler = None
+        if runtime_session is not None:
+            callback = getattr(runtime_session, "_handle_assistant_text_delta", None)
+            if callable(callback):
+                assistant_text_delta_handler = callback
         normalized_provider_tool_names = self._frontdoor_provider_visible_tool_names(
             list(state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or [])
         )
@@ -5738,6 +5746,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         model_refs=list(state_for_request.get("model_refs") or []),
                         parallel_tool_calls=(bool(state_for_request.get("parallel_enabled")) if langchain_tools else None),
                         prompt_cache_key=prompt_cache_key,
+                        on_text_delta=assistant_text_delta_handler,
                     )
                 except Exception as exc:
                     if PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):
