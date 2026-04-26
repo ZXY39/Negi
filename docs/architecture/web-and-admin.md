@@ -137,6 +137,25 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - Frontend pause rendering must not rely only on `source="approval"`. Approval pauses may arrive with ordinary `source="user"` plus approval interrupts in the inflight/paused snapshot lane; in that case the browser should keep the current visible turn in the approval-waiting state instead of finalizing a new `已暂停` history bubble.
 - Once the operator submits the batch, the browser should clear the local draft for that batch and wait for the normal runtime events (`ceo.state`, `ceo.reply.final`, etc.) to continue the conversation.
 
+### 2.3. Streamed Reply Delta Contract
+
+- `/ws/ceo` remains the single duplex transport for Web CEO. Browser sends, pause/resume control, tool events, and assistant reply delivery still share the same websocket connection; streamed assistant text is not a separate SSE channel.
+- User-visible assistant text may now arrive on a dedicated live-only event `ceo.reply.delta`.
+- The payload is intentionally small:
+  - `turn_id`
+  - `source`
+  - `text`
+  - `seq`
+- `text` is the authoritative accumulated assistant text for the current visible turn at that stream point, not a raw provider token and not a stage-trace snapshot.
+- The browser should treat `ceo.reply.delta` as a cheap text-only lane:
+  - update the current assistant bubble text
+  - update cached `inflight_turn.assistant_text` for reconnect/session restore
+  - do not rerender stage trace
+  - do not treat the delta as durable transcript history
+- Streamed reply rendering should stay in a plain-text path while the turn is still running. The full markdown render path is reserved for `ceo.reply.final`.
+- `ceo.reply.final` remains the authoritative closeout event for the assistant bubble. Final markdown rendering, transcript finalization, canonical-context finalization, and visible-turn completion still happen there.
+- `ceo.turn.patch` is no longer the high-frequency assistant-text streaming lane. It remains the lower-frequency lane for inflight/preserved snapshot refreshes, state transitions, reconnect bootstrap, and tool/interrupt-related snapshot changes.
+
 ### 2.5. Image Upload Gating
 
 - Web CEO uploads still persist attachment metadata and transcript/debugging information about the stored local file, but provider-visible current-turn content no longer has to reuse that same local-path note.
