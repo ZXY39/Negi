@@ -19,6 +19,8 @@ _DIFF_START = '### G3KU_PATCH_DIFF ###'
 _EDIT_MODE_TEXT = 'text_replace'
 _EDIT_MODE_RANGE = 'line_range'
 _EDIT_MODE_ERROR = 'Error: edit requires exactly one mode: text-replace or line-range'
+_EDIT_TARGET_EXACT_TEXT = 'exact_text'
+_EDIT_TARGET_ANCHOR_PAIR = 'anchor_pair'
 
 
 def _content_ref_path_error(path: str) -> str | None:
@@ -152,6 +154,79 @@ def _normalize_edit_mode_inputs(
         'text_mode': text_mode,
         'range_mode': range_mode,
     }
+
+
+def _normalize_target_by(value: Any) -> str:
+    text = str(value or '').strip().lower().replace('-', '_')
+    if text in {'exact_text', 'exact', 'text'}:
+        return _EDIT_TARGET_EXACT_TEXT
+    if text in {'anchor_pair', 'anchor', 'anchors'}:
+        return _EDIT_TARGET_ANCHOR_PAIR
+    if text in {'line_range', 'range', 'lines'}:
+        return _EDIT_MODE_RANGE
+    return text
+
+
+def _normalize_edit_target(target: Any) -> dict[str, Any] | None | str:
+    if target is None:
+        return None
+    if not isinstance(target, dict):
+        return 'Error: target must be an object'
+    target_by = _normalize_target_by(target.get('by'))
+    if target_by not in {_EDIT_TARGET_EXACT_TEXT, _EDIT_TARGET_ANCHOR_PAIR, _EDIT_MODE_RANGE}:
+        return f'Error: invalid target.by: {target_by}'
+    if target_by == _EDIT_TARGET_EXACT_TEXT:
+        text = target.get('text')
+        if not isinstance(text, str) or text == '':
+            return 'Error: target.text is required when target.by=exact_text'
+        return {'by': target_by, 'text': text}
+    if target_by == _EDIT_TARGET_ANCHOR_PAIR:
+        start_anchor = target.get('start_anchor')
+        end_anchor = target.get('end_anchor')
+        if not isinstance(start_anchor, str) or start_anchor == '':
+            return 'Error: target.start_anchor is required when target.by=anchor_pair'
+        if not isinstance(end_anchor, str) or end_anchor == '':
+            return 'Error: target.end_anchor is required when target.by=anchor_pair'
+        return {
+            'by': target_by,
+            'start_anchor': start_anchor,
+            'end_anchor': end_anchor,
+        }
+    start_line = target.get('start_line')
+    end_line = target.get('end_line')
+    if start_line in (None, '') or end_line in (None, ''):
+        return 'Error: target.start_line and target.end_line are required when target.by=line_range'
+    return {
+        'by': target_by,
+        'start_line': start_line,
+        'end_line': end_line,
+    }
+
+
+def _line_number_for_offset(content: str, offset: int) -> int:
+    bounded_offset = max(0, min(int(offset), len(content)))
+    return content.count('\n', 0, bounded_offset) + 1
+
+
+def _resolved_line_span(*, content: str, start_offset: int, end_offset_exclusive: int) -> str:
+    start_line = _line_number_for_offset(content, start_offset)
+    end_probe = max(start_offset, end_offset_exclusive - 1)
+    end_line = _line_number_for_offset(content, end_probe)
+    return f'resolved lines {start_line}-{end_line}'
+
+
+def _coerce_line_number(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
 
 
 def _runtime_task_id(runtime: dict[str, Any] | None, default: str | None = None) -> str:
@@ -420,6 +495,7 @@ class FilesystemTool:
         old_text: str | None,
         new_text: str | None,
         runtime: dict[str, Any],
+        target: Any = None,
         mode: str | None = None,
         start_line: Any = None,
         end_line: Any = None,
@@ -448,21 +524,6 @@ class FilesystemTool:
             text_mode = bool(normalized.get('text_mode'))
             range_mode = bool(normalized.get('range_mode'))
 
-            if selected_mode == _EDIT_MODE_TEXT:
-                if range_mode:
-                    return _EDIT_MODE_ERROR
-                text_mode = True
-            elif selected_mode == _EDIT_MODE_RANGE:
-                if text_mode:
-                    return _EDIT_MODE_ERROR
-                range_mode = True
-            else:
-                if text_mode and range_mode:
-                    return _EDIT_MODE_ERROR
-                if not text_mode and not range_mode:
-                    return _EDIT_MODE_ERROR
-                selected_mode = _EDIT_MODE_TEXT if text_mode else _EDIT_MODE_RANGE
-
             file_path = _resolve_path(path, self._workspace, self._allowed_dir)
             self._enforce_workspace_path_policy(file_path=file_path, action='edit', runtime=runtime)
             if not file_path.exists():
@@ -470,6 +531,50 @@ class FilesystemTool:
             if not file_path.is_file():
                 return f'Error: Not a file: {path}'
             original = file_path.read_text(encoding='utf-8')
+
+            resolved_target = _normalize_edit_target(target)
+            if isinstance(resolved_target, str):
+                return resolved_target
+
+            resolved_span = ''
+            if resolved_target is not None:
+                if old_text is not None or start_line is not None or end_line is not None or replacement is not None:
+                    return 'Error: target cannot be combined with legacy edit fields'
+                if new_text is None:
+                    return 'Error: new_text is required when target is provided'
+                target_resolution = self._resolve_edit_target(
+                    path=path,
+                    content=original,
+                    target=resolved_target,
+                    new_text=new_text,
+                )
+                if isinstance(target_resolution, str):
+                    return target_resolution
+                implied_mode = str(target_resolution.get('mode') or '').strip()
+                if selected_mode and selected_mode != implied_mode:
+                    return _EDIT_MODE_ERROR
+                selected_mode = implied_mode
+                old_text = target_resolution.get('old_text')
+                start_line = target_resolution.get('start_line')
+                end_line = target_resolution.get('end_line')
+                replacement = target_resolution.get('replacement')
+                resolved_span = str(target_resolution.get('resolved_span') or '').strip()
+            else:
+                if selected_mode == _EDIT_MODE_TEXT:
+                    if range_mode:
+                        return _EDIT_MODE_ERROR
+                    text_mode = True
+                elif selected_mode == _EDIT_MODE_RANGE:
+                    if text_mode:
+                        return _EDIT_MODE_ERROR
+                    range_mode = True
+                else:
+                    if text_mode and range_mode:
+                        return _EDIT_MODE_ERROR
+                    if not text_mode and not range_mode:
+                        return _EDIT_MODE_ERROR
+                    selected_mode = _EDIT_MODE_TEXT if text_mode else _EDIT_MODE_RANGE
+
             if selected_mode == _EDIT_MODE_TEXT:
                 if old_text is None:
                     return 'Error: old_text is required in text-replace mode'
@@ -503,8 +608,13 @@ class FilesystemTool:
                 default_commands=list(self._settings.edit_validation_default_commands or []),
                 commands_by_ext=dict(self._settings.edit_validation_commands_by_ext or {}),
             ) or 0)
+            details: list[str] = []
+            if resolved_span:
+                details.append(resolved_span)
             if validated_count > 0:
-                return f'Successfully edited {file_path} (validated by {validated_count} command(s))'
+                details.append(f'validated by {validated_count} command(s)')
+            if details:
+                return f'Successfully edited {file_path} ({"; ".join(details)})'
             return f'Successfully edited {file_path}'
         except PermissionError as exc:
             return f'Error: {exc}'
@@ -886,6 +996,88 @@ class FilesystemTool:
         return ({'path': str(path), 'ok': True, 'status': 'deleted'}, [path])
 
     @staticmethod
+    def _anchor_pair_regions(*, content: str, start_anchor: str, end_anchor: str) -> list[tuple[int, int]]:
+        regions: list[tuple[int, int]] = []
+        search_from = 0
+        while True:
+            start_index = content.find(start_anchor, search_from)
+            if start_index == -1:
+                break
+            end_index = content.find(end_anchor, start_index + len(start_anchor))
+            if end_index != -1:
+                region = (start_index, end_index + len(end_anchor))
+                if region not in regions:
+                    regions.append(region)
+            search_from = start_index + 1
+        return regions
+
+    @staticmethod
+    def _resolve_edit_target(*, path: str, content: str, target: dict[str, Any], new_text: str) -> dict[str, Any] | str:
+        target_by = str(target.get('by') or '').strip()
+        if target_by == _EDIT_TARGET_EXACT_TEXT:
+            old_text = str(target.get('text') or '')
+            if old_text not in content:
+                return FilesystemTool._not_found_message(old_text, content, path)
+            count = content.count(old_text)
+            if count > 1:
+                return f'Warning: target.text appears {count} times in {path}. Please provide more context to make it unique.'
+            start_index = content.find(old_text)
+            return {
+                'mode': _EDIT_MODE_TEXT,
+                'old_text': old_text,
+                'resolved_span': _resolved_line_span(
+                    content=content,
+                    start_offset=start_index,
+                    end_offset_exclusive=start_index + len(old_text),
+                ),
+            }
+        if target_by == _EDIT_TARGET_ANCHOR_PAIR:
+            start_anchor = str(target.get('start_anchor') or '')
+            end_anchor = str(target.get('end_anchor') or '')
+            regions = FilesystemTool._anchor_pair_regions(
+                content=content,
+                start_anchor=start_anchor,
+                end_anchor=end_anchor,
+            )
+            if not regions:
+                if start_anchor not in content:
+                    return FilesystemTool._not_found_message(start_anchor, content, path)
+                if end_anchor not in content:
+                    return FilesystemTool._not_found_message(end_anchor, content, path)
+                return f'Error: anchor_pair did not resolve an ordered region in {path}.'
+            if len(regions) > 1:
+                return f'Warning: anchor_pair matched {len(regions)} regions in {path}. Provide more specific anchors.'
+            start_index, end_offset_exclusive = regions[0]
+            return {
+                'mode': _EDIT_MODE_TEXT,
+                'old_text': content[start_index:end_offset_exclusive],
+                'resolved_span': _resolved_line_span(
+                    content=content,
+                    start_offset=start_index,
+                    end_offset_exclusive=end_offset_exclusive,
+                ),
+            }
+        start_line = target.get('start_line')
+        end_line = target.get('end_line')
+        coerced_start = _coerce_line_number(start_line)
+        coerced_end = _coerce_line_number(end_line)
+        resolved_span = ''
+        if (
+            coerced_start is not None
+            and coerced_end is not None
+            and coerced_start > 0
+            and coerced_end >= coerced_start
+        ):
+            resolved_span = f'resolved lines {coerced_start}-{coerced_end}'
+        return {
+            'mode': _EDIT_MODE_RANGE,
+            'start_line': start_line,
+            'end_line': end_line,
+            'replacement': new_text,
+            'resolved_span': resolved_span,
+        }
+
+    @staticmethod
     def _edit_by_text(*, path: str, content: str, old_text: str, new_text: str) -> str:
         if old_text not in content:
             return FilesystemTool._not_found_message(old_text, content, path)
@@ -1171,7 +1363,7 @@ class FilesystemActionTool:
     def description(self) -> str:
         return {
             'write': 'Write file content to disk.',
-            'edit': 'Edit one file in text-replace or line-range mode.',
+            'edit': 'Edit one file by resolving a target span or using legacy text-replace/line-range mode.',
             'copy': 'Copy one or more files or directory trees to new absolute destinations.',
             'move': 'Move one or more files or directory trees to new absolute destinations.',
             'delete': 'Delete one or more files or directory paths.',
@@ -1194,16 +1386,33 @@ class FilesystemActionTool:
                 'type': 'object',
                 'properties': {
                     'path': {'type': 'string', 'description': 'Absolute file path to edit.'},
+                    'target': {
+                        'type': 'object',
+                        'description': 'Preferred target-first edit locator.',
+                        'properties': {
+                            'by': {
+                                'type': 'string',
+                                'enum': [_EDIT_TARGET_EXACT_TEXT, _EDIT_TARGET_ANCHOR_PAIR, _EDIT_MODE_RANGE],
+                                'description': 'How to locate the existing region to replace.',
+                            },
+                            'text': {'type': 'string', 'description': 'Existing text when target.by=exact_text.'},
+                            'start_anchor': {'type': 'string', 'description': 'Starting anchor when target.by=anchor_pair.'},
+                            'end_anchor': {'type': 'string', 'description': 'Ending anchor when target.by=anchor_pair.'},
+                            'start_line': {'type': 'integer', 'description': 'Start line when target.by=line_range.'},
+                            'end_line': {'type': 'integer', 'description': 'End line when target.by=line_range.'},
+                        },
+                        'required': ['by'],
+                    },
                     'mode': {
                         'type': 'string',
                         'enum': [_EDIT_MODE_TEXT, _EDIT_MODE_RANGE],
-                        'description': 'Optional explicit edit mode. Use text_replace with old_text/new_text or line_range with start_line/end_line/replacement.',
+                        'description': 'Legacy explicit edit mode. Use only for backward-compatible text_replace/line_range calls.',
                     },
-                    'old_text': {'type': 'string', 'description': 'Existing text for text-replace mode.'},
-                    'new_text': {'type': 'string', 'description': 'Replacement text for text-replace mode.'},
-                    'start_line': {'type': 'integer', 'description': 'Start line for line-range mode.'},
-                    'end_line': {'type': 'integer', 'description': 'End line for line-range mode.'},
-                    'replacement': {'type': 'string', 'description': 'Replacement text for line-range mode.'},
+                    'old_text': {'type': 'string', 'description': 'Existing text for legacy text-replace mode.'},
+                    'new_text': {'type': 'string', 'description': 'Replacement text for target-first or legacy text-replace mode.'},
+                    'start_line': {'type': 'integer', 'description': 'Start line for legacy line-range mode.'},
+                    'end_line': {'type': 'integer', 'description': 'End line for legacy line-range mode.'},
+                    'replacement': {'type': 'string', 'description': 'Replacement text for legacy line-range mode.'},
                 },
                 'required': ['path'],
             }
@@ -1274,6 +1483,7 @@ class FilesystemActionTool:
         if self._action == 'edit':
             return await self._delegate.edit(
                 path=str(kwargs.get('path') or ''),
+                target=kwargs.get('target'),
                 mode=kwargs.get('mode'),
                 old_text=kwargs.get('old_text'),
                 new_text=kwargs.get('new_text'),
