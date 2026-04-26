@@ -103,25 +103,33 @@ class OpenAICodexProvider(LLMProvider):
         try:
             stream_timeout_seconds = resolve_streaming_timeout_seconds(request_timeout_seconds)
             try:
+                request_codex_kwargs = {
+                    "verify": True,
+                    "timeout": stream_timeout_seconds,
+                }
+                if on_text_delta is not None:
+                    request_codex_kwargs["on_text_delta"] = on_text_delta
                 content, tool_calls, finish_reason, usage = await _request_codex(
                     url,
                     headers,
                     body,
-                    verify=True,
-                    timeout=stream_timeout_seconds,
-                    on_text_delta=on_text_delta,
+                    **request_codex_kwargs,
                 )
             except Exception as e:
                 if "CERTIFICATE_VERIFY_FAILED" not in str(e):
                     raise
                 logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
+                retry_request_codex_kwargs = {
+                    "verify": False,
+                    "timeout": stream_timeout_seconds,
+                }
+                if on_text_delta is not None:
+                    retry_request_codex_kwargs["on_text_delta"] = on_text_delta
                 content, tool_calls, finish_reason, usage = await _request_codex(
                     url,
                     headers,
                     body,
-                    verify=False,
-                    timeout=stream_timeout_seconds,
-                    on_text_delta=on_text_delta,
+                    **retry_request_codex_kwargs,
                 )
             return LLMResponse(
                 content=content,
@@ -192,9 +200,12 @@ async def _request_codex(
                 idle_line_timeout_seconds=client_timeout,
             )
             try:
+                consume_kwargs: dict[str, Any] = {}
+                if on_text_delta is not None:
+                    consume_kwargs["on_text_delta"] = on_text_delta
                 content, tool_calls, finish_reason, usage = await _consume_sse(
                     diagnostics,
-                    on_text_delta=on_text_delta,
+                    **consume_kwargs,
                 )
             except Exception:
                 logger.warning(diagnostics.render_summary(outcome="failed"))

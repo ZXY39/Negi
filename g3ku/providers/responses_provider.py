@@ -217,9 +217,12 @@ class ResponsesProvider(LLMProvider):
                         first_line_timeout_seconds=stream_timeout_seconds,
                         idle_line_timeout_seconds=stream_timeout_seconds,
                     )
+                    consume_kwargs: dict[str, Any] = {}
+                    if on_text_delta is not None:
+                        consume_kwargs["on_text_delta"] = on_text_delta
                     content, tool_calls, finish_reason, usage = await _consume_sse(
                         diagnostics,
-                        on_text_delta=on_text_delta,
+                        **consume_kwargs,
                     )
                     logger.debug(diagnostics.render_summary(outcome="completed"))
                     return LLMResponse(
