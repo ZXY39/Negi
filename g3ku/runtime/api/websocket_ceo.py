@@ -1142,6 +1142,18 @@ async def ceo_websocket(websocket: WebSocket):
             )
             await _push_turn_patch()
             return
+        if event.type == 'assistant_stream_delta':
+            payload = dict(event.payload or {})
+            await _push_stream_event(
+                'ceo.reply.delta',
+                {
+                    'turn_id': str(payload.get('turn_id') or '').strip(),
+                    'source': str(payload.get('source') or 'user').strip().lower() or 'user',
+                    'text': str(payload.get('text') or ''),
+                    'seq': int(payload.get('seq') or 0),
+                },
+            )
+            return
         if event.type == 'control_ack':
             payload = dict(event.payload or {})
             await _push_stream_event('ceo.control_ack', payload)

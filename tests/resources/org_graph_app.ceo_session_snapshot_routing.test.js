@@ -508,6 +508,33 @@ test("ceo.turn.patch preserves canonical_context_delta on cached inflight turn",
     assert.equal(entry?.inflight_turn?.canonical_context_delta?.stages?.[0]?.stage_id, "frontdoor-stage-2");
 });
 
+test("ceo.reply.delta updates cached inflight assistant text without invoking turn patch rendering", () => {
+    const { S, initCeoWs, __socket, getCeoSessionSnapshotCache, __context } = loadApp();
+
+    S.activeSessionId = "web:active";
+    initCeoWs();
+
+    const socket = __socket();
+    assert.ok(socket);
+
+    socket.onmessage({
+        data: JSON.stringify({
+            type: "ceo.reply.delta",
+            session_id: "web:other",
+            data: {
+                turn_id: "turn-stream-1",
+                source: "user",
+                text: "OK",
+                seq: 2,
+            },
+        }),
+    });
+
+    const entry = getCeoSessionSnapshotCache("web:other");
+    assert.equal(entry?.inflight_turn?.assistant_text, "OK");
+    assert.equal(__context.__patchCalls.length, 0);
+});
+
 test("optimistic session switch syncs approval flow from cached preserved_turn interrupts", () => {
     const { S, applyOptimisticCeoSessionSwitch, __context, getCeoSessionSnapshotCache } = loadApp();
 

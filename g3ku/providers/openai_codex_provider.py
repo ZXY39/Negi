@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
+import inspect
 import json
 import re
 import time
@@ -60,6 +61,7 @@ class OpenAICodexProvider(LLMProvider):
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
         request_timeout_seconds: float | None = None,
+        on_text_delta: Any = None,
     ) -> LLMResponse:
         model = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
@@ -101,23 +103,33 @@ class OpenAICodexProvider(LLMProvider):
         try:
             stream_timeout_seconds = resolve_streaming_timeout_seconds(request_timeout_seconds)
             try:
+                request_codex_kwargs = {
+                    "verify": True,
+                    "timeout": stream_timeout_seconds,
+                }
+                if on_text_delta is not None:
+                    request_codex_kwargs["on_text_delta"] = on_text_delta
                 content, tool_calls, finish_reason, usage = await _request_codex(
                     url,
                     headers,
                     body,
-                    verify=True,
-                    timeout=stream_timeout_seconds,
+                    **request_codex_kwargs,
                 )
             except Exception as e:
                 if "CERTIFICATE_VERIFY_FAILED" not in str(e):
                     raise
                 logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
+                retry_request_codex_kwargs = {
+                    "verify": False,
+                    "timeout": stream_timeout_seconds,
+                }
+                if on_text_delta is not None:
+                    retry_request_codex_kwargs["on_text_delta"] = on_text_delta
                 content, tool_calls, finish_reason, usage = await _request_codex(
                     url,
                     headers,
                     body,
-                    verify=False,
-                    timeout=stream_timeout_seconds,
+                    **retry_request_codex_kwargs,
                 )
             return LLMResponse(
                 content=content,
@@ -126,6 +138,7 @@ class OpenAICodexProvider(LLMProvider):
                 usage=usage,
                 provider_request_meta=provider_request_meta,
                 provider_request_body=provider_request_body,
+                visible_text_streamed=bool(content),
             )
         except Exception as e:
             partial_content = str(getattr(e, "partial_content", "") or "").strip()
@@ -136,6 +149,7 @@ class OpenAICodexProvider(LLMProvider):
                     finish_reason="error",
                     provider_request_meta=provider_request_meta,
                     provider_request_body=provider_request_body,
+                    visible_text_streamed=True,
                 )
             return LLMResponse(
                 content=f"Error calling Codex: {str(e)}",
@@ -172,6 +186,7 @@ async def _request_codex(
     body: dict[str, Any],
     verify: bool,
     timeout: float | None,
+    on_text_delta: Any = None,
 ) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
     client_timeout = float(timeout) if timeout is not None else 60.0
     async with httpx.AsyncClient(timeout=client_timeout, verify=verify) as client:
@@ -185,7 +200,13 @@ async def _request_codex(
                 idle_line_timeout_seconds=client_timeout,
             )
             try:
-                content, tool_calls, finish_reason, usage = await _consume_sse(diagnostics)
+                consume_kwargs: dict[str, Any] = {}
+                if on_text_delta is not None:
+                    consume_kwargs["on_text_delta"] = on_text_delta
+                content, tool_calls, finish_reason, usage = await _consume_sse(
+                    diagnostics,
+                    **consume_kwargs,
+                )
             except Exception:
                 logger.warning(diagnostics.render_summary(outcome="failed"))
                 raise
@@ -495,7 +516,11 @@ async def _iter_sse(response: httpx.Response) -> AsyncGenerator[dict[str, Any], 
         buffer.append(line)
 
 
-async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
+async def _consume_sse(
+    response: httpx.Response,
+    *,
+    on_text_delta: Any = None,
+) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
     content = ""
     tool_calls: list[ToolCallRequest] = []
     tool_call_buffers: dict[str, dict[str, Any]] = {}
@@ -516,7 +541,12 @@ async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequ
                     "arguments": item.get("arguments") or "",
                 }
         elif event_type == "response.output_text.delta":
-            content += event.get("delta") or ""
+            delta_text = str(event.get("delta") or "")
+            content += delta_text
+            if delta_text and callable(on_text_delta):
+                callback_result = on_text_delta(delta_text)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
         elif event_type == "response.function_call_arguments.delta":
             call_id = event.get("call_id")
             if call_id and call_id in tool_call_buffers:

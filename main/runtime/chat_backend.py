@@ -55,6 +55,7 @@ class ChatBackend(Protocol):
         prompt_cache_key: str | None = None,
         node_turn_lease: NodeTurnLease | None = None,
         model_concurrency_controller: ModelKeyConcurrencyController | None = None,
+        on_text_delta: Any = None,
     ) -> LLMResponse: ...
 
 
@@ -687,6 +688,7 @@ class ConfigChatBackend:
         prompt_cache_key: str | None = None,
         node_turn_lease: NodeTurnLease | None = None,
         model_concurrency_controller: ModelKeyConcurrencyController | None = None,
+        on_text_delta: Any = None,
     ) -> LLMResponse:
         refs = [str(item or '').strip() for item in list(model_refs or []) if str(item or '').strip()]
         if not refs:
@@ -747,6 +749,7 @@ class ConfigChatBackend:
                         target = base_target
                         request_message_count, request_message_chars = _message_stats(request_messages)
                         permit_lease: ModelKeyPermitLease | None = None
+                        attempt_visible_text_streamed = False
                         use_held_turn_permit = bool(
                             held_turn_lease is not None
                             and held_turn_lease.initial_model_permit is not None
@@ -770,6 +773,17 @@ class ConfigChatBackend:
                                     model_ref=target.provider_ref,
                                     key_index=selected_api_key_index,
                                 )
+
+                            def _provider_text_delta_callback(text: Any) -> Any:
+                                nonlocal attempt_visible_text_streamed
+                                normalized_text = str(text or "")
+                                if not normalized_text:
+                                    return None
+                                attempt_visible_text_streamed = True
+                                if on_text_delta is None:
+                                    return None
+                                return on_text_delta(normalized_text)
+
                             provider_kwargs = {
                                 **dict(preview_payload or {}),
                                 'messages': request_messages,
@@ -777,6 +791,8 @@ class ConfigChatBackend:
                                 'model': target.model_id,
                                 'request_timeout_seconds': None if bool(getattr(target.provider, 'manages_request_timeout_internally', False)) else attempt_timeout_seconds,
                             }
+                            if on_text_delta is not None and bool(getattr(target.provider, 'supports_streaming', False)):
+                                provider_kwargs['on_text_delta'] = _provider_text_delta_callback
                             outer_attempt_timeout_seconds = None if bool(getattr(target.provider, 'manages_request_timeout_internally', False)) else attempt_timeout_seconds
                             response = await wait_for_model_attempt(
                                 target.provider.chat(
@@ -790,6 +806,8 @@ class ConfigChatBackend:
                             )
                         except Exception as exc:
                             last_error = round_last_error = exc
+                            if attempt_visible_text_streamed:
+                                raise
                             rotate_key = should_rotate_api_key_error(exc, retry_on=target.retry_on)
                             if rotate_key and not slot.is_last_key:
                                 continue
@@ -830,10 +848,15 @@ class ConfigChatBackend:
                             ]
                         attempts.extend(response_attempts)
                         response.attempts = list(attempts)
+                        response.visible_text_streamed = bool(
+                            getattr(response, 'visible_text_streamed', False) or attempt_visible_text_streamed
+                        )
                         last_response = response
                         rotate_key_response = response_requires_api_key_rotation(response, retry_on=target.retry_on)
                         retryable_response = response_requires_retry(response, retry_on=target.retry_on)
                         fallback_response = response_requires_fallback(response)
+                        if response.visible_text_streamed and (rotate_key_response or retryable_response or fallback_response):
+                            return response
                         if rotate_key_response:
                             if not slot.is_last_key:
                                 continue

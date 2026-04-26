@@ -35,6 +35,7 @@ _TRANSCRIPT_STATE_PENDING = "pending"
 _TRANSCRIPT_STATE_PAUSED = "paused"
 _TRANSCRIPT_STATE_COMPLETED = "completed"
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
+_ASSISTANT_STREAM_FLUSH_WINDOW_SECONDS = 0.075
 
 
 class RuntimeAgentSession:
@@ -109,6 +110,11 @@ class RuntimeAgentSession:
         self._active_batch_id: str | None = None
         self._active_user_batch_inputs: list[UserInputMessage] = []
         self._last_verified_task_ids: list[str] = []
+        self._assistant_stream_seq: int = 0
+        self._assistant_stream_pending_text: str = ""
+        self._assistant_stream_last_emitted_text: str = ""
+        self._assistant_stream_last_emit_monotonic: float = 0.0
+        self._assistant_stream_flush_task: asyncio.Task[Any] | None = None
         self._turn_lock = asyncio.Lock()
         self._restore_frontdoor_persistent_state()
 
@@ -1716,6 +1722,85 @@ class RuntimeAgentSession:
         }
         return snapshot
 
+    def _cancel_assistant_stream_flush_task(self) -> None:
+        task = self._assistant_stream_flush_task
+        self._assistant_stream_flush_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _reset_assistant_stream_state(self) -> None:
+        self._cancel_assistant_stream_flush_task()
+        self._assistant_stream_seq = 0
+        self._assistant_stream_pending_text = ""
+        self._assistant_stream_last_emitted_text = ""
+        self._assistant_stream_last_emit_monotonic = 0.0
+
+    def _schedule_assistant_stream_flush(self) -> None:
+        task = self._assistant_stream_flush_task
+        if task is not None and not task.done():
+            return
+        self._assistant_stream_flush_task = asyncio.create_task(self._delayed_assistant_stream_flush())
+
+    async def _delayed_assistant_stream_flush(self) -> None:
+        try:
+            await asyncio.sleep(_ASSISTANT_STREAM_FLUSH_WINDOW_SECONDS)
+            await self._flush_assistant_text_delta(force=False)
+        except asyncio.CancelledError:
+            return
+        finally:
+            current = asyncio.current_task()
+            if self._assistant_stream_flush_task is current:
+                self._assistant_stream_flush_task = None
+
+    async def _flush_assistant_text_delta(self, *, force: bool) -> None:
+        text = str(self._assistant_stream_pending_text or "")
+        if not text:
+            return
+        if not force and text == self._assistant_stream_last_emitted_text:
+            return
+        turn_id = self._current_turn_id()
+        if not turn_id:
+            return
+        source = self._internal_prompt_source() or "user"
+        self._assistant_stream_seq += 1
+        self._assistant_stream_last_emitted_text = text
+        self._assistant_stream_pending_text = ""
+        try:
+            self._assistant_stream_last_emit_monotonic = asyncio.get_running_loop().time()
+        except RuntimeError:
+            self._assistant_stream_last_emit_monotonic = 0.0
+        self._sync_persisted_inflight_turn()
+        await self._emit(
+            "assistant_stream_delta",
+            turn_id=turn_id,
+            source=source,
+            text=text,
+            seq=self._assistant_stream_seq,
+        )
+
+    async def _handle_assistant_text_delta(self, text: str) -> None:
+        normalized_text = str(text or "")
+        if not normalized_text:
+            return
+        current_text = str(self._state.latest_message or "")
+        next_text = current_text + normalized_text
+        if next_text == current_text:
+            return
+        self._state.latest_message = next_text
+        self._assistant_stream_pending_text = next_text
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:
+            now = 0.0
+        if (
+            self._assistant_stream_seq <= 0
+            or self._assistant_stream_last_emit_monotonic <= 0.0
+            or (now - self._assistant_stream_last_emit_monotonic) >= _ASSISTANT_STREAM_FLUSH_WINDOW_SECONDS
+        ):
+            await self._flush_assistant_text_delta(force=True)
+            return
+        self._schedule_assistant_stream_flush()
+
     def manual_pause_waiting_reason(self) -> bool:
         return False
 
@@ -2179,6 +2264,7 @@ class RuntimeAgentSession:
             self._latest_sidecar_tool_observation = observation
 
         if kind == "tool_start":
+            await self._flush_assistant_text_delta(force=True)
             if tool_name in _LEGACY_CONTROL_TOOL_NAMES:
                 return
             call_id = self._register_pending_tool_call(tool_name, data)
@@ -2352,6 +2438,8 @@ class RuntimeAgentSession:
             text = str(content or "").strip()
             if text and self._state.latest_message != text:
                 self._state.latest_message = text
+                self._assistant_stream_pending_text = ""
+                self._assistant_stream_last_emitted_text = ""
                 await self._emit_state_snapshot()
 
         channel = "analysis" if kind == "analysis" else "deep_progress" if (deep_progress or kind == "deep_progress") else "progress"
@@ -2453,6 +2541,7 @@ class RuntimeAgentSession:
         self._state.paused = True
         self._state.status = "paused"
         self._state.latest_message = ""
+        self._reset_assistant_stream_state()
         self._state.last_error = None
         self._state.pending_tool_calls.clear()
         self._pending_tool_call_names.clear()
@@ -2528,6 +2617,7 @@ class RuntimeAgentSession:
             self._state.paused = False
             self._state.status = "running"
             self._state.latest_message = ""
+            self._reset_assistant_stream_state()
             self._state.last_error = None
             self._state.pending_tool_calls.clear()
             self._state.pending_interrupts = []
@@ -2594,6 +2684,8 @@ class RuntimeAgentSession:
                 )
                 assistant = AssistantMessage(content=output, timestamp=self._now())
                 self._state.messages.append(assistant)
+                self._cancel_assistant_stream_flush_task()
+                self._assistant_stream_pending_text = ""
                 self._state.latest_message = output
                 self._state.is_running = False
                 self._state.status = "completed"
@@ -2645,6 +2737,8 @@ class RuntimeAgentSession:
             )
             self._state.is_running = False
             self._state.status = "error"
+            self._cancel_assistant_stream_flush_task()
+            self._assistant_stream_pending_text = ""
             if isinstance(exc, StructuredError):
                 error = exc
             elif all(hasattr(exc, key) for key in ("code", "message", "recoverable")):
@@ -2693,6 +2787,8 @@ class RuntimeAgentSession:
         else:
             assistant = AssistantMessage(content=output, timestamp=self._now())
             self._state.messages.append(assistant)
+            self._cancel_assistant_stream_flush_task()
+            self._assistant_stream_pending_text = ""
             self._state.latest_message = output
             self._state.is_running = False
             self._state.status = "completed"
@@ -3037,6 +3133,7 @@ class RuntimeAgentSession:
             self._state.paused = False
             self._state.status = "running"
             self._state.latest_message = ""
+            self._reset_assistant_stream_state()
             self._state.last_error = None
             self._state.pending_tool_calls.clear()
             self._pending_tool_call_names.clear()
@@ -3057,6 +3154,8 @@ class RuntimeAgentSession:
             self._state.is_running = False
             self._state.paused = False
             self._state.status = "completed"
+            self._cancel_assistant_stream_flush_task()
+            self._assistant_stream_pending_text = ""
             self._state.latest_message = str(output or "")
             await self._emit(
                 "message_end",
