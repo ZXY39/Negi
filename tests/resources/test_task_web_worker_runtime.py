@@ -5563,6 +5563,51 @@ def test_node_latest_context_uses_singleton_runtime_frame_artifact_and_freezes_o
     assert payload["actual_tool_schema_hash"] == "tool-hash-1"
 
 
+def test_await_with_runtime_marker_does_not_recreate_removed_frame(tmp_path: Path) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+
+    assert root is not None
+
+    service.log_service.upsert_frame(
+        record.task_id,
+        {
+            "node_id": root.node_id,
+            "depth": root.depth,
+            "node_kind": root.node_kind,
+            "phase": "before_model",
+            "messages": [{"role": "user", "content": "context before terminal result"}],
+        },
+        publish_snapshot=False,
+    )
+    assert service.store.get_task_runtime_frame(record.task_id, root.node_id) is not None
+
+    async def _remove_frame_then_return() -> str:
+        service.log_service.remove_frame(record.task_id, root.node_id, publish_snapshot=False)
+        return "done"
+
+    result = asyncio.run(
+        service.node_runner._await_with_runtime_marker(
+            task_id=record.task_id,
+            node_id=root.node_id,
+            marker="react_loop.run",
+            awaitable=_remove_frame_then_return(),
+        )
+    )
+
+    assert result == "done"
+    assert service.store.get_task_runtime_frame(record.task_id, root.node_id) is None
+
+
 def test_latest_context_prefers_dedicated_actual_request_ref_over_messages_ref(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -6937,6 +6982,139 @@ async def test_run_child_pipeline_loops_until_third_acceptance_rejection_is_term
         assert handshake["state"] == ACCEPTANCE_STATE_REJECTED_TERMINAL
         assert handshake["rejection_count"] == 3
     finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_run_child_pipeline_reruns_reactivated_acceptance_without_duplicate_rejection_notification(
+    tmp_path: Path,
+) -> None:
+    service = _build_service(tmp_path)
+    task = None
+    try:
+        record = await service.create_task("child acceptance rerun", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(
+            goal="announce child",
+            prompt="draft announcement",
+            execution_policy=_execution_policy(),
+            acceptance_prompt="verify announcement",
+        )
+        cached_payload = {
+            "specs": [spec.model_dump(mode="json")],
+            "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
+            "completed": False,
+        }
+
+        service.node_runner._materialize_spawn_batch_children(
+            task=task,
+            parent=root,
+            specs=[spec],
+            allowed_indexes=[0],
+            cache_key="round-rerun",
+            cached_payload=cached_payload,
+        )
+        dispatcher = service.task_actor_service._create_dispatcher(task.task_id)
+        service.task_actor_service._dispatchers[task.task_id] = dispatcher
+
+        call_counts = {"execution": 0, "acceptance": 0}
+
+        async def _mock_run_node(task_id: str, node_id: str) -> NodeFinalResult:
+            target = service.store.get_node(node_id)
+            assert target is not None
+            if target.node_kind == "execution":
+                call_counts["execution"] += 1
+                output = f"draft attempt {call_counts['execution']}"
+                service.log_service.update_node_status(
+                    task_id,
+                    node_id,
+                    status="success",
+                    final_output=output,
+                )
+                return NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary=output,
+                    answer=output,
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                )
+            if target.node_kind == "acceptance":
+                call_counts["acceptance"] += 1
+                if call_counts["acceptance"] == 1:
+                    feedback = "reject once"
+                    service.log_service.update_node_status(
+                        task_id,
+                        node_id,
+                        status="failed",
+                        final_output=feedback,
+                        failure_reason=feedback,
+                    )
+                    return NodeFinalResult(
+                        status="failed",
+                        delivery_status="final",
+                        summary=feedback,
+                        answer=feedback,
+                        evidence=[],
+                        remaining_work=[],
+                        blocking_reason=feedback,
+                    )
+                service.log_service.update_node_status(
+                    task_id,
+                    node_id,
+                    status="success",
+                    final_output="accepted",
+                    failure_reason="",
+                )
+                return NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary="accepted",
+                    answer="accepted",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                )
+            raise AssertionError(f"unexpected node kind: {target.node_kind}")
+
+        service.node_runner.run_node = _mock_run_node  # type: ignore[method-assign]
+
+        result = await service.node_runner._run_child_pipeline(
+            task=task,
+            parent=root,
+            spec=spec,
+            cache_key="round-rerun",
+            cached_payload=cached_payload,
+            index=0,
+        )
+
+        latest_root = service.store.get_node(root.node_id)
+        assert latest_root is not None
+        latest_entry = latest_root.metadata["spawn_operations"]["round-rerun"]["entries"][0]
+        child_id = str(latest_entry["child_node_id"])
+        acceptance_id = str(latest_entry["acceptance_node_id"])
+        child = service.store.get_node(child_id)
+        acceptance = service.store.get_node(acceptance_id)
+        notifications = service.store.list_task_node_notifications(task.task_id, child_id)
+
+        assert child is not None
+        assert acceptance is not None
+        assert call_counts == {"execution": 2, "acceptance": 2}
+        assert result.check_result == "accepted"
+        assert result.failure_info is None
+        assert acceptance.status == "success"
+        assert len(notifications) == 1
+        assert notifications[0].message == "reject once"
+    finally:
+        dispatcher = service.task_actor_service._dispatchers.pop(task.task_id, None) if task is not None else None
+        if dispatcher is not None:
+            await dispatcher.close()
         await service.close()
 
 

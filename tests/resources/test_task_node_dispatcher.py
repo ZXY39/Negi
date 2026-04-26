@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from main.models import NodeFinalResult, SpawnChildSpec
+from main.models import NodeFinalResult, SpawnChildSpec, normalize_final_acceptance_metadata
 from main.service.runtime_service import MainRuntimeService
 
 
@@ -375,3 +375,226 @@ async def test_task_actor_service_requeues_partial_root_acceptance_handshake(tmp
     assert latest is not None
     assert latest.status == "in_progress"
     assert scheduled == [record.task_id]
+
+
+@pytest.mark.asyncio
+async def test_task_actor_service_terminalizes_root_after_pending_notice_acceptance_success(
+    tmp_path: Path,
+) -> None:
+    service = _make_service(tmp_path)
+    record = await service.create_task(
+        "root pending acceptance terminalize",
+        session_id="web:shared",
+        metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+    )
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance"))
+    acceptance = service.store.get_node(final_acceptance.node_id)
+
+    assert acceptance is not None
+
+    root_result = NodeFinalResult(
+        status="success",
+        delivery_status="final",
+        summary="draft ready",
+        answer="draft ready",
+        evidence=[],
+        remaining_work=[],
+        blocking_reason="",
+    )
+    service.node_runner._persist_result_payload(task.task_id, root.node_id, root_result)
+    service.node_runner._set_execution_waiting_acceptance_state(
+        task_id=task.task_id,
+        execution_node_id=root.node_id,
+        acceptance_node_id=acceptance.node_id,
+        result_ref="artifact:root",
+        result_summary="draft ready",
+    )
+    service.log_service.update_task_runtime_meta(
+        task.task_id,
+        distribution={
+            "active_epoch_id": "",
+            "state": "",
+            "mode": "",
+            "frontier_node_ids": [],
+            "blocked_node_ids": [],
+            "pending_notice_node_ids": [acceptance.node_id],
+            "queued_epoch_count": 0,
+            "pending_mailbox_count": 1,
+        },
+    )
+
+    call_order: list[str] = []
+
+    async def fake_run_node(task_id: str, node_id: str) -> NodeFinalResult:
+        call_order.append(node_id)
+        target = service.get_node(node_id)
+        assert target is not None
+        assert target.node_kind == "acceptance"
+        service.log_service.update_node_status(
+            task_id,
+            node_id,
+            status="success",
+            final_output="accepted",
+        )
+        service.log_service.update_task_runtime_meta(
+            task_id,
+            distribution={
+                "active_epoch_id": "",
+                "state": "",
+                "mode": "",
+                "frontier_node_ids": [],
+                "blocked_node_ids": [],
+                "pending_notice_node_ids": [],
+                "queued_epoch_count": 0,
+                "pending_mailbox_count": 0,
+            },
+        )
+        return NodeFinalResult(
+            status="success",
+            delivery_status="final",
+            summary="accepted",
+            answer="accepted",
+            evidence=[],
+            remaining_work=[],
+            blocking_reason="",
+        )
+
+    service.node_runner.run_node = fake_run_node  # type: ignore[method-assign]
+
+    await service.task_actor_service.run_task(record.task_id)
+
+    latest_task = service.get_task(record.task_id)
+    latest_root = service.get_node(root.node_id)
+    latest_acceptance = service.store.get_node(acceptance.node_id)
+
+    assert latest_task is not None
+    assert latest_root is not None
+    assert latest_acceptance is not None
+    assert call_order == [acceptance.node_id]
+    assert latest_acceptance.status == "success"
+    assert latest_root.status == "success"
+    assert latest_root.final_output == "draft ready"
+    assert latest_root.check_result == "accepted"
+    assert dict((latest_root.metadata or {}).get("acceptance_handshake") or {})["state"] == "accepted"
+    assert latest_task.status == "success"
+    assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "passed"
+    assert list(service.store.list_task_runtime_frames(record.task_id) or []) == []
+
+
+@pytest.mark.asyncio
+async def test_task_actor_service_terminalizes_root_after_pending_notice_acceptance_failure(
+    tmp_path: Path,
+) -> None:
+    service = _make_service(tmp_path)
+    record = await service.create_task(
+        "root pending acceptance reject",
+        session_id="web:shared",
+        metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+    )
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance"))
+    acceptance = service.store.get_node(final_acceptance.node_id)
+
+    assert acceptance is not None
+
+    root_result = NodeFinalResult(
+        status="success",
+        delivery_status="final",
+        summary="draft ready",
+        answer="draft ready",
+        evidence=[],
+        remaining_work=[],
+        blocking_reason="",
+    )
+    service.node_runner._persist_result_payload(task.task_id, root.node_id, root_result)
+    service.node_runner._set_execution_waiting_acceptance_state(
+        task_id=task.task_id,
+        execution_node_id=root.node_id,
+        acceptance_node_id=acceptance.node_id,
+        result_ref="artifact:root",
+        result_summary="draft ready",
+    )
+    service.log_service.update_task_runtime_meta(
+        task.task_id,
+        distribution={
+            "active_epoch_id": "",
+            "state": "",
+            "mode": "",
+            "frontier_node_ids": [],
+            "blocked_node_ids": [],
+            "pending_notice_node_ids": [acceptance.node_id],
+            "queued_epoch_count": 0,
+            "pending_mailbox_count": 1,
+        },
+    )
+
+    call_order: list[str] = []
+
+    async def fake_run_node(task_id: str, node_id: str) -> NodeFinalResult:
+        call_order.append(node_id)
+        target = service.get_node(node_id)
+        assert target is not None
+        assert target.node_kind == "acceptance"
+        service.log_service.update_node_status(
+            task_id,
+            node_id,
+            status="failed",
+            final_output="reject once",
+            failure_reason="reject once",
+        )
+        service.log_service.update_task_runtime_meta(
+            task_id,
+            distribution={
+                "active_epoch_id": "",
+                "state": "",
+                "mode": "",
+                "frontier_node_ids": [],
+                "blocked_node_ids": [],
+                "pending_notice_node_ids": [],
+                "queued_epoch_count": 0,
+                "pending_mailbox_count": 0,
+            },
+        )
+        return NodeFinalResult(
+            status="failed",
+            delivery_status="final",
+            summary="reject once",
+            answer="reject once",
+            evidence=[],
+            remaining_work=[],
+            blocking_reason="reject once",
+        )
+
+    service.node_runner.run_node = fake_run_node  # type: ignore[method-assign]
+
+    await service.task_actor_service.run_task(record.task_id)
+
+    latest_task = service.get_task(record.task_id)
+    latest_root = service.get_node(root.node_id)
+    latest_acceptance = service.store.get_node(acceptance.node_id)
+
+    assert latest_task is not None
+    assert latest_root is not None
+    assert latest_acceptance is not None
+    assert call_order == [acceptance.node_id]
+    assert latest_acceptance.status == "failed"
+    assert latest_root.status == "success"
+    assert latest_root.final_output == "draft ready"
+    assert latest_root.check_result == "reject once"
+    assert dict((latest_root.metadata or {}).get("acceptance_handshake") or {})["state"] == "rejected_terminal"
+    assert latest_task.status == "success"
+    assert latest_task.failure_reason == "reject once"
+    assert latest_task.metadata.get("failure_class") == "business_unpassed"
+    assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "failed"
+    assert list(service.store.list_task_runtime_frames(record.task_id) or []) == []

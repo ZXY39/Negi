@@ -21,6 +21,7 @@ from g3ku.resources import ResourceManager
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.registry import ResourceRegistry
 from g3ku.resources.tool_settings import FilesystemToolSettings
+from g3ku.runtime.frontdoor._ceo_runtime_ops import _provider_visible_tool_contract
 from main.api import rest as api_rest
 from main.governance.resource_bridge import build_tool_families
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
@@ -1130,6 +1131,78 @@ async def test_filesystem_edit_rejects_mixed_modes(tmp_path: Path):
             replacement='after\n',
         )
         assert result == 'Error: edit requires exactly one mode: text-replace or line-range'
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_edit_ignores_zeroed_line_range_placeholders_for_text_mode(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'target.txt'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('before\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_filesystem_split_tools(workspace, 'filesystem_edit')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem_edit')
+        assert tool is not None
+        result = await tool.execute(
+            path=str(target_file),
+            old_text='before\n',
+            new_text='after\n',
+            start_line=0,
+            end_line=0,
+            replacement='',
+        )
+        assert 'Successfully edited' in result
+        assert target_file.read_text(encoding='utf-8') == 'after\n'
+    finally:
+        manager.close()
+
+
+def test_filesystem_edit_manifest_exposes_explicit_mode_enum(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_filesystem_split_tools(workspace, 'filesystem_edit')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        descriptor = manager.get_tool_descriptor('filesystem_edit')
+        assert descriptor is not None
+        properties = dict((descriptor.parameters or {}).get('properties') or {})
+        mode_schema = dict(properties.get('mode') or {})
+
+        assert mode_schema.get('type') == 'string'
+        assert mode_schema.get('enum') == ['text_replace', 'line_range']
+    finally:
+        manager.close()
+
+
+def test_filesystem_edit_provider_visible_schema_requires_mode(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_filesystem_split_tools(workspace, 'filesystem_edit')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem_edit')
+        assert tool is not None
+
+        _description, schema = _provider_visible_tool_contract(tool)
+        properties = dict((schema or {}).get('properties') or {})
+        mode_schema = dict(properties.get('mode') or {})
+
+        assert mode_schema.get('type') == 'string'
+        assert mode_schema.get('enum') == ['text_replace', 'line_range']
+        assert 'mode' in list((schema or {}).get('required') or [])
     finally:
         manager.close()
 

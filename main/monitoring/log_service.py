@@ -3691,7 +3691,11 @@ class TaskLogService:
             payload.get('skill_visibility_diagnostics') or {}
         )
         payload['skill_visibility_diagnostics'] = skill_visibility_diagnostics
-        if messages or callable_tool_snapshots or contract_visible_skill_ids or skill_visibility_diagnostics:
+        has_skill_visibility_diagnostics = bool(
+            list(skill_visibility_diagnostics.get('registry_skill_ids') or [])
+            or list(skill_visibility_diagnostics.get('entries') or [])
+        )
+        if messages or callable_tool_snapshots or contract_visible_skill_ids or has_skill_visibility_diagnostics:
             serialized = json.dumps(
                 {
                     'messages': messages,

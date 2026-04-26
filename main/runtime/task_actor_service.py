@@ -8,6 +8,11 @@ from typing import Any
 from main.errors import TaskPausedError, describe_exception
 from main.models import NodeFinalResult, normalize_final_acceptance_metadata, normalize_result_payload
 from main.protocol import now_iso
+from main.runtime.acceptance_handshake import (
+    ACCEPTANCE_STATE_ACCEPTED,
+    ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
+    ACCEPTANCE_STATE_REJECTED_TERMINAL,
+)
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 
 _DEFAULT_NODE_DISPATCH_LIMITS = {
@@ -206,12 +211,17 @@ class TaskNodeDispatcher:
 
     def _get_or_create_entry(self, node_id: str) -> _DispatchEntry:
         normalized_node_id = str(node_id or '').strip()
-        entry = self._entries.get(normalized_node_id)
-        if entry is not None:
-            return entry
         node = self._store.get_node(normalized_node_id)
         if node is None:
             raise ValueError(f'node not found: {normalized_node_id}')
+        entry = self._entries.get(normalized_node_id)
+        if entry is not None:
+            status = str(getattr(node, 'status', '') or '').strip().lower()
+            if entry.future.done() and status not in {'success', 'failed'}:
+                self._finish_entry(entry)
+                self._entries.pop(normalized_node_id, None)
+            else:
+                return entry
         role = 'inspection' if str(node.node_kind or '').strip().lower() == 'acceptance' else 'execution'
         loop = asyncio.get_running_loop()
         future: asyncio.Future[NodeFinalResult] = loop.create_future()
@@ -415,19 +425,23 @@ class TaskActorService:
                         return
                 resumed_pending_notices = await self._resume_pending_notice_nodes(task_id)
                 if resumed_pending_notices:
-                    control_only_return = True
-                    return
-                result = await dispatcher.execute_node(task_id, root_node.node_id)
-                if str(result.delivery_status or '').strip() == 'partial':
-                    await self._enqueue_acceptance_followup_if_needed(task_id)
-                    control_only_return = True
-                    return
-                if result.status == 'success':
-                    result = await self._run_final_acceptance_if_needed(task_id)
+                    resumed_result = self._terminal_result_after_notice_resume(task_id)
+                    if resumed_result is None:
+                        control_only_return = True
+                        return
+                    result = resumed_result
+                else:
+                    result = await dispatcher.execute_node(task_id, root_node.node_id)
                     if str(result.delivery_status or '').strip() == 'partial':
                         await self._enqueue_acceptance_followup_if_needed(task_id)
                         control_only_return = True
                         return
+                    if result.status == 'success':
+                        result = await self._run_final_acceptance_if_needed(task_id)
+                        if str(result.delivery_status or '').strip() == 'partial':
+                            await self._enqueue_acceptance_followup_if_needed(task_id)
+                            control_only_return = True
+                            return
         except TaskPausedError:
             self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
             return
@@ -966,4 +980,112 @@ class TaskActorService:
             evidence=[],
             remaining_work=[],
             blocking_reason=failure_reason if str(node.status or '') == 'failed' else '',
+        )
+
+    def _terminal_result_after_notice_resume(self, task_id: str) -> NodeFinalResult | None:
+        task = self._store.get_task(task_id)
+        if task is None:
+            return None
+        root = self._store.get_node(task.root_node_id)
+        if root is None:
+            return NodeFinalResult(
+                status='failed',
+                delivery_status='blocked',
+                summary='missing root node',
+                answer='',
+                evidence=[],
+                remaining_work=[],
+                blocking_reason='missing root node',
+            )
+        root_result = self._result_from_node(root)
+        root_status = str(getattr(root, 'status', '') or '').strip().lower()
+        if root_status in {'success', 'failed'}:
+            return root_result
+        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance'))
+        if not bool(final_acceptance.required):
+            return None
+        acceptance_node_id = str(final_acceptance.node_id or '').strip()
+        acceptance_status = str(final_acceptance.status or '').strip().lower()
+        execution_output = str(root_result.answer or root_result.summary or '').strip()
+        check_result = str(getattr(root, 'check_result', '') or '').strip()
+
+        if acceptance_status in {'passed', 'failed'}:
+            self._reconcile_root_acceptance_handshake_after_notice_resume(
+                root=root,
+                acceptance_node_id=acceptance_node_id,
+                state=ACCEPTANCE_STATE_ACCEPTED if acceptance_status == 'passed' else ACCEPTANCE_STATE_REJECTED_TERMINAL,
+                rejection_feedback='' if acceptance_status == 'passed' else (check_result or str(task.failure_reason or '').strip()),
+                root_result=root_result,
+            )
+            summary = check_result or execution_output or (
+                'final acceptance passed' if acceptance_status == 'passed' else 'final acceptance failed'
+            )
+            return NodeFinalResult(
+                status='success',
+                delivery_status='final',
+                summary=summary,
+                answer=execution_output,
+                evidence=list(root_result.evidence or []),
+                remaining_work=[],
+                blocking_reason='',
+            )
+
+        if acceptance_status == ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE:
+            failure_text = (
+                str(getattr(root, 'failure_reason', '') or '').strip()
+                or str(task.failure_reason or '').strip()
+                or str(root_result.failure_text or '').strip()
+                or 'execution retry failed'
+            )
+            self._reconcile_root_acceptance_handshake_after_notice_resume(
+                root=root,
+                acceptance_node_id=acceptance_node_id,
+                state=ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
+                rejection_feedback=failure_text,
+                root_result=root_result,
+            )
+            return NodeFinalResult(
+                status='failed',
+                delivery_status='blocked',
+                summary=failure_text,
+                answer=str(getattr(root, 'final_output', '') or execution_output).strip(),
+                evidence=[],
+                remaining_work=[],
+                blocking_reason=failure_text,
+            )
+
+        return None
+
+    def _reconcile_root_acceptance_handshake_after_notice_resume(
+        self,
+        *,
+        root,
+        acceptance_node_id: str,
+        state: str,
+        rejection_feedback: str,
+        root_result: NodeFinalResult,
+    ) -> None:
+        updater = getattr(self._node_runner, '_update_execution_acceptance_handshake', None)
+        if not callable(updater):
+            return
+        metadata = dict(getattr(root, 'metadata', {}) or {})
+        handshake = dict(metadata.get('acceptance_handshake') or {})
+        result_ref = (
+            str(handshake.get('latest_execution_result_ref') or '').strip()
+            or str(metadata.get('result_payload_ref') or '').strip()
+        )
+        result_summary = (
+            str(handshake.get('latest_execution_result_summary') or '').strip()
+            or str(root_result.summary or root_result.answer or '').strip()
+        )
+        updater(
+            node_id=str(getattr(root, 'node_id', '') or '').strip(),
+            state=str(state or '').strip(),
+            acceptance_node_id=acceptance_node_id or str(handshake.get('acceptance_node_id') or '').strip(),
+            rejection_count=int(handshake.get('rejection_count') or 0),
+            max_rejections=int(handshake.get('max_rejections') or 3),
+            latest_execution_result_ref=result_ref,
+            latest_execution_result_summary=result_summary,
+            latest_rejection_feedback_ref='',
+            latest_rejection_feedback_summary=str(rejection_feedback or '').strip(),
         )

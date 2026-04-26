@@ -16,6 +16,9 @@ from g3ku.utils.subprocess_text import decode_subprocess_output, enrich_subproce
 
 _METADATA_START = '### G3KU_PATCH_METADATA ###'
 _DIFF_START = '### G3KU_PATCH_DIFF ###'
+_EDIT_MODE_TEXT = 'text_replace'
+_EDIT_MODE_RANGE = 'line_range'
+_EDIT_MODE_ERROR = 'Error: edit requires exactly one mode: text-replace or line-range'
 
 
 def _content_ref_path_error(path: str) -> str | None:
@@ -57,6 +60,72 @@ def _resolve_path(
         except ValueError as exc:
             raise PermissionError(f'Path {path} is outside allowed directory {allowed_dir}') from exc
     return resolved
+
+
+def _normalize_edit_mode(value: Any) -> str:
+    text = str(value or '').strip().lower()
+    if text in {'text-replace', 'text_replace', 'text'}:
+        return _EDIT_MODE_TEXT
+    if text in {'line-range', 'line_range', 'range', 'lines'}:
+        return _EDIT_MODE_RANGE
+    return text
+
+
+def _is_zero_like_line_marker(value: Any) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value == 0
+    text = str(value or '').strip()
+    if not text:
+        return False
+    try:
+        return int(text) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _normalize_edit_mode_inputs(
+    *,
+    mode: Any,
+    old_text: str | None,
+    new_text: str | None,
+    start_line: Any,
+    end_line: Any,
+    replacement: str | None,
+) -> dict[str, Any]:
+    normalized_mode = _normalize_edit_mode(mode)
+    normalized_start_line = start_line
+    normalized_end_line = end_line
+    normalized_replacement = replacement
+    text_mode_hint = old_text is not None or new_text is not None
+
+    # Some providers/tool adapters auto-fill optional integer/string fields with 0/""
+    # even when the model intended text-replace mode. Treat those placeholders as unset.
+    if normalized_mode in {'', _EDIT_MODE_TEXT} or text_mode_hint:
+        if _is_zero_like_line_marker(normalized_start_line):
+            normalized_start_line = None
+        if _is_zero_like_line_marker(normalized_end_line):
+            normalized_end_line = None
+        if normalized_replacement == '':
+            normalized_replacement = None
+
+    text_mode = old_text is not None or new_text is not None
+    range_mode = (
+        normalized_start_line is not None
+        or normalized_end_line is not None
+        or normalized_replacement is not None
+    )
+    return {
+        'mode': normalized_mode,
+        'old_text': old_text,
+        'new_text': new_text,
+        'start_line': normalized_start_line,
+        'end_line': normalized_end_line,
+        'replacement': normalized_replacement,
+        'text_mode': text_mode,
+        'range_mode': range_mode,
+    }
 
 
 def _runtime_task_id(runtime: dict[str, Any] | None, default: str | None = None) -> str:
@@ -322,6 +391,7 @@ class FilesystemTool:
         self,
         *,
         path: str,
+        mode: str | None,
         old_text: str | None,
         new_text: str | None,
         runtime: dict[str, Any],
@@ -333,12 +403,40 @@ class FilesystemTool:
         if denied is not None:
             return denied
         try:
-            text_mode = old_text is not None or new_text is not None
-            range_mode = start_line is not None or end_line is not None or replacement is not None
-            if text_mode and range_mode:
-                return 'Error: edit requires exactly one mode: text-replace or line-range'
-            if not text_mode and not range_mode:
-                return 'Error: edit requires exactly one mode: text-replace or line-range'
+            normalized = _normalize_edit_mode_inputs(
+                mode=mode,
+                old_text=old_text,
+                new_text=new_text,
+                start_line=start_line,
+                end_line=end_line,
+                replacement=replacement,
+            )
+            selected_mode = str(normalized.get('mode') or '').strip()
+            if selected_mode not in {'', _EDIT_MODE_TEXT, _EDIT_MODE_RANGE}:
+                return f'Error: invalid edit mode: {selected_mode}'
+            old_text = normalized.get('old_text')
+            new_text = normalized.get('new_text')
+            start_line = normalized.get('start_line')
+            end_line = normalized.get('end_line')
+            replacement = normalized.get('replacement')
+            text_mode = bool(normalized.get('text_mode'))
+            range_mode = bool(normalized.get('range_mode'))
+
+            if selected_mode == _EDIT_MODE_TEXT:
+                if range_mode:
+                    return _EDIT_MODE_ERROR
+                text_mode = True
+            elif selected_mode == _EDIT_MODE_RANGE:
+                if text_mode:
+                    return _EDIT_MODE_ERROR
+                range_mode = True
+            else:
+                if text_mode and range_mode:
+                    return _EDIT_MODE_ERROR
+                if not text_mode and not range_mode:
+                    return _EDIT_MODE_ERROR
+                selected_mode = _EDIT_MODE_TEXT if text_mode else _EDIT_MODE_RANGE
+
             file_path = _resolve_path(path, self._workspace, self._allowed_dir)
             self._enforce_workspace_path_policy(file_path=file_path, action='edit', runtime=runtime)
             if not file_path.exists():
@@ -346,7 +444,7 @@ class FilesystemTool:
             if not file_path.is_file():
                 return f'Error: Not a file: {path}'
             original = file_path.read_text(encoding='utf-8')
-            if text_mode:
+            if selected_mode == _EDIT_MODE_TEXT:
                 if old_text is None:
                     return 'Error: old_text is required in text-replace mode'
                 if new_text is None:
@@ -1070,6 +1168,11 @@ class FilesystemActionTool:
                 'type': 'object',
                 'properties': {
                     'path': {'type': 'string', 'description': 'Absolute file path to edit.'},
+                    'mode': {
+                        'type': 'string',
+                        'enum': [_EDIT_MODE_TEXT, _EDIT_MODE_RANGE],
+                        'description': 'Optional explicit edit mode. Use text_replace with old_text/new_text or line_range with start_line/end_line/replacement.',
+                    },
                     'old_text': {'type': 'string', 'description': 'Existing text for text-replace mode.'},
                     'new_text': {'type': 'string', 'description': 'Replacement text for text-replace mode.'},
                     'start_line': {'type': 'integer', 'description': 'Start line for line-range mode.'},
@@ -1145,6 +1248,7 @@ class FilesystemActionTool:
         if self._action == 'edit':
             return await self._delegate.edit(
                 path=str(kwargs.get('path') or ''),
+                mode=kwargs.get('mode'),
                 old_text=kwargs.get('old_text'),
                 new_text=kwargs.get('new_text'),
                 runtime=runtime,

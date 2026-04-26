@@ -560,7 +560,8 @@ class NodeRunner:
         try:
             return await awaitable
         finally:
-            self._set_runtime_await_marker(task_id=task_id, node_id=node_id, marker='')
+            if self._log_service.read_runtime_frame(task_id, node_id) is not None:
+                self._set_runtime_await_marker(task_id=task_id, node_id=node_id, marker='')
 
     async def _run_nested_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         executor = self.nested_node_executor

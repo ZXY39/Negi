@@ -153,6 +153,12 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
   - 目录 `copy` / `move` 只允许目标路径不存在
   - 目录 `delete` 必须显式 `recursive=true`
 
+Maintenance note for `filesystem_edit`:
+
+- The surfaced/runtime contract now exposes an explicit `mode` field with `text_replace` / `line_range`.
+- Provider-facing callable schema should require `mode`, but runtime still tolerates omitted `mode` for backward compatibility and infers the lane from the supplied arguments when possible.
+- The edit executor now also strips placeholder line-range values such as `start_line=0`, `end_line=0`, and `replacement=""` before mode selection when the request otherwise clearly matches text-replace intent. This exists specifically to absorb adapter/provider auto-fill noise; maintainers should not treat it as permission for real mixed-mode edits.
+
 ### 3.2 candidate tools
 
 Maintenance note for surfaced fixed builtins:

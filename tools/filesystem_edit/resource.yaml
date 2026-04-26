@@ -30,6 +30,12 @@ parameters:
     path:
       type: string
       description: Absolute file path to edit.
+    mode:
+      type: string
+      enum:
+        - text_replace
+        - line_range
+      description: Optional explicit edit mode. Use text_replace with old_text/new_text or line_range with start_line/end_line/replacement.
     old_text:
       type: string
       description: Existing text for text-replace mode.
@@ -47,6 +53,36 @@ parameters:
       description: Replacement text for line-range mode.
   required:
     - path
+model_parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: Absolute file path to edit.
+    mode:
+      type: string
+      enum:
+        - text_replace
+        - line_range
+      description: Explicit edit mode. Use text_replace with old_text/new_text or line_range with start_line/end_line/replacement.
+    old_text:
+      type: string
+      description: Existing text for text-replace mode.
+    new_text:
+      type: string
+      description: Replacement text for text-replace mode.
+    start_line:
+      type: integer
+      description: Start line for line-range mode.
+    end_line:
+      type: integer
+      description: End line for line-range mode.
+    replacement:
+      type: string
+      description: Replacement text for line-range mode.
+  required:
+    - path
+    - mode
 governance:
   family: filesystem
   display_name: Filesystem
