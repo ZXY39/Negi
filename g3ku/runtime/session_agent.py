@@ -100,6 +100,8 @@ class RuntimeAgentSession:
         self._frontdoor_visible_tool_ids: list[str] = []
         self._frontdoor_visible_skill_ids: list[str] = []
         self._frontdoor_provider_tool_schema_names: list[str] = []
+        self._frontdoor_restore_source: str = "none"
+        self._frontdoor_baseline_sync_decision: str = ""
         self._frontdoor_completed_continuity_bridge_pending: bool = False
         self._last_stop_reason: str = ""
         self._active_turn_id: str | None = None
@@ -107,7 +109,7 @@ class RuntimeAgentSession:
         self._active_user_batch_inputs: list[UserInputMessage] = []
         self._last_verified_task_ids: list[str] = []
         self._turn_lock = asyncio.Lock()
-        self._restore_completed_continuity_snapshot()
+        self._restore_frontdoor_persistent_state()
 
     @property
     def state(self) -> AgentState:
@@ -143,12 +145,189 @@ class RuntimeAgentSession:
             return sorted(normalized)
         return normalized
 
-    def _restore_completed_continuity_snapshot(self) -> None:
+    @staticmethod
+    def _restorable_frontdoor_request_body_messages(
+        request_messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
+        from g3ku.runtime.web_ceo_sessions import strip_multimodal_blocks_from_message_records
+
+        body_messages: list[dict[str, Any]] = []
+        for item in list(request_messages or []):
+            if not isinstance(item, dict):
+                continue
+            record = dict(item)
+            if is_frontdoor_tool_contract_message(record):
+                continue
+            body_messages.append(record)
+        return strip_multimodal_blocks_from_message_records(body_messages)
+
+    @staticmethod
+    def _frontdoor_actual_request_history_record_from_payload(
+        payload: dict[str, Any],
+        *,
+        artifact_path: str,
+    ) -> dict[str, Any]:
+        return {
+            "path": str(artifact_path or "").strip(),
+            "request_id": str(payload.get("request_id") or "").strip(),
+            "created_at": str(payload.get("created_at") or "").strip(),
+            "persisted_at": str(payload.get("persisted_at") or "").strip(),
+            "turn_id": str(payload.get("turn_id") or "").strip(),
+            "actual_request_hash": str(payload.get("actual_request_hash") or "").strip(),
+            "actual_request_message_count": int(payload.get("actual_request_message_count") or 0),
+            "actual_tool_schema_hash": str(payload.get("actual_tool_schema_hash") or "").strip(),
+            "prompt_cache_key_hash": str(payload.get("prompt_cache_key_hash") or "").strip(),
+            "provider_model": str(payload.get("provider_model") or "").strip(),
+        }
+
+    def _restore_frontdoor_state_from_payload(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        source: str,
+        allow_continuity_bridge: bool,
+    ) -> bool:
+        if not isinstance(payload, dict) or not payload:
+            return False
+        frontdoor_request_body_messages = self._restorable_frontdoor_request_body_messages(
+            payload.get("frontdoor_request_body_messages")
+        )
+        if not frontdoor_request_body_messages:
+            return False
+        self._frontdoor_request_body_messages = list(frontdoor_request_body_messages)
+        self._frontdoor_history_shrink_reason = str(
+            payload.get("frontdoor_history_shrink_reason") or ""
+        ).strip()
+        self._frontdoor_token_preflight_diagnostics = dict(
+            payload.get("frontdoor_token_preflight_diagnostics") or {}
+        )
+        actual_request_path = str(
+            payload.get("frontdoor_actual_request_path") or payload.get("actual_request_path") or ""
+        ).strip()
+        actual_request_history = [
+            dict(item)
+            for item in list(
+                payload.get("frontdoor_actual_request_history") or payload.get("actual_request_history") or []
+            )
+            if isinstance(item, dict)
+        ]
+        self._frontdoor_actual_request_path = actual_request_path
+        self._frontdoor_actual_request_history = actual_request_history
+        self._frontdoor_stage_state = dict(payload.get("frontdoor_stage_state") or {})
+        self._frontdoor_canonical_context = dict(payload.get("frontdoor_canonical_context") or {})
+        self._compression_state = dict(
+            payload.get("compression_state") or payload.get("compression") or {}
+        )
+        self._semantic_context_state = dict(payload.get("semantic_context_state") or {})
+        self._frontdoor_hydrated_tool_names = self._normalized_name_list(
+            payload.get("hydrated_tool_names")
+        )
+        self._frontdoor_capability_snapshot_exposure_revision = str(
+            payload.get("capability_snapshot_exposure_revision") or ""
+        ).strip()
+        self._frontdoor_visible_tool_ids = self._normalized_name_list(payload.get("visible_tool_ids"))
+        self._frontdoor_visible_skill_ids = self._normalized_name_list(payload.get("visible_skill_ids"))
+        self._frontdoor_provider_tool_schema_names = self._normalized_name_list(
+            payload.get("provider_tool_schema_names")
+        )
+        self._frontdoor_restore_source = str(source or "none").strip() or "none"
+        self._frontdoor_baseline_sync_decision = str(
+            payload.get("frontdoor_baseline_sync_decision") or ""
+        ).strip()
+        last_history = actual_request_history[-1] if actual_request_history else {}
+        self._frontdoor_prompt_cache_key_hash = str(
+            payload.get("frontdoor_prompt_cache_key_hash")
+            or payload.get("prompt_cache_key_hash")
+            or last_history.get("prompt_cache_key_hash")
+            or ""
+        ).strip()
+        self._frontdoor_actual_request_hash = str(
+            payload.get("frontdoor_actual_request_hash")
+            or payload.get("actual_request_hash")
+            or last_history.get("actual_request_hash")
+            or ""
+        ).strip()
+        self._frontdoor_actual_request_message_count = int(
+            payload.get("frontdoor_actual_request_message_count")
+            or payload.get("actual_request_message_count")
+            or last_history.get("actual_request_message_count")
+            or 0
+        )
+        self._frontdoor_actual_tool_schema_hash = str(
+            payload.get("frontdoor_actual_tool_schema_hash")
+            or payload.get("actual_tool_schema_hash")
+            or last_history.get("actual_tool_schema_hash")
+            or ""
+        ).strip()
+        bridge_path = actual_request_path or str(last_history.get("path") or "").strip()
+        self._frontdoor_completed_continuity_bridge_pending = bool(
+            allow_continuity_bridge
+            and bridge_path
+            and Path(bridge_path).exists()
+            and self._frontdoor_capability_snapshot_exposure_revision
+            and self._frontdoor_provider_tool_schema_names
+        )
+        return True
+
+    def _restore_frontdoor_state_from_latest_actual_request_artifact(self, session_key: str) -> bool:
+        try:
+            from g3ku.runtime.web_ceo_sessions import actual_request_dir_for_session
+        except Exception:
+            return False
+        request_dir = actual_request_dir_for_session(session_key, create=False)
+        if not request_dir.exists():
+            return False
+        try:
+            artifact_paths = sorted(request_dir.glob("*.json"), reverse=True)
+        except Exception:
+            return False
+        for artifact_path in artifact_paths:
+            try:
+                payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            request_messages = [
+                dict(item)
+                for item in list(payload.get("request_messages") or [])
+                if isinstance(item, dict)
+            ]
+            durable_messages = self._restorable_frontdoor_request_body_messages(request_messages)
+            if not durable_messages:
+                continue
+            history_record = self._frontdoor_actual_request_history_record_from_payload(
+                payload,
+                artifact_path=str(artifact_path.resolve()),
+            )
+            return self._restore_frontdoor_state_from_payload(
+                {
+                    "frontdoor_request_body_messages": durable_messages,
+                    "frontdoor_history_shrink_reason": str(
+                        payload.get("frontdoor_history_shrink_reason") or ""
+                    ).strip(),
+                    "frontdoor_token_preflight_diagnostics": dict(
+                        payload.get("frontdoor_token_preflight_diagnostics") or {}
+                    ),
+                    "frontdoor_actual_request_path": str(artifact_path.resolve()),
+                    "frontdoor_actual_request_history": [history_record],
+                    "prompt_cache_key_hash": str(payload.get("prompt_cache_key_hash") or "").strip(),
+                    "actual_request_hash": str(payload.get("actual_request_hash") or "").strip(),
+                    "actual_request_message_count": int(payload.get("actual_request_message_count") or 0),
+                    "actual_tool_schema_hash": str(payload.get("actual_tool_schema_hash") or "").strip(),
+                },
+                source="actual_request_artifact",
+                allow_continuity_bridge=False,
+            )
+        return False
+
+    def _restore_frontdoor_persistent_state(self) -> str:
         session_key = str(self._state.session_key or "").strip()
         if not session_key.startswith("web:"):
-            return
+            self._frontdoor_restore_source = "none"
+            return "none"
         if getattr(self._loop, "sessions", None) is None:
-            return
+            self._frontdoor_restore_source = "none"
+            return "none"
         try:
             from g3ku.runtime.web_ceo_sessions import (
                 read_completed_continuity_snapshot,
@@ -156,57 +335,25 @@ class RuntimeAgentSession:
                 read_paused_execution_context,
             )
         except Exception:
-            return
-        if read_inflight_turn_snapshot(session_key) is not None:
-            return
-        if read_paused_execution_context(session_key) is not None:
-            return
-        snapshot = read_completed_continuity_snapshot(session_key)
-        if not isinstance(snapshot, dict) or not snapshot:
-            return
-        self._frontdoor_request_body_messages = [
-            dict(item)
-            for item in list(snapshot.get("frontdoor_request_body_messages") or [])
-            if isinstance(item, dict)
-        ]
-        self._frontdoor_history_shrink_reason = str(
-            snapshot.get("frontdoor_history_shrink_reason") or ""
-        ).strip()
-        self._frontdoor_token_preflight_diagnostics = dict(
-            snapshot.get("frontdoor_token_preflight_diagnostics") or {}
+            self._frontdoor_restore_source = "none"
+            return "none"
+        candidates = (
+            ("paused_snapshot", read_paused_execution_context(session_key), True),
+            ("inflight_snapshot", read_inflight_turn_snapshot(session_key), True),
+            ("completed_continuity", read_completed_continuity_snapshot(session_key), True),
         )
-        self._frontdoor_actual_request_path = str(
-            snapshot.get("frontdoor_actual_request_path") or ""
-        ).strip()
-        self._frontdoor_actual_request_history = [
-            dict(item)
-            for item in list(snapshot.get("frontdoor_actual_request_history") or [])
-            if isinstance(item, dict)
-        ]
-        self._frontdoor_stage_state = dict(snapshot.get("frontdoor_stage_state") or {})
-        self._frontdoor_canonical_context = dict(snapshot.get("frontdoor_canonical_context") or {})
-        self._compression_state = dict(snapshot.get("compression_state") or {})
-        self._semantic_context_state = dict(snapshot.get("semantic_context_state") or {})
-        self._frontdoor_hydrated_tool_names = self._normalized_name_list(
-            snapshot.get("hydrated_tool_names")
-        )
-        self._frontdoor_capability_snapshot_exposure_revision = str(
-            snapshot.get("capability_snapshot_exposure_revision") or ""
-        ).strip()
-        self._frontdoor_visible_tool_ids = self._normalized_name_list(snapshot.get("visible_tool_ids"))
-        self._frontdoor_visible_skill_ids = self._normalized_name_list(snapshot.get("visible_skill_ids"))
-        self._frontdoor_provider_tool_schema_names = self._normalized_name_list(
-            snapshot.get("provider_tool_schema_names")
-        )
-        bridge_path = self._frontdoor_actual_request_path
-        if not bridge_path and self._frontdoor_actual_request_history:
-            bridge_path = str(self._frontdoor_actual_request_history[-1].get("path") or "").strip()
-        self._frontdoor_completed_continuity_bridge_pending = bool(
-            bridge_path
-            and Path(bridge_path).exists()
-            and self._frontdoor_capability_snapshot_exposure_revision
-            and self._frontdoor_provider_tool_schema_names
-        )
+        for source, payload, allow_bridge in candidates:
+            if self._restore_frontdoor_state_from_payload(
+                payload,
+                source=source,
+                allow_continuity_bridge=allow_bridge,
+            ):
+                return self._frontdoor_restore_source
+        if self._restore_frontdoor_state_from_latest_actual_request_artifact(session_key):
+            return self._frontdoor_restore_source
+        self._frontdoor_restore_source = "none"
+        self._frontdoor_completed_continuity_bridge_pending = False
+        return "none"
 
     def _consume_completed_continuity_bridge(
         self,
@@ -299,6 +446,13 @@ class RuntimeAgentSession:
                             getattr(self, "_frontdoor_provider_tool_schema_names", [])
                         )
                     ),
+                    "frontdoor_restore_source": str(
+                        getattr(self, "_frontdoor_restore_source", "none") or "none"
+                    ).strip()
+                    or "none",
+                    "frontdoor_baseline_sync_decision": str(
+                        getattr(self, "_frontdoor_baseline_sync_decision", "") or ""
+                    ).strip(),
                     "source_reason": str(source_reason or "").strip(),
                 },
             )
@@ -1518,6 +1672,14 @@ class RuntimeAgentSession:
         actual_request_history = getattr(self, "_frontdoor_actual_request_history", None)
         if isinstance(actual_request_history, list) and actual_request_history:
             snapshot["actual_request_history"] = copy.deepcopy(actual_request_history)
+        frontdoor_restore_source = str(getattr(self, "_frontdoor_restore_source", "none") or "none").strip() or "none"
+        if frontdoor_restore_source != "none":
+            snapshot["frontdoor_restore_source"] = frontdoor_restore_source
+        frontdoor_baseline_sync_decision = str(
+            getattr(self, "_frontdoor_baseline_sync_decision", "") or ""
+        ).strip()
+        if frontdoor_baseline_sync_decision:
+            snapshot["frontdoor_baseline_sync_decision"] = frontdoor_baseline_sync_decision
         if (
             not canonical_context
             and not compression

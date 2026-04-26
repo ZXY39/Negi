@@ -37,6 +37,14 @@ _TASK_RESULT_OUTPUT_MAX_CHARS = 480
 _TASK_RESULT_REASON_MAX_CHARS = 180
 _CONTINUITY_ALLOWED_SHRINK_REASONS = {"", "token_compression", "stage_compaction"}
 _CONTINUITY_ALLOWED_SOURCE_REASONS = {"actual_request_sync", "finalize", "manual_stop"}
+_CONTINUITY_ALLOWED_RESTORE_SOURCES = {
+    "paused_snapshot",
+    "inflight_snapshot",
+    "completed_continuity",
+    "actual_request_artifact",
+    "none",
+}
+_CONTINUITY_ALLOWED_BASELINE_SYNC_DECISIONS = {"", "allowed", "blocked_internal_only_regression"}
 _CEO_CONFIG_CACHE_LOCK = threading.RLock()
 _CEO_CONFIG_CACHE: dict[str, Any] = {
     'token': None,
@@ -994,6 +1002,12 @@ def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | 
     shrink_reason = str(payload.get("frontdoor_history_shrink_reason") or "").strip()
     if shrink_reason not in _CONTINUITY_ALLOWED_SHRINK_REASONS:
         shrink_reason = ""
+    restore_source = str(payload.get("frontdoor_restore_source") or "none").strip() or "none"
+    if restore_source not in _CONTINUITY_ALLOWED_RESTORE_SOURCES:
+        restore_source = "none"
+    baseline_sync_decision = str(payload.get("frontdoor_baseline_sync_decision") or "").strip()
+    if baseline_sync_decision not in _CONTINUITY_ALLOWED_BASELINE_SYNC_DECISIONS:
+        baseline_sync_decision = ""
     normalized = {
         "frontdoor_request_body_messages": strip_multimodal_blocks_from_message_records(
             payload.get("frontdoor_request_body_messages")
@@ -1011,6 +1025,8 @@ def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | 
         "visible_tool_ids": _normalized_name_list(payload.get("visible_tool_ids")),
         "visible_skill_ids": _normalized_name_list(payload.get("visible_skill_ids")),
         "provider_tool_schema_names": _normalized_name_list(payload.get("provider_tool_schema_names")),
+        "frontdoor_restore_source": restore_source,
+        "frontdoor_baseline_sync_decision": baseline_sync_decision,
         "updated_at": updated_at,
         "source_reason": source_reason,
     }

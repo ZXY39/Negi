@@ -3669,7 +3669,7 @@ async def test_memory_write_queues_explicit_memory_request(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_memory_delete_queues_id_deletion_request(tmp_path: Path):
+async def test_memory_delete_queues_natural_language_deletion_request(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -3693,7 +3693,7 @@ async def test_memory_delete_queues_id_deletion_request(tmp_path: Path):
 
     payload = json.loads(
         await tool.execute(
-            id='Ab12Z9',
+            content='删除那条“默认创建文件时遵循项目格式要求”的长期记忆',
             __g3ku_runtime={'session_key': 'cli:demo'},
         )
     )
@@ -3703,4 +3703,4 @@ async def test_memory_delete_queues_id_deletion_request(tmp_path: Path):
     assert manager.last_call['session_key'] == 'cli:demo'
     assert manager.last_call['decision_source'] == 'user'
     assert manager.last_call['trigger_source'] == 'memory_delete_tool'
-    assert manager.last_call['payload_text'] == '["Ab12Z9"]'
+    assert manager.last_call['payload_text'] == '删除那条“默认创建文件时遵循项目格式要求”的长期记忆'

@@ -15,6 +15,7 @@ from g3ku.runtime.web_ceo_sessions import (
     SESSION_TASK_DEFAULTS_SCOPE_KEY,
     SESSION_TASK_DEFAULTS_SCOPE_SESSION,
     WebCeoStateStore,
+    actual_request_dir_for_session,
     build_ceo_session_catalog,
     ceo_session_task_defaults_scope,
     ceo_session_family,
@@ -90,6 +91,9 @@ def _ensure_runtime_session(runtime_manager, session) -> object | None:
         memory_channel=str(memory_scope.get("channel") or "").strip() or None,
         memory_chat_id=str(memory_scope.get("chat_id") or "").strip() or None,
     )
+    restore_frontdoor_state = getattr(runtime_session, "_restore_frontdoor_persistent_state", None)
+    if callable(restore_frontdoor_state):
+        restore_frontdoor_state()
     paused_snapshot = read_paused_execution_context(session.key) or {}
     if not isinstance(paused_snapshot, dict) or not paused_snapshot:
         return runtime_session
@@ -101,25 +105,19 @@ def _ensure_runtime_session(runtime_manager, session) -> object | None:
             setattr(state, "status", str(paused_snapshot.get("status") or "paused"))
         if hasattr(state, "paused"):
             setattr(state, "paused", str(paused_snapshot.get("status") or "paused").strip().lower() == "paused")
-    request_body_messages = [
-        dict(item)
-        for item in list(paused_snapshot.get("frontdoor_request_body_messages") or [])
-        if isinstance(item, dict)
-    ]
-    if request_body_messages or "frontdoor_request_body_messages" in paused_snapshot:
-        setattr(runtime_session, "_frontdoor_request_body_messages", request_body_messages)
-    if "frontdoor_history_shrink_reason" in paused_snapshot:
-        setattr(
-            runtime_session,
-            "_frontdoor_history_shrink_reason",
-            str(paused_snapshot.get("frontdoor_history_shrink_reason") or "").strip(),
-        )
     return runtime_session
 
 
 def _recreate_runtime_session(runtime_manager, session) -> object | None:
     paused_snapshot = read_paused_execution_context(session.key) or {}
-    if not isinstance(paused_snapshot, dict) or not paused_snapshot:
+    inflight_snapshot = read_inflight_turn_snapshot(session.key) or {}
+    continuity_snapshot = read_completed_continuity_snapshot(session.key) or {}
+    request_dir = actual_request_dir_for_session(session.key, create=False)
+    has_request_artifact = request_dir.exists() and any(request_dir.glob("*.json"))
+    if not any(
+        isinstance(snapshot, dict) and snapshot
+        for snapshot in (paused_snapshot, inflight_snapshot, continuity_snapshot)
+    ) and not has_request_artifact:
         return None
     return _ensure_runtime_session(runtime_manager, session)
 

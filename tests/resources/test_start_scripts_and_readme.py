@@ -82,17 +82,18 @@ def test_readme_uses_start_script_as_primary_launch_and_moves_manual_commands_la
 def test_readme_adds_emoji_to_seven_pillars_and_feature_intro_section() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "1. 🧠 自进化体系" in readme
-    assert "2. 🧩 渐进式加载模式" in readme
-    assert "3. 👥 多 Agent 架构" in readme
-    assert "4. 🗺️ 混合 Agent 执行模式" in readme
-    assert "5. 🗜️ 多层上下文压缩优化机制" in readme
-    assert "6. ⚡ 高并发下的性能监控与动态放行机制" in readme
-    assert "7. 🛡️ 安全机制" in readme
+    assert "1. 🧠 **自进化体系**" in readme
+    assert "2. 🧩  **渐进式加载模式**" in readme
+    assert "3. 👥  **多 Agent 架构**" in readme
+    assert "4. 🗺️  **混合 Agent 执行模式**" in readme
+    assert "5. 🗜️  **多层上下文压缩优化机制**" in readme
+    assert "6. ⚡  **性能监控与动态放行机制**" in readme
+    assert "7. 🛡️  **安全机制**" in readme
 
     assert "## 5. 功能介绍" in readme
+    assert "如果你第一次接触 G3KU" in readme
     assert "直接问 Agent“你能做什么？有哪些技能和工具？”" in readme
-    assert "Skill 管理和 Tool 管理页面" in readme
-    assert "浏览器自动化" in readme
+    assert "在 Skill 管理和 Tool 管理页面里自定义管理能力" in readme
+    assert "浏览器自动化相关能力" in readme
     assert "定时任务" in readme
-    assert "Skill 安装与下载" in readme
+    assert "Skill 安装与下载等扩展能力" in readme
