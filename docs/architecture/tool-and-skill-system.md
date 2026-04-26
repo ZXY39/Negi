@@ -155,13 +155,24 @@ filesystem 家族现在与 content 家族不同：它不再保留可执行的 le
 
 Maintenance note for `filesystem_edit`:
 
-- The surfaced/runtime contract now exposes an explicit `mode` field with `text_replace` / `line_range`.
-- Provider-facing callable schema should require `mode`, but runtime still tolerates omitted `mode` for backward compatibility and infers the lane from the supplied arguments when possible.
-- The edit executor now strips placeholder values from the opposite lane before mode selection when intent is otherwise clear:
+- `filesystem_edit` is now target-first for agent-facing calls. The preferred callable/model-visible contract is `path + target + new_text`, where `target.by` is one of `exact_text`, `anchor_pair`, or `line_range`.
+- Runtime validation still keeps a broader backward-compatible lane. Besides the new `target` object, it still tolerates legacy `mode + old_text/new_text` and `mode + start_line/end_line/replacement` calls.
+- The main maintenance boundary is now:
+  - provider/tool-context guidance should teach the model to resolve a concrete object/span first
+  - runtime execution still preserves the older text-replace and line-range forms so existing calls do not break immediately
+- `target.by=exact_text` is the preferred lane when the old block is known and should match uniquely.
+- `target.by=anchor_pair` exists for the common “I know the enclosing anchors but not the exact current body” case; the runtime resolves the ordered region between the anchors before applying the edit.
+- `target.by=line_range` is now a compatibility/fallback lane for cases where the caller already knows exact current line numbers from a fresh read. Maintainers should not treat raw line numbers as the primary contract anymore.
+- The edit executor still strips placeholder values from the opposite lane before deciding whether a legacy call is really text-replace or line-range:
   - text-replace calls may auto-carry `start_line=0`, `end_line=0`, `replacement=""`
   - line-range calls may auto-carry `old_text=""`, `new_text=""`
-- This cleanup exists specifically to absorb adapter/provider auto-fill noise; maintainers should not treat it as permission for real mixed-mode edits with non-empty fields from both lanes.
-- `load_tool_context` / `get_tool_toolskill` agent-facing parameter summaries should now prefer the callable/model-visible schema when a surfaced executor exposes one, rather than blindly replaying the validator-only runtime schema. This is why `filesystem_edit` tool context shows `mode` in the callable contract even though runtime still keeps backward-compatible mode inference.
+- That placeholder cleanup exists only to absorb adapter/provider auto-fill noise. It is not permission for real mixed-mode edits with non-empty fields from both lanes, and it does not make `target + legacy fields` a supported combined contract.
+- `load_tool_context` / `get_tool_toolskill` agent-facing parameter summaries should still prefer the callable/model-visible schema when a surfaced executor exposes one. After this change, that means `filesystem_edit` tool context should show the target-first callable contract even though runtime keeps the broader backward-compatible validator schema underneath.
+
+Maintenance note for the rest of the filesystem family:
+
+- `filesystem_write` remains the whole-file lane. It should be understood as “create or replace the full file body,” not as a partial-edit tool.
+- `filesystem_copy` / `filesystem_move` / `filesystem_delete` remain path-level batch operations. They did not adopt the internal target-resolution contract used by `filesystem_edit`, because their unit of mutation is already the whole filesystem object path rather than a region inside file content.
 
 ### 3.2 candidate tools
 
