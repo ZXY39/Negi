@@ -94,6 +94,8 @@ const S = {
     ceoSelectedSessionIds: new Set(),
     ceoScrollToLatestOnSnapshot: false,
     ceoSnapshotCache: {},
+    ceoReplyDeltaBuffers: {},
+    ceoReplyDeltaFrameId: 0,
     ceoSnapshotPersistId: null,
     ceoContextLoadNoticeSeq: 0,
     ceoContextLoadNoticeTimeoutIds: new Map(),
@@ -3970,6 +3972,21 @@ function renderCeoAssistantLoadingState(turn, label = CEO_ASSISTANT_LOADING_LABE
     icons();
 }
 
+function renderCeoAssistantStreamTextIntoTurn(turn, text = "") {
+    if (!turn?.textEl) return;
+    const normalizedText = String(text || "");
+    if (!normalizedText.trim()) {
+        renderCeoAssistantLoadingState(turn);
+        return;
+    }
+    turn.textEl.textContent = normalizedText;
+    turn.textEl.classList.add("pending");
+    turn.textEl.classList.remove("assistant-text-loading");
+    turn.textEl.classList.remove("markdown-content");
+    syncCeoAssistantLoadingAria(turn.textEl);
+    syncCeoTurnLoadingOnlyState(turn, false);
+}
+
 function renderCeoAssistantTextIntoTurn(turn, text = "", { status = "" } = {}) {
     if (!turn?.textEl) return;
     const normalizedText = String(text || "").trim();
@@ -3997,6 +4014,93 @@ function renderCeoAssistantTextIntoTurn(turn, text = "", { status = "" } = {}) {
     turn.textEl.classList.add("markdown-content");
     syncCeoAssistantLoadingAria(turn.textEl);
     syncCeoTurnLoadingOnlyState(turn, false);
+}
+
+function clearCeoReplyDeltaBuffer(sessionId = "", { turnId = "" } = {}) {
+    const key = String(sessionId || "").trim();
+    if (!key) return false;
+    const current = S.ceoReplyDeltaBuffers && typeof S.ceoReplyDeltaBuffers === "object"
+        ? S.ceoReplyDeltaBuffers[key]
+        : null;
+    if (!current || typeof current !== "object") return false;
+    const expectedTurnId = normalizeCeoTurnId(turnId);
+    const currentTurnId = normalizeCeoTurnId(current?.turnId || "");
+    if (expectedTurnId && currentTurnId && expectedTurnId !== currentTurnId) return false;
+    const next = { ...(S.ceoReplyDeltaBuffers || {}) };
+    delete next[key];
+    S.ceoReplyDeltaBuffers = next;
+    if (!Object.keys(next).length && S.ceoReplyDeltaFrameId) {
+        cancelAnimationFrame(S.ceoReplyDeltaFrameId);
+        S.ceoReplyDeltaFrameId = 0;
+    }
+    return true;
+}
+
+function flushCeoReplyDeltaBuffers() {
+    const buffered = S.ceoReplyDeltaBuffers && typeof S.ceoReplyDeltaBuffers === "object"
+        ? { ...S.ceoReplyDeltaBuffers }
+        : {};
+    S.ceoReplyDeltaBuffers = {};
+    S.ceoReplyDeltaFrameId = 0;
+    const entries = Object.entries(buffered);
+    if (!entries.length) return;
+    entries.forEach(([sessionId, payload]) => {
+        const normalizedSessionId = String(sessionId || "").trim();
+        if (!normalizedSessionId || !payload || typeof payload !== "object") return;
+        const source = normalizeCeoTurnSource(payload?.source || "user");
+        const turnId = normalizeCeoTurnId(payload?.turnId || "");
+        const text = String(payload?.text || "");
+        if (normalizedSessionId === activeSessionId()) {
+            const turn = ensureActiveCeoTurn({ source, turnId });
+            if (turn?.textEl) {
+                mutateCeoFeed(() => {
+                    if (turnId) turn.turnId = turnId;
+                    if (source) turn.source = source;
+                    renderCeoAssistantStreamTextIntoTurn(turn, text);
+                    icons();
+                }, { scrollMode: "preserve" });
+            }
+        }
+        patchCeoSessionSnapshotCache(normalizedSessionId, (entry) => {
+            const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn) || {};
+            return {
+                ...(entry || {}),
+                inflight_turn: {
+                    ...inflightTurn,
+                    source: source || String(inflightTurn?.source || "").trim().toLowerCase() || "user",
+                    turn_id: turnId || inflightTurn?.turn_id || "",
+                    status: String(inflightTurn?.status || "running").trim().toLowerCase() || "running",
+                    assistant_text: text,
+                    assistant_stream_seq: Number(payload?.seq || 0),
+                },
+            };
+        });
+    });
+}
+
+function queueCeoReplyDelta(payload = {}, { sessionId = activeSessionId() } = {}) {
+    const key = String(sessionId || "").trim();
+    if (!key || !payload || typeof payload !== "object") return false;
+    const seq = Number(payload?.seq || 0);
+    const current = S.ceoReplyDeltaBuffers && typeof S.ceoReplyDeltaBuffers === "object"
+        ? S.ceoReplyDeltaBuffers[key]
+        : null;
+    const currentSeq = Number(current?.seq || 0);
+    if (current && currentSeq > seq) return false;
+    S.ceoReplyDeltaBuffers = {
+        ...(S.ceoReplyDeltaBuffers || {}),
+        [key]: {
+            sessionId: key,
+            turnId: normalizeCeoTurnId(payload?.turn_id || payload?.turnId || ""),
+            source: normalizeCeoTurnSource(payload?.source || "user"),
+            text: String(payload?.text || ""),
+            seq,
+        },
+    };
+    if (!S.ceoReplyDeltaFrameId) {
+        S.ceoReplyDeltaFrameId = requestAnimationFrame(() => flushCeoReplyDeltaBuffers());
+    }
+    return true;
 }
 
 function resetCeoToolFlow(turn) {
@@ -8193,6 +8297,7 @@ function initCeoWs() {
         const payloadSessionId = String(payload?.session_id || payload?.data?.session_id || "").trim();
         const effectiveSessionId = payloadSessionId || requestedSessionId || activeSessionId();
         if (payload.type === "snapshot.ceo") {
+            clearCeoReplyDeltaBuffer(effectiveSessionId);
             S.ceoWsLastErrorCode = "";
             const snapshotEntry = {
                 session_id: effectiveSessionId,
@@ -8255,6 +8360,9 @@ function initCeoWs() {
             }
         }
         if (payload.type === "ceo.turn.patch") {
+            clearCeoReplyDeltaBuffer(effectiveSessionId, {
+                turnId: payload.data?.inflight_turn?.turn_id || payload.data?.preserved_turn?.turn_id || "",
+            });
             const patchEntry = {
                 session_id: effectiveSessionId,
                 inflight_turn: payload.data?.inflight_turn || null,
@@ -8292,7 +8400,11 @@ function initCeoWs() {
         if (payload.type === "ceo.internal.ack" && effectiveSessionId === activeSessionId()) {
             handleCeoInternalAck(payload.data || {});
         }
+        if (payload.type === "ceo.reply.delta") {
+            queueCeoReplyDelta(payload.data || {}, { sessionId: effectiveSessionId });
+        }
         if (payload.type === "ceo.reply.final" && effectiveSessionId === activeSessionId()) {
+            clearCeoReplyDeltaBuffer(effectiveSessionId, { turnId: payload.data?.turn_id || "" });
             finalizeCeoTurn(payload.data?.text || "", payload.data || {});
         }
         if (payload.type === "ceo.turn.discard" && effectiveSessionId === activeSessionId()) {
