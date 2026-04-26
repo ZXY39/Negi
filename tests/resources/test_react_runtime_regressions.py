@@ -3956,6 +3956,80 @@ async def test_execute_tool_calls_injects_rbac_visible_tool_names_into_runtime_c
 
 
 @pytest.mark.asyncio
+async def test_execute_tool_calls_injects_image_multimodal_enabled_from_runtime_model_refs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _RuntimeCaptureTool(Tool):
+        @property
+        def name(self) -> str:
+            return "capture_runtime"
+
+        @property
+        def description(self) -> str:
+            return "Capture runtime context"
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {
+                "type": "object",
+                "properties": {
+                    "value": {"type": "string", "description": "value"},
+                },
+                "required": ["value"],
+            }
+
+        async def execute(self, value: str, __g3ku_runtime: dict[str, object] | None = None, **kwargs):
+            _ = kwargs
+            runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else {}
+            return json.dumps(
+                {
+                    "value": value,
+                    "model_refs": runtime.get("model_refs"),
+                    "image_multimodal_enabled": runtime.get("image_multimodal_enabled"),
+                },
+                ensure_ascii=False,
+            )
+
+    import main.runtime.react_loop as react_loop_module
+
+    monkeypatch.setattr(
+        react_loop_module,
+        "get_runtime_config",
+        lambda force=False: (
+            SimpleNamespace(
+                get_managed_model=lambda key: SimpleNamespace(
+                    image_multimodal_enabled=(key == "execution_model")
+                )
+            ),
+            "rev-test",
+            False,
+        ),
+    )
+
+    log_service = _FakeLogService()
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+
+    results = await loop._execute_tool_calls(
+        task=SimpleNamespace(task_id="task-runtime-mm"),
+        node=SimpleNamespace(node_id="node-runtime-mm", depth=0, node_kind="execution"),
+        response_tool_calls=[SimpleNamespace(id="call-runtime-mm", name="capture_runtime", arguments={"value": "demo"})],
+        tools={"capture_runtime": _RuntimeCaptureTool()},
+        allowed_content_refs=[],
+        runtime_context={
+            "session_key": "web:shared",
+            "actor_role": "execution",
+            "node_kind": "execution",
+            "model_refs": ["execution_model"],
+        },
+    )
+
+    payload = json.loads(str(results[0]["raw_result"] or ""))
+    assert payload["value"] == "demo"
+    assert payload["model_refs"] == ["execution_model"]
+    assert payload["image_multimodal_enabled"] is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("node_kind", ["execution", "acceptance"])
 async def test_load_tool_context_direct_read_guard_blocks_duplicate_inline_toolskill_for_callable_lane(
     node_kind: str,

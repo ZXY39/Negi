@@ -251,6 +251,21 @@ class _FakeErrorSession:
         raise RuntimeError("CEO frontdoor exceeded maximum iterations")
 
 
+class _FakeMemoryErrorSession(_FakeErrorSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self._snapshot["last_error"] = {"message": "运行时内存不足，未能完成当前轮次"}
+
+    async def prompt(self, user_message) -> SimpleNamespace:
+        _ = user_message
+        self.state.status = "running"
+        self.state.is_running = True
+        await self._emit("state_snapshot", state=self.state_dict())
+        self.state.status = "error"
+        self.state.is_running = False
+        raise MemoryError()
+
+
 class _FakeHeartbeatSession:
     def __init__(
         self,
@@ -5864,6 +5879,44 @@ def test_ceo_websocket_error_payload_omits_legacy_interaction_trace(tmp_path: Pa
     assert error_events[0]["data"]["message"] == "CEO frontdoor exceeded maximum iterations"
     assert error_events[0]["data"]["source"] == "user"
     assert "interaction_trace" not in error_events[0]["data"]
+
+
+def test_ceo_websocket_memory_error_emits_non_empty_error_message(tmp_path: Path, monkeypatch) -> None:
+    _mock_workspace(monkeypatch, tmp_path)
+
+    async def _ensure_services(_agent) -> None:
+        return None
+
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
+    session_id = "web:ceo-live-memory-error"
+    session_manager = SessionManager(tmp_path)
+    live_session = _FakeMemoryErrorSession()
+    agent = SimpleNamespace(
+        sessions=session_manager,
+        main_task_service=_TaskService(),
+    )
+    monkeypatch.setattr(websocket_ceo, "get_agent", lambda: agent)
+    monkeypatch.setattr(websocket_ceo, "get_runtime_manager", lambda _agent=None: _RuntimeManager(live_session))
+
+    client = TestClient(_build_app())
+    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        assert ws.receive_json()["type"] == "snapshot.ceo"
+        assert ws.receive_json()["type"] == "ceo.state"
+
+        ws.send_json({"type": "client.user_message", "text": "Open bilibili"})
+
+        messages = []
+        for _ in range(6):
+            payload = ws.receive_json()
+            messages.append(payload)
+            if payload.get("type") == "ceo.error":
+                break
+
+    error_events = [item for item in messages if item["type"] == "ceo.error"]
+    assert len(error_events) == 1
+    assert error_events[0]["data"]["message"] == "运行时内存不足，未能完成当前轮次"
+    assert error_events[0]["data"]["source"] == "user"
 
 
 def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_reply(tmp_path: Path, monkeypatch) -> None:

@@ -156,6 +156,13 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - `ceo.reply.final` remains the authoritative closeout event for the assistant bubble. Final markdown rendering, transcript finalization, canonical-context finalization, and visible-turn completion still happen there.
 - `ceo.turn.patch` is no longer the high-frequency assistant-text streaming lane. It remains the lower-frequency lane for inflight/preserved snapshot refreshes, state transitions, reconnect bootstrap, and tool/interrupt-related snapshot changes.
 
+### 2.4. Runtime Error Contract
+
+- `/ws/ceo` may also emit `ceo.error` when a visible turn fails before `ceo.reply.final`.
+- The frontend should treat `ceo.error.data.message` as the authoritative operator-facing text for that failure boundary, not as optional debug metadata.
+- Backend error delivery now has an explicit empty-message fallback. If the raw exception string is empty (for example a bare `MemoryError`), websocket delivery must reuse the session snapshot `last_error.message` when available, and otherwise emit a non-empty fallback message instead of leaving the browser to show `unknown error`.
+- This matters especially for memory-pressure failures during request-artifact persistence: the operator-visible contract is now “a readable runtime failure message plus a terminal error state”, not “blank message that the browser turns into `unknown error`”.
+
 ### 2.5. Image Upload Gating
 
 - Web CEO uploads still persist attachment metadata and transcript/debugging information about the stored local file, but provider-visible current-turn content no longer has to reuse that same local-path note.

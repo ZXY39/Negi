@@ -102,6 +102,8 @@ def test_node_runner_runtime_context_and_prompt_contract_include_project_python(
     assert runtime_context['project_python'] == r'C:\Python314\python.exe'
     assert runtime_context['project_python_hint'] == r"& 'C:\Python314\python.exe'"
     assert runtime_context['task_temp_dir'].endswith(r'G3KU\temp')
+    assert runtime_context['model_refs'] == ['execution_model']
+    assert runtime_context['provider_model'] == 'execution_model'
     assert 'runtime_environment' in prompt
     assert 'project_python_hint' in prompt
     assert 'tool_guidance' in prompt

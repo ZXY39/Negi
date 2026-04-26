@@ -2778,18 +2778,24 @@ class RuntimeAgentSession:
             self._state.status = "error"
             self._cancel_assistant_stream_flush_task()
             self._assistant_stream_pending_text = ""
+            error_message = str(exc).strip()
+            if not error_message:
+                if isinstance(exc, MemoryError):
+                    error_message = "运行时内存不足，未能完成当前轮次"
+                else:
+                    error_message = exc.__class__.__name__ or "unknown error"
             if isinstance(exc, StructuredError):
                 error = exc
             elif all(hasattr(exc, key) for key in ("code", "message", "recoverable")):
                 error = StructuredError(
                     code=str(getattr(exc, "code", "") or "legacy_session_error"),
-                    message=str(getattr(exc, "message", "") or str(exc)),
+                    message=str(getattr(exc, "message", "") or error_message),
                     recoverable=bool(getattr(exc, "recoverable", True)),
                 )
             else:
                 error = StructuredError(
                     code="legacy_session_error",
-                    message=str(exc),
+                    message=error_message,
                     recoverable=True,
                 )
             self._state.last_error = error

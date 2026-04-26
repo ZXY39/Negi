@@ -1673,7 +1673,9 @@ def test_frontdoor_tool_contract_renders_attachment_reopen_targets() -> None:
         },
     ]
     assert "attachment_reopen_targets:" in contract_text
-    assert "copy the exact `path:` or `ref:` into `create_async_task.task`" in contract_text
+    assert "create_async_task.file_targets` is the authoritative reopen lane" in contract_text
+    assert "describe why the file matters" in contract_text
+    assert "create_async_task.task" not in contract_text
     assert "resume.docx" in contract_text
     assert "D:/Uploads/resume.docx" in contract_text
     assert "jd.png" in contract_text
@@ -1760,7 +1762,9 @@ async def test_message_builder_surfaces_current_and_historical_attachment_reopen
     assert "attachment_reopen_targets:" in contract_text
     assert str(current_path) in contract_text
     assert str(history_path) in contract_text
-    assert "create_async_task.task" in contract_text
+    assert "create_async_task.file_targets" in contract_text
+    assert "authoritative reopen lane" in contract_text
+    assert "create_async_task.task" not in contract_text
 
 
 @pytest.mark.asyncio

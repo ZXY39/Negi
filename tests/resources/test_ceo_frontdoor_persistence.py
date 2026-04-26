@@ -1265,6 +1265,7 @@ async def test_ceo_frontdoor_call_model_persists_actual_request_to_disk(
     payload = json.loads(request_path.read_text(encoding="utf-8"))
     assert payload["session_id"] == "web:shared"
     assert payload["turn_id"] == "turn-frontdoor-1"
+    assert "messages" not in payload
     assert payload["prompt_cache_key"] == update["prompt_cache_key"]
     assert payload["actual_request_hash"] == update["prompt_cache_diagnostics"]["actual_request_hash"]
     assert payload["actual_request_message_count"] == update["prompt_cache_diagnostics"]["actual_request_message_count"]
@@ -1820,6 +1821,74 @@ def test_checkpoint_safe_model_response_payload_summarizes_provider_request_body
     assert body["prompt_cache_key"] == "cache-key"
     assert "input" not in body
     assert "tools" not in body
+
+
+def test_persist_frontdoor_actual_request_degrades_after_memory_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    original_dump = json.dump
+    call_count = {"value": 0}
+
+    def _flaky_dump(payload, handle, *args, **kwargs):
+        call_count["value"] += 1
+        if call_count["value"] == 1:
+            raise MemoryError()
+        return original_dump(payload, handle, *args, **kwargs)
+
+    monkeypatch.setattr(web_ceo_sessions.json, "dump", _flaky_dump)
+
+    image_data = "data:image/png;base64," + ("A" * 4096)
+    record = web_ceo_sessions.persist_frontdoor_actual_request(
+        "web:shared",
+        payload={
+            "request_messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Please inspect this image"},
+                        {"type": "image_url", "image_url": {"url": image_data}},
+                    ],
+                },
+            ],
+            "provider_request_body": {
+                "model": "gpt-5.4-mini",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Please inspect this image"},
+                            {"type": "input_image", "image_url": image_data},
+                        ],
+                    }
+                ],
+                "tools": [{"type": "function", "name": "exec"}],
+                "prompt_cache_key": "cache-key",
+                "tool_choice": "auto",
+            },
+            "actual_request_hash": "request-hash",
+            "actual_request_message_count": 2,
+            "actual_tool_schema_hash": "tool-hash",
+            "provider_model": "openai:gpt-5.4-mini",
+        },
+    )
+
+    request_path = Path(str(record["path"]))
+    serialized = request_path.read_text(encoding="utf-8")
+    payload = json.loads(serialized)
+
+    assert call_count["value"] == 2
+    assert payload["artifact_persistence_mode"] == "memory_guard_degraded"
+    assert payload["artifact_persistence_reason"] == "memory_error"
+    assert payload["request_messages"][1]["content"] == "Please inspect this image"
+    assert payload["provider_request_body"] == {}
+    assert payload["provider_request_body_summary"]["contains_multimodal"] is True
+    assert payload["provider_request_body_summary"]["input_count"] == 1
+    assert payload["provider_request_body_summary"]["tools_count"] == 1
+    assert "data:image" not in serialized
+    assert "messages" not in payload
 
 
 def test_checkpoint_safe_stable_messages_strip_multimodal_payloads() -> None:

@@ -1117,11 +1117,18 @@ async def ceo_websocket(websocket: WebSocket):
             return
         except Exception as exc:
             snapshot = _build_inflight_turn_snapshot(session, session_id)
+            error_message = str(exc).strip()
+            if not error_message and isinstance(snapshot, dict):
+                last_error = snapshot.get("last_error")
+                if isinstance(last_error, dict):
+                    error_message = str(last_error.get("message") or "").strip()
+            if not error_message and isinstance(exc, MemoryError):
+                error_message = "运行时内存不足，未能完成当前轮次"
             await _push_stream_event(
                 'ceo.error',
                 {
                     'code': 'turn_failed',
-                    'message': str(exc),
+                    'message': error_message or 'unknown error',
                     'source': str((snapshot or {}).get('source') or 'user').strip().lower() or 'user',
                     'turn_id': str((snapshot or {}).get('turn_id') or '').strip(),
                 },

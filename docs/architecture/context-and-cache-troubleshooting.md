@@ -77,6 +77,11 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 
 ### 2.2 `provider_request_body.input` 比 `request_messages` 更接近最终 transport truth
 
+Maintenance note:
+
+- Frontdoor actual-request persistence is now memory-guarded. If an artifact carries `artifact_persistence_mode=memory_guard_degraded` or `memory_guard_minimal`, its `provider_request_body` may be intentionally empty and its `request_messages` may be a stripped forensic summary rather than the exact provider-bound multimodal body.
+- In that case, do not conclude “the provider never saw the image” from the missing `provider_request_body.input` alone. Treat the degraded artifact as “artifact write survived, but raw transport payload was omitted to avoid turn-fatal `MemoryError`”, then correlate with neighboring artifacts, usage, and transcript timing.
+
 如果 provider adapter 提供了 `provider_request_body`，排 cache miss 时优先用它校验。
 
 特别是 OpenAI `/responses` 路径，要看：
@@ -295,6 +300,10 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 - 因而“旧 frame 里是空 skill 集”本身并不再自动代表“下一轮也应该继续空”；必须先确认 live visibility 也仍然为空
 
 ## 3.9 request artifact 持久化缺口会污染结论
+
+额外维护提醒：
+
+- 要区分 “artifact 缺失” 和 “artifact 被 memory guard 降级”。只要 artifact 文件存在且带有 `artifact_persistence_mode!=full`，它仍然能证明这次 send 发生过；它只是不能再逐字节证明完整的原始多模态 payload。
 
 已踩坑：
 

@@ -53,5 +53,7 @@ def test_frontdoor_contract_guides_models_to_copy_reopen_targets_into_file_targe
 
     assert "attachment_reopen_targets:" in contract_text
     assert "create_async_task.file_targets" in contract_text
-    assert "create_async_task.task" in contract_text
+    assert "authoritative reopen lane" in contract_text
+    assert "describe why the file matters" in contract_text
+    assert "create_async_task.task" not in contract_text
     assert "current_uploads" in contract_text

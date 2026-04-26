@@ -943,7 +943,8 @@ def actual_request_dir_for_session(session_id: str, *, create: bool = True) -> P
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     directory = ensure_dir(path.parent)
     temp_path = directory / f"{path.name}.{uuid.uuid4().hex}.tmp"
-    temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
     temp_path.replace(path)
 
 
@@ -990,6 +991,125 @@ def strip_multimodal_blocks_from_message_records(values: Any) -> list[dict[str, 
                 item["content"] = "\n".join(text_parts).strip()
         normalized.append(item)
     return normalized
+
+
+def _truncate_nested_strings(value: Any, *, max_chars: int = 512) -> Any:
+    if isinstance(value, str):
+        text = str(value or "")
+        if len(text) <= max_chars:
+            return text
+        return summarize_preview_text(text, max_chars=max_chars)
+    if isinstance(value, dict):
+        return {
+            str(key): _truncate_nested_strings(item, max_chars=max_chars)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_truncate_nested_strings(item, max_chars=max_chars) for item in value]
+    return value
+
+
+def _contains_inline_multimodal_payload(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower().startswith("data:image/")
+    if isinstance(value, list):
+        return any(_contains_inline_multimodal_payload(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    block_type = str(value.get("type") or "").strip().lower()
+    if block_type in {"image_url", "input_image", "file", "input_file"}:
+        return True
+    return any(_contains_inline_multimodal_payload(item) for item in value.values())
+
+
+def _payload_item_count(value: Any) -> int:
+    if isinstance(value, list):
+        return len(value)
+    if value in (None, "", [], {}):
+        return 0
+    return 1
+
+
+def _summarize_provider_request_body_for_artifact(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    payload = dict(value or {})
+    summary: dict[str, Any] = {
+        "input_count": _payload_item_count(payload.get("input")),
+        "tools_count": _payload_item_count(payload.get("tools")),
+        "contains_multimodal": _contains_inline_multimodal_payload(payload),
+    }
+    for key in ("model", "prompt_cache_key", "tool_choice", "parallel_tool_calls", "store"):
+        raw = payload.get(key)
+        if raw in (None, "", [], {}):
+            continue
+        summary[str(key)] = _truncate_nested_strings(raw, max_chars=160)
+    text_payload = payload.get("text")
+    if isinstance(text_payload, dict) and text_payload:
+        summary["text"] = _truncate_nested_strings(text_payload, max_chars=160)
+    return summary
+
+
+def _summarize_request_messages_for_artifact(values: Any) -> list[dict[str, Any]]:
+    stripped = strip_multimodal_blocks_from_message_records(values)
+    return [
+        _truncate_nested_strings(dict(item), max_chars=512)
+        for item in stripped
+        if isinstance(item, dict)
+    ]
+
+
+def _degraded_frontdoor_actual_request_record(record: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    degraded = dict(record or {})
+    degraded.pop("messages", None)
+    degraded["artifact_persistence_mode"] = "memory_guard_degraded"
+    degraded["artifact_persistence_reason"] = str(reason or "memory_error").strip() or "memory_error"
+    degraded["request_messages"] = _summarize_request_messages_for_artifact(
+        degraded.get("request_messages")
+    )
+    degraded["provider_request_body_summary"] = _summarize_provider_request_body_for_artifact(
+        degraded.get("provider_request_body")
+    )
+    degraded["provider_request_body"] = {}
+    return degraded
+
+
+def _minimal_frontdoor_actual_request_record(record: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    return {
+        "type": str(record.get("type") or "").strip(),
+        "request_kind": str(record.get("request_kind") or "").strip(),
+        "request_lane": str(record.get("request_lane") or "").strip(),
+        "session_key": str(record.get("session_key") or "").strip(),
+        "session_id": str(record.get("session_id") or "").strip(),
+        "request_id": str(record.get("request_id") or "").strip(),
+        "turn_id": str(record.get("turn_id") or "").strip(),
+        "created_at": str(record.get("created_at") or "").strip(),
+        "persisted_at": str(record.get("persisted_at") or "").strip(),
+        "provider_model": str(record.get("provider_model") or "").strip(),
+        "prompt_cache_key_hash": str(record.get("prompt_cache_key_hash") or "").strip(),
+        "actual_request_hash": str(record.get("actual_request_hash") or "").strip(),
+        "actual_request_message_count": int(record.get("actual_request_message_count") or 0),
+        "actual_tool_schema_hash": str(record.get("actual_tool_schema_hash") or "").strip(),
+        "frontdoor_history_shrink_reason": str(record.get("frontdoor_history_shrink_reason") or "").strip(),
+        "frontdoor_token_preflight_diagnostics": dict(
+            record.get("frontdoor_token_preflight_diagnostics") or {}
+        ),
+        "observed_input_truth": dict(record.get("observed_input_truth") or {}),
+        "usage": dict(record.get("usage") or {}),
+        "tool_schemas": [
+            dict(item)
+            for item in list(record.get("tool_schemas") or [])
+            if isinstance(item, dict)
+        ],
+        "request_messages": _summarize_request_messages_for_artifact(record.get("request_messages")),
+        "provider_request_body": {},
+        "provider_request_body_summary": _summarize_provider_request_body_for_artifact(
+            record.get("provider_request_body")
+        ),
+        "artifact_persistence_mode": "memory_guard_minimal",
+        "artifact_persistence_reason": str(reason or "memory_error_minimal").strip()
+        or "memory_error_minimal",
+    }
 
 
 def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | None:
@@ -1050,7 +1170,22 @@ def persist_frontdoor_actual_request(session_id: str, *, payload: dict[str, Any]
         "created_at": created_at,
         "persisted_at": persisted_at,
     }
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    record.pop("messages", None)
+    record["artifact_persistence_mode"] = "full"
+    try:
+        _atomic_write_json(path, record)
+    except MemoryError:
+        degraded_record = _degraded_frontdoor_actual_request_record(record, reason="memory_error")
+        try:
+            _atomic_write_json(path, degraded_record)
+            record = degraded_record
+        except MemoryError:
+            minimal_record = _minimal_frontdoor_actual_request_record(
+                record,
+                reason="memory_error_minimal",
+            )
+            _atomic_write_json(path, minimal_record)
+            record = minimal_record
     return {
         "request_id": request_id,
         "created_at": created_at,
