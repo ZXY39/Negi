@@ -1042,6 +1042,10 @@ async def test_create_async_task_tool_uses_runtime_task_default_max_depth():
         '整理需求',
         core_requirement='梳理用户需求的核心目标',
         execution_policy={'mode': 'focus'},
+        file_targets=[
+            {'path': 'D:/Uploads/resume.docx'},
+            {'path': 'D:/Uploads/jd.png', 'ref': 'artifact:artifact:jd123'},
+        ],
         __g3ku_runtime={'session_key': 'web:ceo-demo', 'task_defaults': {'max_depth': 3}},
     )
 
@@ -1051,6 +1055,10 @@ async def test_create_async_task_tool_uses_runtime_task_default_max_depth():
     assert captured['max_depth'] == 3
     assert captured['kwargs']['metadata']['core_requirement'] == '梳理用户需求的核心目标'
     assert captured['kwargs']['metadata']['execution_policy'] == {'mode': 'focus'}
+    assert captured['kwargs']['metadata']['file_targets'] == [
+        {'path': 'D:/Uploads/resume.docx'},
+        {'path': 'D:/Uploads/jd.png', 'ref': 'artifact:artifact:jd123'},
+    ]
 
 
 def test_create_async_task_tool_requires_execution_policy_param() -> None:
@@ -1064,6 +1072,38 @@ def test_create_async_task_tool_requires_execution_policy_param() -> None:
     )
 
     assert 'missing required execution_policy' in errors
+
+
+"""
+legacy broken draft kept only to neutralize old garbled literals during patching
+    tool = CreateAsyncTaskTool(SimpleNamespace())
+
+    errors = tool.validate_params(
+        {
+            'task': '鏁寸悊闇€姹?,
+            'core_requirement': '姊崇悊鐢ㄦ埛闇€姹傜殑鏍稿績鐩爣',
+            'execution_policy': {'mode': 'focus'},
+            'file_targets': None,
+        }
+    )
+
+    assert errors == []
+"""
+
+
+def test_create_async_task_tool_allows_null_file_targets() -> None:
+    tool = CreateAsyncTaskTool(SimpleNamespace())
+
+    errors = tool.validate_params(
+        {
+            'task': 'summarize uploaded files',
+            'core_requirement': 'summarize the uploaded file requirements',
+            'execution_policy': {'mode': 'focus'},
+            'file_targets': None,
+        }
+    )
+
+    assert errors == []
 
 
 @pytest.mark.asyncio
@@ -1185,6 +1225,11 @@ def test_create_async_task_contract_no_longer_accepts_continuation_fields() -> N
     schema = build_create_async_task_parameters()
     props = dict(schema.get('properties') or {})
 
+    assert 'file_targets' in props
+    assert props['file_targets']['type'] == ['array', 'null']
+    assert props['file_targets']['items']['type'] == 'object'
+    assert props['file_targets']['items']['properties']['path']['type'] == ['string', 'null']
+    assert props['file_targets']['items']['properties']['ref']['type'] == ['string', 'null']
     assert 'continuation_of_task_id' not in props
     assert 'reuse_existing' not in props
 

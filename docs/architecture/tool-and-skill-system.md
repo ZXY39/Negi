@@ -99,7 +99,7 @@ Maintenance note for CEO/frontdoor task lifecycle tools:
   - `create_async_task` for spawning new detached work
   - `task_append_notice` for appending new requirements, constraints, or acceptance expectations to an existing unfinished task in the current session
 - `create_async_task` no longer creates work unconditionally. Before `MainRuntimeService` creates a task, it runs a duplicate precheck against the current session's unfinished task pool.
-- `create_async_task` still keeps the narrow free-text contract (`task`, `core_requirement`, `execution_policy`, optional final-acceptance fields). It does not expose a separate structured attachments/input-target payload.
+- `create_async_task` still has a compact contract, but it now also exposes optional structured `file_targets` in addition to `task`, `core_requirement`, `execution_policy`, and the optional final-acceptance fields.
 - That duplicate precheck is intentionally hybrid:
   - a deterministic exact-match layer for normalized target text and exact keyword fingerprints
   - an inspection-model review for fuzzy duplicates and "this should update an existing task instead" cases
@@ -110,7 +110,7 @@ Maintenance note for CEO/frontdoor task lifecycle tools:
 - `task_append_notice` success text must stay in the "updated existing task" lane, for example `已向任务 task:xxx 追加通知。`; it must not look like detached task creation and must not create `verified_task_ids` / `route_kind=task_dispatch`.
 - The old `continue_task` tool and its continuation / retry-in-place semantics are removed.
 - Maintainers should treat any later follow-up on a failed task as ordinary new planning/execution, not as a hidden continuation lane.
-- For Web CEO upload-driven work, the model now relies on frontdoor runtime-contract `attachment_reopen_targets` rather than on a structured `create_async_task` parameter. When a detached task must read an uploaded file/image, the model is expected to copy the exact `path` / `ref` from that contract lane into `create_async_task.task` itself.
+- For Web CEO upload-driven work, the model still relies on frontdoor runtime-contract `attachment_reopen_targets` to discover reopenable uploads, but it must now copy the exact `path` / `ref` into `create_async_task.file_targets` itself. The runtime does not auto-inject that field from upload metadata.
 - Placeholders such as `user_uploads`, `current_uploads`, and `user_image_and_docx` are not valid reopen targets. If they appear in detached-task prompts instead of real `path` / `ref`, treat that as frontdoor prompt/contract guidance failure rather than as content-tool drift.
 
 Maintenance note for node distribution mode:
@@ -660,7 +660,7 @@ When debugging provider-tool drift, use this decision rule:
 - 对 CEO/frontdoor，这个摘要现在要额外明确两条不对称语义：
   - `candidate_tools` 是 candidate executor 摘要，通常仍需 `load_tool_context(...)` 后等待下一轮 hydration/promotion
   - `candidate_skills` 是 loadable skill 摘要，应该把列出的 `skill_id` 直接理解为 `load_skill_context(skill_id="...")` 的正文入口，而不是 hydration/install 阶段
-- For detached task creation, `attachment_reopen_targets` is advisory but operationally important: the model should copy the exact target strings into `create_async_task.task` when downstream execution must reopen an uploaded file or image. Runtime does not auto-inject them into the task record.
+- For detached task creation, `attachment_reopen_targets` is advisory but operationally important: the model should copy the exact target strings into `create_async_task.file_targets` when downstream execution must reopen an uploaded file or image. Runtime does not auto-inject them into the task record.
 - The summary block may now also carry dedicated repair lanes:
   - `repair_required_tools`
   - `repair_required_skills`

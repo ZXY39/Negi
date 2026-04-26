@@ -6,6 +6,7 @@
 
 - 用户消息包含 JSON 格式的节点上下文。
 - 用户消息中的稳定 JSON 上下文至少包含 `prompt`、`goal`、`core_requirement`、`execution_policy`、`runtime_environment`，并可能包含 `completion_contract`。
+- 如果 JSON 里出现 `file_targets`，把它视为当前任务依赖文件的权威 reopen 入口；优先直接使用其中的真实 `path` / `ref`，不要自己发明占位名或做大范围兜底搜索。
 {{> node_runtime_contract_shared.md}}
 - `prompt` 是当前节点的直接任务；`core_requirement` 是整棵任务树的核心需求。你在完成 `prompt` 时，不得偏离 `core_requirement`。
 - `runtime_environment` 是当前节点的权威运行环境和工具约束；涉及路径、工作目录、解释器、shell 行为时，优先遵循其中的 `path_policy` 与 `tool_guidance`。

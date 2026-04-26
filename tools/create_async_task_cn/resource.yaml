@@ -37,6 +37,18 @@ parameters:
           enum: [focus, coverage]
           description: "`focus` for highest-value direct work, `coverage` to allow broader completion."
       required: [mode]
+    file_targets:
+      type: [array, "null"]
+      description: Optional reopen targets for files or artifacts needed by the task. Use `null` or `[]` when no specific files are required.
+      items:
+        type: object
+        properties:
+          path:
+            type: [string, "null"]
+            description: Exact absolute file path to reopen.
+          ref:
+            type: [string, "null"]
+            description: Exact artifact or content ref to reopen.
     requires_final_acceptance:
       type: boolean
       description: Whether the root execution should be followed by final acceptance.

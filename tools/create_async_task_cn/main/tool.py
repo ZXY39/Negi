@@ -7,6 +7,7 @@ import yaml
 
 from g3ku.agent.tools.base import Tool
 from main.models import normalize_execution_policy_metadata
+from main.service.create_async_task_contract import normalize_create_async_task_file_targets
 
 
 _MANIFEST = yaml.safe_load((Path(__file__).resolve().parents[1] / 'resource.yaml').read_text(encoding='utf-8'))
@@ -65,6 +66,7 @@ class _CreateAsyncTaskHandler(Tool):
             explicit_max_depth = _runtime_task_default_max_depth(runtime)
         normalized_core_requirement = str(core_requirement or kwargs.get('core_requirement') or '').strip() or str(task or '').strip()
         normalized_execution_policy = normalize_execution_policy_metadata(kwargs.get('execution_policy'))
+        normalized_file_targets = normalize_create_async_task_file_targets(kwargs.get('file_targets'))
         final_acceptance_prompt = str(kwargs.get('final_acceptance_prompt') or '').strip()
         raw_requires_final_acceptance = kwargs.get('requires_final_acceptance')
         requires_final_acceptance = bool(raw_requires_final_acceptance) or (
@@ -77,6 +79,7 @@ class _CreateAsyncTaskHandler(Tool):
             metadata={
                 'core_requirement': normalized_core_requirement,
                 'execution_policy': normalized_execution_policy.model_dump(mode='json'),
+                'file_targets': normalized_file_targets,
                 'final_acceptance': {
                     'required': requires_final_acceptance,
                     'prompt': final_acceptance_prompt,

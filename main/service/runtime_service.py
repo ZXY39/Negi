@@ -110,6 +110,7 @@ from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
 from main.service.create_async_task_contract import (
     CREATE_ASYNC_TASK_DESCRIPTION,
     build_create_async_task_parameters,
+    normalize_create_async_task_file_targets,
 )
 from main.service.task_append_notice_contract import (
     TASK_APPEND_NOTICE_DESCRIPTION,
@@ -8769,6 +8770,7 @@ class CreateAsyncTaskTool(Tool):
             explicit_max_depth = _runtime_task_default_max_depth(runtime)
         normalized_core_requirement = str(core_requirement or kwargs.get('core_requirement') or '').strip() or str(task or '').strip()
         normalized_execution_policy = normalize_execution_policy_metadata(kwargs.get('execution_policy'))
+        normalized_file_targets = normalize_create_async_task_file_targets(kwargs.get('file_targets'))
         final_acceptance_prompt = str(kwargs.get('final_acceptance_prompt') or '').strip()
         raw_requires_final_acceptance = kwargs.get('requires_final_acceptance')
         requires_final_acceptance = bool(raw_requires_final_acceptance) or (raw_requires_final_acceptance in (None, '') and bool(final_acceptance_prompt))
@@ -8817,6 +8819,7 @@ class CreateAsyncTaskTool(Tool):
             metadata={
                 'core_requirement': normalized_core_requirement,
                 'execution_policy': normalized_execution_policy.model_dump(mode='json'),
+                'file_targets': normalized_file_targets,
                 'final_acceptance': {
                     'required': requires_final_acceptance,
                     'prompt': final_acceptance_prompt,

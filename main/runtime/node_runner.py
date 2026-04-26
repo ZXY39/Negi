@@ -38,6 +38,7 @@ from main.runtime.append_notice_context import (
     record_pending_append_notice_records,
     record_consumed_notifications,
 )
+from main.service.create_async_task_contract import normalize_create_async_task_file_targets
 from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
     ACCEPTANCE_STATE_ACCEPTED,
@@ -2299,6 +2300,7 @@ class NodeRunner:
             'prompt': str(node.prompt or ''),
             'core_requirement': core_requirement,
             'execution_policy': execution_policy.model_dump(mode='json'),
+            'file_targets': self._resolve_file_targets(task),
             'runtime_environment': self._runtime_environment_payload(task=task),
         }
         completion_contract = self._completion_contract_payload(task=task, node=node)
@@ -4519,6 +4521,10 @@ class NodeRunner:
     def _resolve_core_requirement(self, task) -> str:
         metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}
         return str(metadata.get('core_requirement') or getattr(task, 'user_request', '') or getattr(task, 'title', '') or '').strip()
+
+    def _resolve_file_targets(self, task) -> list[dict[str, str]]:
+        metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}
+        return normalize_create_async_task_file_targets(metadata.get('file_targets'))
 
     def _resolve_execution_policy(self, task, *, node: NodeRecord | None = None):
         task_metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}

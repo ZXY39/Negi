@@ -349,6 +349,12 @@ async def _create_web_task(service: MainRuntimeService):
     return await service.create_task("test task", session_id="web:shared")
 
 
+EXPECTED_FILE_TARGETS = [
+    {"path": "D:/Uploads/resume.docx"},
+    {"path": "D:/Uploads/jd.png", "ref": "artifact:artifact:jd123"},
+]
+
+
 def _build_service_with_backend(tmp_path: Path, *, chat_backend) -> MainRuntimeService:
     service = MainRuntimeService(
         chat_backend=chat_backend,
@@ -3523,6 +3529,7 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
             metadata={
                 "core_requirement": expected_core_requirement,
                 "execution_policy": _execution_policy(),
+                "file_targets": EXPECTED_FILE_TARGETS,
             },
         )
         task = service.get_task(record.task_id)
@@ -3539,6 +3546,7 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
         payload = json.loads(messages[1]["content"])
         assert payload["core_requirement"] == expected_core_requirement
         assert payload["execution_policy"] == {"mode": "focus"}
+        assert payload["file_targets"] == EXPECTED_FILE_TARGETS
         assert payload["prompt"] == root.prompt
 
         child = service.node_runner._create_execution_child(
@@ -3571,12 +3579,14 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
         child_payload = json.loads(child_messages[1]["content"])
         assert child_payload["core_requirement"] == expected_core_requirement
         assert child_payload["execution_policy"] == {"mode": "focus"}
+        assert child_payload["file_targets"] == EXPECTED_FILE_TARGETS
         assert child_payload["prompt"] == child.prompt
 
         acceptance_messages = await service.node_runner._build_messages(task=task, node=acceptance)
         acceptance_payload = json.loads(acceptance_messages[1]["content"])
         assert acceptance_payload["core_requirement"] == expected_core_requirement
         assert acceptance_payload["execution_policy"] == {"mode": "focus"}
+        assert acceptance_payload["file_targets"] == EXPECTED_FILE_TARGETS
         assert acceptance_payload["prompt"] == acceptance.prompt
     finally:
         await service.close()

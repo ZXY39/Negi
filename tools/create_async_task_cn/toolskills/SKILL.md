@@ -1,32 +1,35 @@
 # create_async_task
 
-把用户请求转交为后台异步任务。
+Create a detached background task in the main runtime.
 
-## 何时使用
-- 任务复杂、耗时长、需要后台持续推进。
-- CEO 不应在当前会话里长时间自行处理，而应尽快派发。
-- 需要把核心需求稳定传递给后续任务树时。
+## When To Use
+- The work is too broad, slow, or multi-step to finish inline in the current CEO turn.
+- You need a stable `core_requirement` for the whole task tree.
+- You want downstream nodes to continue working asynchronously.
 
-## 必填参数
-- `task`：给下游执行链路的完整任务说明。
-- `core_requirement`：一句高度概括的核心需求；不能留空，也不要简单复制 `task` 原文。
-- `execution_policy`：执行策略对象，必须显式提供 `mode`。
-  - `mode="focus"`：只做最高价值、最必要、与当前目标直接相关的动作。
-  - `mode="coverage"`：先做最高价值动作，并在需要时允许扩展范围、补做边缘分支或系统性全量操作。
+## Required Parameters
+- `task`: the full downstream task prompt.
+- `core_requirement`: one-sentence distilled core requirement. It must not simply copy `task`.
+- `execution_policy`: must include `mode`.
+  - `focus`: do only the highest-value, most directly relevant work.
+  - `coverage`: still prioritize the highest-value work first, but allow broader completion when needed.
 
-## 推荐参数
+## Optional Parameters
+- `file_targets`: optional list of exact file reopen targets for downstream work.
+  - Each item should include exact `path` and/or exact `ref`.
+  - Use this when the task depends on specific uploaded files, local files, or artifacts.
+  - Use `null` or `[]` when the task does not depend on specific files.
 - `requires_final_acceptance=true`
-- `final_acceptance_prompt`：写清最终验收标准。
+- `final_acceptance_prompt`: clear acceptance criteria for the final result.
 
-## 任务说明要求
-- 写清目标范围、关键线索和预期产出。
-- 如果需要 skill 或工具上下文，明确要求下游节点先查看并使用相关 skill / tool context。
-- 不要粘贴大段原文；优先给文件路径、目录路径、搜索关键词、引用和目标产出。
+## Task Prompt Requirements
+- Describe the goal, scope, important clues, and expected output.
+- If downstream nodes should consult certain skills or tool context first, say that explicitly.
+- If the task depends on uploaded files or artifacts, mention in `task` which files matter, and put the exact reopen targets into `file_targets`.
+- Do not use placeholders like `user_uploads`, `current_uploads`, or `user_image_and_docx` instead of real `path` / `ref`.
+- Do not paste whole files or large tool outputs into the task prompt; provide paths, refs, search targets, or line ranges instead.
 
-## 返回结果
-- 成功时返回创建结果文本，其中会包含新任务的 `task_id`。
-
-## 注意
-- `core_requirement` 不能为空。
-- 必须显式传入 `execution_policy.mode`，不能省略。
-- 当 `requires_final_acceptance=true` 时，必须同时提供 `final_acceptance_prompt`。
+## Notes
+- `core_requirement` must not be empty.
+- `execution_policy.mode` must be explicit.
+- When `requires_final_acceptance=true`, `final_acceptance_prompt` is required.
