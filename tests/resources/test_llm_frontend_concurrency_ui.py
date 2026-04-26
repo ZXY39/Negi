@@ -218,6 +218,31 @@ def test_api_client_maps_duplicate_binding_name_error_code_to_clear_message() ->
     assert result["message"] == "配置名已存在，请使用其他配置名。"
 
 
+def test_api_client_maps_empty_model_chain_backend_message_to_clear_text() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.window.location = { origin: "http://localhost" };
+        global.fetch = () => {
+          throw new Error("fetch should not be called in this test");
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/api_client.js", "utf8");
+        vm.runInThisContext(code);
+
+        console.log(JSON.stringify({
+          message: ApiClient.friendlyErrorMessage(
+            { detail: "model_keys must not be empty", message: "model_keys must not be empty" },
+            "model_keys must not be empty"
+          ),
+        }));
+        """
+    )
+
+    assert result["message"] == "请先为主Agent、执行Agent、检验Agent配置模型链，全部配置完成后才可保存。"
+
+
 def test_api_client_update_llm_binding_returns_item_and_runtime_refresh() -> None:
     result = _run_node_script(
         """

@@ -66,17 +66,37 @@ class ApiClient {
         }
     }
 
+    static _friendlyErrorMessageForText(text) {
+        const normalized = String(text || "").trim().toLowerCase();
+        if (!normalized) return "";
+        if (normalized === "model_keys must not be empty") {
+            return "请先为主Agent、执行Agent、检验Agent配置模型链，全部配置完成后才可保存。";
+        }
+        return "";
+    }
+
     static friendlyErrorMessage(value, fallback = "") {
         const code = this.getErrorCode(value);
         const friendly = this._friendlyErrorMessageForCode(code);
         if (friendly) return friendly;
         if (value && typeof value === "object") {
+            const detailText = typeof value.detail === "string" ? value.detail.trim() : "";
+            const friendlyDetailText = this._friendlyErrorMessageForText(detailText);
+            if (friendlyDetailText) return friendlyDetailText;
             const detailMessage = typeof value.detail?.message === "string" ? value.detail.message.trim() : "";
+            const friendlyDetailMessage = this._friendlyErrorMessageForText(detailMessage);
+            if (friendlyDetailMessage) return friendlyDetailMessage;
             if (detailMessage) return detailMessage;
             const directMessage = typeof value.message === "string" ? value.message.trim() : "";
+            const friendlyDirectMessage = this._friendlyErrorMessageForText(directMessage);
+            if (friendlyDirectMessage) return friendlyDirectMessage;
             if (directMessage) return directMessage;
         }
+        const friendlyStringValue = this._friendlyErrorMessageForText(value);
+        if (friendlyStringValue) return friendlyStringValue;
         if (typeof value === "string" && value.trim()) return value.trim();
+        const friendlyFallback = this._friendlyErrorMessageForText(fallback);
+        if (friendlyFallback) return friendlyFallback;
         return String(fallback || "").trim() || "未知错误";
     }
 
