@@ -255,6 +255,8 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 - if paused does not carry a usable `frontdoor_request_body_messages` baseline, check inflight next
 - reopened completed session should then check `.g3ku/web-ceo-continuity/<session>.json`
 - if those sidecars do not carry a usable baseline, fall back to the latest actual-request artifact before transcript/history rebuild
+- if a sidecar does carry a usable baseline but its `frontdoor_actual_request_path/history` is missing, unreadable, or body-mismatched, enrich the restored session from the newest actual-request artifact whose durable body matches that same baseline
+- that enrichment repairs request-trace authority only. It must not replace the sidecar baseline with the artifact's full same-turn scaffold, and it must not invent visible-set bridge eligibility that the sidecar itself did not prove
 - only after all of those fail should maintainers blame transcript/history fallback
 
 - 如果 continuity sidecar 里的 visible tool/skill 集与当前完全一致，第一跳应继续借上一轮的 family/schema anchor
@@ -587,10 +589,11 @@ Maintenance note:
 4. prepare-only/no-provider 状态不能覆盖 durable baseline。
 5. manual pause 后新 turn 不能退回 transcript-only reconstruction。
 6. restarted completed session 第一跳不能退回 transcript/history fallback。
-7. stable prefix 不变时，tool schema 也应尽量稳定；必要时验证 family key 不抖。
-8. `provider_request_body.input` 与高层 `request_messages` 的前缀对比结论不能长期分叉。
-9. usage 记录与 request artifact 必须能在时间线层面对得上。
-10. 非 `token_compression` / `stage_compaction` 的 shrink 一律视为失败。
+7. restarted completed session 如果能证明 durable baseline 与某条 actual-request artifact 等价，第一跳必须继续复用那条 previous actual-request scaffold，而不是退回 stripped durable-only request。
+8. stable prefix 不变时，tool schema 也应尽量稳定；必要时验证 family key 不抖。
+9. `provider_request_body.input` 与高层 `request_messages` 的前缀对比结论不能长期分叉。
+10. usage 记录与 request artifact 必须能在时间线层面对得上。
+11. 非 `token_compression` / `stage_compaction` 的 shrink 一律视为失败。
 
 ## 7. 当前仍需继续盯的风险点
 

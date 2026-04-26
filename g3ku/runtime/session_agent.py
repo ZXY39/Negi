@@ -181,6 +181,214 @@ class RuntimeAgentSession:
             "provider_model": str(payload.get("provider_model") or "").strip(),
         }
 
+    @classmethod
+    def _frontdoor_request_body_match_normalized_value(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): cls._frontdoor_request_body_match_normalized_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._frontdoor_request_body_match_normalized_value(item) for item in value]
+        if isinstance(value, str):
+            return value.replace("\r\n", "\n").rstrip()
+        return value
+
+    @classmethod
+    def _frontdoor_request_body_messages_match(
+        cls,
+        first: list[dict[str, Any]] | None,
+        second: list[dict[str, Any]] | None,
+    ) -> bool:
+        first_records = [dict(item) for item in list(first or []) if isinstance(item, dict)]
+        second_records = [dict(item) for item in list(second or []) if isinstance(item, dict)]
+        if len(first_records) != len(second_records):
+            return False
+        return all(
+            cls._frontdoor_request_body_match_normalized_value(left)
+            == cls._frontdoor_request_body_match_normalized_value(right)
+            for left, right in zip(first_records, second_records)
+        )
+
+    @staticmethod
+    def _frontdoor_actual_request_payload_from_path(request_path: str) -> dict[str, Any]:
+        path = Path(str(request_path or "").strip())
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _frontdoor_actual_request_trace_candidate_paths(
+        *,
+        actual_request_path: str,
+        actual_request_history: list[dict[str, Any]] | None,
+    ) -> list[str]:
+        candidates: list[str] = []
+        for raw_path in [
+            str(actual_request_path or "").strip(),
+            *[
+                str(item.get("path") or "").strip()
+                for item in list(actual_request_history or [])
+                if isinstance(item, dict)
+            ],
+        ]:
+            if not raw_path or raw_path in candidates:
+                continue
+            candidates.append(raw_path)
+        return candidates
+
+    def _clear_frontdoor_actual_request_trace(self) -> None:
+        self._frontdoor_actual_request_path = ""
+        self._frontdoor_actual_request_history = []
+        self._frontdoor_prompt_cache_key_hash = ""
+        self._frontdoor_actual_request_hash = ""
+        self._frontdoor_actual_request_message_count = 0
+        self._frontdoor_actual_tool_schema_hash = ""
+
+    def _apply_frontdoor_actual_request_trace_from_payload(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        artifact_path: str,
+    ) -> bool:
+        if not isinstance(payload, dict) or not payload:
+            return False
+        history_record = self._frontdoor_actual_request_history_record_from_payload(
+            payload,
+            artifact_path=str(artifact_path or "").strip(),
+        )
+        actual_request_path = str(artifact_path or "").strip()
+        self._frontdoor_actual_request_path = actual_request_path
+        self._frontdoor_actual_request_history = [history_record]
+        self._frontdoor_prompt_cache_key_hash = str(
+            payload.get("prompt_cache_key_hash") or history_record.get("prompt_cache_key_hash") or ""
+        ).strip()
+        self._frontdoor_actual_request_hash = str(
+            payload.get("actual_request_hash") or history_record.get("actual_request_hash") or ""
+        ).strip()
+        self._frontdoor_actual_request_message_count = int(
+            payload.get("actual_request_message_count")
+            or history_record.get("actual_request_message_count")
+            or 0
+        )
+        self._frontdoor_actual_tool_schema_hash = str(
+            payload.get("actual_tool_schema_hash") or history_record.get("actual_tool_schema_hash") or ""
+        ).strip()
+        return True
+
+    def _frontdoor_actual_request_trace_is_usable(self) -> bool:
+        restored_baseline = [
+            dict(item)
+            for item in list(getattr(self, "_frontdoor_request_body_messages", []) or [])
+            if isinstance(item, dict)
+        ]
+        if not restored_baseline:
+            return False
+        candidate_paths = self._frontdoor_actual_request_trace_candidate_paths(
+            actual_request_path=str(getattr(self, "_frontdoor_actual_request_path", "") or "").strip(),
+            actual_request_history=[
+                dict(item)
+                for item in list(getattr(self, "_frontdoor_actual_request_history", []) or [])
+                if isinstance(item, dict)
+            ],
+        )
+        for candidate_path in candidate_paths:
+            payload = self._frontdoor_actual_request_payload_from_path(candidate_path)
+            if not payload:
+                continue
+            request_messages = [
+                dict(item)
+                for item in list(payload.get("request_messages") or [])
+                if isinstance(item, dict)
+            ]
+            durable_messages = self._restorable_frontdoor_request_body_messages(request_messages)
+            if not self._frontdoor_request_body_messages_match(restored_baseline, durable_messages):
+                continue
+            return self._apply_frontdoor_actual_request_trace_from_payload(
+                payload,
+                artifact_path=candidate_path,
+            )
+        return False
+
+    def _restore_frontdoor_actual_request_trace_from_matching_artifact(self, session_key: str) -> bool:
+        try:
+            from g3ku.runtime.web_ceo_sessions import actual_request_dir_for_session
+        except Exception:
+            return False
+        restored_baseline = [
+            dict(item)
+            for item in list(getattr(self, "_frontdoor_request_body_messages", []) or [])
+            if isinstance(item, dict)
+        ]
+        if not restored_baseline:
+            return False
+        request_dir = actual_request_dir_for_session(session_key, create=False)
+        if not request_dir.exists():
+            return False
+        try:
+            artifact_paths = sorted(request_dir.glob("*.json"), reverse=True)
+        except Exception:
+            return False
+        for artifact_path in artifact_paths:
+            payload = self._frontdoor_actual_request_payload_from_path(str(artifact_path.resolve()))
+            if not payload:
+                continue
+            request_messages = [
+                dict(item)
+                for item in list(payload.get("request_messages") or [])
+                if isinstance(item, dict)
+            ]
+            durable_messages = self._restorable_frontdoor_request_body_messages(request_messages)
+            if not self._frontdoor_request_body_messages_match(restored_baseline, durable_messages):
+                continue
+            return self._apply_frontdoor_actual_request_trace_from_payload(
+                payload,
+                artifact_path=str(artifact_path.resolve()),
+            )
+        return False
+
+    def _recompute_frontdoor_completed_continuity_bridge_pending(
+        self,
+        *,
+        source: str,
+        allow_continuity_bridge: bool,
+    ) -> None:
+        latest_history = [
+            dict(item)
+            for item in list(getattr(self, "_frontdoor_actual_request_history", []) or [])
+            if isinstance(item, dict)
+        ]
+        bridge_path = str(getattr(self, "_frontdoor_actual_request_path", "") or "").strip()
+        if not bridge_path and latest_history:
+            bridge_path = str(latest_history[-1].get("path") or "").strip()
+        self._frontdoor_completed_continuity_bridge_pending = bool(
+            allow_continuity_bridge
+            and str(source or "").strip() in {"paused_snapshot", "inflight_snapshot", "completed_continuity"}
+            and bridge_path
+            and Path(bridge_path).exists()
+            and self._frontdoor_capability_snapshot_exposure_revision
+            and self._frontdoor_provider_tool_schema_names
+        )
+
+    def _enrich_restored_frontdoor_actual_request_trace(
+        self,
+        *,
+        session_key: str,
+        source: str,
+        allow_continuity_bridge: bool,
+    ) -> None:
+        if not self._frontdoor_actual_request_trace_is_usable():
+            if not self._restore_frontdoor_actual_request_trace_from_matching_artifact(session_key):
+                self._clear_frontdoor_actual_request_trace()
+        self._recompute_frontdoor_completed_continuity_bridge_pending(
+            source=source,
+            allow_continuity_bridge=allow_continuity_bridge,
+        )
+
     def _restore_frontdoor_state_from_payload(
         self,
         payload: dict[str, Any] | None,
@@ -260,13 +468,9 @@ class RuntimeAgentSession:
             or last_history.get("actual_tool_schema_hash")
             or ""
         ).strip()
-        bridge_path = actual_request_path or str(last_history.get("path") or "").strip()
-        self._frontdoor_completed_continuity_bridge_pending = bool(
-            allow_continuity_bridge
-            and bridge_path
-            and Path(bridge_path).exists()
-            and self._frontdoor_capability_snapshot_exposure_revision
-            and self._frontdoor_provider_tool_schema_names
+        self._recompute_frontdoor_completed_continuity_bridge_pending(
+            source=source,
+            allow_continuity_bridge=allow_continuity_bridge,
         )
         return True
 
@@ -348,6 +552,11 @@ class RuntimeAgentSession:
                 source=source,
                 allow_continuity_bridge=allow_bridge,
             ):
+                self._enrich_restored_frontdoor_actual_request_trace(
+                    session_key=session_key,
+                    source=source,
+                    allow_continuity_bridge=allow_bridge,
+                )
                 return self._frontdoor_restore_source
         if self._restore_frontdoor_state_from_latest_actual_request_artifact(session_key):
             return self._frontdoor_restore_source

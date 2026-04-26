@@ -2529,8 +2529,21 @@ def test_clear_web_ceo_session_artifacts_clears_completed_continuity_snapshot(
 
 def test_runtime_agent_session_restores_completed_continuity_snapshot_from_disk(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
-    request_path = tmp_path / "request.json"
-    request_path.write_text("{}", encoding="utf-8")
+    record = web_ceo_sessions.persist_frontdoor_actual_request(
+        "web:shared",
+        payload={
+            "turn_id": "turn-1",
+            "request_messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "Resume from continuity"},
+            ],
+            "prompt_cache_key_hash": "family-continuity",
+            "actual_request_hash": "continuity-hash",
+            "actual_request_message_count": 2,
+            "actual_tool_schema_hash": "tool-continuity",
+            "provider_model": "responses:gpt-test",
+        },
+    )
     web_ceo_sessions.write_completed_continuity_snapshot(
         "web:shared",
         {
@@ -2539,8 +2552,8 @@ def test_runtime_agent_session_restores_completed_continuity_snapshot_from_disk(
                 {"role": "user", "content": "Resume from continuity"},
             ],
             "frontdoor_history_shrink_reason": "stage_compaction",
-            "frontdoor_actual_request_path": str(request_path),
-            "frontdoor_actual_request_history": [{"path": str(request_path), "turn_id": "turn-1"}],
+            "frontdoor_actual_request_path": record["path"],
+            "frontdoor_actual_request_history": [record],
             "frontdoor_stage_state": {"active_stage_id": "stage-1", "transition_required": False, "stages": []},
             "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "ready", "text": "ok", "source": "semantic"},
@@ -2565,8 +2578,8 @@ def test_runtime_agent_session_restores_completed_continuity_snapshot_from_disk(
         {"role": "user", "content": "Resume from continuity"},
     ]
     assert session._frontdoor_history_shrink_reason == "stage_compaction"
-    assert session._frontdoor_actual_request_path == str(request_path)
-    assert session._frontdoor_actual_request_history == [{"path": str(request_path), "turn_id": "turn-1"}]
+    assert session._frontdoor_actual_request_path == record["path"]
+    assert session._frontdoor_actual_request_history == [record]
     assert session._frontdoor_stage_state == {"active_stage_id": "stage-1", "transition_required": False, "stages": []}
     assert session._compression_state == {"status": "ready", "text": "ok", "source": "semantic"}
     assert session._semantic_context_state == {"summary_text": "summary", "needs_refresh": False}

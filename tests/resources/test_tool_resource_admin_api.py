@@ -2171,6 +2171,83 @@ def test_recreate_runtime_session_accepts_completed_continuity_only_session(tmp_
     assert runtime_session._frontdoor_history_shrink_reason == 'stage_compaction'
 
 
+def test_recreate_runtime_session_enriches_completed_continuity_only_restore_with_matching_actual_request_trace(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _mock_ceo_catalog_config(monkeypatch)
+
+    from g3ku.runtime.api import ceo_sessions
+
+    monkeypatch.setattr(web_ceo_sessions, 'workspace_path', lambda: tmp_path)
+    monkeypatch.setattr(ceo_sessions, 'workspace_path', lambda: tmp_path)
+    session = Session(key='web:ceo-continuity-trace-enrichment', metadata={'title': 'Continuity Trace Enrichment'})
+    continuity_baseline = [
+        {'role': 'system', 'content': 'SYSTEM'},
+        {'role': 'user', 'content': 'restore from continuity'},
+    ]
+    record = web_ceo_sessions.persist_frontdoor_actual_request(
+        session.key,
+        payload={
+            'turn_id': 'turn-artifact',
+            'request_messages': [
+                {'role': 'system', 'content': 'SYSTEM'},
+                {'role': 'user', 'content': 'restore from continuity'},
+                {
+                    'role': 'assistant',
+                    'content': '## Runtime Tool Contract\nkind: frontdoor_runtime_tool_contract',
+                },
+            ],
+            'prompt_cache_key_hash': 'family-artifact',
+            'actual_request_hash': 'artifact-hash',
+            'actual_request_message_count': 3,
+            'actual_tool_schema_hash': 'tool-artifact',
+            'provider_model': 'responses:gpt-test',
+        },
+    )
+    web_ceo_sessions.write_completed_continuity_snapshot(
+        session.key,
+        {
+            'frontdoor_request_body_messages': list(continuity_baseline),
+            'frontdoor_history_shrink_reason': '',
+            'frontdoor_actual_request_path': '',
+            'frontdoor_actual_request_history': [],
+            'hydrated_tool_names': ['exec'],
+            'visible_tool_ids': ['exec'],
+            'visible_skill_ids': ['writing-plans'],
+            'provider_tool_schema_names': ['exec'],
+            'capability_snapshot_exposure_revision': 'exp:continuity',
+            'source_reason': 'actual_request_sync',
+        },
+    )
+
+    class _RuntimeManager:
+        def get(self, _session_id: str):
+            return None
+
+        def get_or_create(self, **kwargs):
+            return RuntimeAgentSession(
+                SimpleNamespace(model='demo', reasoning_effort=None, multi_agent_runner=None, sessions=SimpleNamespace()),
+                session_key=kwargs['session_key'],
+                channel=kwargs['channel'],
+                chat_id=kwargs['chat_id'],
+                memory_channel=kwargs.get('memory_channel'),
+                memory_chat_id=kwargs.get('memory_chat_id'),
+            )
+
+    runtime_session = ceo_sessions._recreate_runtime_session(_RuntimeManager(), session)
+
+    assert runtime_session is not None
+    assert runtime_session._frontdoor_request_body_messages == continuity_baseline
+    assert runtime_session._frontdoor_restore_source == 'completed_continuity'
+    assert runtime_session._frontdoor_actual_request_path == record['path']
+    assert runtime_session._frontdoor_actual_request_history == [record]
+    assert runtime_session._frontdoor_prompt_cache_key_hash == 'family-artifact'
+    assert runtime_session._frontdoor_actual_request_hash == 'artifact-hash'
+    assert runtime_session._frontdoor_actual_request_message_count == 3
+    assert runtime_session._frontdoor_actual_tool_schema_hash == 'tool-artifact'
+
+
 def _build_channel_ceo_session_delete_client(tmp_path: Path, monkeypatch, *, persist_channel_session: bool = False):
     _mock_ceo_catalog_config(monkeypatch)
 
