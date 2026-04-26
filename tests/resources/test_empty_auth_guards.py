@@ -789,7 +789,6 @@ async def test_chat_backend_skips_outer_total_timeout_for_internally_managed_str
     assert len(captured) == 1
     assert captured[0]["timeout_seconds"] is None
 
-
 @pytest.mark.asyncio
 async def test_litellm_provider_forwards_request_timeout(monkeypatch) -> None:
     captured: dict[str, object] = {}

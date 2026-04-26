@@ -580,6 +580,41 @@ async def test_runtime_agent_session_keeps_background_running_tool_result_as_upd
 
 
 @pytest.mark.asyncio
+async def test_runtime_agent_session_exposes_latest_sidecar_tool_observation_in_reminder_snapshot() -> None:
+    heartbeat = _HeartbeatRecorder()
+    loop = SimpleNamespace(model="gpt-test", reasoning_effort=None, web_session_heartbeat=heartbeat)
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+    session._state.is_running = True
+    session._state.status = "running"
+
+    await session._handle_progress(
+        "agent_browser still running",
+        event_kind="tool",
+        event_data={
+            "tool_name": "agent_browser",
+            "sidecar_observation": {
+                "tool_name": "agent_browser",
+                "command_preview": "agent-browser open https://www.bilibili.com",
+                "stderr_tail": "warning tail",
+                "current_url": "https://www.bilibili.com",
+                "positive_progress": True,
+            },
+        },
+    )
+
+    snapshot = session.reminder_context_snapshot()
+
+    assert isinstance(snapshot, dict)
+    assert snapshot["active_tool_observation"] == {
+        "tool_name": "agent_browser",
+        "command_preview": "agent-browser open https://www.bilibili.com",
+        "stderr_tail": "warning tail",
+        "current_url": "https://www.bilibili.com",
+        "positive_progress": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_runtime_agent_session_merges_wait_tool_execution_back_into_original_tool_step() -> None:
     heartbeat = _HeartbeatRecorder()
     loop = SimpleNamespace(model="gpt-test", reasoning_effort=None, web_session_heartbeat=heartbeat)
@@ -853,7 +888,6 @@ async def test_runtime_agent_session_analysis_progress_updates_inflight_snapshot
     assert snapshot is not None
     assert snapshot["assistant_text"] == "正在请求 CEO 模型生成下一步响应..."
     assert any(event.type == "state_snapshot" for event in events)
-
 
 @pytest.mark.asyncio
 async def test_runtime_agent_session_marks_heartbeat_message_end(tmp_path: Path, monkeypatch) -> None:

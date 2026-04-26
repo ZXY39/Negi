@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 from contextlib import suppress
 from pathlib import Path
@@ -122,6 +123,7 @@ class AgentBrowserTool(Tool):
                 stdin=stdin,
                 timeout_seconds=effective_timeout,
                 cancel_token=cancel_token,
+                runtime_context=runtime,
             )
             first_result.setdefault('retried_after_session_cleanup', False)
             first_result.setdefault('initial_attempt', None)
@@ -137,6 +139,7 @@ class AgentBrowserTool(Tool):
                     env=env,
                     session=active_session,
                     cancel_token=cancel_token,
+                    runtime_context=runtime,
                 )
                 return json.dumps(first_result, ensure_ascii=False)
 
@@ -152,6 +155,7 @@ class AgentBrowserTool(Tool):
                     env=env,
                     session=active_session,
                     cancel_token=cancel_token,
+                    runtime_context=runtime,
                 )
                 retry_result = await self._run_command(
                     command_prefix=command_prefix,
@@ -161,6 +165,7 @@ class AgentBrowserTool(Tool):
                     stdin=stdin,
                     timeout_seconds=effective_timeout,
                     cancel_token=cancel_token,
+                    runtime_context=runtime,
                 )
                 retry_result['retried_after_session_cleanup'] = True
                 retry_result['initial_attempt'] = first_result
@@ -378,6 +383,83 @@ class AgentBrowserTool(Tool):
                 return str(args[index + 1] or '').strip()
         return ''
 
+    @staticmethod
+    def _observation_tail(text: str, *, max_lines: int = 8, max_chars: int = 800) -> str:
+        normalized = str(text or '').replace('\r\n', '\n').strip()
+        if not normalized:
+            return ''
+        lines = normalized.splitlines()
+        tail = '\n'.join(lines[-max_lines:])
+        return tail[-max_chars:]
+
+    @staticmethod
+    def _observation_current_url(*texts: str) -> str:
+        for text in texts:
+            matches = re.findall(r'https?://\S+', str(text or ''))
+            if matches:
+                return str(matches[-1]).strip()
+        return ''
+
+    @staticmethod
+    def _observation_page_title(stdout_tail: str, *, current_url: str) -> str:
+        for raw_line in str(stdout_tail or '').splitlines():
+            line = str(raw_line or '').strip()
+            if not line:
+                continue
+            if current_url and current_url in line:
+                continue
+            cleaned = line.lstrip('✓').strip()
+            if cleaned and not cleaned.startswith('http'):
+                return cleaned[:200]
+        return ''
+
+    @staticmethod
+    def _observation_hard_error(stderr_tail: str) -> str:
+        text = str(stderr_tail or '').strip()
+        if not text:
+            return ''
+        markers = ('ERR_', 'Navigation failed', 'net::')
+        return text if any(marker in text for marker in markers) else ''
+
+    async def _emit_sidecar_observation(
+        self,
+        *,
+        runtime_context: dict[str, Any] | None,
+        command: list[str],
+        args: list[str],
+        stdout_text: str = '',
+        stderr_text: str = '',
+    ) -> None:
+        runtime = runtime_context if isinstance(runtime_context, dict) else {}
+        if not isinstance(runtime, dict):
+            return
+        on_progress = runtime.get('on_progress')
+        if not callable(on_progress):
+            return
+        stdout_tail = self._observation_tail(stdout_text)
+        stderr_tail = self._observation_tail(stderr_text)
+        current_url = self._observation_current_url(stdout_tail, stderr_tail)
+        page_title = self._observation_page_title(stdout_tail, current_url=current_url)
+        hard_error_text = self._observation_hard_error(stderr_tail)
+        payload = {
+            'tool_name': self.name,
+            'command_preview': ' '.join(str(item or '') for item in list(command or [])[:8]).strip(),
+            'arguments': list(args or []),
+            'stdout_tail': stdout_tail,
+            'stderr_tail': stderr_tail,
+            'hard_error_text': hard_error_text,
+            'current_url': current_url,
+            'page_title': page_title,
+            'positive_progress': bool(current_url or page_title),
+        }
+        result = on_progress(
+            'agent_browser still running',
+            event_kind='tool',
+            event_data={'tool_name': self.name, 'sidecar_observation': payload},
+        )
+        if hasattr(result, '__await__'):
+            await result
+
     async def _run_command(
         self,
         *,
@@ -388,6 +470,7 @@ class AgentBrowserTool(Tool):
         stdin: str | None,
         timeout_seconds: int,
         cancel_token: Any | None,
+        runtime_context: dict[str, Any] | None,
     ) -> dict[str, Any]:
         process: asyncio.subprocess.Process | None = None
         try:
@@ -407,12 +490,24 @@ class AgentBrowserTool(Tool):
         except Exception as exc:
             return self._error_payload(error=str(exc), command=[*list(command_prefix or []), *list(args or [])], cwd=cwd)
 
+        observation_command = [*list(command_prefix or []), *list(args or [])]
+        observation_args = list(args or [])
         try:
+            await self._emit_sidecar_observation(
+                runtime_context=runtime_context,
+                command=observation_command,
+                args=observation_args,
+                stdout_text='',
+                stderr_text='',
+            )
             stdout, stderr = await self._communicate_process(
                 process=process,
                 stdin=stdin,
                 timeout_seconds=timeout_seconds,
                 cancel_token=cancel_token,
+                runtime_context=runtime_context,
+                observation_command=observation_command,
+                observation_args=observation_args,
             )
         except ToolCancellationRequested as exc:
             return self._error_payload(
@@ -465,12 +560,49 @@ class AgentBrowserTool(Tool):
         stdin: str | None,
         timeout_seconds: int,
         cancel_token: Any | None,
+        runtime_context: dict[str, Any] | None,
+        observation_command: list[str],
+        observation_args: list[str],
     ) -> tuple[bytes, bytes]:
         loop = asyncio.get_running_loop()
         started = loop.time()
-        communicate_task = asyncio.create_task(
-            process.communicate(None if stdin is None else str(stdin).encode('utf-8'))
-        )
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        stdin_bytes = None if stdin is None else str(stdin).encode('utf-8')
+        if stdin_bytes is not None and process.stdin is not None:
+            process.stdin.write(stdin_bytes)
+            await process.stdin.drain()
+            process.stdin.close()
+
+        last_emit_at = 0.0
+
+        async def _emit_from_buffers(*, force: bool = False) -> None:
+            nonlocal last_emit_at
+            now = loop.time()
+            if not force and (now - last_emit_at) < 0.5:
+                return
+            last_emit_at = now
+            await self._emit_sidecar_observation(
+                runtime_context=runtime_context,
+                command=list(observation_command or []),
+                args=list(observation_args or []),
+                stdout_text=decode_subprocess_output(b''.join(stdout_chunks)),
+                stderr_text=decode_subprocess_output(b''.join(stderr_chunks)),
+            )
+
+        async def _pump_stream(stream, sink: list[bytes]) -> None:
+            if stream is None:
+                return
+            while True:
+                chunk = await stream.read(4096)
+                if not chunk:
+                    break
+                sink.append(chunk)
+                await _emit_from_buffers()
+
+        stdout_task = asyncio.create_task(_pump_stream(process.stdout, stdout_chunks))
+        stderr_task = asyncio.create_task(_pump_stream(process.stderr, stderr_chunks))
+        wait_task = asyncio.create_task(process.wait())
         try:
             while True:
                 self._check_cancel(cancel_token)
@@ -478,28 +610,36 @@ class AgentBrowserTool(Tool):
                 if remaining <= 0:
                     raise asyncio.TimeoutError
                 try:
-                    return await asyncio.wait_for(asyncio.shield(communicate_task), timeout=min(0.25, remaining))
+                    await asyncio.wait_for(asyncio.shield(wait_task), timeout=min(0.25, remaining))
+                    break
                 except asyncio.TimeoutError:
-                    if communicate_task.done():
-                        return communicate_task.result()
                     continue
+            await asyncio.gather(stdout_task, stderr_task)
+            await _emit_from_buffers(force=True)
+            return b''.join(stdout_chunks), b''.join(stderr_chunks)
         except ToolCancellationRequested:
             await self._terminate_process(process)
-            communicate_task.cancel()
+            stdout_task.cancel()
+            stderr_task.cancel()
+            wait_task.cancel()
             with suppress(asyncio.CancelledError):
-                await communicate_task
+                await asyncio.gather(stdout_task, stderr_task, wait_task)
             raise
         except asyncio.TimeoutError:
             await self._terminate_process(process)
-            communicate_task.cancel()
+            stdout_task.cancel()
+            stderr_task.cancel()
+            wait_task.cancel()
             with suppress(asyncio.CancelledError):
-                await communicate_task
+                await asyncio.gather(stdout_task, stderr_task, wait_task)
             raise
         except asyncio.CancelledError:
             await self._terminate_process(process)
-            communicate_task.cancel()
+            stdout_task.cancel()
+            stderr_task.cancel()
+            wait_task.cancel()
             with suppress(asyncio.CancelledError):
-                await communicate_task
+                await asyncio.gather(stdout_task, stderr_task, wait_task)
             raise
 
     async def _terminate_process(self, process: asyncio.subprocess.Process | None) -> None:
@@ -533,6 +673,7 @@ class AgentBrowserTool(Tool):
         env: dict[str, str],
         session: str,
         cancel_token: Any | None,
+        runtime_context: dict[str, Any] | None,
     ) -> dict[str, Any]:
         return await self._run_command(
             command_prefix=command_prefix,
@@ -542,6 +683,7 @@ class AgentBrowserTool(Tool):
             stdin=None,
             timeout_seconds=max(1, int(self._settings.default_timeout_seconds or 300)),
             cancel_token=cancel_token,
+            runtime_context=runtime_context,
         )
 
     @staticmethod

@@ -348,3 +348,263 @@ async def test_reminder_sidecar_persists_internal_request_artifact(
         "output_tokens": 83,
         "cache_hit_tokens": 12672,
     }
+
+
+@pytest.mark.asyncio
+async def test_reminder_sidecar_includes_tool_arguments_and_live_observation_in_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_messages = [
+        {"role": "system", "content": "stable system"},
+        {"role": "user", "content": "Please open the page."},
+    ]
+    tool_schemas = [
+        {
+            "type": "function",
+            "name": "agent_browser",
+            "description": "Open a page",
+            "parameters": {"type": "object", "properties": {}},
+        }
+    ]
+    request_path = tmp_path / "frontdoor-request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "request_messages": request_messages,
+                "tool_schemas": tool_schemas,
+                "prompt_cache_key": "cache-key-main-turn",
+                "parallel_tool_calls": True,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    registry = InlineToolExecutionRegistry()
+    loop = SimpleNamespace(
+        sessions=None,
+        main_task_service=None,
+        inline_tool_execution_registry=registry,
+    )
+    service = CeoToolReminderService(loop=loop, registry=registry)
+    chat_backend = _CapturingChatBackend(content="CONTINUE")
+    monkeypatch.setattr(service, "_resolve_chat_backend", lambda: chat_backend)
+    monkeypatch.setattr(service, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    runtime_session = SimpleNamespace(
+        reminder_context_snapshot=lambda: {
+            "session_key": "web:test",
+            "turn_id": "turn-main-1",
+            "source": "user",
+            "status": "running",
+            "user_message": {"content": "Please open the page."},
+            "assistant_text": "Working on it.",
+            "visible_canonical_context": {},
+            "frontdoor_canonical_context": {},
+            "compression": {},
+            "semantic_context_state": {},
+            "hydrated_tool_names": [],
+            "frontdoor_selection_debug": {},
+            "frontdoor_actual_request_path": str(request_path),
+            "active_tool_observation": {
+                "tool_name": "agent_browser",
+                "command_preview": "agent-browser open https://www.bilibili.com",
+                "stdout_tail": "opening page",
+                "stderr_tail": "warning tail",
+                "current_url": "",
+                "page_title": "",
+                "hard_error_text": "",
+                "positive_progress": False,
+            },
+        }
+    )
+    task = asyncio.create_task(asyncio.sleep(0))
+    try:
+        record = InlineToolExecutionRecord(
+            execution_id="inline-tool-exec:1",
+            session_key="web:test",
+            turn_id="turn-main-1",
+            tool_name="agent_browser",
+            tool_call_id="call-browser-1",
+            task=task,
+            snapshot_supplier=None,
+            cancel_token=None,
+            started_at=time.monotonic() - 35.0,
+            runtime_session=runtime_session,
+            reminder_count=1,
+            arguments={"args": ["open", "https://www.bilibili.com"]},
+        )
+
+        await service._decide(record=record)
+    finally:
+        await task
+
+    assert len(chat_backend.calls) == 1
+    reminder_messages = chat_backend.calls[0]["messages"][len(request_messages) :]
+    reminder_text = "\n".join(str(item.get("content") or "") for item in reminder_messages if isinstance(item, dict))
+    assert "https://www.bilibili.com" in reminder_text
+    assert "warning tail" in reminder_text
+    assert "command_preview" in reminder_text
+
+
+@pytest.mark.asyncio
+async def test_reminder_sidecar_does_not_stop_when_observation_already_has_explicit_hard_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = tmp_path / "frontdoor-request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "request_messages": [{"role": "system", "content": "stable system"}],
+                "tool_schemas": [],
+                "prompt_cache_key": "cache-key-main-turn",
+                "parallel_tool_calls": True,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    registry = InlineToolExecutionRegistry()
+    loop = SimpleNamespace(
+        sessions=None,
+        main_task_service=None,
+        inline_tool_execution_registry=registry,
+    )
+    service = CeoToolReminderService(loop=loop, registry=registry)
+    chat_backend = _CapturingChatBackend(content="STOP")
+    monkeypatch.setattr(service, "_resolve_chat_backend", lambda: chat_backend)
+    monkeypatch.setattr(service, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    runtime_session = SimpleNamespace(
+        reminder_context_snapshot=lambda: {
+            "session_key": "web:test",
+            "turn_id": "turn-main-1",
+            "source": "user",
+            "status": "running",
+            "user_message": {"content": "Please open the page."},
+            "assistant_text": "Working on it.",
+            "visible_canonical_context": {},
+            "frontdoor_canonical_context": {},
+            "compression": {},
+            "semantic_context_state": {},
+            "hydrated_tool_names": [],
+            "frontdoor_selection_debug": {},
+            "frontdoor_actual_request_path": str(request_path),
+            "active_tool_observation": {
+                "tool_name": "agent_browser",
+                "command_preview": "agent-browser open https://www.bilibili.com",
+                "stdout_tail": "",
+                "stderr_tail": "Navigation failed: net::ERR_CONNECTION_CLOSED",
+                "hard_error_text": "Navigation failed: net::ERR_CONNECTION_CLOSED",
+                "positive_progress": False,
+            },
+        }
+    )
+    task = asyncio.create_task(asyncio.sleep(0))
+    try:
+        record = InlineToolExecutionRecord(
+            execution_id="inline-tool-exec:1",
+            session_key="web:test",
+            turn_id="turn-main-1",
+            tool_name="agent_browser",
+            tool_call_id="call-browser-1",
+            task=task,
+            snapshot_supplier=None,
+            cancel_token=None,
+            started_at=time.monotonic() - 35.0,
+            runtime_session=runtime_session,
+            reminder_count=1,
+            arguments={"args": ["open", "https://www.bilibili.com"]},
+        )
+
+        decision = await service._decide(record=record)
+    finally:
+        await task
+
+    assert decision.decision == "continue"
+    assert chat_backend.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reminder_sidecar_prefers_continue_when_observation_shows_positive_navigation_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = tmp_path / "frontdoor-request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "request_messages": [{"role": "system", "content": "stable system"}],
+                "tool_schemas": [],
+                "prompt_cache_key": "cache-key-main-turn",
+                "parallel_tool_calls": True,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    registry = InlineToolExecutionRegistry()
+    loop = SimpleNamespace(
+        sessions=None,
+        main_task_service=None,
+        inline_tool_execution_registry=registry,
+    )
+    service = CeoToolReminderService(loop=loop, registry=registry)
+    chat_backend = _CapturingChatBackend(content="STOP")
+    monkeypatch.setattr(service, "_resolve_chat_backend", lambda: chat_backend)
+    monkeypatch.setattr(service, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    runtime_session = SimpleNamespace(
+        reminder_context_snapshot=lambda: {
+            "session_key": "web:test",
+            "turn_id": "turn-main-1",
+            "source": "user",
+            "status": "running",
+            "user_message": {"content": "Please open the page."},
+            "assistant_text": "Working on it.",
+            "visible_canonical_context": {},
+            "frontdoor_canonical_context": {},
+            "compression": {},
+            "semantic_context_state": {},
+            "hydrated_tool_names": [],
+            "frontdoor_selection_debug": {},
+            "frontdoor_actual_request_path": str(request_path),
+            "active_tool_observation": {
+                "tool_name": "agent_browser",
+                "command_preview": "agent-browser open https://www.bing.com",
+                "stdout_tail": "page opened",
+                "stderr_tail": "",
+                "current_url": "https://www.bing.com",
+                "page_title": "Bing",
+                "hard_error_text": "",
+                "positive_progress": True,
+            },
+        }
+    )
+    task = asyncio.create_task(asyncio.sleep(0))
+    try:
+        record = InlineToolExecutionRecord(
+            execution_id="inline-tool-exec:1",
+            session_key="web:test",
+            turn_id="turn-main-1",
+            tool_name="agent_browser",
+            tool_call_id="call-browser-1",
+            task=task,
+            snapshot_supplier=None,
+            cancel_token=None,
+            started_at=time.monotonic() - 35.0,
+            runtime_session=runtime_session,
+            reminder_count=1,
+            arguments={"args": ["open", "https://www.bing.com"]},
+        )
+
+        decision = await service._decide(record=record)
+    finally:
+        await task
+
+    assert decision.decision == "continue"
+    assert chat_backend.calls == []

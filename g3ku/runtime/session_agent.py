@@ -70,6 +70,7 @@ class RuntimeAgentSession:
         self._background_tool_targets: dict[str, dict[str, str]] = {}
         self._tool_seq: int = 0
         self._active_cancel_token: ToolCancellationToken | None = None
+        self._latest_sidecar_tool_observation: dict[str, Any] = {}
         self._preserved_inflight_turn: dict[str, Any] | None = None
         self._follow_up_transition_snapshot: dict[str, Any] | None = None
         self._paused_execution_context: dict[str, Any] | None = None
@@ -1711,6 +1712,7 @@ class RuntimeAgentSession:
             ],
             "frontdoor_selection_debug": copy.deepcopy(getattr(self, "_frontdoor_selection_debug", None) or {}),
             "frontdoor_actual_request_path": str(getattr(self, "_frontdoor_actual_request_path", "") or "").strip(),
+            "active_tool_observation": copy.deepcopy(getattr(self, "_latest_sidecar_tool_observation", None) or {}),
         }
         return snapshot
 
@@ -2171,6 +2173,10 @@ class RuntimeAgentSession:
         data = event_data if isinstance(event_data, dict) else {}
         tool_name = str(data.get("tool_name") or "").strip() or "tool"
         source = self._internal_prompt_source() or "user"
+        observation = dict(data.get("sidecar_observation") or {}) if isinstance(data.get("sidecar_observation"), dict) else {}
+        if observation:
+            observation["tool_name"] = str(observation.get("tool_name") or tool_name).strip() or tool_name
+            self._latest_sidecar_tool_observation = observation
 
         if kind == "tool_start":
             if tool_name in _LEGACY_CONTROL_TOOL_NAMES:
@@ -2242,6 +2248,8 @@ class RuntimeAgentSession:
                 return
             tool_name, call_id = self._resolve_completed_tool_call(tool_name, data)
             self._state.pending_tool_calls.discard(call_id)
+            if self._latest_sidecar_tool_observation and str(self._latest_sidecar_tool_observation.get("tool_name") or "").strip() == tool_name:
+                self._latest_sidecar_tool_observation = {}
             await self._emit(
                 "tool_execution_end",
                 tool_name=tool_name,
@@ -2296,6 +2304,8 @@ class RuntimeAgentSession:
                 return
             tool_name, call_id = self._resolve_completed_tool_call(tool_name, data)
             self._state.pending_tool_calls.discard(call_id)
+            if self._latest_sidecar_tool_observation and str(self._latest_sidecar_tool_observation.get("tool_name") or "").strip() == tool_name:
+                self._latest_sidecar_tool_observation = observation or {}
             error = StructuredError(
                 code="tool_error",
                 message=str(content or f"{tool_name} failed"),

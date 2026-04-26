@@ -524,6 +524,7 @@ This is intentionally different from both ordinary tool interaction steps and he
 
 - Backend reminder events are emitted only as websocket live events.
 - The payload includes `turn_id`, `execution_id`, `tool_name`, `elapsed_seconds`, `reminder_count`, `decision`, `label`, `source="reminder"`, and optional `terminal`.
+- Some direct CEO tools may never emit this event at all. If the tool call already declares its own timeout budget through a normalized top-level timeout-bearing argument such as `timeout_seconds`, the runtime skips the reminder sidecar and lets the tool surface its native timeout or error contract directly.
 - The frontend must not create a new assistant bubble and must not append a new interaction step for reminder events.
 - The current CEO frontend also no longer renders `label` as a visible reminder block under the pending turn. These events are kept as live-only bookkeeping signals so the UI stays clean while the authoritative tool outcome still arrives through the ordinary tool/error/final-reply path.
 
@@ -539,6 +540,10 @@ This is intentionally different from both ordinary tool interaction steps and he
 - `decision=continue` means the sidecar reviewed the context and decided to keep waiting.
 - `decision=stop` means the sidecar requested `stop_tool_execution`; the main turn will later surface the actual tool failure through the ordinary tool-result path.
 - `decision=unavailable` means the reminder sidecar failed or could not make a valid stop decision, so the tool keeps running.
+- For sidecar-managed tools, the reminder decision is observation-aware before the model is consulted. The sidecar can inspect the current tool name, normalized arguments, and the latest live `sidecar_observation` payload, including bounded stdout/stderr tails plus best-effort URL or page-title progress when a tool publishes them.
+- If the latest observation already shows a concrete hard error such as `Navigation failed: net::ERR_CONNECTION_CLOSED`, the sidecar should keep waiting so the tool can return that native failure instead of replacing it with a timeout-stop.
+- If the latest observation already shows positive progress such as a current URL, page title, or explicit progress marker, the sidecar should also keep waiting rather than issuing an early timeout-stop.
+- Sidecar timeout-stop no longer cancels the whole visible CEO turn. It only targets the active tool call, so later tool calls in the same turn are not supposed to inherit a stale cancelled state.
 
 Operators should therefore treat `ceo.tool.reminder` as a live runtime signal, not as durable conversation UI. The authoritative end state still arrives through the normal CEO tool/error/final-reply events.
 

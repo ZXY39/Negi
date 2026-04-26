@@ -772,6 +772,7 @@ CEO frontdoor direct long-running tools now have a separate inline reminder lane
 - Direct CEO tool executions register in `InlineToolExecutionRegistry` when they run without a detached `ToolExecutionManager` handoff.
 - This registry is separate from detached/background tool execution semantics. Maintainers should not treat an inline execution id as a detached watchdog execution id.
 - Reminder windows are fixed at `30 / 60 / 120 / 240 / 600` seconds, then repeat every 600 seconds after that.
+- CEO/frontdoor direct tools now have an argument-owned opt-out from this lane: if the normalized top-level tool arguments already contain an explicit timeout-bearing key such as `timeout_seconds`, the runtime skips the inline reminder sidecar entirely and lets the tool's own timeout/error contract speak for itself.
 - The old inline watchdog poll text is no longer the operator-facing mechanism for CEO direct tools. The direct tool keeps running inline, while reminder decisions happen in the sidecar lane.
 
 The reminder lane itself is deliberately read-only with respect to session persistence:
@@ -779,7 +780,9 @@ The reminder lane itself is deliberately read-only with respect to session persi
 - `CeoToolReminderService` does not call `session.prompt(...)`.
 - It does not take the normal turn lock or create a heartbeat/internal turn.
 - Its first choice is to reuse the latest persisted CEO actual-request artifact as the provider-facing scaffold so the sidecar request shares the same cacheable prefix as the main turn; only if that scaffold is missing does it fall back to `CeoMessageBuilder.build_for_ceo(..., ephemeral_tail_messages=...)`.
-- The reminder snapshot from `RuntimeAgentSession.reminder_context_snapshot()` therefore now needs to carry the latest actual-request pointer in addition to the current visible stage/canonical view, durable `frontdoor_canonical_context`, compression state, hydrated tools, selection debug, and current visible user/assistant text.
+- The reminder snapshot from `RuntimeAgentSession.reminder_context_snapshot()` therefore now needs to carry the latest actual-request pointer in addition to the current visible stage/canonical view, durable `frontdoor_canonical_context`, compression state, hydrated tools, selection debug, current visible user/assistant text, and the latest live `sidecar_observation` for the active tool when one exists.
+- Reminder decisions are no longer duration-only. Before the sidecar asks the reminder model whether it should `STOP` or `CONTINUE`, it now inspects runtime-owned tool context: current tool name, normalized arguments, and the latest live observation payload.
+- That live observation lane is generic. `agent_browser` is the first producer and emits best-effort command preview plus bounded stdout/stderr tails while the subprocess is still running; later tools may publish the same shape through progress events.
 - Sidecar stop/continue decisions are now parsed from a text-only reminder reply (`STOP` / `CONTINUE`). Reusing the main turn's provider-visible tool bundle is a cache-stability tactic, not permission to execute arbitrary returned tool calls in the sidecar lane.
 - The reminder text itself is live-only. It must not be written into transcript history, canonical context, or future prompt-history injection.
 
@@ -790,6 +793,9 @@ If the sidecar decides to stop a running tool, the main turn must see that as a 
 - The registry stores `InlineToolStopDecisionMetadata` with `reason_code=sidecar_timeout_stop` and the elapsed runtime / reminder count at the stop point.
 - The direct CEO tool execution path checks that metadata and normalizes the tool result into `tool_error` / `status=error`.
 - The failure text is intentionally explanatory because the main agent does not share the sidecar reasoning context.
+- Sidecar stop no longer cancels the whole visible CEO turn through the shared session token. User pause/stop still cancels the turn token, but sidecar timeout-stop now targets a per-tool child cancellation token so later tool calls in the same turn are not poisoned.
+- If the latest observation already exposes a concrete hard failure such as `Navigation failed: net::ERR_CONNECTION_CLOSED`, the sidecar must not overwrite that condition with `sidecar_timeout_stop`; it should keep waiting and let the tool return its native error result.
+- If the latest observation already exposes positive progress such as a current URL, page title, or explicit progress marker, the sidecar should bias toward `CONTINUE` without issuing an early timeout stop.
 
 Example shape:
 

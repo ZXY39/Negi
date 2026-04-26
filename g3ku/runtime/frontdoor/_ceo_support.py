@@ -24,7 +24,11 @@ from g3ku.runtime.tool_error_guidance import (
     is_parameter_like_tool_exception,
 )
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
-from g3ku.runtime.tool_watchdog import actor_role_allows_watchdog, run_tool_with_watchdog
+from g3ku.runtime.tool_watchdog import (
+    actor_role_allows_watchdog,
+    run_tool_with_watchdog,
+    tool_arguments_request_timeout_budget,
+)
 from g3ku.runtime.web_ceo_sessions import SESSION_TASK_DEFAULTS_SCOPE_SESSION, ceo_session_task_defaults_scope
 from main.protocol import now_iso
 from main.runtime.chat_backend import ConfigChatBackend, sanitize_provider_messages
@@ -592,9 +596,16 @@ class CeoFrontDoorSupport:
         )
 
         execute_kwargs = dict(normalized_arguments)
+        session_cancel_token = runtime_context.get("cancel_token")
+        per_call_cancel_token = (
+            session_cancel_token.derive_child(reason=f"inline_tool:{tool_name}")
+            if session_cancel_token is not None and hasattr(session_cancel_token, "derive_child")
+            else session_cancel_token
+        )
         per_call_runtime = {
             **runtime_context,
             "tool_name": tool_name,
+            "cancel_token": per_call_cancel_token,
             **({"tool_call_id": normalized_tool_call_id} if normalized_tool_call_id else {}),
         }
         if self._accepts_runtime_context(tool):
@@ -613,7 +624,11 @@ class CeoFrontDoorSupport:
 
         token = self._loop.tools.push_runtime_context(per_call_runtime)
         try:
-            if actor_role_allows_watchdog(per_call_runtime):
+            use_watchdog = (
+                actor_role_allows_watchdog(per_call_runtime)
+                and not tool_arguments_request_timeout_budget(normalized_arguments)
+            )
+            if use_watchdog:
                 inline_registry = getattr(self._loop, "inline_tool_execution_registry", None)
                 outcome = await run_tool_with_watchdog(
                     _invoke(),
@@ -675,6 +690,13 @@ class CeoFrontDoorSupport:
             )
             return error_text, error_text, "error", started_at, finished_at, elapsed_seconds
         finally:
+            if (
+                session_cancel_token is not None
+                and per_call_cancel_token is not None
+                and per_call_cancel_token is not session_cancel_token
+                and hasattr(session_cancel_token, "detach_child")
+            ):
+                session_cancel_token.detach_child(per_call_cancel_token)
             self._loop.tools.pop_runtime_context(token)
             inline_registry = getattr(self._loop, "inline_tool_execution_registry", None)
             if inline_execution_id and inline_registry is not None and hasattr(inline_registry, "discard_execution"):

@@ -267,6 +267,23 @@ def runtime_context_value(runtime_context: Any, key: str, default: Any = None) -
     return getattr(runtime_context, key, default)
 
 
+def tool_arguments_request_timeout_budget(arguments: dict[str, Any] | None) -> bool:
+    if not isinstance(arguments, dict):
+        return False
+    for raw_key, value in arguments.items():
+        key = str(raw_key or "").strip().lower()
+        if "timeout" not in key:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if isinstance(value, (list, tuple, set, dict)) and not value:
+            continue
+        return True
+    return False
+
+
 def actor_role_allows_watchdog(runtime_context: Any) -> bool:
     role = str(runtime_context_value(runtime_context, "actor_role", "") or "").strip().lower()
     # CEO and execution/acceptance nodes all benefit from watchdog polling so long
@@ -644,6 +661,7 @@ async def run_tool_with_watchdog(
                 turn_id=str(runtime_context_value(runtime_context, "turn_id", "") or "").strip(),
                 tool_name=tool_name,
                 tool_call_id=str(runtime_context_value(runtime_context, "tool_call_id", "") or "").strip(),
+                arguments=dict(arguments or {}),
                 task=execution_task,
                 snapshot_supplier=supplier,
                 cancel_token=cancel_token,

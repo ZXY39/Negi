@@ -719,7 +719,6 @@ async def test_g3ku_chat_model_adapter_preserves_provider_request_payload_metada
         "tool_choice": "auto",
     }
 
-
 def test_runtime_send_token_preflight_threshold_math_is_ceo_aligned() -> None:
     """
     Regression guard: node/runtime send-side token preflight must share the CEO threshold semantics:

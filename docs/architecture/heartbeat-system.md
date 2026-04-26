@@ -89,8 +89,11 @@ CEO frontdoor direct long-running tools now use a live-only sidecar reminder lan
 
 - Inline executions register in `InlineToolExecutionRegistry`, not in the detached `ToolExecutionManager` background-execution path.
 - Reminder windows are fixed at `30 / 60 / 120 / 240 / 600` seconds, and after the 600-second window they repeat every 600 seconds.
+- CEO direct tools now have an argument-owned opt-out from this lane: if the normalized top-level tool arguments already contain a timeout-bearing key such as `timeout_seconds`, the runtime skips reminder-sidecar stop/continue decisions and leaves timeout ownership to the tool itself.
 - When the main turn already has an authoritative CEO actual-request JSON, `CeoToolReminderService` reuses that saved `request_messages` / `tool_schemas` / `prompt_cache_key` / `parallel_tool_calls` scaffold as the provider-facing cache prefix and appends only live reminder-tail messages. It falls back to a read-only `CeoMessageBuilder.build_for_ceo(..., ephemeral_tail_messages=...)` rebuild only when no actual-request scaffold exists yet.
 - The sidecar still reuses the CEO main model binding, but its decision channel is now text-only (`STOP` / `CONTINUE`). Even when it reuses the main turn's full provider-visible tool bundle for cache-prefix stability, it must not execute arbitrary returned tool calls.
+- For tools that remain sidecar-managed, the reminder decision is now observation-aware before the model is consulted. The sidecar reads the current tool name, normalized arguments, and the latest live `sidecar_observation` payload when available.
+- `sidecar_observation` is a generic progress-side channel. `agent_browser` is the first producer and emits best-effort command preview plus bounded stdout/stderr tails while the browser process is still live.
 - Reminder labels remain live-only event data and must not be persisted into transcript, canonical context, or history injection.
 
 ## Reminder Failure Semantics
@@ -98,6 +101,8 @@ CEO frontdoor direct long-running tools now use a live-only sidecar reminder lan
 - If the reminder model call fails, times out, or returns unusable output, the default decision is `unavailable`.
 - `unavailable` reminders do not stop the tool and do not interrupt the main turn.
 - Only an explicit sidecar stop decision is allowed to stop the inline execution.
+- If the latest observation already shows a concrete hard tool failure, the sidecar should not convert that state into a timeout stop. It should keep waiting so the tool can complete and surface its native error.
+- If the latest observation already shows positive progress such as a current URL, page title, or explicit progress marker, the sidecar should also keep waiting instead of issuing an early timeout stop.
 
 ## Timeout Stop Contract
 
@@ -106,6 +111,7 @@ When the sidecar stops a running CEO direct tool, the stop must flow back into t
 - The registry stores `InlineToolStopDecisionMetadata` with `reason_code=sidecar_timeout_stop`.
 - The direct tool completion path normalizes that into a `tool_error` / `status=error` result visible to the main turn.
 - The error text must include the tool name, elapsed runtime, reminder count, and the fact that the stop came from a sidecar timeout decision.
+- Sidecar timeout-stop now targets only the inline tool execution's child cancellation token. It must not mark the whole visible CEO turn as cancelled or cause later tool calls in that same turn to fail immediately.
 
 Example shape:
 

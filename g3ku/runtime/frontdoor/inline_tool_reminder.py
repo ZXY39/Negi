@@ -66,6 +66,7 @@ class CeoReminderSnapshot:
     hydrated_tool_names: list[str]
     frontdoor_selection_debug: dict[str, Any]
     frontdoor_actual_request_path: str
+    active_tool_observation: dict[str, Any]
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> "CeoReminderSnapshot | None":
@@ -89,6 +90,7 @@ class CeoReminderSnapshot:
             ],
             frontdoor_selection_debug=dict(payload.get("frontdoor_selection_debug") or {}),
             frontdoor_actual_request_path=str(payload.get("frontdoor_actual_request_path") or "").strip(),
+            active_tool_observation=dict(payload.get("active_tool_observation") or {}),
         )
 
 
@@ -103,6 +105,7 @@ class InlineToolExecutionRecord:
     snapshot_supplier: Callable[[], Any] | None
     cancel_token: Any | None
     started_at: float
+    arguments: dict[str, Any] | None = None
     runtime_session: Any | None = None
     reminder_count: int = 0
     next_window_index: int = 0
@@ -190,6 +193,7 @@ class InlineToolExecutionRegistry:
         turn_id: str,
         tool_name: str,
         tool_call_id: str,
+        arguments: dict[str, Any] | None,
         task: asyncio.Task[Any],
         snapshot_supplier: Callable[[], Any] | None,
         cancel_token: Any | None,
@@ -207,6 +211,7 @@ class InlineToolExecutionRegistry:
                 turn_id=str(turn_id or "").strip(),
                 tool_name=str(tool_name or "tool").strip() or "tool",
                 tool_call_id=str(tool_call_id or "").strip(),
+                arguments=dict(arguments or {}),
                 task=task,
                 snapshot_supplier=snapshot_supplier if callable(snapshot_supplier) else None,
                 cancel_token=cancel_token,
@@ -629,6 +634,13 @@ class CeoToolReminderService:
                     reminder_count=record.reminder_count,
                 ),
             )
+        deterministic_decision = self._deterministic_observation_decision(
+            record=record,
+            snapshot=snapshot,
+            elapsed_seconds=elapsed_seconds,
+        )
+        if deterministic_decision is not None:
+            return deterministic_decision
         reminder_messages: list[dict[str, Any]] = [
             {
                 "role": "assistant",
@@ -646,9 +658,22 @@ class CeoToolReminderService:
                 ),
             },
         ]
+        tool_context_payload = {
+            "tool_name": record.tool_name,
+            "tool_call_id": record.tool_call_id,
+            "arguments": dict(record.arguments or {}),
+            "active_tool_observation": dict(snapshot.active_tool_observation or {}),
+        }
+        reminder_messages.insert(
+            1,
+            {
+                "role": "assistant",
+                "content": "Current tool context:\n" + json.dumps(tool_context_payload, ensure_ascii=False),
+            },
+        )
         if snapshot.assistant_text:
             reminder_messages.insert(
-                1,
+                2,
                 {
                     "role": "assistant",
                     "content": f"Current visible assistant draft before this reminder:\n{snapshot.assistant_text}",
@@ -754,6 +779,43 @@ class CeoToolReminderService:
             ),
             model_decision_excerpt=decision_excerpt,
         )
+
+    def _deterministic_observation_decision(
+        self,
+        *,
+        record: InlineToolExecutionRecord,
+        snapshot: CeoReminderSnapshot,
+        elapsed_seconds: float,
+    ) -> CeoReminderDecision | None:
+        observation = dict(snapshot.active_tool_observation or {})
+        hard_error_text = str(
+            observation.get("hard_error_text")
+            or observation.get("stderr_tail")
+            or ""
+        ).strip()
+        if hard_error_text and any(marker in hard_error_text for marker in ("ERR_", "Navigation failed", "net::")):
+            return CeoReminderDecision(
+                decision="continue",
+                label=(
+                    f"The running tool `{record.tool_name}` has been active for {elapsed_seconds:.0f}s. "
+                    "A concrete tool error is already visible, so the sidecar will keep waiting and preserve the tool's native failure."
+                ),
+                model_decision_excerpt="deterministic_continue_hard_error",
+            )
+        if (
+            bool(observation.get("positive_progress"))
+            or str(observation.get("current_url") or "").strip()
+            or str(observation.get("page_title") or "").strip()
+        ):
+            return CeoReminderDecision(
+                decision="continue",
+                label=(
+                    f"The running tool `{record.tool_name}` has been active for {elapsed_seconds:.0f}s. "
+                    "Positive progress is already visible, so the sidecar will continue waiting."
+                ),
+                model_decision_excerpt="deterministic_continue_positive_progress",
+            )
+        return None
 
     @staticmethod
     def _tool_call_name(item: Any) -> str:

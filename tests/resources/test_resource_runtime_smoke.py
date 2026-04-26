@@ -3515,7 +3515,7 @@ async def test_agent_browser_timeout_triggers_session_cleanup(tmp_path: Path):
     async def _fake_resolve_command_prefix(self):
         return ['agent-browser']
 
-    async def _fake_run_command(self, *, command_prefix, args, cwd, env, stdin, timeout_seconds, cancel_token):
+    async def _fake_run_command(self, *, command_prefix, args, cwd, env, stdin, timeout_seconds, cancel_token, runtime_context):
         run_calls.append(
             {
                 'command_prefix': list(command_prefix),
@@ -3523,6 +3523,7 @@ async def test_agent_browser_timeout_triggers_session_cleanup(tmp_path: Path):
                 'cwd': str(cwd),
                 'timeout_seconds': timeout_seconds,
                 'cancel_token': cancel_token,
+                'runtime_context': dict(runtime_context or {}),
             }
         )
         return {
@@ -3533,13 +3534,14 @@ async def test_agent_browser_timeout_triggers_session_cleanup(tmp_path: Path):
             'cwd': str(cwd),
         }
 
-    async def _fake_close_session(self, *, command_prefix, cwd, env, session, cancel_token):
+    async def _fake_close_session(self, *, command_prefix, cwd, env, session, cancel_token, runtime_context):
         close_calls.append(
             {
                 'command_prefix': list(command_prefix),
                 'cwd': str(cwd),
                 'session': session,
                 'cancel_token': cancel_token,
+                'runtime_context': dict(runtime_context or {}),
             }
         )
         return {
@@ -3572,6 +3574,7 @@ async def test_agent_browser_timeout_triggers_session_cleanup(tmp_path: Path):
             'cwd': str(workspace),
             'timeout_seconds': 300,
             'cancel_token': None,
+            'runtime_context': {},
         }
     ]
     assert close_calls == [
@@ -3580,6 +3583,7 @@ async def test_agent_browser_timeout_triggers_session_cleanup(tmp_path: Path):
             'cwd': str(workspace),
             'session': 'g3ku-agent-browser',
             'cancel_token': None,
+            'runtime_context': {},
         }
     ]
     assert payload['timed_out'] is True
@@ -3597,7 +3601,7 @@ async def test_agent_browser_failed_daemon_warning_retries_once_after_cleanup(tm
     async def _fake_resolve_command_prefix(self):
         return ['agent-browser']
 
-    async def _fake_run_command(self, *, command_prefix, args, cwd, env, stdin, timeout_seconds, cancel_token):
+    async def _fake_run_command(self, *, command_prefix, args, cwd, env, stdin, timeout_seconds, cancel_token, runtime_context):
         run_calls.append(
             {
                 'command_prefix': list(command_prefix),
@@ -3605,6 +3609,7 @@ async def test_agent_browser_failed_daemon_warning_retries_once_after_cleanup(tm
                 'cwd': str(cwd),
                 'timeout_seconds': timeout_seconds,
                 'cancel_token': cancel_token,
+                'runtime_context': dict(runtime_context or {}),
             }
         )
         if len(run_calls) == 1:
@@ -3626,7 +3631,7 @@ async def test_agent_browser_failed_daemon_warning_retries_once_after_cleanup(tm
             'cwd': str(cwd),
         }
 
-    async def _fake_close_session(self, *, command_prefix, cwd, env, session, cancel_token):
+    async def _fake_close_session(self, *, command_prefix, cwd, env, session, cancel_token, runtime_context):
         close_calls.append(session)
         return {
             'ok': True,
@@ -3658,6 +3663,7 @@ async def test_agent_browser_failed_daemon_warning_retries_once_after_cleanup(tm
             'cwd': str(workspace),
             'timeout_seconds': 300,
             'cancel_token': None,
+            'runtime_context': {},
         },
         {
             'command_prefix': ['agent-browser'],
@@ -3672,6 +3678,7 @@ async def test_agent_browser_failed_daemon_warning_retries_once_after_cleanup(tm
             'cwd': str(workspace),
             'timeout_seconds': 300,
             'cancel_token': None,
+            'runtime_context': {},
         },
     ]
     assert close_calls == ['g3ku-agent-browser']
@@ -3697,6 +3704,42 @@ async def test_agent_browser_missing_cli_returns_install_guidance(tmp_path: Path
     assert payload['install_root'] == str((workspace / 'externaltools' / 'agent_browser').resolve(strict=False))
     assert payload['temp_root'] == str((workspace / 'temp' / 'agent_browser').resolve(strict=False))
     assert 'load_tool_context(tool_id="agent_browser")' in payload['next_actions']
+
+
+@pytest.mark.asyncio
+async def test_agent_browser_emits_sidecar_observation_payload(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    handler = _load_agent_browser_handler(workspace)
+    progress_calls: list[dict[str, object]] = []
+
+    async def _on_progress(content: str, *, event_kind=None, event_data=None, **kwargs):
+        progress_calls.append(
+            {
+                'content': content,
+                'event_kind': event_kind,
+                'event_data': dict(event_data or {}),
+                'extra': dict(kwargs or {}),
+            }
+        )
+
+    await handler._emit_sidecar_observation(
+        runtime_context={'on_progress': _on_progress},
+        command=['agent-browser', 'open', 'https://example.com'],
+        args=['open', 'https://example.com'],
+        stdout_text='✓ Example Domain\n  https://example.com/\n',
+        stderr_text='warning tail\n',
+    )
+
+    assert len(progress_calls) == 1
+    assert progress_calls[0]['event_kind'] == 'tool'
+    payload = dict(progress_calls[0]['event_data'].get('sidecar_observation') or {})
+    assert payload['tool_name'] == 'agent_browser'
+    assert payload['command_preview'].startswith('agent-browser open https://example.com')
+    assert payload['arguments'] == ['open', 'https://example.com']
+    assert payload['stdout_tail'].startswith('✓ Example Domain')
+    assert payload['stderr_tail'] == 'warning tail'
+    assert payload['current_url'] == 'https://example.com/'
+    assert payload['positive_progress'] is True
 
 
 @pytest.mark.asyncio
