@@ -61,3 +61,10 @@ def test_prompts_describe_historical_image_reopen_via_content_open() -> None:
         assert "使用 `content_open` 重新打开图片" in prompt
         assert "若本轮已经直接带有图片输入" in prompt
         assert "非多模态模型无法打开图片" in prompt
+
+
+def test_ceo_frontdoor_prompt_requires_real_upload_paths_or_refs_in_async_task_prompt() -> None:
+    prompt = (REPO_ROOT / "g3ku/runtime/prompts/ceo_frontdoor.md").read_text(encoding="utf-8")
+    assert "如果异步任务依赖当前或历史上传的文件/图片" in prompt
+    assert "必须在 `task` 说明里写明对应文件的真实 `path` 或 `ref`" in prompt
+    assert "`user_uploads`、`current_uploads`、`user_image_and_docx`" in prompt

@@ -2666,6 +2666,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             state.get("candidate_tool_items"),
             fallback_names=candidate_tool_names,
         )
+        attachment_reopen_targets = [
+            dict(item)
+            for item in list(
+                state.get("attachment_reopen_targets")
+                or getattr(session, "_frontdoor_attachment_reopen_targets", [])
+                or []
+            )
+            if isinstance(item, dict)
+        ]
         hydrated_tool_names = cls._normalized_hydrated_tool_names(
             state.get("hydrated_tool_names")
             or getattr(session, "_frontdoor_hydrated_tool_names", [])
@@ -2735,6 +2744,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "provider_tool_exposure_commit_reason": "",
             "candidate_tool_names": list(candidate_tool_names),
             "candidate_tool_items": list(candidate_tool_items),
+            "attachment_reopen_targets": list(attachment_reopen_targets),
             "hydrated_tool_names": list(hydrated_tool_names),
             "visible_skill_ids": list(visible_skill_ids),
             "candidate_skill_ids": list(candidate_skill_ids),
@@ -2866,6 +2876,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             [
                 dict(item)
                 for item in list(state.get("repair_required_skill_items") or [])
+                if isinstance(item, dict)
+            ],
+        )
+        setattr(
+            target_session,
+            "_frontdoor_attachment_reopen_targets",
+            [
+                dict(item)
+                for item in list(state.get("attachment_reopen_targets") or [])
                 if isinstance(item, dict)
             ],
         )
@@ -4972,12 +4991,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if (heartbeat_internal or cron_internal) and has_prior_request_body_seed
             else {}
         )
+        attachment_reopen_targets: list[dict[str, Any]] = []
         repair_required_tool_items: list[dict[str, Any]] = []
         repair_required_skill_items: list[dict[str, Any]] = []
         compression_state_payload = dict(current_compression_state or self._default_compression_state())
         frontdoor_history_shrink_reason_from_prepare = ""
         turn_overlay_section_count = 0
         if inherited_internal_contract_state:
+            attachment_reopen_targets = [
+                dict(item)
+                for item in list(inherited_internal_contract_state.get("attachment_reopen_targets") or [])
+                if isinstance(item, dict)
+            ]
             selected_skill_ids = list(inherited_internal_contract_state.get("visible_skill_ids") or [])
             candidate_tool_names = list(inherited_internal_contract_state.get("candidate_tool_names") or [])
             candidate_tool_items = [
@@ -5123,6 +5148,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             turn_overlay_section_count = int(
                 getattr(assembly, "trace", {}).get("turn_overlay_section_count", 0) or 0
             )
+            attachment_reopen_targets = [
+                dict(item)
+                for item in list(getattr(assembly, "trace", {}).get("attachment_reopen_targets") or [])
+                if isinstance(item, dict)
+            ]
             frontdoor_selection_debug = {
                 "query_text": str(builder_query_text or "").strip(),
                 "raw_turn_query_text": str(query_text or "").strip(),
@@ -5221,6 +5251,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     if callable(getattr(getattr(self._loop, "main_task_service", None), "_current_exec_runtime_policy_payload", None))
                     else None
                 ),
+                attachment_reopen_targets=list(attachment_reopen_targets),
             ),
         )
         prompt_scope = "ceo_frontdoor"
@@ -5351,6 +5382,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ),
             "candidate_tool_names": list(candidate_tool_names),
             "candidate_tool_items": list(candidate_tool_items),
+            "attachment_reopen_targets": [
+                dict(item)
+                for item in list(attachment_reopen_targets or [])
+                if isinstance(item, dict)
+            ],
             "repair_required_tool_items": [
                 dict(item)
                 for item in list(repair_required_tool_items or [])
@@ -6362,6 +6398,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             str(item or "").strip()
             for item in list(state.get("rbac_visible_skill_ids") or [])
             if str(item or "").strip()
+        ]
+        result["attachment_reopen_targets"] = [
+            dict(item)
+            for item in list(state.get("attachment_reopen_targets") or [])
+            if isinstance(item, dict)
         ]
         result["repair_required_tool_items"] = [
             dict(item)

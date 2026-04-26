@@ -1620,6 +1620,149 @@ def test_frontdoor_tool_contract_renders_repair_required_sections_separately() -
     assert "Reference skill: `writing-skills`." in str(updated[0]["content"] or "")
 
 
+def test_frontdoor_tool_contract_renders_attachment_reopen_targets() -> None:
+    contract = build_frontdoor_tool_contract(
+        callable_tool_names=["create_async_task", "content_open"],
+        candidate_tool_names=[],
+        candidate_tool_items=[],
+        hydrated_tool_names=[],
+        frontdoor_stage_state={
+            "active_stage_id": "stage:1",
+            "transition_required": False,
+            "stages": [{"stage_id": "stage:1", "status": "active", "stage_goal": "dispatch"}],
+        },
+        visible_skill_ids=[],
+        candidate_skill_ids=[],
+        rbac_visible_tool_names=["create_async_task", "content_open"],
+        rbac_visible_skill_ids=[],
+        contract_revision="frontdoor:v1",
+        attachment_reopen_targets=[
+            {
+                "name": "resume.docx",
+                "kind": "file",
+                "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "path": "D:/Uploads/resume.docx",
+            },
+            {
+                "name": "jd.png",
+                "kind": "image",
+                "mime_type": "image/png",
+                "path": "D:/Uploads/jd.png",
+                "ref": "artifact:artifact:jd123",
+            },
+        ],
+    )
+
+    updated = upsert_frontdoor_tool_contract_message([], contract)
+    payload = contract.to_message_payload()
+    contract_text = str(updated[0]["content"] or "")
+
+    assert payload["attachment_reopen_targets"] == [
+        {
+            "name": "resume.docx",
+            "kind": "file",
+            "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "path": "D:/Uploads/resume.docx",
+        },
+        {
+            "name": "jd.png",
+            "kind": "image",
+            "mime_type": "image/png",
+            "path": "D:/Uploads/jd.png",
+            "ref": "artifact:artifact:jd123",
+        },
+    ]
+    assert "attachment_reopen_targets:" in contract_text
+    assert "copy the exact `path:` or `ref:` into `create_async_task.task`" in contract_text
+    assert "resume.docx" in contract_text
+    assert "D:/Uploads/resume.docx" in contract_text
+    assert "jd.png" in contract_text
+    assert "artifact:artifact:jd123" in contract_text
+
+
+@pytest.mark.asyncio
+async def test_message_builder_surfaces_current_and_historical_attachment_reopen_targets_in_frontdoor_contract(
+    tmp_path: Path,
+) -> None:
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    history_path = tmp_path / "history-report.pdf"
+    history_path.write_text("history upload", encoding="utf-8")
+    current_path = tmp_path / "current-jd.png"
+    current_path.write_bytes(b"\x89PNG\r\n\x1a\nsmall")
+
+    persisted_session = Session(key="web:shared")
+    persisted_session.add_message(
+        "user",
+        "prior upload",
+        attachments=[str(history_path)],
+        metadata={
+            "web_ceo_raw_text": "prior upload",
+            "web_ceo_uploads": [
+                {
+                    "path": str(history_path),
+                    "name": history_path.name,
+                    "mime_type": "application/pdf",
+                    "kind": "file",
+                    "size": history_path.stat().st_size,
+                }
+            ],
+        },
+    )
+    persisted_session.add_message("assistant", "acknowledged")
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="inspect uploaded files",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["create_async_task", "content_open"]},
+        persisted_session=persisted_session,
+        user_content="inspect uploaded files",
+        user_metadata={
+            "web_ceo_raw_text": "inspect uploaded files",
+            "web_ceo_uploads": [
+                {
+                    "path": str(current_path),
+                    "name": current_path.name,
+                    "mime_type": "image/png",
+                    "kind": "image",
+                    "size": current_path.stat().st_size,
+                }
+            ],
+        },
+    )
+
+    contract_messages = [
+        item
+        for item in list(result.dynamic_appendix_messages or [])
+        if is_frontdoor_tool_contract_message(item)
+    ]
+
+    assert len(contract_messages) == 1
+    payload = frontdoor_tool_contract_payload_from_message(contract_messages[0])
+    assert payload is not None
+    assert payload["attachment_reopen_targets"] == [
+        {
+            "name": current_path.name,
+            "kind": "image",
+            "mime_type": "image/png",
+            "path": str(current_path),
+        },
+        {
+            "name": history_path.name,
+            "kind": "file",
+            "mime_type": "application/pdf",
+            "path": str(history_path),
+        },
+    ]
+    contract_text = str(contract_messages[0]["content"] or "")
+    assert "attachment_reopen_targets:" in contract_text
+    assert str(current_path) in contract_text
+    assert str(history_path) in contract_text
+    assert "create_async_task.task" in contract_text
+
+
 @pytest.mark.asyncio
 async def test_message_builder_keeps_capability_snapshot_stable_when_semantic_skill_selection_changes(
     monkeypatch: pytest.MonkeyPatch,

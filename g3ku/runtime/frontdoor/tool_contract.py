@@ -93,6 +93,31 @@ def normalize_frontdoor_candidate_tool_items(
     return _normalized_candidate_tool_items(items, fallback_names=fallback_names)
 
 
+def _normalized_attachment_reopen_targets(items: list[Any] | None) -> list[dict[str, str]]:
+    ordered: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in list(items or []):
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get('path') or '').strip()
+        ref = str(item.get('ref') or '').strip()
+        if not path and not ref:
+            continue
+        dedupe_key = ref or path
+        if not dedupe_key or dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        entry = {
+            'name': str(item.get('name') or path or ref).strip() or (path or ref),
+            'kind': str(item.get('kind') or '').strip(),
+            'mime_type': str(item.get('mime_type') or item.get('mimeType') or '').strip(),
+            'path': path,
+            'ref': ref,
+        }
+        ordered.append({key: value for key, value in entry.items() if value})
+    return ordered
+
+
 def _render_name_list(items: list[str] | None) -> str:
     names = _normalized_name_list(items)
     if not names:
@@ -159,6 +184,31 @@ def _render_repair_required_skill_section(items: list[dict[str, str]] | None) ->
     return lines
 
 
+def _render_attachment_reopen_target_section(items: list[dict[str, str]] | None) -> list[str]:
+    normalized_items = _normalized_attachment_reopen_targets(items)
+    if not normalized_items:
+        return []
+    lines = [
+        'attachment_reopen_targets:',
+        '- These uploaded files remain reopenable in later turns.',
+        '- If a detached task must read one of them, copy the exact `path:` or `ref:` into `create_async_task.task`.',
+        '- Do not replace them with placeholders like `current_uploads`, `user_uploads`, or `user_image_and_docx`.',
+    ]
+    for item in normalized_items:
+        name = str(item.get('name') or '').strip() or 'attachment'
+        kind = str(item.get('kind') or '').strip() or 'file'
+        mime_type = str(item.get('mime_type') or '').strip() or 'application/octet-stream'
+        details = [f'kind={kind}', f'mime_type={mime_type}']
+        path = str(item.get('path') or '').strip()
+        ref = str(item.get('ref') or '').strip()
+        if path:
+            details.append(f'path={path}')
+        if ref:
+            details.append(f'ref={ref}')
+        lines.append(f'- `{name}`: ' + '; '.join(details))
+    return lines
+
+
 def _render_stage_summary(stage_summary: dict[str, Any] | None) -> str:
     payload = dict(stage_summary or {})
     active_stage_id = str(payload.get('active_stage_id') or '').strip() or 'none'
@@ -204,6 +254,7 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
     candidate_tools = _normalized_candidate_tool_items(payload.get('candidate_tools'))
     repair_required_tools = _normalized_repair_required_tool_items(payload.get('repair_required_tools'))
     repair_required_skills = _normalized_repair_required_skill_items(payload.get('repair_required_skills'))
+    attachment_reopen_targets = _normalized_attachment_reopen_targets(payload.get('attachment_reopen_targets'))
     lines = [
         FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING,
         f'kind: {FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND}',
@@ -214,6 +265,7 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
         'load_skill_context_help: Skills listed in `candidate_skills` do not hydrate. Call `load_skill_context(skill_id="<skill_id>")` to read the skill body when `load_skill_context` is callable; if only `submit_next_stage` is callable, start a stage first.',
         'load_tool_context_help: Any surfaced RBAC-visible tool may be loaded by exact `tool_id` for docs/help, including tools that are already callable or already hydrated.',
         'load_tool_context_repeat_guard: For callable, hydrated, or fixed-builtin tools, do not reread the same inline uncompressed toolskill. Reuse it unless the tool state changed or the old result was compressed away.',
+        *_render_attachment_reopen_target_section(attachment_reopen_targets),
         *_render_candidate_tool_section(candidate_tools),
         *_render_repair_required_tool_section(repair_required_tools),
         *_render_repair_required_skill_section(repair_required_skills),
@@ -273,6 +325,7 @@ class FrontdoorToolContract:
     repair_required_tool_items: list[dict[str, str]] | None = None
     repair_required_skill_items: list[dict[str, str]] | None = None
     exec_runtime_policy: dict[str, Any] | None = None
+    attachment_reopen_targets: list[dict[str, str]] | None = None
 
     def to_message_payload(self) -> dict[str, Any]:
         payload = {
@@ -292,6 +345,9 @@ class FrontdoorToolContract:
                 else None
             ),
         }
+        attachment_reopen_targets = _normalized_attachment_reopen_targets(self.attachment_reopen_targets)
+        if attachment_reopen_targets:
+            payload['attachment_reopen_targets'] = attachment_reopen_targets
         repair_required_tools = _normalized_repair_required_tool_items(self.repair_required_tool_items)
         if repair_required_tools:
             payload['repair_required_tools'] = repair_required_tools
@@ -357,6 +413,7 @@ def build_frontdoor_tool_contract(
     rbac_visible_skill_ids: list[str] | None = None,
     contract_revision: str | None = None,
     exec_runtime_policy: dict[str, Any] | None = None,
+    attachment_reopen_targets: list[dict[str, str]] | None = None,
 ) -> FrontdoorToolContract:
     callable_names = _normalized_name_list(callable_tool_names)
     candidate_names = [
@@ -379,6 +436,7 @@ def build_frontdoor_tool_contract(
         repair_required_tool_items=_normalized_repair_required_tool_items(repair_required_tool_items),
         repair_required_skill_items=_normalized_repair_required_skill_items(repair_required_skill_items),
         exec_runtime_policy=dict(exec_runtime_policy) if isinstance(exec_runtime_policy, dict) else None,
+        attachment_reopen_targets=_normalized_attachment_reopen_targets(attachment_reopen_targets),
     )
 
 

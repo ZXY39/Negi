@@ -337,6 +337,11 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 if callable(getattr(getattr(self._loop, "main_task_service", None), "_current_exec_runtime_policy_payload", None))
                 else None
             ),
+            attachment_reopen_targets=[
+                dict(item)
+                for item in list(state.get("attachment_reopen_targets") or [])
+                if isinstance(item, dict)
+            ],
         )
         return upsert_frontdoor_tool_contract_message(normalized_dynamic_messages, frontdoor_tool_contract)
 
@@ -683,6 +688,11 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 state.get("candidate_tool_items"),
                 fallback_names=result["candidate_tool_names"],
             )
+            result["attachment_reopen_targets"] = [
+                dict(item)
+                for item in list(state.get("attachment_reopen_targets") or [])
+                if isinstance(item, dict)
+            ]
             result["hydrated_tool_names"] = self._normalized_tool_name_state_list(state.get("hydrated_tool_names"))
             result["visible_skill_ids"] = self._normalized_tool_name_state_list(state.get("visible_skill_ids"))
             result["candidate_skill_ids"] = self._normalized_tool_name_state_list(state.get("candidate_skill_ids"))

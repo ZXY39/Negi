@@ -113,6 +113,7 @@ class CeoMessageBuilder:
     }
     RESERVED_INTERNAL_TOOLS: tuple[str, ...] = ("stop_tool_execution",)
     FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = CEO_FIXED_BUILTIN_TOOL_NAMES
+    ATTACHMENT_REOPEN_TARGET_LIMIT = 8
 
     def __init__(self, *, loop, prompt_builder) -> None:
         self._loop = loop
@@ -760,6 +761,83 @@ class CeoMessageBuilder:
                 }
             )
         return items
+
+    @staticmethod
+    def _attachment_reopen_targets_from_uploads(
+        uploads: Any,
+    ) -> list[dict[str, str]]:
+        items: list[dict[str, str]] = []
+        for raw in list(uploads or []):
+            if not isinstance(raw, dict):
+                continue
+            path = str(raw.get('path') or '').strip()
+            ref = str(raw.get('ref') or '').strip()
+            if not path and not ref:
+                continue
+            item = {
+                'name': str(raw.get('name') or path or ref).strip() or (path or ref),
+                'kind': str(raw.get('kind') or '').strip(),
+                'mime_type': str(raw.get('mime_type') or raw.get('mimeType') or '').strip(),
+                'path': path,
+                'ref': ref,
+            }
+            items.append({key: value for key, value in item.items() if value})
+        return items
+
+    @classmethod
+    def _normalize_attachment_reopen_targets(
+        cls,
+        items: list[dict[str, str]] | None,
+    ) -> list[dict[str, str]]:
+        ordered: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for raw in list(items or []):
+            if not isinstance(raw, dict):
+                continue
+            path = str(raw.get('path') or '').strip()
+            ref = str(raw.get('ref') or '').strip()
+            if not path and not ref:
+                continue
+            dedupe_key = ref or path
+            if not dedupe_key or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            ordered.append(
+                {
+                    key: value
+                    for key, value in {
+                        'name': str(raw.get('name') or path or ref).strip() or (path or ref),
+                        'kind': str(raw.get('kind') or '').strip(),
+                        'mime_type': str(raw.get('mime_type') or '').strip(),
+                        'path': path,
+                        'ref': ref,
+                    }.items()
+                    if value
+                }
+            )
+            if len(ordered) >= cls.ATTACHMENT_REOPEN_TARGET_LIMIT:
+                break
+        return ordered
+
+    @classmethod
+    def _frontdoor_attachment_reopen_targets(
+        cls,
+        *,
+        persisted_session: Any | None,
+        user_metadata: dict[str, Any] | None,
+    ) -> list[dict[str, str]]:
+        collected: list[dict[str, str]] = []
+        current_uploads = (
+            user_metadata.get('web_ceo_uploads')
+            if isinstance(user_metadata, dict)
+            else None
+        )
+        collected.extend(cls._attachment_reopen_targets_from_uploads(current_uploads))
+        if persisted_session is not None:
+            for message in reversed(transcript_messages(persisted_session)):
+                metadata = message_metadata(message)
+                collected.extend(cls._attachment_reopen_targets_from_uploads(metadata.get('web_ceo_uploads')))
+        return cls._normalize_attachment_reopen_targets(collected)
 
     @staticmethod
     def _now_iso() -> str:
@@ -1671,6 +1749,10 @@ class CeoMessageBuilder:
         collect_elapsed_ms: float,
         history_elapsed_ms: float,
     ) -> ContextAssemblyResult:
+        attachment_reopen_targets = self._frontdoor_attachment_reopen_targets(
+            persisted_session=persisted_session,
+            user_metadata=user_metadata,
+        )
         task_ledger_state = self._task_ledger_state(persisted_session)
         task_ledger_text = build_task_ledger_summary(task_ledger_state)
         turn_overlay_parts = list(context_sources['turn_overlay_parts'])
@@ -1732,6 +1814,7 @@ class CeoMessageBuilder:
                 )
                 else None
             ),
+            attachment_reopen_targets=attachment_reopen_targets,
         )
         dynamic_appendix_messages = upsert_frontdoor_tool_contract_message(
             list(dynamic_appendix_messages),
@@ -1825,6 +1908,7 @@ class CeoMessageBuilder:
             'turn_overlay_present': bool(turn_overlay_text),
             'turn_overlay_section_count': len(turn_overlay_parts),
             'turn_overlay_character_count': len(turn_overlay_text),
+            'attachment_reopen_targets': list(attachment_reopen_targets),
             'turn_overlay_text_hash': (
                 hashlib.sha256(turn_overlay_text.encode('utf-8')).hexdigest()
                 if turn_overlay_text
@@ -1889,6 +1973,10 @@ class CeoMessageBuilder:
             hydrated_tool_names=hydrated_tool_names,
         )
         collect_elapsed_ms = self._elapsed_ms(collect_started_at)
+        attachment_reopen_targets = self._frontdoor_attachment_reopen_targets(
+            persisted_session=persisted_session,
+            user_metadata=user_metadata,
+        )
         request_body_seed_records = self._request_body_seed_records(request_body_seed_messages)
         if request_body_seed_records:
             context_sources = {
@@ -2029,6 +2117,7 @@ class CeoMessageBuilder:
                 )
                 else None
             ),
+            attachment_reopen_targets=attachment_reopen_targets,
         )
         dynamic_appendix_messages = upsert_frontdoor_tool_contract_message(
             list(dynamic_appendix_messages),
@@ -2104,6 +2193,7 @@ class CeoMessageBuilder:
             'turn_overlay_present': bool(turn_overlay_text),
             'turn_overlay_section_count': len(turn_overlay_parts),
             'turn_overlay_character_count': len(turn_overlay_text),
+            'attachment_reopen_targets': list(attachment_reopen_targets),
             'turn_overlay_text_hash': (
                 hashlib.sha256(turn_overlay_text.encode('utf-8')).hexdigest()
                 if turn_overlay_text
