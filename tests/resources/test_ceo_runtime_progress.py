@@ -4726,6 +4726,83 @@ async def test_runtime_agent_session_recovers_dispatched_async_task_after_intern
 
 
 @pytest.mark.asyncio
+async def test_runtime_agent_session_preserves_streamed_reply_when_async_dispatch_recovery_runs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
+
+    original_reply = (
+        "我先给你一版可直接参考的修改建议，后台任务 `task:demo-stream-123` 已创建，"
+        "完成后我会继续把完整结果同步给你。"
+    )
+
+    class _CancelToken:
+        def cancel(self, *, reason: str = "") -> None:
+            _ = reason
+
+    class _FakeRunner:
+        async def run_turn(self, *, user_input, session, on_progress):
+            _ = user_input
+            session._frontdoor_stage_state = _sample_frontdoor_stage_state()
+            await on_progress(
+                "create_async_task started",
+                event_kind="tool_start",
+                event_data={"tool_name": "create_async_task"},
+            )
+            await on_progress(
+                "创建任务成功task:demo-stream-123",
+                event_kind="tool_result",
+                event_data={"tool_name": "create_async_task"},
+            )
+            await session._handle_assistant_text_delta(original_reply)
+            raise RuntimeError("no active connection")
+
+    async def _cancel_session_tasks(session_key: str) -> int:
+        _ = session_key
+        return 0
+
+    loop = SimpleNamespace(
+        model="gpt-test",
+        reasoning_effort=None,
+        sessions=SessionManager(tmp_path),
+        multi_agent_runner=_FakeRunner(),
+        memory_manager=None,
+        commit_service=None,
+        prompt_trace=False,
+        create_session_cancellation_token=lambda _session_key: _CancelToken(),
+        release_session_cancellation_token=lambda _session_key, _token: None,
+        cancel_session_tasks=_cancel_session_tasks,
+        _use_rag_memory=lambda: False,
+    )
+    session = RuntimeAgentSession(
+        loop,
+        session_key="web:ceo-recover-streamed-dispatch",
+        channel="web",
+        chat_id="ceo-recover-streamed-dispatch",
+    )
+
+    result = await session.prompt("Analyze the repository in background")
+
+    assert result.output == original_reply
+    assert "当前回写遇到暂时异常" not in result.output
+    assert session.state.status == "completed"
+    assert session.state.last_error is None
+
+    reloaded_session = SessionManager(tmp_path).get_or_create("web:ceo-recover-streamed-dispatch")
+    assert [message["role"] for message in reloaded_session.messages] == ["user", "assistant"]
+    assert reloaded_session.messages[1]["content"] == original_reply
+    assert reloaded_session.messages[1]["metadata"] == {
+        "task_ids": ["task:demo-stream-123"],
+        "reason": "async_dispatch_runtime_recovered",
+    }
+
+
+@pytest.mark.asyncio
 async def test_runtime_agent_session_logs_traceback_for_recovered_async_dispatch_runtime_error(
     tmp_path: Path,
     monkeypatch,

@@ -931,13 +931,52 @@ class RuntimeAgentSession:
         if not task_ids:
             return None
         primary_task_id = task_ids[0]
+        fallback_text = (
+            f"后台任务已经建立，任务号 `{primary_task_id}`。"
+            "当前回写遇到暂时异常，但后台任务仍在运行，完成后会继续同步结果。"
+        )
+        recovered_visible_text = self._best_effort_async_dispatch_visible_text(task_ids=task_ids)
+        if recovered_visible_text:
+            if any(task_id in recovered_visible_text for task_id in task_ids):
+                recovered_text = recovered_visible_text
+            else:
+                recovered_text = f"{recovered_visible_text}\n\n{fallback_text}"
+        else:
+            recovered_text = fallback_text
         return {
-            "text": (
-                f"后台任务已经建立，任务号 `{primary_task_id}`。"
-                "当前回写遇到暂时异常，但后台任务仍在运行，完成后会继续同步结果。"
-            ),
+            "text": recovered_text,
             "task_ids": task_ids,
         }
+
+    @staticmethod
+    def _frontdoor_stage_summary_candidates(stage_state: dict[str, Any] | None) -> list[str]:
+        if not isinstance(stage_state, dict):
+            return []
+        summaries: list[str] = []
+        for raw_stage in reversed(list(stage_state.get("stages") or [])):
+            if not isinstance(raw_stage, dict):
+                continue
+            summary = str(raw_stage.get("completed_stage_summary") or "").strip()
+            if summary and summary not in summaries:
+                summaries.append(summary)
+        return summaries
+
+    def _best_effort_async_dispatch_visible_text(self, *, task_ids: list[str]) -> str:
+        candidates: list[str] = []
+        latest_message = str(self._state.latest_message or "").strip()
+        if latest_message:
+            candidates.append(latest_message)
+        for summary in self._frontdoor_stage_summary_candidates(getattr(self, "_frontdoor_stage_state", None)):
+            if summary not in candidates:
+                candidates.append(summary)
+        if not candidates:
+            return ""
+        normalized_task_ids = self._normalize_verified_task_ids(task_ids)
+        if normalized_task_ids:
+            for candidate in candidates:
+                if any(task_id in candidate for task_id in normalized_task_ids):
+                    return candidate
+        return candidates[0]
 
     def _ensure_user_turn_id(self, user_input: UserInputMessage, *, reuse_active: bool = True) -> str:
         metadata = dict(user_input.metadata or {})
