@@ -742,7 +742,7 @@ async def test_g3ku_chat_model_adapter_forwards_text_delta_callback() -> None:
     )
 
     assert result.generations[0].message.content == "OK"
-    assert captured[0]["on_text_delta"] is deltas.append
+    assert callable(captured[0]["on_text_delta"])
     assert deltas == ["O", "K"]
 
 

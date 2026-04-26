@@ -139,6 +139,7 @@ class ResponsesProvider(LLMProvider):
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
         request_timeout_seconds: float | None = None,
+        on_text_delta: Any = None,
     ) -> LLMResponse:
         model = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
@@ -216,7 +217,10 @@ class ResponsesProvider(LLMProvider):
                         first_line_timeout_seconds=stream_timeout_seconds,
                         idle_line_timeout_seconds=stream_timeout_seconds,
                     )
-                    content, tool_calls, finish_reason, usage = await _consume_sse(diagnostics)
+                    content, tool_calls, finish_reason, usage = await _consume_sse(
+                        diagnostics,
+                        on_text_delta=on_text_delta,
+                    )
                     logger.debug(diagnostics.render_summary(outcome="completed"))
                     return LLMResponse(
                         content=content,
@@ -225,6 +229,7 @@ class ResponsesProvider(LLMProvider):
                         usage=usage,
                         provider_request_meta=provider_request_meta,
                         provider_request_body=provider_request_body,
+                        visible_text_streamed=diagnostics._diagnostics.first_text_delta_received_at is not None,
                     )
         except Exception as e:
             partial_content = str(getattr(e, "partial_content", "") or "").strip()
@@ -243,6 +248,7 @@ class ResponsesProvider(LLMProvider):
                     error_text=error_text,
                     provider_request_meta=provider_request_meta,
                     provider_request_body=provider_request_body,
+                    visible_text_streamed=True,
                 )
             if diagnostics_summary:
                 logger.warning(diagnostics_summary)

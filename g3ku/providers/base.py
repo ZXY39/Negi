@@ -49,6 +49,7 @@ class LLMResponse:
     request_message_chars: int | None = None
     provider_request_meta: dict[str, Any] = field(default_factory=dict)
     provider_request_body: dict[str, Any] = field(default_factory=dict)
+    visible_text_streamed: bool = False
 
     @property
     def has_tool_calls(self) -> bool:
@@ -188,6 +189,7 @@ class LLMProvider(ABC):
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
         request_timeout_seconds: float | None = None,
+        on_text_delta: Any = None,
     ) -> LLMResponse:
         """
         Send a chat completion request.
@@ -204,6 +206,8 @@ class LLMProvider(ABC):
             request_timeout_seconds: Optional per-request network timeout. When provided,
                 providers should pass it down to their transport/SDK instead of waiting on
                 library defaults.
+            on_text_delta: Optional callback invoked for visible assistant text chunks
+                when the provider supports streaming text output.
 
         Returns:
             LLMResponse with content and/or tool calls.

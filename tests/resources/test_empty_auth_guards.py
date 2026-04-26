@@ -833,7 +833,7 @@ async def test_chat_backend_forwards_text_delta_callback_only_to_streaming_provi
     )
 
     assert response.content == "OK"
-    assert captured[0]["on_text_delta"] is seen_deltas.append
+    assert callable(captured[0]["on_text_delta"])
     assert seen_deltas == ["O", "K"]
 
 

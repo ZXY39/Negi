@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 from dataclasses import dataclass
@@ -158,6 +159,7 @@ async def consume_openai_like_chat_stream(
     diagnostics: StreamingDiagnostics,
     first_chunk_timeout_seconds: float,
     idle_chunk_timeout_seconds: float,
+    on_text_delta: Any = None,
 ) -> tuple[str | None, list[ToolCallRequest], str, dict[str, int], str | None]:
     content_parts: list[str] = []
     tool_call_buffers: dict[int, dict[str, str]] = {}
@@ -185,6 +187,10 @@ async def consume_openai_like_chat_stream(
         if text_delta:
             content_parts.append(text_delta)
             diagnostics.note_chunk("text_delta", is_text=True)
+            if callable(on_text_delta):
+                callback_result = on_text_delta(text_delta)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
         elif reasoning_delta:
             reasoning_content_parts.append(reasoning_delta)
             diagnostics.note_chunk("reasoning_delta")

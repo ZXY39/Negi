@@ -50,7 +50,8 @@ class CustomProvider(LLMProvider):
                    tool_choice: str | dict[str, Any] | None = None,
                    parallel_tool_calls: bool | None = None,
                    prompt_cache_key: str | None = None,
-                   request_timeout_seconds: float | None = None) -> LLMResponse:
+                   request_timeout_seconds: float | None = None,
+                   on_text_delta: Any = None) -> LLMResponse:
         del prompt_cache_key
         kwargs: dict[str, Any] = {
             "model": model or self.default_model,
@@ -93,6 +94,7 @@ class CustomProvider(LLMProvider):
                     diagnostics=diagnostics,
                     first_chunk_timeout_seconds=stream_timeout_seconds,
                     idle_chunk_timeout_seconds=stream_timeout_seconds,
+                    on_text_delta=on_text_delta,
                 )
                 from loguru import logger
                 logger.debug(diagnostics.render_summary(outcome="completed"))
@@ -102,6 +104,7 @@ class CustomProvider(LLMProvider):
                     finish_reason=finish_reason,
                     usage=usage,
                     reasoning_content=reasoning_content,
+                    visible_text_streamed=diagnostics.first_text_delta_received_at is not None,
                 )
             except Exception as stream_exc:
                 if not should_fallback_to_non_streaming_from_error(stream_exc):
