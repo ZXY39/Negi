@@ -374,6 +374,50 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
 
 
 @pytest.mark.asyncio
+async def test_load_tool_context_filesystem_edit_prefers_callable_schema_for_agent_docs(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'filesystem_edit')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+    manager.bind_service_getter(lambda: {'main_task_service': service})
+    manager.reload_now(trigger='test-service-bind')
+    service.bind_resource_manager(manager)
+
+    try:
+        await service.startup()
+
+        toolskill = service.get_tool_toolskill('filesystem_edit')
+        assert toolskill is not None
+        assert toolskill['required_parameters'] == ['path', 'mode']
+        assert toolskill['parameters_schema']['properties']['mode']['enum'] == ['text_replace', 'line_range']
+        assert dict(toolskill['example_arguments']).get('mode') == 'text_replace'
+
+        payload_v2 = service.load_tool_context_v2(
+            actor_role='ceo',
+            session_id='web:shared',
+            tool_id='filesystem_edit',
+        )
+        assert payload_v2['required_parameters'] == ['path', 'mode']
+        assert payload_v2['parameters_schema']['properties']['mode']['enum'] == ['text_replace', 'line_range']
+        assert dict(payload_v2['example_arguments']).get('mode') == 'text_replace'
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_load_tool_context_marks_result_delivery_contract_violation_as_repair_required(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)

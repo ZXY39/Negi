@@ -157,7 +157,11 @@ Maintenance note for `filesystem_edit`:
 
 - The surfaced/runtime contract now exposes an explicit `mode` field with `text_replace` / `line_range`.
 - Provider-facing callable schema should require `mode`, but runtime still tolerates omitted `mode` for backward compatibility and infers the lane from the supplied arguments when possible.
-- The edit executor now also strips placeholder line-range values such as `start_line=0`, `end_line=0`, and `replacement=""` before mode selection when the request otherwise clearly matches text-replace intent. This exists specifically to absorb adapter/provider auto-fill noise; maintainers should not treat it as permission for real mixed-mode edits.
+- The edit executor now strips placeholder values from the opposite lane before mode selection when intent is otherwise clear:
+  - text-replace calls may auto-carry `start_line=0`, `end_line=0`, `replacement=""`
+  - line-range calls may auto-carry `old_text=""`, `new_text=""`
+- This cleanup exists specifically to absorb adapter/provider auto-fill noise; maintainers should not treat it as permission for real mixed-mode edits with non-empty fields from both lanes.
+- `load_tool_context` / `get_tool_toolskill` agent-facing parameter summaries should now prefer the callable/model-visible schema when a surfaced executor exposes one, rather than blindly replaying the validator-only runtime schema. This is why `filesystem_edit` tool context shows `mode` in the callable contract even though runtime still keeps backward-compatible mode inference.
 
 ### 3.2 candidate tools
 

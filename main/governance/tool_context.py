@@ -157,6 +157,21 @@ def resolve_primary_executor_name(family: Any, *, resource_manager: Any) -> str:
     return ""
 
 
+def _agent_facing_parameters_schema(*, descriptor: Any, runtime_instance: Any) -> dict[str, Any]:
+    runtime_schema = normalize_object_json_schema(getattr(descriptor, "parameters", None))
+
+    runtime_model_parameters = getattr(runtime_instance, "model_parameters", None) if runtime_instance is not None else None
+    if isinstance(runtime_model_parameters, dict) and type(runtime_instance).__name__ != "RepairRequiredTool":
+        return normalize_object_json_schema(runtime_model_parameters)
+
+    metadata = dict(getattr(descriptor, "metadata", {}) or {})
+    configured_model_parameters = metadata.get("model_parameters")
+    if isinstance(configured_model_parameters, dict):
+        return normalize_object_json_schema(configured_model_parameters)
+
+    return runtime_schema
+
+
 def build_tool_toolskill_payload(
     tool_id: str,
     *,
@@ -273,7 +288,10 @@ def build_tool_toolskill_payload(
         or getattr(family, "description", "")
         or requested_name
     ).strip() or requested_name
-    parameters_schema = normalize_object_json_schema(getattr(effective_descriptor, "parameters", None))
+    parameters_schema = _agent_facing_parameters_schema(
+        descriptor=effective_descriptor,
+        runtime_instance=runtime_instance,
+    )
     required_parameters = [
         str(item or "").strip()
         for item in list(parameters_schema.get("required") or [])

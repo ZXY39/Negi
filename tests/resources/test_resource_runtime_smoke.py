@@ -1164,6 +1164,36 @@ async def test_filesystem_edit_ignores_zeroed_line_range_placeholders_for_text_m
         manager.close()
 
 
+@pytest.mark.asyncio
+async def test_filesystem_edit_ignores_empty_text_placeholders_for_line_range_mode(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'target.txt'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('alpha\nbeta\ngamma\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_filesystem_split_tools(workspace, 'filesystem_edit')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem_edit')
+        assert tool is not None
+        result = await tool.execute(
+            path=str(target_file),
+            mode='line_range',
+            old_text='',
+            new_text='',
+            start_line=1,
+            end_line=2,
+            replacement='delta\nepsilon\n',
+        )
+        assert 'Successfully edited' in result
+        assert target_file.read_text(encoding='utf-8') == 'delta\nepsilon\ngamma\n'
+    finally:
+        manager.close()
+
+
 def test_filesystem_edit_manifest_exposes_explicit_mode_enum(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)

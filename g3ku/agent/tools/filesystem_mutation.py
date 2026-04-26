@@ -85,6 +85,10 @@ def _is_zero_like_line_marker(value: Any) -> bool:
         return False
 
 
+def _is_empty_text_placeholder(value: Any) -> bool:
+    return isinstance(value, str) and value == ''
+
+
 def _normalize_edit_mode_inputs(
     *,
     mode: Any,
@@ -95,14 +99,36 @@ def _normalize_edit_mode_inputs(
     replacement: str | None,
 ) -> dict[str, Any]:
     normalized_mode = _normalize_edit_mode(mode)
+    normalized_old_text = old_text
+    normalized_new_text = new_text
     normalized_start_line = start_line
     normalized_end_line = end_line
     normalized_replacement = replacement
-    text_mode_hint = old_text is not None or new_text is not None
+    text_mode_hint = (
+        normalized_old_text not in (None, '')
+        or normalized_new_text not in (None, '')
+    )
+    range_mode_hint = (
+        (
+            normalized_start_line is not None
+            and not _is_zero_like_line_marker(normalized_start_line)
+        )
+        or (
+            normalized_end_line is not None
+            and not _is_zero_like_line_marker(normalized_end_line)
+        )
+        or normalized_replacement not in (None, '')
+    )
+
+    if normalized_mode == _EDIT_MODE_RANGE or (normalized_mode == '' and range_mode_hint and not text_mode_hint):
+        if _is_empty_text_placeholder(normalized_old_text):
+            normalized_old_text = None
+        if _is_empty_text_placeholder(normalized_new_text):
+            normalized_new_text = None
 
     # Some providers/tool adapters auto-fill optional integer/string fields with 0/""
     # even when the model intended text-replace mode. Treat those placeholders as unset.
-    if normalized_mode in {'', _EDIT_MODE_TEXT} or text_mode_hint:
+    if normalized_mode == _EDIT_MODE_TEXT or (normalized_mode == '' and text_mode_hint):
         if _is_zero_like_line_marker(normalized_start_line):
             normalized_start_line = None
         if _is_zero_like_line_marker(normalized_end_line):
@@ -110,7 +136,7 @@ def _normalize_edit_mode_inputs(
         if normalized_replacement == '':
             normalized_replacement = None
 
-    text_mode = old_text is not None or new_text is not None
+    text_mode = normalized_old_text is not None or normalized_new_text is not None
     range_mode = (
         normalized_start_line is not None
         or normalized_end_line is not None
@@ -118,8 +144,8 @@ def _normalize_edit_mode_inputs(
     )
     return {
         'mode': normalized_mode,
-        'old_text': old_text,
-        'new_text': new_text,
+        'old_text': normalized_old_text,
+        'new_text': normalized_new_text,
         'start_line': normalized_start_line,
         'end_line': normalized_end_line,
         'replacement': normalized_replacement,
