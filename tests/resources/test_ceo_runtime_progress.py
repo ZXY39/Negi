@@ -874,6 +874,7 @@ async def test_runtime_agent_session_emits_lightweight_assistant_stream_events_w
     session.subscribe(_listener)
     await session._handle_assistant_text_delta("O")
     await session._handle_assistant_text_delta("K")
+    await asyncio.sleep(0.1)
 
     assert session.state.latest_message == "OK"
     stream_events = [event for event in events if event.type == "assistant_stream_delta"]
