@@ -9,13 +9,14 @@ CREATE_ASYNC_TASK_DESCRIPTION = (
     "Dispatch the user request into a detached background task. "
     "The caller must provide a distilled `core_requirement` and an explicit "
     "`execution_policy.mode`. When the task depends on specific files or "
-    "artifacts, put the exact reopen targets into `file_targets`."
+    "artifacts, `file_targets` must carry the exact reopen targets."
 )
 
 CREATE_ASYNC_TASK_TASK_DESCRIPTION = (
     "Full task prompt for downstream execution. Describe the goal, scope, "
     "important clues, and expected output. If the task depends on files, also "
-    "say in the prompt which files matter and how they should be used."
+    "say in the prompt which files matter and how they should be used, but keep "
+    "the exact reopen handles in `file_targets`."
 )
 
 CREATE_ASYNC_TASK_CORE_REQUIREMENT_DESCRIPTION = (
@@ -29,9 +30,9 @@ CREATE_ASYNC_TASK_EXECUTION_POLICY_DESCRIPTION = (
 )
 
 CREATE_ASYNC_TASK_FILE_TARGETS_DESCRIPTION = (
-    "Optional reopen targets for specific files or artifacts needed by the task. "
-    "Use a list of objects with exact `path` and/or exact `ref`. Use `null` or "
-    "an empty list when the task does not depend on specific files."
+    "Authoritative reopen targets for specific files or artifacts needed by the "
+    "task. Use a list of objects with exact `path` and/or exact `ref`. Use `null` "
+    "or an empty list only when the task does not depend on specific files."
 )
 
 CREATE_ASYNC_TASK_REQUIRES_FINAL_ACCEPTANCE_DESCRIPTION = (

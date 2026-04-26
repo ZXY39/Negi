@@ -192,7 +192,8 @@ def _render_attachment_reopen_target_section(items: list[dict[str, str]] | None)
         'attachment_reopen_targets:',
         '- These uploaded files remain reopenable in later turns.',
         '- If a detached task must read one of them, copy the exact `path:` or `ref:` into `create_async_task.file_targets`.',
-        '- If a detached task must read one of them, copy the exact `path:` or `ref:` into `create_async_task.task`.',
+        '- `create_async_task.file_targets` is the authoritative reopen lane for detached tasks.',
+        '- In `create_async_task.task`, describe why the file matters and how it should be used, but do not rely on prose alone for reopen handles.',
         '- Do not replace them with placeholders like `current_uploads`, `user_uploads`, or `user_image_and_docx`.',
     ]
     for item in normalized_items:

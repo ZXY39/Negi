@@ -2360,6 +2360,7 @@ class NodeRunner:
             (task.metadata or {}).get('memory_scope') if isinstance(task.metadata, dict) else None,
             fallback_session_key=task.session_id,
         )
+        model_refs = self._model_refs_for(node)
         project_environment = current_project_environment(
             shell_family=self._shell_family(),
             workspace_root=self._workspace_root(),
@@ -2375,6 +2376,8 @@ class NodeRunner:
             'node_id': node.node_id,
             'depth': node.depth,
             'node_kind': node.node_kind,
+            'model_refs': list(model_refs or []),
+            'provider_model': str((list(model_refs or []) or [''])[0] or '').strip(),
             'actor_role': self._actor_role_for_node(node),
             'can_spawn_children': bool(node.can_spawn_children),
             'memory_channel': str(memory_scope.get('channel') or 'unknown'),

@@ -1230,6 +1230,8 @@ def test_create_async_task_contract_no_longer_accepts_continuation_fields() -> N
     assert props['file_targets']['items']['type'] == 'object'
     assert props['file_targets']['items']['properties']['path']['type'] == ['string', 'null']
     assert props['file_targets']['items']['properties']['ref']['type'] == ['string', 'null']
+    assert 'authoritative reopen targets' in str(props['file_targets']['description'] or '').lower()
+    assert 'exact reopen handles in `file_targets`' in str(props['task']['description'] or '').lower()
     assert 'continuation_of_task_id' not in props
     assert 'reuse_existing' not in props
 
