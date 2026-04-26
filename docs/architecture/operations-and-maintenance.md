@@ -424,7 +424,7 @@ For the queued Markdown memory runtime, the first operator checks should now be:
 1. Inspect `memory/memory_state.sqlite3` for the authoritative memory rows, `refresh_count`, `passed_count`, `is_compressed`, and `from_user` state.
 2. Inspect `memory/MEMORY.md` for the regenerated prompt snapshot currently injected into CEO/frontdoor.
 3. Inspect `memory/queue.jsonl` for pending `write` / `delete` requests.
-4. Inspect `memory/ops.jsonl` for the latest terminal batch history, including both applied rows and durable discarded rows plus final compression metadata.
+4. Inspect `memory/ops.jsonl` for the latest 7-day terminal batch history, including both applied rows and durable discarded rows plus final compression metadata.
 5. If a processed row exposes `request_artifact_paths`, inspect the referenced files under `.g3ku/memory-requests/` before blaming prompt assembly or the provider adapter.
 6. Use `g3ku memory current`, `g3ku memory queue`, and `g3ku memory flush` when you need a quick operator view without manually opening files.
 7. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend or the catalog bridge.
@@ -435,7 +435,7 @@ The important maintenance boundary is:
 - `memory_state.sqlite3` is the authoritative long-term memory state; `MEMORY.md` is the regenerated prompt snapshot
 - `notes/` contains optional detail bodies and should stay small and human-readable
 - `review_state.json` is per-session buffering metadata for the 5-turn ordinary review window; it is not committed user memory
-- `ops.jsonl` is terminal history, not an in-flight retry log: applied rows and durable discarded outcomes belong there, while queue-head error fields remain authoritative for engineering failures that are still retryable
+- `ops.jsonl` is rolling terminal history, not an in-flight retry log or append-forever archive: applied rows and durable discarded outcomes belong there, queue-head error fields remain authoritative for engineering failures that are still retryable, and rows older than 7 days are pruned automatically during normal runtime reads/writes
 - only one live process should hold the memory-worker lease at a time; extra web/worker processes may exist, but they should leave queue consumption to the active lease holder
 
 Operator debugging order for a stuck queue head:

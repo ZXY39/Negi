@@ -947,6 +947,8 @@ class _MemorySqliteRepository:
 
 
 class MemoryManager:
+    _PROCESSED_BATCH_RETENTION_DAYS = 7
+
     def __init__(self, workspace: Path, config: Any, *, read_only_init: bool = False):
         self.workspace = Path(workspace)
         self.config = config
@@ -1752,15 +1754,26 @@ class MemoryManager:
             text = "\n".join(json.dumps(asdict(item), ensure_ascii=False) for item in rows)
             self.queue_file.write_text((f"{text}\n" if text else ""), encoding="utf-8")
 
-    def _read_processed_batches(self) -> list[dict[str, Any]]:
+    def _write_processed_batches(self, rows: list[dict[str, Any]]) -> None:
+        with self._io_lock:
+            text = "\n".join(json.dumps(item, ensure_ascii=False) for item in rows)
+            self.ops_file.write_text((f"{text}\n" if text else ""), encoding="utf-8")
+
+    def _read_processed_batches(self, *, prune_expired: bool = True, now_iso: str | None = None) -> list[dict[str, Any]]:
         if not self.ops_file.exists():
             return []
         with self._io_lock:
-            return [
+            rows = [
                 json.loads(line)
                 for line in self.ops_file.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
+        if not prune_expired:
+            return rows
+        kept_rows, changed = self._prune_processed_batches(rows, now_iso=now_iso)
+        if changed and not self._read_only_init:
+            self._write_processed_batches(kept_rows)
+        return kept_rows
 
     def _processed_request_ids(self) -> set[str]:
         request_ids: set[str] = set()
@@ -1796,10 +1809,9 @@ class MemoryManager:
         return dropped
 
     def _append_ops_payload(self, payload: dict[str, Any]) -> None:
-        line = json.dumps(dict(payload or {}), ensure_ascii=False)
-        with self._io_lock:
-            with self.ops_file.open("a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
+        rows = self._read_processed_batches()
+        rows.append(dict(payload or {}))
+        self._write_processed_batches(rows)
 
     def _note_file_refs(self) -> set[str]:
         return {path.stem for path in self.notes_dir.glob("*.md")}
@@ -2255,6 +2267,51 @@ class MemoryManager:
             return text
         return text[:237].rstrip() + "..."
 
+    @staticmethod
+    def _inline_preview_text(text: str, *, max_chars: int = 240) -> str:
+        value = " ".join(str(text or "").split())
+        limit = max(int(max_chars or 0), 0)
+        if not value or not limit:
+            return ""
+        if len(value) <= limit:
+            return value
+        if limit <= 3:
+            return value[:limit]
+        return value[: limit - 3].rstrip() + "..."
+
+    def _build_change_preview(self, validated: _MemoryValidatedWrite | None) -> str:
+        if validated is None:
+            return ""
+        if str(validated.noop_reason or "").strip():
+            return ""
+
+        parts: list[str] = []
+        for item in list(validated.adds or []):
+            content = self._inline_preview_text(item.get("content") or "")
+            if content:
+                parts.append(f"新增：{content}")
+        for item in list(validated.rewrites or []):
+            memory_id = str(item.get("id") or "").strip()
+            content = self._inline_preview_text(item.get("content") or "")
+            if memory_id and content:
+                parts.append(f"修改 {memory_id}：{content}")
+            elif content:
+                parts.append(f"修改：{content}")
+        for memory_id in list(validated.deletes or []):
+            normalized_id = str(memory_id or "").strip()
+            if normalized_id:
+                parts.append(f"删除 {normalized_id}")
+        for ref, body in sorted(dict(validated.note_upserts or {}).items()):
+            normalized_ref = str(ref or "").strip()
+            body_preview = self._inline_preview_text(body or "")
+            if normalized_ref and body_preview:
+                parts.append(f"更新 note ref:{normalized_ref}：{body_preview}")
+            elif normalized_ref:
+                parts.append(f"更新 note ref:{normalized_ref}")
+        if not parts:
+            return ""
+        return self._inline_preview_text("；".join(parts), max_chars=400)
+
     def _commit_validated_write(self, validated: _MemoryValidatedWrite) -> None:
         now_iso = self._now_iso()
         with self._io_lock:
@@ -2293,6 +2350,38 @@ class MemoryManager:
             validated.compression_triggered = bool(compression_result.get("compression_triggered"))
             validated.compressed_memory_ids = list(compression_result.get("compressed_memory_ids") or [])
             validated.deleted_by_compression_ids = list(compression_result.get("deleted_by_compression_ids") or [])
+
+    @classmethod
+    def _processed_batch_retention_delta(cls) -> timedelta:
+        return timedelta(days=int(cls._PROCESSED_BATCH_RETENTION_DAYS))
+
+    def _prune_processed_batches(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        now_iso: str | None = None,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        effective_now = self._parse_optional_iso(now_iso) or self._parse_optional_iso(self._now_iso()) or datetime.now().astimezone()
+        if effective_now.tzinfo is None:
+            effective_now = effective_now.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        cutoff = effective_now - self._processed_batch_retention_delta()
+        kept_rows: list[dict[str, Any]] = []
+        changed = False
+        for payload in list(rows or []):
+            if not isinstance(payload, dict):
+                changed = True
+                continue
+            processed_at = self._parse_optional_iso(payload.get("processed_at"))
+            if processed_at is None:
+                kept_rows.append(payload)
+                continue
+            if processed_at.tzinfo is None:
+                processed_at = processed_at.replace(tzinfo=effective_now.tzinfo)
+            if processed_at < cutoff:
+                changed = True
+                continue
+            kept_rows.append(payload)
+        return kept_rows, changed
 
     def _run_post_commit_compression_locked(self, *, now_iso: str) -> dict[str, Any]:
         return self._compress_memory_snapshot_if_needed(now_iso=now_iso)
@@ -2680,6 +2769,9 @@ class MemoryManager:
             payload["memory_chars_after"] = len(self.snapshot_text())
             payload["note_refs_written"] = list(validated.note_refs_written)
             payload["document_preview"] = self._document_preview(self.snapshot_text())
+            change_preview = self._build_change_preview(validated)
+            if change_preview:
+                payload["change_preview"] = change_preview
             payload["inspired_memory_ids"] = list(validated.inspired_memory_ids)
             payload["compression_triggered"] = bool(validated.compression_triggered)
             payload["compressed_memory_ids"] = list(validated.compressed_memory_ids)

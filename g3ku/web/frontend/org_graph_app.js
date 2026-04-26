@@ -8688,6 +8688,10 @@ function memoryProcessedNoopReason(item) {
     return String(item?.noop_reason || "").trim();
 }
 
+function memoryProcessedChangePreview(item) {
+    return String(item?.change_preview || item?.document_preview || "").trim();
+}
+
 function memoryProcessedIsNoChange(item) {
     const normalized = String(item?.status || "").trim().toLowerCase();
     if (normalized === "discarded") return true;
@@ -9011,7 +9015,7 @@ function renderMemoryDetailPreview() {
     if (U.memoryDetailSecondarySection) U.memoryDetailSecondarySection.hidden = !secondaryText;
     if (U.memoryDetailSecondaryTitle) {
         U.memoryDetailSecondaryTitle.textContent = String(preview.secondaryTitle || "").trim()
-            || (preview.kind === "processed" ? "结果摘要" : "最近错误");
+            || (preview.kind === "processed" ? "变更内容" : "最近错误");
     }
     if (U.memoryDetailSecondary) {
         U.memoryDetailSecondary.innerHTML = secondaryText ? renderMemoryTextWithNoteRefs(secondaryText) : "";
@@ -9067,10 +9071,10 @@ function openMemoryDetailPreview(kind, key) {
             ? payloadTexts.join("\n\n---\n\n")
             : String(source?.payload_text || ""),
         secondaryTitle: isProcessed
-            ? (noopReason ? "无变更原因" : "结果摘要")
+            ? (noopReason ? "无变更原因" : "变更内容")
             : "最近错误",
         secondaryText: isProcessed
-            ? String(noopReason || source?.document_preview || "")
+            ? String(noopReason || memoryProcessedChangePreview(source) || "")
             : String(source?.last_error_text || ""),
     };
     renderMemoryDetailPreview();
@@ -9164,7 +9168,7 @@ function renderMemoryProcessedCard(item) {
                     <div>尝试次数：${esc(String(item?.attempt_count || 0))}</div>
                     <div>废弃原因：${esc(discardReason || "-")}</div>
                     <div>写入 notes：${renderMemoryNoteRefList(noteRefs)}</div>
-                    <div>结果摘要：<span class="memory-card-inline-rich">${renderMemoryTextWithNoteRefs(String(item?.document_preview || "")) || "-"}</span></div>
+                    <div>变更内容：<span class="memory-card-inline-rich">${renderMemoryTextWithNoteRefs(memoryProcessedChangePreview(item)) || "-"}</span></div>
                 </div>
                 <div class="memory-card-body-text memory-card-body-text-rich">${renderMemoryTextWithNoteRefs(payloadTexts.join("\n\n---\n\n"))}</div>
             </div>
@@ -9258,7 +9262,7 @@ function renderMemoryProcessedCard(item) {
                     <div>尝试次数：${esc(String(item?.attempt_count || 0))}</div>
                     <div>废弃原因：${esc(discardReason || "-")}</div>
                     <div>写入 notes：${renderMemoryNoteRefList(noteRefs)}</div>
-                    <div>结果摘要：<span class="memory-card-inline-rich">${renderMemoryTextWithNoteRefs(String(item?.document_preview || "")) || "-"}</span></div>
+                    <div>变更内容：<span class="memory-card-inline-rich">${renderMemoryTextWithNoteRefs(memoryProcessedChangePreview(item)) || "-"}</span></div>
                 </div>
                 <div class="memory-card-actions">
                     <button type="button" class="toolbar-btn ghost" data-memory-detail-open="processed" data-memory-detail-key="${esc(batchId)}">查看全文详情</button>

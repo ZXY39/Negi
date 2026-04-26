@@ -2186,6 +2186,137 @@ async def test_run_due_batch_once_records_rewrite_write_mode_for_processed_batch
 
 
 @pytest.mark.asyncio
+async def test_run_due_batch_once_records_change_preview_for_processed_rewrite_batch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_memory_agent_runtime_module()
+    markdown_module = _load_markdown_memory_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        (tmp_path / "memory" / "MEMORY.md").write_text(
+            markdown_module.format_memory_entry(
+                markdown_module.MemoryEntry(
+                    memory_id="Ab12Z9",
+                    date_text="2026/4/16",
+                    source="user",
+                    summary="Use [G3KU]-time-prefix for Markdown files.",
+                    note_ref="",
+                )
+            ),
+            encoding="utf-8",
+        )
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="Change Markdown naming to time-content format without the [G3KU] prefix.",
+                created_at="2026-04-17T10:00:00+08:00",
+                request_id="write_rewrite_preview_1",
+            )
+        )
+        fake_model = _FakeToolCallingModel(
+            [
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "name": "memory_apply_batch",
+                            "args": {
+                                "rewrites": [
+                                    {
+                                        "id": "Ab12Z9",
+                                        "content": "Use time-content naming for Markdown files.",
+                                        "minimal_memory": "markdown-docs->time-content-naming",
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                    usage={"input_tokens": 6, "output_tokens": 2, "cache_read_tokens": 0},
+                ),
+                _fake_response(
+                    content="done",
+                    usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0},
+                ),
+            ]
+        )
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-17T10:00:04+08:00")
+        processed = _read_jsonl(tmp_path / "memory" / "ops.jsonl")
+
+        assert report["ok"] is True
+        assert report["status"] == "applied"
+        assert len(processed) == 1
+        assert processed[0]["change_preview"] == "修改 Ab12Z9：Use time-content naming for Markdown files."
+        assert processed[0]["document_preview"] != processed[0]["change_preview"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_list_processed_page_prunes_batches_older_than_seven_days(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        monkeypatch.setattr(module.MemoryManager, "_now_iso", staticmethod(lambda: "2026-04-27T10:00:00+08:00"))
+        old_payload = {
+            "batch_id": "old_batch",
+            "op": "write",
+            "source_op": "write",
+            "status": "applied",
+            "processed_at": "2026-04-19T09:59:59+08:00",
+            "request_ids": ["old_request"],
+            "request_count": 1,
+            "decision_sources": ["user"],
+            "payload_texts": ["old payload"],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0},
+            "model_chain": ["memory-primary"],
+            "attempt_count": 1,
+        }
+        boundary_payload = {
+            "batch_id": "boundary_batch",
+            "op": "write",
+            "source_op": "write",
+            "status": "applied",
+            "processed_at": "2026-04-20T10:00:00+08:00",
+            "request_ids": ["boundary_request"],
+            "request_count": 1,
+            "decision_sources": ["user"],
+            "payload_texts": ["boundary payload"],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0},
+            "model_chain": ["memory-primary"],
+            "attempt_count": 1,
+        }
+        (tmp_path / "memory" / "ops.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(old_payload, ensure_ascii=False),
+                    json.dumps(boundary_payload, ensure_ascii=False),
+                ]
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+        payload = await manager.list_processed_page(limit=20, offset=0)
+
+        assert [item["batch_id"] for item in payload["items"]] == ["boundary_batch"]
+        assert [item["batch_id"] for item in _read_jsonl(tmp_path / "memory" / "ops.jsonl")] == ["boundary_batch"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_run_due_batch_once_keeps_processing_batch_on_provider_error_without_processed_record(
     tmp_path: Path,
     monkeypatch,

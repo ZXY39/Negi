@@ -39,7 +39,8 @@ def test_memory_page_renders_note_ref_trigger() -> None:
     assert 'class="memory-note-ref-trigger"' in app_js
     assert 'data-memory-note-ref="${esc(noteRef)}"' in app_js
     assert "renderMemoryTextWithNoteRefs(String(item?.payload_text || \"\"))" in app_js
-    assert "renderMemoryTextWithNoteRefs(String(item?.document_preview || \"\"))" in app_js
+    assert "function memoryProcessedChangePreview(item)" in app_js
+    assert "renderMemoryTextWithNoteRefs(memoryProcessedChangePreview(item))" in app_js
     assert "renderMemoryTextWithNoteRefs(payloadTexts.join(\"\\n\\n---\\n\\n\"))" in app_js
     assert "renderMemoryNoteRefList(noteRefs)" in app_js
     assert 'U.memoryQueueList?.addEventListener("click"' in app_js

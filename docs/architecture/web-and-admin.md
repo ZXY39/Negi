@@ -27,6 +27,7 @@ The browser shell now has a top-level `记忆管理` page. This is intentionally
 - Queue cards default to collapsed and show runtime-owned state such as `pending` / `processing`, enqueue time, and the latest engineering error when present.
 - Processed cards default to collapsed and show batch-owned metadata such as processed time, terminal status, op type, token usage, model chain, attempts, discard reason when present, and note refs.
 - Applied `write` batches may now also carry a backend-owned `write_mode` detail (`add` / `rewrite` / `mixed`). The frontend should prefer that field when choosing the operator-visible action label (`增加` / `修改` / `混合变更`) instead of assuming every `write` means a new memory row was added.
+- Processed detail modals should treat the secondary text lane as mutation-oriented, not notebook-oriented. For ordinary applied writes, the operator-facing title is `变更内容` and the frontend should prefer backend `change_preview`; for no-op / discarded write rows, the title remains `无变更原因` and the body should still come from `noop_reason`.
 - Memory list cards are intentionally compact. Clicking a queue or processed card opens a frontend-owned read-only detail modal for the full payload instead of expanding the entire text inline inside the list.
 - The detail modal keeps long payloads inside scrollable text regions so one large row does not push the rest of the list off-screen.
 - Queue / processed detail text still treats `ref:note_xxxx` as a read-only preview trigger. Clicking a note ref opens a second frontend-owned drawer/modal that only fetches and displays the note body; it must not expose edit or save controls.
@@ -38,6 +39,8 @@ The browser shell now has a top-level `记忆管理` page. This is intentionally
 - `GET /api/memory/queue` returns queue-owned runtime state directly from `memory/queue.jsonl`, including `status`, retry/error fields, and pagination metadata.
 - `GET /api/memory/processed` returns terminal batch records from `memory/ops.jsonl`, including both applied rows and durable discarded rows, also with pagination metadata.
 - For applied `write` rows, the processed payload may also include `write_mode` so the browser can distinguish a pure add from a rewrite or mixed write batch without reopening request artifacts.
+- Mutation-bearing processed rows may also include `change_preview`. This is a backend-owned summary of what changed in the current batch; it is intentionally different from `document_preview`, which is still a snapshot-oriented preview of the rebuilt notebook head.
+- `memory/ops.jsonl` is now a rolling processed-history surface rather than an append-forever archive. The backend prunes processed rows older than 7 days during normal processed-log reads/writes, so `/api/memory/processed` should be treated as the latest 7-day operator history window.
 - `GET /api/memory/notes/{ref}` is the minimal read-only note preview contract for the memory page. It returns the note body for an existing `ref:note_xxxx` entry and returns a clear not-found error when the referenced note file is missing.
 - `POST /api/memory/admin/retry-head` exists as a guarded operator contract, but it is disabled by default. When `G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS` is not enabled, the backend returns `403` with `detail.code=memory_admin_mutation_disabled`; successful calls append an audit record to `memory/admin_audit.jsonl`.
 - Older admin memory endpoints such as dense-index reset/rebuild and runtime stats still exist, but they are no longer the primary operator path for understanding whether long-term memory is healthy.
@@ -46,7 +49,7 @@ The browser shell now has a top-level `记忆管理` page. This is intentionally
 
 - If the memory page looks wrong but the raw JSON from `/api/memory/queue` or `/api/memory/processed` is correct, debug `g3ku/web/frontend/*`.
 - If a `ref:note_xxxx` chip renders but the preview drawer cannot load, compare the frontend `ApiClient.getMemoryNote(...)` request with `GET /api/memory/notes/{ref}` before debugging the memory runtime itself.
-- If the page is missing fields, ordering, discarded statuses, or request-artifact links already in the API response, debug the admin endpoints or `g3ku/agent/memory_agent_runtime.py`.
+- If the page is missing fields, ordering, discarded statuses, `change_preview`, or request-artifact links already in the API response, debug the admin endpoints or `g3ku/agent/memory_agent_runtime.py`.
 - If the queue page is stuck on one `processing` batch, treat that as a backend/runtime issue first, not as a frontend pagination bug.
 - Browser-side memory management remains read-only by default. If an operator expects a retry button in the UI, first check whether the feature was intentionally kept backend-only for the current build rather than debugging missing DOM wiring.
 
