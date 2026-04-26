@@ -720,6 +720,32 @@ async def test_g3ku_chat_model_adapter_preserves_provider_request_payload_metada
     }
 
 
+@pytest.mark.asyncio
+async def test_g3ku_chat_model_adapter_forwards_text_delta_callback() -> None:
+    captured: list[dict[str, object]] = []
+    deltas: list[str] = []
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            captured.append(dict(kwargs))
+            callback = kwargs.get("on_text_delta")
+            if callable(callback):
+                callback("O")
+                callback("K")
+            return LLMResponse(content="OK", finish_reason="stop")
+
+    adapter = G3kuChatModelAdapter(chat_backend=_Backend(), default_model="demo:model")
+
+    result = await adapter._agenerate(
+        [HumanMessage(content="hello")],
+        on_text_delta=deltas.append,
+    )
+
+    assert result.generations[0].message.content == "OK"
+    assert captured[0]["on_text_delta"] is deltas.append
+    assert deltas == ["O", "K"]
+
+
 def test_runtime_send_token_preflight_threshold_math_is_ceo_aligned() -> None:
     """
     Regression guard: node/runtime send-side token preflight must share the CEO threshold semantics:

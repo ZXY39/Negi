@@ -791,6 +791,121 @@ async def test_chat_backend_skips_outer_total_timeout_for_internally_managed_str
 
 
 @pytest.mark.asyncio
+async def test_chat_backend_forwards_text_delta_callback_only_to_streaming_providers(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+    seen_deltas: list[str] = []
+
+    class _StreamingProvider:
+        manages_request_timeout_internally = True
+        supports_streaming = True
+
+        async def chat(self, **kwargs):
+            captured.append(dict(kwargs))
+            callback = kwargs.get("on_text_delta")
+            if callable(callback):
+                callback("O")
+                callback("K")
+            return LLMResponse(content="OK", finish_reason="stop")
+
+    target = ProviderTarget(
+        provider_ref="primary",
+        provider_id="responses",
+        model_id="gpt-primary",
+        provider=_StreamingProvider(),
+        retry_on=["network", "429", "5xx"],
+        retry_count=0,
+        api_key_count=1,
+        api_key_indexes=[0],
+    )
+
+    monkeypatch.setattr(
+        chat_backend_module,
+        "build_provider_from_model_key",
+        lambda config, ref, api_key_index=None: target,
+    )
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    response = await backend.chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["primary"],
+        on_text_delta=seen_deltas.append,
+    )
+
+    assert response.content == "OK"
+    assert captured[0]["on_text_delta"] is seen_deltas.append
+    assert seen_deltas == ["O", "K"]
+
+
+@pytest.mark.asyncio
+async def test_chat_backend_stops_model_fallback_after_visible_stream_text(monkeypatch) -> None:
+    attempts: list[str] = []
+    streamed_chunks: list[str] = []
+
+    class _StreamingFailureProvider:
+        manages_request_timeout_internally = True
+        supports_streaming = True
+
+        async def chat(self, **kwargs):
+            attempts.append("primary")
+            callback = kwargs.get("on_text_delta")
+            if callable(callback):
+                callback("partial")
+            raise RuntimeError("HTTP 502: Upstream request failed")
+
+    class _SecondaryProvider:
+        manages_request_timeout_internally = True
+        supports_streaming = True
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            attempts.append("secondary")
+            return LLMResponse(content="secondary ok", finish_reason="stop")
+
+    targets = {
+        "primary": ProviderTarget(
+            provider_ref="primary",
+            provider_id="responses",
+            model_id="gpt-primary",
+            provider=_StreamingFailureProvider(),
+            retry_on=["network", "429", "5xx"],
+            retry_count=0,
+            api_key_count=1,
+            api_key_indexes=[0],
+        ),
+        "secondary": ProviderTarget(
+            provider_ref="secondary",
+            provider_id="responses",
+            model_id="gpt-secondary",
+            provider=_SecondaryProvider(),
+            retry_on=["network", "429", "5xx"],
+            retry_count=0,
+            api_key_count=1,
+            api_key_indexes=[0],
+        ),
+    }
+
+    monkeypatch.setattr(
+        chat_backend_module,
+        "build_provider_from_model_key",
+        lambda config, ref, api_key_index=None: targets[ref],
+    )
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+
+    with pytest.raises(RuntimeError, match="HTTP 502: Upstream request failed"):
+        await backend.chat(
+            messages=[{"role": "user", "content": "demo"}],
+            tools=None,
+            model_refs=["primary", "secondary"],
+            on_text_delta=streamed_chunks.append,
+        )
+
+    assert streamed_chunks == ["partial"]
+    assert attempts == ["primary"]
+
+
+@pytest.mark.asyncio
 async def test_litellm_provider_forwards_request_timeout(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

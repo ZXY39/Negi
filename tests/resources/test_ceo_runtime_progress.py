@@ -856,6 +856,34 @@ async def test_runtime_agent_session_analysis_progress_updates_inflight_snapshot
 
 
 @pytest.mark.asyncio
+async def test_runtime_agent_session_emits_lightweight_assistant_stream_events_without_state_snapshot() -> None:
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="gpt-test", reasoning_effort=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._active_turn_id = "turn-stream-1"
+    events: list[AgentEvent] = []
+
+    async def _listener(event: AgentEvent) -> None:
+        events.append(event)
+
+    session.subscribe(_listener)
+    await session._handle_assistant_text_delta("O")
+    await session._handle_assistant_text_delta("K")
+
+    assert session.state.latest_message == "OK"
+    stream_events = [event for event in events if event.type == "assistant_stream_delta"]
+    assert stream_events
+    assert stream_events[-1].payload["turn_id"] == "turn-stream-1"
+    assert stream_events[-1].payload["text"] == "OK"
+    assert not any(event.type == "state_snapshot" for event in events)
+
+
+@pytest.mark.asyncio
 async def test_runtime_agent_session_marks_heartbeat_message_end(tmp_path: Path, monkeypatch) -> None:
     async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
         _ = force, reason
