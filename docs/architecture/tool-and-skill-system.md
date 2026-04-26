@@ -572,11 +572,20 @@ For Tool Admin surfaced tool families, RBAC is the highest-priority access contr
 - `actions[].allowed_roles` is now an exact persisted whitelist.
 - An empty list means deny-all for that action.
 - Refresh, reload, reopen, and store readback must preserve an explicit empty list; maintainers should treat `[]` as real state, not as "missing".
-- Tool discovery no longer injects default roles for newly surfaced tool actions. If no persisted RBAC exists yet, the surfaced action starts deny-all until an operator grants roles explicitly.
+- There is now a first-discovery seeding boundary that maintainers must keep separate from persisted RBAC:
+  - when a surfaced tool action is discovered for the first time and there is no persisted `tool_families` row/action yet, runtime seeds `allowed_roles` from the tool's discovery governance
+  - that governance may come from explicit resource-local `governance.actions[].allowed_roles`, or from the implicit default governance mapping in `main/governance/action_mapper.py`
+  - this is especially important for merged surfaced families such as `skill_access`, where concrete executors like `load_skill_context` and `load_tool_context` share one family/action row
+  - after that first persistence boundary, `tool_families.payload_json` becomes authoritative; reload/refresh must preserve operator edits, including an explicit persisted `[]`
+- There is also a one-time legacy repair boundary for older workspaces:
+  - before `governance_meta.implicit_tool_role_backfill_v1_applied` is set, refresh may backfill an older persisted empty `allowed_roles=[]` action from the newly discovered non-empty discovery-governance default
+  - this repair exists specifically to heal historical fresh-start rows that were accidentally persisted as deny-all for implicit-governance surfaced families
+  - once that meta flag is written, later refreshes stop auto-healing empty lists; an operator-cleared `[]` stays authoritative
 
 This changes how maintainers should reason about surfaced tools such as `exec`, `content_*`, `memory_*`, and `task_runtime`:
 
 - If the executor belongs to a surfaced tool family, its model visibility now follows Tool Admin RBAC exactly.
+- If a fresh workspace shows an unexpected default role set, compare the resource discovery governance with the first persisted `tool_families` row before debugging prompt assembly or frontend rendering.
 - A surfaced fixed-builtin executor may still be listed in frontdoor or execution fixed-builtin sets, but it only becomes actually visible/callable when the surfaced family/action RBAC allows it.
 - When debugging "the tool still appears after I removed all roles", inspect the persisted `tool_families` record and the derived `role_policy_matrix` first. Do not assume there is still any fallback to `ceo` or `execution`.
 

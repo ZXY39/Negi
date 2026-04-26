@@ -5721,12 +5721,18 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         assert items['skill_access'].is_core is True
         assert items['task_runtime'].is_core is True
 
+        skill_access_actions = {action.action_id: action for action in items['skill_access'].actions}
+        assert skill_access_actions['load_context'].allowed_roles == ['ceo', 'execution', 'inspection']
+
         task_runtime_actions = {action.action_id: action for action in items['task_runtime'].actions}
         assert 'append_notice_cn' in task_runtime_actions
         assert 'ceo' in set(task_runtime_actions['append_notice_cn'].allowed_roles)
 
         memory_actions = {action.action_id: action for action in items['memory'].actions}
         assert set(memory_actions) == {'write', 'delete', 'note', 'runtime'}
+        assert memory_actions['write'].allowed_roles == ['ceo']
+        assert memory_actions['delete'].allowed_roles == ['ceo']
+        assert memory_actions['note'].allowed_roles == ['ceo']
         assert memory_actions['write'].agent_visible is True
         assert memory_actions['write'].admin_mode == 'editable'
         assert memory_actions['delete'].agent_visible is True
@@ -5761,7 +5767,14 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         visible = set(
             list_effective_tool_names(
                 subject=SimpleNamespace(actor_role='ceo'),
-                supported_tool_names=['memory_write', 'memory_delete', 'memory_note', 'memory_runtime'],
+                supported_tool_names=[
+                    'load_skill_context',
+                    'load_tool_context',
+                    'memory_write',
+                    'memory_delete',
+                    'memory_note',
+                    'memory_runtime',
+                ],
                 resource_registry=_Registry(),
                 policy_engine=_PolicyEngine(),
                 mutation_allowed=True,
@@ -5770,7 +5783,14 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         execution_visible = set(
             list_effective_tool_names(
                 subject=SimpleNamespace(actor_role='execution'),
-                supported_tool_names=['memory_write', 'memory_delete', 'memory_note', 'memory_runtime'],
+                supported_tool_names=[
+                    'load_skill_context',
+                    'load_tool_context',
+                    'memory_write',
+                    'memory_delete',
+                    'memory_note',
+                    'memory_runtime',
+                ],
                 resource_registry=_Registry(),
                 policy_engine=_PolicyEngine(),
                 mutation_allowed=True,
@@ -5779,15 +5799,28 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         inspection_visible = set(
             list_effective_tool_names(
                 subject=SimpleNamespace(actor_role='inspection'),
-                supported_tool_names=['memory_write', 'memory_delete', 'memory_note', 'memory_runtime'],
+                supported_tool_names=[
+                    'load_skill_context',
+                    'load_tool_context',
+                    'memory_write',
+                    'memory_delete',
+                    'memory_note',
+                    'memory_runtime',
+                ],
                 resource_registry=_Registry(),
                 policy_engine=_PolicyEngine(),
                 mutation_allowed=True,
             )
         )
-        assert visible == set()
-        assert execution_visible == set()
-        assert inspection_visible == set()
+        assert visible == {
+            'load_skill_context',
+            'load_tool_context',
+            'memory_delete',
+            'memory_note',
+            'memory_write',
+        }
+        assert execution_visible == {'load_skill_context', 'load_tool_context'}
+        assert inspection_visible == {'load_skill_context', 'load_tool_context'}
     finally:
         await service.close()
         manager.close()
@@ -5832,6 +5865,62 @@ async def test_startup_reconciles_core_tool_family_visibility_and_enablement(tmp
         assert reconciled.is_core is True
         assert reconciled.enabled is True
         assert all('ceo' not in action.allowed_roles for action in reconciled.actions if action.agent_visible)
+    finally:
+        await service.close()
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_backfills_legacy_empty_roles_for_implicit_tool_governance_once(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_repo_tools(workspace, 'load_skill_context', 'load_tool_context', 'memory_write')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        resource_manager=manager,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+    )
+
+    try:
+        families = {item.tool_id: item for item in service.resource_registry.refresh_from_current_resources()[1]}
+        legacy_empty = families['skill_access'].model_copy(
+            update={
+                'actions': [
+                    action.model_copy(update={'allowed_roles': []})
+                    for action in families['skill_access'].actions
+                ],
+            }
+        )
+        service.governance_store.upsert_tool_family(legacy_empty, updated_at=datetime.now().isoformat())
+        service.governance_store.set_bool_meta('implicit_tool_role_backfill_v1_applied', False)
+
+        await service.startup()
+
+        healed = service.get_tool_family('skill_access')
+        assert healed is not None
+        assert healed.actions[0].allowed_roles == ['ceo', 'execution', 'inspection']
+        assert 'load_tool_context' in service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
+
+        cleared = service.update_tool_policy(
+            'skill_access',
+            session_id='web:shared',
+            allowed_roles_by_action={'load_context': []},
+        )
+        assert cleared is not None
+        assert cleared.actions[0].allowed_roles == []
+
+        service.reload_resources(session_id='web:shared')
+        after_reload = service.get_tool_family('skill_access')
+        assert after_reload is not None
+        assert after_reload.actions[0].allowed_roles == []
     finally:
         await service.close()
         manager.close()
@@ -5890,7 +5979,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         await service.startup()
         before = service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
         assert 'create_async_task' in before
-        assert 'memory_write' not in before
+        assert 'memory_write' in before
 
         changed = service.ensure_runtime_config_current(force=True, reason='test')
 
@@ -5899,7 +5988,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         after = service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
         assert 'create_async_task' in after
         assert 'task_append_notice' in after
-        assert 'memory_write' not in after
+        assert 'memory_write' in after
         assert {
             'task_list',
             'task_append_notice',

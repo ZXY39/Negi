@@ -6,9 +6,11 @@ from g3ku.resources import ResourceManager
 from main.governance.action_mapper import DEFAULT_TOOL_FAMILIES
 from main.governance.models import SkillResourceRecord, ToolActionRecord, ToolFamilyRecord
 from main.governance.resource_bridge import build_skill_resources, build_tool_families
+from main.governance.roles import normalize_public_allowed_roles
 from main.protocol import now_iso
 
 MANUAL_ACTION_TOOL_NAMES = {'patch_apply'}
+IMPLICIT_TOOL_ROLE_BACKFILL_META_KEY = 'implicit_tool_role_backfill_v1_applied'
 
 
 def _primary_executor_name(actions: list[ToolActionRecord]) -> str:
@@ -40,12 +42,19 @@ class MainRuntimeResourceRegistry:
             return [], []
         existing_skills = {item.skill_id: item for item in self._store.list_skill_resources()}
         existing_tools = {item.tool_id: item for item in self._store.list_tool_families()}
+        apply_legacy_empty_role_backfill = self._should_backfill_legacy_empty_tool_roles()
         discovered_skills = build_skill_resources(self._resource_manager.list_skills(), default_risk_level='medium', exclude_names=set())
         merged_skills = [self._merge_skill(existing_skills.get(item.skill_id), item) for item in discovered_skills]
-        merged_tools = self._merge_tool_families(existing_tools=existing_tools, discovered=build_tool_families(self._resource_manager.list_tools()))
+        merged_tools = self._merge_tool_families(
+            existing_tools=existing_tools,
+            discovered=build_tool_families(self._resource_manager.list_tools()),
+            apply_legacy_empty_role_backfill=apply_legacy_empty_role_backfill,
+        )
         refreshed_at = now_iso()
         self._store.replace_skill_resources(merged_skills, updated_at=refreshed_at)
         self._store.replace_tool_families(merged_tools, updated_at=refreshed_at)
+        if apply_legacy_empty_role_backfill:
+            self._mark_legacy_empty_tool_roles_backfilled()
         return merged_skills, merged_tools
 
     def list_skill_resources(self) -> list[SkillResourceRecord]:
@@ -83,7 +92,13 @@ class MainRuntimeResourceRegistry:
             }
         )
 
-    def _merge_tool_families(self, *, existing_tools: dict[str, ToolFamilyRecord], discovered: list[ToolFamilyRecord]) -> list[ToolFamilyRecord]:
+    def _merge_tool_families(
+        self,
+        *,
+        existing_tools: dict[str, ToolFamilyRecord],
+        discovered: list[ToolFamilyRecord],
+        apply_legacy_empty_role_backfill: bool = False,
+    ) -> list[ToolFamilyRecord]:
         families = {item.tool_id: item for item in discovered}
         discovered_tool_names = {
             executor_name
@@ -105,7 +120,14 @@ class MainRuntimeResourceRegistry:
                 if old is None:
                     merged_actions.append(action)
                 else:
-                    merged_actions.append(action.model_copy(update={'allowed_roles': list(old.allowed_roles)}))
+                    persisted_roles = list(old.allowed_roles)
+                    if (
+                        apply_legacy_empty_role_backfill
+                        and not persisted_roles
+                        and list(action.allowed_roles)
+                    ):
+                        persisted_roles = list(action.allowed_roles)
+                    merged_actions.append(action.model_copy(update={'allowed_roles': persisted_roles}))
             merged.append(
                 record.model_copy(
                     update={
@@ -141,7 +163,9 @@ class MainRuntimeResourceRegistry:
                         label=str(action.get('label') or action_id),
                         risk_level=str(action.get('risk_level') or 'medium'),
                         destructive=bool(action.get('destructive', False)),
-                        allowed_roles=[],
+                        allowed_roles=normalize_public_allowed_roles(
+                            [str(role) for role in list(action.get('allowed_roles') or [])]
+                        ),
                         executor_names=[tool_name],
                     )
                 else:
@@ -156,3 +180,21 @@ class MainRuntimeResourceRegistry:
                     'primary_executor_name': _primary_executor_name(actions),
                 }
             )
+
+    def _should_backfill_legacy_empty_tool_roles(self) -> bool:
+        getter = getattr(self._store, 'get_bool_meta', None)
+        if not callable(getter):
+            return False
+        try:
+            return not bool(getter(IMPLICIT_TOOL_ROLE_BACKFILL_META_KEY, default=False))
+        except Exception:
+            return False
+
+    def _mark_legacy_empty_tool_roles_backfilled(self) -> None:
+        setter = getattr(self._store, 'set_bool_meta', None)
+        if not callable(setter):
+            return
+        try:
+            setter(IMPLICIT_TOOL_ROLE_BACKFILL_META_KEY, True)
+        except Exception:
+            return

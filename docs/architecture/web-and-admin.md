@@ -431,6 +431,13 @@ Tool management now has a strict persisted-RBAC contract for surfaced tool famil
 - The backend `PUT /api/resources/tools/{tool_id}/policy` path treats each action's `allowed_roles` as the authoritative whitelist.
 - Clearing all checkboxes for a surfaced action is valid and persists as `[]`, meaning deny-all.
 - Reopening the same tool after save or after `/api/resources/reload` must show the same empty-role state instead of silently restoring `ceo` or `execution`.
+- Freshly discovered surfaced tool actions now have one earlier seeding step before operator edits exist:
+  - if there is no persisted `tool_families` row/action yet, backend discovery seeds `allowed_roles` from the tool's discovery governance
+  - that discovery governance may come from explicit resource-local `governance.actions[].allowed_roles`, or from the implicit default mapping in `main/governance/action_mapper.py`
+  - once the family/action has been persisted, later reloads must preserve the stored value exactly, including `[]`
+- Older workspaces may also cross one compatibility boundary on upgrade:
+  - before `governance_meta.implicit_tool_role_backfill_v1_applied` is set, backend refresh may repair an older persisted empty surfaced-action role list from the newly discovered non-empty discovery-governance default
+  - after that one-time repair marker is written, later reloads stop auto-healing empty lists so operator-cleared `[]` remains authoritative
 
 The frontend responsibilities are now:
 
@@ -442,6 +449,7 @@ The frontend responsibilities are now:
 The backend responsibilities are now:
 
 - preserve explicit empty role lists through store readback and resource refresh,
+- make `/api/resources/tools` and `/api/resources/tools/{tool_id}` reflect the same registry/store-backed surfaced family state that runtime visibility checks use,
 - derive runtime visibility for surfaced tools from that persisted RBAC state,
 - and keep internal non-Tool-Admin tools outside the Tool Admin contract.
 
@@ -476,6 +484,15 @@ If an operator reports "save succeeded but reopen restored the roles", first ins
 3. the post-reload `GET /api/resources/tools/{tool_id}` response.
 
 Do not start with frontdoor prompt debugging unless those three layers already agree.
+
+If an operator reports "Tool 管理 shows one role set but runtime visibility behaves differently", inspect in this order:
+
+1. `GET /api/resources/tools/{tool_id}`
+2. the stored `tool_families.payload_json` row
+3. the derived `role_policy_matrix`
+4. the runtime-side `list_effective_tool_names(...)` result for the affected role/session
+
+Do not assume the browser has a second hidden RBAC source. For surfaced tool families, the API detail payload and runtime visibility should now be two views over the same backend-owned family/action state.
 
 ## Container Deployment Contract
 

@@ -189,7 +189,7 @@ def _has_explicit_tool_governance(descriptor: ToolResourceDescriptor) -> bool:
 
 def _tool_action_allowed_roles(action: dict[str, Any], *, explicit_governance: bool) -> list[str]:
     raw_roles = action.get('allowed_roles') if isinstance(action, dict) else None
-    if explicit_governance:
+    if explicit_governance or raw_roles is not None:
         return normalize_public_allowed_roles([str(role) for role in list(raw_roles or [])])
     return []
 
