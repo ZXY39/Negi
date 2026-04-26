@@ -86,6 +86,18 @@
     return String(value || "").trim();
   }
 
+  function missingRequiredModelRoleLabels() {
+    return ["ceo", "execution", "inspection"]
+      .filter((scope) => !normalizeModelRoleChain(S.modelCatalog.roleDrafts?.[scope] || []).length)
+      .map((scope) => SCOPE_LABELS[scope] || scope);
+  }
+
+  function requiredModelRoleValidationMessage() {
+    const labels = missingRequiredModelRoleLabels();
+    if (!labels.length) return "";
+    return `请先为以下角色配置模型链：${labels.join("、")}。全部拖入后才可保存。`;
+  }
+
   function bindingNameLabel() {
     return "配置名 / 绑定名";
   }
@@ -2249,6 +2261,13 @@
     }
     if (!S.modelCatalog.rolesDirty) {
       cancelModelRoleEditing();
+      renderAll();
+      return;
+    }
+    const validationMessage = requiredModelRoleValidationMessage();
+    if (validationMessage) {
+      llmState().error = validationMessage;
+      showToast({ title: "保存失败", text: llmState().error, kind: "error" });
       renderAll();
       return;
     }

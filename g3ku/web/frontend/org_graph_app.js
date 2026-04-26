@@ -6324,6 +6324,20 @@ function modelScopeLabel(scope) {
     return (MODEL_SCOPES.find((item) => item.key === scope) || { label: String(scope || "") }).label;
 }
 
+function missingRequiredModelRoleLabels(source = "draft") {
+    return MODEL_SCOPES
+        .filter((item) => item.key !== "memory")
+        .map((item) => item.key)
+        .filter((scope) => modelScopeChain(scope, source).length < 1)
+        .map((scope) => modelScopeLabel(scope));
+}
+
+function requiredModelRoleValidationMessage(source = "draft") {
+    const labels = missingRequiredModelRoleLabels(source);
+    if (!labels.length) return "";
+    return `请先为以下角色配置模型链：${labels.join("、")}。全部拖入后才可保存。`;
+}
+
 function modelRefItem(ref) {
     const raw = String(ref || "").trim();
     if (!raw) return null;
@@ -7307,6 +7321,13 @@ async function handleModelRoleEditorAction() {
     }
     if (!S.modelCatalog.rolesDirty) {
         cancelModelRoleEditing();
+        return;
+    }
+    const validationMessage = requiredModelRoleValidationMessage("draft");
+    if (validationMessage) {
+        S.modelCatalog.error = validationMessage;
+        hint(`模型配置错误：${S.modelCatalog.error}`, true);
+        showToast({ title: "保存失败", text: S.modelCatalog.error, kind: "error" });
         return;
     }
     await persistModelRoleChains(MODEL_SCOPES.map((item) => item.key), "模型链已保存。", { useDrafts: true });
