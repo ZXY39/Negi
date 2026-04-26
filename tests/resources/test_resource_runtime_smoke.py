@@ -1074,6 +1074,72 @@ async def test_filesystem_edit_line_range_mode(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_filesystem_edit_target_exact_text_mode(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'target.txt'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('alpha\nold line\nomega\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_filesystem_split_tools(workspace, 'filesystem_edit')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem_edit')
+        assert tool is not None
+        result = await tool.execute(
+            path=str(target_file),
+            target={'by': 'exact_text', 'text': 'old line'},
+            new_text='new line',
+        )
+        assert 'Successfully edited' in result
+        assert target_file.read_text(encoding='utf-8') == 'alpha\nnew line\nomega\n'
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_edit_target_anchor_pair_mode(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'target.py'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text(
+        'before\n'
+        'def _browser_executable_path():\n'
+        '    return None\n'
+        'after\n',
+        encoding='utf-8',
+    )
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_filesystem_split_tools(workspace, 'filesystem_edit')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem_edit')
+        assert tool is not None
+        result = await tool.execute(
+            path=str(target_file),
+            target={
+                'by': 'anchor_pair',
+                'start_anchor': 'def _browser_executable_path():\n',
+                'end_anchor': '    return None\n',
+            },
+            new_text='def _browser_executable_path():\n    return "/tmp/browser"\n',
+        )
+        assert 'Successfully edited' in result
+        assert target_file.read_text(encoding='utf-8') == (
+            'before\n'
+            'def _browser_executable_path():\n    return "/tmp/browser"\n'
+            'after\n'
+        )
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_filesystem_edit_validation_failure_rolls_back(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     target_file = workspace / 'target.py'
@@ -1214,7 +1280,7 @@ def test_filesystem_edit_manifest_exposes_explicit_mode_enum(tmp_path: Path):
         manager.close()
 
 
-def test_filesystem_edit_provider_visible_schema_requires_mode(tmp_path: Path):
+def test_filesystem_edit_provider_visible_schema_requires_target_first_contract(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -1228,11 +1294,14 @@ def test_filesystem_edit_provider_visible_schema_requires_mode(tmp_path: Path):
 
         _description, schema = _provider_visible_tool_contract(tool)
         properties = dict((schema or {}).get('properties') or {})
-        mode_schema = dict(properties.get('mode') or {})
+        target_schema = dict(properties.get('target') or {})
+        target_properties = dict(target_schema.get('properties') or {})
+        by_schema = dict(target_properties.get('by') or {})
 
-        assert mode_schema.get('type') == 'string'
-        assert mode_schema.get('enum') == ['text_replace', 'line_range']
-        assert 'mode' in list((schema or {}).get('required') or [])
+        assert target_schema.get('type') == 'object'
+        assert by_schema.get('type') == 'string'
+        assert by_schema.get('enum') == ['exact_text', 'anchor_pair', 'line_range']
+        assert list((schema or {}).get('required') or []) == ['path', 'target', 'new_text']
     finally:
         manager.close()
 

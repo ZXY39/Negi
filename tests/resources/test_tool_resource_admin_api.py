@@ -401,18 +401,26 @@ async def test_load_tool_context_filesystem_edit_prefers_callable_schema_for_age
 
         toolskill = service.get_tool_toolskill('filesystem_edit')
         assert toolskill is not None
-        assert toolskill['required_parameters'] == ['path', 'mode']
-        assert toolskill['parameters_schema']['properties']['mode']['enum'] == ['text_replace', 'line_range']
-        assert dict(toolskill['example_arguments']).get('mode') == 'text_replace'
+        assert toolskill['required_parameters'] == ['path', 'target', 'new_text']
+        assert toolskill['parameters_schema']['properties']['target']['properties']['by']['enum'] == [
+            'exact_text',
+            'anchor_pair',
+            'line_range',
+        ]
+        assert dict(toolskill['example_arguments']).get('target', {}).get('by') == 'exact_text'
 
         payload_v2 = service.load_tool_context_v2(
             actor_role='ceo',
             session_id='web:shared',
             tool_id='filesystem_edit',
         )
-        assert payload_v2['required_parameters'] == ['path', 'mode']
-        assert payload_v2['parameters_schema']['properties']['mode']['enum'] == ['text_replace', 'line_range']
-        assert dict(payload_v2['example_arguments']).get('mode') == 'text_replace'
+        assert payload_v2['required_parameters'] == ['path', 'target', 'new_text']
+        assert payload_v2['parameters_schema']['properties']['target']['properties']['by']['enum'] == [
+            'exact_text',
+            'anchor_pair',
+            'line_range',
+        ]
+        assert dict(payload_v2['example_arguments']).get('target', {}).get('by') == 'exact_text'
     finally:
         await service.close()
         manager.close()

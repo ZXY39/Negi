@@ -38,7 +38,7 @@ def test_recovery_check_filesystem_edit_verifies_done_when_expected_edit_already
         tool_name="filesystem_edit",
         arguments={
             "path": str(target),
-            "old_text": "old line",
+            "target": {"by": "exact_text", "text": "old line"},
             "new_text": "new line",
         },
         runtime_context={"task_temp_dir": str(tmp_path)},

@@ -137,6 +137,19 @@ def test_filesystem_split_mutation_manifests_replace_legacy_monolith():
     assert 'operations' in move_properties
 
 
+def test_filesystem_edit_manifest_exposes_target_first_model_schema():
+    manifest = yaml.safe_load((TOOLS_ROOT / 'filesystem_edit' / 'resource.yaml').read_text(encoding='utf-8'))
+    model_parameters = dict((manifest.get('model_parameters') or {}))
+    properties = dict(model_parameters.get('properties') or {})
+    target_schema = dict(properties.get('target') or {})
+    target_properties = dict(target_schema.get('properties') or {})
+    by_schema = dict(target_properties.get('by') or {})
+
+    assert list(model_parameters.get('required') or []) == ['path', 'target', 'new_text']
+    assert target_schema.get('type') == 'object'
+    assert by_schema.get('enum') == ['exact_text', 'anchor_pair', 'line_range']
+
+
 def test_all_manifest_parameters_have_descriptions():
     for manifest_path in TOOLS_ROOT.glob('*/resource.yaml'):
         manifest = yaml.safe_load(manifest_path.read_text(encoding='utf-8')) or {}
