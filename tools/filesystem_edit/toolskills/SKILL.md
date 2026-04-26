@@ -2,23 +2,33 @@
 
 Use this for precise edits to an existing file.
 
-Preferred:
-- Set `mode="text_replace"` for text replacement calls.
-- Set `mode="line_range"` for line-based replacement calls.
+Preferred workflow:
+- Read the file first with `content_open`.
+- Use the target-first contract: `path`, `target`, `new_text`.
 
-Text-replace mode:
+Preferred target-first locators:
+- `target={"by":"exact_text","text":"..."}` when you already have the exact old block and it should match uniquely.
+- `target={"by":"anchor_pair","start_anchor":"...","end_anchor":"..."}` when exact old text is too large or too fragile, but stable surrounding anchors exist.
+- `target={"by":"line_range","start_line":N,"end_line":M}` only when you already know the exact current lines from a fresh read.
+
+Target-first call shape:
 - `path`
-- `mode="text_replace"` (recommended)
+- `target`
+- `new_text`
+
+Legacy text-replace mode is still supported for backward compatibility:
+- `path`
+- `mode="text_replace"`
 - `old_text`
 - `new_text`
 
-Line-range mode:
+Legacy line-range mode is still supported for backward compatibility:
 - `path`
-- `mode="line_range"` (recommended)
+- `mode="line_range"`
 - `start_line`
 - `end_line`
 - `replacement`
 
-Use exactly one mode per call.
+Do not mix `target` with real legacy edit fields in the same call.
 
-If a caller auto-fills placeholder line-range values such as `start_line=0`, `end_line=0`, and `replacement=""` during a text-replace call, omit them or set `mode="text_replace"`.
+If a caller auto-fills placeholder legacy values such as `start_line=0`, `end_line=0`, `replacement=""`, or empty legacy text fields, omit them. Placeholder cleanup only exists to absorb adapter noise, not to support real mixed-mode edits.

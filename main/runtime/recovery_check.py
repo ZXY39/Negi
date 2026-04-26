@@ -193,24 +193,91 @@ class RecoveryCheckEngine:
             return []
         return [dict(item) for item in operations if isinstance(item, dict)]
 
+    @staticmethod
+    def _normalized_edit_target(arguments: dict[str, Any]) -> dict[str, Any]:
+        target = arguments.get("target")
+        return dict(target) if isinstance(target, dict) else {}
+
+    @staticmethod
+    def _coerce_line_number(value: Any) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except (TypeError, ValueError):
+            return None
+
     def _inspect_filesystem_edit(self, arguments: dict[str, Any]) -> RecoveryCheckResult:
         target = self._resolve_path(arguments.get("path"))
-        old_text = str(arguments.get("old_text") or "")
         new_text = str(arguments.get("new_text") or "")
         if target is not None and target.is_file():
             try:
                 current = target.read_text(encoding="utf-8")
             except Exception:
                 current = None
-            if current is not None and old_text not in current and new_text and new_text in current:
-                return RecoveryCheckResult(
-                    decision=RecoveryCheckDecision.VERIFIED_DONE,
-                    expected_tool_status="success",
-                    lost_result_summary=(
-                        "Recovery check confirmed that the requested edit is already reflected on disk."
-                    ),
-                    evidence=[self._file_evidence(path=target, note="File content already reflects the requested edit.")],
-                )
+            if current is not None:
+                edit_target = self._normalized_edit_target(arguments)
+                target_by = str(edit_target.get("by") or "").strip().lower()
+                if target_by == "exact_text":
+                    old_text = str(edit_target.get("text") or "")
+                    if old_text and new_text and old_text not in current and new_text in current:
+                        return RecoveryCheckResult(
+                            decision=RecoveryCheckDecision.VERIFIED_DONE,
+                            expected_tool_status="success",
+                            lost_result_summary=(
+                                "Recovery check confirmed that the requested edit is already reflected on disk."
+                            ),
+                            evidence=[self._file_evidence(path=target, note="File content already reflects the requested edit.")],
+                        )
+                elif target_by == "anchor_pair":
+                    start_anchor = str(edit_target.get("start_anchor") or "")
+                    end_anchor = str(edit_target.get("end_anchor") or "")
+                    start_index = current.find(start_anchor) if start_anchor else -1
+                    if start_index != -1:
+                        end_index = current.find(end_anchor, start_index + len(start_anchor)) if end_anchor else -1
+                        if end_index != -1:
+                            current_region = current[start_index:end_index + len(end_anchor)]
+                            if new_text and current_region == new_text:
+                                return RecoveryCheckResult(
+                                    decision=RecoveryCheckDecision.VERIFIED_DONE,
+                                    expected_tool_status="success",
+                                    lost_result_summary=(
+                                        "Recovery check confirmed that the requested edit is already reflected on disk."
+                                    ),
+                                    evidence=[self._file_evidence(path=target, note="File content already reflects the requested edit.")],
+                                )
+                elif target_by == "line_range":
+                    start_line = self._coerce_line_number(edit_target.get("start_line"))
+                    end_line = self._coerce_line_number(edit_target.get("end_line"))
+                    if start_line is not None and end_line is not None:
+                        lines = current.splitlines(keepends=True)
+                        if start_line >= 1 and end_line >= start_line and end_line <= len(lines):
+                            current_region = "".join(lines[start_line - 1 : end_line])
+                            if current_region == new_text:
+                                return RecoveryCheckResult(
+                                    decision=RecoveryCheckDecision.VERIFIED_DONE,
+                                    expected_tool_status="success",
+                                    lost_result_summary=(
+                                        "Recovery check confirmed that the requested edit is already reflected on disk."
+                                    ),
+                                    evidence=[self._file_evidence(path=target, note="File content already reflects the requested edit.")],
+                                )
+                else:
+                    old_text = str(arguments.get("old_text") or "")
+                    if old_text and new_text and old_text not in current and new_text in current:
+                        return RecoveryCheckResult(
+                            decision=RecoveryCheckDecision.VERIFIED_DONE,
+                            expected_tool_status="success",
+                            lost_result_summary=(
+                                "Recovery check confirmed that the requested edit is already reflected on disk."
+                            ),
+                            evidence=[self._file_evidence(path=target, note="File content already reflects the requested edit.")],
+                        )
         return RecoveryCheckResult(
             decision=RecoveryCheckDecision.MODEL_DECIDE,
             expected_tool_status="interrupted",

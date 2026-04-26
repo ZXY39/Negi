@@ -2,7 +2,7 @@
 kind: tool
 name: filesystem_edit
 display_name: Filesystem Edit
-description: Edit one file in text-replace or line-range mode.
+description: Edit one file by resolving a target span or using legacy text-replace or line-range inputs.
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:
@@ -30,27 +30,55 @@ parameters:
     path:
       type: string
       description: Absolute file path to edit.
+    target:
+      type: object
+      description: Preferred target-first edit locator.
+      properties:
+        by:
+          type: string
+          enum:
+            - exact_text
+            - anchor_pair
+            - line_range
+          description: How to locate the existing region to replace.
+        text:
+          type: string
+          description: Existing text when target.by=exact_text.
+        start_anchor:
+          type: string
+          description: Starting anchor when target.by=anchor_pair.
+        end_anchor:
+          type: string
+          description: Ending anchor when target.by=anchor_pair.
+        start_line:
+          type: integer
+          description: Start line when target.by=line_range.
+        end_line:
+          type: integer
+          description: End line when target.by=line_range.
+      required:
+        - by
     mode:
       type: string
       enum:
         - text_replace
         - line_range
-      description: Optional explicit edit mode. Use text_replace with old_text/new_text or line_range with start_line/end_line/replacement.
+      description: Legacy explicit edit mode. Use only for backward-compatible text_replace or line_range calls.
     old_text:
       type: string
-      description: Existing text for text-replace mode.
+      description: Existing text for legacy text-replace mode.
     new_text:
       type: string
-      description: Replacement text for text-replace mode.
+      description: Replacement text for target-first or legacy text-replace mode.
     start_line:
       type: integer
-      description: Start line for line-range mode.
+      description: Start line for legacy line-range mode.
     end_line:
       type: integer
-      description: End line for line-range mode.
+      description: End line for legacy line-range mode.
     replacement:
       type: string
-      description: Replacement text for line-range mode.
+      description: Replacement text for legacy line-range mode.
   required:
     - path
 model_parameters:
@@ -59,30 +87,41 @@ model_parameters:
     path:
       type: string
       description: Absolute file path to edit.
-    mode:
-      type: string
-      enum:
-        - text_replace
-        - line_range
-      description: Explicit edit mode. Use text_replace with old_text/new_text or line_range with start_line/end_line/replacement.
-    old_text:
-      type: string
-      description: Existing text for text-replace mode.
+    target:
+      type: object
+      description: Preferred target-first edit locator.
+      properties:
+        by:
+          type: string
+          enum:
+            - exact_text
+            - anchor_pair
+            - line_range
+          description: How to locate the existing region to replace.
+        text:
+          type: string
+          description: Existing text when target.by=exact_text.
+        start_anchor:
+          type: string
+          description: Starting anchor when target.by=anchor_pair.
+        end_anchor:
+          type: string
+          description: Ending anchor when target.by=anchor_pair.
+        start_line:
+          type: integer
+          description: Start line when target.by=line_range.
+        end_line:
+          type: integer
+          description: End line when target.by=line_range.
+      required:
+        - by
     new_text:
       type: string
-      description: Replacement text for text-replace mode.
-    start_line:
-      type: integer
-      description: Start line for line-range mode.
-    end_line:
-      type: integer
-      description: End line for line-range mode.
-    replacement:
-      type: string
-      description: Replacement text for line-range mode.
+      description: Replacement text for the resolved target region.
   required:
     - path
-    - mode
+    - target
+    - new_text
 governance:
   family: filesystem
   display_name: Filesystem
