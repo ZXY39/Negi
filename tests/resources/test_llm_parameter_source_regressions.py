@@ -898,6 +898,40 @@ def test_runtime_hybrid_estimate_prefers_conservative_upper_bound() -> None:
     assert estimate.comparable_to_previous_request is True
 
 
+def test_runtime_request_preview_breakdown_omits_inline_image_data_urls_from_text_estimate() -> None:
+    from main.runtime.send_token_preflight import estimate_runtime_provider_request_token_breakdown
+
+    png_data_url = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6bQAAAAASUVORK5CYII="
+    )
+    provider_request_body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "describe the attached image"},
+                    {"type": "image_url", "image_url": {"url": png_data_url}},
+                ],
+            }
+        ],
+        "tools": [{"type": "function", "function": {"name": "demo", "parameters": {"type": "object"}}}],
+    }
+
+    breakdown = estimate_runtime_provider_request_token_breakdown(
+        provider_request_body=provider_request_body,
+        request_messages=[],
+        tool_schemas=[],
+    )
+
+    assert breakdown["estimated_image_tokens"] > 0
+    assert breakdown["image_count"] == 1
+    assert breakdown["image_estimation_method"] == "openai_vision_heuristic"
+    # Regression guard: the text lane should not scale with the raw base64 payload size.
+    assert breakdown["estimated_text_tokens"] < 500
+    assert breakdown["estimated_total_tokens"] < 1000
+
+
 def test_frontdoor_token_preflight_re_exports_ground_truth_helpers() -> None:
     from g3ku.runtime.frontdoor.token_preflight_compaction import (
         RuntimeHybridSendTokenEstimate,

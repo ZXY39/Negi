@@ -470,6 +470,11 @@ This changes the troubleshooting rule:
 - `actual_request_hash`
 - `actual_request_message_count`
 
+额外维护提醒：
+
+- 节点侧 preflight 现在也和 frontdoor 一样，不再把 inline image `data:` URL 的 base64 字符串按普通文本估 token。
+- 如果当前轮 `content_open` 刚打开了多张图片，下一跳请求仍可能因为真实图像开销过大而超窗；但这时应优先从 `estimated_image_tokens` / `image_count` 解释，而不是再把根因归结为 “base64 文本被算爆了”。
+
 如果 `token_preflight_diagnostics.applied=true`：
 
 - 预期 `history_shrink_reason` 为 `token_compression`
