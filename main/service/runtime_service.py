@@ -111,6 +111,7 @@ from main.service.create_async_task_contract import (
     CREATE_ASYNC_TASK_DESCRIPTION,
     build_create_async_task_parameters,
     normalize_create_async_task_file_targets,
+    validate_create_async_task_file_targets,
 )
 from main.service.task_append_notice_contract import (
     TASK_APPEND_NOTICE_DESCRIPTION,
@@ -7897,7 +7898,7 @@ class MainRuntimeService:
         return bool(governance.get('frozen'))
 
     def _task_governance_state(self, task_id: str) -> dict[str, Any]:
-        total_nodes = max(1, len(list(self.store.list_task_nodes(task_id) or [])))
+        total_nodes = max(1, int((self._task_tree_stats(task_id) or {}).get('total_nodes') or 0))
         meta = self.log_service.read_task_runtime_meta(task_id) or {}
         governance = dict(meta.get('governance') or {}) if isinstance(meta.get('governance'), dict) else {}
         governance.setdefault('enabled', True)
@@ -7915,8 +7916,116 @@ class MainRuntimeService:
         ]
         return governance
 
+    def _governance_execution_nodes(self, task_id: str) -> list[NodeRecord]:
+        nodes = [
+            node
+            for node in list(self.store.list_nodes(task_id) or [])
+            if str(getattr(node, 'node_kind', '') or '').strip().lower() == 'execution'
+        ]
+        nodes.sort(
+            key=lambda item: (
+                int(getattr(item, 'depth', 0) or 0),
+                str(getattr(item, 'created_at', '') or ''),
+                str(getattr(item, 'node_id', '') or ''),
+            )
+        )
+        return nodes
+
+    @staticmethod
+    def _governance_execution_tree_text(*, root_node_id: str, nodes_by_id: dict[str, Any]) -> str:
+        normalized_root_node_id = str(root_node_id or '').strip()
+        if not normalized_root_node_id or normalized_root_node_id not in nodes_by_id:
+            return '(empty execution tree)'
+        lines: list[str] = []
+
+        def _walk(node_id: str, prefix: str = '', *, is_root: bool = False) -> None:
+            node = dict(nodes_by_id.get(node_id) or {})
+            if not node:
+                return
+            label = f'({node_id},{str(node.get("status") or "").strip()},{str(node.get("goal") or "").strip()})'
+            lines.append(label if is_root else f'{prefix}|-{label}')
+            child_prefix = '' if is_root else f'{prefix}  '
+            for child_id in list(node.get('child_node_ids') or []):
+                _walk(str(child_id or '').strip(), child_prefix, is_root=False)
+
+        _walk(normalized_root_node_id, is_root=True)
+        return '\n'.join(lines)
+
+    def _build_governance_execution_snapshot(
+        self,
+        *,
+        task: TaskRecord,
+        trigger_reason: str,
+        trigger_snapshot: dict[str, int],
+    ) -> dict[str, Any]:
+        execution_nodes = self._governance_execution_nodes(task.task_id)
+        node_map = {
+            str(node.node_id or '').strip(): node
+            for node in execution_nodes
+            if str(getattr(node, 'node_id', '') or '').strip()
+        }
+        children_by_parent: dict[str, list[str]] = {}
+        for node in execution_nodes:
+            parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
+            node_id = str(getattr(node, 'node_id', '') or '').strip()
+            if not parent_node_id or not node_id or parent_node_id not in node_map:
+                continue
+            children_by_parent.setdefault(parent_node_id, []).append(node_id)
+        for child_ids in children_by_parent.values():
+            child_ids.sort(
+                key=lambda node_id: (
+                    int(getattr(node_map.get(node_id), 'depth', 0) or 0),
+                    str(getattr(node_map.get(node_id), 'created_at', '') or ''),
+                    str(node_id or ''),
+                )
+            )
+        execution_leaf_ids = [
+            node_id
+            for node_id in node_map
+            if not list(children_by_parent.get(node_id) or [])
+        ]
+        root = self.get_node(task.root_node_id)
+        snapshot_nodes: dict[str, Any] = {}
+        for node in execution_nodes:
+            node_id = str(node.node_id or '').strip()
+            if not node_id:
+                continue
+            snapshot_nodes[node_id] = {
+                'node_id': node_id,
+                'parent_node_id': str(node.parent_node_id or '').strip() or None,
+                'depth': int(node.depth or 0),
+                'status': str(node.status or '').strip(),
+                'goal': str(node.goal or ''),
+                'prompt': str(node.prompt or ''),
+                'child_node_ids': list(children_by_parent.get(node_id) or []),
+                'is_leaf': node_id in execution_leaf_ids,
+                'created_at': str(node.created_at or ''),
+                'updated_at': str(node.updated_at or ''),
+            }
+        return {
+            'task_id': task.task_id,
+            'trigger_reason': str(trigger_reason or '').strip(),
+            'trigger_snapshot': {
+                'max_depth': int(trigger_snapshot.get('max_depth') or 0),
+                'total_nodes': int(trigger_snapshot.get('total_nodes') or 0),
+            },
+            'user_request': str(task.user_request or ''),
+            'core_requirement': str((task.metadata or {}).get('core_requirement') or ''),
+            'root_execution_goal': str(getattr(root, 'goal', '') or ''),
+            'root_execution_prompt': str(getattr(root, 'prompt', '') or ''),
+            'execution_leaf_ids': list(execution_leaf_ids),
+            'execution_tree': {
+                'root_node_id': str(task.root_node_id or '').strip(),
+                'nodes_by_id': snapshot_nodes,
+            },
+            'execution_tree_text': self._governance_execution_tree_text(
+                root_node_id=str(task.root_node_id or '').strip(),
+                nodes_by_id=snapshot_nodes,
+            ),
+        }
+
     def _task_tree_stats(self, task_id: str) -> dict[str, int]:
-        nodes = list(self.store.list_task_nodes(task_id) or [])
+        nodes = self._governance_execution_nodes(task_id)
         max_depth = 0
         for node in nodes:
             try:
@@ -8041,6 +8150,7 @@ class MainRuntimeService:
             'decision_evidence': [str(item).strip() for item in list(decision.get('evidence') or []) if str(item).strip()],
             'limited_depth': None,
             'error_text': str(decision.get('error_text') or '').strip(),
+            'review_artifact_ref': str(decision.get('review_artifact_ref') or '').strip(),
         }
         governance = self._task_governance_state(task_id)
         governance['frozen'] = False
@@ -8060,6 +8170,91 @@ class MainRuntimeService:
         if self.node_turn_controller is not None:
             self.node_turn_controller.poke()
 
+    def _governance_review_request_payload(
+        self,
+        *,
+        task: TaskRecord,
+        trigger_reason: str,
+        trigger_snapshot: dict[str, int],
+    ) -> dict[str, Any]:
+        return self._build_governance_execution_snapshot(
+            task=task,
+            trigger_reason=trigger_reason,
+            trigger_snapshot=trigger_snapshot,
+        )
+
+    def _persist_governance_review_artifact(
+        self,
+        *,
+        task: TaskRecord,
+        trigger_reason: str,
+        trigger_snapshot: dict[str, int],
+        system_prompt: str,
+        request_payload: dict[str, Any],
+        response_payload: dict[str, Any],
+        parsed_result: dict[str, Any],
+        error_text: str,
+    ) -> str:
+        title = f'task-governance-review:{task.root_node_id}:{str(trigger_reason or "").strip() or "review"}'
+        payload = {
+            'task_id': task.task_id,
+            'root_node_id': str(task.root_node_id or '').strip(),
+            'created_at': now_iso(),
+            'trigger_reason': str(trigger_reason or '').strip(),
+            'trigger_snapshot': {
+                'max_depth': int((trigger_snapshot or {}).get('max_depth') or 0),
+                'total_nodes': int((trigger_snapshot or {}).get('total_nodes') or 0),
+            },
+            'request_system_prompt': str(system_prompt or ''),
+            'request_payload': dict(request_payload or {}),
+            'response_payload': dict(response_payload or {}),
+            'parsed_result': dict(parsed_result or {}),
+            'error_text': str(error_text or '').strip(),
+        }
+        try:
+            artifact = self.artifact_store.create_json_artifact(
+                task_id=task.task_id,
+                node_id=str(task.root_node_id or '').strip() or None,
+                kind='task_governance_review',
+                title=title,
+                payload=payload,
+                extension='.json',
+                mime_type='application/json',
+                preview_text=title,
+            )
+            return f'artifact:{artifact.artifact_id}' if artifact is not None else ''
+        except Exception:
+            return ''
+
+    @staticmethod
+    def _governance_review_response_payload(response: Any) -> dict[str, Any]:
+        tool_calls_payload: list[dict[str, Any]] = []
+        for call in list(getattr(response, 'tool_calls', []) or []):
+            if isinstance(call, dict):
+                tool_calls_payload.append(
+                    {
+                        'id': str(call.get('id') or '').strip(),
+                        'name': str(call.get('name') or '').strip(),
+                        'arguments': call.get('arguments'),
+                    }
+                )
+                continue
+            tool_calls_payload.append(
+                {
+                    'id': str(getattr(call, 'id', '') or '').strip(),
+                    'name': str(getattr(call, 'name', '') or '').strip(),
+                    'arguments': getattr(call, 'arguments', None),
+                }
+            )
+        raw_usage = getattr(response, 'usage', {}) or {}
+        usage_payload = dict(raw_usage) if isinstance(raw_usage, dict) else {}
+        return {
+            'content': str(getattr(response, 'content', '') or ''),
+            'finish_reason': str(getattr(response, 'finish_reason', '') or ''),
+            'tool_calls': tool_calls_payload,
+            'usage': usage_payload,
+        }
+
     async def _execute_task_governance_review(self, *, task: TaskRecord, trigger_reason: str, trigger_snapshot: dict[str, int]) -> dict[str, Any]:
         model_refs = list(self.node_runner._acceptance_model_refs or self.node_runner._execution_model_refs)
         if not model_refs:
@@ -8077,23 +8272,18 @@ class MainRuntimeService:
                 'evidence': [],
                 'error_text': '[RuntimeError: task governance model chain is unavailable + 默认限深]',
             }
-        root = self.get_node(task.root_node_id)
+        system_prompt = load_prompt('task_governance_review.md').strip()
+        request_payload = self._governance_review_request_payload(
+            task=task,
+            trigger_reason=trigger_reason,
+            trigger_snapshot=trigger_snapshot,
+        )
         while True:
             try:
                 response = await backend.chat(
                     messages=[
-                        {'role': 'system', 'content': load_prompt('task_governance_review.md').strip()},
-                        {'role': 'user', 'content': json.dumps({
-                            'task_id': task.task_id,
-                            'user_request': str(task.user_request or ''),
-                            'core_requirement': str((task.metadata or {}).get('core_requirement') or ''),
-                            'root_prompt': str(getattr(root, 'prompt', '') or ''),
-                            'trigger_reason': str(trigger_reason or ''),
-                            'max_depth': int(trigger_snapshot.get('max_depth') or 0),
-                            'total_nodes': int(trigger_snapshot.get('total_nodes') or 0),
-                            'frontier_stage_goals': self._governance_frontier_summary(task.task_id),
-                            'task_progress_text': self.view_progress(task.task_id, mark_read=False),
-                        }, ensure_ascii=False, indent=2)},
+                        {'role': 'system', 'content': system_prompt},
+                        {'role': 'user', 'content': json.dumps(request_payload, ensure_ascii=False, indent=2)},
                     ],
                     tools=[{
                         'type': 'function',
@@ -8114,15 +8304,39 @@ class MainRuntimeService:
                     model_refs=model_refs,
                 )
             except Exception as exc:
+                artifact_ref = self._persist_governance_review_artifact(
+                    task=task,
+                    trigger_reason=trigger_reason,
+                    trigger_snapshot=trigger_snapshot,
+                    system_prompt=system_prompt,
+                    request_payload=request_payload,
+                    response_payload={},
+                    parsed_result={},
+                    error_text=f'{type(exc).__name__}: {exc}',
+                )
                 return {
                     'decision': 'cap_current_depth',
                     'reason': f'{type(exc).__name__}: {exc}',
                     'evidence': [],
                     'error_text': f'[{type(exc).__name__}: {exc} + 默认限深]',
+                    'review_artifact_ref': artifact_ref,
                 }
             parsed = self._parse_task_governance_review_response(response)
+            artifact_ref = self._persist_governance_review_artifact(
+                task=task,
+                trigger_reason=trigger_reason,
+                trigger_snapshot=trigger_snapshot,
+                system_prompt=system_prompt,
+                request_payload=request_payload,
+                response_payload=self._governance_review_response_payload(response),
+                parsed_result=parsed or {},
+                error_text='' if parsed is not None else 'governance_review_unparsed_response',
+            )
             if parsed is not None:
-                return parsed
+                return {
+                    **parsed,
+                    'review_artifact_ref': artifact_ref,
+                }
             await asyncio.sleep(0.1)
 
     @staticmethod
@@ -8752,6 +8966,7 @@ class CreateAsyncTaskTool(Tool):
         final_acceptance_prompt = str((params or {}).get('final_acceptance_prompt') or '').strip()
         if requires_final_acceptance is True and not final_acceptance_prompt:
             errors.append('final_acceptance_prompt is required when requires_final_acceptance=true')
+        errors.extend(validate_create_async_task_file_targets((params or {}).get('file_targets')))
         return errors
 
     async def execute(
@@ -8771,6 +8986,9 @@ class CreateAsyncTaskTool(Tool):
         normalized_core_requirement = str(core_requirement or kwargs.get('core_requirement') or '').strip() or str(task or '').strip()
         normalized_execution_policy = normalize_execution_policy_metadata(kwargs.get('execution_policy'))
         normalized_file_targets = normalize_create_async_task_file_targets(kwargs.get('file_targets'))
+        file_target_errors = validate_create_async_task_file_targets(normalized_file_targets)
+        if file_target_errors:
+            raise ValueError("; ".join(file_target_errors))
         final_acceptance_prompt = str(kwargs.get('final_acceptance_prompt') or '').strip()
         raw_requires_final_acceptance = kwargs.get('requires_final_acceptance')
         requires_final_acceptance = bool(raw_requires_final_acceptance) or (raw_requires_final_acceptance in (None, '') and bool(final_acceptance_prompt))

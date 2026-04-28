@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from pathlib import Path
+
+import pytest
 
 from main.models import NodeRecord, TaskRecord, TokenUsageSummary
 from main.storage.sqlite_store import SQLiteTaskStore
@@ -203,3 +206,48 @@ def test_sqlite_task_store_externalizes_live_patch_payload_and_hydrates_on_read(
         assert "runtime_summary" not in preview_only[-1]["payload"]
     finally:
         store.close()
+
+
+def test_sqlite_task_store_logs_sqlite_errorcode_and_name_for_read_queries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    captured: dict[str, object] = {}
+
+    class _FakeBoundLogger:
+        def error(self, message: str, *args) -> None:
+            captured["message"] = message
+            captured["args"] = args
+
+    class _FakeLogger:
+        def opt(self, *, exception=None):
+            captured["exception"] = exception
+            return _FakeBoundLogger()
+
+    class _FailingReadConnection:
+        def execute(self, sql: str, params: tuple[object, ...]):
+            _ = (sql, params)
+            exc = sqlite3.OperationalError("disk I/O error")
+            exc.sqlite_errorcode = 10
+            exc.sqlite_errorname = "SQLITE_IOERR"
+            raise exc
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("main.storage.sqlite_store.logger", _FakeLogger(), raising=False)
+    store._read_conn = _FailingReadConnection()
+
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+            store.get_task("task:demo")
+    finally:
+        store.close()
+
+    assert captured["message"] == "sqlite read query failed: operation={} sqlite_errorcode={} sqlite_errorname={} path={}"
+    assert captured["args"] == ("SELECT", 10, "SQLITE_IOERR", str(store.path))
+    exc = captured["exception"]
+    assert isinstance(exc, sqlite3.OperationalError)
+    assert getattr(exc, "sqlite_errorcode", None) == 10
+    assert getattr(exc, "sqlite_errorname", None) == "SQLITE_IOERR"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from main.models import build_execution_policy_schema
@@ -9,14 +10,16 @@ CREATE_ASYNC_TASK_DESCRIPTION = (
     "Dispatch the user request into a detached background task. "
     "The caller must provide a distilled `core_requirement` and an explicit "
     "`execution_policy.mode`. When the task depends on specific files or "
-    "artifacts, `file_targets` must carry the exact reopen targets."
+    "artifacts, `file_targets` must carry the exact absolute `path` or exact "
+    "`ref` needed to reopen them."
 )
 
 CREATE_ASYNC_TASK_TASK_DESCRIPTION = (
     "Full task prompt for downstream execution. Describe the goal, scope, "
     "important clues, and expected output. If the task depends on files, also "
     "say in the prompt which files matter and how they should be used, but keep "
-    "the exact reopen handles in `file_targets`."
+    "the exact reopen handles in `file_targets` instead of prose-only or bare "
+    "filename references."
 )
 
 CREATE_ASYNC_TASK_CORE_REQUIREMENT_DESCRIPTION = (
@@ -31,8 +34,11 @@ CREATE_ASYNC_TASK_EXECUTION_POLICY_DESCRIPTION = (
 
 CREATE_ASYNC_TASK_FILE_TARGETS_DESCRIPTION = (
     "Authoritative reopen targets for specific files or artifacts needed by the "
-    "task. Use a list of objects with exact `path` and/or exact `ref`. Use `null` "
-    "or an empty list only when the task does not depend on specific files."
+    "task. Use a list of objects with exact absolute `path` and/or exact `ref`; "
+    "bare filenames like `resume.docx` are not valid reopen targets. When `path` "
+    "is provided, runtime rejects relative paths and paths that do not point to "
+    "an existing file. Use `null` or an empty list only when the task does not "
+    "depend on specific files."
 )
 
 CREATE_ASYNC_TASK_REQUIRES_FINAL_ACCEPTANCE_DESCRIPTION = (
@@ -88,6 +94,25 @@ def normalize_create_async_task_file_targets(value: Any) -> list[dict[str, str]]
             payload["ref"] = ref
         normalized.append(payload)
     return normalized
+
+
+def validate_create_async_task_file_targets(value: Any) -> list[str]:
+    normalized = normalize_create_async_task_file_targets(value)
+    errors: list[str] = []
+    for index, item in enumerate(normalized):
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            errors.append(f"file_targets[{index}].path must be an absolute path: {path}")
+            continue
+        if not candidate.exists():
+            errors.append(f"file_targets[{index}].path does not exist: {path}")
+            continue
+        if not candidate.is_file():
+            errors.append(f"file_targets[{index}].path must point to a file: {path}")
+    return errors
 
 
 def build_create_async_task_parameters() -> dict[str, Any]:

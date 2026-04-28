@@ -65,10 +65,11 @@
   - `coverage`：需要从深度和广度扩展的任务，仍然先做最高价值动作，但在需要时允许扩展范围、补做边缘分支或系统性全量操作。
 - 默认使用 `focus`。只有当用户明确要求全面盘点、不要遗漏、尽可能完整、全量覆盖或系统梳理时，才使用 `coverage`。
 
- - 如果异步任务依赖特定文件、上传附件或历史图片，必须在 `create_async_task.file_targets` 中显式填写列表，并写入真实的 `path` 和/或 `ref`。
- - 只有在任务不依赖任何特定文件时，`file_targets` 才可以写成 `[]` 或 `null`。
- - 不要指望 runtime 从 `attachment_reopen_targets`、`web_ceo_uploads` 或其他上下文里自动回填这个字段；你必须自己把需要的目标复制进去。
- - `task` 说明里仍要写清楚这些文件各自是做什么用的，但可重开的精确地址必须放在 `file_targets` 字段里。
+- 如果异步任务依赖特定文件、上传附件或历史图片，必须在 `create_async_task.file_targets` 中显式填写列表，并写入真实的 `path` 和/或 `ref`。
+- 只有在任务不依赖任何特定文件时，`file_targets` 才可以写成 `[]` 或 `null`。
+- `file_targets.path` 一旦填写，就必须是精确绝对 `path`，并且该路径当前必须指向真实存在的文件；runtime 会拒绝相对路径、裸文件名（例如 `resume.docx`、`待优化脱敏.docx`）以及不存在的路径。
+- 不要指望 runtime 从 `attachment_reopen_targets`、`web_ceo_uploads` 或其他上下文里自动回填这个字段；你必须自己把需要的目标复制进去。
+- `task` 说明里仍要写清楚这些文件各自是做什么用的，但可重开的精确地址必须放在 `file_targets` 字段里。
 
 ### 2.2 `core_requirement` 要求
 

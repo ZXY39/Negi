@@ -254,6 +254,31 @@ class _QueuedChatBackend:
         return self._responses.pop(0)
 
 
+class _GovernanceReviewCaptureChatBackend:
+    def __init__(self, *, decision: str = "cap_current_depth", reason: str = "captured") -> None:
+        self.calls: list[dict[str, object]] = []
+        self._decision = str(decision or "cap_current_depth")
+        self._reason = str(reason or "captured")
+
+    async def chat(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call:governance-review",
+                    name="review_task_governance",
+                    arguments={
+                        "decision": self._decision,
+                        "reason": self._reason,
+                    },
+                )
+            ],
+            finish_reason="tool_calls",
+            usage={"input_tokens": 12, "output_tokens": 4, "cache_hit_tokens": 0},
+        )
+
+
 class _StaticTool(Tool):
     def __init__(self, name: str, result: str = "ok") -> None:
         self._name = name
@@ -11912,6 +11937,188 @@ async def test_node_detail_includes_latest_direct_child_results(tmp_path: Path, 
         assert all(item["check_result"] == SKIPPED_CHECK_RESULT for item in direct_child_results)
         assert all(str(item["node_output_summary"] or "").strip() for item in direct_child_results)
         assert all(str(item["node_output_ref"] or "").startswith("artifact:") for item in direct_child_results)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_governance_review_history_keeps_request_artifact_ref_and_payload(tmp_path: Path):
+    backend = _GovernanceReviewCaptureChatBackend(
+        decision="cap_current_depth",
+        reason="governance artifact capture",
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        anime = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(
+                goal="collect anime candidates",
+                prompt="ANIME FULL PROMPT FOR ARTIFACT\nneed at least 60 candidates",
+                execution_policy=_execution_policy("coverage"),
+            ),
+        )
+        service.node_runner.create_acceptance_node(
+            task=task,
+            accepted_node=anime,
+            goal="accept:collect anime candidates",
+            acceptance_prompt="ACCEPTANCE PROMPT SHOULD NOT APPEAR IN GOVERNANCE ARTIFACT REQUEST VIEW",
+        )
+
+        await service._run_task_governance_review(
+            task_id=record.task_id,
+            trigger_reason="depth_plus_one",
+            trigger_snapshot={"max_depth": 1, "total_nodes": 2},
+        )
+
+        governance = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("governance") or {})
+        history = list(governance.get("history") or [])
+        assert history
+        artifact_ref = str(history[-1].get("review_artifact_ref") or "")
+        assert artifact_ref.startswith("artifact:")
+
+        artifact_payload = json.loads(service.log_service.resolve_content_ref(artifact_ref))
+        request_payload = dict(artifact_payload.get("request_payload") or {})
+        response_payload = dict(artifact_payload.get("response_payload") or {})
+        parsed_result = dict(artifact_payload.get("parsed_result") or {})
+
+        assert request_payload["task_id"] == record.task_id
+        assert request_payload["root_execution_prompt"] == str(root.prompt or "")
+        assert "task_progress_text" not in request_payload
+        assert "frontier_stage_goals" not in request_payload
+        assert anime.node_id in list(request_payload.get("execution_leaf_ids") or [])
+        assert "ACCEPTANCE PROMPT SHOULD NOT APPEAR" not in json.dumps(request_payload, ensure_ascii=False)
+        assert str(artifact_payload.get("request_system_prompt") or "").strip()
+        assert response_payload["tool_calls"][0]["name"] == "review_task_governance"
+        assert parsed_result["decision"] == "cap_current_depth"
+        assert parsed_result["reason"] == "governance artifact capture"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_governance_tree_stats_ignore_acceptance_nodes(tmp_path: Path):
+    service = _build_service(tmp_path)
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        child = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(
+                goal="collect branch",
+                prompt="full branch prompt for governance stats",
+                execution_policy=_execution_policy("coverage"),
+            ),
+        )
+        service.node_runner.create_acceptance_node(
+            task=task,
+            accepted_node=child,
+            goal="accept:collect branch",
+            acceptance_prompt="acceptance prompt should not count toward governance stats",
+        )
+
+        stats = service._task_tree_stats(record.task_id)
+
+        assert stats == {
+            "max_depth": 1,
+            "total_nodes": 2,
+        }
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_governance_review_payload_uses_execution_tree_with_full_prompts_only(tmp_path: Path):
+    backend = _GovernanceReviewCaptureChatBackend()
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        anime_prompt = (
+            "ANIME FULL PROMPT\n"
+            "need at least 60 candidates\n"
+            "at least 2 traceable sources per candidate\n"
+            "keep cross-media dedup risks explicit"
+        )
+        vtuber_prompt = (
+            "VTUBER FULL PROMPT\n"
+            "need at least 50 candidates\n"
+            "must distinguish角色与中之人\n"
+            "keep official links and source notes"
+        )
+        acceptance_prompt = (
+            "ACCEPTANCE PROMPT SHOULD NOT APPEAR IN GOVERNANCE REVIEW INPUT\n"
+            "this node must be hidden from governance evaluation"
+        )
+
+        anime = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(
+                goal="collect anime candidates",
+                prompt=anime_prompt,
+                execution_policy=_execution_policy("coverage"),
+            ),
+        )
+        service.node_runner.create_acceptance_node(
+            task=task,
+            accepted_node=anime,
+            goal="accept:collect anime candidates",
+            acceptance_prompt=acceptance_prompt,
+        )
+        vtuber = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(
+                goal="collect vtuber candidates",
+                prompt=vtuber_prompt,
+                execution_policy=_execution_policy("coverage"),
+            ),
+        )
+
+        decision = await service._execute_task_governance_review(
+            task=task,
+            trigger_reason="depth_plus_one",
+            trigger_snapshot={"max_depth": 1, "total_nodes": 3},
+        )
+
+        assert decision["decision"] == "cap_current_depth"
+        assert backend.calls, "governance review backend was not called"
+        request = backend.calls[-1]
+        messages = list(request.get("messages") or [])
+        assert len(messages) == 2
+        payload = json.loads(str(messages[1]["content"]))
+
+        assert "task_progress_text" not in payload
+        assert "frontier_stage_goals" not in payload
+        assert payload["root_execution_prompt"] == str(root.prompt or "")
+
+        execution_tree = dict(payload.get("execution_tree") or {})
+        nodes_by_id = dict(execution_tree.get("nodes_by_id") or {})
+        assert set(nodes_by_id) == {root.node_id, anime.node_id, vtuber.node_id}
+        assert set(payload["execution_leaf_ids"]) == {anime.node_id, vtuber.node_id}
+        assert nodes_by_id[anime.node_id]["prompt"] == anime_prompt
+        assert nodes_by_id[vtuber.node_id]["prompt"] == vtuber_prompt
+
+        serialized = json.dumps(payload, ensure_ascii=False)
+        assert "ACCEPTANCE PROMPT SHOULD NOT APPEAR" not in serialized
+        assert "accept:collect anime candidates" not in serialized
+        assert "acceptance prompt should not count" not in serialized
     finally:
         await service.close()
 

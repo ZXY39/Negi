@@ -193,6 +193,8 @@ def _render_attachment_reopen_target_section(items: list[dict[str, str]] | None)
         '- These uploaded files remain reopenable in later turns.',
         '- If a detached task must read one of them, copy the exact `path:` or `ref:` into `create_async_task.file_targets`.',
         '- `create_async_task.file_targets` is the authoritative reopen lane for detached tasks.',
+        '- A bare filename like `resume.docx` is not a valid reopen target; use the exact absolute `path` or exact `ref`.',
+        '- If you provide `path`, runtime rejects relative paths and paths that do not point to an existing file.',
         '- In `create_async_task.task`, describe why the file matters and how it should be used, but do not rely on prose alone for reopen handles.',
         '- Do not replace them with placeholders like `current_uploads`, `user_uploads`, or `user_image_and_docx`.',
     ]

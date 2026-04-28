@@ -8,6 +8,7 @@ from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain.agents.middleware.types import ExtendedModelResponse
 from langchain.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command
 
@@ -26,6 +27,7 @@ from g3ku.runtime.frontdoor.prompt_cache_contract import (
     FrontdoorPromptContract,
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, initial_persistent_state
+from g3ku.runtime.frontdoor.state_models import CeoPersistentState
 from g3ku.runtime.frontdoor.tool_contract import (
     is_frontdoor_tool_contract_message,
 )
@@ -79,6 +81,28 @@ def _web_ceo_upload_metadata(image_path: Path) -> dict[str, object]:
                 "kind": "image",
                 "size": image_path.stat().st_size,
             }
+        ],
+    }
+
+
+def _web_ceo_mixed_upload_metadata(*, text: str, docx_path: Path, image_path: Path) -> dict[str, object]:
+    return {
+        "web_ceo_raw_text": text,
+        "web_ceo_uploads": [
+            {
+                "path": str(docx_path),
+                "name": docx_path.name,
+                "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "kind": "file",
+                "size": docx_path.stat().st_size,
+            },
+            {
+                "path": str(image_path),
+                "name": image_path.name,
+                "mime_type": "image/png",
+                "kind": "image",
+                "size": image_path.stat().st_size,
+            },
         ],
     }
 
@@ -4705,6 +4729,94 @@ async def test_prepare_turn_keeps_uploaded_image_as_text_only_when_binding_disab
     assert prepared["frontdoor_request_body_messages"][-1]["content"] == merged_text
     assert prepared["frontdoor_live_request_messages"][-1]["content"] == merged_text
     assert "input_image" not in json.dumps(preflight["provider_request_body"], ensure_ascii=False)
+
+
+def test_request_messages_for_state_keep_attachment_reopen_targets_after_state_graph_round_trip(
+    tmp_path: Path,
+) -> None:
+    docx_path = tmp_path / "resume.docx"
+    docx_path.write_bytes(b"PK\x03\x04docx")
+    image_path = tmp_path / "jd.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nsmall")
+
+    state = initial_persistent_state(
+        user_input={
+            "content": "参考JD优化简历",
+            "metadata": _web_ceo_mixed_upload_metadata(
+                text="参考JD优化简历",
+                docx_path=docx_path,
+                image_path=image_path,
+            ),
+        }
+    )
+    state.update(
+        {
+            "messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "参考JD优化简历"},
+            ],
+            "stable_messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "参考JD优化简历"},
+            ],
+            "dynamic_appendix_messages": [],
+            "frontdoor_live_request_messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "参考JD优化简历"},
+            ],
+            "frontdoor_request_body_messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "参考JD优化简历"},
+            ],
+            "tool_names": ["submit_next_stage"],
+            "provider_tool_names": [],
+            "pending_provider_tool_names": [],
+            "provider_tool_exposure_pending": False,
+            "provider_tool_exposure_revision": "",
+            "provider_tool_exposure_commit_reason": "",
+            "candidate_tool_names": [],
+            "candidate_tool_items": [],
+            "hydrated_tool_names": [],
+            "visible_skill_ids": [],
+            "candidate_skill_ids": [],
+            "rbac_visible_tool_names": ["submit_next_stage"],
+            "rbac_visible_skill_ids": [],
+            "cache_family_revision": "frontdoor:v1",
+            "attachment_reopen_targets": [
+                {
+                    "name": docx_path.name,
+                    "kind": "file",
+                    "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "path": str(docx_path),
+                },
+                {
+                    "name": image_path.name,
+                    "kind": "image",
+                    "mime_type": "image/png",
+                    "path": str(image_path),
+                },
+            ],
+        }
+    )
+
+    graph = StateGraph(CeoPersistentState)
+    graph.add_node("round_trip", lambda current_state: dict(current_state))
+    graph.add_edge(START, "round_trip")
+    graph.add_edge("round_trip", END)
+    round_tripped = graph.compile().invoke(state)
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    system_message, request_messages = runner._request_messages_for_state(
+        state=round_tripped,
+        provider_model="ceo_primary",
+        tool_schemas=[],
+    )
+
+    assert system_message is not None
+    rendered = "\n\n".join(str(getattr(item, "content", "") or "") for item in list(request_messages or []))
+    assert "attachment_reopen_targets:" in rendered
+    assert str(docx_path) in rendered
+    assert str(image_path) in rendered
 
 
 @pytest.mark.asyncio

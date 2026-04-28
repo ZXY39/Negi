@@ -63,6 +63,8 @@ class CeoPersistentState(TypedDict, total=False):
 
     rbac_visible_skill_ids: list[str]
 
+    attachment_reopen_targets: list[dict[str, Any]]
+
     cache_family_revision: str
 
     used_tools: list[str]
@@ -218,6 +220,8 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "rbac_visible_tool_names": [],
 
         "rbac_visible_skill_ids": [],
+
+        "attachment_reopen_targets": [],
 
         "cache_family_revision": DEFAULT_CACHE_FAMILY_REVISION,
 

@@ -7,7 +7,10 @@ import yaml
 
 from g3ku.agent.tools.base import Tool
 from main.models import normalize_execution_policy_metadata
-from main.service.create_async_task_contract import normalize_create_async_task_file_targets
+from main.service.create_async_task_contract import (
+    normalize_create_async_task_file_targets,
+    validate_create_async_task_file_targets,
+)
 
 
 _MANIFEST = yaml.safe_load((Path(__file__).resolve().parents[1] / 'resource.yaml').read_text(encoding='utf-8'))
@@ -67,6 +70,9 @@ class _CreateAsyncTaskHandler(Tool):
         normalized_core_requirement = str(core_requirement or kwargs.get('core_requirement') or '').strip() or str(task or '').strip()
         normalized_execution_policy = normalize_execution_policy_metadata(kwargs.get('execution_policy'))
         normalized_file_targets = normalize_create_async_task_file_targets(kwargs.get('file_targets'))
+        file_target_errors = validate_create_async_task_file_targets(normalized_file_targets)
+        if file_target_errors:
+            raise ValueError('; '.join(file_target_errors))
         final_acceptance_prompt = str(kwargs.get('final_acceptance_prompt') or '').strip()
         raw_requires_final_acceptance = kwargs.get('requires_final_acceptance')
         requires_final_acceptance = bool(raw_requires_final_acceptance) or (

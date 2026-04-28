@@ -669,6 +669,7 @@ class TaskLogService:
                         for line in list(item.get('decision_evidence') or [])
                         if str(line).strip()
                     ],
+                    'review_artifact_ref': str(item.get('review_artifact_ref') or '').strip(),
                     'limited_depth': (
                         None if item.get('limited_depth') in {None, ''} else max(0, int(item.get('limited_depth') or 0))
                     ),

@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from loguru import logger
 from pydantic import BaseModel
 
 from main.models import (
@@ -2084,7 +2085,11 @@ class SQLiteTaskStore:
         started_mono = time.perf_counter()
         started_at = datetime.now().astimezone().isoformat(timespec='seconds')
         with self._read_lock:
-            row = self._read_conn.execute(sql, params).fetchone()
+            try:
+                row = self._read_conn.execute(sql, params).fetchone()
+            except sqlite3.Error as exc:
+                self._log_sqlite_query_error(scope='read', sql=sql, exc=exc)
+                raise
         elapsed_ms = max(0.0, (time.perf_counter() - started_mono) * 1000.0)
         self._update_runtime_metrics(sqlite_query_latency_ms=elapsed_ms)
         recorder = self._debug_recorder
@@ -2099,7 +2104,11 @@ class SQLiteTaskStore:
         started_mono = time.perf_counter()
         started_at = datetime.now().astimezone().isoformat(timespec='seconds')
         with self._read_lock:
-            rows = list(self._read_conn.execute(sql, params).fetchall())
+            try:
+                rows = list(self._read_conn.execute(sql, params).fetchall())
+            except sqlite3.Error as exc:
+                self._log_sqlite_query_error(scope='read', sql=sql, exc=exc)
+                raise
         elapsed_ms = max(0.0, (time.perf_counter() - started_mono) * 1000.0)
         self._update_runtime_metrics(sqlite_query_latency_ms=elapsed_ms)
         recorder = self._debug_recorder
@@ -2109,6 +2118,22 @@ class SQLiteTaskStore:
             except Exception:
                 pass
         return rows
+
+    @staticmethod
+    def _sqlite_operation_name(sql: str) -> str:
+        token = str(sql or '').strip().split(None, 1)
+        if not token:
+            return 'UNKNOWN'
+        return str(token[0] or 'UNKNOWN').upper()
+
+    def _log_sqlite_query_error(self, *, scope: str, sql: str, exc: sqlite3.Error) -> None:
+        logger.opt(exception=exc).error(
+            f'sqlite {scope} query failed: operation={{}} sqlite_errorcode={{}} sqlite_errorname={{}} path={{}}',
+            self._sqlite_operation_name(sql),
+            getattr(exc, 'sqlite_errorcode', None),
+            getattr(exc, 'sqlite_errorname', None),
+            str(self.path),
+        )
 
     def _update_runtime_metrics(self, **values: float) -> None:
         updated_mono = time.perf_counter()

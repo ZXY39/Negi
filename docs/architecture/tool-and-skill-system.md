@@ -112,6 +112,7 @@ Maintenance note for CEO/frontdoor task lifecycle tools:
 - Maintainers should treat any later follow-up on a failed task as ordinary new planning/execution, not as a hidden continuation lane.
 - For Web CEO upload-driven work, the model still relies on frontdoor runtime-contract `attachment_reopen_targets` to discover reopenable uploads, but it must now copy the exact `path` / `ref` into `create_async_task.file_targets` itself. The runtime does not auto-inject that field from upload metadata.
 - Placeholders such as `user_uploads`, `current_uploads`, and `user_image_and_docx` are not valid reopen targets. If they appear in detached-task prompts instead of real `path` / `ref`, treat that as frontdoor prompt/contract guidance failure rather than as content-tool drift.
+- `create_async_task` now also has a narrow runtime-side path validation boundary: if a `file_targets` entry provides `path`, that path must already be absolute and must already point to an existing file. This is a reject-only guard, not an auto-rewrite or auto-fill lane.
 
 Maintenance note for node distribution mode:
 

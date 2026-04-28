@@ -1017,7 +1017,7 @@ def test_runtime_service_has_single_live_task_node_detail_tool_definition():
 
 
 @pytest.mark.asyncio
-async def test_create_async_task_tool_uses_runtime_task_default_max_depth():
+async def test_create_async_task_tool_uses_runtime_task_default_max_depth(tmp_path: Path):
     captured: dict[str, object] = {}
 
     class _StubService:
@@ -1038,13 +1038,17 @@ async def test_create_async_task_tool_uses_runtime_task_default_max_depth():
             return SimpleNamespace(task_id='task:demo')
 
     tool = CreateAsyncTaskTool(_StubService())
+    resume_path = tmp_path / 'resume.docx'
+    resume_path.write_bytes(b'PK\x03\x04resume')
+    jd_path = tmp_path / 'jd.png'
+    jd_path.write_bytes(b'\x89PNG\r\n\x1a\njd')
     result = await tool.execute(
         '整理需求',
         core_requirement='梳理用户需求的核心目标',
         execution_policy={'mode': 'focus'},
         file_targets=[
-            {'path': 'D:/Uploads/resume.docx'},
-            {'path': 'D:/Uploads/jd.png', 'ref': 'artifact:artifact:jd123'},
+            {'path': str(resume_path)},
+            {'path': str(jd_path), 'ref': 'artifact:artifact:jd123'},
         ],
         __g3ku_runtime={'session_key': 'web:ceo-demo', 'task_defaults': {'max_depth': 3}},
     )
@@ -1056,8 +1060,8 @@ async def test_create_async_task_tool_uses_runtime_task_default_max_depth():
     assert captured['kwargs']['metadata']['core_requirement'] == '梳理用户需求的核心目标'
     assert captured['kwargs']['metadata']['execution_policy'] == {'mode': 'focus'}
     assert captured['kwargs']['metadata']['file_targets'] == [
-        {'path': 'D:/Uploads/resume.docx'},
-        {'path': 'D:/Uploads/jd.png', 'ref': 'artifact:artifact:jd123'},
+        {'path': str(resume_path)},
+        {'path': str(jd_path), 'ref': 'artifact:artifact:jd123'},
     ]
 
 
@@ -1104,6 +1108,51 @@ def test_create_async_task_tool_allows_null_file_targets() -> None:
     )
 
     assert errors == []
+
+
+def test_create_async_task_tool_rejects_relative_file_target_path() -> None:
+    tool = CreateAsyncTaskTool(SimpleNamespace())
+
+    errors = tool.validate_params(
+        {
+            'task': 'summarize uploaded files',
+            'core_requirement': 'summarize the uploaded file requirements',
+            'execution_policy': {'mode': 'focus'},
+            'file_targets': [{'path': 'resume.docx'}],
+        }
+    )
+
+    assert 'file_targets[0].path must be an absolute path: resume.docx' in errors
+
+
+def test_create_async_task_tool_rejects_nonexistent_file_target_path(tmp_path: Path) -> None:
+    tool = CreateAsyncTaskTool(SimpleNamespace())
+    missing_path = tmp_path / 'missing.docx'
+
+    errors = tool.validate_params(
+        {
+            'task': 'summarize uploaded files',
+            'core_requirement': 'summarize the uploaded file requirements',
+            'execution_policy': {'mode': 'focus'},
+            'file_targets': [{'path': str(missing_path)}],
+        }
+    )
+
+    assert f'file_targets[0].path does not exist: {missing_path}' in errors
+
+
+@pytest.mark.asyncio
+async def test_create_async_task_tool_execute_rejects_relative_file_target_path() -> None:
+    tool = CreateAsyncTaskTool(SimpleNamespace())
+
+    with pytest.raises(ValueError, match=r'file_targets\[0\]\.path must be an absolute path: resume\.docx'):
+        await tool.execute(
+            'summarize uploaded files',
+            core_requirement='summarize the uploaded file requirements',
+            execution_policy={'mode': 'focus'},
+            file_targets=[{'path': 'resume.docx'}],
+            __g3ku_runtime={'session_key': 'web:ceo-demo'},
+        )
 
 
 @pytest.mark.asyncio
