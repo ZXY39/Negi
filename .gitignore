@@ -10,6 +10,7 @@ docs/*
 !docs/maintenance/
 docs/maintenance/*
 !docs/maintenance/openclaw-china-sync.md
+!docs/FIX_PLAN_create-async-task-aimessage-crash.md
 docs/superpowers/
 research/
 *.egg-info/
