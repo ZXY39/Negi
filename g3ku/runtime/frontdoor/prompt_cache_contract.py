@@ -165,6 +165,8 @@ def _dynamic_diagnostic_messages(
 def _contains_long_context_summary(records: list[dict[str, Any]]) -> bool:
     items = list(records or [])
     for record in items:
+        if not isinstance(record, dict):
+            continue
         role = str(record.get("role") or "").strip().lower()
         content = str(record.get("content") or "").strip()
         if role == "assistant" and content.startswith(LEGACY_LONG_CONTEXT_SUMMARY_PREFIX):

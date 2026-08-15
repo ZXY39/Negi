@@ -150,9 +150,11 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
     @staticmethod
     def _overlay_text_from_messages(messages: list[dict[str, Any]] | None) -> str:
         return "\n\n".join(
-            str(message.get("content") or "").strip()
-            for message in list(messages or [])
-            if str(message.get("content") or "").strip()
+            str(record.get("content") or "").strip()
+            for record in (
+                dict(item) for item in list(messages or []) if isinstance(item, dict)
+            )
+            if str(record.get("content") or "").strip()
         ).strip()
 
     @staticmethod

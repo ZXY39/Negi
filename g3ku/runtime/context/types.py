@@ -74,6 +74,8 @@ class ContextAssemblyResult:
     @property
     def system_prompt(self) -> str:
         for message in self.stable_messages:
+            if not isinstance(message, dict):
+                continue
             if str(message.get("role") or "").strip().lower() == "system":
                 return str(message.get("content") or "")
         return ""
@@ -82,7 +84,7 @@ class ContextAssemblyResult:
     def recent_history(self) -> list[dict[str, Any]]:
         if not self.stable_messages:
             return []
-        body = list(self.stable_messages)
+        body = [item for item in list(self.stable_messages) if isinstance(item, dict)]
         if body and str(body[0].get("role") or "").strip().lower() == "system":
             body = body[1:]
         if body and str(body[-1].get("role") or "").strip().lower() == "user":

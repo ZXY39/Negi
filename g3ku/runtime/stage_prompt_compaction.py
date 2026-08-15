@@ -16,7 +16,9 @@ def _stage_get(stage: Any, key: str, default: Any = None) -> Any:
     return getattr(stage, key, default)
 
 
-def _message_role(message: dict[str, Any]) -> str:
+def _message_role(message: Any) -> str:
+    if not isinstance(message, dict):
+        return ""
     return str((message or {}).get("role") or "").strip().lower()
 
 
@@ -149,7 +151,7 @@ def repair_split_stage_tool_boundaries(
 
     declared_stage_call_ids: set[str] = set()
     for message in list(messages or []):
-        if _message_role(message) != "assistant":
+        if not isinstance(message, dict) or _message_role(message) != "assistant":
             continue
         for tool_call in list(message.get("tool_calls") or []):
             call_id = extract_call_id((tool_call or {}).get("id"))

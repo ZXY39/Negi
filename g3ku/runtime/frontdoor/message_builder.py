@@ -566,7 +566,7 @@ class CeoMessageBuilder:
     ) -> bool:
         if persisted_session is None:
             return False
-        messages = transcript_messages(persisted_session)
+        messages = [message for message in transcript_messages(persisted_session) if isinstance(message, dict)]
         if not messages:
             return False
         last = dict(messages[-1])
@@ -592,6 +592,8 @@ class CeoMessageBuilder:
             return ''
         lines = ['## 已检索上下文']
         for record in records:
+            if not isinstance(record, dict):
+                continue
             record_id = str(record.get('record_id') or '').strip() or '未知'
             context_type = str(record.get('context_type') or '').strip()
             l0 = str(record.get('l0') or '').strip()
@@ -845,6 +847,8 @@ class CeoMessageBuilder:
 
     @staticmethod
     def _normalize_hidden_internal_summary_message(message: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(message, dict):
+            return None
         if message_role(message) != "assistant":
             return None
         metadata = message_metadata(message)
@@ -915,6 +919,8 @@ class CeoMessageBuilder:
         chat_id: str,
     ) -> bool:
         _ = channel, chat_id
+        if not isinstance(record, dict):
+            return False
         if str(record.get("context_type") or "").strip().lower() != "memory":
             return False
         if str(record.get("source") or "").strip().lower() != "turn":

@@ -3187,6 +3187,8 @@ class ReActToolLoop:
     def _overflowed_search_signatures(cls, messages: list[dict[str, Any]]) -> set[str]:
         signatures: set[str] = set()
         for message in list(messages or []):
+            if not isinstance(message, dict):
+                continue
             if str(message.get('role') or '').strip().lower() != 'tool':
                 continue
             signature = cls._search_overflow_signature_from_tool_message(message)
@@ -3196,6 +3198,8 @@ class ReActToolLoop:
 
     @classmethod
     def _search_overflow_signature_from_tool_message(cls, message: dict[str, Any]) -> str:
+        if not isinstance(message, dict):
+            return ''
         tool_name = str(message.get('name') or '').strip()
         if tool_name != 'content':
             return ''
@@ -4644,6 +4648,8 @@ class ReActToolLoop:
     ) -> dict[str, dict[str, Any]]:
         latest: dict[str, dict[str, Any]] = {}
         for message in reversed(list(messages or [])):
+            if not isinstance(message, dict):
+                continue
             if str((message or {}).get("role") or "").strip().lower() != "tool":
                 continue
             tool_name = str((message or {}).get("name") or "").strip()
@@ -4879,6 +4885,8 @@ class ReActToolLoop:
     @classmethod
     def _latest_spawn_child_nodes_ref(cls, messages: list[dict[str, Any]]) -> str:
         for message in reversed(list(messages or [])):
+            if not isinstance(message, dict):
+                continue
             if str((message or {}).get('role') or '').strip().lower() != 'tool':
                 continue
             if str((message or {}).get('name') or '').strip() != _STAGE_SPAWN_TOOL_NAME:
@@ -4891,6 +4899,8 @@ class ReActToolLoop:
 
     @staticmethod
     def _tool_message_json_payload(message: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(message, dict):
+            return {}
         content = (message or {}).get('content')
         if isinstance(content, dict):
             return dict(content)
@@ -4908,9 +4918,13 @@ class ReActToolLoop:
         call_signatures: dict[str, str] = {}
         latest_messages: dict[str, dict[str, Any]] = {}
         for message in list(messages or []):
+            if not isinstance(message, dict):
+                continue
             role = str((message or {}).get('role') or '').strip().lower()
             if role == 'assistant':
                 for tool_call in list((message or {}).get('tool_calls') or []):
+                    if not isinstance(tool_call, dict):
+                        continue
                     call_id = extract_call_id((tool_call or {}).get('id'))
                     if not call_id:
                         continue
@@ -5320,6 +5334,8 @@ class ReActToolLoop:
 
         tool_names: list[str] = []
         for message in list(message_history or []):
+            if not isinstance(message, dict):
+                continue
             if str(message.get('role') or '').strip().lower() != 'tool':
                 continue
             tool_name = str(message.get('name') or '').strip()
@@ -5392,6 +5408,8 @@ class ReActToolLoop:
     @staticmethod
     def _extract_node_context_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
         for message in reversed(list(messages or [])):
+            if not isinstance(message, dict):
+                continue
             if str(message.get('role') or '').strip().lower() != 'user':
                 continue
             content = str(message.get('content') or '').strip()
@@ -5773,6 +5791,8 @@ class ReActToolLoop:
         return text[: _COMPACT_HISTORY_STEP_MAX_CHARS - 3].rstrip() + '...'
 
     def _open_thread_from_message(self, message: dict[str, Any]) -> str:
+        if not isinstance(message, dict):
+            return ''
         role = str((message or {}).get('role') or '').strip().lower()
         if role == 'tool':
             summary, _ref = content_summary_and_ref((message or {}).get('content'))
@@ -5790,6 +5810,8 @@ class ReActToolLoop:
 
     @classmethod
     def _is_result_contract_prompt(cls, message: dict[str, Any]) -> bool:
+        if not isinstance(message, dict):
+            return False
         if str((message or {}).get('role') or '').strip().lower() != 'user':
             return False
         content = str((message or {}).get('content') or '').strip()
@@ -5804,6 +5826,8 @@ class ReActToolLoop:
     def _dedupe_tool_messages(self, tool_messages: list[dict[str, Any]], *, existing_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen_signatures: dict[str, dict[str, str]] = {}
         for message in list(existing_messages or []):
+            if not isinstance(message, dict):
+                continue
             if str(message.get('role') or '').strip().lower() != 'tool':
                 continue
             signature = self._tool_result_signature(message.get('content'))
@@ -5820,6 +5844,8 @@ class ReActToolLoop:
 
         deduped: list[dict[str, Any]] = []
         for message in list(tool_messages or []):
+            if not isinstance(message, dict):
+                continue
             payload = dict(message or {})
             signature = self._tool_result_signature(payload.get('content'))
             if not signature:
