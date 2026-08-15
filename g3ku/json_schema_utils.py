@@ -140,10 +140,34 @@ def _preferred_provider_schema_branch(branches: list[dict[str, Any]]) -> dict[st
     return max(filtered, key=_branch_score)
 
 
+def _tighten_object_field_types(schema: dict[str, Any]) -> dict[str, Any]:
+    """Never relax a structured object field into an open type union.
+
+    When a field declares a concrete object shape (non-empty ``properties``)
+    but its ``type`` is a list that also admits other primitive JSON types
+    (e.g. ``["object", "string"]``), strip the extra members so the
+    provider-visible contract stays a strict object. ``["object", "null"]``
+    (optionality only) is preserved; ``null`` is kept as an additional member
+    when present. Fields without a declared ``properties`` shape are untouched,
+    so genuinely open unions (e.g. memory_write ``value``) are unaffected.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    payload = dict(schema)
+    raw_type = payload.get("type")
+    if isinstance(raw_type, list):
+        properties = payload.get("properties")
+        if isinstance(properties, dict) and properties:
+            non_null = [item for item in raw_type if item != "null"]
+            if non_null and any(item != "object" for item in non_null):
+                payload["type"] = ["object", "null"] if "null" in raw_type else "object"
+    return payload
+
+
 def sanitize_provider_parameters_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(schema, dict):
         return {}
-    payload = copy.deepcopy(schema)
+    payload = copy.deepcopy(_tighten_object_field_types(schema))
     combinator_branches: dict[str, list[Any]] = {}
     for name in _UNSUPPORTED_PROVIDER_SCHEMA_COMBINATORS:
         raw_value = payload.pop(name, None)

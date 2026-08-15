@@ -49,6 +49,7 @@ from g3ku.runtime.frontdoor.token_preflight_compaction import (
 )
 from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.models import normalize_execution_policy_metadata
+from main.service.create_async_task_contract import normalize_create_async_task_file_targets
 from main.protocol import now_iso
 from main.runtime.chat_backend import (
     build_actual_request_diagnostics,
@@ -637,6 +638,21 @@ def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any
     else:
         policy_payload = {}
     normalized["execution_policy"] = normalize_execution_policy_metadata(policy_payload).model_dump(mode="json")
+    raw_targets = normalized.get("file_targets")
+    if raw_targets is None:
+        normalized["file_targets"] = []
+    elif isinstance(raw_targets, str):
+        stripped_targets = str(raw_targets).strip()
+        parsed_targets: Any = None
+        if stripped_targets.startswith("[") and stripped_targets.endswith("]"):
+            try:
+                parsed_targets = json.loads(stripped_targets)
+            except Exception:
+                parsed_targets = None
+        if isinstance(parsed_targets, list):
+            normalized["file_targets"] = parsed_targets
+        else:
+            normalized["file_targets"] = normalize_create_async_task_file_targets(stripped_targets)
     return normalized
 
 
@@ -2364,14 +2380,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         explicit_stable_messages = cls._prompt_message_records(getattr(assembly, "stable_messages", None))
         if explicit_stable_messages:
             return explicit_stable_messages
-        if not live_request_messages:
+        live_records = [dict(item) for item in list(live_request_messages or []) if isinstance(item, dict)]
+        if not live_records:
             return []
-        if str(live_request_messages[-1].get("role") or "").strip().lower() == "user":
-            fallback_prefix = live_request_messages[:-1]
+        if str(live_records[-1].get("role") or "").strip().lower() == "user":
+            fallback_prefix = live_records[:-1]
             if fallback_prefix:
                 return fallback_prefix
-        if str(live_request_messages[0].get("role") or "").strip().lower() == "system":
-            return [live_request_messages[0]]
+        if str(live_records[0].get("role") or "").strip().lower() == "system":
+            return [live_records[0]]
         return []
 
     @staticmethod
@@ -2479,6 +2496,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> dict[str, dict[str, Any]]:
         latest: dict[str, dict[str, Any]] = {}
         for message in reversed(list(messages or [])):
+            if not isinstance(message, dict):
+                continue
             if str((message or {}).get("role") or "").strip().lower() != "tool":
                 continue
             tool_name = str((message or {}).get("name") or "").strip()

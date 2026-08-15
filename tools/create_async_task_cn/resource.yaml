@@ -29,8 +29,8 @@ parameters:
       type: string
       description: One-sentence distilled core requirement for the task tree.
     execution_policy:
-      type: [object, string]
-      description: Execution policy for the task.
+      type: object
+      description: "Execution policy for the task. Must be a JSON object with a mode, never a JSON-encoded string."
       properties:
         mode:
           type: string
@@ -38,8 +38,8 @@ parameters:
           description: "`focus` for highest-value direct work, `coverage` to allow broader completion."
       required: [mode]
     file_targets:
-      type: [array, "null"]
-      description: Optional reopen targets for files or artifacts needed by the task. Use `null` or `[]` when no specific files are required.
+      type: array
+      description: Optional reopen targets for files or artifacts needed by the task. Use `[]` when no specific files are required - never pass a JSON-encoded string.
       items:
         type: object
         properties:

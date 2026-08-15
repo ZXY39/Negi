@@ -1275,7 +1275,7 @@ def test_create_async_task_contract_no_longer_accepts_continuation_fields() -> N
     props = dict(schema.get('properties') or {})
 
     assert 'file_targets' in props
-    assert props['file_targets']['type'] == ['array', 'null']
+    assert props['file_targets']['type'] == 'array'
     assert props['file_targets']['items']['type'] == 'object'
     assert props['file_targets']['items']['properties']['path']['type'] == ['string', 'null']
     assert props['file_targets']['items']['properties']['ref']['type'] == ['string', 'null']

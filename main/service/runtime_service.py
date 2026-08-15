@@ -111,6 +111,7 @@ from main.service.create_async_task_contract import (
     CREATE_ASYNC_TASK_DESCRIPTION,
     build_create_async_task_parameters,
     normalize_create_async_task_file_targets,
+    normalize_create_async_task_inbound_params,
     validate_create_async_task_file_targets,
 )
 from main.service.task_append_notice_contract import (
@@ -8955,18 +8956,19 @@ class CreateAsyncTaskTool(Tool):
         return build_create_async_task_parameters()
 
     def validate_params(self, params: dict[str, Any]) -> list[str]:
-        errors = super().validate_params(params)
-        if 'core_requirement' in (params or {}):
-            core_requirement = str((params or {}).get('core_requirement') or '').strip()
+        normalized = normalize_create_async_task_inbound_params(params)
+        errors = super().validate_params(normalized)
+        if 'core_requirement' in (normalized or {}):
+            core_requirement = str((normalized or {}).get('core_requirement') or '').strip()
             if not core_requirement:
                 errors.append('core_requirement must not be empty')
-        if 'continuation_of_task_id' in (params or {}) or 'reuse_existing' in (params or {}):
+        if 'continuation_of_task_id' in (normalized or {}) or 'reuse_existing' in (normalized or {}):
             errors.append('create_async_task_no_longer_supports_continuation')
-        requires_final_acceptance = (params or {}).get('requires_final_acceptance')
-        final_acceptance_prompt = str((params or {}).get('final_acceptance_prompt') or '').strip()
+        requires_final_acceptance = (normalized or {}).get('requires_final_acceptance')
+        final_acceptance_prompt = str((normalized or {}).get('final_acceptance_prompt') or '').strip()
         if requires_final_acceptance is True and not final_acceptance_prompt:
             errors.append('final_acceptance_prompt is required when requires_final_acceptance=true')
-        errors.extend(validate_create_async_task_file_targets((params or {}).get('file_targets')))
+        errors.extend(validate_create_async_task_file_targets((normalized or {}).get('file_targets')))
         return errors
 
     async def execute(
