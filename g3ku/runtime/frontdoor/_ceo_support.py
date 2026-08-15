@@ -35,6 +35,35 @@ from main.runtime.chat_backend import ConfigChatBackend, sanitize_provider_messa
 from main.runtime.tool_call_repair import format_xml_repair_failure_reason
 
 
+_CREATE_ASYNC_TASK_CONTRACT_TYPE_ERROR_HINTS = (
+    "should be array",
+    "should be object",
+    "should be string",
+    "should be a ",
+    "should be an ",
+    "should be one of",
+    "must be an array",
+    "must be an object",
+    "must be array",
+    "must be object",
+    "must be string",
+    "is not of type",
+    "not a valid",
+    "expected array",
+    "expected object",
+    "expected string",
+    "invalid type",
+    "type error",
+)
+
+_CREATE_ASYNC_TASK_PARAMETER_EXAMPLE_TEXT = (
+    "合法参数示例：\n"
+    " - execution_policy：{\"mode\": \"focus\"} 必须是 JSON 对象，不要传 JSON 字符串。\n"
+    " - file_targets：[{\"path\": \"/absolute/path/to/file.docx\"}, {\"ref\": \"artifact:xxx\"}] "
+    "必须是 JSON 数组；无依赖时请传 []（空数组），不要传 JSON 字符串。"
+)
+
+
 class _DirectProviderChatBackend:
     def __init__(self, provider: Any) -> None:
         self._provider = provider
@@ -534,6 +563,23 @@ class CeoFrontDoorSupport:
             return True
         return any(param.kind is inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values())
 
+    @staticmethod
+    def _append_contract_error_example(error_text: str, *, tool_name: str) -> str:
+        """契约类型错误（如 "file_targets should be array"）时，在错误文本末尾补充 create_async_task 的合法参数示例。
+
+        仅对 create_async_task 生效；正常错误文本或非契约类型错误保持原样。
+        该提示与 append_parameter_error_guidance 的 load_tool_context 指引并存，示例紧随其后。
+        """
+        text = str(error_text or "").strip()
+        if str(tool_name or "").strip() != "create_async_task":
+            return text
+        lowercase = text.lower()
+        if not any(hint in lowercase for hint in _CREATE_ASYNC_TASK_CONTRACT_TYPE_ERROR_HINTS):
+            return text
+        if _CREATE_ASYNC_TASK_PARAMETER_EXAMPLE_TEXT in text:
+            return text
+        return f"{text}\n{_CREATE_ASYNC_TASK_PARAMETER_EXAMPLE_TEXT}"
+
     async def _execute_tool_call(
         self,
         *,
@@ -574,12 +620,14 @@ class CeoFrontDoorSupport:
                 f"Error validating {tool_name}: {exc}",
                 tool_name=tool_name,
             )
+            error_text = self._append_contract_error_example(error_text, tool_name=tool_name)
             return error_text, error_text, "error", "", "", None
         if errors:
             error_text = append_parameter_error_guidance(
                 f"Error: {'; '.join(errors)}",
                 tool_name=tool_name,
             )
+            error_text = self._append_contract_error_example(error_text, tool_name=tool_name)
             return error_text, error_text, "error", "", "", None
 
         started_at = now_iso()
