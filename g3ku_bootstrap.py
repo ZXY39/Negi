@@ -17,6 +17,8 @@ if os.name == "nt":
 else:
     VENV_PYTHON = VENV_DIR / "bin" / "python"
 BOOTSTRAP_MARKER = VENV_DIR / ".g3ku_bootstrap_complete"
+RUNTIME_LOG_DIR = PROJECT_ROOT / ".g3ku" / "logs"
+RUNTIME_CONSOLE_LOG_FILE = RUNTIME_LOG_DIR / "console.log"
 MIN_PYTHON = (3, 11)
 MIN_CHINA_BRIDGE_NODE = (20, 0, 0)
 WINDOWS_NODE_LTS_PACKAGE_ID = "OpenJS.NodeJS.LTS"
@@ -363,6 +365,44 @@ def _china_bridge_preflight_messages() -> list[str]:
     return messages
 
 
+def _configure_runtime_log_loguru_sink() -> None:
+    """Add a rolling loguru file sink to .g3ku/logs/console.log when available.
+
+    Guarded: unavailability or misconfiguration must never break bootstrap. The
+    real web runtime capture is handled by stream redirection in main(); this
+    sink keeps the owning process loguru records persistent as well.
+    """
+    try:
+        from loguru import logger as _loguru_logger
+    except Exception:
+        return
+    try:
+        RUNTIME_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _loguru_logger.add(
+            str(RUNTIME_CONSOLE_LOG_FILE),
+            rotation="50 MB",
+            retention="7 days",
+            encoding="utf-8",
+            backtrace=False,
+            diagnose=False,
+        )
+    except Exception:
+        return
+
+
+def _open_runtime_console_log_stream() -> object | None:
+    """Append-mode stream for a server subprocess (stdout/stderr).
+
+    Returns None when the runtime log directory is not writable so callers can
+    keep the old console-only behavior.
+    """
+    try:
+        RUNTIME_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        return RUNTIME_CONSOLE_LOG_FILE.open("a", encoding="utf-8")
+    except OSError:
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     os.chdir(PROJECT_ROOT)
     _ensure_venv()
@@ -371,11 +411,33 @@ def main(argv: list[str] | None = None) -> int:
     for message in _china_bridge_preflight_messages():
         print(message)
     args = list(argv if argv is not None else sys.argv[1:])
+    _configure_runtime_log_loguru_sink()
+    console_log_stream: object | None = None
+    process_env: dict[str, str] | None = None
+    is_web_command = bool(args) and str(args[0] or "").strip().lower() == "web"
+    if is_web_command:
+        console_log_stream = _open_runtime_console_log_stream()
+        if console_log_stream is not None:
+            print(f"[g3ku] web runtime stdout/stderr appending to {RUNTIME_CONSOLE_LOG_FILE}")
+            process_env = dict(os.environ)
+            process_env["PYTHONUNBUFFERED"] = "1"
     try:
-        completed = subprocess.run([str(VENV_PYTHON), "-m", "g3ku", *args], cwd=str(PROJECT_ROOT))
+        completed = subprocess.run(
+            [str(VENV_PYTHON), "-m", "g3ku", *args],
+            cwd=str(PROJECT_ROOT),
+            stdout=console_log_stream,
+            stderr=subprocess.STDOUT if console_log_stream is not None else None,
+            env=process_env,
+        )
         return int(completed.returncode or 0)
     except KeyboardInterrupt:
         return 130
+    finally:
+        if console_log_stream is not None:
+            try:
+                console_log_stream.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

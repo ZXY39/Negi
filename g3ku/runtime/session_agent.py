@@ -2599,6 +2599,87 @@ class RuntimeAgentSession:
         await self._emit_state_snapshot()
         return RunResult(output="", events=list(self._event_log))
 
+    @staticmethod
+    def _sanitized_error_log_filename_fragment(session_key: str) -> str:
+        sanitized = re.sub(r"[:/\\]+", "-", str(session_key or "").strip()).strip("-_ ")
+        if not sanitized:
+            sanitized = "unknown"
+        return sanitized
+
+    @staticmethod
+    def _last_tool_interaction_summary(interaction_flow: list[dict[str, Any]] | None) -> str:
+        items = [item for item in list(interaction_flow or []) if isinstance(item, dict)]
+        if not items:
+            return ""
+        latest = items[-1]
+        parts = [
+            f"tool_name={str(latest.get('tool_name') or '').strip() or 'tool'}",
+            f"status={str(latest.get('status') or '').strip() or 'unknown'}",
+        ]
+        for key in ("tool_call_id", "arguments_text", "output_preview_text"):
+            value = latest.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if not text:
+                continue
+            if len(text) > 240:
+                text = text[:240] + "..."
+            parts.append(f"{key}={text}")
+        is_error = latest.get("is_error")
+        if is_error is not None:
+            parts.append(f"is_error={bool(is_error)}")
+        return " | ".join(parts)
+
+    def _persist_runtime_error_file(
+        self,
+        exc: Exception,
+        *,
+        user_text: str,
+        interaction_flow: list[dict[str, Any]] | None,
+        internal_source: str | None,
+        route_kind: str,
+    ) -> None:
+        """Best-effort persistence of an unhandled turn exception to .g3ku/errors/.
+
+        Writes timestamp / session_key / route_kind / internal_source / exception
+        type+message / user_text / last tool interaction summary plus the full
+        traceback. Never raises: a failed write must not disturb the reply flow.
+        """
+        if not isinstance(exc, BaseException):
+            return
+        try:
+            import traceback as _traceback
+
+            session_key = str(self._state.session_key or "").strip() or "unknown"
+            timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+            filename_fragment = self._sanitized_error_log_filename_fragment(session_key)
+            error_dir = Path(__file__).resolve().parents[2] / ".g3ku" / "errors"
+            error_dir.mkdir(parents=True, exist_ok=True)
+            target = error_dir / f"{timestamp}-{filename_fragment}.log"
+            traceback_text = "".join(
+                _traceback.format_exception(type(exc), exc, exc.__traceback__)
+            ).rstrip()
+            summary = self._last_tool_interaction_summary(interaction_flow)
+            lines = [
+                f"timestamp={self._now()}",
+                f"session_key={session_key}",
+                f"route_kind={str(route_kind or '').strip()}",
+                f"internal_source={str(internal_source or 'user').strip()}",
+                f"exception_type={exc.__class__.__module__}.{exc.__class__.__qualname__}",
+                f"exception_message={str(exc).strip()}",
+                f"user_text={str(user_text or '').strip()}",
+            ]
+            if summary:
+                lines.append(f"last_tool_interaction={summary}")
+            target.write_text("\n".join(lines) + "\n\n" + traceback_text + "\n", encoding="utf-8")
+            logger.info("Persisted runtime error for {} to {}", session_key, str(target))
+        except Exception:
+            logger.debug(
+                "Failed to persist runtime error log for {}",
+                str(getattr(self._state, "session_key", "") or "")[:80],
+            )
+
     async def _prompt_locked(
         self,
         user_input: UserInputMessage,
@@ -2801,6 +2882,13 @@ class RuntimeAgentSession:
             self._state.last_error = error
             error_reply = f"运行出错：{error.message}"
             self._state.latest_message = error_reply
+            self._persist_runtime_error_file(
+                exc,
+                user_text=user_text,
+                interaction_flow=interaction_flow,
+                internal_source=internal_source,
+                route_kind=str(getattr(self, "_last_route_kind", "") or ""),
+            )
             if persist_transcript:
                 assistant_metadata = {
                     "source": "runtime_error",
