@@ -29,9 +29,34 @@ from main.governance.models import ToolActionRecord, ToolFamilyRecord
 from main.governance.resource_filter import list_effective_tool_names
 from main.models import TaskRecord
 from main.protocol import now_iso
-from main.service.runtime_service import CreateAsyncTaskTool, MainRuntimeService, TaskNodeDetailTool
+from main.service.runtime_service import MainRuntimeService, TaskNodeDetailTool
+from g3ku.resources.loader import ResourceLoader
+from g3ku.resources.registry import ResourceRegistry
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_live_create_async_task_tool(service):
+    """Load create_async_task through the real resource dispatch path.
+
+    Returns the tool the frontdoor would actually receive (wrapping the
+    tools/create_async_task_cn handler), so tests exercise the live
+    implementation instead of a hand-built class.
+    """
+    registry = ResourceRegistry(
+        REPO_ROOT,
+        skills_dir=REPO_ROOT / 'skills',
+        tools_dir=REPO_ROOT / 'tools',
+    )
+    descriptor = registry.build_tool_descriptor(REPO_ROOT / 'tools' / 'create_async_task_cn')
+    assert descriptor is not None, 'create_async_task_cn descriptor failed to build'
+    tool = ResourceLoader(REPO_ROOT).load_tool(
+        descriptor,
+        services={'main_task_service': service},
+    )
+    assert tool is not None, 'resource loader refused to build create_async_task'
+    assert tool.name == 'create_async_task'
+    return tool
 
 
 async def _noop_enqueue_task(_task_id: str) -> None:
@@ -1037,7 +1062,7 @@ async def test_create_async_task_tool_uses_runtime_task_default_max_depth(tmp_pa
             captured['kwargs'] = kwargs
             return SimpleNamespace(task_id='task:demo')
 
-    tool = CreateAsyncTaskTool(_StubService())
+    tool = _load_live_create_async_task_tool(_StubService())._handler
     resume_path = tmp_path / 'resume.docx'
     resume_path.write_bytes(b'PK\x03\x04resume')
     jd_path = tmp_path / 'jd.png'
@@ -1066,7 +1091,7 @@ async def test_create_async_task_tool_uses_runtime_task_default_max_depth(tmp_pa
 
 
 def test_create_async_task_tool_requires_execution_policy_param() -> None:
-    tool = CreateAsyncTaskTool(SimpleNamespace())
+    tool = _load_live_create_async_task_tool(SimpleNamespace())._handler
 
     errors = tool.validate_params(
         {
@@ -1078,25 +1103,10 @@ def test_create_async_task_tool_requires_execution_policy_param() -> None:
     assert 'missing required execution_policy' in errors
 
 
-"""
-legacy broken draft kept only to neutralize old garbled literals during patching
-    tool = CreateAsyncTaskTool(SimpleNamespace())
-
-    errors = tool.validate_params(
-        {
-            'task': '鏁寸悊闇€姹?,
-            'core_requirement': '姊崇悊鐢ㄦ埛闇€姹傜殑鏍稿績鐩爣',
-            'execution_policy': {'mode': 'focus'},
-            'file_targets': None,
-        }
-    )
-
-    assert errors == []
-"""
 
 
 def test_create_async_task_tool_allows_null_file_targets() -> None:
-    tool = CreateAsyncTaskTool(SimpleNamespace())
+    tool = _load_live_create_async_task_tool(SimpleNamespace())._handler
 
     errors = tool.validate_params(
         {
@@ -1111,7 +1121,7 @@ def test_create_async_task_tool_allows_null_file_targets() -> None:
 
 
 def test_create_async_task_tool_rejects_relative_file_target_path() -> None:
-    tool = CreateAsyncTaskTool(SimpleNamespace())
+    tool = _load_live_create_async_task_tool(SimpleNamespace())._handler
 
     errors = tool.validate_params(
         {
@@ -1126,7 +1136,7 @@ def test_create_async_task_tool_rejects_relative_file_target_path() -> None:
 
 
 def test_create_async_task_tool_rejects_nonexistent_file_target_path(tmp_path: Path) -> None:
-    tool = CreateAsyncTaskTool(SimpleNamespace())
+    tool = _load_live_create_async_task_tool(SimpleNamespace())._handler
     missing_path = tmp_path / 'missing.docx'
 
     errors = tool.validate_params(
@@ -1143,7 +1153,7 @@ def test_create_async_task_tool_rejects_nonexistent_file_target_path(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_create_async_task_tool_execute_rejects_relative_file_target_path() -> None:
-    tool = CreateAsyncTaskTool(SimpleNamespace())
+    tool = _load_live_create_async_task_tool(SimpleNamespace())._handler
 
     with pytest.raises(ValueError, match=r'file_targets\[0\]\.path must be an absolute path: resume\.docx'):
         await tool.execute(
@@ -1157,7 +1167,7 @@ async def test_create_async_task_tool_execute_rejects_relative_file_target_path(
 
 @pytest.mark.asyncio
 async def test_create_async_task_tool_rejects_continuation_of_task_id():
-    tool = CreateAsyncTaskTool(SimpleNamespace())
+    tool = _load_live_create_async_task_tool(SimpleNamespace())._handler
 
     with pytest.raises(ValueError, match='create_async_task_no_longer_supports_continuation'):
         await tool.execute(
@@ -1186,7 +1196,7 @@ async def test_create_async_task_tool_returns_duplicate_rejection_text():
         async def create_task(self, *args, **kwargs):
             raise AssertionError('create_task should not run for duplicate rejection')
 
-    tool = CreateAsyncTaskTool(_StubService())
+    tool = _load_live_create_async_task_tool(_StubService())._handler
     result = await tool.execute(
         '整理重点客户流失信号',
         core_requirement='整理重点客户流失信号',
@@ -1224,7 +1234,7 @@ async def test_create_async_task_tool_rechecks_exact_duplicate_before_create():
         async def create_task(self, *args, **kwargs):
             raise AssertionError('create_task should not run when revalidation catches a duplicate')
 
-    tool = CreateAsyncTaskTool(_StubService())
+    tool = _load_live_create_async_task_tool(_StubService())._handler
     result = await tool.execute(
         '整理重点客户流失信号',
         core_requirement='整理重点客户流失信号',
@@ -1252,7 +1262,7 @@ async def test_create_async_task_tool_returns_append_notice_guidance():
         async def create_task(self, *args, **kwargs):
             raise AssertionError('create_task should not run for append-notice rejection')
 
-    tool = CreateAsyncTaskTool(_StubService())
+    tool = _load_live_create_async_task_tool(_StubService())._handler
     result = await tool.execute(
         '整理重点客户流失信号并新增董事会验收格式',
         core_requirement='整理重点客户流失信号并新增董事会验收格式',
@@ -1266,6 +1276,61 @@ async def test_create_async_task_tool_returns_append_notice_guidance():
     assert 'task:existing-2' in result
     assert '追加通知' in result
     assert 'task_append_notice' in result
+
+
+@pytest.mark.asyncio
+async def test_live_create_async_task_resource_tool_runs_duplicate_precheck():
+    """Regression guard for the 2026-08 duplicate-task incident.
+
+    The gate must live on the tool instance that the resource system
+    actually dispatches (tools/create_async_task_cn), not on an
+    unregistered service-side class. Loads the tool through the real
+    ResourceRegistry/ResourceLoader path and asserts the precheck blocks
+    creation of a duplicate task.
+    """
+
+    class _StubService:
+        def __init__(self) -> None:
+            self.precheck_calls: list[dict[str, object]] = []
+            self.create_calls: list[tuple[tuple, dict]] = []
+
+        async def precheck_async_task_creation(self, **kwargs):
+            self.precheck_calls.append(dict(kwargs))
+            return {
+                'decision': 'reject_duplicate',
+                'matched_task_id': 'task:live-existing',
+                'reason': 'core_requirement exact match',
+                'decision_source': 'rule',
+            }
+
+        def revalidate_async_task_creation_before_create(self, **kwargs):
+            _ = kwargs
+            return {
+                'decision': 'approve_new',
+                'matched_task_id': '',
+                'reason': 'rule precheck found no exact duplicate',
+                'decision_source': 'rule',
+            }
+
+        async def create_task(self, *args, **kwargs):
+            self.create_calls.append((args, kwargs))
+            return SimpleNamespace(task_id='task:must-not-exist')
+
+    service = _StubService()
+    handler = _load_live_create_async_task_tool(service)._handler
+
+    result = await handler.execute(
+        '整理重点客户流失信号',
+        core_requirement='整理重点客户流失信号',
+        execution_policy={'mode': 'focus'},
+        __g3ku_runtime={'session_key': 'web:ceo-demo'},
+    )
+
+    assert '任务未创建' in result
+    assert 'task:live-existing' in result
+    assert len(service.precheck_calls) == 1
+    assert service.precheck_calls[0]['session_id'] == 'web:ceo-demo'
+    assert service.create_calls == []
 
 
 def test_create_async_task_contract_no_longer_accepts_continuation_fields() -> None:
