@@ -43,7 +43,10 @@ class CronJobState:
     last_run_at_ms: int | None = None
     delivered_runs: int = 0
     last_delivered_at_ms: int | None = None
-    last_status: Literal["ok", "error", "skipped"] | None = None
+    # "running": claimed before dispatch but not yet finalized.
+    # "interrupted": a "running" claim found on startup (process restarted
+    # mid-dispatch); the run is suppressed to avoid duplicate delivery.
+    last_status: Literal["ok", "error", "skipped", "running", "interrupted"] | None = None
     last_error: str | None = None
 
 

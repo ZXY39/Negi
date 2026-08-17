@@ -555,6 +555,127 @@ async def test_cron_service_counts_successful_deliveries_and_deletes_at_max_runs
 
 
 @pytest.mark.asyncio
+async def test_cron_service_persists_claim_before_dispatch(tmp_path: Path) -> None:
+    """The run claim (last_run_at_ms + status=running) must be on disk before
+    the handler runs, so a crash mid-dispatch cannot re-arm the job."""
+    store_path = tmp_path / "jobs.json"
+    captured: dict[str, object] = {}
+
+    async def _on_job(job: CronJob) -> str | None:
+        raw = json.loads(store_path.read_text(encoding="utf-8"))
+        captured["claim"] = raw["jobs"][0]["state"]
+        return "ok"
+
+    service = CronService(store_path, on_job=_on_job)
+    job = service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="hello",
+        deliver=True,
+        channel="web",
+        to="shared",
+        max_runs=3,
+    )
+
+    await service._execute_job(job)
+
+    assert captured["claim"]["lastStatus"] == "running"
+    assert captured["claim"]["lastRunAtMs"] is not None
+    assert captured["claim"]["deliveredRuns"] == 0
+    # finalized after dispatch
+    assert job.state.last_status == "ok"
+    assert job.state.delivered_runs == 1
+
+
+@pytest.mark.asyncio
+async def test_cron_service_suppresses_interrupted_at_job_on_restart(tmp_path: Path) -> None:
+    """A one-shot job whose claim was persisted but dispatch never finalized
+    (process restarted mid-flight) must NOT be re-dispatched on startup."""
+    store_path = tmp_path / "jobs.json"
+    now_ms = int(time.time() * 1000)
+    store_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "jobs": [
+                    {
+                        "id": "job-int",
+                        "name": "interrupted",
+                        "enabled": True,
+                        "schedule": {"kind": "at", "atMs": now_ms - 30_000},
+                        "payload": {"kind": "agent_turn", "message": "run once", "deliver": True},
+                        "state": {
+                            "nextRunAtMs": now_ms - 30_000,
+                            "lastRunAtMs": now_ms - 30_000,
+                            "deliveredRuns": 0,
+                            "lastStatus": "running",
+                        },
+                        "createdAtMs": now_ms - 60_000,
+                        "updatedAtMs": now_ms - 30_000,
+                        "deleteAfterRun": False,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    fired: list[str] = []
+
+    async def _on_job(job: CronJob) -> str | None:
+        fired.append(job.id)
+        return "ok"
+
+    service = CronService(store_path, on_job=_on_job)
+
+    await service.start()
+    await asyncio.sleep(0.05)
+    service.stop()
+
+    jobs = service.list_jobs(include_disabled=True)
+    assert fired == []
+    assert len(jobs) == 1
+    assert jobs[0].state.last_status == "interrupted"
+    assert jobs[0].state.next_run_at_ms is None
+    assert jobs[0].enabled is False
+
+
+@pytest.mark.asyncio
+async def test_cron_service_in_flight_guard_blocks_concurrent_dispatch(tmp_path: Path) -> None:
+    """A second _execute_job for a job already dispatching must be skipped."""
+    store_path = tmp_path / "jobs.json"
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    async def _on_job(job: CronJob) -> str | None:
+        calls.append(job.id)
+        entered.set()
+        await release.wait()
+        return "ok"
+
+    service = CronService(store_path, on_job=_on_job)
+    job = service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="hello",
+        deliver=True,
+        channel="web",
+        to="shared",
+        max_runs=3,
+    )
+
+    first = asyncio.create_task(service._execute_job(job))
+    await entered.wait()  # first call is now inside the handler (in-flight)
+    await service._execute_job(job)  # must be rejected by the guard
+    release.set()
+    await first
+
+    assert calls == [job.id]
+    assert job.state.delivered_runs == 1
+
+
+@pytest.mark.asyncio
 async def test_cron_service_does_not_increment_failed_deliveries(tmp_path: Path) -> None:
     store_path = tmp_path / "jobs.json"
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from datetime import datetime
@@ -100,6 +101,9 @@ class CronService:
         self._last_mtime_ns: int = 0
         self._timer_task: asyncio.Task | None = None
         self._running = False
+        # Job ids currently inside _execute_job; blocks concurrent dispatch of
+        # the same job from overlapping entry points (timer tick vs run_job).
+        self._in_flight: set[str] = set()
 
     def _load_store(self) -> CronStore:
         """Load jobs from disk. Reloads automatically if file was modified externally."""
@@ -172,7 +176,13 @@ class CronService:
         return self._store
 
     def _save_store(self) -> None:
-        """Save jobs to disk."""
+        """Save jobs to disk atomically.
+
+        Writes to a temp file then os.replace()s it over the store so a crash
+        mid-write can never truncate jobs.json. A truncated store would be
+        treated as corrupt by _load_store and reset to an empty store, losing
+        persisted claims and re-arming already-dispatched jobs.
+        """
         if not self._store:
             return
 
@@ -218,7 +228,9 @@ class CronService:
             ]
         }
 
-        self.store_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path = self.store_path.with_name(self.store_path.name + ".tmp")
+        tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp_path, self.store_path)
         self._last_mtime_ns = self.store_path.stat().st_mtime_ns
     
     async def start(self) -> None:
@@ -229,6 +241,7 @@ class CronService:
             raise RuntimeError("cron job handler is not configured")
         self._running = True
         self._load_store()
+        self._recover_interrupted_runs()
         self._recompute_next_runs()
         self._save_store()
         self._arm_timer()
@@ -240,6 +253,43 @@ class CronService:
         if self._timer_task:
             self._timer_task.cancel()
             self._timer_task = None
+
+    def _recover_interrupted_runs(self) -> None:
+        """Reconcile jobs whose claim was persisted but dispatch never finalized.
+
+        A job still marked "running" at startup means the process restarted
+        between the claim write and the finalize write. The dispatch may
+        already have reached the downstream handler, so one-shot "at" jobs are
+        suppressed (at-most-once): a duplicate reminder is worse than a missed
+        one. Recurring jobs simply resume their schedule.
+        """
+        if not self._store:
+            return
+        for job in self._store.jobs:
+            if job.state.last_status != "running":
+                continue
+            job.state.last_status = "interrupted"
+            job.updated_at_ms = _now_ms()
+            if job.schedule.kind == "at":
+                job.state.next_run_at_ms = None
+                job.state.last_error = (
+                    "dispatch was interrupted by a runtime restart; "
+                    "suppressed to avoid duplicate delivery"
+                )
+                if job.delete_after_run or max(1, int(job.payload.max_runs or 1)) <= 1:
+                    job.enabled = False
+                logger.warning(
+                    "Cron: one-shot job '{}' ({}) interrupted by restart; suppressed",
+                    job.name,
+                    job.id,
+                )
+            else:
+                job.state.last_error = None
+                logger.info(
+                    "Cron: recurring job '{}' ({}) interrupted by restart; resuming schedule",
+                    job.name,
+                    job.id,
+                )
 
     def _recompute_next_runs(self) -> None:
         """Restore next run times after startup without replaying every missed tick."""
@@ -316,49 +366,80 @@ class CronService:
         self._arm_timer()
 
     async def _execute_job(self, job: CronJob) -> None:
-        """Execute a single job."""
+        """Execute a single job with claim-before-dispatch semantics.
+
+        Phase 1 (claim):    mark the run started and persist it BEFORE any side
+                            effect. Once last_run_at_ms is on disk, a restart
+                            can never re-arm an "at" job (see
+                            _recompute_next_runs), so a crash mid-dispatch
+                            cannot double-trigger it.
+        Phase 2 (dispatch): invoke the job handler.
+        Phase 3 (finalize): persist delivery counters and the next run.
+        """
+        if job.id in self._in_flight:
+            logger.warning(
+                "Cron: job '{}' ({}) is already dispatching; skipping duplicate",
+                job.name,
+                job.id,
+            )
+            return
+
+        self._in_flight.add(job.id)
         start_ms = _now_ms()
-        logger.info("Cron: executing job '{}' ({})", job.name, job.id)
-        delivered = False
-
         try:
-            if not callable(self.on_job):
-                raise RuntimeError("cron job handler is not configured")
-            await self.on_job(job)
-
-            delivered = True
-            job.state.delivered_runs = max(0, int(job.state.delivered_runs or 0)) + 1
-            job.state.last_delivered_at_ms = start_ms
-            job.state.last_status = "ok"
+            # ---- Phase 1: claim (persisted before any side effect) ----
+            job.state.last_run_at_ms = start_ms
+            job.state.last_status = "running"
             job.state.last_error = None
-            logger.info("Cron: job '{}' completed", job.name)
+            job.updated_at_ms = start_ms
+            self._save_store()
 
-        except Exception as e:
-            job.state.last_status = "error"
-            job.state.last_error = str(e)
-            logger.error("Cron: job '{}' failed: {}", job.name, e)
+            # ---- Phase 2: dispatch ----
+            logger.info("Cron: executing job '{}' ({})", job.name, job.id)
+            delivered = False
+            try:
+                if not callable(self.on_job):
+                    raise RuntimeError("cron job handler is not configured")
+                await self.on_job(job)
+                delivered = True
+            except Exception as e:
+                job.state.last_error = str(e)
+                logger.error("Cron: job '{}' failed: {}", job.name, e)
 
-        job.state.last_run_at_ms = start_ms
-        job.updated_at_ms = _now_ms()
-
-        max_runs = max(1, int(getattr(job.payload, "max_runs", 1) or 1))
-        terminal_delivery = delivered and int(job.state.delivered_runs or 0) >= max_runs
-
-        if terminal_delivery:
-            if not self._delete_job_in_memory(job.id):
-                job.enabled = False
-                job.state.next_run_at_ms = None
+            # ---- Phase 3: finalize (persisted) ----
+            finish_ms = _now_ms()
+            if delivered:
+                job.state.delivered_runs = max(0, int(job.state.delivered_runs or 0)) + 1
+                job.state.last_delivered_at_ms = finish_ms
+                job.state.last_status = "ok"
+                job.state.last_error = None
+                logger.info("Cron: job '{}' completed", job.name)
+            else:
                 job.state.last_status = "error"
-                job.state.last_error = (
-                    f"terminal cron delivery reached max_runs={max_runs} but in-memory removal failed"
-                )
-                logger.error(
-                    "Cron: failed to remove terminal job '{}' ({}); disabled instead",
-                    job.name,
-                    job.id,
-                )
-        else:
-            job.state.next_run_at_ms = self._next_run_after_execution(job, delivered=delivered)
+            job.updated_at_ms = finish_ms
+
+            max_runs = max(1, int(getattr(job.payload, "max_runs", 1) or 1))
+            terminal_delivery = delivered and int(job.state.delivered_runs or 0) >= max_runs
+
+            if terminal_delivery:
+                if not self._delete_job_in_memory(job.id):
+                    job.enabled = False
+                    job.state.next_run_at_ms = None
+                    job.state.last_status = "error"
+                    job.state.last_error = (
+                        f"terminal cron delivery reached max_runs={max_runs} but in-memory removal failed"
+                    )
+                    logger.error(
+                        "Cron: failed to remove terminal job '{}' ({}); disabled instead",
+                        job.name,
+                        job.id,
+                    )
+            else:
+                job.state.next_run_at_ms = self._next_run_after_execution(job, delivered=delivered)
+
+            self._save_store()
+        finally:
+            self._in_flight.discard(job.id)
 
     def _next_run_after_execution(self, job: CronJob, *, delivered: bool) -> int | None:
         now = _now_ms()
