@@ -262,6 +262,126 @@ def test_cron_service_rejects_expired_at_jobs_on_creation(
     assert not store_path.exists()
 
 
+def test_cron_service_rejects_duplicate_at_job_same_session_same_time(tmp_path: Path) -> None:
+    """Re-registering a one-shot reminder for the same session at the exact
+    same instant is a duplicate and must be rejected (different message text
+    does not make it a new reminder)."""
+    store_path = tmp_path / "jobs.json"
+    service = CronService(store_path)
+    at_ms = int(time.time() * 1000) + 3_600_000
+
+    first = service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="at", at_ms=at_ms),
+        message="first wording",
+        deliver=True,
+        channel="web",
+        to="shared",
+        session_key="web:ceo-cd3aa88b1ef0",
+    )
+
+    with pytest.raises(ValueError, match="已存在一次性提醒"):
+        service.add_job(
+            name="demo",
+            schedule=CronSchedule(kind="at", at_ms=at_ms),
+            message="second, reworded message",
+            deliver=True,
+            channel="web",
+            to="shared",
+            session_key="web:ceo-cd3aa88b1ef0",
+        )
+
+    jobs = service.list_jobs(include_disabled=True)
+    assert [j.id for j in jobs] == [first.id]
+
+
+def test_cron_service_allows_same_time_for_different_sessions(tmp_path: Path) -> None:
+    store_path = tmp_path / "jobs.json"
+    service = CronService(store_path)
+    at_ms = int(time.time() * 1000) + 3_600_000
+
+    service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="at", at_ms=at_ms),
+        message="hello",
+        deliver=True,
+        channel="web",
+        to="shared",
+        session_key="web:session-a",
+    )
+    second = service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="at", at_ms=at_ms),
+        message="hello",
+        deliver=True,
+        channel="web",
+        to="shared",
+        session_key="web:session-b",
+    )
+
+    assert len(service.list_jobs(include_disabled=True)) == 2
+    assert second.payload.session_key == "web:session-b"
+
+
+def test_cron_service_allows_same_session_at_different_times(tmp_path: Path) -> None:
+    store_path = tmp_path / "jobs.json"
+    service = CronService(store_path)
+    base_ms = int(time.time() * 1000) + 3_600_000
+
+    service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="at", at_ms=base_ms),
+        message="hello",
+        deliver=True,
+        channel="web",
+        to="shared",
+        session_key="web:session-a",
+    )
+    second = service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="at", at_ms=base_ms + 60_000),
+        message="hello",
+        deliver=True,
+        channel="web",
+        to="shared",
+        session_key="web:session-a",
+    )
+
+    assert len(service.list_jobs(include_disabled=True)) == 2
+    assert second.schedule.at_ms == base_ms + 60_000
+
+
+def test_cron_service_conflict_check_ignores_disabled_jobs(tmp_path: Path) -> None:
+    store_path = tmp_path / "jobs.json"
+    service = CronService(store_path)
+    at_ms = int(time.time() * 1000) + 3_600_000
+
+    first = service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="at", at_ms=at_ms),
+        message="hello",
+        deliver=True,
+        channel="web",
+        to="shared",
+        session_key="web:session-a",
+    )
+    service.enable_job(first.id, enabled=False)
+
+    # disabled job must not block a fresh registration
+    second = service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="at", at_ms=at_ms),
+        message="hello again",
+        deliver=True,
+        channel="web",
+        to="shared",
+        session_key="web:session-a",
+    )
+
+    enabled_ids = [j.id for j in service.list_jobs(include_disabled=False)]
+    assert enabled_ids == [second.id]
+
+
 @pytest.mark.asyncio
 async def test_cron_tool_accepts_asia_shanghai_without_zoneinfo_tzdata(monkeypatch) -> None:
     service = _CronToolService()

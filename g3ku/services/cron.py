@@ -466,6 +466,28 @@ class CronService:
         jobs = store.jobs if include_disabled else [j for j in store.jobs if j.enabled]
         return sorted(jobs, key=lambda j: j.state.next_run_at_ms or float('inf'))
 
+    def _find_conflicting_at_job(self, at_ms: int, session_key: str | None) -> CronJob | None:
+        """Return an enabled one-shot job for the same instant and session, if any.
+
+        Two enabled one-shot reminders targeting the same session at the exact
+        same time are treated as a duplicate registration (a common model
+        failure mode), so the second add is rejected instead of later
+        double-firing. Different sessions may legitimately share a time, and
+        recurring schedules are never compared here.
+        """
+        store = self._load_store()
+        for existing in store.jobs:
+            if not existing.enabled:
+                continue
+            if existing.schedule.kind != "at":
+                continue
+            if int(existing.schedule.at_ms or 0) != at_ms:
+                continue
+            existing_session = str(existing.payload.session_key or "").strip() or None
+            if existing_session == session_key:
+                return existing
+        return None
+
     def add_job(
         self,
         name: str,
@@ -489,6 +511,13 @@ class CronService:
                 current_time_text = _format_local_time_ms(now)
                 raise ValueError(
                     f"任务定时已过期，当前时间为{current_time_text}，请立即执行或视情况废弃而不要创建过期任务"
+                )
+            effective_session_key = str(session_key or "").strip() or None
+            conflict = self._find_conflicting_at_job(at_ms, effective_session_key)
+            if conflict is not None:
+                raise ValueError(
+                    f"同一会话在 {_format_local_time_ms(at_ms)} 已存在一次性提醒 (id: {conflict.id})，"
+                    f"请勿重复创建；如需修改请先用 remove 删除旧任务，或改用其他时间"
                 )
         _ = stop_condition
         effective_max_runs = _normalize_max_runs(schedule=schedule, max_runs=max_runs)
