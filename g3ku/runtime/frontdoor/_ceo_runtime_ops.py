@@ -4995,7 +4995,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 model_refs=model_refs,
             )
         )
-        current_turn_has_multimodal_uploads = bool(metadata.get("web_ceo_uploads")) and self._message_content_has_multimodal_blocks(
+        multimodal_enabled = self._ceo_image_multimodal_enabled_for_model_refs(model_refs)
+        if not multimodal_enabled and self._message_content_has_multimodal_blocks(current_turn_user_content):
+            current_turn_user_content = strip_multimodal_blocks_from_message_records(
+                [{"role": "user", "content": current_turn_user_content}]
+            )[0].get("content", current_turn_user_content)
+        current_turn_has_multimodal_uploads = multimodal_enabled and self._message_content_has_multimodal_blocks(
             current_turn_user_content
         )
         if session_request_body_messages:
