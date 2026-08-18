@@ -282,23 +282,6 @@ def _should_keep_inline_search_tool_result(payload: dict[str, Any]) -> bool:
     return _inline_tool_payload_fits_limits(payload)
 
 
-def _looks_like_search_tool_result(payload: dict[str, Any]) -> bool:
-    if payload.get("ok") is not True:
-        return False
-    hits = payload.get("hits")
-    if not isinstance(hits, list):
-        return False
-    if payload.get("count") in {None, ""}:
-        return False
-    if "query" not in payload or "overflow" not in payload or "requires_refine" not in payload or "cap" not in payload:
-        return False
-    if any(not isinstance(item, dict) for item in hits):
-        return False
-    if any("line" not in item or "preview" not in item for item in hits):
-        return False
-    return True
-
-
 def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
     normalized = str(source_kind or "").strip().lower()
     if normalized in _ALWAYS_INLINE_TOOL_RESULT_SOURCES:
@@ -312,7 +295,7 @@ def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
         excerpt = str(payload.get("excerpt") or "").strip()
         return bool(excerpt) and payload.get("start_line") not in {None, ""} and payload.get("end_line") not in {None, ""}
     if normalized == "tool_result:content_search":
-        return _looks_like_search_tool_result(payload)
+        return _should_keep_inline_search_tool_result(payload)
     if normalized == "tool_result:spawn_child_nodes":
         return _should_keep_inline_spawn_child_tool_result(payload)
     if normalized not in {"tool_result:content", "tool_result:filesystem"}:

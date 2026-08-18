@@ -2700,6 +2700,45 @@ def test_content_navigation_keeps_large_content_search_results_inline(tmp_path: 
     store.close()
 
 
+def test_content_navigation_externalizes_oversized_content_search_results(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    payload = {
+        "ok": True,
+        "ref": "artifact:artifact:search-wrapper",
+        "requested_ref": "artifact:artifact:search-wrapper",
+        "resolved_ref": "artifact:artifact:search-canonical",
+        "wrapper_ref": "artifact:artifact:search-wrapper",
+        "wrapper_depth": 1,
+        "query": "needle",
+        "hits": [
+            {"line": index, "preview": f"needle preview {index} " + ("y" * 2000)}
+            for index in range(1, 16)
+        ],
+        "count": 15,
+        "overflow": False,
+        "requires_refine": False,
+        "cap": 20,
+        "overflow_lower_bound": None,
+        "message": "",
+        "suggestions": [],
+    }
+    rendered = navigator.externalize_for_message(
+        json.dumps(payload, ensure_ascii=False),
+        runtime={"task_id": "task:test", "node_id": "node:search"},
+        display_name="search-results",
+        source_kind="tool_result:content_search",
+        compact=True,
+    )
+    envelope = parse_content_envelope(rendered)
+    assert envelope is not None
+    assert envelope.ref
+    search_result = navigator.search(ref=envelope.ref, query="needle")
+    assert search_result["count"] == 1
+    store.close()
+
+
 def test_content_navigation_open_raw_view_reads_wrapper_json(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
