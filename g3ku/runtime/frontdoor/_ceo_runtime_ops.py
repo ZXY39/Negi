@@ -991,7 +991,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not blocks:
             durable = strip_multimodal_blocks_from_message_records(records)
             return records, durable
-        live_records = self._replace_last_user_message_content(messages=records, content=blocks)
+        last_role = str(records[-1].get("role") or "").strip().lower() if records else ""
+        if last_role == "user":
+            live_records = self._replace_last_user_message_content(messages=records, content=blocks)
+        else:
+            live_records = [*records, {"role": "user", "content": list(blocks)}]
         durable_records = strip_multimodal_blocks_from_message_records(live_records)
         return live_records, durable_records
 

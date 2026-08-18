@@ -119,6 +119,8 @@ class CeoPersistentState(TypedDict, total=False):
 
     tool_call_payloads: list[dict[str, Any]]
 
+    pending_content_open_image_payloads: list[dict[str, Any]]
+
     verified_task_ids: list[str]
 
     next_step: str
