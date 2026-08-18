@@ -201,6 +201,17 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - Image attachments should render as thumbnail bubbles, not as ordinary file pills. The same thumbnail should also be the click target that opens the underlying file in a new tab.
 - If refresh/reconnect shows the internal upload note instead of attachment bubbles, debug the snapshot builder in `g3ku/runtime/api/websocket_ceo.py` before debugging CSS or DOM layout.
 
+### 2.7. Inline Markdown Image Rendering Contract
+
+- The browser-side chat markdown renderer (`renderInlineMarkdown` in `g3ku/web/frontend/org_graph_app.js`) supports the standard image syntax `![描述](来源)` and renders it as an inline `<img class="msg-inline-image">`. This applies to both persisted history and live turns, since both flow through the same `renderMarkdown` pipeline.
+- `来源` is resolved as follows:
+  - `https://` / `http://` URLs render directly as the image source.
+  - absolute local filesystem paths (e.g. `C:\...\output\xx.png`) and workspace-relative paths resolve to the backend-owned read-only route `GET /api/ceo/uploads/file?session_id=...&path=...`.
+  - `data:` URIs and unknown schemes are rejected and render as nothing (no image, no stray link).
+- The file route serves from two allowed roots only: the per-session upload directory and `workspace_path()/output`. Paths outside either root return `400 upload_path_outside_session_dir`; missing files return `404`. This is enforced in `g3ku/runtime/api/websocket_ceo.py:_resolve_uploaded_file`.
+- The frontdoor system prompt (`g3ku/runtime/prompts/ceo_frontdoor.md`) instructs the agent to present images to the user with this markdown syntax instead of plain text paths or bare links; the renderer is the enforcement backstop.
+- This contract complements, and does not replace, the structured attachment lane in section 2.6: user uploads still render as attachment bubbles, while the agent's generated/returned images render inline via markdown.
+
 ### 3. Context Loader Notices
 
 - Successful CEO/frontdoor `load_tool_context` and `load_skill_context` calls are no longer shown as ordinary `Interaction Flow` steps under the assistant bubble.

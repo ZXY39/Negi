@@ -4132,6 +4132,17 @@ textarea {
     background: color-mix(in srgb, var(--bg-app) 82%, black 18%);
 }
 
+.msg-inline-image {
+    display: block;
+    width: min(100%, 420px);
+    max-height: 420px;
+    object-fit: contain;
+    border-radius: 12px;
+    margin: 8px 0;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 82%, black 18%);
+}
+
 .chat-attachment-image-meta {
     display: flex;
     align-items: center;

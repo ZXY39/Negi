@@ -6550,6 +6550,54 @@ def test_ceo_uploaded_file_endpoint_serves_unicode_filename_inline(tmp_path: Pat
     assert "filename*=" in response.headers["content-disposition"]
 
 
+def test_ceo_uploaded_file_endpoint_serves_output_dir_image_inline(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    file_path = output_dir / "midnight_street.png"
+    payload = b"\x89PNG\r\n\x1a\nfake-image-bytes"
+    file_path.write_bytes(payload)
+
+    app = FastAPI()
+    app.include_router(websocket_ceo.router, prefix="/api")
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/ceo/uploads/file",
+        params={
+            "session_id": "web:test-output",
+            "path": str(file_path),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.content == payload
+    assert response.headers["content-type"].startswith("image/png")
+
+
+def test_ceo_uploaded_file_endpoint_rejects_paths_outside_upload_and_output(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    outside = tmp_path / "elsewhere" / "secret.txt"
+    outside.parent.mkdir()
+    outside.write_text("do not serve", encoding="utf-8")
+
+    app = FastAPI()
+    app.include_router(websocket_ceo.router, prefix="/api")
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/ceo/uploads/file",
+        params={
+            "session_id": "web:test-outside",
+            "path": str(outside),
+        },
+    )
+
+    assert response.status_code == 400
+
+
 @pytest.mark.asyncio
 async def test_web_session_heartbeat_delays_background_tool_prompt(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-tool"

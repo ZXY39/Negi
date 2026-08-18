@@ -305,10 +305,14 @@ def _resolve_uploaded_file(session_id: str, raw_path: str) -> Path:
     else:
         candidate = candidate.resolve()
     upload_dir = _session_upload_dir(session_id).resolve()
+    output_dir = (workspace_path() / "output").resolve()
     try:
         candidate.relative_to(upload_dir)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail='upload_path_outside_session_dir') from exc
+    except ValueError:
+        try:
+            candidate.relative_to(output_dir)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail='upload_path_outside_session_dir') from exc
     if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail='uploaded_file_not_found')
     return candidate

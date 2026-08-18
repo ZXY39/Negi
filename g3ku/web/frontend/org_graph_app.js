@@ -3096,6 +3096,19 @@ function safeHref(value) {
     return "#";
 }
 
+function ceoMarkdownImageSrc(href) {
+    const src = String(href || "").trim();
+    if (!src) return "";
+    if (/^https?:\/\//i.test(src)) return esc(src);
+    if (/^data:/i.test(src)) return "";
+    if (src.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(src)) return esc(src);
+    const params = new URLSearchParams({
+        session_id: String(activeSessionId() || "").trim(),
+        path: src,
+    });
+    return esc(`/api/ceo/uploads/file?${params.toString()}`);
+}
+
 function createMarkdownToken(tokens, html) {
     const token = `${MD_TOKEN_MARKER}${tokens.length}${MD_TOKEN_MARKER}`;
     tokens.push(html);
@@ -3109,6 +3122,16 @@ function renderInlineMarkdown(value, { allowLinks = true } = {}) {
 
     text = text.replace(/`([^`\n]+)`/g, (_match, code) => createMarkdownToken(tokens, `<code>${esc(code)}</code>`));
     if (allowLinks) {
+        text = text.replace(/!\[([^\]]*)\]\(([^)\s]+(?:\s+"[^"]*")?)\)/g, (_match, alt, target) => {
+            const rawSrc = String(target || "").replace(/\s+"[^"]*"$/, "");
+            const safeSrc = ceoMarkdownImageSrc(rawSrc);
+            if (!safeSrc) return _match;
+            const label = esc(String(alt || "image").trim() || "image");
+            return createMarkdownToken(
+                tokens,
+                `<img class="msg-inline-image" src="${safeSrc}" alt="${label}" title="${label}" loading="lazy">`
+            );
+        });
         text = text.replace(/\[([^\]]+)\]\(([^)\s]+(?:\s+"[^"]*")?)\)/g, (_match, label, target) => {
             const href = String(target || "").replace(/\s+"[^"]*"$/, "");
             return createMarkdownToken(
