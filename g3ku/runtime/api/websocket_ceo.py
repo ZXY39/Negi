@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse
 
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.events import AgentEvent
+from g3ku.runtime.api.ceo_media import rewrite_assistant_media_content
 from g3ku.security import get_bootstrap_security_service
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
@@ -450,6 +451,8 @@ def _build_live_turn_payload(
         _build_preserved_turn_snapshot(session, session_id, persisted_session),
         baseline_context,
     )
+    inflight_turn = _rewrite_turn_snapshot_media(session_id, inflight_turn)
+    preserved_turn = _rewrite_turn_snapshot_media(session_id, preserved_turn)
     payload: dict[str, Any] = {"inflight_turn": inflight_turn}
     if preserved_turn is not None:
         payload["preserved_turn"] = preserved_turn
@@ -561,10 +564,22 @@ def _snapshot_message_transcript_state(message: dict[str, Any] | None) -> str:
     return str(metadata.get("_transcript_state") or "").strip().lower()
 
 
+def _rewrite_turn_snapshot_media(
+    session_id: str, snapshot: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    if isinstance(snapshot, dict):
+        snapshot = dict(snapshot)
+        text = snapshot.get('assistant_text')
+        if isinstance(text, str):
+            snapshot['assistant_text'] = rewrite_assistant_media_content(session_id, text)
+    return snapshot
+
+
 def _build_ceo_snapshot(
     messages: list[dict[str, Any]] | None,
     *,
     inflight_turn: dict[str, Any] | None = None,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     inflight_payload = inflight_turn if isinstance(inflight_turn, dict) else {}
     inflight_status = str(inflight_payload.get("status") or "").strip().lower()
@@ -589,6 +604,8 @@ def _build_ceo_snapshot(
             raw_text = metadata.get('web_ceo_raw_text')
             if isinstance(raw_text, str) and isinstance(metadata.get('web_ceo_uploads'), list):
                 content = raw_text
+        if role == 'assistant' and session_id:
+            content = rewrite_assistant_media_content(session_id, content)
         attachments = _normalize_snapshot_attachments(raw) if role == 'user' else []
         canonical_context = (
             dict(raw.get('canonical_context'))
@@ -1028,6 +1045,7 @@ async def ceo_websocket(websocket: WebSocket):
     persisted_messages = _build_ceo_snapshot(
         getattr(persisted_session, 'messages', []),
         inflight_turn=turn_payload.get("inflight_turn") if isinstance(turn_payload, dict) else None,
+        session_id=session_id,
     )
     current_turn_task: asyncio.Task[Any] | None = None
     closed = asyncio.Event()

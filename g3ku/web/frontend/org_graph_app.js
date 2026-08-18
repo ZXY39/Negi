@@ -3123,17 +3123,35 @@ function renderInlineMarkdown(value, { allowLinks = true } = {}) {
     text = text.replace(/`([^`\n]+)`/g, (_match, code) => createMarkdownToken(tokens, `<code>${esc(code)}</code>`));
     if (allowLinks) {
         text = text.replace(/!\[([^\]]*)\]\(([^)\s]+(?:\s+"[^"]*")?)\)/g, (_match, alt, target) => {
+            const titleMatch = /\s+"([^"]*)"$/.exec(String(target || ""));
             const rawSrc = String(target || "").replace(/\s+"[^"]*"$/, "");
             const safeSrc = ceoMarkdownImageSrc(rawSrc);
             if (!safeSrc) return _match;
             const label = esc(String(alt || "image").trim() || "image");
+            const imgTag = `<img class="msg-inline-image" src="${safeSrc}" alt="${label}" title="${label}" loading="lazy">`;
+            const clickHref =
+                titleMatch && /^\/api\/ceo\/media\/original\?/.test(String(titleMatch[1] || "").trim())
+                    ? esc(String(titleMatch[1]).trim())
+                    : "";
+            if (!clickHref) return createMarkdownToken(tokens, imgTag);
             return createMarkdownToken(
                 tokens,
-                `<img class="msg-inline-image" src="${safeSrc}" alt="${label}" title="${label}" loading="lazy">`
+                `<a class="msg-inline-image-link" href="${clickHref}" target="_blank" rel="noreferrer noopener">${imgTag}</a>`
             );
         });
         text = text.replace(/\[([^\]]+)\]\(([^)\s]+(?:\s+"[^"]*")?)\)/g, (_match, label, target) => {
             const href = String(target || "").replace(/\s+"[^"]*"$/, "");
+            if (/^\/api\/ceo\/media\/original\?/.test(href)) {
+                const chipLabel = esc(String(label || "file").trim() || "file");
+                return createMarkdownToken(
+                    tokens,
+                    `<a class="msg-file-chip" href="${esc(href)}" target="_blank" rel="noreferrer noopener">` +
+                        `<svg class="msg-file-chip-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">` +
+                        `<path d="M4.5 1.5h5l2.5 2.5v10.5h-7.5z" fill="none" stroke="currentColor" stroke-width="1.1"/>` +
+                        `<path d="M9.5 1.5V4h2.5" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>` +
+                        `<span>${chipLabel}</span></a>`
+                );
+            }
             return createMarkdownToken(
                 tokens,
                 `<a href="${safeHref(href)}" target="_blank" rel="noreferrer noopener">${renderInlineMarkdown(label, { allowLinks: false })}</a>`

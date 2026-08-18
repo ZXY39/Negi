@@ -212,6 +212,17 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - The frontdoor system prompt (`g3ku/runtime/prompts/ceo_frontdoor.md`) instructs the agent to present images to the user with this markdown syntax instead of plain text paths or bare links; the renderer is the enforcement backstop.
 - This contract complements, and does not replace, the structured attachment lane in section 2.6: user uploads still render as attachment bubbles, while the agent's generated/returned images render inline via markdown.
 
+#### 2.7.1. Media Middle Layer (thumbnail staging + signed original viewer)
+
+Local paths referenced by the agent are usually outside the two allowed serving roots (channel media dirs, desktop, downloads...). Instead of widening the whitelist, `g3ku/runtime/api/ceo_media.py` rewrites assistant content at the snapshot egress so every local reference becomes servable without touching the persisted transcript:
+
+- Hook points: `_build_ceo_snapshot(..., session_id=...)` rewrites assistant `content` for history, and `websocket_ceo.py:_rewrite_turn_snapshot_media` rewrites `assistant_text` inside both `inflight_turn` and `preserved_turn` live payloads. The transcript on disk keeps the agent's original paths.
+- Raster image references (`png/jpg/jpeg/gif/webp/bmp`, existing file): a JPEG thumbnail of at most 100KB is generated with Pillow (size/quality ladder) and staged into `<session upload dir>/inline_media/thumb_<sha1(path|size|mtime)[:12]>_<name>.jpg` — already an allowed root, so the existing uploads/file route serves it. The hash includes size+mtime, so editing the source regenerates the thumbnail; `exists()` makes repeated snapshot builds cheap. The markdown is rewritten to `![描述](<thumb abs path> "<viewer url>")`, using the title slot as the click-through target; the frontend wraps such images in `<a class="msg-inline-image-link" target="_blank">` so clicking opens the original.
+- Non-image local references (plain links `[desc](path)` and image syntax around non-image files) are rewritten to `[desc](<viewer url>)`; the frontend renders any link whose href targets the viewer route as a file chip (`.msg-file-chip`) that opens in a new tab.
+- Original viewer route `GET /api/ceo/media/original?token=...`: the token is a stateless HMAC-signed payload `{path, exp}` (per-process secret, 24h TTL). Paths never appear as query parameters an external caller can choose, preserving the whitelist's purpose (the web app is unauthenticated and may bind 0.0.0.0). Response disposition is MIME-driven: raster images/pdf/text are `inline`; `image/svg+xml`, html and unknown types are forced to `attachment` to block top-level script rendering.
+- Security posture: only raster image bytes are ever staged into a serving root, and originals are only reachable via unguessable signed tokens, so prompt-injected content cannot turn the endpoint into an arbitrary file oracle beyond what the agent could already paste into its reply.
+- URLs and already-servable references pass through unchanged; missing files and failed thumbnail generation leave the original markdown untouched.
+
 ### 3. Context Loader Notices
 
 - Successful CEO/frontdoor `load_tool_context` and `load_skill_context` calls are no longer shown as ordinary `Interaction Flow` steps under the assistant bubble.

@@ -4143,6 +4143,35 @@ textarea {
     background: color-mix(in srgb, var(--bg-app) 82%, black 18%);
 }
 
+.msg-inline-image-link {
+    display: block;
+    width: fit-content;
+    cursor: zoom-in;
+}
+
+.msg-file-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 4px 0;
+    padding: 4px 10px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 82%, black 18%);
+    color: inherit;
+    text-decoration: none;
+    font-size: 12.5px;
+}
+
+.msg-file-chip:hover {
+    border-color: color-mix(in srgb, var(--border-color) 40%, #7aa2f7 60%);
+}
+
+.msg-file-chip-icon {
+    flex: none;
+    opacity: 0.8;
+}
+
 .chat-attachment-image-meta {
     display: flex;
     align-items: center;
