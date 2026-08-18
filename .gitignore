@@ -68,3 +68,6 @@ browser-profile/
 default/
 .worktrees/
 worktrees/
+
+# 生成产物（图片等）不入库
+output/
