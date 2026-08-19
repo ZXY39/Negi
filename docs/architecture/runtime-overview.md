@@ -156,6 +156,7 @@ Maintenance note for `create_async_task` duplicate precheck:
 
 - CEO/frontdoor may still call `create_async_task` more than once in the same visible turn; the runtime no longer enforces a hidden "one turn, one async task" rule.
 - Whether a detached task is actually created is now decided by `MainRuntimeService`, not by prompt wording alone.
+- The gate itself is enforced by the live `create_async_task` resource tool (`tools/create_async_task_cn`), which calls `MainRuntimeService.precheck_async_task_creation(...)` and, just before persisting, `revalidate_async_task_creation_before_create(...)`, and only then `create_task(...)`. There is exactly one `create_async_task` implementation; the former service-side `CreateAsyncTaskTool` class was removed. If the duplicate precheck ever looks bypassed, first confirm creation is still routed through this resource-tool handler and that no second create path has been reintroduced.
 - Before creating a new task, the service compares the candidate request against the current session's unfinished task pool.
 - The deterministic rule layer only blocks exact duplicates, using normalized target text and exact keyword fingerprint matching.
 - If the exact-rule layer allows the request and unfinished tasks exist, an inspection-model review may still return `approve_new`, `reject_duplicate`, or `reject_use_append_notice`.

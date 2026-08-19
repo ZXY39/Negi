@@ -99,6 +99,7 @@ Maintenance note for CEO/frontdoor task lifecycle tools:
   - `create_async_task` for spawning new detached work
   - `task_append_notice` for appending new requirements, constraints, or acceptance expectations to an existing unfinished task in the current session
 - `create_async_task` no longer creates work unconditionally. Before `MainRuntimeService` creates a task, it runs a duplicate precheck against the current session's unfinished task pool.
+- This precheck gate is invoked by the live `create_async_task` resource tool (`tools/create_async_task_cn`), which delegates the decision to `MainRuntimeService.precheck_async_task_creation(...)` / `revalidate_async_task_creation_before_create(...)` before calling `create_task(...)`. There is now a single `create_async_task` implementation: the earlier service-side `CreateAsyncTaskTool` class was removed because it was a second, unregistered implementation that bypassed the gate. If duplicate detached tasks appear, first verify creation is routed through the resource tool's precheck rather than through a re-added parallel create path.
 - `create_async_task` still has a compact contract, but it now also exposes optional structured `file_targets` in addition to `task`, `core_requirement`, `execution_policy`, and the optional final-acceptance fields.
 - That duplicate precheck is intentionally hybrid:
   - a deterministic exact-match layer for normalized target text and exact keyword fingerprints

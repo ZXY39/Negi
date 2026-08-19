@@ -55,6 +55,16 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 - One-shot `at` reminders are now also validated at creation time against the service clock. If the target timestamp is already in the past when `add_job()` runs, the cron service rejects creation immediately with `任务定时已过期，当前时间为<service-local time>，请立即执行或视情况废弃而不要创建过期任务` instead of storing a dormant expired job.
 - If an old cron store uses the previous schema version, the runtime now drops those jobs instead of attempting migration; maintainers should treat this as an intentional semantic reset.
 
+Cron job delivery is claim-before-dispatch, which defines the restart/recovery guarantee:
+
+- Before invoking a job handler, the cron service persists a run claim to `.g3ku/cron/jobs.json` (`state.last_run_at_ms` set, `state.last_status = "running"`). Because `_recompute_next_runs()` never re-arms an `at` job whose `last_run_at_ms` is already set, a one-shot reminder is **at-most-once across restarts**: a crash mid-dispatch cannot re-trigger it.
+- Store writes are atomic (temp-file + replace). A crash mid-write cannot truncate `jobs.json`; a truncated store would be read back as corrupt and reset, which would silently drop claims and re-arm already-dispatched jobs.
+- On startup, any job still marked `running` is a run that was claimed but never finalized (the process restarted between claim and finalize). The service reconciles these into `last_status = "interrupted"`:
+  - one-shot `at` jobs are suppressed — disabled and not re-dispatched — because a duplicate reminder is worse than a missed one, and the original dispatch may already have reached the downstream handler;
+  - recurring jobs simply resume their schedule.
+- The service also keeps an in-flight guard per job id, so an overlapping timer tick and a manual `run_job` for the same job do not produce a second concurrent dispatch.
+- New-maintainer caveat: if a one-shot reminder appears to have "not fired" after a restart, check for an `interrupted` / `running` state in the store first. The at-most-once guarantee means a missed one-shot is the *expected* outcome of a crash between claim and finalize, not a scheduler bug, and it must not be "fixed" by re-arming a duplicate job.
+
 ## Task Terminal Repair Contract
 
 - Task-terminal heartbeat only repairs or produces the session reply for an existing terminal event.
