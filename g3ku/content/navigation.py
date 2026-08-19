@@ -844,6 +844,21 @@ class ContentNavigationService:
             "excerpt": excerpt,
         }
 
+    def _read_text_for_content_display(self, file_path: Path) -> tuple[str, str]:
+        """Read file text for content display without crashing on binary files.
+
+        Images and other non-UTF-8 binaries return a short placeholder plus the
+        guessed mime type instead of raising ``UnicodeDecodeError``. Normal text
+        files are read unchanged and keep the historical ``text/plain`` mime.
+        """
+        mime_type = self._guess_path_mime_type(file_path)
+        if self.is_image_mime_type(mime_type):
+            return f"[图片文件：{file_path.name}]", mime_type
+        try:
+            return file_path.read_text(encoding="utf-8"), "text/plain"
+        except UnicodeDecodeError:
+            return f"[二进制文件：{file_path.name}]", mime_type
+
     def _resolve(
         self,
         *,
@@ -862,7 +877,7 @@ class ContentNavigationService:
                 raise FileNotFoundError(f"path not found: {path}")
             if not file_path.is_file():
                 raise ValueError(f"path is not a file: {path}")
-            text = file_path.read_text(encoding="utf-8")
+            text, mime_type = self._read_text_for_content_display(file_path)
             try:
                 ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
             except ValueError:
@@ -873,7 +888,7 @@ class ContentNavigationService:
                 uri=str(file_path),
                 source_kind="file_path",
                 display_name=file_path.name,
-                mime_type="text/plain",
+                mime_type=mime_type,
                 origin_ref="",
                 invocation_text="",
                 text=text,
@@ -894,7 +909,7 @@ class ContentNavigationService:
                 raise FileNotFoundError(f"path not found: {normalized_ref[5:]}")
             if not file_path.is_file():
                 raise ValueError(f"path is not a file: {normalized_ref[5:]}")
-            text = file_path.read_text(encoding="utf-8")
+            text, mime_type = self._read_text_for_content_display(file_path)
             try:
                 ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
             except ValueError:
@@ -905,7 +920,7 @@ class ContentNavigationService:
                 uri=str(file_path),
                 source_kind="file_path",
                 display_name=file_path.name,
-                mime_type="text/plain",
+                mime_type=mime_type,
                 origin_ref="",
                 invocation_text="",
                 text=text,
@@ -929,7 +944,7 @@ class ContentNavigationService:
         if artifact is None or not getattr(artifact, "path", None):
             raise FileNotFoundError(f"artifact not found: {artifact_id}")
         artifact_path = Path(str(artifact.path))
-        text = artifact_path.read_text(encoding="utf-8") if artifact_path.exists() else ""
+        text = self._read_text_for_content_display(artifact_path)[0] if artifact_path.exists() else ""
         handle = self._build_handle(
             ref=normalized_ref,
             artifact_id=artifact_id,
