@@ -934,6 +934,49 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             payloads.append(payload)
         return payloads
 
+    def _compress_image_bytes_within_limit(self, path: Path) -> tuple[bytes, str] | None:
+        """Best-effort compress an image so its bytes fit under the upload limit.
+
+        Returns ``(bytes, mime_type)`` on success, or ``None`` when the image cannot
+        be brought under ``WEB_CEO_IMAGE_UPLOAD_MAX_BYTES`` (or Pillow is unavailable).
+        """
+        try:
+            import io
+
+            from PIL import Image
+        except Exception:
+            return None
+        try:
+            with Image.open(path) as opened:
+                opened.load()
+                image = opened
+                if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
+                    image = image.convert("RGBA")
+                    background = Image.new("RGB", image.size, (255, 255, 255))
+                    background.paste(image, mask=image.split()[-1])
+                    image = background
+                else:
+                    image = image.convert("RGB")
+                for quality in (85, 70, 55, 40, 30):
+                    buffer = io.BytesIO()
+                    image.save(buffer, format="JPEG", quality=quality, optimize=True)
+                    if buffer.tell() <= WEB_CEO_IMAGE_UPLOAD_MAX_BYTES:
+                        return buffer.getvalue(), "image/jpeg"
+                scaled = image
+                for _ in range(8):
+                    width, height = scaled.size
+                    scaled = scaled.resize(
+                        (max(1, int(width * 0.8)), max(1, int(height * 0.8))),
+                        Image.LANCZOS,
+                    )
+                    buffer = io.BytesIO()
+                    scaled.save(buffer, format="JPEG", quality=60, optimize=True)
+                    if buffer.tell() <= WEB_CEO_IMAGE_UPLOAD_MAX_BYTES:
+                        return buffer.getvalue(), "image/jpeg"
+            return None
+        except Exception:
+            return None
+
     def _content_open_image_overlay_message_blocks(
         self,
         payloads: list[dict[str, Any]] | None,
@@ -957,20 +1000,33 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             path_key = str(path).strip()
             if not path_key or path_key in seen_paths:
                 continue
+            display_name = str(target.get("display_name") or path.name)
             if not path.exists() or not path.is_file():
-                raise FrontdoorCompressionRuntimeError(
-                    code="content_open_image_missing",
-                    message=f"Opened image is missing: {path_key or 'image'}",
-                    recoverable=True,
-                )
+                seen_paths.add(path_key)
+                blocks.append({"type": "text", "text": f"[图片 {display_name} 文件不存在，未能附带]"})
+                continue
             seen_paths.add(path_key)
             mime_type = str(target.get("mime_type") or payload.get("mime_type") or "image/png").strip() or "image/png"
             size_bytes = int(path.stat().st_size or 0)
             if size_bytes > WEB_CEO_IMAGE_UPLOAD_MAX_BYTES:
-                raise self._frontdoor_image_upload_too_large_error(
-                    name=str(target.get("display_name") or path.name),
-                    size_bytes=size_bytes,
+                compressed = self._compress_image_bytes_within_limit(path)
+                if compressed is None:
+                    blocks.append(
+                        {
+                            "type": "text",
+                            "text": f"[图片 {display_name} 超过 5 MiB 上限（{size_bytes} 字节）且无法压缩到上限以内，未能附带]",
+                        }
+                    )
+                    continue
+                compressed_bytes, mime_type = compressed
+                encoded = base64.b64encode(compressed_bytes).decode("ascii")
+                blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
+                    }
                 )
+                continue
             blocks.append(
                 {
                     "type": "image_url",
