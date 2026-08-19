@@ -141,6 +141,7 @@ Maintenance note for split content navigation executors:
 - 这条图片 reopen 契约仍然沿用同一个 `content_open` 工具；不要把它理解成独立的新图片工具。CEO/frontdoor 与 execution / acceptance 节点看到的是同一套 tool result 语义
 - 图片 reopen 是否允许，取决于当前运行时/模型绑定是否启用了 `image_multimodal_enabled`，而不是底层 provider 理论上能不能收图。未启用时，`content_open` 应直接返回 `非多模态模型无法打开图片`
 - 历史上下文里保留的图片 `path` / `ref` 只是 reopen 入口，不等于模型已经再次看到了图片像素。后续轮次若要重新直接查看图片内容，仍需再次调用 `content_open`
+- 图片 reopen 对超限图自动压缩：目标图超过 5 MiB 时，运行时会把它压缩到上限以内（先降 JPEG 质量、不够再降分辨率）再注入，而不是失败；仅当无法压缩到上限以内、或文件缺失时，才跳过该图并附一条文本说明。单张图的问题不会中断整轮、也不会波及后续轮次
 - `content_search` 的结果与 legacy search 结果走同一套 inline 尺寸守卫：良构结果 payload 超过 16000 字符或 260 行时不会整包内联，而是外置为新 artifact，模型只拿到 summary + ref。维护时看到超大搜索结果以 content envelope 形式出现在上下文里，属于预期交付行为，不要误判为 split tool 契约回退
 
 legacy `content(action=...)` 仍然存在兼容包装，但它与 split tools 最终走的是同一底层 content service；不要假设 split tools 会比 legacy wrapper “更宽松”。

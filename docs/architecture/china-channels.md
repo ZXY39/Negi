@@ -121,6 +121,13 @@
 - 渠道消息最终仍进入统一 `RuntimeAgentSession`
 - China 渠道不是单独的 Agent 实现
 
+### 渠道入站图片 / 媒体
+
+- Node 侧把平台图片下载到本地并作为 attachments 归一化进 `inbound_message`；Python `ChinaBridgeTransport` 据此构造请求，生成 provider 可见的 `image_url` 块（`china_bridge_attachments` 元数据记录这些附件）。
+- 渠道入站图片能否真正进入模型，和 Web 上传一样由所选模型绑定的 `image_multimodal_enabled` 门控。此前 frontdoor 只在 `web_ceo_uploads` 存在时才注入图片块，渠道附件被忽略，模型只看到 `[Image: source: 路径]` 文本标记并凭空编造描述；现在只要当前轮内容携带图片块且模型多模态开启就会注入。
+- 与 Web 一致：图片块只注入到达当轮的 live 请求，历史/持久化仍是纯文本，后续轮次不会自动重发图片像素。跨轮再次查看同一张图需要重新 `content_open` 该路径。
+- 排障"渠道图识别错 / 编造内容"：先确认该轮请求是否真的携带 image 块（而不是只看文本标记），再确认模型绑定是否 `image_multimodal_enabled=true`。
+
 ## 7. 出站消息链路
 
 Python 输出到渠道时，主要走：

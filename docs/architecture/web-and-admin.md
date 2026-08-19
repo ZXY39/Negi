@@ -183,6 +183,8 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - Web CEO upload protection now has two layers:
   - `/api/ceo/uploads` rejects any single image larger than `5 MiB`
   - the runtime rechecks image size again before expanding the upload into a provider request, so bypassing the upload endpoint does not bypass the limit
+  - by contrast, a historical image reopened via `content_open` that exceeds `5 MiB` is auto-compressed (JPEG quality reduction, then downscaling) to fit under the limit and still injected, rather than rejected; only when it cannot be compressed under the limit, or the file is missing, is that single image skipped with a text note
+- `/api/content/read` is binary-safe: for image/binary targets it returns a short placeholder plus the real mime type instead of raising a UTF-8 decode 500. Content reading is a text/display surface; it is not the path that carries image pixels to the model (that is the upload-expansion / `content_open` overlay path).
 - Composer/preflight estimation must use the same expansion rule as the real send. If the current model binding would not expand images, the meter/preflight must estimate the downgraded text-only request instead of pretending an image will be sent.
 
 ### 2.6. Attachment Bubble Rendering Contract
