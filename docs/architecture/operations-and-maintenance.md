@@ -147,7 +147,9 @@
 如果问题是“一次性 cron / 定时提醒为什么没有真正创建或没有后续触发”，还要先区分两类情况：
 
 - job 已成功落进 `.g3ku/cron/jobs.json`，但后续没有被消费：再继续查 scheduler / Web 主进程 / session dispatch
-- `cron add` 本身在创建阶段就失败：尤其是 `at` 单次提醒，如果真正执行 `add_job()` 时目标时间已经过去，服务现在会直接拒绝创建并提示 `任务定时已过期，当前时间为<service-local time>，请立即执行或视情况废弃而不要创建过期任务`；这时应优先排查前门/tool 调用延迟、重试、参数错误，而不是先怀疑 scheduler 没触发
+- `cron add` 本身在创建阶段就失败，有两种已知拒绝：
+  - 尤其是 `at` 单次提醒，如果真正执行 `add_job()` 时目标时间已经过去，服务会直接拒绝创建并提示 `任务定时已过期，当前时间为<service-local time>，请立即执行或视情况废弃而不要创建过期任务`；这时应优先排查前门/tool 调用延迟、重试、参数错误，而不是先怀疑 scheduler 没触发
+  - 同一 session 在同一个 `at` 时间点已存在启用的一次性提醒时，重复注册会被拒绝并提示 `同一会话在 <time> 已存在一次性提醒 (id: …)`（按 `(session_key, at_ms)` 结构化匹配，不看 message 文案）。这是有意的防双触发约束而非 bug：如需改期，先 `remove` 旧 job 再重新创建，或改用其他时间；不要为了绕过它去禁用或删改冲突检查
 
 Maintenance note for `task_append_notice` / task message distribution:
 
