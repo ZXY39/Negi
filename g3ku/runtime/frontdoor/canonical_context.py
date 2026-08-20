@@ -70,6 +70,7 @@ def _normalize_round(round_item: Any) -> dict[str, Any]:
         "round_id": _as_str(current.get("round_id")),
         "round_index": _as_int(current.get("round_index")),
         "created_at": _as_str(current.get("created_at")),
+        "text": _as_str(current.get("text")),
         "budget_counted": bool(current.get("budget_counted")),
         "tool_names": [
             _as_str(item)
@@ -114,6 +115,7 @@ def _normalize_stage(stage: Any, *, fallback_index: int) -> dict[str, Any]:
         "stage_id": _as_str(current.get("stage_id") or f"frontdoor-stage-{fallback_index}"),
         "stage_index": _as_int(current.get("stage_index"), fallback_index),
         "stage_goal": _as_str(current.get("stage_goal")),
+        "preamble_text": _as_str(current.get("preamble_text")),
         "representation": representation,
         "status": _as_str(current.get("status") or "completed") or "completed",
         "stage_kind": stage_kind,

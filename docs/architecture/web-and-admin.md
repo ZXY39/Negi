@@ -14,6 +14,14 @@ When debugging behavior, first identify which side owns the state transition:
 - If the issue is display text, interaction wiring, or DOM updates, start in `g3ku/web/frontend/*`.
 - If the issue is data shape, status lifecycle, or permissions, start in API/runtime services.
 
+## Local Startup And Launcher Contract
+
+- `g3ku.cmd` / `g3ku.ps1` / `g3ku.sh` are thin CLI passthrough wrappers around `g3ku_bootstrap.py`; with no arguments they now default to `web` (historically they printed usage and exited, which made right-click / argument-less launches look broken). `start-g3ku.*` remains the explicit double-click entry with its own managed-process handling.
+- For the `web` command the bootstrap parent stays in the terminal as a readiness supervisor: it spawns the server child, polls `http://127.0.0.1:<port>/api/bootstrap/status` (a g3ku-specific endpoint so a foreign process squatting on the port cannot fake readiness), and prints a terminal banner: success with the clickable URL, or failure with the child exit code plus a pointer to `.g3ku/logs/console.log` (where the child's stdout/stderr are appended). A slow-start warning appears after the probe deadline instead of a false failure.
+- `g3ku/web/launcher.py::prepare_web_server_start` self-heals before acquiring the single-instance lock: it terminates leftover web-server processes of this workspace (cmdline `-m g3ku web` or `-c "...run_web_server_entrypoint..."`, scoped by the workspace venv python path or the process working directory, excluding itself). Starting therefore replaces a stale/zombie server of the same workspace; two web servers for one workspace still cannot coexist.
+- The single-instance guard is `.g3ku/start.lock` (byte-range lock; metadata pid/port are written right after locking, so a holder killed between lock and write leaves an empty file and error messages may show `pid=unknown` — fall back to `netstat` on the web port when identifying squatters).
+- The web port for banners and probes is read from `.g3ku/config.json` (`web.port`, default 18790). Non-`web` commands keep the plain passthrough behavior, and direct `python -m g3ku` still prints CLI help.
+
 ## Memory Management Page And Admin Contract
 
 The browser shell now has a top-level `记忆管理` page. This is intentionally a read-only operator surface for the queued long-term memory runtime.
@@ -148,12 +156,15 @@ This is intentional. The composer button no longer means "pause whenever a turn 
   - `seq`
 - `text` is the authoritative accumulated assistant text for the current visible turn at that stream point, not a raw provider token and not a stage-trace snapshot.
 - The browser should treat `ceo.reply.delta` as a cheap text-only lane:
-  - update the current assistant bubble text
+  - render the accumulated text as a transient live block inside the turn's stage rail (`.task-trace-live-text`), not into the final assistant bubble; the bubble only receives the authoritative final text at `ceo.reply.final`
   - update cached `inflight_turn.assistant_text` for reconnect/session restore
+  - never treat the delta as durable transcript history and never rerender the stage trace from it
   - do not rerender stage trace
   - do not treat the delta as durable transcript history
 - Streamed reply rendering should stay in a plain-text path while the turn is still running. The full markdown render path is reserved for `ceo.reply.final`.
 - `ceo.reply.final` remains the authoritative closeout event for the assistant bubble. Final markdown rendering, transcript finalization, canonical-context finalization, and visible-turn completion still happen there.
+- The CEO turn body is rendered as a stage timeline reconstructed from the turn's canonical context / stage state, not as a single overwritten bubble: each stage renders its `preamble_text` (the narration that accompanied its creation) above the stage header, collapsed by default to stage titles with budget/progress meta; expanding a stage reveals per-round blocks carrying `rounds[].text` (the model's mid-turn narration) plus that round's tool cards (clickable for arguments/output, externalized refs resolved through the existing content API). The final output renders below the stage rail and user messages render right-aligned. The historical separate "Interaction Flow" details wrapper is retired for the CEO feed; rounds with no mid-turn text render tool cards only.
+- Because the timeline reads stage/round records, mid-turn narration survives page reloads via the persisted `canonical_context` on assistant transcript entries even though the transcript content itself stores only the final reply text.
 - `ceo.turn.patch` is no longer the high-frequency assistant-text streaming lane. It remains the lower-frequency lane for inflight/preserved snapshot refreshes, state transitions, reconnect bootstrap, and tool/interrupt-related snapshot changes.
 
 ### 2.4. Runtime Error Contract
@@ -260,6 +271,14 @@ Local paths referenced by the agent are usually outside the two allowed serving 
 - The stage progress badge in both the CEO session view and the shared task-trace components must reflect budget-counted rounds rather than raw round history length.
 - Frontend progress rendering should use `tool_rounds_used` as the primary source, and only infer a fallback count from `rounds[].budget_counted=true` when an older payload lacks an explicit count.
 - Do not derive displayed progress from plain `rounds.length`: successful `load_tool_context` / `load_skill_context` rounds may remain in history for auditability while being hidden from visible execution chips, and treating raw round count as budget usage will overstate progress.
+
+### CEO Turn Timeline Rendering Contract
+
+- The CEO session view renders each visible turn as a timeline: user message, then the turn's own stage rail (stage titles collapsed by default, expandable to rounds), then the final assistant output. The older "single bubble plus collapsible Interaction Flow wrapper" layout has been replaced; the wrapper element remains only as the rail container.
+- Live inflight turns must resolve stage data from the per-turn `canonical_context_delta` first, then from the turn's own already-rendered trace summary. They must never fall back to the session-cumulative `canonical_context` on the inflight lane: `_frontdoor_stage_state` accumulates across turns at session level, so a full-context fallback leaks the previous turn's stages into a new live turn. When a patch carries a different `turn_id` than the reused turn, the browser clears that turn's rendered trace summary and live stream text before resolving context.
+- Persisted assistant messages keep `canonical_context` (cumulative) and `canonical_context_delta` (relative to the previous assistant message); refresh and reconnect render the delta so each turn shows only its own stages. `preserved_turn` snapshots may still fall back to full context because follow-up archival can absorb their delta baseline.
+- `rounds[].text` carries the model's mid-turn narration for that tool round; a stage's `preamble_text` carries the narration from the response that created the stage (rendered above the stage title). Both are display-only fields of the stage state; prompt assembly, transcript durability, and archive semantics do not depend on them.
+- `ceo.reply.final` remains the authoritative closeout (final markdown plus final delta/trace when present). If the completed turn produced no stage trace, the final payload omits `canonical_context` and the browser must not backfill an older trace under the new bubble.
 
 The backend contract behind that UI behavior is:
 

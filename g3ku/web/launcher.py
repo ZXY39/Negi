@@ -69,6 +69,77 @@ def _read_lock_metadata(handle) -> dict[str, object]:
     return data if isinstance(data, dict) else {}
 
 
+def _web_runtime_cmdline_matches(cmdline: list[str]) -> bool:
+    args = [str(item) for item in list(cmdline or [])]
+    for index, part in enumerate(args):
+        if part == "-m" and index + 2 < len(args) and args[index + 1] == "g3ku" and args[index + 2] == "web":
+            return True
+        if part == "-c" and index + 1 < len(args) and "run_web_server_entrypoint" in args[index + 1]:
+            return True
+    return False
+
+
+def _terminate_stale_web_runtime_processes() -> list[int]:
+    """Kill leftover `python -m g3ku web` servers of this workspace.
+
+    Closing the launcher console can orphan the runtime child process, which
+    keeps holding the port / start lock and makes every later start fail.
+    """
+    try:
+        import psutil
+    except Exception:
+        return []
+    root = _resolve_project_root()
+    root_key = str(root).replace("/", "\\").casefold() if os.name == "nt" else str(root)
+    venv_python = root / ".venv" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+    venv_key = str(venv_python).replace("/", "\\").casefold() if os.name == "nt" else str(venv_python)
+    own_pid = os.getpid()
+    ancestor_pids: set[int] = set()
+    try:
+        ancestor = psutil.Process(own_pid)
+        while ancestor is not None:
+            ancestor_pids.add(int(ancestor.pid))
+            ancestor = ancestor.parent()
+    except Exception:
+        ancestor_pids.add(own_pid)
+    victims: list[object] = []
+    for proc in psutil.process_iter(attrs=["pid", "exe", "cmdline"]):
+        try:
+            pid = int(proc.info.get("pid") or 0)
+            if not pid or pid in ancestor_pids:
+                continue
+            if not _web_runtime_cmdline_matches(list(proc.info.get("cmdline") or [])):
+                continue
+            exe = str(proc.info.get("exe") or "")
+            exe_key = exe.replace("/", "\\").casefold() if os.name == "nt" else exe
+            same_venv = bool(exe_key) and exe_key == venv_key
+            same_workspace = False
+            try:
+                cwd = str(proc.cwd() or "")
+                cwd_key = cwd.replace("/", "\\").casefold() if os.name == "nt" else cwd
+                same_workspace = bool(cwd_key) and cwd_key == root_key
+            except Exception:
+                same_workspace = False
+            if not same_venv and not same_workspace:
+                continue
+            victims.append(proc)
+        except Exception:
+            continue
+    killed: list[int] = []
+    for proc in victims:
+        try:
+            proc.kill()
+            killed.append(int(proc.pid))
+        except Exception:
+            continue
+    if killed:
+        try:
+            psutil.wait_procs(victims, timeout=3)
+        except Exception:
+            pass
+    return killed
+
+
 def release_web_start_lock() -> None:
     global _START_LOCK_HANDLE
     handle = _START_LOCK_HANDLE
@@ -149,6 +220,12 @@ def prepare_web_server_start(
     auto_unlock_from_env(workspace=root)
     _ensure_frontend_ready()
     resolved_host, resolved_port = _resolve_web_bind(host, port)
+    stale_pids = _terminate_stale_web_runtime_processes()
+    if stale_pids:
+        typer.echo(
+            "[g3ku] terminated stale `g3ku web` runtime process(es): "
+            + ", ".join(f"pid={pid}" for pid in stale_pids)
+        )
     _acquire_web_start_lock(root, port=resolved_port)
 
     callback_url = str(os.getenv(TASK_TERMINAL_CALLBACK_URL_ENV, "") or "").strip()

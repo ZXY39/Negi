@@ -3780,6 +3780,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "stage_id": stage_id,
                     "stage_index": int(raw_stage.get("stage_index") or index),
                     "stage_goal": str(raw_stage.get("stage_goal") or "").strip(),
+                    "preamble_text": str(raw_stage.get("preamble_text") or "").strip(),
                     "tool_round_budget": max(0, int(raw_stage.get("tool_round_budget") or 0)),
                     "tool_rounds_used": max(0, int(raw_stage.get("tool_rounds_used") or 0)),
                     "status": stage_status,
@@ -3880,6 +3881,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         completed_stage_summary: str = "",
         key_refs: list[dict[str, Any]] | None = None,
         final: bool = False,
+        preamble_text: str = "",
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
         normalized_goal = str(stage_goal or "").strip()
@@ -3939,6 +3941,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "mode": "自主执行",
             "status": "active",
             "stage_goal": normalized_goal,
+            "preamble_text": str(preamble_text or "").strip(),
             "completed_stage_summary": "",
             "final_stage": bool(final),
             "key_refs": [],
@@ -3962,6 +3965,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         *,
         tool_call_payloads: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        text: str = "",
     ) -> dict[str, Any]:
         normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
         active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
@@ -3993,6 +3997,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         "round_id": f"{active_stage_id}:round-{round_index}",
                         "round_index": round_index,
                         "created_at": now_iso(),
+                        "text": str(text or "").strip(),
                         "tool_names": [
                             str(item.get("name") or "").strip()
                             for item in visible_calls
@@ -4225,6 +4230,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         ordinary_calls: list[dict[str, Any]] = []
         ordinary_results: list[dict[str, Any]] = []
         source = "cron" if bool(state.get("cron_internal")) else "heartbeat" if bool(state.get("heartbeat_internal")) else "user"
+        cycle_narration_text = str(state.get("analysis_text") or "").strip()
+        stage_created_this_cycle = False
         for payload, result in zip(list(tool_call_payloads or []), list(tool_results or []), strict=False):
             tool_name = str(payload.get("name") or "").strip()
             status = str(result.get("status") or "").strip().lower()
@@ -4243,7 +4250,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                             if isinstance(item, dict)
                         ],
                         final=bool(dict(payload.get("arguments") or {}).get("final")),
+                        preamble_text=cycle_narration_text,
                     )
+                    stage_created_this_cycle = True
                 continue
             ordinary_calls.append(dict(payload))
             ordinary_results.append(dict(result))
@@ -4254,6 +4263,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 self._frontdoor_round_tool_entry(payload=payload, result=result, source=source)
                 for payload, result in zip(list(ordinary_calls or []), list(ordinary_results or []), strict=False)
             ],
+            text="" if stage_created_this_cycle else cycle_narration_text,
         )
         return self._externalize_completed_frontdoor_stage_batches(
             session_key=str(state.get("session_key") or "").strip(),
@@ -4638,6 +4648,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 completed_stage_summary=completed_stage_summary,
                 key_refs=key_refs,
                 final=final,
+                preamble_text=str(state.get("analysis_text") or "").strip(),
             )
             mutable_stage_state.clear()
             mutable_stage_state.update(next_stage_state)

@@ -573,7 +573,7 @@ test("ceo loader tool live events still show notices when serialized output_text
     assert.deepEqual(scheduled.map((item) => item.delay), [10000]);
 });
 
-test("ceo stage trace keeps interaction flow collapsed by default", () => {
+test("ceo stage trace shows stage rail directly with per-stage collapse by default", () => {
     const { renderCeoStageTraceIntoTurn } = loadApp();
     const turn = makeTurn({ text: "" });
 
@@ -584,10 +584,12 @@ test("ceo stage trace keeps interaction flow collapsed by default", () => {
                 stage_goal: "inspect repository",
                 status: "running",
                 tool_round_budget: 3,
+                preamble_text: "好的，我先建个阶段再查",
                 rounds: [
                     {
                         round_id: "round-1",
                         round_index: 1,
+                        text: "先搜一下候选",
                         tools: [
                             {
                                 tool_name: "memory_note",
@@ -603,7 +605,13 @@ test("ceo stage trace keeps interaction flow collapsed by default", () => {
 
     assert.equal(renderedSteps, 1);
     assert.equal(turn.flowEl.hidden, false);
-    assert.equal(turn.flowEl.open, false);
+    assert.equal(turn.flowEl.open, true);
+    const html = String(turn.listEl.innerHTML || "");
+    assert.match(html, /ceo-stage-preamble/);
+    assert.match(html, /好的，我先建个阶段再查/);
+    assert.match(html, /task-trace-round-text/);
+    assert.match(html, /先搜一下候选/);
+    assert.ok(!/<details[^>]*\sopen[>\s]/.test(html), "stages should stay collapsed by default");
 });
 
 test("ceo live tool events do not auto-expand interaction flow", () => {
@@ -638,7 +646,7 @@ test("ceo snapshot patch preserves a manually expanded interaction flow", () => 
         turn_id: "turn-stage-1",
         source: "user",
         status: "running",
-        canonical_context: {
+        canonical_context_delta: {
             stages: [
                 {
                     stage_id: "frontdoor-stage-1",
@@ -821,4 +829,93 @@ test("ceo tool output expansion prefetches full content when output_ref is prese
 
     assert.equal(item.dataset.outputExpanded, "true");
     assert.equal(callCount, 1);
+});
+
+test("inflight patch without delta does not render previous turn stages", () => {
+    const { patchCeoInflightTurn, S } = loadApp();
+    const turn = makeTurn({ text: "" });
+    turn.source = "user";
+    turn.turnId = "turn-old-1";
+    turn.lastExecutionTraceSummary = {
+        stages: [{ stage_id: "frontdoor-stage-old", stage_index: 1, stage_goal: "old stage goal", status: "completed", tool_round_budget: 1, rounds: [] }],
+    };
+    S.activeSessionId = "web:test";
+    S.ceoPendingTurns = [turn];
+
+    const patched = patchCeoInflightTurn({
+        turn_id: "turn-new-1",
+        source: "user",
+        status: "running",
+        canonical_context: {
+            stages: [{ stage_id: "frontdoor-stage-old", stage_goal: "old stage goal", rounds: [] }],
+        },
+    });
+
+    assert.equal(patched, true);
+    assert.equal(String(turn.listEl.innerHTML || "").includes("old stage goal"), false);
+    assert.equal(turn.flowEl.hidden, true);
+});
+
+test("live stream text renders inside the rail and absorbs into round text", () => {
+    const { patchCeoInflightTurn, S } = loadApp();
+    const turn = makeTurn({ text: "" });
+    turn.source = "user";
+    turn.turnId = "turn-live-1";
+    S.activeSessionId = "web:test";
+    S.ceoPendingTurns = [turn];
+
+    patchCeoInflightTurn({
+        turn_id: "turn-live-1",
+        source: "user",
+        status: "running",
+        assistant_text: "正在搜",
+        canonical_context_delta: {
+            stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "search", status: "running", tool_round_budget: 3, rounds: [] }],
+        },
+    });
+    // stub 无法表达 `.task-trace-step` 细节体：live 文本走气泡 fallback 展示
+    assert.equal(String(turn.textEl.textContent || ""), "正在搜");
+
+    patchCeoInflightTurn({
+        turn_id: "turn-live-1",
+        source: "user",
+        status: "running",
+        assistant_text: "正在搜，补充中",
+        canonical_context_delta: {
+            stages: [{
+                stage_id: "frontdoor-stage-1",
+                stage_goal: "search",
+                status: "running",
+                tool_round_budget: 3,
+                rounds: [{ round_id: "round-1", round_index: 1, text: "正在搜", tools: [{ tool_name: "exec", status: "success" }] }],
+            }],
+        },
+    });
+    // round.text 吸收掉已进轨的部分，residual 只剩新内容
+    assert.equal(String(turn.textEl.textContent || ""), "，补充中");
+});
+
+test("paused patch clears the live stream text", () => {
+    const { patchCeoInflightTurn, S } = loadApp();
+    const turn = makeTurn({ text: "" });
+    turn.source = "user";
+    turn.turnId = "turn-pause-1";
+    S.activeSessionId = "web:test";
+    S.ceoPendingTurns = [turn];
+
+    patchCeoInflightTurn({
+        turn_id: "turn-pause-1",
+        source: "user",
+        status: "running",
+        assistant_text: "streaming",
+    });
+    assert.equal(String(turn.liveStreamText || ""), "streaming");
+
+    patchCeoInflightTurn({
+        turn_id: "turn-pause-1",
+        source: "user",
+        status: "paused",
+        assistant_text: "",
+    });
+    assert.equal(String(turn.liveStreamText || ""), "");
 });

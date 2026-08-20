@@ -7,6 +7,8 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+import urllib.request
 from pathlib import Path
 
 
@@ -403,6 +405,37 @@ def _open_runtime_console_log_stream() -> object | None:
         return None
 
 
+def _web_bind_port() -> int:
+    web_cfg = _load_bootstrap_config().get("web")
+    try:
+        return int((web_cfg or {}).get("port") or 18790)
+    except (TypeError, ValueError):
+        return 18790
+
+
+def _probe_web_ready(port: int) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/bootstrap/status", timeout=2) as resp:
+            return int(getattr(resp, "status", 200) or 200) < 400
+    except Exception:
+        return False
+
+
+def _print_web_ready_banner(port: int) -> None:
+    url = f"http://127.0.0.1:{port}/"
+    if os.environ.get("WT_SESSION"):
+        url = f"\x1b]8;;{url}\x07{url}\x1b]8;;\x07"
+    print(f"[g3ku] web UI started successfully: {url} (click to open)", flush=True)
+
+
+def _print_web_start_failure(returncode: int) -> None:
+    print(
+        f"[g3ku] web UI failed to start (exit code {returncode}); "
+        f"see {RUNTIME_CONSOLE_LOG_FILE}",
+        flush=True,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     os.chdir(PROJECT_ROOT)
     _ensure_venv()
@@ -411,6 +444,9 @@ def main(argv: list[str] | None = None) -> int:
     for message in _china_bridge_preflight_messages():
         print(message)
     args = list(argv if argv is not None else sys.argv[1:])
+    if not args:
+        args = ["web"]
+        print("[g3ku] no command given, starting web UI (use `g3ku.cmd <command>` for others)")
     _configure_runtime_log_loguru_sink()
     console_log_stream: object | None = None
     process_env: dict[str, str] | None = None
@@ -422,6 +458,35 @@ def main(argv: list[str] | None = None) -> int:
             process_env = dict(os.environ)
             process_env["PYTHONUNBUFFERED"] = "1"
     try:
+        if is_web_command:
+            child = subprocess.Popen(
+                [str(VENV_PYTHON), "-m", "g3ku", *args],
+                cwd=str(PROJECT_ROOT),
+                stdout=console_log_stream,
+                stderr=subprocess.STDOUT if console_log_stream is not None else None,
+                env=process_env,
+            )
+            port = _web_bind_port()
+            deadline = time.monotonic() + 180
+            warned_slow = False
+            ready = False
+            while child.poll() is None:
+                if _probe_web_ready(port):
+                    ready = True
+                    break
+                if not warned_slow and time.monotonic() >= deadline:
+                    warned_slow = True
+                    print(
+                        f"[g3ku] web UI is not responding on port {port} yet; "
+                        f"check {RUNTIME_CONSOLE_LOG_FILE}",
+                        flush=True,
+                    )
+                time.sleep(1)
+            if not ready:
+                _print_web_start_failure(int(child.returncode or 1))
+                return int(child.returncode or 1)
+            _print_web_ready_banner(port)
+            return int(child.wait() or 0)
         completed = subprocess.run(
             [str(VENV_PYTHON), "-m", "g3ku", *args],
             cwd=str(PROJECT_ROOT),

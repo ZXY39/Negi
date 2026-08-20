@@ -226,7 +226,8 @@ test("queueCeoReplyDelta updates assistant text without markdown rendering and c
 
     flushFrames();
 
-    assert.equal(String(turn.textEl.textContent || ""), "OK");
+    assert.equal(String(turn.liveStreamText || ""), "OK");
+    assert.equal(turn.flowEl.hidden, false);
     assert.equal(markdownCalls.length, 0);
     assert.equal(getCeoSessionSnapshotCache("web:shared")?.inflight_turn?.assistant_text, "OK");
 });

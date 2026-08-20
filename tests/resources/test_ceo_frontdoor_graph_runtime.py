@@ -483,6 +483,7 @@ async def test_graph_execute_tools_executes_runtime_submit_next_stage_and_persis
             "stage_id": "frontdoor-stage-1",
             "stage_index": 1,
             "stage_goal": "Create a stage before using tools",
+            "preamble_text": "",
             "tool_round_budget": 5,
             "tool_rounds_used": 0,
             "status": "active",

@@ -58,6 +58,8 @@ def _normalize_round(round_item: Any) -> dict[str, Any]:
     return {
         "round_id": str(current.get("round_id") or "").strip(),
         "round_index": int(current.get("round_index") or 0),
+        "created_at": str(current.get("created_at") or "").strip(),
+        "text": str(current.get("text") or "").strip(),
         "budget_counted": bool(current.get("budget_counted")),
         "tool_names": [
             str(item or "").strip()
@@ -89,6 +91,7 @@ def _normalize_stage(stage: Any) -> dict[str, Any]:
         "stage_index": int(current.get("stage_index") or 0),
         "stage_id": str(current.get("stage_id") or "").strip(),
         "stage_goal": str(current.get("stage_goal") or "").strip(),
+        "preamble_text": str(current.get("preamble_text") or "").strip(),
         "status": str(current.get("status") or "").strip(),
         "stage_kind": str(current.get("stage_kind") or "normal").strip() or "normal",
         "mode": str(current.get("mode") or "").strip(),

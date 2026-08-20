@@ -212,7 +212,7 @@ test("manual pause ack replaces pending label with paused label and keeps tool f
     assert.equal(turn.textEl.textContent, PAUSED_LABEL);
     assert.equal(turn.textEl.classList.contains("pending"), false);
     assert.equal(turn.flowEl.hidden, false);
-    assert.equal(turn.flowEl.open, false);
+    assert.equal(turn.flowEl.open, true);
     assert.equal(turn.finalized, true);
     assert.equal(S.ceoPendingTurns.length, 0);
 });
@@ -261,7 +261,7 @@ test("approval pause keeps the current pending turn instead of finalizing a paus
     assert.equal(turn.turnId, "turn-approval-1");
     assert.equal(turn.textEl.textContent, PAUSED_LABEL);
     assert.equal(turn.flowEl.hidden, false);
-    assert.equal(turn.flowEl.open, false);
+    assert.equal(turn.flowEl.open, true);
     assert.match(turn.metaEl.textContent, /\u7b49\u5f85\u5ba1\u6279/);
     assert.equal(S.ceoPendingTurns.length, 1);
 });
@@ -397,7 +397,7 @@ test("running patch without turn id reuses the existing approval turn instead of
     assert.equal(S.ceoPendingTurns.length, 1);
     assert.equal(S.ceoPendingTurns[0], turn);
     assert.equal(turn.source, "approval");
-    assert.match(turn.textEl.innerHTML, /still working/);
+    assert.equal(String(turn.liveStreamText || ""), "still working");
 });
 
 test("persisted paused assistant history renders as a paused bubble", () => {
@@ -421,7 +421,7 @@ test("persisted paused assistant history renders as a paused bubble", () => {
     assert.equal(turn.finalized, true);
     assert.equal(turn.renderMode, "stage");
     assert.equal(turn.flowEl.hidden, false);
-    assert.equal(turn.flowEl.open, false);
+    assert.equal(turn.flowEl.open, true);
     assert.equal(S.ceoPendingTurns.length, 0);
 });
 
@@ -458,7 +458,7 @@ test("discard and final match the target pending turn by turn_id before source",
         assistant_text: "Older turn is still active",
     });
 
-    assert.match(older.textEl.innerHTML, /Older turn is still active/);
+    assert.equal(String(older.liveStreamText || ""), "Older turn is still active");
     assert.equal(newer.textEl.innerHTML, PROCESSING_LABEL);
 
     finalizeCeoTurn("done", { source: "user", turn_id: "turn-old" });
@@ -549,6 +549,9 @@ test("stage trace stays visible when a later patch only carries assistant text",
         source: "user",
         status: "running",
         canonical_context: {
+            stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo" }],
+        },
+        canonical_context_delta: {
             stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo" }],
         },
     });

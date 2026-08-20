@@ -2475,9 +2475,10 @@ class RuntimeAgentSession:
 
         if kind == "analysis":
             text = str(content or "").strip()
-            if text and self._state.latest_message != text:
-                self._state.latest_message = text
-                self._assistant_stream_pending_text = ""
+            current = str(self._state.latest_message or "")
+            if text and not current.endswith(text):
+                self._state.latest_message = current + text if current else text
+                self._assistant_stream_pending_text = str(self._state.latest_message)
                 self._assistant_stream_last_emitted_text = ""
                 await self._emit_state_snapshot()
 
