@@ -206,7 +206,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, resolveFinalCeoTraceContext, normalizeCeoSnapshotCanonicalContext, renderPersistedCeoAssistantTurn, ceoLiveStreamResidual, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, finalizeCeoTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, resolveFinalCeoTraceContext, normalizeCeoSnapshotCanonicalContext, renderPersistedCeoAssistantTurn, ceoLiveStreamResidual, S, U };`,
         context
     );
     context.__testExports.U.ceoCompressionToast = new StubHTMLElement();
@@ -1054,4 +1054,46 @@ test("live stream residual removes the earliest occurrence in rail order", () =>
     };
     // 只删最早出现的轨道副本，保留 echo 出来的新内容
     assert.equal(ceoLiveStreamResidual(turn, summary), "；正在跑；好的，重复了一遍");
+});
+
+test("finalize keeps the current turn's live stage trace when the payload omits canonical data", () => {
+    const { patchCeoInflightTurn, finalizeCeoTurn, S } = loadApp();
+    const turn = makeTurn({ text: "" });
+    turn.source = "user";
+    turn.turnId = "turn-final-live";
+    S.activeSessionId = "web:test";
+    S.ceoPendingTurns = [turn];
+
+    // run 阶段：live inflight 渲染出轨道
+    patchCeoInflightTurn({
+        turn_id: "turn-final-live",
+        source: "user",
+        status: "running",
+        assistant_text: "正在查找",
+        canonical_context_delta: {
+            stages: [{
+                stage_id: "frontdoor-stage-live",
+                stage_goal: "search live",
+                status: "running",
+                tool_round_budget: 3,
+                rounds: [],
+            }],
+        },
+    });
+
+    // 最终答复：本轮没有新增 stage，后端把 canonical 字段连 delta 一起省略，
+    // final 事件只带 text/source/turn_id + user_messages（走 user-messages 重建分支）
+    finalizeCeoTurn("查完了", {
+        source: "user",
+        turn_id: "turn-final-live",
+        user_messages: [{ content: "帮我查一下" }],
+    });
+
+    // 后备缓存必须保留本轮 live 轨道：renderCeoSnapshot 从这里重建 feed，
+    // 缺失时阶段会消失、仅刷新才恢复
+    const cacheMessages = (S.ceoSnapshotCache && S.ceoSnapshotCache["web:test"]?.messages) || [];
+    const lastAssistant = [...cacheMessages].reverse().find((m) => m?.role === "assistant");
+    assert.ok(lastAssistant, "cache assistant message written");
+    assert.ok(lastAssistant.canonical_context_delta, "cache delta falls back to the turn's live trace");
+    assert.match(JSON.stringify(lastAssistant.canonical_context_delta), /frontdoor-stage-live/);
 });

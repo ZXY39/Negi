@@ -5719,9 +5719,15 @@ function finalizeCeoTurn(text, meta = {}) {
     const normalizedSource = normalizeCeoTurnSource(meta?.source || "user");
     const normalizedTurnId = normalizeCeoTurnId(meta?.turn_id || "");
     const finalCanonicalContext = normalizeCeoSnapshotCanonicalContext(meta?.canonical_context || null);
-    const finalTraceContext = resolveFinalCeoTraceContext(meta || {});
     const finalUserMessages = normalizeCeoSnapshotUserMessages(meta?.user_messages, meta?.user_message);
     const turn = pullActiveCeoTurn(normalizedSource, normalizedTurnId);
+    // final 事件带的 canonical 数据优先（后端在 delta 为空时会连 canonical_context 一起省略）；
+    // 缺失时回退到本轮在 run 中自己渲染出的轨道（lastExecutionTraceSummary），
+    // 避免「阶段在最终答复后消失、刷新才回来」。该兜底是当前轮的 per-turn delta，
+    // 不会回填旧轮次全量 trace；心跳轮没有 live 轨道（null）不受影响。
+    const finalTraceContext = resolveFinalCeoTraceContext(meta || {})
+        || turn?.lastExecutionTraceSummary
+        || null;
     if (finalUserMessages.length) {
         const updatedEntry = patchCeoSessionSnapshotCache(sessionId, (entry) => {
             const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
