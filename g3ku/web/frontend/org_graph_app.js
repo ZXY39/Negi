@@ -4070,15 +4070,25 @@ function renderCeoLiveStreamTextIntoTurn(turn) {
 function ceoLiveStreamResidual(turn, summary) {
     let residual = String(turn?.liveStreamText || "");
     if (!residual.trim()) return "";
+    // 轨道上已渲染的文本（preamble + 各 round.text）从 live 流里按
+    // 出现位置删掉，剩下的才是真正还没进轨的尾巴。子串级删除对「间隙旁白、
+    // 建阶段 preamble、空白符差异」都不再断链；按轨道顺序找最早出现位置，
+    // 避免 echo 场景删错新的那一段。
+    const absorb = (text) => {
+        const normalized = String(text || "").trim();
+        if (!normalized) return;
+        const index = residual.indexOf(normalized);
+        if (index >= 0) {
+            residual = residual.slice(0, index) + residual.slice(index + normalized.length);
+        }
+    };
     for (const stage of summary?.stages || []) {
+        absorb(stage?.preamble_text);
         for (const round of stage?.rounds || []) {
-            const roundText = String(round?.text || "").trim();
-            if (roundText && residual.startsWith(roundText)) {
-                residual = residual.slice(roundText.length);
-            }
+            absorb(round?.text);
         }
     }
-    return residual;
+    return residual.trim();
 }
 
 function renderCeoAssistantTextIntoTurn(turn, text = "", { status = "" } = {}) {

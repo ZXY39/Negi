@@ -206,7 +206,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, resolveFinalCeoTraceContext, normalizeCeoSnapshotCanonicalContext, renderPersistedCeoAssistantTurn, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, resolveFinalCeoTraceContext, normalizeCeoSnapshotCanonicalContext, renderPersistedCeoAssistantTurn, ceoLiveStreamResidual, S, U };`,
         context
     );
     context.__testExports.U.ceoCompressionToast = new StubHTMLElement();
@@ -996,4 +996,62 @@ test("persisted assistant turn with empty delta renders plain text without re-sh
     assert.match(U.ceoFeed._children[0].className, /message system/);
     assert.match(U.ceoFeed._children[0].innerHTML, /干净的最后报告/);
     assert.doesNotMatch(U.ceoFeed._children[0].innerHTML, /old stage/);
+});
+
+test("live stream residual absorbs round texts across gap narration", () => {
+    const { ceoLiveStreamResidual } = loadApp();
+    const turn = { liveStreamText: "第一轮旁白思考第二轮旁白正在跑" };
+    const summary = {
+        stages: [{
+            stage_id: "frontdoor-stage-1",
+            rounds: [
+                { round_id: "round-1", text: "第一轮旁白" },
+                { round_id: "round-2", text: "第二轮旁白" },
+            ],
+        }],
+    };
+    // 中间夹着未上轨的间隙文本时，前缀链会断：旧逻辑会把第二轮旁白一起残留（重复+累加）
+    assert.equal(ceoLiveStreamResidual(turn, summary), "思考正在跑");
+});
+
+test("live stream residual absorbs stage preamble text", () => {
+    const { ceoLiveStreamResidual } = loadApp();
+    const turn = { liveStreamText: "建阶段旁白第1轮正在跑" };
+    const summary = {
+        stages: [{
+            stage_id: "frontdoor-stage-1",
+            preamble_text: "建阶段旁白",
+            rounds: [{ round_id: "round-1", text: "第1轮" }],
+        }],
+    };
+    assert.equal(ceoLiveStreamResidual(turn, summary), "正在跑");
+});
+
+test("live stream residual absorbs whitespace-differing round texts", () => {
+    const { ceoLiveStreamResidual } = loadApp();
+    const turn = { liveStreamText: "旁白1\n旁白2\ntail" };
+    // round.text 存储时被 trim 过，live 流里带换行/空白，前缀链会在这里断开
+    const summary = {
+        stages: [{
+            stage_id: "frontdoor-stage-1",
+            rounds: [
+                { round_id: "round-1", text: "旁白1" },
+                { round_id: "round-2", text: "旁白2" },
+            ],
+        }],
+    };
+    assert.equal(ceoLiveStreamResidual(turn, summary), "tail");
+});
+
+test("live stream residual removes the earliest occurrence in rail order", () => {
+    const { ceoLiveStreamResidual } = loadApp();
+    const turn = { liveStreamText: "好的，我去查；正在跑；好的，重复了一遍" };
+    const summary = {
+        stages: [{
+            stage_id: "frontdoor-stage-1",
+            rounds: [{ round_id: "round-1", text: "好的，我去查" }],
+        }],
+    };
+    // 只删最早出现的轨道副本，保留 echo 出来的新内容
+    assert.equal(ceoLiveStreamResidual(turn, summary), "；正在跑；好的，重复了一遍");
 });
