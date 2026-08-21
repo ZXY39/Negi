@@ -14,10 +14,13 @@ from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
+from g3ku.runtime.frontdoor.canonical_context import canonical_context_delta
 from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
 from g3ku.runtime.web_ceo_sessions import (
     _extract_task_ids_from_text,
     clear_inflight_turn_snapshot,
+    final_reply_canonical_merge,
+    latest_assistant_message_canonical_context,
     normalize_ceo_metadata,
     update_ceo_session_after_heartbeat,
 )
@@ -38,6 +41,7 @@ HeartbeatReplyNotifier = Callable[[str, str], Awaitable[None] | None]
 _TASK_TERMINAL_OUTPUT_INLINE_LIMIT = 4000
 _TASK_TERMINAL_REPAIR_ATTEMPT_LIMIT = 5
 _TASK_TERMINAL_INVALID_OUTPUT_LABEL = "<empty>"
+_HANDLED_TERMINAL_DEDUPE_KEYS_MAX = 16
 
 
 @lru_cache(maxsize=1)
@@ -719,6 +723,73 @@ class WebSessionHeartbeatService:
             if str(event.reason or "").strip().lower() == "task_terminal"
         ]
 
+    @staticmethod
+    def _normalize_handled_terminal_keys(values: Any) -> list[str]:
+        normalized: list[str] = []
+        for raw in list(values or []):
+            if not isinstance(raw, str):
+                continue
+            dedupe_key = raw.strip()
+            if not dedupe_key or dedupe_key in normalized:
+                continue
+            normalized.append(dedupe_key)
+            if len(normalized) >= _HANDLED_TERMINAL_DEDUPE_KEYS_MAX:
+                break
+        return normalized
+
+    @classmethod
+    def _handled_terminal_keys_from_session(cls, session: Any) -> list[str]:
+        metadata = session.metadata if isinstance(session, dict) else getattr(session, "metadata", None)
+        payload = dict(metadata) if isinstance(metadata, dict) else {}
+        return cls._normalize_handled_terminal_keys(payload.get("handled_terminal_dedupe_keys"))
+
+    @classmethod
+    def _split_handled_terminal_events(
+        cls,
+        key: str,
+        events: list[SessionHeartbeatEvent],
+        session: Any,
+    ) -> tuple[list[SessionHeartbeatEvent], list[SessionHeartbeatEvent]]:
+        handled = set(cls._handled_terminal_keys_from_session(session))
+        if not handled:
+            return list(events or []), []
+        remaining: list[SessionHeartbeatEvent] = []
+        handled_events: list[SessionHeartbeatEvent] = []
+        for event in list(events or []):
+            is_terminal = str(event.reason or "").strip().lower() == "task_terminal"
+            dedupe_key = str(getattr(event, "dedupe_key", "") or "").strip()
+            if is_terminal and dedupe_key and dedupe_key in handled:
+                handled_events.append(event)
+            else:
+                remaining.append(event)
+        return remaining, handled_events
+
+    def _consume_handled_terminal_events(self, key: str, events: list[SessionHeartbeatEvent]) -> None:
+        if not events:
+            return
+        event_ids = {event.event_id for event in events}
+        popped = self._events.pop_many(key, event_ids=event_ids)
+        self._requeue_running_background_events(key, popped if popped else events)
+        self._ack_task_terminal_events(popped if popped else events)
+
+    def _merge_handled_terminal_keys(self, session: Any, dedupe_keys: list[str]) -> bool:
+        new_keys = [
+            key
+            for key in self._normalize_handled_terminal_keys(dedupe_keys)
+            if key
+        ]
+        if not new_keys:
+            return False
+        metadata = dict(getattr(session, "metadata", None) or {})
+        merged = self._normalize_handled_terminal_keys(
+            [*self._handled_terminal_keys_from_session(session), *new_keys]
+        )
+        if metadata.get("handled_terminal_dedupe_keys") == merged:
+            return False
+        metadata["handled_terminal_dedupe_keys"] = merged
+        session.metadata = metadata
+        return True
+
     def _event_current_task(self, event: SessionHeartbeatEvent):
         payload = dict(event.payload or {})
         task_id = str(payload.get("task_id") or "").strip()
@@ -899,6 +970,7 @@ class WebSessionHeartbeatService:
         reason: str,
         task_results: list[dict[str, str]] | None = None,
         turn_id: str = "",
+        handled_terminal_dedupe_keys: list[str] | None = None,
     ) -> bool:
         if not self._session_exists(session_id):
             return False
@@ -973,6 +1045,8 @@ class WebSessionHeartbeatService:
             if hasattr(session, "updated_at"):
                 session.updated_at = datetime.now()
             reply_already_persisted = True
+        if handled_terminal_dedupe_keys:
+            self._merge_handled_terminal_keys(session, handled_terminal_dedupe_keys)
         self._session_manager.save(session)
         return reply_already_persisted
 
@@ -1073,6 +1147,9 @@ class WebSessionHeartbeatService:
             discarded_events = self._events.pop_many(key, event_ids=discarded_task_stall_ids)
             self._ack_task_stall_events(discarded_events)
             events = [event for event in events if event.event_id not in discarded_task_stall_ids]
+        events, handled_terminal_events = self._split_handled_terminal_events(key, events, persisted_session)
+        if handled_terminal_events:
+            self._consume_handled_terminal_events(key, handled_terminal_events)
         if not events:
             return self._events.next_delay(key)
         reasons = sorted({str(event.reason or "").strip().lower() or "heartbeat" for event in events})
@@ -1211,6 +1288,14 @@ class WebSessionHeartbeatService:
             if preserved_turn_id:
                 discard_payload["turn_id"] = preserved_turn_id
             self._publish_ceo(key, "ceo.turn.discard", discard_payload)
+        previous_canonical_context = latest_assistant_message_canonical_context(
+            persisted_session,
+            exclude_turn_id=heartbeat_turn_id,
+        )
+        handled_terminal_keys = [
+            str(getattr(event, "dedupe_key", "") or "").strip()
+            for event in self._task_terminal_events(events)
+        ]
         reply_already_persisted = self._persist_assistant_reply(
             key,
             text=output,
@@ -1218,13 +1303,18 @@ class WebSessionHeartbeatService:
             reason=heartbeat_reason,
             task_results=task_results,
             turn_id=heartbeat_turn_id,
+            handled_terminal_dedupe_keys=[
+                dedupe_key for dedupe_key in handled_terminal_keys if dedupe_key
+            ],
         )
         if not reply_already_persisted:
-            self._publish_ceo(
+            final_payload = self._build_heartbeat_final_payload(
                 key,
-                "ceo.reply.final",
-                {"text": output, "source": "heartbeat", "turn_id": heartbeat_turn_id},
+                text=output,
+                turn_id=heartbeat_turn_id,
+                previous_canonical_context=previous_canonical_context,
             )
+            self._publish_ceo(key, "ceo.reply.final", final_payload)
         await self._notify_reply(key, output)
         event_ids = {event.event_id for event in events}
         popped = self._events.pop_many(key, event_ids=event_ids)
@@ -1245,3 +1335,25 @@ class WebSessionHeartbeatService:
                 await maybe
         except Exception:
             logger.debug("heartbeat reply notify skipped for {}", session_id)
+
+    def _build_heartbeat_final_payload(
+        self,
+        key: str,
+        *,
+        text: str,
+        turn_id: str,
+        previous_canonical_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        final_payload: dict[str, Any] = {
+            "text": str(text or "").strip(),
+            "source": "heartbeat",
+            "turn_id": str(turn_id or "").strip(),
+        }
+        current_canonical_context = latest_assistant_message_canonical_context(
+            self._session_manager.get_or_create(key)
+        )
+        if not current_canonical_context:
+            return final_payload
+        canonical_delta = canonical_context_delta(previous_canonical_context, current_canonical_context)
+        final_payload.update(final_reply_canonical_merge(current_canonical_context, canonical_delta))
+        return final_payload

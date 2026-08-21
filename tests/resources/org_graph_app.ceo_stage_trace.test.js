@@ -206,7 +206,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, resolveFinalCeoTraceContext, normalizeCeoSnapshotCanonicalContext, renderPersistedCeoAssistantTurn, S, U };`,
         context
     );
     context.__testExports.U.ceoCompressionToast = new StubHTMLElement();
@@ -918,4 +918,82 @@ test("paused patch clears the live stream text", () => {
         assistant_text: "",
     });
     assert.equal(String(turn.liveStreamText || ""), "");
+});
+
+test("final trace resolver does not fall back to full context when delta is empty", () => {
+    const { resolveFinalCeoTraceContext } = loadApp();
+    const full = {
+        stages: [
+            {
+                stage_id: "frontdoor-stage-old",
+                stage_goal: "old stage",
+                status: "completed",
+                system_generated: false,
+                rounds: [],
+            },
+        ],
+    };
+    const resolved = resolveFinalCeoTraceContext({
+        canonical_context_delta: {},
+        canonical_context: full,
+    });
+    assert.equal(resolved, null);
+});
+
+test("final trace resolver uses full context when delta is absent", () => {
+    const { resolveFinalCeoTraceContext } = loadApp();
+    const full = {
+        stages: [
+            {
+                stage_id: "frontdoor-stage-only",
+                stage_goal: "only stage",
+                status: "completed",
+                system_generated: false,
+                rounds: [],
+            },
+        ],
+    };
+    const resolved = resolveFinalCeoTraceContext({ canonical_context: full });
+    assert.deepEqual(resolved.stages.map((stage) => stage.stage_id), ["frontdoor-stage-only"]);
+});
+
+test("final trace resolver returns null when payload has no canonical data", () => {
+    const { resolveFinalCeoTraceContext } = loadApp();
+    assert.equal(resolveFinalCeoTraceContext({ text: "hello" }), null);
+    assert.equal(resolveFinalCeoTraceContext({}), null);
+});
+
+test("persisted assistant turn with empty delta renders plain text without re-showing old stages", () => {
+    const { renderPersistedCeoAssistantTurn, S, U } = loadApp();
+    S.activeSessionId = "web:final-empty-delta";
+    S.ceoPendingTurns = [];
+    U.ceoFeed = new StubHTMLElement();
+    renderPersistedCeoAssistantTurn({
+        role: "assistant",
+        content: "干净的最后报告",
+        canonical_context_delta: {},
+        canonical_context: {
+            stages: [
+                {
+                    stage_id: "frontdoor-stage-old",
+                    stage_goal: "old stage 1",
+                    status: "completed",
+                    system_generated: false,
+                    rounds: [],
+                },
+                {
+                    stage_id: "frontdoor-stage-old-2",
+                    stage_goal: "old stage 2",
+                    status: "completed",
+                    system_generated: false,
+                    rounds: [],
+                },
+            ],
+        },
+    });
+    assert.equal(S.ceoPendingTurns.length, 0);
+    assert.equal(U.ceoFeed._children.length, 1);
+    assert.match(U.ceoFeed._children[0].className, /message system/);
+    assert.match(U.ceoFeed._children[0].innerHTML, /干净的最后报告/);
+    assert.doesNotMatch(U.ceoFeed._children[0].innerHTML, /old stage/);
 });

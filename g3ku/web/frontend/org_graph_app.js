@@ -1841,6 +1841,16 @@ function resolvePreferredCeoTraceContext(deltaContext = null, fullContext = null
         || null;
 }
 
+function resolveFinalCeoTraceContext(meta = {}) {
+    if (meta?.canonical_context_delta) {
+        return normalizeCeoSnapshotCanonicalContext(meta.canonical_context_delta) || null;
+    }
+    if (meta?.canonical_context) {
+        return normalizeCeoSnapshotCanonicalContext(meta.canonical_context) || null;
+    }
+    return null;
+}
+
 function normalizeCeoSnapshotToolEvents() {
     return [];
 }
@@ -4509,11 +4519,10 @@ restoreCeoInflightTurn = function approvalAwareRestoreCeoInflightTurn(
 };
 
 function renderPersistedCeoAssistantTurn(item = {}) {
-    const canonicalContext = resolvePreferredCeoTraceContext(
-        item?.canonical_context_delta || null,
-        item?.canonical_context || null,
-        null,
-    );
+    const hasDelta = item?.canonical_context_delta !== null && item?.canonical_context_delta !== undefined;
+    const canonicalContext = hasDelta
+        ? normalizeCeoSnapshotCanonicalContext(item.canonical_context_delta)
+        : (normalizeCeoSnapshotCanonicalContext(item.canonical_context) || null);
     const content = String(item?.content || "");
     const status = String(item?.status || "").trim().toLowerCase();
     if (status !== "paused" && !canonicalContext) {
@@ -5700,11 +5709,7 @@ function finalizeCeoTurn(text, meta = {}) {
     const normalizedSource = normalizeCeoTurnSource(meta?.source || "user");
     const normalizedTurnId = normalizeCeoTurnId(meta?.turn_id || "");
     const finalCanonicalContext = normalizeCeoSnapshotCanonicalContext(meta?.canonical_context || null);
-    const finalCanonicalContextDelta = resolvePreferredCeoTraceContext(
-        meta?.canonical_context_delta || null,
-        meta?.canonical_context || null,
-        null,
-    );
+    const finalTraceContext = resolveFinalCeoTraceContext(meta || {});
     const finalUserMessages = normalizeCeoSnapshotUserMessages(meta?.user_messages, meta?.user_message);
     const turn = pullActiveCeoTurn(normalizedSource, normalizedTurnId);
     if (finalUserMessages.length) {
@@ -5716,21 +5721,16 @@ function finalizeCeoTurn(text, meta = {}) {
                 || (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId ? false : true)
                 || !String(inflightTurn?.source || "").trim()
                 || ceoTurnSourceMatches(normalizedSource, inflightSource);
-            const fallbackCanonicalContext = resolvePreferredCeoCanonicalContext(
-                turn?.lastExecutionTraceSummary || null,
-                inflightTurn?.canonical_context || null
-            );
-            const persistedCanonicalContext = resolvePreferredCeoCanonicalContext(
-                finalCanonicalContext,
-                fallbackCanonicalContext
-            );
+            const persistedCanonicalContext = finalTraceContext
+                ? (finalCanonicalContext || finalTraceContext)
+                : null;
             let messages = trimCeoSessionSnapshotMessages(entry?.messages);
             messages = appendMissingCeoUserMessages(messages, finalUserMessages);
             messages = appendCeoSessionSnapshotMessage(messages, {
                 role: "assistant",
                 content: String(text || "").trim() || "Done.",
                 canonical_context: persistedCanonicalContext,
-                canonical_context_delta: finalCanonicalContextDelta,
+                canonical_context_delta: finalTraceContext,
             });
             return {
                 ...(entry || {}),
@@ -5766,10 +5766,9 @@ function finalizeCeoTurn(text, meta = {}) {
                 || (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId ? false : true)
                 || !inflightSource
                 || ceoTurnSourceMatches(normalizedSource, inflightSource);
-            const persistedCanonicalContext = resolvePreferredCeoCanonicalContext(
-                finalCanonicalContext,
-                inflightMatchesSource ? inflightTurn?.canonical_context || null : null
-            );
+            const persistedCanonicalContext = finalTraceContext
+                ? (finalCanonicalContext || finalTraceContext)
+                : null;
             const messages = appendCeoSessionSnapshotMessage(
                 appendMissingCeoUserMessages(entry?.messages, normalizeCeoSnapshotUserMessages(
                     inflightTurn?.user_messages,
@@ -5779,7 +5778,7 @@ function finalizeCeoTurn(text, meta = {}) {
                 role: "assistant",
                 content: String(text || "").trim() || "Done.",
                 canonical_context: persistedCanonicalContext,
-                canonical_context_delta: finalCanonicalContextDelta,
+                canonical_context_delta: finalTraceContext,
                 }
             );
             return {
@@ -5799,9 +5798,6 @@ function finalizeCeoTurn(text, meta = {}) {
         turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
         turn.textEl.classList.remove("pending");
         turn.textEl.classList.add("markdown-content");
-        const finalTraceContext = finalCanonicalContextDelta
-            || turn.lastExecutionTraceSummary
-            || finalCanonicalContext;
         if (finalTraceContext) {
             renderCeoStageTraceIntoTurn(turn, finalTraceContext);
         }
@@ -5826,14 +5822,9 @@ function finalizeCeoTurn(text, meta = {}) {
     patchCeoSessionSnapshotCache(sessionId, (entry) => {
         const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
         const inflightTurnId = normalizeCeoTurnId(inflightTurn?.turn_id);
-        const fallbackCanonicalContext = resolvePreferredCeoCanonicalContext(
-            turn?.lastExecutionTraceSummary || null,
-            inflightTurn?.canonical_context || null
-        );
-        const persistedCanonicalContext = resolvePreferredCeoCanonicalContext(
-            finalCanonicalContext,
-            fallbackCanonicalContext
-        );
+        const persistedCanonicalContext = finalTraceContext
+            ? (finalCanonicalContext || finalTraceContext)
+            : null;
         let messages = trimCeoSessionSnapshotMessages(entry?.messages);
         const inflightSource = normalizeCeoTurnSource(inflightTurn?.source || "user");
         const inflightMatchesSource = !inflightTurn
@@ -5850,7 +5841,7 @@ function finalizeCeoTurn(text, meta = {}) {
             role: "assistant",
             content: String(text || "").trim() || "Done.",
             canonical_context: persistedCanonicalContext,
-            canonical_context_delta: finalCanonicalContextDelta,
+            canonical_context_delta: finalTraceContext,
         });
         return {
             ...(entry || {}),

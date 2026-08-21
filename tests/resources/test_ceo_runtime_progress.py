@@ -8177,6 +8177,229 @@ async def test_web_session_heartbeat_second_visible_reply_is_not_appended_after_
     }
 
 
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_handled_terminal_keys_normalized(tmp_path: Path) -> None:
+    assert WebSessionHeartbeatService._normalize_handled_terminal_keys(
+        ["a", "", "a", 123, None, "b", "c"] * 3
+    ) == ["a", "b", "c"]
+    assert len(WebSessionHeartbeatService._normalize_handled_terminal_keys([f"k:{i}" for i in range(40)])) == 16
+
+    session_id = "web:ceo-heartbeat-handled-normalize"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    persisted.metadata["handled_terminal_dedupe_keys"] = [123, "pre", "pre", "", "x"] * 20
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(output="done.")
+    task_service = _TaskService()
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    dedupe_key = "task-terminal:task:demo-normalize:success:2026-03-27T01:34:32+08:00"
+    accepted = service.enqueue_task_terminal_payload(
+        {
+            "task_id": "task:demo-normalize",
+            "session_id": session_id,
+            "title": "demo normalize task",
+            "status": "success",
+            "brief_text": "task finished successfully",
+            "finished_at": "2026-03-27T01:34:32+08:00",
+            "dedupe_key": dedupe_key,
+        }
+    )
+    assert accepted is True
+    service._started = True
+    next_delay = await service._run_session(session_id)
+    assert next_delay is None
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    assert reloaded.metadata.get("handled_terminal_dedupe_keys") == ["pre", "x", dedupe_key]
+
+
+def _stage(stage_id: str, stage_index: int, *, summary: str) -> dict:
+    return {
+        "stage_id": stage_id,
+        "stage_index": stage_index,
+        "status": "completed",
+        "stage_kind": "normal",
+        "mode": "自主执行",
+        "system_generated": False,
+        "stage_goal": "",
+        "completed_stage_summary": summary,
+        "rounds": [],
+    }
+
+
+def test_web_session_heartbeat_final_payload_carries_canonical_context_delta(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-final-canonical"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    previous_context = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [_stage("frontdoor-stage-1", 1, summary="创建任务成功")],
+    }
+    current_context = copy.deepcopy(previous_context)
+    current_context["stages"].append(_stage("frontdoor-stage-2", 2, summary="最终报告"))
+    persisted.add_message("assistant", "前置回复", turn_id="turn-previous-phase")
+    persisted.messages[-1]["canonical_context"] = copy.deepcopy(previous_context)
+    persisted.add_message("assistant", "当前回复", turn_id="turn-current-phase")
+    persisted.messages[-1]["canonical_context"] = copy.deepcopy(current_context)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(output="Background final result.")
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=_TaskService(),
+        session_manager=session_manager,
+    )
+
+    payload = service._build_heartbeat_final_payload(
+        session_id,
+        text="Background final result.",
+        turn_id="turn-heartbeat-final",
+        previous_canonical_context=previous_context,
+    )
+
+    assert payload["source"] == "heartbeat"
+    assert payload["turn_id"] == "turn-heartbeat-final"
+    assert payload["text"] == "Background final result."
+    assert [stage["stage_id"] for stage in payload["canonical_context"]["stages"]] == [
+        "frontdoor-stage-1",
+        "frontdoor-stage-2",
+    ]
+    assert [stage["stage_id"] for stage in payload["canonical_context_delta"]["stages"]] == [
+        "frontdoor-stage-2"
+    ]
+
+
+def test_web_session_heartbeat_final_payload_omits_canonical_when_delta_empty(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-final-canonical-empty"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    current_context = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [_stage("frontdoor-stage-1", 1, summary="已完成的阶段")],
+    }
+    persisted.add_message("assistant", "前置回复", turn_id="turn-previous-phase")
+    persisted.messages[-1]["canonical_context"] = copy.deepcopy(current_context)
+    session_manager.save(persisted)
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(_FakeHeartbeatSession(output="done.")),
+        main_task_service=_TaskService(),
+        session_manager=session_manager,
+    )
+
+    payload = service._build_heartbeat_final_payload(
+        session_id,
+        text="done.",
+        turn_id="turn-heartbeat-default",
+        previous_canonical_context=current_context,
+    )
+
+    assert list(payload.keys()) == ["text", "source", "turn_id"]
+    assert "canonical_context" not in payload
+    assert "canonical_context_delta" not in payload
+
+
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_full_run_publishes_final_without_canonical_for_no_new_stages(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-final-no-stage-publish"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    current_context = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [_stage("frontdoor-stage-1", 1, summary="已汇报")],
+    }
+    persisted.add_message("assistant", "此前回复", turn_id="turn-previous-phase")
+    persisted.messages[-1]["canonical_context"] = copy.deepcopy(current_context)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(output="Background already reported.")
+    task_service = _TaskService()
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    accepted = service.enqueue_task_terminal_payload(
+        {
+            "task_id": "task:demo-no-new-stage",
+            "session_id": session_id,
+            "title": "demo no new stage task",
+            "status": "success",
+            "brief_text": "task finished successfully",
+            "finished_at": "2026-03-27T01:34:32+08:00",
+            "dedupe_key": "task-terminal:task:demo-no-new-stage:success:2026-03-27T01:34:32+08:00",
+        }
+    )
+    assert accepted is True
+    service._started = True
+
+    await service._run_session(session_id)
+
+    finals = [
+        envelope
+        for _session, envelope in task_service.registry.published
+        if envelope.get("type") == "ceo.reply.final"
+    ]
+    assert len(finals) == 1
+    data = finals[0].get("data") or {}
+    assert "canonical_context" not in data
+    assert "canonical_context_delta" not in data
+
+
+@pytest.mark.asyncio
+async def test_web_session_heartbeat_skips_reply_for_already_handled_terminal(tmp_path: Path) -> None:
+    session_id = "web:ceo-heartbeat-terminal-dedupe"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+    live_session = _FakeHeartbeatSession(output="Background install finished successfully.")
+    task_service = _TaskService()
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    payload = {
+        "task_id": "task:demo-terminal",
+        "session_id": session_id,
+        "title": "demo terminal task",
+        "status": "success",
+        "brief_text": "task finished successfully",
+        "finished_at": "2026-03-23T01:34:32+08:00",
+        "dedupe_key": "task-terminal:task:demo-terminal:success:2026-03-23T01:34:32+08:00",
+    }
+    assert service.enqueue_task_terminal_payload(payload) is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+    assert next_delay is None
+    assert len(live_session.prompts) == 1
+    assert [envelope["type"] for _session, envelope in task_service.registry.published] == ["ceo.reply.final"]
+    reloaded = SessionManager(tmp_path).get_or_create(session_id)
+    assert reloaded.metadata.get("handled_terminal_dedupe_keys") == [payload["dedupe_key"]]
+    assert task_service.delivered == [(payload["dedupe_key"], task_service.delivered[0][1])]
+
+    # 第二次相同 dedupe_key 重新投递（模拟第一轮在 ack/pop 之前中断、事件仍在队列）：应静默 ack，不再回复
+    assert service.enqueue_task_terminal_payload(payload) is True
+    next_delay = await service._run_session(session_id)
+    assert len(live_session.prompts) == 1
+    assert [envelope["type"] for _session, envelope in task_service.registry.published] == ["ceo.reply.final"]
+    assert len(task_service.delivered) == 2
+
+
 def test_web_ceo_session_summary_helpers_exclude_hidden_heartbeat_reply_surfaces() -> None:
     session = SimpleNamespace(
         key="web:summary-hidden-heartbeat",
