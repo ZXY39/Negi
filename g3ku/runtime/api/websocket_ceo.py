@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import hashlib
-import json
 import mimetypes
 import shutil
 import uuid
@@ -27,6 +25,7 @@ from g3ku.runtime.web_ceo_sessions import (
     create_web_ceo_session,
     ensure_active_web_ceo_session,
     ensure_ceo_session_metadata,
+    final_reply_canonical_merge,
     find_ceo_session_catalog_item,
     is_internal_ceo_user_message,
     list_web_ceo_sessions,
@@ -53,6 +52,14 @@ from main.api.websocket_utils import (
     websocket_send_json,
 )
 from main.protocol import build_envelope
+
+from g3ku.runtime.frontdoor.canonical_context import (
+    canonical_context_delta as _canonical_context_delta,
+    canonical_round_identity as _canonical_round_identity,
+    canonical_stage_identity as _canonical_stage_identity,
+    canonical_tool_identity as _canonical_tool_identity,
+    canonical_value_fingerprint as _canonical_value_fingerprint,
+)
 
 router = APIRouter()
 _HEARTBEAT_OK = "HEARTBEAT_OK"
@@ -674,99 +681,6 @@ def _canonical_context_copy(raw: Any) -> dict[str, Any]:
     return copy.deepcopy(raw)
 
 
-def _canonical_value_fingerprint(value: Any) -> str:
-    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-
-def _canonical_stage_identity(stage: dict[str, Any], index: int) -> str:
-    return str(stage.get("stage_id") or stage.get("stage_index") or f"stage:{index}").strip()
-
-
-def _canonical_round_identity(round_payload: dict[str, Any], index: int) -> str:
-    return str(round_payload.get("round_id") or round_payload.get("round_index") or f"round:{index}").strip()
-
-
-def _canonical_tool_identity(tool_payload: dict[str, Any], index: int) -> str:
-    tool_call_id = str(tool_payload.get("tool_call_id") or "").strip()
-    if tool_call_id:
-        return tool_call_id
-    tool_name = str(tool_payload.get("tool_name") or "tool").strip() or "tool"
-    return f"{tool_name}:{index}"
-
-
-def _canonical_context_delta(previous_context: Any, current_context: Any) -> dict[str, Any]:
-    previous = _canonical_context_copy(previous_context)
-    current = _canonical_context_copy(current_context)
-    current_stages = [dict(item) for item in list(current.get("stages") or []) if isinstance(item, dict)]
-    if not current_stages:
-        return {}
-    previous_stages = {
-        _canonical_stage_identity(stage, index): dict(stage)
-        for index, stage in enumerate(list(previous.get("stages") or []))
-        if isinstance(stage, dict)
-    }
-    delta_stages: list[dict[str, Any]] = []
-    for stage_index, stage in enumerate(current_stages):
-        stage_identity = _canonical_stage_identity(stage, stage_index)
-        previous_stage = previous_stages.get(stage_identity)
-        if previous_stage is None:
-            delta_stages.append(copy.deepcopy(stage))
-            continue
-        stage_header = {key: copy.deepcopy(value) for key, value in stage.items() if key != "rounds"}
-        previous_stage_header = {
-            key: copy.deepcopy(value) for key, value in previous_stage.items() if key != "rounds"
-        }
-        stage_header_changed = _canonical_value_fingerprint(previous_stage_header) != _canonical_value_fingerprint(stage_header)
-        previous_rounds = {
-            _canonical_round_identity(round_payload, round_index): dict(round_payload)
-            for round_index, round_payload in enumerate(list(previous_stage.get("rounds") or []))
-            if isinstance(round_payload, dict)
-        }
-        delta_rounds: list[dict[str, Any]] = []
-        for round_index, round_payload in enumerate(list(stage.get("rounds") or [])):
-            if not isinstance(round_payload, dict):
-                continue
-            round_identity = _canonical_round_identity(round_payload, round_index)
-            previous_round = previous_rounds.get(round_identity)
-            if previous_round is None:
-                delta_rounds.append(copy.deepcopy(round_payload))
-                continue
-            previous_tools = {
-                _canonical_tool_identity(tool_payload, tool_index): dict(tool_payload)
-                for tool_index, tool_payload in enumerate(list(previous_round.get("tools") or []))
-                if isinstance(tool_payload, dict)
-            }
-            delta_tools: list[dict[str, Any]] = []
-            for tool_index, tool_payload in enumerate(list(round_payload.get("tools") or [])):
-                if not isinstance(tool_payload, dict):
-                    continue
-                tool_identity = _canonical_tool_identity(tool_payload, tool_index)
-                previous_tool = previous_tools.get(tool_identity)
-                if previous_tool is None:
-                    delta_tools.append(copy.deepcopy(tool_payload))
-                    continue
-                if _canonical_value_fingerprint(previous_tool) != _canonical_value_fingerprint(tool_payload):
-                    delta_tools.append(copy.deepcopy(tool_payload))
-            if delta_tools:
-                delta_round = copy.deepcopy(round_payload)
-                delta_round["tools"] = delta_tools
-                delta_rounds.append(delta_round)
-        if stage_header_changed or delta_rounds:
-            delta_stage = copy.deepcopy(stage)
-            delta_stage["rounds"] = delta_rounds
-            delta_stages.append(delta_stage)
-    if not delta_stages:
-        return {}
-    delta: dict[str, Any] = {"stages": delta_stages}
-    active_stage_id = str(current.get("active_stage_id") or "").strip()
-    if active_stage_id and any(str(stage.get("stage_id") or "").strip() == active_stage_id for stage in delta_stages):
-        delta["active_stage_id"] = active_stage_id
-    if current.get("transition_required") is True:
-        delta["transition_required"] = True
-    return delta
-
-
 def _assistant_canonical_context(message: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(message, dict):
         return {}
@@ -1273,8 +1187,7 @@ async def ceo_websocket(websocket: WebSocket):
                     'source': source,
                     'turn_id': turn_id,
                     **({'user_messages': user_messages} if user_messages else {}),
-                    **({'canonical_context': canonical_context} if canonical_context else {}),
-                    **({'canonical_context_delta': canonical_context_delta} if canonical_context_delta else {}),
+                    **final_reply_canonical_merge(canonical_context, canonical_context_delta),
                 },
             )
             _publish_ceo_session_patch(

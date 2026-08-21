@@ -738,6 +738,43 @@ def _has_visible_message_content(content: Any) -> bool:
     return content is not None
 
 
+def final_reply_canonical_merge(canonical_context: Any, canonical_context_delta: Any) -> dict[str, Any]:
+    delta = canonical_context_delta if isinstance(canonical_context_delta, dict) else {}
+    if not delta:
+        return {}
+    payload: dict[str, Any] = {}
+    canonical = canonical_context if isinstance(canonical_context, dict) else {}
+    if canonical:
+        payload["canonical_context"] = dict(canonical)
+    payload["canonical_context_delta"] = dict(delta)
+    return payload
+
+
+def latest_assistant_message_canonical_context(session: Any, *, exclude_turn_id: str = "") -> dict[str, Any]:
+    excluded = str(exclude_turn_id or "").strip()
+    for raw in reversed(list(getattr(session, "messages", []) or [])):
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("role") or "").strip().lower() != "assistant":
+            continue
+        if excluded:
+            message_turn_id = str(
+                raw.get("turn_id")
+                or (
+                    raw.get("metadata", {}).get("_transcript_turn_id")
+                    if isinstance(raw.get("metadata"), dict)
+                    else ""
+                )
+                or ""
+            ).strip()
+            if message_turn_id == excluded:
+                continue
+        canonical_context = raw.get("canonical_context")
+        if isinstance(canonical_context, dict) and canonical_context:
+            return dict(canonical_context)
+    return {}
+
+
 def latest_llm_output_at(session: Any) -> str:
     for item in reversed(list(getattr(session, "messages", []) or [])):
         if not is_history_visible_message(item):
