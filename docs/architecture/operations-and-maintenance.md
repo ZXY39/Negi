@@ -26,6 +26,8 @@
 - 它们会在启动前默认清理当前仓库下已有的 g3ku web / worker 进程
 - 它们最终仍然是调用 `g3ku` bootstrap，再进入 `g3ku web`
 - 当脚本使用 reload 模式时，Web 侧自动托管 worker 会关闭；这时要单独运行 `g3ku worker`
+- `g3ku.cmd` / `g3ku.ps1` / `g3ku.sh` 是 CLI 透传包装；无参调用现在默认启动 `web`（历史上无参只打印 usage 就退出，右键/无参启动因此看起来像“坏了”）。任何入口的 web 启动都会在终端报告结果：成功横幅带 URL，失败横幅带子进程退出码和 `.g3ku/logs/console.log` 指引
+- web 启动在拿单实例锁（`.g3ku/start.lock`）之前会先自愈：杀掉本工作区残留的 g3ku web 服务进程（`-m g3ku web` 或 `-c ...run_web_server_entrypoint...` 形态，按 venv python 路径或进程 cwd 归属本工作区）。因此“端口/锁被占”不再是永久失败：再次启动会替换残留实例；若报错里 `pid=unknown`（持有者在加锁与写元数据之间被杀），用 `netstat` 查 web 端口定位占用者
 
 ### CLI
 

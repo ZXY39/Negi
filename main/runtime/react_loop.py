@@ -76,7 +76,13 @@ from main.runtime.stage_budget import (
     stage_gate_error_for_tool,
     visible_tools_for_stage_iteration,
 )
-from main.runtime.stage_messages import build_execution_stage_overlay, build_execution_stage_result_block_message
+from main.runtime.stage_messages import (
+    build_execution_stage_overlay,
+    build_execution_stage_result_block_message,
+    build_turn_only_system_note_message,
+    is_turn_only_system_note_message,
+    strip_turn_only_system_note_messages,
+)
 from main.runtime.tool_call_repair import (
     XML_REPAIR_ATTEMPT_LIMIT,
     build_xml_tool_repair_message,
@@ -3866,8 +3872,12 @@ class ReActToolLoop:
         previous_tool_schemas: list[dict[str, Any]],
         current_tool_schemas: list[dict[str, Any]],
     ) -> tuple[int, bool]:
-        previous_records = self._prompt_message_records(previous_request_messages)
-        current_records = self._prompt_message_records(current_request_messages)
+        previous_records = strip_turn_only_system_note_messages(
+            strip_node_dynamic_contract_messages(self._prompt_message_records(previous_request_messages))
+        )
+        current_records = strip_turn_only_system_note_messages(
+            strip_node_dynamic_contract_messages(self._prompt_message_records(current_request_messages))
+        )
         if not previous_records or len(current_records) < len(previous_records):
             return 0, False
         if not self._fresh_turn_seed_records_match(current_records[: len(previous_records)], previous_records):
@@ -5968,7 +5978,7 @@ class ReActToolLoop:
         )
 
     def _prepare_messages(self, messages: list[dict[str, Any]], *, runtime_context: dict[str, Any]) -> list[dict[str, Any]]:
-        normalized_messages = strip_node_dynamic_contract_messages(messages)
+        normalized_messages = strip_turn_only_system_note_messages(strip_node_dynamic_contract_messages(messages))
         stage_state = self._execution_stage_state_for_runtime(runtime_context=runtime_context)
         parts = _shared_decompose_stage_prompt_messages(
             normalized_messages,
@@ -6051,7 +6061,9 @@ class ReActToolLoop:
         stable_messages: list[dict[str, Any]] | None,
         live_request_messages: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
-        seed_records = cls._prompt_message_records(seed_request_messages)
+        seed_records = strip_turn_only_system_note_messages(
+            strip_node_dynamic_contract_messages(cls._prompt_message_records(seed_request_messages))
+        )
         stable_records = cls._prompt_message_records(stable_messages)
         live_records = cls._prompt_message_records(live_request_messages)
         stable_len = len(stable_records)
@@ -6087,8 +6099,12 @@ class ReActToolLoop:
         current_records = cls._prompt_message_records(current_model_messages)
         tail_records = cls._prompt_message_records(request_tail_messages)
         live_records = [*current_records, *tail_records]
-        previous_records = cls._prompt_message_records(previous_request_messages)
-        delta_records = cls._prompt_message_records(pending_delta_messages)
+        previous_records = strip_turn_only_system_note_messages(
+            strip_node_dynamic_contract_messages(cls._prompt_message_records(previous_request_messages))
+        )
+        delta_records = strip_turn_only_system_note_messages(
+            strip_node_dynamic_contract_messages(cls._prompt_message_records(pending_delta_messages))
+        )
         if not previous_records or not delta_records:
             return live_records
         prefix_probe = current_records[: min(2, len(current_records))]
@@ -6099,11 +6115,10 @@ class ReActToolLoop:
     @staticmethod
     def _apply_temporary_system_overlay(messages: list[dict[str, Any]], *, overlay_text: str | None) -> list[dict[str, Any]]:
         base_messages = list(messages or [])
-        text = str(overlay_text or '').strip()
-        if not text:
+        overlay_message = build_turn_only_system_note_message(overlay_text)
+        if overlay_message is None:
             return base_messages
-        overlay_block = f'System note for this turn only:\n{text}'
-        return [*base_messages, {'role': 'user', 'content': overlay_block}]
+        return [*base_messages, overlay_message]
 
     def _externalize_message_content(
         self,

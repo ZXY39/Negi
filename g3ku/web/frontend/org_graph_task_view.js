@@ -1119,6 +1119,7 @@ function normalizeExecutionStageTrace(stage, index = 0) {
         mode: String(stage?.mode || "自主执行").trim() || "自主执行",
         status: String(stage?.status || "进行中").trim() || "进行中",
         stage_goal: String(stage?.stage_goal || "").trim(),
+        preamble_text: String(stage?.preamble_text || "").trim(),
         stage_total_steps: normalizeInt(stage?.tool_round_budget ?? stage?.stage_total_steps, 0),
         tool_rounds_used: normalizeInt(stage?.tool_rounds_used, 0),
         created_at: String(stage?.created_at || ""),
@@ -1127,6 +1128,7 @@ function normalizeExecutionStageTrace(stage, index = 0) {
             round_id: String(round?.round_id || ""),
             round_index: normalizeInt(round?.round_index, roundIndex + 1),
             created_at: String(round?.created_at || ""),
+            text: String(round?.text || "").trim(),
             budget_counted: !!round?.budget_counted,
             tools: (Array.isArray(round?.tools) ? round.tools : []).map((step) => ({
                 tool_call_id: String(step?.tool_call_id || ""),
@@ -1353,9 +1355,11 @@ function bindTraceOutputAutoLoad(traceList) {
 function renderExecutionStageRoundBlock(stage, round, index) {
     const tools = Array.isArray(round?.tools) ? round.tools : [];
     const time = round?.created_at ? formatCompactTime(round.created_at) : "";
+    const roundText = String(round?.text || "").trim();
     return `
         <section class="task-trace-round-group" data-round-key="${esc(String(round?.round_id || round?.round_index || index + 1).trim())}">
             ${time ? `<div class="task-trace-round-meta">${esc(time)}</div>` : ""}
+            ${roundText ? `<div class="task-trace-round-text">${esc(roundText)}</div>` : ""}
             ${renderExecutionRoundToolStrip(round, tools)}
         </section>
     `;

@@ -7210,3 +7210,104 @@ def test_node_preflight_falls_back_to_preview_when_observed_truth_hash_mismatche
     assert estimate_payload["estimate_source"] == "preview_estimate"
     assert estimate_payload["comparable_to_previous_request"] is False
     assert estimate_payload["usage_based_estimate_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_node_second_tool_round_request_carries_no_stale_contract_or_note() -> None:
+    """End-to-end: two tool rounds in one `run()` must keep exactly one contract and
+    at most one turn-only note at the tail; the carried prefix must not retain the
+    stale note/contract from the previous round."""
+    from main.runtime.stage_messages import is_turn_only_system_note_message
+
+    calls: list[list[dict[str, object]]] = []
+    executed: list[tuple[str, str]] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self._responses = [
+                LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCallRequest(
+                            id="call:first",
+                            name="record_one",
+                            arguments={"value": "first"},
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                    usage={"input_tokens": 8, "output_tokens": 3},
+                ),
+                LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCallRequest(
+                            id="call:final",
+                            name="submit_final_result",
+                            arguments={
+                                "status": "success",
+                                "delivery_status": "final",
+                                "summary": "done",
+                                "answer": "done",
+                                "evidence": [],
+                                "remaining_work": [],
+                                "blocking_reason": "",
+                            },
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                    usage={"input_tokens": 8, "output_tokens": 3},
+                ),
+            ]
+
+        async def chat(self, **kwargs):
+            calls.append([dict(item) for item in list(kwargs.get("messages") or [])])
+            return self._responses.pop(0)
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
+    result = await loop.run(
+        task=SimpleNamespace(task_id="task-overlay-single"),
+        node=SimpleNamespace(node_id="node-overlay-single", depth=0, node_kind="execution"),
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-overlay-single","goal":"demo"}'},
+        ],
+        tools={
+            "record_one": _RecordingTool("record_one", executed),
+            "submit_final_result": _submit_final_result_tool(),
+        },
+        model_refs=["fake"],
+        runtime_context={"task_id": "task-overlay-single", "node_id": "node-overlay-single"},
+        max_iterations=3,
+    )
+
+    assert result.status == "success"
+    assert executed == [("record_one", "first")]
+    assert len(calls) >= 2
+
+    def _contract_count(messages: list[dict[str, object]]) -> int:
+        return sum(
+            1
+            for item in messages
+            if str(item.get("content") or "").startswith("## Runtime Tool Contract")
+        )
+
+    def _note_count(messages: list[dict[str, object]]) -> int:
+        return sum(1 for item in messages if is_turn_only_system_note_message(item))
+
+    for request_messages in calls:
+        assert _contract_count(request_messages) == 1
+        assert _note_count(request_messages) <= 1
+
+    second_request = calls[-1]
+    assistant_turns = [item for item in second_request if item.get("role") == "assistant"]
+    tool_turns = [item for item in second_request if item.get("role") == "tool"]
+    assert any(
+        str((((tool_call or {}).get("function") or {}).get("name") or "")).strip() == "record_one"
+        for message in assistant_turns
+        for tool_call in list(message.get("tool_calls") or [])
+    )
+    assert any(str(item.get("name") or "").strip() == "record_one" for item in tool_turns)
+    # The carried prefix must not retain the previous round's note/contract.
+    non_tail = second_request[:-1]
+    assert _contract_count(non_tail) == 0
+    assert _note_count(non_tail) == 0

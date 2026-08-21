@@ -1269,7 +1269,7 @@ async def ceo_websocket(websocket: WebSocket):
             await _push_stream_event(
                 'ceo.reply.final',
                 {
-                    'text': text,
+                    'text': rewrite_assistant_media_content(session_id, text),
                     'source': source,
                     'turn_id': turn_id,
                     **({'user_messages': user_messages} if user_messages else {}),

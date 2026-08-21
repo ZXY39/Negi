@@ -121,7 +121,7 @@ Maintenance note:
 正确语义：
 
 - 同一 visible turn 内，request 应该只增长，不该重排
-- 新增内容应当追加到尾部
+- 新增工具轮内容应当追加到尾部
 - 旧前缀应尽量保持不变
 
 已踩坑：
@@ -130,11 +130,13 @@ Maintenance note:
 - 新 round 直接从 stripped body 继续，导致 provider 前缀在第 3 条就断
 - overlay 被错误地拼回已有消息，而不是作为新的 request-tail 消息追加
 
-维护要点：
+去累积后的正确语义（2026-08 起）：
 
-- 同 turn 的 `request_messages` 必须尽量保持 append-only
-- 旧 `frontdoor_runtime_tool_contract` 可以继续保留在 actual request 中作为 prefix scaffold
-- durable history 才负责把它们剥回去
+- 同 turn 的 `request_messages` 在真实 transcript（system/user/历次 assistant 工具调用 + 工具结果）上保持 append-only，命中前缀逐轮变长
+- **每个请求只有恰好 1 份最新 `frontdoor_runtime_tool_contract` / `node_runtime_tool_contract`，位于请求尾部；被携带的历史里 0 份**
+- **turn-only note（`System note for this turn only:`）同理：每个请求至多 1 份当前 note，被携带历史 0 份**
+- 剥离尾部契约/note **不是**非法 shrink，也不算前缀断裂——它们本来就在 stable prefix 之外，每轮整份替换
+- durable history 仍然负责把它们剥回去（与去累积一致）
 
 ## 3.2 assistant 空文本 + tool_calls 被当成“空消息”丢掉
 
@@ -397,7 +399,12 @@ This changes the troubleshooting rule:
 - `token_compression`
 - `stage_compaction`
 
-如果下一轮 baseline 变短，却没有这两个原因之一：
+此外（2026-08 去累积起）还需注意两个**不**算非法 shrink 的合法变化：
+
+- 从被携带历史中剥掉列尾的 turn-only note / 已轮次膨胀的旧契约——前端 shrink 守卫已对 note 做中性化比较，不会误判
+- 因去累积导致的单轮“尾部被剥再重注”，只要 body 的真实 transcript 没有缩短，就不算 shrink
+
+如果下一轮 baseline 变短，却没有上述原因之一：
 
 - 按 runtime bug 处理
 - 不要把它解释成“正常上下文整理”
@@ -570,6 +577,11 @@ Maintenance note:
 - same-turn bug 更像 request growth/append-only 问题
 - fresh-turn bug 更像 baseline handoff / family churn / scaffold 选择问题
 
+去累积起，两套测试都要补一条不变量：**每个请求尾部恰好 1 份契约、至多 1 份 turn-only note，被携带的前缀里都是 0 份**。断言位置：
+
+- same-turn：多轮 tool 调用后，检查实际请求 JSON 的契约/note 计数与"真实 transcript 前缀不携带陈旧契约/note"
+- fresh-turn：上一请求带陈旧契约/note 时，第一跳 scaffold 仍应正确回退/复用真实前缀，不被静默禁用
+
 ## 5.6 pause/new turn 与 ordinary fresh turn 也要分开测
 
 节点如果以后支持 pause/resume 或类似边界，也要把下面三种情况拆开：
@@ -607,7 +619,7 @@ Maintenance note:
 8. stable prefix 不变时，tool schema 也应尽量稳定；必要时验证 family key 不抖。
 9. `provider_request_body.input` 与高层 `request_messages` 的前缀对比结论不能长期分叉。
 10. usage 记录与 request artifact 必须能在时间线层面对得上。
-11. 非 `token_compression` / `stage_compaction` 的 shrink 一律视为失败。
+11. 非 `token_compression` / `stage_compaction` 的 shrink 一律视为失败（唯一例外：因去累积而从历史中剥掉 turn-only note / 已膨胀的旧契约时，body 真实 transcript 未缩短，经 note 中性化比较后不算非法 shrink）。
 
 ## 7. 当前仍需继续盯的风险点
 
@@ -691,5 +703,5 @@ Older references in historical troubleshooting notes to `semantic_context_state`
 
 - `frontdoor_runtime_tool_contract` and `node_runtime_tool_contract` now normally appear as assistant summary blocks headed `## Runtime Tool Contract`, not as raw JSON message bodies.
 - Treat those summary blocks as dynamic contract tail records during cache analysis. They are still outside the stable prefix even though the body is no longer JSON.
-- Same-turn live requests may still contain multiple contract summaries because the request path stays append-only for cache preservation. The newest summary is the authoritative contract for that round.
+- Each request carries exactly one newest contract summary at the tail. Carried history never retains a stale contract or a stale turn-only note: the request path stays append-only over the real transcript (system/user/assistant tool calls + tool results) and re-injects the newest contract (and at most one turn-only note) only at the tail each round. This is a deliberate reversal of the earlier "keep multiple contract summaries for cache preservation" design; the newest summary is the authoritative contract for that round.
 - Durable continuity baselines should still strip runtime-contract summaries before persistence. If a later turn replays an old summary as ordinary stable history without `token_compression` or `stage_compaction`, treat that as illegal context carryover.

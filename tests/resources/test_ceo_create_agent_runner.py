@@ -3541,10 +3541,6 @@ def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix(
         {"role": "user", "content": "old question"},
         {"role": "assistant", "content": "old retrieved"},
         {
-            "role": "user",
-            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["submit_next_stage"]}',
-        },
-        {
             "role": "assistant",
             "content": "",
             "tool_calls": [
@@ -3659,8 +3655,28 @@ def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix_
         ],
     )
 
+    # The stale contract inside the previous actual request is dropped from the
+    # scaffold; the real prefix (with whitespace-normalized tool result) is reused.
     assert scaffold == [
-        *previous_request_messages,
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "old question"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "submit_next_stage",
+            "tool_call_id": "call-1",
+            "content": '{"status":"success"} ',
+        },
         {"role": "assistant", "content": "final answer"},
         {"role": "user", "content": "next user"},
     ]
@@ -3812,10 +3828,6 @@ def test_restart_restored_trace_reuses_previous_actual_request_scaffold_for_next
         {"role": "system", "content": "SYSTEM"},
         {"role": "user", "content": "old question"},
         {"role": "assistant", "content": "old retrieved"},
-        {
-            "role": "user",
-            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["submit_next_stage"]}',
-        },
         {
             "role": "assistant",
             "content": "",
@@ -4272,7 +4284,18 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
         runtime=runtime,
     )
 
-    assert captured_model_messages[: len(previous_request_messages)] == previous_request_messages
+    # The stale contract inside the previous actual request is never reused as a
+    # scaffold prefix; the real prefix (system/user/assistant/tool) survives.
+    expected_scaffold_prefix = [
+        item
+        for item in previous_request_messages
+        if not (
+            isinstance(item, dict)
+            and str(item.get("role") or "").strip().lower() == "user"
+            and "message_type" in str(item.get("content") or "")
+        )
+    ]
+    assert captured_model_messages[: len(expected_scaffold_prefix)] == expected_scaffold_prefix
     assert {"role": "assistant", "content": "final answer"} in captured_model_messages
     final_answer_index = captured_model_messages.index({"role": "assistant", "content": "final answer"})
     next_user_index = captured_model_messages.index({"role": "user", "content": "next question"})
@@ -4480,9 +4503,21 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
         runtime=runtime,
     )
 
-    assert observed["request_messages"][: len(previous_request_messages)] == previous_request_messages
+    # The stale contract inside the previous actual request is never reused as a
+    # scaffold prefix; both the preflight observation and the provider send carry
+    # the real prefix and re-inject a fresh contract only at the tail.
+    expected_scaffold_prefix = [
+        item
+        for item in previous_request_messages
+        if not (
+            isinstance(item, dict)
+            and str(item.get("role") or "").strip().lower() == "user"
+            and "message_type" in str(item.get("content") or "")
+        )
+    ]
+    assert observed["request_messages"][: len(expected_scaffold_prefix)] == expected_scaffold_prefix
     assert observed["tool_schemas"]
-    assert captured_model_messages[: len(previous_request_messages)] == previous_request_messages
+    assert captured_model_messages[: len(expected_scaffold_prefix)] == expected_scaffold_prefix
 
 
 @pytest.mark.asyncio
@@ -5406,7 +5441,18 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
         runtime=runtime,
     )
 
-    assert captured_model_messages[: len(previous_request_messages)] == previous_request_messages
+    # The stale contract inside the previous actual request is never reused as a
+    # scaffold prefix (the whitespace-normalized tool result is still preserved).
+    expected_scaffold_prefix = [
+        item
+        for item in previous_request_messages
+        if not (
+            isinstance(item, dict)
+            and str(item.get("role") or "").strip().lower() == "user"
+            and "message_type" in str(item.get("content") or "")
+        )
+    ]
+    assert captured_model_messages[: len(expected_scaffold_prefix)] == expected_scaffold_prefix
     assert {"role": "assistant", "content": "final answer"} in captured_model_messages
     final_answer_index = captured_model_messages.index({"role": "assistant", "content": "final answer"})
     next_user_index = captured_model_messages.index({"role": "user", "content": "next question"})

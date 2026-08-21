@@ -9567,3 +9567,49 @@ textarea {
         justify-content: space-between;
     }
 }
+
+/* ---- CEO 轮次时间线：阶段直接铺开，轮次显示中途输出 ---- */
+.ceo-timeline .ceo-turn-content {
+    display: flex;
+    flex-direction: column;
+}
+
+.ceo-timeline .interaction-flow {
+    order: -1;
+    border: 0;
+    background: transparent;
+    border-radius: 0;
+    overflow: visible;
+}
+
+.ceo-timeline .interaction-flow-summary {
+    display: none;
+}
+
+.ceo-stage-preamble {
+    margin: 0 0 var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    border-left: 2px solid color-mix(in srgb, var(--brand-primary) 45%, transparent);
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.task-trace-round-text {
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--bg-msg-sys);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.task-trace-live-text {
+    border-style: dashed;
+    color: var(--text-secondary);
+}

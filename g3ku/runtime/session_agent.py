@@ -158,6 +158,7 @@ class RuntimeAgentSession:
     ) -> list[dict[str, Any]]:
         from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
         from g3ku.runtime.web_ceo_sessions import strip_multimodal_blocks_from_message_records
+        from main.runtime.stage_messages import is_turn_only_system_note_message
 
         body_messages: list[dict[str, Any]] = []
         for item in list(request_messages or []):
@@ -165,6 +166,8 @@ class RuntimeAgentSession:
                 continue
             record = dict(item)
             if is_frontdoor_tool_contract_message(record):
+                continue
+            if is_turn_only_system_note_message(record):
                 continue
             body_messages.append(record)
         return strip_multimodal_blocks_from_message_records(body_messages)
@@ -2475,9 +2478,10 @@ class RuntimeAgentSession:
 
         if kind == "analysis":
             text = str(content or "").strip()
-            if text and self._state.latest_message != text:
-                self._state.latest_message = text
-                self._assistant_stream_pending_text = ""
+            current = str(self._state.latest_message or "")
+            if text and not current.endswith(text):
+                self._state.latest_message = current + text if current else text
+                self._assistant_stream_pending_text = str(self._state.latest_message)
                 self._assistant_stream_last_emitted_text = ""
                 await self._emit_state_snapshot()
 

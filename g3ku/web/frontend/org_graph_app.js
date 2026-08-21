@@ -3520,11 +3520,13 @@ function finalizePausedCeoTurn(text = "已暂停", { source = null } = {}) {
     if (!turn?.textEl || !turn.flowEl) return false;
     mutateCeoFeed(() => {
         turn.finalized = true;
+        turn.liveStreamText = "";
+        renderCeoLiveStreamTextIntoTurn(turn);
         turn.textEl.textContent = String(text || "已暂停");
         turn.textEl.classList.remove("pending");
         if (turn.steps > 0) {
             turn.flowEl.hidden = false;
-            turn.flowEl.open = false;
+            turn.flowEl.open = true;
             updateCeoTurnMeta(turn, "已暂停");
         } else {
             turn.flowEl.hidden = true;
@@ -3562,7 +3564,7 @@ function holdApprovalPausedCeoTurnLegacy(text = "", { source = "", turnId = "" }
         turn.finalized = false;
         if (turn.steps > 0) {
             turn.flowEl.hidden = false;
-            turn.flowEl.open = false;
+            turn.flowEl.open = true;
         }
         updateCeoTurnMeta(turn, "绛夊緟瀹℃壒");
     }, { scrollMode: "preserve" });
@@ -4013,19 +4015,60 @@ function renderCeoAssistantLoadingState(turn, label = CEO_ASSISTANT_LOADING_LABE
     icons();
 }
 
-function renderCeoAssistantStreamTextIntoTurn(turn, text = "") {
-    if (!turn?.textEl) return;
-    const normalizedText = String(text || "");
-    if (!normalizedText.trim()) {
-        renderCeoAssistantLoadingState(turn);
+function renderCeoLiveStreamTextIntoTurn(turn) {
+    if (!turn?.listEl || !turn?.flowEl) return;
+    const text = ceoLiveStreamResidual(turn, turn.lastExecutionTraceSummary);
+    const existing = typeof turn.listEl.querySelector === "function"
+        ? turn.listEl.querySelector(".task-trace-live-text")
+        : null;
+    if (!text.trim()) {
+        if (existing?.remove) existing.remove();
         return;
     }
-    turn.textEl.textContent = normalizedText;
-    turn.textEl.classList.add("pending");
-    turn.textEl.classList.remove("assistant-text-loading");
-    turn.textEl.classList.remove("markdown-content");
-    syncCeoAssistantLoadingAria(turn.textEl);
-    syncCeoTurnLoadingOnlyState(turn, false);
+    const lastStep = (() => {
+        if (typeof turn.listEl.querySelectorAll !== "function") return null;
+        const steps = turn.listEl.querySelectorAll(".task-trace-step");
+        return steps && steps.length ? steps[steps.length - 1] : null;
+    })();
+    if (!lastStep) {
+        // 尚无阶段（纯问答轮或建阶段前）：流式文本退回气泡展示
+        if (!turn.textEl) return;
+        turn.textEl.textContent = text;
+        turn.textEl.classList?.add?.("pending");
+        turn.textEl.classList?.remove?.("assistant-text-loading");
+        turn.textEl.classList?.remove?.("markdown-content");
+        if (typeof syncCeoAssistantLoadingAria === "function") syncCeoAssistantLoadingAria(turn.textEl);
+        if (typeof syncCeoTurnLoadingOnlyState === "function") syncCeoTurnLoadingOnlyState(turn, false);
+        return;
+    }
+    // 有阶段：live 文本挂进最后一个阶段体内，气泡回到 loading，避免中途文本外显
+    if (turn.textEl?.classList?.contains?.("pending")) {
+        renderCeoAssistantTextIntoTurn(turn, "", { status: "running" });
+    }
+    if (existing?.remove) existing.remove();
+    const body = typeof lastStep.querySelector === "function"
+        ? lastStep.querySelector(".task-trace-body")
+        : null;
+    if (!body || typeof body.appendChild !== "function") return;
+    const block = document.createElement("div");
+    block.className = "task-trace-round-text task-trace-live-text";
+    block.textContent = text;
+    body.appendChild(block);
+    if (typeof syncCeoTurnLoadingOnlyState === "function") syncCeoTurnLoadingOnlyState(turn, false);
+}
+
+function ceoLiveStreamResidual(turn, summary) {
+    let residual = String(turn?.liveStreamText || "");
+    if (!residual.trim()) return "";
+    for (const stage of summary?.stages || []) {
+        for (const round of stage?.rounds || []) {
+            const roundText = String(round?.text || "").trim();
+            if (roundText && residual.startsWith(roundText)) {
+                residual = residual.slice(roundText.length);
+            }
+        }
+    }
+    return residual;
 }
 
 function renderCeoAssistantTextIntoTurn(turn, text = "", { status = "" } = {}) {
@@ -4097,7 +4140,8 @@ function flushCeoReplyDeltaBuffers() {
                 mutateCeoFeed(() => {
                     if (turnId) turn.turnId = turnId;
                     if (source) turn.source = source;
-                    renderCeoAssistantStreamTextIntoTurn(turn, text);
+                    turn.liveStreamText = text;
+                    renderCeoLiveStreamTextIntoTurn(turn);
                     icons();
                 }, { scrollMode: "preserve" });
             }
@@ -4186,6 +4230,7 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null) {
     if (!summary?.stages?.length) {
         resetCeoToolFlow(turn);
         updateCeoTurnMeta(turn, "等待工具开始...");
+        renderCeoLiveStreamTextIntoTurn(turn);
         return 0;
     }
     if (typeof renderTraceStep !== "function"
@@ -4195,25 +4240,29 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null) {
         || typeof displayTaskStageStatus !== "function") {
         return 0;
     }
-    const wasFlowOpen = !!turn.flowEl.open;
     syncCeoTurnLoadingOnlyState(turn, false);
     resetCeoToolFlow(turn);
+    turn.el?.classList?.add?.("ceo-timeline");
     turn.listEl.classList?.add?.("task-trace-list");
-    turn.listEl.innerHTML = summary.stages.map((stage, index) => renderTraceStep({
-        traceKey: `ceo:stage:${stage.stage_id || stage.stage_index || index}`,
-        title: formatExecutionStageTitle(stage),
-        status: stageTraceStatus(stage),
-        statusLabel: displayTaskStageStatus(stage.status),
-        open: index === summary.stages.length - 1,
-        bodyHtml: renderExecutionStageRounds(stage),
-    })).join("");
+    turn.listEl.innerHTML = summary.stages.map((stage, index) => {
+        const preamble = String(stage?.preamble_text || "").trim();
+        const preambleHtml = preamble ? `<div class="ceo-stage-preamble">${esc(preamble)}</div>` : "";
+        return renderTraceStep({
+            traceKey: `ceo:stage:${stage.stage_id || stage.stage_index || index}`,
+            title: formatExecutionStageTitle(stage),
+            status: stageTraceStatus(stage),
+            statusLabel: displayTaskStageStatus(stage.status),
+            open: false,
+            bodyHtml: preambleHtml + renderExecutionStageRounds(stage),
+        });
+    }).join("");
     if (typeof bindTraceRoundToolStrips === "function") bindTraceRoundToolStrips(turn.listEl);
     const stageCount = summary.stages.length;
     const roundCount = summary.stages.reduce((sum, stage) => sum + (Array.isArray(stage?.rounds) ? stage.rounds.length : 0), 0);
     turn.steps = roundCount || stageCount;
     turn.lastExecutionTraceSummary = summary;
     turn.flowEl.hidden = false;
-    turn.flowEl.open = wasFlowOpen;
+    turn.flowEl.open = true;
     updateCeoTurnMeta(turn, `${stageCount} 个阶段 · ${roundCount} 轮工具`);
     if (typeof bindTraceOutputAutoLoad === "function") bindTraceOutputAutoLoad(turn.listEl);
     if (typeof hydrateTraceOutputBlocks === "function") {
@@ -4221,6 +4270,7 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null) {
             if (item instanceof HTMLElement) hydrateTraceOutputBlocks(item);
         });
     }
+    renderCeoLiveStreamTextIntoTurn(turn);
     return turn.steps;
 }
 
@@ -4258,14 +4308,33 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         if (turn) S.ceoPendingTurns.push(turn);
     }
     if (!turn?.textEl || !turn?.flowEl) return false;
+    if (turnId && turn.turnId && turnId !== turn.turnId) {
+        turn.lastExecutionTraceSummary = null;
+        turn.liveStreamText = "";
+    }
     if (turnId) turn.turnId = turnId;
-    const preferredCanonicalContext = resolvePreferredCeoTraceContext(
-        snapshot?.canonical_context_delta || null,
-        snapshot?.canonical_context || null,
-        turn?.lastExecutionTraceSummary || null
-    );
+    // live inflight 只渲染本轮 delta（或本轮已渲染的 summary），不回退 full，
+    // 避免新 turn 继承上一轮阶段；跨 turn 时 lastExecutionTraceSummary 已在上面被清空；
+    // preserved 保留 full 回退
+    const preferredCanonicalContext = cacheField === "inflight_turn"
+        ? resolvePreferredCeoTraceContext(
+            snapshot?.canonical_context_delta || null,
+            null,
+            turn?.lastExecutionTraceSummary || null
+        )
+        : resolvePreferredCeoTraceContext(
+            snapshot?.canonical_context_delta || null,
+            snapshot?.canonical_context || null,
+            turn?.lastExecutionTraceSummary || null
+        );
     mutateCeoFeed(() => {
-        renderCeoAssistantTextIntoTurn(turn, snapshot?.assistant_text || "", { status });
+        if (status === "running") {
+            turn.liveStreamText = String(snapshot?.assistant_text || "");
+            renderCeoAssistantTextIntoTurn(turn, "", { status });
+        } else {
+            turn.liveStreamText = "";
+            renderCeoAssistantTextIntoTurn(turn, snapshot?.assistant_text || "", { status });
+        }
         const stageRoundCount = renderCeoStageTraceIntoTurn(turn, preferredCanonicalContext);
         if (!stageRoundCount) {
             if (status === "paused") updateCeoTurnMeta(turn, "已暂停");
@@ -4365,7 +4434,7 @@ function holdApprovalPausedCeoTurn({ source = "", turnId = "", text = "" } = {})
         turn.finalized = false;
         if (turn.steps > 0) {
             turn.flowEl.hidden = false;
-            turn.flowEl.open = false;
+            turn.flowEl.open = true;
         }
         updateCeoTurnMeta(turn, "等待审批");
         icons();
@@ -4461,7 +4530,7 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
         renderCeoStageTraceIntoTurn(turn, canonicalContext);
         turn.flowEl.hidden = false;
-        turn.flowEl.open = false;
+        turn.flowEl.open = true;
         icons();
     }, { scrollMode: "preserve" });
     if (status === "paused") {
@@ -4569,6 +4638,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
             finalized: false,
             historyExpanded: false,
             lastExecutionTraceSummary: null,
+            liveStreamText: "",
             contextLoadNoticeKeys: new Set(),
             turnId: "",
             reminderExecutionId: "",
@@ -5362,7 +5432,9 @@ function toggleCeoToolStepOutput(item) {
 
 function trimCeoToolSteps(turn) {
     if (!turn?.listEl) return;
-    const items = Array.from(turn.listEl.children).filter((item) => item instanceof HTMLElement);
+    const items = Array.from(turn.listEl.children).filter((item) => (
+        item instanceof HTMLElement && !item.classList.contains("task-trace-live-text")
+    ));
     const hiddenCount = Math.max(0, items.length - CEO_TOOL_STEP_MAX);
     items.forEach((item, index) => {
         const shouldHide = !turn.historyExpanded && index < hiddenCount;
@@ -5722,16 +5794,21 @@ function finalizeCeoTurn(text, meta = {}) {
     mutateCeoFeed(() => {
         clearCeoToolReminder(turn, { force: true });
         turn.finalized = true;
+        turn.liveStreamText = "";
+        renderCeoLiveStreamTextIntoTurn(turn);
         turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
         turn.textEl.classList.remove("pending");
         turn.textEl.classList.add("markdown-content");
-        if (finalCanonicalContextDelta || finalCanonicalContext) {
-            renderCeoStageTraceIntoTurn(turn, finalCanonicalContextDelta || finalCanonicalContext);
+        const finalTraceContext = finalCanonicalContextDelta
+            || turn.lastExecutionTraceSummary
+            || finalCanonicalContext;
+        if (finalTraceContext) {
+            renderCeoStageTraceIntoTurn(turn, finalTraceContext);
         }
         if (turn.steps > 0) {
             const hasRunningStep = hasRunningCeoToolStep(turn);
             turn.flowEl.hidden = false;
-            turn.flowEl.open = false;
+            turn.flowEl.open = true;
             updateCeoTurnMeta(
                 turn,
                 turn.hasError ? "处理完成，但有异常" : (hasRunningStep ? "已返回当前判断，后台任务仍在运行" : "处理完成")

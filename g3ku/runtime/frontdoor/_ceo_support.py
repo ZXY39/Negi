@@ -32,6 +32,7 @@ from g3ku.runtime.tool_watchdog import (
 from g3ku.runtime.web_ceo_sessions import SESSION_TASK_DEFAULTS_SCOPE_SESSION, ceo_session_task_defaults_scope
 from main.protocol import now_iso
 from main.runtime.chat_backend import ConfigChatBackend, sanitize_provider_messages
+from main.runtime.stage_messages import build_turn_only_system_note_message, is_turn_only_system_note_message, strip_turn_only_system_note_messages
 from main.runtime.tool_call_repair import format_xml_repair_failure_reason
 
 
@@ -383,12 +384,11 @@ class CeoFrontDoorSupport:
 
     @staticmethod
     def _apply_turn_overlay(messages: list[dict[str, Any]], *, overlay_text: str | None) -> list[dict[str, Any]]:
-        text = str(overlay_text or "").strip()
-        if not text:
-            return list(messages or [])
         base_messages = list(messages or [])
-        overlay_block = f"System note for this turn only:\n{text}"
-        return [*base_messages, {"role": "user", "content": overlay_block}]
+        overlay_message = build_turn_only_system_note_message(overlay_text)
+        if overlay_message is None:
+            return base_messages
+        return [*base_messages, overlay_message]
 
     @staticmethod
     def _render_tool_result(result: Any) -> str:

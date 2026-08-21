@@ -10,6 +10,7 @@ from main.runtime.chat_backend import (
     build_session_prompt_cache_key,
     sanitize_provider_messages,
 )
+from main.runtime.stage_messages import is_turn_only_system_note_message
 
 DEFAULT_CACHE_FAMILY_REVISION = "ceo_frontdoor:stable-prefix:v1"
 LEGACY_LONG_CONTEXT_SUMMARY_PREFIX = "[G3KU_LONG_CONTEXT_SUMMARY_V1]"
@@ -65,10 +66,19 @@ def _with_dynamic_appendix_at_tail(
         for item in normalized_dynamic_messages
         if not _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
-    merged_request_messages = list(normalized_request_messages)
+    # The carried body must never retain a stale contract or a stale turn-only note:
+    # exactly one newest contract is appended at the tail below, and the current
+    # turn-only note is appended separately by the turn overlay.
+    stripped_request_messages = [
+        dict(item)
+        for item in normalized_request_messages
+        if not _is_frontdoor_runtime_tool_contract_record(dict(item))
+        and not is_turn_only_system_note_message(item)
+    ]
+    merged_request_messages = list(stripped_request_messages)
     if non_contract_messages:
         merged_request_messages = _strip_first_slice(merged_request_messages, non_contract_messages)
-        if merged_request_messages == normalized_request_messages:
+        if merged_request_messages == stripped_request_messages:
             merged_request_messages = _strip_first_slice(
                 merged_request_messages,
                 _dynamic_appendix_overlap_records(non_contract_messages),
@@ -76,13 +86,7 @@ def _with_dynamic_appendix_at_tail(
         if not _records_contain_slice(merged_request_messages, non_contract_messages):
             merged_request_messages = [*merged_request_messages, *non_contract_messages]
     if contract_messages:
-        contract_len = len(contract_messages)
-        if not (
-            contract_len > 0
-            and len(merged_request_messages) >= contract_len
-            and merged_request_messages[-contract_len:] == contract_messages
-        ):
-            merged_request_messages = [*merged_request_messages, *contract_messages]
+        merged_request_messages = [*merged_request_messages, *contract_messages]
     return merged_request_messages
 
 
