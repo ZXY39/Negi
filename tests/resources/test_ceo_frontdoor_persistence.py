@@ -1624,10 +1624,10 @@ async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_insid
     )
 
     replaced_messages = list(update["messages"] or [])
-    expected_messages = [
+    replaced_body_messages = [dict(item) for item in replaced_messages if isinstance(item, dict)]
+    expected_body_messages = [
         {"role": "system", "content": "stable system"},
         {"role": "user", "content": "hello"},
-        {"role": "user", "content": contract_text},
         {
             "role": "assistant",
             "content": "",
@@ -1646,11 +1646,14 @@ async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_insid
             "content": '{"status":"success"}',
         },
     ]
-    assert replaced_messages == runner._replace_messages_update(
-        [*expected_messages, dict(replaced_messages[-1])]
-    )["messages"]
-    assert is_frontdoor_tool_contract_message(dict(replaced_messages[-1]))
-    assert "callable_tools: `submit_next_stage`" in str(replaced_messages[-1].get("content") or "")
+    # The tool contract is turn-only and must never be persisted into state messages:
+    # the stale contract carried inside the live body is dropped before the state update.
+    assert replaced_body_messages == expected_body_messages
+    assert all(not is_frontdoor_tool_contract_message(dict(item)) for item in replaced_body_messages)
+    assert all(
+        str(item.get("content") or "") != contract_text
+        for item in replaced_body_messages
+    )
 
 
 @pytest.mark.asyncio
@@ -1741,8 +1744,16 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
     assert selected_tool_schema_requests
     assert selected_tool_schema_requests[-1] == ["exec", "load_tool_context", "submit_next_stage"]
     replaced_messages = [dict(item) for item in list(update["messages"] or []) if isinstance(item, dict)]
-    assert is_frontdoor_tool_contract_message(replaced_messages[-1])
-    assert "callable_tools: `submit_next_stage`" in str(replaced_messages[-1].get("content") or "")
+    # Turn-only tool contract must not be persisted into state messages, even when a
+    # stage transition is required; the latest request still exposes it at its tail.
+    assert replaced_messages == [
+        {"role": "system", "content": "stable system"},
+        {"role": "user", "content": "hello"},
+    ]
+    assert all(not is_frontdoor_tool_contract_message(dict(item)) for item in replaced_messages)
+    assert "callable_tools:" not in str([
+        item.get("content") for item in replaced_messages if isinstance(item, dict)
+    ])
 
 
 @pytest.mark.asyncio

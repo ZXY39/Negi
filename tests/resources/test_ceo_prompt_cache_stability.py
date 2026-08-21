@@ -370,10 +370,11 @@ def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only(
         {"role": "user", "content": "start"},
         contract_record,
     ]
+    # Newest contract only: the stale contract carried inside the live body of the
+    # second request must be dropped, and exactly one contract remains at the tail.
     assert list(_field(second, "request_messages")) == [
         {"role": "system", "content": "stable system"},
         {"role": "user", "content": "start"},
-        contract_record,
         {
             "role": "assistant",
             "content": "",
@@ -393,9 +394,14 @@ def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only(
         },
         contract_record,
     ]
-    assert list(_field(second, "request_messages"))[: len(list(_field(first, "request_messages")))] == list(
-        _field(first, "request_messages")
+    second_messages = list(_field(second, "request_messages"))
+    contract_count = sum(
+        1
+        for item in second_messages
+        if isinstance(item, dict) and item.get("content") == contract_message["content"]
     )
+    assert contract_count == 1
+    assert second_messages[-1] == contract_record
 
 
 def test_frontdoor_prompt_contract_appends_dynamic_appendix_at_tail_for_main_lane() -> None:

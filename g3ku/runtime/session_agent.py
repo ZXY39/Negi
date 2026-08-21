@@ -158,6 +158,7 @@ class RuntimeAgentSession:
     ) -> list[dict[str, Any]]:
         from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
         from g3ku.runtime.web_ceo_sessions import strip_multimodal_blocks_from_message_records
+        from main.runtime.stage_messages import is_turn_only_system_note_message
 
         body_messages: list[dict[str, Any]] = []
         for item in list(request_messages or []):
@@ -165,6 +166,8 @@ class RuntimeAgentSession:
                 continue
             record = dict(item)
             if is_frontdoor_tool_contract_message(record):
+                continue
+            if is_turn_only_system_note_message(record):
                 continue
             body_messages.append(record)
         return strip_multimodal_blocks_from_message_records(body_messages)

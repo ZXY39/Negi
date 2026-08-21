@@ -73,7 +73,12 @@ from main.runtime.stage_budget import (
     stage_gate_error_for_tool,
     visible_tools_for_stage_iteration,
 )
-from main.runtime.stage_messages import build_ceo_stage_overlay, build_ceo_stage_result_block_message
+from main.runtime.stage_messages import (
+    build_ceo_stage_overlay,
+    build_ceo_stage_result_block_message,
+    is_turn_only_system_note_message,
+    strip_turn_only_system_note_messages,
+)
 from main.runtime.tool_call_repair import (
     XML_REPAIR_ATTEMPT_LIMIT,
     build_xml_tool_repair_message,
@@ -673,6 +678,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     def _is_frontdoor_tool_contract_record(record: dict[str, Any] | None) -> bool:
         return is_frontdoor_tool_contract_message(dict(record or {}))
 
+    @classmethod
+    def _strip_frontdoor_turn_only_artifacts(
+        cls,
+        messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        return [
+            dict(item)
+            for item in list(messages or [])
+            if isinstance(item, dict)
+            and not cls._is_frontdoor_tool_contract_record(item)
+            and not is_turn_only_system_note_message(item)
+        ]
+
     @staticmethod
     def _is_frontdoor_memory_snapshot_record(record: dict[str, Any] | None) -> bool:
         if not isinstance(record, dict):
@@ -714,7 +732,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         request_messages: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
         return strip_multimodal_blocks_from_message_records(
-            cls._request_body_messages_without_tool_contracts(request_messages)
+            cls._strip_frontdoor_turn_only_artifacts(
+                cls._request_body_messages_without_tool_contracts(request_messages)
+            )
         )
 
     def _ceo_image_multimodal_enabled_for_model_refs(self, model_refs: list[str] | None) -> bool:
@@ -1850,8 +1870,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         previous_tool_schemas: list[dict[str, Any]] | None,
         current_tool_schemas: list[dict[str, Any]] | None,
     ) -> tuple[int, bool]:
-        previous_records = [dict(item) for item in list(previous_request_messages or []) if isinstance(item, dict)]
-        current_records = [dict(item) for item in list(current_request_messages or []) if isinstance(item, dict)]
+        previous_records = cls._strip_frontdoor_turn_only_artifacts(
+            [dict(item) for item in list(previous_request_messages or []) if isinstance(item, dict)]
+        )
+        current_records = cls._strip_frontdoor_turn_only_artifacts(
+            [dict(item) for item in list(current_request_messages or []) if isinstance(item, dict)]
+        )
         if not previous_records or len(current_records) < len(previous_records):
             return 0, False
         if not cls._fresh_turn_seed_records_match(current_records[: len(previous_records)], previous_records):
@@ -2015,7 +2039,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         previous_request_messages = cls._prompt_message_records(previous_record.get("request_messages"))
         if not previous_request_messages:
             return cls._prompt_message_records(live_request_messages)
-        previous_request_body = cls._request_body_messages_without_tool_contracts(previous_request_messages)
+        previous_request_body = cls._strip_frontdoor_turn_only_artifacts(
+            cls._request_body_messages_without_tool_contracts(previous_request_messages)
+        )
         stable_records = cls._prompt_message_records(stable_messages)
         live_records = cls._prompt_message_records(live_request_messages)
         body_len = len(previous_request_body)
@@ -2031,7 +2057,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return live_records
         stable_tail = list(stable_records[body_len:])
         live_tail = list(live_records[stable_len:])
-        return [*list(previous_request_messages), *stable_tail, *live_tail]
+        return [
+            *list(cls._strip_frontdoor_turn_only_artifacts(previous_request_messages)),
+            *stable_tail,
+            *live_tail,
+        ]
 
     @classmethod
     def _fresh_turn_tool_schema_seed_from_previous_actual_request(
@@ -5436,11 +5466,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # baselines may still carry runtime-only tool metadata such as status
             # or timing fields, but those fields are stripped when the next visible
             # turn rebuilds its request-body seed.
+            # Both sides are note-neutral: the turn-only note is stripped from the
+            # carried history before this turn and re-appended fresh at the tail,
+            # so stripping it here must not count as an illegal shrink.
             previous_tokens = estimate_message_tokens(
-                CeoMessageBuilder._request_body_seed_records(session_request_body_messages)
+                CeoMessageBuilder._request_body_seed_records(
+                    strip_turn_only_system_note_messages(session_request_body_messages)
+                )
             )
             next_tokens = estimate_message_tokens(
-                CeoMessageBuilder._request_body_seed_records(persisted_messages)
+                CeoMessageBuilder._request_body_seed_records(
+                    strip_turn_only_system_note_messages(persisted_messages)
+                )
             )
             if next_tokens < previous_tokens and shrink_reason not in self._ALLOWED_FRONTDOOR_SHRINK_REASONS.difference({""}):
                 raise RuntimeError("frontdoor context shrank without an allowed reason")
@@ -5926,9 +5963,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             usage=self._model_response_usage(message),
         )
         message_state_update = (
-            self._replace_messages_update(list(durable_request_messages))
+            self._replace_messages_update(
+                list(self._strip_frontdoor_turn_only_artifacts(durable_request_messages))
+            )
             if callable(getattr(self, "_replace_messages_update", None))
-            else {"messages": list(durable_request_messages)}
+            else {"messages": list(self._strip_frontdoor_turn_only_artifacts(durable_request_messages))}
         )
         return {
             "iteration": iteration,
@@ -6420,6 +6459,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         messages = list(state.get("messages") or [])
         if hasattr(self, "_state_message_records"):
             messages = list(getattr(self, "_state_message_records")(messages))
+        messages = self._strip_frontdoor_turn_only_artifacts(messages)
         messages.append(assistant_message)
         messages.extend(tool_messages)
         authoritative_request_body_messages = self._durable_frontdoor_request_body_messages(messages)

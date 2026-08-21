@@ -1173,3 +1173,95 @@ async def test_prepare_turn_heartbeat_continues_previous_request_body_and_append
         ("user", "## EVENT BUNDLE\n- task completed"),
     ]
     assert prepared["frontdoor_request_body_messages"] == prepared["messages"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_turn_ignores_stale_turn_only_note_when_checking_context_shrink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The turn-only note is re-created fresh at the tail of every request, so its
+    removal from carried history must never be treated as an illegal shrink."""
+    session_key = "web:shared"
+    loop = _loop_with_session(session_key)
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+    monkeypatch.setattr(prompt_cache_contract, "build_session_prompt_cache_key", lambda **kwargs: "cache-key")
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["submit_next_stage"]}
+
+    stale_note = {"role": "user", "content": "System note for this turn only:\nstale overlay"}
+    body_baseline = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "u1"},
+        dict(stale_note),
+    ]
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            tool_names=["submit_next_stage"],
+            model_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "u1"},
+                {"role": "user", "content": "new question"},
+            ],
+            stable_messages=[
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "u1"},
+                {"role": "user", "content": "new question"},
+            ],
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["submit_next_stage"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key=session_key),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=list(body_baseline),
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_stage_state={},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={},
+        _semantic_context_state={},
+        _frontdoor_hydrated_tool_names=[],
+        _frontdoor_selection_debug={},
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=loop, session=session, session_key=session_key, on_progress=None)
+    )
+
+    prepared = await runner._graph_prepare_turn(
+        initial_persistent_state(user_input={"content": "new question", "metadata": {}}),
+        runtime=runtime,
+    )
+
+    assert prepared["frontdoor_history_shrink_reason"] == ""
+    assert prepared["frontdoor_request_body_messages"] == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "u1"},
+        {"role": "user", "content": "new question"},
+    ]

@@ -273,8 +273,8 @@ Maintenance note for `task_append_notice` and task message distribution:
 - CEO/frontdoor 的稳定 system prompt 现在只保留最小的 capability exposure revision 锚点，不再把可见 tool/skill 名单整块写进稳定前缀。
 - 对 CEO/frontdoor，当前轮真正给模型看的 tool/skill catalog 现在只有一份 `frontdoor_runtime_tool_contract` user 消息。它位于 request 尾部，也就是所有稳定前缀、持久化历史和当前 user message 之后。
 - 这份 frontdoor runtime tool contract 属于“当前轮临时合同”，不是 durable history。后续轮次的 `stable_messages` / transcript 不应再继承旧轮的 tool/skill 名单；如果维护者在下一轮历史里又看到旧 contract，优先排查 prompt contract 组装或 state replay 是否把 dynamic appendix 错写回了 stable history。
-- 对 CEO/frontdoor 主链路，`dynamic_appendix_messages` 的持久化形态仍然只保留“当前 authoritative 的 `frontdoor_runtime_tool_contract`”。但活动中的 turn state / provider-facing request 现在允许保留同一 turn 里更早轮次的 contract snapshots，目的不是持久化历史，而是让同一 turn 的 request body 保持 append-only。
-- 维护时要区分两层：`dynamic_appendix_messages` 表示“下一次重建时应追加的最新合同”，而活动中的 `messages` / actual request JSON 可能还包含更早轮次的 contract snapshot。若同一 turn 里出现多个 contract，最后一条才是权威；这些旧 snapshot 不应写入后续 durable history。
+- 对 CEO/frontdoor 主链路，每个请求**只有一份最新契约**（位于请求尾部），live request / state 载体 **不携带历史契约**；携带历史里的旧契约与 turn-only note 会被剥掉，新契约每轮在尾部重新注入。不要把“同一 turn 保留多份 contract snapshot 以保 append-only”当作正确行为——那是 2026-08 之前的设计，现已有意反转（详见《去累积后的缓存行为》）。
+- 维护时要区分两层：`dynamic_appendix_messages` 表示“下一次重建时应追加的最新合同”，而活动中的 `messages` / actual request JSON 每轮重新注入唯一一份最新契约。若同一 turn 里出现多个 contract，说明去累积剥离漏网，最后一条才是权威；这些旧 snapshot 不应写入后续 durable history。
 
 维护上现在还要区分 frontdoor 的两份工具状态：
 
@@ -497,7 +497,7 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - Caller-side prompt cache family is now defined only by the stable prefix plus explicit cache-family revision inputs.
 - Ordinary callable/candidate/hydrated tool drift, stage-gated schema shrink, and loader-driven hydration promotion may still change the actual provider request, but they must not rotate the caller family key by themselves.
 - CEO/frontdoor `call_model` must always send the request rebuilt for that exact turn together with the matching rebuilt `prompt_cache_key`. A rebuilt request paired with an older key is now considered a runtime bug because it hides whether a miss came from family churn or from the actual request changing.
-- Node execution follows the same rule: keep the static prefix append-only at the front, keep the runtime contract at the tail, and debug `prompt_cache_key_hash` separately from `actual_request_hash`.
+- Node execution follows the same rule: keep the static prefix append-only at the front, keep exactly one runtime contract at the tail, and debug `prompt_cache_key_hash` separately from `actual_request_hash`. Stale contracts and turn-only notes from earlier rounds are stripped out of carried history; the newest contract is re-injected at the tail each round.
 - Node runtime now also persists a dedicated per-round actual-request artifact for every `call_model`. `actual_request_ref` / `latest-context` should point to that artifact instead of reusing runtime-frame `messages_ref`.
 - That node artifact stores the runtime-side request projection (`model_messages`, `request_messages`, `actual_tool_schemas`, cache-family diagnostics) and, when available from the provider adapter, the final transport payload under `provider_request_meta` and `provider_request_body`.
 - Node actual-request persistence is now memory-guarded on its own write path. The normal path writes a dedicated JSON artifact directly, without routing the whole payload back through the generic text-artifact hash/dedupe lane.
@@ -517,7 +517,7 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - In that degraded shape, `request_messages` becomes a text-only / truncated forensic summary, `provider_request_body` is cleared, and `provider_request_body_summary` plus `artifact_persistence_mode` / `artifact_persistence_reason` explain what was omitted. Maintainers should read those markers before assuming the provider never saw multimodal input.
 - The session-scoped request-artifact lane is no longer limited to visible provider sends. `visible_frontdoor`, `token_compression`, and `inline_tool_reminder` now all persist under the same `.g3ku/web-ceo-requests/<session>/...json` family so request-forensics can explain ordinary sends and internal subrequests from one timeline.
 - Each saved frontdoor request artifact now also carries normalized `usage`, `frontdoor_history_shrink_reason`, and `frontdoor_token_preflight_diagnostics`. Maintainers should use those fields to compare "what preflight thought would be sent" against "what the provider actually billed," rather than reconstructing that relation from transcript timing alone.
-- To preserve prefix reuse inside one visible CEO turn, same-turn request growth now follows: previous request body -> newly appended assistant/tool transcript -> newest contract snapshot. This means the actual request may contain multiple contract snapshots during one turn, but the durable post-turn transcript must still strip them back out.
+- To preserve prefix reuse inside one visible CEO turn, same-turn request growth now follows: previous request body -> newly appended assistant/tool transcript -> newest contract snapshot. The actual request carries **one** latest contract at the tail and **zero** stale contracts or turn-only notes inside the carried prefix; the worn-out "multiple contract snapshots during one turn" behavior was deliberately reversed (2026-08) so history never accumulates contracts. The durable post-turn transcript must still strip them back out.
 - `frontdoor_canonical_context` remains durable single-writer state. Turn finalization may merge completed-stage data into it, but session sync and request assembly must not write a visible projection back into the durable chain.
 - Provider-facing `tools[]` now have a separate stability rule from agent-facing callable tools: ordinary turns derive `provider_tool_names` from the current RBAC-visible concrete tool set for that path, while callable-stage gates still decide what the model is actually allowed to invoke this round.
 - The provider bundle is refreshed conditionally rather than through an active/pending commit machine. If the current RBAC-visible concrete membership changed, rebuild `provider_tool_names`; if the membership is effectively unchanged, keep the persisted order verbatim so prompt-cache prefixes and `provider_tool_exposure_revision` stay stable.
@@ -748,7 +748,7 @@ There is now a second explicit continuity contract for prompt assembly:
   - ordinary callable/hydrated tools
   - ordinary candidate tools/skills
   - repair-required tools/skills that must be fixed before use or body load
-- The hot same-turn provider request may still keep earlier contract snapshots so request growth stays append-only. The newest contract summary in that request is the authoritative one for the current round.
+- The hot same-turn provider request carries only the newest contract snapshot at the tail; carried history keeps zero stale contract snapshots and zero stale turn-only notes, and the newest tail records are rebuilt each round. The newest contract summary in that request is the authoritative one for the current round.
 - Durable continuity baselines continue to strip runtime-contract messages before persistence. If a later turn appears to inherit an old contract summary as ordinary history, treat that as a contract-lane replay bug.
 - If the next baseline is shorter for any other reason, `prepare_turn` treats that as unexpected context loss and fails fast instead of silently continuing with a truncated request.
 

@@ -7526,13 +7526,15 @@ async def test_runtime_frame_persists_model_visible_tool_selection_fields(tmp_pa
 
 
 def test_same_turn_append_only_request_messages_reuses_previous_actual_request_prefix() -> None:
+    note = {"role": "user", "content": f"System note for this turn only:\nstage overlay"}
+    contract = {"role": "assistant", "content": "## Runtime Tool Contract\ncontract-payload-1", "tool_calls": [], }
     previous_request_messages = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "prompt"},
         {"role": "assistant", "content": "assistant-1"},
         {"role": "tool", "tool_call_id": "call-1", "name": "submit_next_stage", "content": "ok"},
-        {"role": "user", "content": "overlay-1"},
-        {"role": "user", "content": "contract-1"},
+        dict(note),
+        dict(contract),
     ]
     current_model_messages = [
         {"role": "system", "content": "system"},
@@ -7543,8 +7545,8 @@ def test_same_turn_append_only_request_messages_reuses_previous_actual_request_p
         {"role": "tool", "tool_call_id": "call-2", "name": "content_open", "content": "ok"},
     ]
     request_tail_messages = [
-        {"role": "user", "content": "overlay-2"},
-        {"role": "user", "content": "contract-2"},
+        {"role": "user", "content": "System note for this turn only:\nnew overlay"},
+        {"role": "assistant", "content": "## Runtime Tool Contract\ncontract-payload-2", "tool_calls": [], },
     ]
 
     merged = ReActToolLoop._same_turn_append_only_request_messages(
@@ -7554,11 +7556,20 @@ def test_same_turn_append_only_request_messages_reuses_previous_actual_request_p
         request_tail_messages=request_tail_messages,
     )
 
+    # Carried history must never retain a stale turn-only note or a stale contract:
+    # the previous prefix's real records survive, the stale note/contract are dropped,
+    # and the newest note/contract appear once at the tail.
     assert merged == [
-        *previous_request_messages,
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "prompt"},
+        {"role": "assistant", "content": "assistant-1"},
+        {"role": "tool", "tool_call_id": "call-1", "name": "submit_next_stage", "content": "ok"},
         *pending_delta_messages,
         *request_tail_messages,
     ]
+    concise_roles = [str(item.get("content") or "") for item in merged if isinstance(item, dict)]
+    assert sum(1 for c in concise_roles if str(c).startswith("System note for this turn only:")) == 1
+    assert sum(1 for c in concise_roles if str(c).startswith("## Runtime Tool Contract")) == 1
 
 
 def test_same_turn_append_only_request_messages_falls_back_when_prefix_changes() -> None:
@@ -7566,14 +7577,16 @@ def test_same_turn_append_only_request_messages_falls_back_when_prefix_changes()
         {"role": "system", "content": "system-old"},
         {"role": "user", "content": "prompt-old"},
         {"role": "assistant", "content": "assistant-1"},
+        {"role": "user", "content": "System note for this turn only:\nstale note"},
+        {"role": "assistant", "content": "## Runtime Tool Contract\nstale contract", "tool_calls": [], },
     ]
     current_model_messages = [
         {"role": "system", "content": "system-new"},
         {"role": "user", "content": "prompt-new"},
     ]
     request_tail_messages = [
-        {"role": "user", "content": "overlay-new"},
-        {"role": "user", "content": "contract-new"},
+        {"role": "user", "content": "System note for this turn only:\nnew overlay"},
+        {"role": "assistant", "content": "## Runtime Tool Contract\nnew contract", "tool_calls": [], },
     ]
 
     merged = ReActToolLoop._same_turn_append_only_request_messages(
@@ -7589,6 +7602,10 @@ def test_same_turn_append_only_request_messages_falls_back_when_prefix_changes()
         *current_model_messages,
         *request_tail_messages,
     ]
+    # The stale residue from the mismatched previous request must not leak through.
+    concise_roles = [str(item.get("content") or "") for item in merged if isinstance(item, dict)]
+    assert sum(1 for c in concise_roles if str(c).startswith("System note for this turn only:")) == 1
+    assert sum(1 for c in concise_roles if str(c).startswith("## Runtime Tool Contract")) == 1
 
 
 @pytest.mark.asyncio
@@ -7982,7 +7999,22 @@ async def test_run_node_appends_notice_delivered_after_first_model_response_befo
         assert len(backend.calls) == 2
         first_messages = list(backend.calls[0].get("messages") or [])
         second_messages = list(backend.calls[1].get("messages") or [])
-        assert second_messages[: len(first_messages)] == first_messages
+        # The carried prefix keeps the real conversation, but the previous round's
+        # turn-only note/contract are dropped: exactly one of each stays at the tail.
+        assert second_messages[:2] == first_messages[:2]
+        note_count = sum(
+            1
+            for item in second_messages
+            if str(item.get("content") or "").startswith("System note for this turn only:")
+        )
+        contract_count = sum(
+            1
+            for item in second_messages
+            if str(item.get("content") or "").startswith("## Runtime Tool Contract")
+        )
+        assert note_count == 1
+        assert contract_count == 1
+        assert str(second_messages[-1].get("content") or "").startswith("## Runtime Tool Contract")
 
         notice_indexes = [
             index

@@ -408,8 +408,8 @@ Maintenance note for parameter-error guidance:
 - 对 CEO/frontdoor，turn overlay / repair overlay 也属于 dynamic appendix 一侧的尾部临时内容；它们只能尾部追加，不能回写进已有 stable/request user 消息，否则会把原本 append-only 的稳定前缀变成每轮不同的文本。
 - 对 CEO/frontdoor 主链路，`dynamic_appendix_messages` 的持久化形态现在也进一步收紧为“只保留当前 `frontdoor_runtime_tool_contract`”。像 retrieved context 这类当次 request body 内容若需要跨同一 turn 的后续模型轮次保留，应留在 `messages` / stage state / canonical context 的重建链路里，而不是重新作为第二份 appendix 尾插。
 - 因此排查 CEO/frontdoor cache drop 时，要区分两件事：`messages` 中保存的是“下一次重建 request body 的基线”，而 `dynamic_appendix_messages` 只是“当前轮唯一尾部合同”。如果两边都出现完整 catalog 或 retrieved context 副本，说明 runtime contract 已经重复注入。
-- 为了修复同一 turn 内 contract 被新工具轨迹不断顶走的问题，CEO/frontdoor 的活动中 request 现在允许暂时保留更早轮次的 contract snapshots，并在最新一轮末尾再追加新的 authoritative contract。换句话说，同一 turn 的 provider-facing request 里可以有多条 contract，但只有最后一条有效。
-- 这条规则只适用于活动中的 turn request / actual request JSON；turn 结束后写回 durable transcript 时，旧的 contract snapshots 仍然必须全部剥离。
+- 为了修复同一 turn 内 contract 被新工具轨迹不断顶走的问题，CEO/frontdoor 的活动中 request 现在只携带**一份最新** contract（位于 request 尾部）；每轮重建时先剥掉携带历史里的旧 contract 与 turn-only note，再在尾部注入当前 authoritative contract。旧的"同一 turn 保留多条 contract snapshot"设计已被有意反转（2026-08）。
+- 这条规则同时适用活动中的 turn request / actual request JSON 与 durable transcript：两者都不再持有旧 contract snapshots；turn 结束后写回 durable transcript 时，更是必须全部剥离。
 - 对 CEO/frontdoor，当前轮 contract 的推荐排障顺序也变了：
   - 先看 request 尾部那条唯一的 `frontdoor_runtime_tool_contract`
   - 再看 internal state 中的 `tool_names` / `candidate_tool_names` / `candidate_tool_items` / `hydrated_tool_names`
@@ -669,7 +669,7 @@ When debugging provider-tool drift, use this decision rule:
   - `repair_required_tools`
   - `repair_required_skills`
 - These lanes are agent-facing only. They exist so the model can see “repair before use/view” resources without misreading them as ordinary callable/candidate capabilities.
-- Same-turn provider-bound requests may still accumulate older contract snapshots so the hot request path stays append-only. Within one turn, the newest summary block is the authoritative contract.
+- Each provider-bound request carries exactly one newest contract summary at the tail. Carried history keeps zero stale contract snapshots and zero stale turn-only notes; the previous "accumulate multiple contract snapshots to stay append-only" behavior was deliberately reversed (2026-08). Within one turn, the newest summary block is the authoritative contract.
 - Durable CEO continuity baselines still strip those contract messages before they are written back to session-owned request-body state. The next round rebuilds one fresh authoritative summary from canonical runtime state.
 - Execution and acceptance nodes now use the same summary-style contract lane instead of a raw `node_runtime_tool_contract` JSON user message.
 - Node summaries now expose `hydrated_executor_names` as names only. The detailed provider-call schema remains separate in node `provider_tool_names` and provider `tools[]`.
