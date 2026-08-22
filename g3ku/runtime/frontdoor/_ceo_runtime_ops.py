@@ -1143,7 +1143,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         records[-1] = {**last, "content": content}
         return records
 
-    @classmethod
     def _resolve_frontdoor_send_model_context_window(
         self,
         *,
