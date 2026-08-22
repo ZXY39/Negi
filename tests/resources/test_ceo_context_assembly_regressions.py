@@ -3480,3 +3480,49 @@ async def test_message_builder_trims_full_transcript_history_to_active_window() 
     # 首条用户请求保留，且有压缩/外部化块代表旧阶段
     assert "bootstrap request" in rendered
     assert ("[G3KU_STAGE_COMPACT_V1]" in rendered) or ("[G3KU_STAGE_EXTERNALIZED_V1]" in rendered)
+
+
+@pytest.mark.asyncio
+async def test_seed_continuation_path_trims_old_raw_with_stage_summaries() -> None:
+    """续跑 seed 路径：有完成阶段摘要时应裁掉旧 raw 并以压缩块代表（接通后第一层生效）。"""
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    seed: list[dict[str, object]] = [{"role": "user", "content": "bootstrap request"}]
+    for index in range(1, 6):
+        seed.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": f"call-stage-{index}", "type": "function", "function": {"name": "submit_next_stage", "arguments": "{}"}}
+                ],
+            }
+        )
+        seed.append({"role": "tool", "name": "submit_next_stage", "tool_call_id": f"call-stage-{index}", "content": '{"ok": true}'})
+        seed.append({"role": "assistant", "content": f"stage {index} raw detail"})
+
+    stages = [
+        {
+            "stage_id": f"frontdoor-stage-{index}",
+            "stage_index": index,
+            "stage_kind": "normal",
+            "system_generated": False,
+            "status": "completed" if index < 5 else "active",
+            "stage_goal": f"inspect stage {index}",
+            "completed_stage_summary": f"finished stage {index}",
+            "key_refs": [],
+            "tool_round_budget": 2,
+            "tool_rounds_used": 1,
+        }
+        for index in range(1, 6)
+    ]
+
+    stage_state = {"active_stage_id": "frontdoor-stage-5", "transition_required": False, "stages": stages}
+    trimmed = CreateAgentCeoFrontDoorRunner._trim_frontdoor_seed_to_stage_window(seed, stage_state)
+    rendered = "\n\n".join(str(item.get("content") or "") for item in trimmed)
+    # 旧阶段原文被裁（由压缩块代表），最近窗口保留
+    assert "stage 1 raw detail" not in rendered
+    assert "stage 2 raw detail" in rendered
+    assert ("[G3KU_STAGE_COMPACT_V1]" in rendered) or ("[G3KU_STAGE_EXTERNALIZED_V1]" in rendered)

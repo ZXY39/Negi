@@ -5035,8 +5035,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             current_turn_user_content
         )
         if session_request_body_messages:
+            # 接通 stage 数据源：优先 frontdoor_stage_state，为空时回退 canonical 的 stages，
+            # 使续跑路径的 seed 裁剪能拿到完成阶段摘要（无损裁剪的前提）。
+            seed_stage_state = dict(current_frontdoor_stage_state or {})
+            if not list(seed_stage_state.get("stages") or []):
+                seed_stage_state = dict(current_frontdoor_canonical_context or {})
             request_body_seed_messages = self._trim_frontdoor_seed_to_stage_window(
-                session_request_body_messages, current_frontdoor_stage_state
+                session_request_body_messages, seed_stage_state
             )
             checkpoint_messages = []
             builder_user_metadata["_frontdoor_history_seed"] = "session_window"
