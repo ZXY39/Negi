@@ -10,6 +10,8 @@ import json
 import math
 import re
 import uuid
+
+from loguru import logger
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -731,10 +733,40 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         cls,
         request_messages: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
-        return strip_multimodal_blocks_from_message_records(
+        durable = strip_multimodal_blocks_from_message_records(
             cls._strip_frontdoor_turn_only_artifacts(
                 cls._request_body_messages_without_tool_contracts(request_messages)
             )
+        )
+        # 不变量：durable 基线永不含 frontdoor 运行时工具契约块。
+        # 若混入（旧版本遗留/回归），直接丢弃，避免污染跨回合基线。
+        return [
+            item
+            for item in durable
+            if not cls._is_frontdoor_tool_contract_record(item)
+        ]
+
+    def _quarantine_frontdoor_shrink(
+        self,
+        session: Any,
+        *,
+        new_seed: list[dict[str, Any]],
+        previous_tokens: int,
+        next_tokens: int,
+    ) -> None:
+        """检测到「无理由收缩」时不裸抛冻结会话，而是把拒绝后的新种子
+        以受控原因写回基线，使后续回合对比一致、会话可自愈。"""
+        consecutive = int(getattr(session, "_frontdoor_shrink_quarantine_count", 0) or 0) + 1
+        setattr(session, "_frontdoor_shrink_quarantine_count", consecutive)
+        durable_seed = self._durable_frontdoor_request_body_messages(new_seed)
+        setattr(session, "_frontdoor_request_body_messages", durable_seed)
+        setattr(session, "_frontdoor_history_shrink_reason", "context_shrink_quarantine")
+        logger.warning(
+            "frontdoor shrink quarantined (self-heal): prev={} next={} consecutive={} session={}",
+            previous_tokens,
+            next_tokens,
+            consecutive,
+            getattr(getattr(session, "state", None), "session_key", ""),
         )
 
     def _ceo_image_multimodal_enabled_for_model_refs(self, model_refs: list[str] | None) -> bool:
@@ -3059,7 +3091,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ).strip()
                 if actual_tool_schema_hash:
                     setattr(target_session, "_frontdoor_actual_tool_schema_hash", actual_tool_schema_hash)
-            request_body_messages = strip_multimodal_blocks_from_message_records(
+            # 基线持久化统一走 durable 归一（剥工具契约/瞬时件/多模态），
+            # 与守卫对比侧、新回合种子保持同一形态，避免契约块漏进基线。
+            request_body_messages = self._durable_frontdoor_request_body_messages(
                 [
                     dict(item)
                     for item in list(state.get("frontdoor_request_body_messages") or [])
@@ -5469,18 +5503,30 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # Both sides are note-neutral: the turn-only note is stripped from the
             # carried history before this turn and re-appended fresh at the tail,
             # so stripping it here must not count as an illegal shrink.
+            # 两侧同形归一：基线与新种子都先剥工具契约/瞬时件/多模态，
+            # 再比 token。历史上基线曾混入末位工具契约块，导致新回合（已剥契约）
+            # 被误判为「无理由收缩」而永久冻结。
             previous_tokens = estimate_message_tokens(
                 CeoMessageBuilder._request_body_seed_records(
-                    strip_turn_only_system_note_messages(session_request_body_messages)
+                    strip_turn_only_system_note_messages(
+                        self._request_body_messages_without_tool_contracts(session_request_body_messages)
+                    )
                 )
             )
             next_tokens = estimate_message_tokens(
                 CeoMessageBuilder._request_body_seed_records(
-                    strip_turn_only_system_note_messages(persisted_messages)
+                    strip_turn_only_system_note_messages(
+                        self._request_body_messages_without_tool_contracts(persisted_messages)
+                    )
                 )
             )
             if next_tokens < previous_tokens and shrink_reason not in self._ALLOWED_FRONTDOOR_SHRINK_REASONS.difference({""}):
-                raise RuntimeError("frontdoor context shrank without an allowed reason")
+                self._quarantine_frontdoor_shrink(
+                    session,
+                    new_seed=persisted_messages,
+                    previous_tokens=previous_tokens,
+                    next_tokens=next_tokens,
+                )
         parallel_enabled, max_parallel_tool_calls = self._parallel_tool_settings()
         return {
             "session_key": str(getattr(session.state, "session_key", "") or ""),

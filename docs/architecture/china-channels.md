@@ -120,6 +120,7 @@
 
 - 渠道消息最终仍进入统一 `RuntimeAgentSession`
 - China 渠道不是单独的 Agent 实现
+- 入站用户内容必须保持「用户原始消息」。历史上 Node host 会在命中定时意图时把一段 cron 隐藏契约追加进 `CommandBody`，导致该契约被当作**用户消息内容**持久化并显示在会话里（影响美观、重复发送），还破坏 frontdoor 的当前用户精确匹配（答非所问）。现在注入已在宿主侧停用（`appendCronHiddenPrompt` 为 no-op），Python `ChinaBridgeTransport` 入站构造时也会用 `strip_cron_hidden_prompt` 兜底剥除旧污染；cron 的正确使用规范改由 cron 工具 toolskill 按需加载。排障「用户消息里多出一大段 cron 说明」或「定时相关消息答非所问」时，先确认这条隐藏契约注入是否复活。
 
 ### 渠道入站图片 / 媒体
 

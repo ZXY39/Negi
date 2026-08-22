@@ -18,6 +18,7 @@ from g3ku.china_bridge.session_keys import (
     build_runtime_chat_id,
     build_session_key,
 )
+from g3ku.runtime.frontdoor.cron_hidden_prompt import strip_cron_hidden_prompt
 from g3ku.china_bridge.registry import china_channel_id_set
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.bridge import SessionRuntimeBridge
@@ -127,6 +128,9 @@ class ChinaBridgeTransport:
         metadata: dict[str, Any],
         attachments: list[Any],
     ) -> str | UserInputMessage:
+        # 宿主侧可能把 cron 隐藏契约追加进用户正文；引擎这里剥除，
+        # 使持久化/显示的用户内容只保留原始消息。规范改由 cron toolskill 提供。
+        text = strip_cron_hidden_prompt(text)
         normalized_attachments = [
             descriptor
             for descriptor in (cls._attachment_descriptor(item) for item in attachments)

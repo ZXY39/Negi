@@ -105,9 +105,9 @@ export function splitCronHiddenPrompt(text: string): { base: string; prompt?: st
 }
 
 export function appendCronHiddenPrompt(text: string): string {
-  if (!shouldInjectCronHiddenPrompt(text)) return text;
-  if (text.includes(CRON_HIDDEN_PROMPT)) return text;
-  return `${text}\n\n${CRON_HIDDEN_PROMPT}`;
+  // cron 使用规范已迁入 cron toolskill（按需加载）。不再把隐藏契约追加进
+  // 用户消息：那会污染显示/持久化的转录、重复发送，并破坏当前用户匹配。
+  return text;
 }
 
 export function applyCronHiddenPromptToContext<

@@ -30,6 +30,7 @@ from g3ku.runtime.tool_visibility import (
 )
 from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
 from g3ku.runtime.frontdoor.canonical_context import combine_canonical_context, normalize_frontdoor_canonical_context
+from g3ku.runtime.frontdoor.cron_hidden_prompt import strip_cron_hidden_prompt
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 from g3ku.runtime.frontdoor.raw_stage_renderer import retained_raw_stage_messages
 from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
@@ -555,7 +556,7 @@ class CeoMessageBuilder:
         last_turn_id = str(last_metadata.get('_transcript_turn_id') or '').strip()
         if turn_id and last_turn_id:
             return last_turn_id == turn_id
-        return self._content_text(last.get('content')).strip() == str(query_text or '').strip()
+        return self._cron_prompt_equal(last.get('content'), query_text)
 
     def _transcript_has_current_user(
         self,
@@ -576,7 +577,17 @@ class CeoMessageBuilder:
         turn_id = str((user_metadata or {}).get('_transcript_turn_id') or '').strip()
         if turn_id and str(last_metadata.get('_transcript_turn_id') or '').strip() == turn_id:
             return True
-        return self._content_text(last.get('content')).strip() == str(query_text or '').strip()
+        return self._cron_prompt_equal(last.get('content'), query_text)
+
+    def _cron_prompt_equal(self, content: Any, query_text: str) -> bool:
+        """比较当前用户内容时忽略 cron 隐藏契约。
+
+        历史/转录里旧消息可能带宿主追加的隐藏契约，而新消息已剥除；直接
+        全等比较会判失败，导致 frontdoor 没把当前用户置于末位（答非所问）。
+        """
+        left = strip_cron_hidden_prompt(self._content_text(content)).strip()
+        right = strip_cron_hidden_prompt(str(query_text or '')).strip()
+        return left == right
 
     @staticmethod
     def _task_ledger_state(persisted_session: Any | None) -> dict[str, Any]:
@@ -1732,14 +1743,16 @@ class CeoMessageBuilder:
         )
         live_messages = list(stable_messages)
         has_user_content = bool(self._content_text(user_content).strip())
-        if not current_user_in_history and has_user_content:
-            live_messages.append({"role": "user", "content": user_content})
         dynamic_appendix_messages = [
             {"role": "assistant", "content": part}
             for part in turn_overlay_parts
             if str(part or "").strip()
         ]
+        # overlay/契约放在当前 user 之前，保证模型最后看到的是用户回合，
+        # 而不是把工具契约/overlay 当“上一条发言”回显。
         model_messages = [*live_messages, *dynamic_appendix_messages]
+        if not current_user_in_history and has_user_content:
+            model_messages.append({"role": "user", "content": user_content})
         return model_messages, stable_messages, dynamic_appendix_messages, turn_overlay_text, current_user_in_history
 
     def _build_direct_request_body_continuation_result(
@@ -1829,12 +1842,13 @@ class CeoMessageBuilder:
 
         live_messages = list(stable_messages)
         has_user_content = bool(self._content_text(context_sources['user_content']).strip())
-        if not current_user_in_history and has_user_content:
-            live_messages.append({"role": "user", "content": context_sources['user_content']})
         model_messages = [*live_messages, *list(dynamic_appendix_messages)]
         ephemeral_tail = self._prompt_message_records(ephemeral_tail_messages)
         if ephemeral_tail:
             model_messages.extend(ephemeral_tail)
+        # 当前用户回合必须是模型看到的最后一条，避免契约/overlay 占据末位被回显。
+        if not current_user_in_history and has_user_content:
+            model_messages.append({"role": "user", "content": context_sources['user_content']})
 
         raw_history_messages = [
             dict(item)

@@ -344,6 +344,7 @@ Maintenance note for parameter-error guidance:
 - `cron_internal` 的真正特例只剩两点：
   - reminder 正文不再伪装成 `user` 事件消息，而是隐藏的结构化 `system` 事件块
   - cron 任务生命周期不再依赖模型自己调用 `cron(action="remove")` 或自然语言 `stop_condition` 推断停止；停止与删除由 scheduler 侧的 `payload.max_runs` / `state.delivered_runs` 计数器负责
+- `cron` 的使用规范（提醒写成内部指令、`max_runs`、调度三选一、投递目标由运行时从当前会话上下文自动推导、模型不传 `delivery.*`/`sessionTarget`/`payload.*`）现在放在 cron 工具的 toolskill 里，模型按需 `load_tool_context("cron")` 加载；不再由渠道宿主往用户消息里追加隐藏契约。维护者若发现模型对 cron 用法理解过时，改 toolskill 而不是改注入逻辑。
 - 因此，若维护者排查“cron 到点了但没有创建异步任务 / 没有查询任务 / 只会重复谈 cron 自己”，应优先检查 frontdoor tool exposure 是否被错误缩成了 `cron`，而不是先怀疑 scheduler 没触发。
 - 当前 cron 工具合同应该理解为“结构化提醒”而不是“自然语言循环任务”：
   - `message` = 给未来 agent 的提醒动作

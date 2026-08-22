@@ -563,7 +563,7 @@ async def test_finalize_turn_appends_visible_output_for_self_execute_route() -> 
 
 
 @pytest.mark.asyncio
-async def test_prepare_turn_rejects_unexpected_context_shrink_without_reason(
+async def test_prepare_turn_quarantines_unexpected_context_shrink_without_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_key = "web:shared"
@@ -635,11 +635,18 @@ async def test_prepare_turn_rejects_unexpected_context_shrink_without_reason(
         context=CeoRuntimeContext(loop=loop, session=session, session_key=session_key, on_progress=None)
     )
 
-    with pytest.raises(RuntimeError, match="frontdoor context shrank without an allowed reason"):
-        await runner._graph_prepare_turn(
-            initial_persistent_state(user_input={"content": "new question", "metadata": {}}),
-            runtime=runtime,
-        )
+    # 新的自愈语义：不裸抛冻结会话，而是以受控原因把新种子写回基线。
+    await runner._graph_prepare_turn(
+        initial_persistent_state(user_input={"content": "new question", "metadata": {}}),
+        runtime=runtime,
+    )
+    assert getattr(session, "_frontdoor_history_shrink_reason", "") == "context_shrink_quarantine"
+    assert session._frontdoor_request_body_messages == runner._durable_frontdoor_request_body_messages(
+        [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "new question"},
+        ]
+    )
 
 
 @pytest.mark.asyncio
