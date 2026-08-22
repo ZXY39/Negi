@@ -160,7 +160,7 @@
 - 每回合构造 `_QQBotProgressCollector` 收集事件：`tool_execution_start`（「🔧 …」）、`tool_execution_end` 出错 / `error`（「⚠️ …」）、`message_delta` 的 progress/analysis channel（跳过 `deep_progress` 高噪声内容）。
 - 回合内单一 flush 任务按 `QQBOT_PROGRESS_MIN_INTERVAL_SECONDS`（5 秒）节流，合并至多 `QQBOT_PROGRESS_MAX_LINES_PER_FRAME`（3）行，以 `deliver_message(mode="progress", metadata.progress_kind="milestone")` 发出，**复用同一 `event_id`**（宿主按 event_id 关联 pending）。
 - 宿主 `runtime_bridge.ts` 仅在对应 `event_id` 的 pending 存在时转发 progress 帧（回合结束后的残留过程帧是噪声，不走 lateDeliverRoutes）；`bot.ts` deliver 识别 `kind: "progress"`，以纯文本发送、绕过 C2C markdown 缓冲，同样受 abort 代数抑制。
-- 配置：`channels.qqbot.progressMode: "off" | "milestones"`（默认 milestones）；`replyFinalOnly: true` 时过程帧一并禁用。
+- 配置：`channels.qqbot.progressMode: "off" | "milestones"`（默认 milestones）；`replyFinalOnly: true` 时进入最少回复模式——只投递最终回答，过程帧、非 final 中间回复与中途长任务提示（「任务处理时间较长…」）全部抑制。
 
 ## 7. 出站消息链路
 

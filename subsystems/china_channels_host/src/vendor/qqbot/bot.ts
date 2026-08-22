@@ -3072,6 +3072,8 @@ async function dispatchToAgent(params: {
     logger,
     sendNotice: async () => {
       if (groupMessageInterfaceBlocked || isControlCommand || shouldSuppressVisibleReplies()) return;
+      // 最少回复模式：只发最终回答，中途的“还在处理”提示一并抑制。
+      if (qqCfg.replyFinalOnly ?? false) return;
       markVisibleOutboundStarted();
       const result = await qqbotOutbound.sendText({
         cfg: { channels: { qqbot: qqCfg } },
