@@ -12,6 +12,7 @@ import pytest
 
 import g3ku.shells.web as web_shell
 from g3ku.agent.tools.cron import CronTool
+from g3ku.bus.events import OutboundMessage
 import g3ku.cron.timezones as cron_timezones
 from g3ku.config.loader import get_data_dir
 from g3ku.core.messages import UserInputMessage
@@ -101,6 +102,7 @@ def _make_job(
     session_key: str | None = None,
     max_runs: int = 1,
     delivered_runs: int = 0,
+    deliver: bool = True,
 ) -> CronJob:
     return CronJob(
         id=job_id,
@@ -110,7 +112,7 @@ def _make_job(
             kind="agent_turn",
             message=message,
             max_runs=max_runs,
-            deliver=True,
+            deliver=deliver,
             channel=channel,
             to=to,
             session_key=session_key,
@@ -552,6 +554,151 @@ async def test_dispatch_cron_job_falls_back_to_cron_thread_when_session_missing(
     assert bridge.calls[0]["chat_id"] == "direct"
     assert bridge.calls[0]["register_task"] is None
     assert resolve_cron_session_key(job, session_manager=session_manager) == "cron:job-42"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_cron_job_publishes_outbound_when_deliver_true() -> None:
+    bridge = _BridgeRecorder(output="杭州今天晴，28℃")
+    published: list[OutboundMessage] = []
+    job = _make_job(channel="qqbot", to="default:dm:EB6C8D4341C1238A627FF73CBE540DAE")
+
+    result = await dispatch_cron_job(
+        job,
+        runtime_bridge=bridge,
+        publish_outbound=published.append,
+    )
+
+    assert result == "杭州今天晴，28℃"
+    assert len(published) == 1
+    msg = published[0]
+    assert msg.channel == "qqbot"
+    assert msg.chat_id == "default:dm:EB6C8D4341C1238A627FF73CBE540DAE"
+    assert msg.content == "杭州今天晴，28℃"
+    assert msg.metadata["source"] == "cron"
+    assert msg.metadata["cron_job_id"] == "job-1"
+    assert msg.metadata["session_key"] == "cron:job-1"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_cron_job_awaits_async_outbound_publisher() -> None:
+    bridge = _BridgeRecorder(output="async hello")
+    published: list[OutboundMessage] = []
+
+    async def _publish(msg: OutboundMessage) -> None:
+        published.append(msg)
+
+    result = await dispatch_cron_job(
+        job=_make_job(channel="qqbot", to="default:dm:USER123"),
+        runtime_bridge=bridge,
+        publish_outbound=_publish,
+    )
+
+    assert result == "async hello"
+    assert len(published) == 1
+    assert published[0].chat_id == "default:dm:USER123"
+    assert published[0].content == "async hello"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_cron_job_skips_outbound_when_deliver_false() -> None:
+    bridge = _BridgeRecorder(output="trace only")
+    published: list[OutboundMessage] = []
+
+    result = await dispatch_cron_job(
+        job=_make_job(channel="qqbot", to="default:dm:USER123", deliver=False),
+        runtime_bridge=bridge,
+        publish_outbound=published.append,
+    )
+
+    assert result == "trace only"
+    assert published == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_cron_job_skips_outbound_for_empty_output() -> None:
+    bridge = _BridgeRecorder(output="")
+    published: list[OutboundMessage] = []
+
+    result = await dispatch_cron_job(
+        job=_make_job(channel="qqbot", to="default:dm:USER123"),
+        runtime_bridge=bridge,
+        publish_outbound=published.append,
+    )
+
+    assert result == ""
+    assert published == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_cron_job_skips_outbound_for_internal_direct_target() -> None:
+    bridge = _BridgeRecorder(output="internal done")
+    published: list[OutboundMessage] = []
+
+    result = await dispatch_cron_job(
+        job=_make_job(channel=None, to=None),
+        runtime_bridge=bridge,
+        publish_outbound=published.append,
+    )
+
+    assert result == "internal done"
+    assert published == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_cron_job_swallows_outbound_publish_failure() -> None:
+    bridge = _BridgeRecorder(output="deliver anyway")
+
+    def _boom(_msg: OutboundMessage) -> None:
+        raise RuntimeError("bus down")
+
+    result = await dispatch_cron_job(
+        job=_make_job(channel="qqbot", to="default:dm:USER123"),
+        runtime_bridge=bridge,
+        publish_outbound=_boom,
+    )
+
+    assert result == "deliver anyway"
+
+
+@pytest.mark.asyncio
+async def test_web_cron_on_job_wires_bus_outbound_publisher(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def _fake_dispatch(job, **kwargs):
+        calls["job"] = job
+        calls["publish_outbound"] = kwargs.get("publish_outbound")
+        return "ok"
+
+    class _Bus:
+        def __init__(self) -> None:
+            self.outbound: list[object] = []
+
+        def publish_outbound(self, msg) -> str:
+            self.outbound.append(msg)
+            return str(msg)
+
+    class _FakeSessionRuntimeBridge:
+        def __init__(self, *args, **kwargs) -> None:
+            calls["bridge"] = (args, kwargs)
+
+    bus = _Bus()
+    monkeypatch.setattr(web_shell, "dispatch_cron_job", _fake_dispatch)
+    monkeypatch.setattr(web_shell, "SessionRuntimeBridge", _FakeSessionRuntimeBridge)
+    monkeypatch.setattr(web_shell, "get_runtime_manager", lambda agent: ("manager", agent))
+    monkeypatch.setattr(web_shell, "_global_bus", bus)
+
+    agent = SimpleNamespace(sessions=object(), _register_active_task=lambda *a, **k: None)
+    service = web_shell._build_web_cron_service({"agent": agent})
+    job = _make_job(channel="qqbot", to="default:dm:USER123")
+
+    result = await service.on_job(job)
+
+    assert result == "ok"
+    assert calls["job"] is job
+    publisher = calls["publish_outbound"]
+    assert callable(publisher)
+    # publisher must be bound to the live bus instance, not None
+    assert getattr(publisher, "__self__", None) is bus
 
 
 @pytest.mark.asyncio

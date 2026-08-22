@@ -193,11 +193,13 @@ def _build_web_cron_service(agent_holder: dict[str, AgentLoop]) -> CronService:
             raise RuntimeError("web cron runtime is not initialized")
         runtime_bridge = SessionRuntimeBridge(get_runtime_manager(runtime_agent))
         task_registrar = getattr(runtime_agent, "_register_active_task", None)
+        bus = _global_bus
         return await dispatch_cron_job(
             job,
             runtime_bridge=runtime_bridge,
             session_manager=getattr(runtime_agent, "sessions", None),
             register_task=task_registrar if callable(task_registrar) else None,
+            publish_outbound=bus.publish_outbound if bus is not None else None,
         )
 
     return CronService(get_data_dir() / "cron" / "jobs.json", on_job=_on_job)

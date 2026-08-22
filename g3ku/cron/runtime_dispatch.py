@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any, Callable
 
+from loguru import logger
+
+from g3ku.bus.events import OutboundMessage
 from g3ku.core.messages import UserInputMessage
 from g3ku.cron.types import CronJob
 
@@ -31,6 +35,7 @@ async def dispatch_cron_job(
     runtime_bridge: Any,
     session_manager: Any | None = None,
     register_task: Callable[[str, Any], None] | None = None,
+    publish_outbound: Callable[[Any], Any] | None = None,
 ) -> str | None:
     payload = getattr(job, "payload", None)
     channel = str(getattr(payload, "channel", "") or "").strip() or "cli"
@@ -58,4 +63,23 @@ async def dispatch_cron_job(
         chat_id=chat_id,
         register_task=register_task,
     )
-    return str(getattr(result, "output", "") or "")
+    output = str(getattr(result, "output", "") or "")
+    deliver = bool(getattr(payload, "deliver", False))
+    if deliver and output.strip() and publish_outbound is not None and chat_id and chat_id != "direct":
+        try:
+            outbound = OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=output,
+                metadata={
+                    "source": "cron",
+                    "session_key": session_key,
+                    "cron_job_id": str(getattr(job, "id", "") or "").strip(),
+                },
+            )
+            published = publish_outbound(outbound)
+            if inspect.isawaitable(published):
+                await published
+        except Exception:
+            logger.debug("cron outbound publish skipped for job {}", getattr(job, "id", ""))
+    return output
