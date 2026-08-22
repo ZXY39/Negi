@@ -524,6 +524,68 @@ def _get_china_transport(agent: AgentLoop | None = None) -> ChinaBridgeTransport
     return _global_china_transport
 
 
+_CHINA_OUTBOUND_RETRY_LOG_INTERVAL_S = 30.0
+
+
+def _start_china_outbound_drain(bus: MessageBus, transport: ChinaBridgeTransport) -> asyncio.Task:
+    """Create the outbound drain task and return it.
+
+    The drain is the only bridge between the in-process outbound bus and the
+    China host, so it must never die silently: a crashed drain strands every
+    later message (e.g. cron reminders) in the queue forever with no log.
+
+    Failure handling:
+    - ``RuntimeError`` from the send path (control WebSocket not connected
+      yet, or dropped mid-reconnect) is transient: keep the message and retry
+      with a backoff instead of losing it.
+    - Any other exception is treated as a poison message: log and drop only
+      that message, then keep draining.
+    - ``CancelledError`` still terminates the task (shutdown/restart path).
+    """
+
+    async def _drain_outbound() -> None:
+        pending: OutboundMessage | None = None
+        last_retry_log = float("-inf")
+        while True:
+            try:
+                if pending is None:
+                    try:
+                        pending = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
+                if pending.channel not in CHINA_CHANNELS:
+                    pending = None
+                    continue
+                await transport.send_outbound(pending)
+                logger.debug(
+                    "china outbound drained: channel={} chat_id={}",
+                    pending.channel,
+                    pending.chat_id,
+                )
+                pending = None
+            except asyncio.CancelledError:
+                raise
+            except RuntimeError as exc:
+                now = asyncio.get_running_loop().time()
+                if now - last_retry_log >= _CHINA_OUTBOUND_RETRY_LOG_INTERVAL_S:
+                    logger.warning(
+                        "china outbound drain waiting for bridge connection; will retry: {}",
+                        exc,
+                    )
+                    last_retry_log = now
+                await asyncio.sleep(1.0)
+            except Exception as exc:
+                logger.error(
+                    "china outbound drain dropped message channel={} chat_id={}: {}",
+                    getattr(pending, "channel", "?"),
+                    getattr(pending, "chat_id", "?"),
+                    exc,
+                )
+                pending = None
+
+    return asyncio.create_task(_drain_outbound())
+
+
 async def _start_china_bridge_services_now(runtime_agent: AgentLoop, config) -> None:
     bus = _global_bus
     if bus is None:
@@ -538,18 +600,7 @@ async def _start_china_bridge_services_now(runtime_agent: AgentLoop, config) -> 
         )
     await _global_china_supervisor.start()
     if _global_china_outbound_task is None or _global_china_outbound_task.done():
-        async def _drain_outbound() -> None:
-            while True:
-                try:
-                    msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-                    if msg.channel in CHINA_CHANNELS:
-                        await transport.send_outbound(msg)
-                except asyncio.TimeoutError:
-                    continue
-                except asyncio.CancelledError:
-                    break
-
-        _global_china_outbound_task = asyncio.create_task(_drain_outbound())
+        _global_china_outbound_task = _start_china_outbound_drain(bus, transport)
 
 
 async def _await_current_web_process_then_start_china_bridge(runtime_agent: AgentLoop, config, web_port: int) -> None:

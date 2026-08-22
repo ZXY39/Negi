@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import mimetypes
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -21,11 +22,115 @@ from g3ku.china_bridge.session_keys import (
 from g3ku.runtime.frontdoor.cron_hidden_prompt import strip_cron_hidden_prompt
 from g3ku.china_bridge.registry import china_channel_id_set
 from g3ku.core.messages import UserInputMessage
-from g3ku.runtime.bridge import SessionRuntimeBridge
+from g3ku.runtime.bridge import SessionRuntimeBridge, cli_event_text
 
 CHINA_CHANNELS = china_channel_id_set()
 
 Sender = Callable[[dict[str, Any]], asyncio.Future | Any]
+
+# QQ 暂停命令触发词（与宿主 QQBOT_PAUSE_TRIGGERS 对齐）。
+QQBOT_PAUSE_COMMANDS = {"/pause", "pause", "暂停", "暫停"}
+STOP_COMMANDS = {"/stop", "停止"}
+# 镜像宿主 QQBOT_ABORT_TRAILING_PUNCTUATION_RE，保证「停止。」「暂停！」等
+# 带标点变体在 Python 侧与宿主侧的判定一致。
+_CONTROL_TRAILING_PUNCTUATION_RE = re.compile(r"[.!?…,，。;；:：'\"’”)\]}]+$")
+# QQ 官方机器人 API 有频率限制且不能编辑已发消息，过程信息只能按
+# 里程碑节流下发，不能做 token 级流式。
+QQBOT_PROGRESS_MIN_INTERVAL_SECONDS = 5.0
+QQBOT_PROGRESS_MAX_LINES_PER_FRAME = 3
+
+
+class _QQBotProgressCollector:
+    """按回合收集 QQ 会话过程事件，节流合并后以 progress 帧下发。
+
+    QQ 官方机器人 API 不能编辑已发消息且有频率限制，因此过程信息
+    （工具调用、阶段进展）以里程碑式的节流消息送达，而不是逐字流式。
+    监听器回调位于会话事件派发路径上，必须保持非阻塞且不抛异常。
+    """
+
+    def __init__(
+        self,
+        *,
+        transport: "ChinaBridgeTransport",
+        envelope: Any,
+        session_key: str,
+        min_interval_seconds: float = QQBOT_PROGRESS_MIN_INTERVAL_SECONDS,
+        max_lines_per_frame: int = QQBOT_PROGRESS_MAX_LINES_PER_FRAME,
+    ) -> None:
+        self._transport = transport
+        self._envelope = envelope
+        self._session_key = session_key
+        self._min_interval_seconds = float(min_interval_seconds)
+        self._max_lines_per_frame = max(1, int(max_lines_per_frame))
+        self._buffer: list[str] = []
+        self._flush_task: asyncio.Task | None = None
+        self._stopped = False
+
+    def start(self) -> None:
+        if self._flush_task is None:
+            self._flush_task = asyncio.create_task(self._flush_loop())
+
+    def stop(self) -> None:
+        self._stopped = True
+        if self._flush_task is not None:
+            self._flush_task.cancel()
+            self._flush_task = None
+
+    async def listener(self, event) -> None:
+        if self._stopped:
+            return
+        try:
+            line = self._format_event_line(event)
+        except Exception:
+            line = ""
+        if line:
+            self._buffer.append(line)
+
+    @staticmethod
+    def _format_event_line(event) -> str:
+        kind, text = cli_event_text(event)
+        text = str(text or "").strip()
+        if not text:
+            return ""
+        if kind == "tool":
+            return f"🔧 {text}"
+        if kind == "tool_error":
+            return f"⚠️ {text}"
+        if kind in {"progress", "analysis"}:
+            return text
+        return ""
+
+    async def _flush_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self._min_interval_seconds)
+                await self._flush()
+        except asyncio.CancelledError:
+            return
+
+    async def _flush(self) -> None:
+        if not self._buffer or self._stopped:
+            return
+        lines = self._buffer[: self._max_lines_per_frame]
+        del self._buffer[: self._max_lines_per_frame]
+        text = "\n".join(lines)
+        if not text.strip():
+            return
+        envelope = self._envelope
+        await self._transport._emit(
+            build_deliver_frame(
+                event_id=envelope.event_id,
+                delivery_id=uuid.uuid4().hex,
+                channel=envelope.channel,
+                account_id=envelope.account_id,
+                target_kind=envelope.peer_kind,
+                target_id=envelope.peer_id,
+                text=text,
+                mode="progress",
+                reply_to=envelope.message_id,
+                metadata={"session_key": self._session_key, "progress_kind": "milestone"},
+            )
+        )
 
 
 class ChinaBridgeTransport:
@@ -176,7 +281,49 @@ class ChinaBridgeTransport:
         if callable(self._register_task):
             self._register_task(None, task)
         else:
-            task.add_done_callback(lambda t: t.exception())
+            task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
+
+    @classmethod
+    def _normalize_control_command_text(cls, text: str) -> str:
+        """与宿主 normalizeQQBotAbortTriggerText 对齐的控制命令归一化。"""
+        normalized = str(text or "").strip().lower()
+        normalized = normalized.replace("’", "'").replace("`", "'")
+        normalized = re.sub(r"\s+", " ", normalized)
+        normalized = _CONTROL_TRAILING_PUNCTUATION_RE.sub("", normalized).strip()
+        return normalized
+
+    @staticmethod
+    def _session_is_running(session) -> bool:
+        state = getattr(session, "state", None)
+        status = str(getattr(state, "status", "") or "").strip().lower()
+        return bool(getattr(state, "is_running", False)) or status == "running"
+
+    async def _deliver(
+        self,
+        *,
+        envelope,
+        session_key: str,
+        text: str,
+        mode: str = "final",
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        metadata: dict[str, Any] = {"session_key": session_key}
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        await self._emit(
+            build_deliver_frame(
+                event_id=envelope.event_id,
+                delivery_id=uuid.uuid4().hex,
+                channel=envelope.channel,
+                account_id=envelope.account_id,
+                target_kind=envelope.peer_kind,
+                target_id=envelope.peer_id,
+                text=text,
+                mode=mode,
+                reply_to=envelope.message_id,
+                metadata=metadata,
+            )
+        )
 
     async def _run_turn(self, payload: dict[str, Any]) -> None:
         envelope = normalize_inbound_frame(payload)
@@ -213,22 +360,26 @@ class ChinaBridgeTransport:
             }
         )
         text = str(envelope.text or "")
+        # 暂停/运行中注入/过程信息流仅对 QQ 渠道生效（范围决定）；
+        # 其他中国渠道保持原有行为。
+        is_qqbot = envelope.channel == "qqbot"
         try:
-            if text.strip().lower() in {"/stop", "停止"}:
+            control_text = self._normalize_control_command_text(text)
+            if control_text in STOP_COMMANDS:
                 total = await self._runtime_bridge.cancel(session_key, reason="china_stop")
-                await self._emit(
-                    build_deliver_frame(
-                        event_id=envelope.event_id,
-                        delivery_id=uuid.uuid4().hex,
-                        channel=envelope.channel,
-                        account_id=envelope.account_id,
-                        target_kind=envelope.peer_kind,
-                        target_id=envelope.peer_id,
-                        text=f"Stopped {total} task(s)." if total else "No active task to stop.",
-                        mode="final",
-                        reply_to=envelope.message_id,
-                        metadata={"session_key": session_key},
-                    )
+                await self._deliver(
+                    envelope=envelope,
+                    session_key=session_key,
+                    text=f"Stopped {total} task(s)." if total else "No active task to stop.",
+                )
+                await self._emit(build_turn_complete_frame(event_id=envelope.event_id))
+                return
+            if is_qqbot and control_text in QQBOT_PAUSE_COMMANDS:
+                paused = await self._runtime_bridge.pause(session_key, manual=True)
+                await self._deliver(
+                    envelope=envelope,
+                    session_key=session_key,
+                    text="已暂停。" if paused else "当前没有正在进行的任务。",
                 )
                 await self._emit(build_turn_complete_frame(event_id=envelope.event_id))
                 return
@@ -239,8 +390,107 @@ class ChinaBridgeTransport:
                 attachments=list(envelope.attachments or []),
             )
 
-            result = await self._runtime_bridge.prompt(
-                user_message,
+            if is_qqbot:
+                # 运行中收到的消息立即入 follow-up 队列（对齐 Web 行为），
+                # 由 frontdoor 在下一次调模型前注入，或由本回合结束后的
+                # 排空兜底循环续跑，不再阻塞等待最终回复。
+                existing_session = self._runtime_bridge.get_existing_session(session_key)
+                if self._session_is_running(existing_session):
+                    await existing_session.queue_follow_up_batch(
+                        [user_message], persist_transcript=True
+                    )
+                    await self._deliver(
+                        envelope=envelope,
+                        session_key=session_key,
+                        text="收到，将在当前任务中一并处理。",
+                    )
+                    await self._emit(build_turn_complete_frame(event_id=envelope.event_id))
+                    return
+
+            collector: _QQBotProgressCollector | None = None
+            listeners = None
+            if is_qqbot:
+                collector = _QQBotProgressCollector(
+                    transport=self,
+                    envelope=envelope,
+                    session_key=session_key,
+                    min_interval_seconds=QQBOT_PROGRESS_MIN_INTERVAL_SECONDS,
+                    max_lines_per_frame=QQBOT_PROGRESS_MAX_LINES_PER_FRAME,
+                )
+                collector.start()
+                listeners = [collector.listener]
+            try:
+                result = await self._runtime_bridge.prompt(
+                    user_message,
+                    session_key=session_key,
+                    channel=envelope.channel,
+                    chat_id=runtime_chat_id,
+                    runtime_channel=envelope.channel,
+                    runtime_chat_id=runtime_chat_id,
+                    runtime_memory_channel=envelope.channel,
+                    runtime_memory_chat_id=memory_chat_id,
+                    listeners=listeners,
+                    register_task=self._register_task,
+                )
+                if getattr(result, "output", None):
+                    await self._deliver(
+                        envelope=envelope,
+                        session_key=session_key,
+                        text=str(result.output),
+                    )
+                if is_qqbot:
+                    await self._drain_queued_follow_ups(
+                        envelope=envelope,
+                        session_key=session_key,
+                        runtime_chat_id=runtime_chat_id,
+                        memory_chat_id=memory_chat_id,
+                        listeners=listeners,
+                    )
+                await self._emit(build_turn_complete_frame(event_id=envelope.event_id))
+            finally:
+                if collector is not None:
+                    collector.stop()
+        except asyncio.CancelledError:
+            # 会话被暂停/取消时（例如 Web 端手动暂停渠道会话），CancelledError
+            # 是 BaseException，会穿过 except Exception。若不发终止帧，宿主侧
+            # 该回合的 pending Promise 永不 settle，串行派发队列永久卡死。
+            await self._emit(build_turn_complete_frame(event_id=envelope.event_id))
+            raise
+        except Exception as exc:
+            await self._emit(build_turn_error_frame(event_id=envelope.event_id, error=str(exc)))
+
+    async def _drain_queued_follow_ups(
+        self,
+        *,
+        envelope,
+        session_key: str,
+        runtime_chat_id: str,
+        memory_chat_id: str,
+        listeners,
+    ) -> None:
+        """排空兜底循环：对齐 websocket_ceo._run_user_turn 的 follow-up 续跑。
+
+        prompt 正常返回后，运行中排队进来的消息可能仍留在会话队列里
+        （例如到达时模型已进入最后一段生成）。这里循环续跑直到排空，
+        整个过程仍只由调用方发送一个 turn_complete。
+        """
+        while True:
+            session = self._runtime_bridge.get_existing_session(session_key)
+            drained = (
+                session.drain_queued_follow_up_messages() if session is not None else []
+            )
+            if not drained:
+                return
+            archive = getattr(session, "archive_follow_up_chain_transition", None)
+            if callable(archive):
+                follow_up_turn_ids = {
+                    str((getattr(item, "metadata", None) or {}).get("_transcript_turn_id") or "").strip()
+                    for item in drained
+                }
+                follow_up_turn_ids.discard("")
+                await archive(pending_follow_up_turn_ids=follow_up_turn_ids)
+            result = await self._runtime_bridge.prompt_batch(
+                drained,
                 session_key=session_key,
                 channel=envelope.channel,
                 chat_id=runtime_chat_id,
@@ -248,26 +498,15 @@ class ChinaBridgeTransport:
                 runtime_chat_id=runtime_chat_id,
                 runtime_memory_channel=envelope.channel,
                 runtime_memory_chat_id=memory_chat_id,
+                listeners=listeners,
                 register_task=self._register_task,
             )
             if getattr(result, "output", None):
-                await self._emit(
-                    build_deliver_frame(
-                        event_id=envelope.event_id,
-                        delivery_id=uuid.uuid4().hex,
-                        channel=envelope.channel,
-                        account_id=envelope.account_id,
-                        target_kind=envelope.peer_kind,
-                        target_id=envelope.peer_id,
-                        text=str(result.output),
-                        mode="final",
-                        reply_to=envelope.message_id,
-                        metadata={"session_key": session_key},
-                    )
+                await self._deliver(
+                    envelope=envelope,
+                    session_key=session_key,
+                    text=str(result.output),
                 )
-            await self._emit(build_turn_complete_frame(event_id=envelope.event_id))
-        except Exception as exc:
-            await self._emit(build_turn_error_frame(event_id=envelope.event_id, error=str(exc)))
 
     async def _emit(self, payload: dict[str, Any]) -> None:
         if self._sender is None:
@@ -305,12 +544,19 @@ class ChinaBridgeTransport:
         metadata = dict(msg.metadata or {})
         if bool(metadata.get("_progress")) or bool(metadata.get("_tool_hint")) or bool(metadata.get("_session_event")):
             return
+        if self._sender is None:
+            # Bus-driven outbound must never be dropped silently: the drain
+            # loop treats RuntimeError as transient and retries once the
+            # bridge sender is initialized / connected.
+            raise RuntimeError("china bridge sender is not initialized")
         parsed_target = self._parse_chat_id_target(getattr(msg, "chat_id", None) or "")
         account_id = str(metadata.get("_china_account_id") or (parsed_target or {}).get("account_id") or "default").strip() or "default"
         peer_kind = str(metadata.get("_china_peer_kind") or (parsed_target or {}).get("peer_kind") or "user").strip() or "user"
         peer_id = str(metadata.get("_china_peer_id") or (parsed_target or {}).get("peer_id") or msg.chat_id or "").strip()
         if not peer_id:
-            return
+            raise ValueError(
+                f"cannot resolve china peer for outbound chat_id={getattr(msg, 'chat_id', '')!r}"
+            )
         await self._emit(
             build_deliver_frame(
                 event_id=str((msg.metadata or {}).get("_china_event_id") or uuid.uuid4().hex),

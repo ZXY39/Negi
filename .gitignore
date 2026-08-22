@@ -41,6 +41,7 @@ tests/resources/**/*.pyc
 !tests/test_china_bridge_config.py
 !tests/test_china_bridge_session_keys.py
 !tests/test_china_bridge_transport.py
+!tests/test_web_outbound_drain.py
 !tests/test_channel_manager_china_bridge.py
 
 # Runtime and local state

@@ -115,6 +115,25 @@ export class ChinaChannelsHost {
       version: "0.2.0",
       channelsConfig: cfg.channels,
     });
+    // Proactive fallback for late final frames with no remembered route
+    // (e.g. cron reminder pushes right after a host restart). The frame
+    // already carries channel/account/target, so no route table is needed.
+    this.runtimeBridge.setProactiveDeliver(async ({ channel, accountId, target, text }) => {
+      if (channel !== "qqbot") {
+        throw new Error(`proactive fallback not implemented for channel "${channel}"`);
+      }
+      const { sendProactiveQQBotMessage } = await import("./vendor/qqbot/proactive.js");
+      const isGroup = target.kind === "group" || target.kind === "chat" || target.kind === "channel";
+      const result = await sendProactiveQQBotMessage({
+        cfg: { channels: this.cfg.channels },
+        to: `${isGroup ? "group" : "user"}:${target.id}`,
+        text,
+        accountId,
+      });
+      if (result && result.error) {
+        throw new Error(String(result.error));
+      }
+    });
   }
 
   async start(): Promise<void> {

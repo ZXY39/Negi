@@ -65,3 +65,58 @@ describe("G3kuRuntimeBridge late final delivery", () => {
     );
   });
 });
+
+describe("G3kuRuntimeBridge proactive fallback", () => {
+  function makeBridge() {
+    const bridge = new G3kuRuntimeBridge({
+      host: "127.0.0.1",
+      port: 18989,
+      token: "token",
+      version: "test",
+      channelsConfig: {},
+    }) as any;
+    bridge.send = vi.fn();
+    return bridge;
+  }
+
+  const orphanFrame = {
+    type: "deliver_message",
+    event_id: "evt-orphan",
+    delivery_id: "delivery-orphan",
+    channel: "qqbot",
+    account_id: "default",
+    target: { kind: "user", id: "user-99" },
+    payload: { text: "cron reminder", mode: "final" },
+    metadata: { session_key: "china:qqbot:default:dm" },
+  };
+
+  it("uses the proactive sender when no pending turn or late route exists", async () => {
+    const bridge = makeBridge();
+    const proactive = vi.fn().mockResolvedValue(undefined);
+    bridge.setProactiveDeliver(proactive);
+
+    await bridge.handleFrame(orphanFrame);
+
+    expect(proactive).toHaveBeenCalledTimes(1);
+    expect(proactive).toHaveBeenCalledWith({
+      channel: "qqbot",
+      accountId: "default",
+      target: { kind: "user", id: "user-99" },
+      text: "cron reminder",
+    });
+  });
+
+  it("does not throw when no proactive sender is registered", async () => {
+    const bridge = makeBridge();
+    await expect(bridge.handleFrame(orphanFrame)).resolves.toBeUndefined();
+  });
+
+  it("swallows proactive sender errors without killing frame handling", async () => {
+    const bridge = makeBridge();
+    const proactive = vi.fn().mockRejectedValue(new Error("send failed"));
+    bridge.setProactiveDeliver(proactive);
+
+    await expect(bridge.handleFrame(orphanFrame)).resolves.toBeUndefined();
+    expect(proactive).toHaveBeenCalledTimes(1);
+  });
+});

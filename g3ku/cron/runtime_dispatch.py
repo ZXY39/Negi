@@ -80,6 +80,12 @@ async def dispatch_cron_job(
             published = publish_outbound(outbound)
             if inspect.isawaitable(published):
                 await published
-        except Exception:
-            logger.debug("cron outbound publish skipped for job {}", getattr(job, "id", ""))
+            logger.info(
+                "cron outbound published for job {} -> {}:{}",
+                str(getattr(job, "id", "") or "").strip(),
+                channel,
+                chat_id,
+            )
+        except Exception as exc:
+            logger.debug("cron outbound publish skipped for job {}: {}", getattr(job, "id", ""), exc)
     return output
