@@ -64,6 +64,25 @@ Focus on:
 - Frontdoor vs main runtime responsibilities
 - Recovery, pause/resume, continuation, orchestration semantics
 
+### `docs/architecture/context-and-cache-troubleshooting.md`
+
+Update when touching:
+
+- Prompt cache / prefix stability (node prompt assembly, CEO frontdoor context construction)
+- Context shrink/compression paths (`token_compression`, `stage_compaction`)
+- Request artifact persistence (`provider_request_body`, actual-request JSON, prompt cache family)
+- Send-side token preflight or usage normalization
+- Session continuation baselines, fresh-turn scaffold continuity
+
+Focus on:
+
+- Cache-miss vs context-loss triage vocabulary (token split, hash families)
+- Data-source hierarchy (per-request JSON over transcript)
+- Known pitfall invariants (append-only, baseline/restore ordering)
+- Verification requirements when node/CEO context strategies change
+
+This doc is the canonical owner of actual-request forensics. Runtime-side cache facts live here, not in `runtime-overview.md`.
+
 ### `docs/architecture/heartbeat-system.md`
 
 Update when touching:
@@ -176,6 +195,7 @@ Update this file if any of the following change:
 - The recommended reading order changes
 - The system-level decomposition changes
 - A maintenance entrypoint or major subsystem boundary changes
+- A contract's owning doc changes (keep the Topic Ownership table accurate)
 
 ## How To Update The Docs
 
@@ -201,6 +221,18 @@ Avoid:
 - Temporary implementation notes
 - Deep code dump details that will rot quickly
 - Bullet lists of every file in a directory unless they serve the maintenance goal
+
+## Anti-Accumulation Rules
+
+The docs previously bloat by appending a new addendum section after every fix. To prevent that regression, every doc update MUST follow these rules:
+
+1. Update in place, never append. When behavior changes, rewrite the section that owns the topic. Do not add trailing sections named like “X Update”, “X Contract Notes”, or “X Addendum”. If no owning section exists, create a properly numbered section inside the owning doc — not an appendix.
+2. One contract, one home. Every contract has exactly one owning doc, per the Topic Ownership table in `docs/architecture/README.md`. All other docs reference it with a pointer (`详见 <doc>「<topic>」` / `See <doc> "<topic>"`) and never restate the contract body. If a change moves ownership, update the table.
+3. Pointers use topic phrases, never section numbers. Numbers shift as docs are renumbered.
+4. Present tense only. Never write “now / no longer / previously / since 2026-XX / 现在 / 不再 / 曾经”. Needing those phrases means you are writing a changelog — rewrite as the current contract or delete.
+5. README notes are pointers only. The maintenance/debugging-notes area of `README.md` holds one-line symptom → doc pointers. No implementation details, ever.
+6. Respect word budgets. `runtime-overview.md` ≤ 9,000 words, `web-and-admin.md` ≤ 8,500, `tool-and-skill-system.md` ≤ 5,000, `context-and-cache-troubleshooting.md` ≤ 4,000, `operations-and-maintenance.md` ≤ 3,000, `heartbeat-system.md` ≤ 2,600, `config-and-models.md` ≤ 2,000, `china-channels.md` ≤ 800. If an update would push a doc over budget, condense existing sections first.
+7. Superseded content is deleted, not annotated. Never leave “obsolete notes to ignore” markers — remove the dead text outright.
 
 ## Update Decision Checklist
 
