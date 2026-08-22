@@ -107,15 +107,19 @@ describe("QQBot fast abort queue handling", () => {
     clearQQBotRuntime();
   });
 
-  it("executes fast abort immediately and drops queued messages for the same session", async () => {
+  it("dispatches busy inbound immediately and executes fast abort immediately", async () => {
     const logger = createLogger();
     let releaseFirstDispatch: (() => void) | undefined;
     let resolveFirstEntered: (() => void) | undefined;
+    let resolveSecondEntered: (() => void) | undefined;
     let resolveStopEntered: (() => void) | undefined;
     let executedSecondMessage = false;
 
     const firstEntered = new Promise<void>((resolve) => {
       resolveFirstEntered = resolve;
+    });
+    const secondEntered = new Promise<void>((resolve) => {
+      resolveSecondEntered = resolve;
     });
     const stopEntered = new Promise<void>((resolve) => {
       resolveStopEntered = resolve;
@@ -137,6 +141,7 @@ describe("QQBot fast abort queue handling", () => {
       }
       if (rawBody === "second") {
         executedSecondMessage = true;
+        resolveSecondEntered?.();
       }
     });
 
@@ -183,8 +188,15 @@ describe("QQBot fast abort queue handling", () => {
       logger,
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+    await secondEntered;
+
+    // 新契约：会话忙碌时消息立即派发（Python 侧按运行状态分流为
+    // follow-up 注入或新回合），不再排队等待当前回合结束。
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+    expect(executedSecondMessage).toBe(true);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("session busy; dispatching inbound immediately")
+    );
 
     const stopDispatch = handleQQBotDispatch({
       eventType: "C2C_MESSAGE_CREATE",
@@ -204,20 +216,21 @@ describe("QQBot fast abort queue handling", () => {
 
     await stopEntered;
 
-    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(3);
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining("session fast-abort command detected; executing immediately")
     );
+    // 忙碌消息已立即派发，队列中无可丢弃项。
     expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining("session fast-abort command dropped 1 queued messages")
+      expect.stringContaining("session fast-abort command dropped 0 queued messages")
     );
 
     releaseFirstDispatch?.();
 
     await Promise.all([firstDispatch, secondDispatch, stopDispatch]);
 
-    expect(executedSecondMessage).toBe(false);
-    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+    expect(executedSecondMessage).toBe(true);
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(3);
   });
 
   it("suppresses stale reply payloads after stop and keeps the abort acknowledgement", async () => {
@@ -316,15 +329,19 @@ describe("QQBot fast abort queue handling", () => {
     );
   });
 
-  it("limits fast abort queue dropping to the current queue key", async () => {
+  it("executes another sender's fast abort immediately without disturbing busy dispatches", async () => {
     const logger = createLogger();
     let releaseFirstDispatch: (() => void) | undefined;
     let resolveFirstEntered: (() => void) | undefined;
+    let resolveSecondEntered: (() => void) | undefined;
     let resolveOtherUserStopEntered: (() => void) | undefined;
     let executedQueuedMessage = false;
 
     const firstEntered = new Promise<void>((resolve) => {
       resolveFirstEntered = resolve;
+    });
+    const secondEntered = new Promise<void>((resolve) => {
+      resolveSecondEntered = resolve;
     });
     const otherUserStopEntered = new Promise<void>((resolve) => {
       resolveOtherUserStopEntered = resolve;
@@ -347,6 +364,7 @@ describe("QQBot fast abort queue handling", () => {
       }
       if (rawBody === "second-u1") {
         executedQueuedMessage = true;
+        resolveSecondEntered?.();
       }
     });
 
@@ -393,8 +411,11 @@ describe("QQBot fast abort queue handling", () => {
       logger,
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+    await secondEntered;
+
+    // 新契约：忙碌消息立即派发，不排队。
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+    expect(executedQueuedMessage).toBe(true);
 
     const stopDispatch = handleQQBotDispatch({
       eventType: "C2C_MESSAGE_CREATE",
@@ -413,7 +434,7 @@ describe("QQBot fast abort queue handling", () => {
     });
 
     await otherUserStopEntered;
-    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(3);
 
     releaseFirstDispatch?.();
 

@@ -426,6 +426,29 @@ export function isQQBotFastAbortCommandText(text: string): boolean {
   );
 }
 
+// QQ 端暂停命令触发词。与 Python 传输层 QQBOT_PAUSE_COMMANDS 对齐；
+// 暂停与停止的区别：暂停保留排队消息，停止丢弃。
+const QQBOT_PAUSE_TRIGGERS = new Set([
+  "pause",
+  "暂停",
+  "暫停",
+]);
+
+export function isQQBotPauseCommandText(text: string): boolean {
+  if (!text) {
+    return false;
+  }
+
+  const normalized = text.trim();
+  if (!normalized) {
+    return false;
+  }
+
+  const lower = normalized.toLowerCase();
+  const triggerNormalized = normalizeQQBotAbortTriggerText(lower);
+  return lower === "/pause" || triggerNormalized === "/pause" || QQBOT_PAUSE_TRIGGERS.has(triggerNormalized);
+}
+
 function toString(value: unknown): string | undefined {
   if (typeof value === "string" && value.trim()) return value;
   return undefined;
@@ -2952,6 +2975,10 @@ async function dispatchToAgent(params: {
   const routeSessionKey = resolveQQBotRouteSessionKey(route);
   const queueKey = buildSessionDispatchQueueKey(route);
   const isFastAbortCommand = isQQBotFastAbortCommandText(inbound.content);
+  const isPauseCommand = isQQBotPauseCommandText(inbound.content);
+  // Control commands (stop/pause) skip typing/heartbeat/long-task notice/fallback
+  // so they stay fast and don't emit noise around the control acknowledgement.
+  const isControlCommand = isFastAbortCommand || isPauseCommand;
   const dispatchAbortGeneration = getSessionDispatchState(queueKey).abortGeneration;
   const shouldSuppressVisibleReplies = (): boolean => {
     const currentAbortGeneration =
@@ -2964,7 +2991,7 @@ async function dispatchToAgent(params: {
   const typingHeartbeatIntervalMs = resolveQQBotTypingHeartbeatIntervalMs(qqCfg);
   const typingInputSeconds = resolveQQBotTypingInputSeconds(qqCfg);
   let typingRefIdx: string | undefined;
-  if (inbound.c2cOpenid && !isFastAbortCommand && !shouldSuppressVisibleReplies()) {
+  if (inbound.c2cOpenid && !isControlCommand && !shouldSuppressVisibleReplies()) {
     const typing = await qqbotOutbound.sendTyping({
       cfg: { channels: { qqbot: qqCfg } },
       to: `user:${inbound.c2cOpenid}`,
@@ -3008,7 +3035,7 @@ async function dispatchToAgent(params: {
   if (
     inbound.c2cOpenid &&
     typingHeartbeatMode !== "none" &&
-    !isFastAbortCommand &&
+    !isControlCommand &&
     !shouldSuppressVisibleReplies()
   ) {
     typingHeartbeat = startQQBotTypingHeartbeat({
@@ -3044,7 +3071,7 @@ async function dispatchToAgent(params: {
     delayMs: qqCfg.longTaskNoticeDelayMs ?? DEFAULT_LONG_TASK_NOTICE_DELAY_MS,
     logger,
     sendNotice: async () => {
-      if (groupMessageInterfaceBlocked || isFastAbortCommand || shouldSuppressVisibleReplies()) return;
+      if (groupMessageInterfaceBlocked || isControlCommand || shouldSuppressVisibleReplies()) return;
       markVisibleOutboundStarted();
       const result = await qqbotOutbound.sendText({
         cfg: { channels: { qqbot: qqCfg } },
@@ -3299,6 +3326,8 @@ async function dispatchToAgent(params: {
     };
 
     const replyFinalOnly = qqCfg.replyFinalOnly ?? false;
+    // QQ 过程信息（工具/阶段里程碑）下发档位；off 时进度帧直接丢弃。
+    const progressMode = qqCfg.progressMode ?? "milestones";
     const markdownSupport = qqCfg.markdownSupport ?? true;
     const c2cMarkdownDeliveryMode = qqCfg.c2cMarkdownDeliveryMode ?? "proactive-table-only";
     const c2cMarkdownChunkStrategy = qqCfg.c2cMarkdownChunkStrategy ?? "markdown-block";
@@ -3459,6 +3488,42 @@ async function dispatchToAgent(params: {
         autoSendLocalPathMedia: resolveQQBotAutoSendLocalPathMedia(qqCfg),
       });
       const cleanedText = sanitizeQQBotOutboundText(extractedTextMedia.text);
+
+      if (info?.kind === "progress") {
+        // 过程里程碑消息（工具调用/阶段进展）：纯文本立即发送，不参与
+        // C2C markdown 缓冲；progressMode=off 或 replyFinalOnly 时丢弃。
+        if (progressMode === "off" || replyFinalOnly || !cleanedText) {
+          return;
+        }
+        if (useC2CMarkdownTransport && hasBufferedC2CMarkdownReply()) {
+          await flushBufferedC2CMarkdownReply();
+          if (shouldSuppressVisibleReplies()) {
+            return;
+          }
+        }
+        const progressReplyRefs = resolveQQBotTextReplyRefs({
+          to: target.to,
+          text: cleanedText,
+          markdownSupport,
+          c2cMarkdownDeliveryMode,
+          replyToId: inbound.messageId,
+          replyEventId: inbound.eventId,
+        });
+        markVisibleOutboundStarted();
+        const progressResult = await qqbotOutbound.sendText({
+          cfg: { channels: { qqbot: qqCfg } },
+          to: target.to,
+          text: cleanedText,
+          replyToId: progressReplyRefs.replyToId,
+          replyEventId: progressReplyRefs.replyEventId,
+          accountId: outboundAccountId,
+        });
+        if (progressResult.error) {
+          logger.warn(`send progress notice failed: ${progressResult.error}`);
+          markGroupMessageInterfaceBlocked(progressResult.error);
+        }
+        return;
+      }
 
       const payloadMediaUrls = Array.isArray(typed?.mediaUrls)
         ? typed?.mediaUrls
@@ -3686,7 +3751,7 @@ async function dispatchToAgent(params: {
     if (
       noReplyFallback &&
       !groupMessageInterfaceBlocked &&
-      !isFastAbortCommand &&
+      !isControlCommand &&
       !shouldSuppressVisibleReplies()
     ) {
       logger.info("no visible reply generated for group mention; sending fallback text");
@@ -3863,7 +3928,72 @@ export async function handleQQBotDispatch(params: DispatchParams): Promise<void>
     logger.info(
       `session fast-abort command dropped ${droppedCount} queued messages sessionKey=${routeSessionKey}`
     );
-    await runImmediateSessionDispatch(queueKey, async () =>
+    try {
+      await runImmediateSessionDispatch(queueKey, async () =>
+        dispatchToAgent({
+          inbound: { ...resolvedInbound, content },
+          cfg: params.cfg,
+          qqCfg,
+          accountId,
+          logger,
+          route: resolvedRoute,
+        })
+      );
+    } catch (err) {
+      logger.error(`fast-abort dispatch failed sessionKey=${routeSessionKey}: ${String(err)}`);
+    }
+    return;
+  }
+
+  if (isQQBotPauseCommandText(content)) {
+    const routeSessionKey = resolveQQBotRouteSessionKey(resolvedRoute);
+    // 暂停与停止的差异：暂停保留排队消息（不 drop 队列），abortGeneration
+    // 仍用于抑制被取消回合的残留回复。
+    markSessionDispatchAbort(queueKey);
+    logger.info(
+      `session pause command detected; executing immediately sessionKey=${routeSessionKey}`
+    );
+    try {
+      await runImmediateSessionDispatch(queueKey, async () =>
+        dispatchToAgent({
+          inbound: { ...resolvedInbound, content },
+          cfg: params.cfg,
+          qqCfg,
+          accountId,
+          logger,
+          route: resolvedRoute,
+        })
+      );
+    } catch (err) {
+      logger.error(`pause dispatch failed sessionKey=${routeSessionKey}: ${String(err)}`);
+    }
+    return;
+  }
+
+  if (hasSessionDispatchBacklog(queueKey)) {
+    // 会话忙碌：立即派发而不是排队。Python 传输层会按会话状态分流——
+    // 运行中 → follow-up 注入（立即回执），空闲 → 新回合（回合锁串行）。
+    const routeSessionKey = resolveQQBotRouteSessionKey(resolvedRoute);
+    logger.info(`session busy; dispatching inbound immediately sessionKey=${routeSessionKey}`);
+    try {
+      await runImmediateSessionDispatch(queueKey, async () =>
+        dispatchToAgent({
+          inbound: { ...resolvedInbound, content },
+          cfg: params.cfg,
+          qqCfg,
+          accountId,
+          logger,
+          route: resolvedRoute,
+        })
+      );
+    } catch (err) {
+      logger.error(`inbound dispatch failed sessionKey=${routeSessionKey}: ${String(err)}`);
+    }
+    return;
+  }
+
+  try {
+    await runSerializedSessionDispatch(queueKey, async () =>
       dispatchToAgent({
         inbound: { ...resolvedInbound, content },
         cfg: params.cfg,
@@ -3873,21 +4003,9 @@ export async function handleQQBotDispatch(params: DispatchParams): Promise<void>
         route: resolvedRoute,
       })
     );
-    return;
+  } catch (err) {
+    logger.error(
+      `inbound dispatch failed sessionKey=${resolveQQBotRouteSessionKey(resolvedRoute)}: ${String(err)}`
+    );
   }
-
-  if (hasSessionDispatchBacklog(queueKey)) {
-    logger.info(`session busy; queueing inbound dispatch sessionKey=${resolveQQBotRouteSessionKey(resolvedRoute)}`);
-  }
-
-  await runSerializedSessionDispatch(queueKey, async () =>
-    dispatchToAgent({
-      inbound: { ...resolvedInbound, content },
-      cfg: params.cfg,
-      qqCfg,
-      accountId,
-      logger,
-      route: resolvedRoute,
-    })
-  );
 }

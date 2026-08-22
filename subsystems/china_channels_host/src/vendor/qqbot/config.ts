@@ -40,6 +40,13 @@ export const QQBotTypingHeartbeatModeSchema = z
 
 export type QQBotTypingHeartbeatMode = z.input<typeof QQBotTypingHeartbeatModeSchema>;
 
+export const QQBotProgressModeSchema = z
+  .enum(["off", "milestones"])
+  .optional()
+  .default("milestones");
+
+export type QQBotProgressMode = z.input<typeof QQBotProgressModeSchema>;
+
 export const DEFAULT_QQBOT_TYPING_HEARTBEAT_MODE = "idle";
 export const DEFAULT_QQBOT_TYPING_HEARTBEAT_INTERVAL_MS = 5000;
 export const DEFAULT_QQBOT_TYPING_INPUT_SECONDS = 60;
@@ -80,6 +87,7 @@ const QQBotAccountSchema = z.object({
   historyLimit: z.number().int().min(0).optional().default(10),
   textChunkLimit: z.number().int().positive().optional().default(1500),
   replyFinalOnly: z.boolean().optional().default(false),
+  progressMode: QQBotProgressModeSchema,
   longTaskNoticeDelayMs: z.number().int().min(0).optional().default(30000),
   maxFileSizeMB: z.number().positive().optional().default(100),
   mediaTimeoutMs: z.number().int().positive().optional().default(30000),

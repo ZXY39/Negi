@@ -15,6 +15,9 @@ class _ReplyingRuntimeBridge:
     async def cancel(self, session_key: str, *, reason: str = "user_cancelled") -> int:
         raise AssertionError(f"cancel should not be called: {session_key} {reason}")
 
+    def get_existing_session(self, session_key: str):
+        return None
+
     async def prompt(self, message, **kwargs):
         self.calls.append({"message": message, "kwargs": dict(kwargs)})
         return SimpleNamespace(output="final answer")

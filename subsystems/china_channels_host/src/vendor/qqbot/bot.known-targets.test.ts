@@ -454,30 +454,30 @@ describe("QQBot inbound known-target recording", () => {
     expect(proactiveMocks.upsertKnownQQBotTarget).not.toHaveBeenCalled();
   });
 
-  it("serializes concurrent dispatches for the same resolved session", async () => {
+  it("dispatches busy inbound immediately for the same resolved session", async () => {
     const logger = createLogger();
-    let activeDispatches = 0;
-    let maxActiveDispatches = 0;
     let resolveFirstEntered: (() => void) | undefined;
+    let resolveSecondEntered: (() => void) | undefined;
     let releaseFirstDispatch: (() => void) | undefined;
 
     const firstEntered = new Promise<void>((resolve) => {
       resolveFirstEntered = resolve;
+    });
+    const secondEntered = new Promise<void>((resolve) => {
+      resolveSecondEntered = resolve;
     });
     const firstRelease = new Promise<void>((resolve) => {
       releaseFirstDispatch = resolve;
     });
 
     const dispatchReplyWithBufferedBlockDispatcher = vi.fn(async () => {
-      activeDispatches += 1;
-      maxActiveDispatches = Math.max(maxActiveDispatches, activeDispatches);
-
-      if (dispatchReplyWithBufferedBlockDispatcher.mock.calls.length === 1) {
+      const callIndex = dispatchReplyWithBufferedBlockDispatcher.mock.calls.length;
+      if (callIndex === 1) {
         resolveFirstEntered?.();
         await firstRelease;
+      } else if (callIndex === 2) {
+        resolveSecondEntered?.();
       }
-
-      activeDispatches -= 1;
     });
 
     setQQBotRuntime({
@@ -529,12 +529,14 @@ describe("QQBot inbound known-target recording", () => {
       logger,
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await secondEntered;
 
-    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+    // 新契约：会话忙碌时立即派发（Python 传输层按会话运行状态分流：
+    // 运行中 → follow-up 注入；空闲 → 新回合，回合锁串行）。
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining(
-        `session busy; queueing inbound dispatch sessionKey=${isolatedSessionKey({
+        `session busy; dispatching inbound immediately sessionKey=${isolatedSessionKey({
           routeSessionKey: "shared-session",
           accountId: "default",
           senderId: "u-serial",
@@ -547,7 +549,6 @@ describe("QQBot inbound known-target recording", () => {
     await Promise.all([firstDispatch, secondDispatch]);
 
     expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
-    expect(maxActiveDispatches).toBe(1);
   });
 });
 
