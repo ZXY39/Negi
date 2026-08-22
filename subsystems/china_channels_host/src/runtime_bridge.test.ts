@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { G3kuRuntimeBridge } from "./runtime_bridge.js";
 
 describe("G3kuRuntimeBridge late final delivery", () => {
-  it("routes late final replies through the last known session deliver callback", async () => {
+  it("routes non-qqbot late final replies through the last known session deliver callback", async () => {
     const bridge = new G3kuRuntimeBridge({
       host: "127.0.0.1",
       port: 18989,
@@ -17,11 +17,11 @@ describe("G3kuRuntimeBridge late final delivery", () => {
     const deliver = vi.fn().mockResolvedValue(undefined);
     const pending = bridge.dispatchTurn({
       ctx: {
-        OriginatingChannel: "qqbot",
+        OriginatingChannel: "wecom",
         AccountId: "default",
         OriginatingTo: "user:user-42",
         Body: "hello",
-        SessionKey: "china:qqbot:default:dm:user-42",
+        SessionKey: "china:wecom:default:dm:user-42",
       },
       dispatcherOptions: {
         deliver,
@@ -47,11 +47,11 @@ describe("G3kuRuntimeBridge late final delivery", () => {
       type: "deliver_message",
       event_id: "evt-late",
       delivery_id: "delivery-late",
-      channel: "qqbot",
+      channel: "wecom",
       account_id: "default",
       target: { kind: "user", id: "user-42" },
       payload: { text: lateText, mode: "final" },
-      metadata: { session_key: "china:qqbot:default:dm" },
+      metadata: { session_key: "china:wecom:default:dm" },
     });
 
     expect(deliver).toHaveBeenCalledTimes(1);
@@ -63,6 +63,60 @@ describe("G3kuRuntimeBridge late final delivery", () => {
       },
       { kind: "final" },
     );
+  });
+
+  it("bypasses the stale qqbot route and uses the proactive sender for late finals", async () => {
+    const bridge = new G3kuRuntimeBridge({
+      host: "127.0.0.1",
+      port: 18989,
+      token: "token",
+      version: "test",
+      channelsConfig: {},
+    }) as any;
+    const send = vi.fn();
+    bridge.send = send;
+
+    // A remembered route from an earlier turn (its turn already completed).
+    const staleDeliver = vi.fn().mockResolvedValue(undefined);
+    const pending = bridge.dispatchTurn({
+      ctx: {
+        OriginatingChannel: "qqbot",
+        AccountId: "default",
+        OriginatingTo: "user:user-42",
+        Body: "hello",
+        SessionKey: "china:qqbot:default:dm:user-42",
+      },
+      dispatcherOptions: { deliver: staleDeliver },
+    });
+    const eventId = send.mock.calls[0]?.[0]?.event_id;
+    await bridge.handleFrame({ type: "turn_complete", event_id: eventId });
+    await pending;
+
+    const proactive = vi.fn().mockResolvedValue(undefined);
+    bridge.setProactiveDeliver(proactive);
+
+    // Cron-style late final for the same session: must NOT reuse the stale
+    // turn-scoped deliver (its markdown buffer can never flush after the
+    // turn ends); it must go through the proactive sender instead.
+    await bridge.handleFrame({
+      type: "deliver_message",
+      event_id: "evt-cron",
+      delivery_id: "delivery-cron",
+      channel: "qqbot",
+      account_id: "default",
+      target: { kind: "user", id: "user-42" },
+      payload: { text: "**structured** reminder", mode: "final" },
+      metadata: { session_key: "china:qqbot:default:dm" },
+    });
+
+    expect(staleDeliver).not.toHaveBeenCalled();
+    expect(proactive).toHaveBeenCalledTimes(1);
+    expect(proactive).toHaveBeenCalledWith({
+      channel: "qqbot",
+      accountId: "default",
+      target: { kind: "user", id: "user-42" },
+      text: "**structured** reminder",
+    });
   });
 });
 

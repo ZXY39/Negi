@@ -178,7 +178,7 @@ outbound drain（`g3ku/shells/web.py` 的 `_drain_outbound`）是总线出站队
 - `send_outbound(...)` 在 sender 未初始化时抛错而非静默返回，保证消息进入重试而不是无声丢失。
 - 发布/投递各有一条日志（`cron outbound published` / `china outbound drained`）；「队列有消息但渠道没收到」时先看这两条。
 
-Node 侧 `deliver_message` final 帧无对应 pending 回合时按 `lateDeliverRoutes` 投递；该路由表是内存态、宿主重启即清空。找不到路由时不再静默丢帧，而是用帧自带的 channel/account/target 走平台主动发送兜底（QQ 为 `sendProactiveC2CMessage`），成功/失败分别有 `proactive fallback` 日志。
+Node 侧 `deliver_message` final 帧无对应 pending 回合时：qqbot 一律不复用 `lateDeliverRoutes` 里旧回合的 deliver 闭包（闭包内的 C2C markdown 缓冲是回合级状态，回合结束后无人冲洗，结构化文本会被永久困住；被动回复上下文也已过期），直接用帧自带的 channel/account/target 走平台主动发送兜底（`sendProactiveC2CMessage`）；其他渠道暂无主动兜底，仍按旧路由投递。兜底成功/失败分别有 `proactive fallback` 日志。`lateDeliverRoutes` 是内存表、宿主重启即清空——兜底同样覆盖这种"有帧无路由"场景。
 
 当前设计里：
 

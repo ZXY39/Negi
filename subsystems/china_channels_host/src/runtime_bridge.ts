@@ -184,7 +184,12 @@ export class G3kuRuntimeBridge {
       const pending = this.pending.get(frame.event_id);
       if (!pending) {
         const lateRoute = this.resolveLateDeliverRoute(frame);
-        if (lateRoute) {
+        // qqbot 的迟到 final 帧绝不复用旧回合的 deliver 闭包：闭包里的
+        // C2C markdown 缓冲是回合级状态，回合结束后无人再冲洗，结构化
+        // 文本会被永久困在孤儿缓冲里（cron 提醒丢消息的实证根因）；
+        // 被动回复上下文同样已过期。改走无状态的主动发送兜底。
+        // 其他渠道暂无主动兜底实现，保留旧路由行为。
+        if (lateRoute && String(frame.channel || "").trim() !== "qqbot") {
           try {
             await lateRoute.deliver(
               {
@@ -199,10 +204,10 @@ export class G3kuRuntimeBridge {
           }
           return;
         }
-        // No pending turn and no remembered late route. This happens right
-        // after a host restart (lateDeliverRoutes is in-memory only) for
-        // proactive pushes like cron reminders. Fall back to the channel
-        // proactive sender instead of dropping the frame silently.
+        // No usable pending/route path (or qqbot, see above). This also
+        // covers the right-after-host-restart case where lateDeliverRoutes
+        // is still empty. Fall back to the channel proactive sender instead
+        // of dropping the frame silently.
         await this.deliverProactiveFallback(frame);
         return;
       }
