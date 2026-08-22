@@ -12,6 +12,11 @@ from g3ku.config.schema import Config
 from g3ku.prompt_trace import render_model_chain_trace
 from g3ku.providers.base import LLMProvider, LLMResponse
 from g3ku.utils.api_keys import APIKeyConfigurationError, iter_api_key_retry_slots
+from g3ku.utils.retry_keywords import (
+    DEFAULT_RETRY_ON_KEYWORDS,
+    expand_retry_keywords,
+    split_retry_keywords,
+)
 
 PUBLIC_PROVIDER_FAILURE_MESSAGE = "Model provider call failed after exhausting the configured fallback chain."
 RETRYABLE_MODEL_CHAIN_MAX_ROUNDS = 10
@@ -41,8 +46,16 @@ _AUTH_ERROR_TOKENS = (
 
 
 class ModelProviderExhaustedError(RuntimeError):
-    def __init__(self, *, raw_message: str = "", retryable: bool = False) -> None:
-        super().__init__(PUBLIC_PROVIDER_FAILURE_MESSAGE)
+    def __init__(
+        self,
+        *,
+        raw_message: str = "",
+        retryable: bool = False,
+        message: str = "",
+    ) -> None:
+        # Surface the original provider error untouched; fall back to the
+        # public message only when no raw error text is available.
+        super().__init__(str(message or "").strip() or PUBLIC_PROVIDER_FAILURE_MESSAGE)
         self.raw_message = str(raw_message or "")
         self.retryable = bool(retryable)
 
@@ -111,7 +124,7 @@ async def wait_for_model_attempt(
         ) from exc
 
 
-def exception_chain_text(exc: Exception) -> str:
+def _exception_chain_parts(exc: Exception) -> list[str]:
     parts: list[str] = []
     seen: set[int] = set()
     stack: list[BaseException] = [exc]
@@ -128,7 +141,16 @@ def exception_chain_text(exc: Exception) -> str:
             stack.append(cause)
         if context is not None:
             stack.append(context)
-    return " | ".join(parts).lower()
+    return parts
+
+
+def exception_chain_text(exc: Exception) -> str:
+    return " | ".join(_exception_chain_parts(exc)).lower()
+
+
+def exception_chain_display_text(exc: Exception) -> str:
+    """Case-preserving variant of :func:`exception_chain_text` for user display."""
+    return " | ".join(_exception_chain_parts(exc))
 
 
 def is_internal_runtime_model_error(error: Exception | str) -> bool:
@@ -137,52 +159,15 @@ def is_internal_runtime_model_error(error: Exception | str) -> bool:
 
 
 def is_retryable_model_error(error: Exception | str, retry_on: list[str] | None = None) -> bool:
-    retry_on = [str(item or "").strip().lower() for item in (retry_on or ["network", "429", "5xx"]) if str(item or "").strip()]
-    if not retry_on:
+    keywords = split_retry_keywords(retry_on or DEFAULT_RETRY_ON_KEYWORDS)
+    if not keywords:
         return False
 
     text = exception_chain_text(error) if isinstance(error, Exception) else str(error or "").lower()
     if is_internal_runtime_model_error(text):
         return False
 
-    token_map = {
-        "network": [
-            "timeout",
-            "timed out",
-            "network error",
-            "network is unstable",
-            "connecterror",
-            "connect error",
-            "all connection attempts failed",
-            "connection reset",
-            "connection refused",
-            "remoteprotocolerror",
-            "readerror",
-            "sslerror",
-        ],
-        "429": [
-            "429",
-            "rate limit",
-            "too many requests",
-            "quota",
-        ],
-        "5xx": [
-            "500",
-            "502",
-            "503",
-            "504",
-            "5xx",
-            "server error",
-            "temporar",
-            "bad gateway",
-            "service unavailable",
-            "gateway timeout",
-        ],
-    }
-    for key in retry_on:
-        if any(token in text for token in token_map.get(key, [])):
-            return True
-    return False
+    return any(token in text for token in expand_retry_keywords(keywords))
 
 
 def is_auth_model_error(error: Exception | str) -> bool:
@@ -224,7 +209,9 @@ def response_requires_fallback(response: LLMResponse) -> bool:
 
 
 def sanitize_terminal_model_error(response: LLMResponse) -> LLMResponse:
-    if response_requires_fallback(response):
+    # Keep the provider's original error text so failures surface unwrapped;
+    # only backfill the public message when there is no error detail at all.
+    if response_requires_fallback(response) and not str(response.error_text or response.content or "").strip():
         response.error_text = PUBLIC_PROVIDER_FAILURE_MESSAGE
     return response
 
@@ -236,10 +223,13 @@ def exhausted_model_chain_error(
 ) -> ModelProviderExhaustedError:
     if isinstance(error, Exception):
         raw_message = exception_chain_text(error)
+        display_message = exception_chain_display_text(error)
     else:
         raw_message = str(error or "")
+        display_message = raw_message
     return ModelProviderExhaustedError(
         raw_message=raw_message,
+        message=display_message,
         retryable=is_retryable_model_error(raw_message, retry_on=retry_on),
     )
 
@@ -328,7 +318,11 @@ class FallbackProvider(LLMProvider):
                         logger.warning("Model target init failed for {}: {}", model_key, exc)
                         continue
                     if should_fallback_model_error(exc):
-                        exhausted = exhausted_model_chain_error(exc)
+                        profile = self._config.get_model_runtime_profile(model_key)
+                        exhausted = exhausted_model_chain_error(
+                            exc,
+                            retry_on=list(profile.retry_on) if profile is not None else None,
+                        )
                         if should_retry_model_chain_error(exhausted) and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
                             logger.warning(
                                 "Retryable model-chain failure exhausted round {}/{}; retrying full chain: {}",

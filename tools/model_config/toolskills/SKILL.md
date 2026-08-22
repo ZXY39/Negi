@@ -16,7 +16,7 @@ Manage .g3ku/config.json model catalog, provider templates/drafts/bindings, and 
 - `max_tokens`: Optional max output token cap for this model.
 - `temperature`: Optional default temperature for this model.
 - `reasoning_effort`: Optional reasoning effort override.
-- `retry_on`: Retry triggers such as network, 429, 5xx.
+- `retry_on`: Custom retry keywords (list or comma-separated string) matched as lowercase substrings of the provider error text; a hit triggers automatic retry. Preset aliases `network` and `429` still expand; defaults to `network, 429`.
 - `retry_count`: Retryable failures to allow on the same model before fallback.
 - `description`: Optional human-readable description.
 - `scopes`: Scopes for add_model, e.g. ceo, execution, inspection.

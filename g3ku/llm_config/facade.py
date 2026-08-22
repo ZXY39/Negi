@@ -25,6 +25,7 @@ from g3ku.utils.api_keys import (
     parse_api_keys,
     resolve_api_key_concurrency_layout,
 )
+from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS, split_retry_keywords
 
 
 MASKED_SECRET_VALUE = "********"
@@ -248,8 +249,8 @@ class LLMConfigFacade:
             binding.enabled = bool(draft_payload.get("enabled"))
         if "description" in draft_payload:
             binding.description = str(draft_payload.get("description") or "").strip()
-        if "retry_on" in draft_payload and isinstance(draft_payload.get("retry_on"), list):
-            binding.retry_on = [str(item).strip() for item in draft_payload.get("retry_on") if str(item).strip()]
+        if "retry_on" in draft_payload:
+            binding.retry_on = split_retry_keywords(draft_payload.get("retry_on")) or list(DEFAULT_RETRY_ON_KEYWORDS)
         if "retry_count" in draft_payload:
             binding.retry_count = int(draft_payload.get("retry_count") or 0)
         if "single_api_key_max_concurrency" in draft_payload or "singleApiKeyMaxConcurrency" in draft_payload:

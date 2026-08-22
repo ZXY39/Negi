@@ -62,7 +62,7 @@ from main.runtime.pending_notice_state import (
     normalize_pending_notice_state,
 )
 from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
-from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
+from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE, ModelProviderExhaustedError
 from g3ku.config.live_runtime import get_runtime_config
 from main.runtime import chat_backend as runtime_chat_backend
 from main.runtime import send_token_preflight as runtime_send_token_preflight
@@ -671,7 +671,8 @@ class ReActToolLoop:
                         if provider_retry_count >= _PROVIDER_RETRY_LIMIT:
                             exhausted_message = (
                                 f'{PUBLIC_PROVIDER_FAILURE_MESSAGE} '
-                                f'Automatic retries exhausted after {provider_retry_count} attempts.'
+                                f'Automatic retries exhausted after {provider_retry_count} attempts. '
+                                f'Last error: {exc}'
                             )
                             self._log_service.update_frame(
                                 task.task_id,
@@ -682,7 +683,10 @@ class ReActToolLoop:
                                 },
                                 publish_snapshot=True,
                             )
-                            return self._provider_retry_failure(attempt_count=provider_retry_count)
+                            return self._provider_retry_failure(
+                                attempt_count=provider_retry_count,
+                                error_text=str(exc),
+                            )
                         delay_seconds = self._provider_retry_delay_seconds(provider_retry_count)
                         self._log_service.update_frame(
                             task.task_id,
@@ -692,7 +696,8 @@ class ReActToolLoop:
                                 'last_error': (
                                     f'{PUBLIC_PROVIDER_FAILURE_MESSAGE} '
                                     f'Retrying automatically in {delay_seconds:.1f}s '
-                                    f'(attempt {provider_retry_count}).'
+                                    f'(attempt {provider_retry_count}). '
+                                    f'Last error: {exc}'
                                 ),
                             },
                             publish_snapshot=True,
@@ -3604,8 +3609,15 @@ class ReActToolLoop:
         )
 
     @staticmethod
-    def _provider_retry_failure(*, attempt_count: int) -> NodeFinalResult:
+    def _provider_retry_failure(*, attempt_count: int, error_text: str = '') -> NodeFinalResult:
         attempts = max(1, int(attempt_count or 0))
+        blocking_reason = (
+            f'{PUBLIC_PROVIDER_FAILURE_MESSAGE} '
+            f'Automatic retries exhausted after {attempts} attempts.'
+        )
+        normalized_error = str(error_text or '').strip()
+        if normalized_error:
+            blocking_reason = f'{blocking_reason} Last error: {normalized_error}'
         return NodeFinalResult(
             status='failed',
             delivery_status='blocked',
@@ -3613,10 +3625,7 @@ class ReActToolLoop:
             answer='',
             evidence=[],
             remaining_work=[],
-            blocking_reason=(
-                f'{PUBLIC_PROVIDER_FAILURE_MESSAGE} '
-                f'Automatic retries exhausted after {attempts} attempts.'
-            ),
+            blocking_reason=blocking_reason,
         )
 
     @staticmethod
@@ -5186,7 +5195,10 @@ class ReActToolLoop:
 
     @staticmethod
     def _is_provider_chain_exhausted_error(error: Exception | str) -> bool:
-        return PUBLIC_PROVIDER_FAILURE_MESSAGE in str(error or '')
+        return (
+            isinstance(error, ModelProviderExhaustedError)
+            or PUBLIC_PROVIDER_FAILURE_MESSAGE in str(error or '')
+        )
 
     @staticmethod
     def _provider_retry_delay_seconds(attempt_count: int) -> float:

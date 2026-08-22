@@ -8,6 +8,7 @@ from g3ku.config.schema import Config
 from g3ku.llm_config.enums import AuthMode, Capability
 from g3ku.llm_config.facade import LLMConfigFacade
 from g3ku.utils.api_keys import SingleAPIKeyMaxConcurrency, normalize_single_api_key_max_concurrency
+from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS, split_retry_keywords
 
 VALID_SCOPES = ("ceo", "execution", "inspection", "memory")
 _UNSET = object()
@@ -162,7 +163,7 @@ class ModelManager:
                 "config_id": "",
                 "enabled": bool(enabled),
                 "description": str(description or "").strip(),
-                "retry_on": list(retry_on or ["network", "429", "5xx"]),
+                "retry_on": split_retry_keywords(retry_on) or list(DEFAULT_RETRY_ON_KEYWORDS),
                 "retry_count": 0 if retry_count is None else int(retry_count),
                 "single_api_key_max_concurrency": normalize_single_api_key_max_concurrency(single_api_key_max_concurrency),
                 "image_multimodal_enabled": bool(image_multimodal_enabled),
@@ -222,8 +223,8 @@ class ModelManager:
             patch["extra_headers"] = extra_headers
         if patch:
             self.facade.update_binding(self.config, model_key=key, draft_payload=patch)
-        if retry_on is not _UNSET:
-            item.retry_on = list(retry_on)
+        if retry_on is not _UNSET and retry_on is not None:
+            item.retry_on = split_retry_keywords(retry_on) or list(DEFAULT_RETRY_ON_KEYWORDS)
         if retry_count is not _UNSET:
             item.retry_count = int(retry_count)
         if single_api_key_max_concurrency is not _UNSET:

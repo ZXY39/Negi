@@ -76,10 +76,15 @@ parameters:
       type: string
       description: Optional reasoning-effort override.
     retry_on:
-      type: array
+      type:
+      - array
+      - string
       items:
         type: string
-      description: Retry trigger classes, for example `network`, `429`, or `5xx`.
+      description: Custom retry keywords matched as lowercase substrings of the provider
+        error text; a hit triggers automatic retry. Accepts a list or a comma-separated
+        string, for example `network, 429, 502`. Preset aliases `network` and `429`
+        expand to curated token lists; defaults to `network, 429` when omitted.
     retry_count:
       type: integer
       description: How many retries are allowed on the same model before the runtime falls through to the next fallback.

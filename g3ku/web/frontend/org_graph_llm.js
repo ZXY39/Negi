@@ -1,5 +1,5 @@
 (() => {
-  const DEFAULT_RETRY_ON = ["network", "429", "5xx"];
+  const DEFAULT_RETRY_ON = ["network", "429"];
   const SCOPE_LABELS = { ceo: "主Agent", execution: "执行Agent", inspection: "检验Agent", memory: "记忆Agent" };
 
   function emptyMemorySection(label, capability) {
@@ -1001,7 +1001,7 @@
         <div class="llm-form-grid">
           <label class="resource-field">
             <span class="resource-field-label">Retry On</span>
-            <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 5xx">
+            <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 502（可自定义关键词，逗号分隔）">
           </label>
           <label class="resource-field">
             <span class="resource-field-label">重试次数</span>
@@ -1024,7 +1024,7 @@
       <div class="llm-form-grid llm-form-grid--binding-detail-policy">
         <label class="resource-field">
           <span class="resource-field-label">Retry On</span>
-          <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 5xx">
+          <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 502（可自定义关键词，逗号分隔）">
         </label>
         <label class="resource-field">
           <span class="resource-field-label">重试次数</span>
@@ -1087,7 +1087,7 @@
         <div class="llm-form-grid">
           <label class="resource-field">
             <span class="resource-field-label">Retry On</span>
-            <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 5xx">
+            <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 502（可自定义关键词，逗号分隔）">
           </label>
           <label class="resource-field">
             <span class="resource-field-label">重试次数</span>
@@ -1110,7 +1110,7 @@
       <div class="llm-form-grid llm-form-grid--binding-detail-policy">
         <label class="resource-field">
           <span class="resource-field-label">Retry On</span>
-          <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 5xx">
+          <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 502（可自定义关键词，逗号分隔）">
         </label>
         <label class="resource-field">
           <span class="resource-field-label">重试次数</span>

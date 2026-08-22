@@ -10,6 +10,7 @@ import yaml
 
 from .enums import AuthMode, Capability
 from .models import NormalizedProviderConfig
+from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS
 
 if TYPE_CHECKING:
     from .facade import LLMConfigFacade
@@ -328,7 +329,8 @@ def migrate_raw_config_if_needed(raw_data: dict[str, Any], *, workspace: Path | 
             "enabled": bool(item.get("enabled", True)),
             "description": str(item.get("description") or "").strip(),
             "retryOn": list(
-                item.get("retryOn", item.get("retry_on", ["network", "429", "5xx"])) or ["network", "429", "5xx"]
+                item.get("retryOn", item.get("retry_on", list(DEFAULT_RETRY_ON_KEYWORDS)))
+                or list(DEFAULT_RETRY_ON_KEYWORDS)
             ),
             "retryCount": int(item.get("retryCount", item.get("retry_count", 0)) or 0),
         }

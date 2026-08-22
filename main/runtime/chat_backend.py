@@ -715,7 +715,11 @@ class ConfigChatBackend:
                             )
                             continue
                         if should_fallback_model_error(exc):
-                            exhausted = exhausted_model_chain_error(exc)
+                            profile = self._config.get_model_runtime_profile(ref)
+                            exhausted = exhausted_model_chain_error(
+                                exc,
+                                retry_on=list(profile.retry_on) if profile is not None else None,
+                            )
                             if should_retry_model_chain_error(exhausted) and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
                                 retry_full_chain = True
                                 break

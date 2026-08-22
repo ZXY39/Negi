@@ -13,6 +13,7 @@ from g3ku.utils.api_keys import (
     normalize_single_api_key_max_concurrency,
     resolve_api_key_concurrency_layout,
 )
+from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS, split_retry_keywords
 
 ROLE_SCOPE_ALIASES = {
     "ceo": "ceo",
@@ -236,7 +237,7 @@ class RoleConcurrencyConfig(Base):
 
 class ModelFallbackTarget(Base):
     model_key: str
-    retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
+    retry_on: list[str] = Field(default_factory=lambda: list(DEFAULT_RETRY_ON_KEYWORDS))
     retry_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="before")
@@ -260,16 +261,8 @@ class ModelFallbackTarget(Base):
     @field_validator("retry_on", mode="before")
     @classmethod
     def _normalize_retry_on(cls, value: Any) -> list[str]:
-        items = value if isinstance(value, list) else ["network", "429", "5xx"]
-        clean: list[str] = []
-        seen: set[str] = set()
-        for item in items:
-            token = str(item or "").strip().lower()
-            if not token or token in seen:
-                continue
-            seen.add(token)
-            clean.append(token)
-        return clean or ["network", "429", "5xx"]
+        clean = split_retry_keywords(value)
+        return clean or list(DEFAULT_RETRY_ON_KEYWORDS)
 
     @field_validator("retry_count", mode="before")
     @classmethod
@@ -298,7 +291,7 @@ class ManagedModelConfig(Base):
     max_tokens: int | None = None
     temperature: float | None = None
     reasoning_effort: str | None = None
-    retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
+    retry_on: list[str] = Field(default_factory=lambda: list(DEFAULT_RETRY_ON_KEYWORDS))
     retry_count: int = Field(default=0, ge=0)
     single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None
     description: str = ""
@@ -335,16 +328,8 @@ class ManagedModelConfig(Base):
     @field_validator("retry_on", mode="before")
     @classmethod
     def _normalize_retry_on(cls, value: Any) -> list[str]:
-        items = value if isinstance(value, list) else ["network", "429", "5xx"]
-        clean: list[str] = []
-        seen: set[str] = set()
-        for item in items:
-            token = str(item or "").strip().lower()
-            if not token or token in seen:
-                continue
-            seen.add(token)
-            clean.append(token)
-        return clean or ["network", "429", "5xx"]
+        clean = split_retry_keywords(value)
+        return clean or list(DEFAULT_RETRY_ON_KEYWORDS)
 
     @field_validator("retry_count", mode="before")
     @classmethod

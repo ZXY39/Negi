@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from g3ku.utils.api_keys import SingleAPIKeyMaxConcurrency, normalize_single_api_key_max_concurrency
+from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS
 
 from .enums import AuthMode, Capability, FieldInputType, ProbeStatus, ProtocolAdapter
 
@@ -207,7 +208,7 @@ class ModelBindingDraft(StrictModel):
     config_id: str
     enabled: bool = True
     description: str = ""
-    retry_on: list[str] = Field(default_factory=lambda: ["network", "429", "5xx"])
+    retry_on: list[str] = Field(default_factory=lambda: list(DEFAULT_RETRY_ON_KEYWORDS))
     retry_count: int = Field(default=0, ge=0)
     single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None
     image_multimodal_enabled: bool = False

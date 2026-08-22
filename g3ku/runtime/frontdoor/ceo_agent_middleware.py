@@ -11,7 +11,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command, interrupt
 
 from g3ku.json_schema_utils import get_attached_raw_parameters_schema
-from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
+from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE, ModelProviderExhaustedError
 
 _PROVIDER_RETRY_LIMIT = 3
 
@@ -162,14 +162,16 @@ class CeoPromptAssemblyMiddleware(AgentMiddleware):
             try:
                 response = await handler(updated_request)
             except Exception as exc:
-                if PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):
+                if not isinstance(exc, ModelProviderExhaustedError) and PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):
                     raise
                 provider_retry_count += 1
                 if provider_retry_count >= _PROVIDER_RETRY_LIMIT:
-                    raise RuntimeError(PUBLIC_PROVIDER_FAILURE_MESSAGE) from exc
+                    # Re-raise the original exception so the raw provider error
+                    # reaches the frontend unwrapped.
+                    raise
                 await self._runner._emit_progress(
                     progress,
-                    f"模型调用失败，正在重试（第{provider_retry_count}次）...",
+                    f"模型调用失败，正在重试（第{provider_retry_count}次）。错误信息：{exc}",
                     event_kind="analysis",
                     event_data={"phase": "provider_retry", "attempt": provider_retry_count},
                 )

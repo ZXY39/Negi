@@ -4,6 +4,7 @@ from typing import Any
 
 from g3ku.agent.tools.base import Tool
 from g3ku.config.model_manager import ModelManager
+from g3ku.utils.retry_keywords import split_retry_keywords
 
 
 class ModelConfigTool(Tool):
@@ -55,9 +56,15 @@ class ModelConfigTool(Tool):
                 "temperature": {"type": "number", "description": "Optional default temperature for this model."},
                 "reasoning_effort": {"type": "string", "description": "Optional reasoning effort override."},
                 "retry_on": {
-                    "type": "array",
+                    "type": ["array", "string"],
                     "items": {"type": "string"},
-                    "description": "Retry triggers such as network, 429, 5xx.",
+                    "description": (
+                        "Custom retry keywords matched as lowercase substrings of the provider "
+                        "error text; a hit triggers automatic retry. Accepts a list or a "
+                        "comma-separated string, e.g. 'network, 429, 502'. Preset aliases "
+                        "'network' and '429' expand to curated token lists; defaults to "
+                        "'network, 429' when omitted."
+                    ),
                 },
                 "retry_count": {
                     "type": "integer",
@@ -148,7 +155,7 @@ class ModelConfigTool(Tool):
                 max_tokens=kwargs.get("max_tokens"),
                 temperature=kwargs.get("temperature"),
                 reasoning_effort=kwargs.get("reasoning_effort"),
-                retry_on=[str(item) for item in (kwargs.get("retry_on") or [])] if kwargs.get("retry_on") is not None else None,
+                retry_on=split_retry_keywords(kwargs.get("retry_on")) or None,
                 retry_count=kwargs.get("retry_count"),
                 description=str(kwargs.get("description") or ""),
             )
@@ -165,7 +172,7 @@ class ModelConfigTool(Tool):
                 max_tokens=kwargs.get("max_tokens"),
                 temperature=kwargs.get("temperature"),
                 reasoning_effort=kwargs.get("reasoning_effort"),
-                retry_on=[str(item) for item in (kwargs.get("retry_on") or [])] if kwargs.get("retry_on") is not None else None,
+                retry_on=split_retry_keywords(kwargs.get("retry_on")) or None,
                 retry_count=kwargs.get("retry_count"),
                 description=kwargs.get("description"),
             )

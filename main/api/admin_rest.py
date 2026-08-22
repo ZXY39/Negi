@@ -37,6 +37,7 @@ from g3ku.runtime.frontdoor.checkpoint_inspection import (
     get_frontdoor_checkpoint_history,
 )
 from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error, refresh_web_agent_runtime
+from g3ku.utils.retry_keywords import split_retry_keywords
 from main.governance import (
     GovernanceStore,
     MainRuntimePolicyEngine,
@@ -1921,7 +1922,7 @@ async def create_model(payload: dict = Body(...)):
             max_tokens=payload.get('max_tokens'),
             temperature=payload.get('temperature'),
             reasoning_effort=payload.get('reasoning_effort'),
-            retry_on=[str(item) for item in (payload.get('retry_on') or [])] if payload.get('retry_on') is not None else None,
+            retry_on=split_retry_keywords(payload.get('retry_on')) or None,
             retry_count=raw_retry_count,
             description=str(payload.get('description') or ''),
             context_window_tokens=(
@@ -1987,9 +1988,9 @@ async def update_model(model_key: str, payload: dict = Body(...)):
             temperature=_pick('temperature'),
             reasoning_effort=_pick('reasoning_effort', 'reasoningEffort'),
             retry_on=(
-                [str(item) for item in (body.get('retry_on') or [])]
+                split_retry_keywords(body.get('retry_on'))
                 if 'retry_on' in body
-                else [str(item) for item in (body.get('retryOn') or [])]
+                else split_retry_keywords(body.get('retryOn'))
                 if 'retryOn' in body
                 else _UNSET
             ),

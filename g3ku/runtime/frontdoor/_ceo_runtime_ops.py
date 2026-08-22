@@ -32,7 +32,7 @@ from g3ku.json_schema_utils import (
 )
 from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
-from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE
+from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE, ModelProviderExhaustedError
 from g3ku.providers.openai_codex_provider import (
     _convert_messages as _preview_responses_messages,
     _convert_tools as _preview_responses_tools,
@@ -5865,7 +5865,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         on_text_delta=assistant_text_delta_handler,
                     )
                 except Exception as exc:
-                    if PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):
+                    if not isinstance(exc, ModelProviderExhaustedError) and PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):
                         raise
                     if self._refresh_runtime_config_for_retry_invalidation():
                         state_for_request["model_refs"] = list(self._resolve_ceo_model_refs())
@@ -5873,7 +5873,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         break
                     provider_retry_count += 1
                     if provider_retry_count >= _PROVIDER_RETRY_LIMIT:
-                        raise RuntimeError(PUBLIC_PROVIDER_FAILURE_MESSAGE) from exc
+                        # Re-raise the original exception so the raw provider
+                        # error reaches the frontend unwrapped.
+                        raise
                     await asyncio.sleep(float(min(10, max(1, provider_retry_count))))
                     continue
                 response_view = self._model_response_view(message)

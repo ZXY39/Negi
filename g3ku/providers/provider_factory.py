@@ -17,6 +17,7 @@ from g3ku.utils.api_keys import (
     parse_api_keys,
     resolve_api_key_concurrency_layout,
 )
+from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS
 
 
 @dataclass(slots=True)
@@ -29,7 +30,7 @@ class ProviderTarget:
     max_tokens_limit: int | None = None
     default_temperature: float | None = None
     default_reasoning_effort: str | None = None
-    retry_on: list[str] = field(default_factory=lambda: ['network', '429', '5xx'])
+    retry_on: list[str] = field(default_factory=lambda: list(DEFAULT_RETRY_ON_KEYWORDS))
     retry_count: int = 0
     api_key_count: int = 0
     api_key_indexes: list[int] | None = None
@@ -137,7 +138,7 @@ def build_provider_from_model_key(
     max_tokens_limit = target.max_tokens_limit
     default_temperature = target.default_temperature
     default_reasoning_effort = target.default_reasoning_effort
-    retry_on = list(managed.retry_on or []) if managed is not None else ['network', '429', '5xx']
+    retry_on = list(managed.retry_on or []) if managed is not None else list(DEFAULT_RETRY_ON_KEYWORDS)
     retry_count = int(getattr(managed, 'retry_count', 0) or 0) if managed is not None else 0
     api_key_count = len(api_keys)
     api_key_indexes = list(key_layout.key_indexes or ([0] if not api_keys else []))

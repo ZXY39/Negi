@@ -120,7 +120,7 @@ def _target(*, provider, retry_count: int, api_key_count: int, api_key_indexes: 
         provider_id="custom",
         model_id="custom-model",
         provider=provider,
-        retry_on=["network", "429", "5xx"],
+        retry_on=["network", "429", "502"],
         retry_count=retry_count,
         api_key_count=api_key_count,
         api_key_indexes=list(range(api_key_count)) if api_key_indexes is None else api_key_indexes,
@@ -195,7 +195,7 @@ async def test_config_chat_backend_does_not_rotate_on_bad_request(monkeypatch) -
 
     with pytest.raises(
         RuntimeError,
-        match="Model provider call failed after exhausting the configured fallback chain.",
+        match=r"HTTP 400: bad request",
     ):
         await backend.chat(
             messages=[{"role": "user", "content": "demo"}],
@@ -266,7 +266,7 @@ async def test_config_chat_backend_retries_full_model_chain_on_retryable_exhaust
             provider_id="custom",
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
-            retry_on=["network", "429", "5xx"],
+            retry_on=["network", "429", "502"],
             retry_count=0,
             api_key_count=1,
         )
@@ -300,7 +300,7 @@ async def test_fallback_provider_retries_full_model_chain_on_retryable_exhaustio
             provider_id="custom",
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
-            retry_on=["network", "429", "5xx"],
+            retry_on=["network", "429", "502"],
             retry_count=0,
             api_key_count=1,
         )
@@ -334,7 +334,7 @@ async def test_config_chat_backend_fails_after_retryable_chain_round_limit(monke
             provider_id="custom",
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
-            retry_on=["network", "429", "5xx"],
+            retry_on=["network", "429", "502"],
             retry_count=0,
             api_key_count=1,
         )
@@ -346,7 +346,7 @@ async def test_config_chat_backend_fails_after_retryable_chain_round_limit(monke
 
     with pytest.raises(
         RuntimeError,
-        match="Model provider call failed after exhausting the configured fallback chain.",
+        match=r"HTTP 502: upstream request failed",
     ):
         await backend.chat(
             messages=[{"role": "user", "content": "demo"}],
@@ -374,7 +374,7 @@ async def test_config_chat_backend_falls_back_after_attempt_timeout(monkeypatch)
             provider_id="custom",
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
-            retry_on=["network", "429", "5xx"],
+            retry_on=["network", "429", "502"],
             retry_count=0,
             api_key_count=1,
         )
@@ -413,7 +413,7 @@ async def test_fallback_provider_falls_back_after_attempt_timeout(monkeypatch) -
             provider_id="custom",
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
-            retry_on=["network", "429", "5xx"],
+            retry_on=["network", "429", "502"],
             retry_count=0,
             api_key_count=1,
         )

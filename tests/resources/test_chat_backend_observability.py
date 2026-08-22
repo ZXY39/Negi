@@ -70,7 +70,7 @@ async def test_config_chat_backend_logs_colored_fallback_events(monkeypatch) -> 
             provider_id='responses',
             model_id='gpt-primary',
             provider=_AlwaysFailProvider(),
-            retry_on=['5xx'],
+            retry_on=['502'],
             retry_count=0,
         ),
         'secondary': ProviderTarget(
@@ -78,7 +78,7 @@ async def test_config_chat_backend_logs_colored_fallback_events(monkeypatch) -> 
             provider_id='responses',
             model_id='gpt-secondary',
             provider=_SuccessProvider(),
-            retry_on=['5xx'],
+            retry_on=['502'],
             retry_count=0,
         ),
     }
@@ -115,7 +115,7 @@ async def test_fallback_provider_logs_colored_retry_events(monkeypatch) -> None:
             provider_id='responses',
             model_id='gpt-primary',
             provider=provider,
-            retry_on=['5xx'],
+            retry_on=['502'],
             retry_count=1,
         ),
     )

@@ -6900,7 +6900,7 @@ function renderModelDetail() {
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">Retry On</span>
-                                <input class="resource-search" name="retryOn" value="${esc((current?.retry_on || []).join(", "))}" placeholder="如 network, 429, 5xx">
+                                <input class="resource-search" name="retryOn" value="${esc((current?.retry_on || []).join(", "))}" placeholder="如 network, 429, 502（可自定义关键词，逗号分隔）">
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">重试次数</span>
