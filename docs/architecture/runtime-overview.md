@@ -49,7 +49,7 @@
   `SessionRuntimeManager`。按 `session_key` 复用 `RuntimeAgentSession`，是所有入口共享的 session 路由器。
 
 - `g3ku/runtime/bridge.py`
-  `SessionRuntimeBridge`。给 Web、CLI、China bridge、cron 提供统一的 prompt/continue/cancel API。
+  `SessionRuntimeBridge`。给 Web、CLI、China bridge、cron 提供统一的 prompt / prompt_batch / continue / cancel / pause API。pause 带运行状态前置检查（空闲会话返回 0，避免空闲暂停产生多余转录归档）；China bridge 的 QQ 渠道用它实现端内「暂停」命令与运行中消息注入（详见 `china-channels.md`「QQ 渠道增强」）。
 
 - `g3ku/runtime/session_agent.py`
   单次 turn 的核心执行器，也是最复杂、最值得精读的文件之一。
@@ -89,59 +89,19 @@
 - frontdoor interrupt 恢复
 - heartbeat / cron 等内部消息的特殊处理
 
-在当前 Web CEO 路径里，还要特别注意一个维护语义：
+在当前 Web CEO 路径里，`RuntimeAgentSession` 还维护“当前可显示 turn 的身份”，核心不变量：
 
-- 每个可显示的 inflight turn 现在都有稳定的 `turn_id`
-- `inflight_turn_snapshot`、`message_end`、heartbeat discard/final reply 都会沿这个 `turn_id` 传递
-- 前端不应再仅靠 `source=user|heartbeat` 去猜“当前该收口的是哪个 pending bubble”
-- `inflight_turn_snapshot()` 现在必须只表达“当前真实在跑的 turn”。如果 heartbeat / cron 在运行前需要暂时保留上一条可见 user bubble，运行时会把它放在单独的 preserved snapshot，而不是再让 preserved turn 覆盖当前 inflight turn。
-- 对 Web CEO websocket 来说，这意味着 live payload 里可能同时出现 `inflight_turn` 和 `preserved_turn`：前者是当前 heartbeat/cron/user turn，后者只是等待后续 `ceo.turn.discard` 收口的旧可见气泡。
-- 对 Web CEO/frontdoor 来说，session 侧还会同步保存当前 turn 的 hydrated tool state；它和 stage trace 一样属于“当前进行中 turn 的运行时事实”，不是长期 transcript。
-- session 侧现在还会同步保存 `frontdoor_selection_debug`，用于记录当前 turn 的 frontdoor 候选生成诊断：原始 query、rewrite 后的 skill/tool query、dense/rerank trace、tool selection trace，以及当轮 callable/candidate/hydrated 合同快照。
-- 维护上还要记住两个默认上限：CEO/frontdoor 的默认 candidate skills / candidate tools 上限现在都是 16；frontdoor 与节点的默认 hydrated tool LRU 上限也都是 16。若线上行为不像 16，优先检查运行时状态或 `tools/memory_runtime/resource.yaml` 是否显式改写。
+- 每个可显示的 inflight turn 都有稳定 `turn_id`：`inflight_turn_snapshot`、`message_end`、heartbeat discard/final reply 都沿这个 `turn_id` 传递；`inflight_turn_snapshot()` 只表达当前真实在跑的 turn，等待 `ceo.turn.discard` 收口的旧可见气泡放在单独的 preserved snapshot（live payload 里 `inflight_turn` 与 `preserved_turn` 可并存）。`turn_id` 传播断裂的典型回归是同 source 的多个 pending turn 被错误合并、heartbeat 清理误删旧 turn、前端残留只有“处理中...”的气泡。
+- session 侧同步保存当前 turn 的 hydrated tool state 与 `frontdoor_selection_debug`；它们和 stage trace 一样属于“当前进行中 turn 的运行时事实”，不是长期 transcript。candidate/hydrated 默认上限与诊断读取方式详见 `tool-and-skill-system.md`「四个概念必须分清」。
 
-这意味着 `RuntimeAgentSession` 不只是维护“session 是否正在运行”，还维护了“当前可显示 turn 的身份”。如果这里的 `turn_id` 传播断掉，典型回归就是：
+另外两条不变量：
 
-- 同 source 的多个 pending turn 被错误合并
-- heartbeat 清理时误删或漏删旧 turn
-- 前端残留一个只有“处理中...”的气泡
-- heartbeat 新气泡错误继承上一条 user bubble 的 `Interaction Flow`
+- 手动 pause 的语义是“冻结上一轮”，不是“等待下一条输入来补写原请求”：session 以 `completed` + `stop_reason=user_pause` 收尾，pause 当下的轮次上下文照常持久化，收尾时立即写 completed continuity sidecar，并把 paused assistant 气泡归档成带 `status=paused`、`history_visible=false`、`source=manual_pause_archive` 的 durable 记录。后续输入必须作为新一轮 user turn 发送，不得走 `resume(additional_context=...)`。
+- 运行中补充的消息作为一批独立 user message 持久化，在同一轮下一次 `call_model` 前一起注入，不拼接成一条文本；可见用户顺序的权威是 `inflight_turn.user_messages` 与 `ceo.reply.final.user_messages`（兼容字段 `user_message` 只保留批内最后一条），`pending` user rows 只是 durability/continuity 记录。
 
-另外，手动 pause 之后的后续输入语义也有一个容易误改的点：
+手动暂停恢复规则、排队补充消息与 follow-up 消费的完整契约详见 `web-and-admin.md`「Manual Pause Resume Rule」与「Queued Follow-Ups」。
 
-- Web 会话里，手动 pause 的语义现在是“冻结上一轮”，不是“等待下一条输入来补写原请求”
-- UI 文案仍然可以显示“暂停”，但普通用户 manual pause 的后端语义已经改成“停止当前轮并固化当前进度”：session 最终会落成 `completed`，并带 `stop_reason=user_pause`
-- pause 当下的 user message、阶段状态、工具调用轨迹、压缩状态和中间 assistant 文本都会继续持久化，作为上一轮上下文保留
-- manual pause 收尾时会立即写一份 completed continuity sidecar 到 `.g3ku/web-ceo-continuity/<session>.json`，然后清掉普通用户路径上的 paused / inflight restorable snapshot；后续输入不再依赖“继续 paused turn”
-- 因此前端/网关层在普通用户点击 pause 之后，不应再走 `resume(additional_context=...)`；后续输入必须作为新一轮 user turn 发送
-- paused assistant 气泡现在会在 manual pause 收尾时立即归档成 durable assistant transcript entry；这条记录会带 `status=paused`，并标记 `history_visible=false` 与 `source=manual_pause_archive`
-- 这条 archived paused assistant 的职责是让刷新/重连后的 UI 能重建上一轮暂停气泡，并保留审计痕迹；它不是下一轮 prompt 的可见原始历史
-- 因此普通用户下一轮 frontdoor/history compaction 现在应继续依赖可见 transcript 加 completed continuity sidecar 恢复出的 baseline / stage / compression / semantic 状态；session 列表的 `preview_text` / `message_count` 这类 operator summary 也应继续过滤掉这条 hidden paused assistant
-- 如果用户在运行中连续补充多条消息，运行时会把它们作为“同一轮 LLM 调用前的一批独立 user message”一起持久化并一起注入模型，而不是拼接成一条 `补充要求` 文本
-- Web CEO websocket 现在会在当前可见 turn 仍在运行时立刻把这批 follow-up 交给 session 侧后端队列；如果当前 turn 在进入下一次 `call_model` 之前就结束，websocket 会直接从这批 follow-up 接续启动下一轮 fresh user turn，而不是把它们留到前端再重发
-- `RuntimeAgentSession` 的 inflight snapshot 现在还会带当前可见 turn 的 `user_messages` 批次视图；兼容字段 `user_message` 仍然保留，但它只再代表这批用户输入里的最后一条
-- 维护上要把 `user_messages` 看成“当前可见 turn 的权威用户批次”，而不是 transcript 的替代品。它的职责是让 websocket/final-reply 层在 running follow-up 与 chained fresh turn 之间保住 UI 顺序
-- `ceo.reply.final.user_messages` 现在沿用这份当前 turn 用户批次快照。如果这份数组里已经包含 runtime-sent follow-up，说明这些补充属于同一个 assistant 最终回复；如果没有，说明它们仍在等待后续 fresh turn 或 transcript 快照来落位
-- 反过来说，普通 transcript 里的 `pending` user rows 现在不能在 running turn 的 `snapshot.ceo.messages` 里直接回放成历史气泡。维护上应把这些 `pending` 行视为 durability/continuity 记录，而不是当前可见排序的权威来源；running turn 的可见用户顺序必须以 `inflight_turn.user_messages` 和后续 `ceo.reply.final.user_messages` 为准
-- 当 follow-up 被真正并入同一可见会话 lane 的下一次 `call_model` 发送前，session 现在还会先把“补充消息到来前的当前 assistant 执行气泡”归档成一条 UI 可见、prompt 不可见的 assistant 历史记录。这个归档的职责纯粹是保证刷新/重连后的可见顺序稳定，不是新的 prompt 历史边界
-
-如果这里被改回“pause 后仍把新输入合并回原 user message”，典型回归就是：
-
-- 被暂停前的 transcript user message 被覆盖，上一轮真实输入丢失
-- 工具调用和阶段轨迹虽然还在 snapshot 里，但 transcript 与上下文压缩看到的是被篡改后的 user 文本
-- 前端多个补充气泡在后端被折叠成一条 `补充要求`，导致 UI 和 LLM 实际收到的消息结构不一致
-
-可以把它看成“一个会话的状态机 + turn 执行器”。
-
-新人容易低估这个文件的复杂度，因为它名字看起来像简单 session 封装，实际上它承担了：
-
-- user turn
-- heartbeat internal turn
-- cron internal turn
-- async dispatch 错误恢复
-- paused execution context
-- frontdoor stage state
-- frontdoor hydrated tool state
+可以把它看成“一个会话的状态机 + turn 执行器”：名字看起来像简单 session 封装，实际上 user turn、heartbeat / cron internal turn、async dispatch 错误恢复、paused execution context 与 frontdoor stage / hydrated tool state 都在这里汇合。
 
 ## 4. frontdoor 与任务运行时的关系
 
@@ -152,252 +112,61 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - 判断当前这轮能直接回答，还是需要走任务运行时
 - 在必要时触发任务工具，如 `create_async_task`
 
-Maintenance note for `create_async_task` duplicate precheck:
+`create_async_task` / `task_append_notice` 的完整工具契约与守卫（重复预检与重验、`file_targets` reopen 车道、拒绝语义）详见 `tool-and-skill-system.md`「fixed builtin tools」。运行时记账与任务级控制合同要点如下：
 
-- CEO/frontdoor may still call `create_async_task` more than once in the same visible turn; the runtime no longer enforces a hidden "one turn, one async task" rule.
-- Whether a detached task is actually created is now decided by `MainRuntimeService`, not by prompt wording alone.
-- The gate itself is enforced by the live `create_async_task` resource tool (`tools/create_async_task_cn`), which calls `MainRuntimeService.precheck_async_task_creation(...)` and, just before persisting, `revalidate_async_task_creation_before_create(...)`, and only then `create_task(...)`. There is exactly one `create_async_task` implementation; the former service-side `CreateAsyncTaskTool` class was removed. If the duplicate precheck ever looks bypassed, first confirm creation is still routed through this resource-tool handler and that no second create path has been reintroduced.
-- Before creating a new task, the service compares the candidate request against the current session's unfinished task pool.
-- The deterministic rule layer only blocks exact duplicates, using normalized target text and exact keyword fingerprint matching.
-- If the exact-rule layer allows the request and unfinished tasks exist, an inspection-model review may still return `approve_new`, `reject_duplicate`, or `reject_use_append_notice`.
-- The create path now also reruns the deterministic exact-duplicate check immediately before `create_task(...)` is allowed to persist a new record. Maintainers should treat this as a create-time race/stale-read guard, not as a replacement for the earlier hybrid precheck.
-- `reject_use_append_notice` means the new request is really an update to an existing unfinished task rather than a new detached work item. The rejection now points explicitly at CEO/frontdoor builtin `task_append_notice`.
-- Frontdoor dispatch bookkeeping must therefore distinguish "tool call happened" from "new task was actually created". A rejection message may still mention an old `task:...` id, but that does not count as a fresh dispatch.
-- Upload-dependent detached tasks now have a second contract boundary besides duplicate precheck: the runtime still stores upload paths in session/transcript metadata, and `create_async_task` now has an optional structured `file_targets` payload for downstream reopen targets.
-- Frontdoor still exposes runtime-contract `attachment_reopen_targets`, but the runtime does not auto-fill `create_async_task.file_targets` from that lane. The model must copy the exact `path` / `ref` itself when downstream work needs to reopen an uploaded file or image.
-- `file_targets` is list-shaped and may be `[]` or `null` only when the detached task does not depend on any specific file or artifact. Once persisted, node runtime forwards the normalized targets into execution/acceptance JSON payloads so downstream nodes can reopen them without re-parsing the free-text task prompt.
-- In other words, prompt guidance should now treat `file_targets` as the authoritative reopen lane. The free-text task prompt can explain file purpose, but the exact reopen handles belong in the structured field.
-- The runtime now also enforces a reject-only path guard on that field: when a `file_targets` entry includes `path`, it must already be an absolute path to an existing file. Bare filenames such as `resume.docx`, relative paths, and nonexistent paths are rejected instead of being persisted as reopen targets.
-- This matters especially for current-turn multimodal image sends. The provider-visible user text may only say that the image is attached directly in the current request; maintainers should not assume that detached tasks can reopen the image from that note alone. If the async-task prompt still only says "上传图片" / "当前附件" or uses placeholders like `user_uploads`, expect downstream reopen failures even though the original turn itself was multimodal.
+- frontdoor dispatch 记账必须区分“工具调用发生了”与“新任务真的创建了”：只有显式成功形式才算已核实派发；拒绝消息里提到的旧 `task:...` id 不算新建任务。同一可见轮可以多次调用 `create_async_task`，是否真正创建由 `MainRuntimeService` 的唯一创建路径决定。
+- 运行时把追加的任务消息视为任务级控制事务：`MainRuntimeService.task_append_notice(...)` 把当前执行树快照进 epoch payload，请求任务级 barrier，并写入操作员可见的 `runtime_meta.distribution`。
+- Public distribution states are `barrier_requested -> barrier_draining -> distributing -> resume_ready`; the authoritative source is the task-level distribution state plus the epoch payload's `barrier_node_ids` / `drain_pending_node_ids`. `barrier_draining` is safe-boundary only: running leaves are not hard-interrupted, and a node drains only at an existing safe boundary (`before_model`, `waiting_tool_results`, `after_model`, `waiting_children`, `waiting_acceptance`). Draining also waits for active spawn rounds to finish materializing child execution nodes; distribution must not snapshot a partially materialized child round. `NodeRunner.reconcile_spawn_entry_child_bindings(...)` repairs durable parent-entry / child-row drift before spawn execution and barrier checks, binding the canonical child back into the parent entry and marking non-canonical siblings `duplicate_spawn_child` so they are excluded from the live tree.
+- Distribution turns are compact control turns (`node_message_distribution.md` + internal tool `submit_message_distribution`) that run through the ordinary `TaskActorService` / `TaskNodeDispatcher` / `NodeRunner` path and the same node send-side token preflight. `submit_message_distribution.children` is a complete per-child decision set: every live child appears exactly once with `should_distribute=true` and a non-empty `message`, or `should_distribute=false` and a non-empty `reason`; empty or partial decisions fail the control turn. On `/responses`-style providers the control turn uses the flat function selector form for `tool_choice`. When a distribution turn produces `next_frontier_node_ids`, the task is re-enqueued immediately; each frontier turn may accumulate an append-only `payload.debug_trace` for control-turn forensics.
+- Delivery to child execution nodes creates durable mailbox rows; delivering to a terminal execution node reactivates it and invalidates/detaches its old acceptance node instead of deleting it. Root appended messages keep node-local pending notice records plus epoch `decision_records`, not root mailbox rows. A notice flips to consumed as soon as the first ordinary model response that included those notice ids returns for the resumed node turn; until then it stays pending/delivered, including across `waiting_children` pauses. Ordinary execution re-scans newly delivered notices at each `before_model` safe boundary via append-only refresh, never a history rebuild. Consumed notices persist into node-local `append_notice_context` so they survive stage compaction; spawn review reads them as `consumed_distribution_notices` and treats the latest consumed distribution notice as the effective current requirement when it conflicts with older wording. Raw unconsumed notices render as a dedicated non-compressible tail block ahead of `STAGE_COMPACT` / `STAGE_EXTERNALIZED` blocks and roll into a compressed notice-tail segment at stage archival.
+- Epoch completion and delayed notice consumption are separate states: once the epoch reaches `completed`, `runtime_meta.distribution.state/mode/active_epoch_id` are cleared even while `pending_notice_node_ids` / `pending_mailbox_count` remain — those fields only mean nodes still hold node-local pending notices or delivered mailbox rows, not that barrier/distribution is still active. Nodes blocked by `runtime_meta.distribution.blocked_node_ids` skip interrupted-turn recovery until the barrier releases them. A node holding an incomplete `spawn_child_nodes` round resumes with `resume_mode=wait_for_children` and consumes its held notice only after that round disappears (durable notice now, prompt consumption later). The first ordinary consumption of a held notice preserves the previous provider-facing request as an exact prefix: semantic node history comes from `runtime_frame.messages` / durable rebuild, while the latest actual request body is only a send-side seed scaffold.
+- Acceptance nodes are created eagerly with the spawn entry (root `final_acceptance` at task creation) and activated by execution success. Execution success is not terminal when acceptance is required: `submit_final_result(success + final)` first persists the candidate result and moves the node into `acceptance_handshake.state="waiting_acceptance"`. Child and root acceptance share one reflation loop: the first and second rejections feed acceptance feedback back into the execution node and reactivate it, the third rejection is terminal, and execution failure during any retry cancels the waiting acceptance path. `NodeRunner._run_child_pipeline(...)` loops `execution -> acceptance` until acceptance returns a terminal result. Acceptance prompt/input refresh happens at activation time from the latest execution output (`result_payload_ref`).
+- Task-depth governance review is an execution-only inspection lane: acceptance/inspection nodes are filtered out of trigger stats and payload, each execution node's full `prompt` is the primary leaf-work evidence, and each review attempt writes its own `kind=task_governance_review` artifact referenced by `task_runtime_meta.governance.history[*].review_artifact_ref`.
+- Force delete wins over message distribution: before task rows disappear, the runtime cancels active epochs, cancels or purges mailbox rows, clears `runtime_meta.distribution`, and prevents later queue wakeups from resuming the deleted task.
 
-Maintenance note for `task_append_notice` and task message distribution:
+对于异步任务的回传：任务终态通过 task terminal callback / heartbeat 回到原 CEO 会话；heartbeat 的修复/回退语义与 `terminal_output` / `root_output` 双车道详见 `heartbeat-system.md`「Task Terminal Repair Contract」。
 
-- `task_append_notice` is a CEO-only task-lifecycle builtin for appending new requirements, constraints, or acceptance expectations to an unfinished task in the current session. It is not a generic task-editing tool and it must not be treated as detached task creation.
-- The runtime now treats appended task messages as a task-wide control transaction. `MainRuntimeService.task_append_notice(...)` captures the current live execution tree into the epoch payload, requests a task-wide barrier, and writes operator-visible `runtime_meta.distribution` immediately.
-- The public runtime states are now `barrier_requested -> barrier_draining -> distributing -> resume_ready`. Maintainers should stop thinking about append-notice as a root-only frontier toggle; the authoritative source is the task-level distribution state plus the epoch payload's `barrier_node_ids` / `drain_pending_node_ids`.
-- `barrier_draining` is safe-boundary only. Running leaves are not hard-interrupted. A node is considered drained only after it reaches an existing safe boundary such as `before_model`, `waiting_tool_results`, `after_model`, `waiting_children`, or `waiting_acceptance`.
-- `barrier_draining` also waits for active spawn rounds to finish materializing child execution nodes. If a live parent still has allowed `spawn_operations.entries` without `child_node_id`, with a `child_node_id` that still has no durable node row, or with a child row whose spawn-owner metadata does not match the parent round entry, the epoch must keep draining until that binding is fully materialized; distribution must not snapshot a partially materialized child round.
-- Before spawn execution and barrier materialization checks, `NodeRunner.reconcile_spawn_entry_child_bindings(...)` now repairs durable parent-entry / child-row drift. It scans child rows by `spawn_owner_parent_node_id + spawn_owner_round_id + spawn_owner_entry_index`, binds a canonical child back into the parent entry when the entry is empty or stale, and marks non-canonical siblings with `duplicate_spawn_child` metadata so they are excluded from the live distribution tree. This is the runtime recovery boundary for historical crashes or replay races that created duplicate child rows for the same spawn entry.
-- Once the task enters distribution mode, the work still goes through the existing `TaskActorService` / `TaskNodeDispatcher` / `NodeRunner` path. There is no sidecar execution lane for node distribution turns.
-- Distribution turns are compact control turns. They use `node_message_distribution.md` plus internal tool `submit_message_distribution`, not the ordinary execution prompt/tool bundle.
-- When a distribution frontier node has live child execution nodes, `submit_message_distribution.children` is a complete per-child decision set, not a sparse delivery list. Every live child must appear exactly once with `should_distribute=true` and a non-empty `message`, or `should_distribute=false` and a non-empty `reason`. Empty or partial child decisions fail the control turn instead of being treated as successful no-op distribution.
-- Distribution turns now also run the same node send-side token preflight as ordinary execution/acceptance turns before the provider call is dispatched. If a distribution turn never reaches the model, check the node preflight diagnostics and resolved context window before blaming the control prompt.
-- On `/responses`-style providers, the compact distribution turn must use the flat function selector form for `tool_choice` (`{"type":"function","name":"submit_message_distribution"}`), not the nested chat-completions form. If a distribution turn returns gateway `502` while ordinary execution is healthy, inspect the provider-facing request body for this field before blaming the model route.
-- Each distribution epoch may now accumulate a lightweight `payload.debug_trace` for control-turn forensics. The trace is append-only per frontier turn and records milestones such as control-turn start, send-side preflight, provider tool-call names, and validation failures, so maintainers can distinguish “provider returned no usable tool call” from “model chose an invalid child-decision shape” without reproducing the turn live.
-- When a distribution turn produces `next_frontier_node_ids`, the task must be re-enqueued immediately so the next frontier turn can run. Treat `frontier_node_ids` as a queue-controlled continuation signal, not as proof that another worker pass will happen automatically without a fresh enqueue.
-- Top-down propagation still happens through the ordinary dispatcher, but the model-facing child list is now a runtime-built sidecar. It may include live child status, prompt summary, output preview, and failure hints, but that snapshot is not durable prompt history and must not be replayed as ordinary node conversation context.
-- That sidecar is now a distribution-recipient projection rather than the raw live-child set. Execution nodes in `acceptance_handshake.state="waiting_acceptance"` may be intentionally hidden from distribution recipient lists, while unfinished acceptance nodes remain visible there and may still receive distribution messages.
-- The browser task tree no longer uses that same recipient projection as its visibility source. Frontend tree visibility is now a separate contract: execution nodes stay visible in every status, acceptance nodes stay hidden until activation, and distribution-active tree rendering may force-show all nodes without redefining actual message recipients.
-- Acceptance nodes are now created eagerly with the spawn entry (and root `final_acceptance` is created at task creation time), even though activation still waits for execution success. This lets distribution merge new requirements into acceptance context before the acceptance pass actually starts.
-- Delivery to child execution nodes creates durable mailbox rows. If the target execution node was terminal, delivery reactivates it; if its old acceptance node exists, that acceptance node is invalidated and detached from the current effective spawn-entry chain instead of being deleted.
-- Root-node appended messages still do not create `task_node_notifications` rows for the root itself. Instead, the root keeps node-local pending notice records plus epoch `decision_records`, so query/UI paths can show both the root's pending local notice and the child deliveries chosen during that same distribution turn.
-- Recovery replays no longer outrank task-wide append-notice priority. If a node is blocked by `runtime_meta.distribution.blocked_node_ids`, the runtime must skip interrupted-turn recovery such as `pending_tool_turn` or `waiting_children` replay until the barrier releases that node. After the epoch is completed, nodes still listed in `pending_notice_node_ids` are node-local pending notice holders, not proof that global distribution is still active.
-- Root/local append-notice persistence now has an explicit resume-mode split. If a node still owns an incomplete `spawn_child_nodes` round when a new local notice is queued, the notice is persisted immediately but tagged `resume_mode=wait_for_children`. Child mailbox deliveries now stamp the same resume-mode contract instead of bypassing it. After the task-wide distribution epoch finishes, the task still re-enters the dispatcher, but that node resumes only into `waiting_children` recovery; it must not inject the held notice into ordinary prompt history and must not open a new spawn round yet.
-- Once the latest incomplete child round disappears, the same persisted local notice flips back into ordinary consumption and enters the next ordinary model request as a user message. Maintainers should treat this as `durable notice now, prompt consumption later`, not as a dropped message.
-- First ordinary consumption of a held append-notice must preserve the previous provider-facing request as an exact prefix. When a latest actual-request artifact has `provider_request_body.input`, `_resume_react_state(...)` now keeps two lanes separate:
-  - semantic/canonical node history still comes from `runtime_frame.messages`, `latest_runtime_messages_ref`, or a fresh rebuild from durable node state
-  - the latest actual request body is carried only as a send-side seed scaffold for the next provider call
-  Runtime must append the new notice onto that send-side seed instead of treating the provider-shaped payload itself as ordinary node history. Reusing the seed as logical history can preserve semantics while still reordering stage blocks / contract tails / tool-call records and destroying prompt-cache reuse.
-- CEO/frontdoor 的跨回合请求体基线（`session._frontdoor_request_body_messages`）与「收缩守卫」是一体的：新回合种子在发送前会与该基线比较，若 token 变小且没有允许的收缩原因（`token_compression`/`stage_compaction`），旧实现会直接抛错并把整个会话永久卡在 `frontdoor context shrank without an allowed reason`。现在守卫两侧同形归一（基线侧同样先剥工具契约/瞬时件/多模态），并在仍判 shrink 时**自愈**——以受控原因 `context_shrink_quarantine` 把拒绝后的新种子写回基线，不再裸抛冻结。若维护者仍看到该报错文本，应视为旧版本行为或隔离逻辑回归，而不是“正常防护”。
-- durable 基线永不含 `frontdoor_runtime_tool_contract` 块；组装模型输入时工具契约/turn overlay 也不再放在末位（末位必须是当前 user 回合），否则模型会把契约当成“上一条发言”回显成回复。
-- Because root-node delivery has an explicit pending-notice phase, operator-facing query paths must treat both pending and consumed notices as real received messages. Pending notices now flip into consumed notice history as soon as the first ordinary model response returns for that resumed node turn, rather than waiting for the whole `run_node(...)` invocation to finish. The remaining `pending` cases are therefore mostly true pre-send / in-flight pause boundaries, not long-running post-send lag.
-- Ordinary execution no longer consumes delivered mailbox rows only during the initial `_resume_react_state(...)` pass. Initial pickup still happens there when `run_node(...)` first resumes the node, but long-running `react_loop.run(...)` turns now also re-scan for newly delivered notices at the next ordinary `before_model` safe boundary before assembling the next request.
-- That same-run refresh is append-only, not a history rebuild. Runtime closes the previous active stage, appends the newly eligible mailbox/root notices after any already recovered tool or spawn-round history, and, if the current provider request is already using same-turn delta growth, extends only the delta tail so the previous actual provider request remains an exact prefix.
-- Consumption timing still stays tied to the first ordinary model response that actually included those notice ids. A notice may therefore remain `delivered` while the node is paused in `waiting_children`, between rounds, or waiting for the next eligible send; once that refreshed ordinary response returns, the rows are marked `consumed` without waiting for the whole `run_node(...)` invocation to exit.
-- Completed distribution and delayed notice consumption are now separate states. Once the epoch reaches `completed`, `runtime_meta.distribution.state/mode/active_epoch_id` are cleared even if `pending_notice_node_ids` and `pending_mailbox_count` remain non-empty. Those remaining fields mean "these nodes still hold node-local pending root notices or delivered mailbox rows"; they do not mean barrier/distribution is still active. The dispatcher may still resume those nodes first, lets `wait_for_children` nodes replay their existing child round without opening a new one, and only after that recovery pass does the held notice become eligible for ordinary prompt consumption. The frontend must not use non-empty `pending_notice_node_ids` by itself to paint the whole tree yellow.
-- Consumed append-notice messages now also persist into node-local `append_notice_context` metadata. This is a second prompt-assembly truth source used specifically to keep notice requirements visible across stage compaction and later compression-stage archival.
-- Spawn review now reads the same consumed notice history through `append_notice_context.notice_records` as `consumed_distribution_notices`. If those consumed notices conflict with older `user_request`, task `core_requirement`, or the root prompt, spawn review must treat the latest consumed distribution notice as the effective current requirement for that parent node instead of blocking on stale pre-distribution wording alone.
-- Task-depth governance review is now an execution-only inspection lane. Before the governance model is called, runtime filters acceptance/inspection nodes out of both the trigger stats and the review payload, then builds one execution-only tree snapshot for that review call.
-- That governance payload now uses each execution node's full `prompt` as the primary leaf-work evidence, not `task_progress_text`, frontier stage-goal lines, or acceptance-node placeholders. If maintainers debug a `cap_current_depth` decision, inspect the execution-node prompts and execution-only tree shape first.
-- Task-depth governance review now also writes its own JSON artifact per review attempt (`kind=task_governance_review`). That artifact captures the exact system prompt, user payload, raw response payload, parsed decision, and any error text for that governance call.
-- The governance history row now carries `review_artifact_ref`. When maintainers need to answer “what did governance actually see?”, start from `task_runtime_meta.governance.history[*].review_artifact_ref` instead of reconstructing the request indirectly from task-tree text or live-frame snapshots.
-- During ordinary node prompt assembly, raw notices received since the last compression-stage rollover render as a dedicated non-compressible tail block before any `STAGE_COMPACT` / `STAGE_EXTERNALIZED` blocks.
-- When execution-stage archival creates a new compression stage, the runtime rolls the previously uncompressed notice interval into a compressed notice-tail segment and keeps that segment ahead of the archived stage block. Maintainers debugging “notice disappeared after compression” should inspect `append_notice_context`, not only the raw mailbox rows.
-- Force delete wins over message distribution. Before task rows disappear, the runtime cancels active epochs, cancels or purges mailbox rows, clears `runtime_meta.distribution`, and prevents later queue wakeups from resuming the deleted task.
+当前 frontdoor 的上下文组织以阶段工作集为近场上下文：最近 3 个 completed stages 与当前 active stage 保留原始窗口，更早 completed stages 改写为 compact / externalized stage blocks（表示规则见本文「Runtime Contract Lane」）。全局语义摘要层不参与 prompt assembly；长会话的远场连续性由权威请求体基线、canonical context 链与压缩合同承担，收缩边界详见本文「Frontdoor Context Compression (Current Contract)」。
 
-对于异步任务的回传，还要补一个当前维护边界：
+前门提示词分成“静态协议层”和“动态注入层”两部分理解：
 
-- 任务本身在 `main/` 中结束后，会通过 task terminal callback / heartbeat 回到原 CEO 会话。
-- For `task_terminal`, heartbeat is no longer allowed to swallow the result silently; the normal path must produce a user-visible reply.
-- Heartbeat may still enter repair rounds to produce that visible reply, but it no longer creates replacement tasks and no longer retries failed or unpassed tasks in place.
-- If repair rounds still only produce empty output or `HEARTBEAT_OK`, the service emits a fixed fallback error; any further work must come from a later explicit user/frontdoor decision, typically through `create_async_task`.
-- If the task panel says success but the CEO session never receives a final reply, treat that as a heartbeat repair/fallback bug first, not as an ordinary UI rendering issue.
-- Execution success is no longer terminal when acceptance is required. `submit_final_result(success + final)` first persists the candidate result and moves the execution/root node into `acceptance_handshake.state="waiting_acceptance"`; only an acceptance pass promotes that execution result to real success.
-- Child acceptance and root `final_acceptance` now share the same reflation loop. With the current default handshake budget, the first and second rejections feed acceptance feedback back into the execution node, preserve the acceptance node context, and reactivate execution for another retry. The third rejection is terminal; execution failure during any retry still cancels the waiting acceptance path instead of routing through acceptance again.
-- Spawn-child acceptance now follows that same contract end-to-end inside `NodeRunner._run_child_pipeline(...)`. Maintainers should no longer think of child acceptance as a single `if partial` handoff: the pipeline keeps looping through `execution -> acceptance` until acceptance returns a terminal result or execution itself fails during a retry.
-- Acceptance prompt/input refresh now happens at activation time from the latest execution output, not only when the acceptance node row was first created. Maintainers debugging stale acceptance evidence should inspect the accepted execution node's latest `result_payload_ref` before changing prompt composition.
-- Task-terminal callbacks now also preserve a separate root-execution-output lane for final-acceptance failures. Maintainers should not overload `terminal_output` with the root deliverable:
-  - `terminal_output` still follows the real terminal node and therefore remains the acceptance-node output when `terminal_node_reason=acceptance_failed`.
-  - `root_output` / `root_output_ref` now carries the root-node final deliverable so heartbeat can show the main agent the full execution result even when the task is business-unpassed.
+- `g3ku/runtime/prompts/ceo_frontdoor.md` 承载 CEO frontdoor 的稳定协议（角色规则、任务/工具通用约束、stage-first 高优先级协议）；稳定 system prompt 只保留最小的 capability exposure revision 锚点，不把可见 tool/skill 名单写进稳定前缀。
+- `g3ku/runtime/frontdoor/prompt_builder.py` 负责把稳定协议与少量环境提示装成 base prompt；`g3ku/runtime/frontdoor/message_builder.py` 按本轮会话状态动态注入 retrieved context、memory hint 与当前轮运行时工具合同所需的数据。
+- CEO/frontdoor 的生产执行面是显式 `StateGraph`，入口到收尾固定经过 `prepare_turn -> call_model -> normalize_model_output -> review_tool_calls -> execute_tools -> finalize`。`call_model` 和 `execute_tools` 共用同一份 frontdoor runtime tool bundle；`submit_next_stage` 这类运行时注入的 stage protocol tool 必须同时对模型“可见”且在 `execute_tools` 里可真实执行，执行环节不得从 `state.tool_names` 重建第二套工具表。阶段门控与 mixed-batch 语义详见 `tool-and-skill-system.md`「四个概念必须分清」。
+- 可见 `call_model` 轮次有专用的流式 assistant 文本 lane，`RuntimeAgentSession` 是其合并边界：流式块追加进 `latest_message`，`inflight_turn_snapshot().assistant_text` 保持最新，并以节流轻量事件代替整份 `state_snapshot` 重建；该 lane 只承载文本，工具进度 / stage trace / canonical context 仍走各自的低频事件/快照通道。可见发送的硬回退边界：首个可见流式文本块出现前允许 provider retry / API-key rotation / model-chain fallback，首个可见块之后同一发送必须停止透明回退——一个可见气泡由多个 provider/model attempt 拼接属于 runtime bug。内部不可见发送（如 `token_compression` helper）不得复用该可见回调路径。
+- 内部运行时错误后的 async-dispatch 恢复遵守同一可见性规则：若 `create_async_task` 已成功且当前轮已有用户可见 assistant 文案，恢复必须保留该文案；通用回退文案仅适用于没有任何可见文本幸存的窄场景。
+- 只要当前没有“有效阶段”（`active_stage_id` 为空，或当前阶段已 `transition_required=true`），agent-facing `frontdoor_runtime_tool_contract.callable_tool_names` 收紧到只剩 `submit_next_stage`；这些只影响模型决策边界，不同步收紧 provider-facing `tools` schemas——前门继续发送当前路径上 RBAC-visible concrete tools 对应的 `provider_tool_names` bundle，仅在 membership 真正变化时刷新并保持已持久化顺序稳定，`token_compression` 所在 send 沿用压缩前已持久化的 bundle。阶段门控、候选/修复车道与 provider 工具面详见 `tool-and-skill-system.md`「四个概念必须分清」与「CEO Provider Tool Surface」。
+- `g3ku/runtime/frontdoor/_ceo_create_agent_impl.py` 是 runner 入口，但前门主执行链以 `_graph_*` 节点为唯一权威路径。
+- 对 CEO/frontdoor 主链路，每个请求只有一份最新契约：位于所有稳定前缀、持久化历史和当前 user message 之后的一份 `frontdoor_runtime_tool_contract` user 消息，属于“当前轮临时合同”，不是 durable history（剥掉/重注规则详见 `context-and-cache-troubleshooting.md`「append-only 规则」）。维护上区分 `dynamic_appendix_messages`（下一次重建时应追加的最新合同）与活动中的 `messages` / actual request JSON。
 
-当前 frontdoor 的上下文组织需要按“双层模型”理解：
-
-- 内层是阶段工作集：
-  - 最近 3 个 completed stages 保留原始窗口
-  - 更早 completed stages 改写为 compact / externalized stage blocks
-  - 当前 active stage 保留原始窗口
-- 外层是全局语义摘要：
-  - 覆盖 local workset 之外的更老历史
-  - 采用 lossy summarization 生成 handoff/reference block
-  - 不替代 canonical transcript，也不替代 frontdoor stage archive
-
-这两层不是互斥关系。阶段工作集负责“当前轮还需要精读的近场上下文”，全局语义摘要负责“防止长会话失忆的远场上下文”。
-
-前门提示词本身还要再分成“静态协议层”和“动态注入层”两部分理解：
-
-- `g3ku/runtime/prompts/ceo_frontdoor.md` 承载 CEO frontdoor 的稳定协议，包括角色规则、任务/工具通用约束，以及 stage-first 这类高优先级协议。
-- `g3ku/runtime/frontdoor/prompt_builder.py` 负责把稳定协议与少量环境提示装成 base prompt。
-- `g3ku/runtime/frontdoor/message_builder.py` 继续按本轮会话状态动态注入 retrieved context、memory hint、全局语义摘要，以及当前轮运行时工具合同所需的数据。
-- CEO/frontdoor 的生产执行面现在是显式 `StateGraph`，入口到收尾固定经过 `prepare_turn -> call_model -> normalize_model_output -> review_tool_calls -> execute_tools -> finalize`。
-- `call_model` 和 `execute_tools` 现在共用同一份 frontdoor runtime tool bundle。像 `submit_next_stage` 这类运行时注入的 stage protocol tool，必须同时对模型“可见”并且在 `execute_tools` 里可真实执行；维护时不要再在执行环节单独从 `state.tool_names` 重建第二套工具表。
-- `execute_tools` 现在会在真正执行前落实 stage gate：普通工具在无活动阶段或阶段预算耗尽时会直接得到 gate error；但如果同一批 tool calls 里同时出现 `submit_next_stage` 和普通工具，runtime 会先顺序执行 `submit_next_stage`，再把同批普通工具当作“新阶段内的第一批工具调用”执行。若阶段切换失败，同批剩余普通工具会收到 batch-local 的阶段切换失败错误，而不是悄悄回落到旧阶段继续跑。
-- 成功的 `submit_next_stage` 会在同一轮 `execute_tools` 内立刻写回 `frontdoor_stage_state`；对 mixed batch 来说，这表示同批后续普通工具看到的已经是 promotion 后的新阶段，而下一次 `call_model` 看到的也同样是已推进后的 runtime state，而不是等额外的后处理链再补写。
-- CEO websocket now attaches the current visible turn's authoritative final `canonical_context` directly to `ceo.reply.final`; maintainers should not assume the frontend must wait for a later `state_snapshot` to reconstruct the closing stage view.
-- Visible CEO/frontdoor `call_model` rounds now also have a dedicated streamed assistant-text lane. When the selected provider supports streaming, the runtime may emit user-visible assistant text chunks during the live `call_model` send instead of waiting for `message_end` to show any text.
-- `RuntimeAgentSession` is the coalescing boundary for that lane. It appends streamed chunks into `latest_message`, keeps `inflight_turn_snapshot().assistant_text` current for reconnect/bootstrap, and emits a throttled lightweight event rather than rebuilding a full `state_snapshot` for every chunk.
-- That streamed lane is intentionally text-only. Tool progress, stage trace, canonical context, and token-preflight diagnostics still move on their existing lower-frequency event/snapshot lanes.
-- frontdoor 的 stage/round 记录携带两个展示字段：round 的 `text`（该工具轮对应的中途旁白）与新建阶段的 `preamble_text`（建阶段当轮旁白，UI 渲染在阶段标题上方）。它们只服务 Web 时间线渲染；stage state 仍跨 turn 以 session 属性累积，live 快照带累积全量 + 相对上一条持久化 assistant 消息的 delta，刷新侧靠相邻消息求差还原本轮增量——维护时不要把这两个展示字段接进 prompt 组装或 transcript 权威链路。
-- There is also now a hard fallback boundary for visible sends: provider retry, API-key rotation, and model-chain fallback are still allowed before the first visible streamed text chunk, but after the first visible chunk the runtime must stop transparent fallback for that send. If a maintainer sees one visible assistant bubble stitched together from multiple provider/model attempts, treat that as a runtime bug.
-- Async-dispatch recovery after an internal runtime error now follows the same visibility rule. If `create_async_task` already succeeded and the current turn already has user-visible assistant copy (for example `latest_message` from the streamed lane or the newest completed stage summary), recovery must preserve that copy. The generic fallback text `后台任务已经建立，任务号 ... 当前回写遇到暂时异常...` is only for the narrower case where no visible assistant text survived the failure boundary.
-- Internal non-visible sends must stay out of this lane. Token-compression helper calls and other internal frontdoor sends may still use streaming under the hood, but they must not reuse the visible assistant-text callback path that ordinary user-facing `call_model` rounds use.
-- 新的前门暴露边界要分两层理解：只要当前没有“有效阶段”（`active_stage_id` 为空，或当前阶段已 `transition_required=true`），agent-facing `frontdoor_runtime_tool_contract.callable_tool_names` 会收紧到只剩 `submit_next_stage`；候选 tool/skill 列表仍继续显示，供模型先看能力边界、再开阶段。
-- agent-facing runtime contract 现在还会把 repair-required 资源单独列出：
-  - `repair_required_tools` 表示这些工具在修复前不能当成普通 callable/candidate 能力使用
-  - `repair_required_skills` 表示这些 skill 在修复前不能通过 `load_skill_context` 查看正文
-  - 这两个列表服务于模型决策边界，不代表 provider-facing `tools[]` 发生变化
-- 但 provider-facing `tools` schemas 现在不再随着 `transition_required=true` 收紧到只剩 `submit_next_stage`。前门会继续向 provider 发送当前这条路径上 RBAC-visible concrete tools 对应的 `provider_tool_names` bundle，以减少阶段切换回合对 prompt cache 前缀命中的破坏。
-- 这条稳定性规则现在不再依赖 active/pending provider-bundle 状态机：普通轮次直接按当前 RBAC-visible concrete tools 条件刷新 `provider_tool_names`；如果当前 send 已经进入 `token_compression`，这一轮实际发给 provider 的 bundle 必须继续沿用压缩前已持久化的 bundle，而不是在压缩轮里切换 schema。
-- 当前保留的内部-turn 例外是 `heartbeat_internal` 与 `cron_internal`。只要 session 已有权威的 `frontdoor_request_body_messages` / actual-request baseline，且前序 frontdoor contract state 仍在，这类内部轮次就不会被前门 callable-tool helper 收紧到只剩 `submit_next_stage`，也不会重新跑 tool/skill selector；它们会直接继承上一轮的 callable / candidate / hydrated / provider-tool / visible-skill 状态，只在原 baseline 之后追加隐藏内部提示。
-- 这同样意味着 heartbeat / cron 内部轮次从 agent 视角与普通 CEO/frontdoor 轮次一致：模型既可以直接输出内容，也可以立刻开阶段、调用当前已继承的普通工具。若维护时看到到点后的 heartbeat/cron 只能围着 `submit_next_stage` 或 `cron` 自己打转，优先排查 frontdoor contract state 是否在内部轮次开始前被错误清空或重选。
-- 若当前 session 还没有权威 frontdoor baseline，这条“直接继承上一轮 contract”规则不会强行触发；内部轮次会回退到普通 CEO/frontdoor exposure assembly，而 provider-facing schema 稳定性仍由 active/pending provider-tool exposure 状态机保证。
-- `g3ku/runtime/frontdoor/_ceo_create_agent_impl.py` 仍是 runner 入口，但它不再把 `create_agent + middleware` 当作前门主执行链；维护时应把 `_graph_*` 节点看成唯一权威路径。
-- frontdoor 与节点动态合同现在还会携带 `exec_runtime_policy`。这让 prompt 中不再需要把 exec 的“只读/受监管”规则写死为静态事实；维护者应优先把当前 exec 模式视为 runtime contract 的一部分，而不是 prompt 文案的一部分。
-- CEO/frontdoor 的稳定 system prompt 现在只保留最小的 capability exposure revision 锚点，不再把可见 tool/skill 名单整块写进稳定前缀。
-- 对 CEO/frontdoor，当前轮真正给模型看的 tool/skill catalog 现在只有一份 `frontdoor_runtime_tool_contract` user 消息。它位于 request 尾部，也就是所有稳定前缀、持久化历史和当前 user message 之后。
-- 这份 frontdoor runtime tool contract 属于“当前轮临时合同”，不是 durable history。后续轮次的 `stable_messages` / transcript 不应再继承旧轮的 tool/skill 名单；如果维护者在下一轮历史里又看到旧 contract，优先排查 prompt contract 组装或 state replay 是否把 dynamic appendix 错写回了 stable history。
-- 对 CEO/frontdoor 主链路，每个请求**只有一份最新契约**（位于请求尾部），live request / state 载体 **不携带历史契约**；携带历史里的旧契约与 turn-only note 会被剥掉，新契约每轮在尾部重新注入。不要把“同一 turn 保留多份 contract snapshot 以保 append-only”当作正确行为——那是 2026-08 之前的设计，现已有意反转（详见《去累积后的缓存行为》）。
-- 维护时要区分两层：`dynamic_appendix_messages` 表示“下一次重建时应追加的最新合同”，而活动中的 `messages` / actual request JSON 每轮重新注入唯一一份最新契约。若同一 turn 里出现多个 contract，说明去累积剥离漏网，最后一条才是权威；这些旧 snapshot 不应写入后续 durable history。
-
-维护上现在还要区分 frontdoor 的两份工具状态：
-
-- `candidate_tool_names` 表示当前轮对模型可见、但默认仍需先 `load_tool_context` 并在后续轮次 hydration 后才能直接调用的 concrete tools。
-- `hydrated_tool_names` 表示本 turn 里已经成功读过契约、并被提升为下一轮 callable 的 concrete tools。
-- `load_tool_context(tool_id="...")` 的精确工具加载现在不再是 candidate-only：只要工具属于当前 RBAC 可见且已 surfaced 的 concrete tool，就可以读取 toolskill / 参数说明，即使它已经 callable 或已经 hydrated。
-- frontdoor 的语义工具选择现在直接面向 concrete tool，而不是“先命中 family 再按 family 顺序展开 executor”；因此 `frontdoor_selection_debug.semantic_frontdoor` 里的 `tool_ids` 应直接是诸如 `filesystem_write` 这样的 concrete tool names。
-
-这两份状态都由 frontdoor persistent state 维护，而不是只存在于某一轮 prompt 文本里。其直接后果是：
-
-- 同一用户 turn 内，`load_tool_context` 只有在目标工具仍属于 canonical `candidate_tool_names`、且解析到的是普通 extension executor 时，下一轮真正发给模型的函数工具列表才会并入对应 hydrated tool。
-- 对已经 callable、已经 hydrated、fixed builtin 或其他“仅 RBAC 可见但不在当前 candidate 中”的 direct-load lane，`load_tool_context` 只返回 toolskill / help payload，不会改 hydration 状态，也不会占用 hydration LRU 槽位。
-- frontdoor approval interrupt、session inflight snapshot、paused execution context 也会携带这份 hydrated state，避免“暂停前已经 load 成功，恢复后又退回 candidate-only”。
-- 同一套 inflight snapshot / paused execution context 现在也会带上 `frontdoor_selection_debug`。排查“rewrite 后 query 不对”“向量召回打到了哪些 tool/skill”“为什么某个工具没进 candidate”时，优先查看这份 snapshot，而不是只看最终 assistant 文本。
-- approval interrupt 负载现在还会一起携带 `frontdoor_stage_state`、`compression_state`、`hydrated_tool_names`、`tool_call_payloads` 和 `frontdoor_selection_debug`；恢复时这些字段会直接回灌 session/runtime state，而不是再由 middleware 临时重建。
-- 对 CEO/frontdoor 与 execution / acceptance 节点，callable / hydrated / fixed-builtin direct-load 现在还有一条重复读取防线：runtime 会检查当前未压缩 inline 历史里最近一次成功 `load_tool_context` 的 `tool_context_fingerprint`。若同一 resolved `tool_id` 的 fingerprint 未变化，就会 soft-reject，并要求模型复用已有 toolskill。
-
-- CEO/frontdoor 现在还有一条监管审批 lane：当 Tool Admin 的全局 `监管模式` 打开时，主 agent 对中/高风险工具的调用会被收束成一个 `frontdoor_tool_approval_batch` interrupt，而不是逐个 tool call 立即继续执行。
-- 这条 lane 的关键维护语义是 “UI 可以逐个审，但 runtime 必须整批回灌”。`review_items` 只覆盖需要人工审阅的 risky calls；resume payload 必须一次性提交整批 `decisions[]`，否则 runtime 会拒绝恢复。
-- 对同一批次里被拒绝的 tool call，runtime 不会把它们静默丢掉，而是构造 synthetic rejection tool results，并按原始 tool call 顺序与真正执行过的结果重新合并后再继续后续 round。排查“为什么 agent 看到了被拒绝工具的返回”时，应先检查 synthetic-result merge，而不是误判为 executor 真跑了。
-- Web CEO 的 pending approval 现在也是一种 blocking active state。只要当前 session 仍持有 `frontdoor_tool_approval_batch`（无论来自 live state 还是 paused snapshot / restart restore），新的用户消息与 queued follow-up dispatch 都必须被拦住，直到该批次统一提交给 runtime。
-
-阶段预算上还有一个容易被误判的点：
-
-- `load_tool_context` / `load_skill_context` 会照常进入 round 记录与执行轨迹，但它们现在不再增加 `tool_rounds_used`。
-- 这条规则同时适用于 execution/acceptance 节点和 CEO/frontdoor；如果维护者看到很多 loader 调用，不要据此直接推断阶段预算已经被吃掉。
-- 排查预算问题时，应优先检查 `rounds[*].budget_counted`、阶段快照和 runtime messages artifact，而不是按工具名手算。
-- execution、acceptance 与 CEO/frontdoor 现在共用同一条阶段预算合同：`submit_next_stage.tool_round_budget` 必须落在 `1-10` 之间；这表示单阶段允许声明的上限窗口，而不是要求模型必须把预算耗尽后才能提前切到下一阶段。
-
-### Canonical Tool Contract Notes
-
-Additional maintenance note for fixed-builtin resource executors:
-
-- CEO/frontdoor and node execution now treat semantic top-k as an extension-tool budget. Resource-backed fixed builtin executors are filtered out before semantic narrowing so they do not consume dense/rerank shortlist capacity.
-- The same class of executors also stays out of hydration LRU. `load_tool_context` may still surface their contract/help payload, but a successful loader result should not promote an already fixed-callable executor into hydrated state.
-- In practice this means "resource-backed fixed builtin" is now a third debugging category between "pure internal builtin" and "ordinary extension executor": it is resource-backed for catalog/help/RBAC purposes, but it does not spend semantic top-k or hydration-LRU budget.
-- `content_describe` / `content_open` / `content_search` no longer belong to that category. Fresh turns should surface them as ordinary candidates, and successful `load_tool_context(tool_id="content_*")` calls should promote them through the normal hydration path on later turns.
-- Within that split content family, the agent-facing callable contract for `content_open` now exposes only `start_line` / `end_line`. If maintainers still see `around_line` / `window`, first check REST callers, legacy `content(action=open)`, or direct service usage before assuming the split tool contract regressed.
-- `content_open` also has a runtime-managed image reopen lane. For image targets, success now means "the runtime may attach this image to the next model send", not "the tool already returned a text excerpt of the image".
-- Runtime tool-result status is now broader than plain `Error: ...` strings: any tool result payload whose top-level JSON contains `ok=false` must also enter the error lane for node execution and CEO/frontdoor live status handling.
-
-- 节点与 CEO/frontdoor 的 `candidate_tool_names` / `candidate_skill_ids` 现在都表示“`RBAC 可见 ∩ 语义召回命中` 的当前候选集合”；语义召回不可用时，候选集合退化为 `RBAC 可见集合`，而不是报错中断。
-- `load_tool_context(tool_id="...")` 的精确工具加载现在接受两条准入路径：当前 canonical `candidate_tool_names`，或当前 `rbac_visible_tool_names` 中仍然 surfaced 的 concrete tool。`load_skill_context` 仍然只认当前 canonical skill candidate 集合。
-- 这次放宽只影响 loader gate，不改变 provider-facing `tools[]` / `provider_tool_names` 的来源语义；如果维护者看到模型可以读 toolskill 却没有新增 provider schema，先确认当前 RBAC-visible concrete tools 是否真的发生了 membership 变化，再判断是否是异常。
-- 对节点与 CEO/frontdoor，`candidate_tool_items` / `candidate_skill_items` 现在都只应被理解为 display cache，而不是第二份候选真相源。只要 canonical `candidate_tool_names` / `candidate_skill_ids` 已为空，agent-facing runtime contract 中的 `candidate_tools` / `candidate_skills` 也必须同步为空，不能再从旧 contract item 列表或旧 frame item 缓存把候选“补回去”。
-- 节点的 hydration canonical state 继续落在 runtime frame：`hydrated_executor_state` / `hydrated_executor_names`。这是节点生命周期级 LRU，跨多轮、阶段切换、pause/resume、restore 保留。
-- 节点的 skill candidate canonical state 也继续落在 runtime frame：至少包括 `candidate_skill_ids`，以及供 dynamic contract 重建使用的 `candidate_skill_items` 显示缓存。阶段切换后的 prompt compaction 可以裁掉旧的 `node_runtime_tool_contract` user 消息，但下一轮 contract 刷新仍应从 frame 恢复这两份 skill 状态，而不是把 skill 候选清空。
-- 但节点首轮还有一个更细的维护边界：`initialize_task()` 先写下的默认空 runtime frame 只是占位快照，不是 skill truth source。若 `_enrich_node_messages()` 已经为当前 turn 注入了 fresh `node_runtime_tool_contract`，后续 `react_loop` contract rebuild 不能再让这份 bootstrap 空 frame 把 `candidate_skill_ids` / `contract_visible_skill_ids` / `skill_visibility_diagnostics` 覆写回空。
-- 为了跨同一 turn 的后续 round 保住这份 fresh skill 合同，NodeRunner 现在会把 fresh `node_runtime_tool_contract` 摘要沿 runtime context 继续传给 `react_loop`。因此就算 `_prepare_messages()` 暂时裁掉了上一轮的动态合同尾部消息，后续 `before_model` rebuild 也应继续沿用这份 fresh skill 值，直到 runtime frame 自己已经写成 authoritative skill-contract frame。
-- CEO/frontdoor 的 hydration canonical state 继续落在 session/frontdoor state：`RuntimeAgentSession._frontdoor_hydrated_tool_names` 加上前门 persistent state 中的 `hydrated_tool_names`。这是 session 生命周期级 LRU，跨 turn 保留，但每轮都会按当前 RBAC 可见集合过滤。
-- 节点与 CEO/frontdoor 都只允许 concrete tool names 进入 hydration LRU；family id 不能进入 promoted callable 集合。
-- execution / acceptance 节点现在也采用与 CEO/frontdoor 对齐的“有效阶段”合同：只要 `has_active_stage=false`，或当前阶段已经 `transition_required=true`，当前轮真正暴露给模型的 callable tool schemas 就只剩 `submit_next_stage`。
-- 这条节点规则只收紧当前轮 callable，不收紧 candidate。`candidate_tool_names` / `candidate_skill_ids` 继续表达候选集合；维护时如果看到节点动态合同里 callable 只剩 `submit_next_stage`，不要据此误判 selector、hydration 或语义召回已经丢失。
-- execution / acceptance 节点现在也采用与 CEO/frontdoor 对齐的 mixed-batch 语义：如果同一轮模型回复里同时给出 `submit_next_stage` 和普通工具，runtime 会先推进阶段，再把同批普通工具登记为新阶段的第一轮，并按该新阶段的预算规则更新 `tool_rounds_used` / `transition_required`。
-- 节点侧已经删除“final convergence stage”特殊语义。`submit_next_stage` 仍然只负责开新阶段/切换阶段，但不会再把某个阶段标记成“禁止 `spawn_child_nodes` 的最终收敛阶段”；后续是否允许普通工具或派生，完全由普通 stage gate 与预算状态决定。
-- 节点侧的完整 callable pool 现在只通过本地 `model_visible_tool_selection_trace.full_callable_tool_names` 保留下来，并随 runtime frame 与 `runtime-frame-messages:{node_id}` artifact 一起落盘；它不再属于 agent-facing `node_runtime_tool_contract`。排障时应先看这份 trace，再决定是阶段锁定还是工具选择真的出错。
-- restore / recovery 只认 canonical frame / session state 中的 callable/candidate/hydrated/skill 字段；缺失时直接报“运行时工具合同损坏/缺失”，不再回退 bootstrap 文本、旧 transcript 或旧动态消息。
-- For execution / acceptance nodes, a successful `load_tool_context` may clear the cached node-context selection before the next round rebuild. That rebuild must restore surviving candidate executors from the canonical frame and keep them available to the next tool-provider pass, only subtracting executors that were actually promoted into `hydrated_executor_names`.
-- If a node loads `web_fetch` (or any other candidate) and the next round suddenly shows `candidate_tool_names=[]` even though the previous frame still carried other candidates such as `content_open` or `filesystem_write`, debug the restore/tool-provider chain first. That symptom is not the normal "semantic selector found no matches" path.
-- 排查“首轮明明选中了某个 skill，`submit_next_stage` 之后再 `load_skill_context` 却报 not candidate”时，先看节点 runtime frame 是否仍保留该 skill 的 `candidate_skill_ids` / `candidate_skill_items`。如果 frame 还在而当轮 dynamic contract 已空，优先判断为 contract 重建链路或阶段压缩边界问题，而不是 selector 没命中。
-- 对 CEO/frontdoor，`frontdoor_stage_state` 与 `compression_state` 属于受保护运行时状态。工具合同刷新不能覆盖、清空或重置这两份状态；旧快照里如果还残留 `semantic_context_state`，应视为兼容遗留数据而不是 live contract。
-- `exec` 的执行模式现在也是受保护的 runtime-owned state：`ExecTool` 会在每次调用时重新读取当前 `exec_runtime` family metadata，而不是只在工具实例初始化时拍死一份本地配置。因此 Tool Admin 修改 mode 后，后续新的 `exec` 调用会立即生效，不需要项目重启，也不依赖重建现有 tool 实例。
+frontdoor / 节点的工具状态分两层，且都由持久化状态维护而不是只存在于某一轮 prompt 文本里：`candidate_tool_names` / `candidate_skill_ids` 是“RBAC 可见 ∩ 语义召回命中”的当前候选集合（语义召回不可用时退化为 RBAC 可见集合，不报错中断）；`hydrated_tool_names`（节点侧为 `hydrated_executor_state` / `hydrated_executor_names`）是本轮成功读取契约后被提升为下一轮 callable 的 concrete tool 集合。节点侧 canonical state 落在 runtime frame，是节点生命周期级 LRU，跨阶段切换 / pause/resume / restore 保留；frontdoor 侧落在 `RuntimeAgentSession._frontdoor_hydrated_tool_names` 加前门 persistent state，是 session 生命周期级 LRU，跨 turn 保留但每轮按当前 RBAC 可见集合过滤。两侧 LRU 只接受 concrete tool names；restore / recovery 只认 canonical frame / session state 中的 callable/candidate/hydrated/skill 字段，缺失时直接报“运行时工具合同损坏/缺失”。另有一条运行时边界：tool result 的错误判定不止 `Error: ...` 文本，任何 top-level JSON 带 `ok=false` 的工具结果 payload 都进入节点执行与 CEO/frontdoor 的 error lane。fixed builtin / candidate tools / candidate skills / hydrated tools 四个概念的完整区分、loader 准入与预算合同详见 `tool-and-skill-system.md`「四个概念必须分清」。
 
 ### CEO Frontdoor Round Tool Ownership
 
-For the CEO/frontdoor path, `frontdoor_stage_state.stages[].rounds[].tools` is now the authoritative record of which tool calls belong to a round.
+CEO/frontdoor 路径上，`frontdoor_stage_state.stages[].rounds[].tools` 是“哪些工具调用属于某一轮”的权威记录：
 
-- `_frontdoor_stage_state_after_tool_cycle()` writes the exact round-level tool entries at tool-cycle completion time.
-- Each stored tool entry should carry the stable identity (`tool_call_id`) together with the display-oriented fields used by snapshots and transcript summaries, such as `tool_name`, `status`, `arguments_text`, `output_preview_text` / `output_text`, `output_ref`, `timestamp`, `kind`, and `source`.
-- `tool_names` and `tool_call_ids` may still exist for compatibility or summary purposes, but maintainers should treat them as derived hints rather than a second source of truth.
-- The stage/round ledger also carries the turn's display text: each round record has `text` (the model's mid-turn narration for that tool cycle, taken from the cycle's `analysis_text`), and a stage created by `submit_next_stage` carries `preamble_text` (the narration emitted in the same response as the stage call; it belongs to the new stage and is rendered above it, not duplicated into a round of the previous stage). Both fields are display-oriented and must survive every normalization hop (`_frontdoor_stage_state_snapshot`, `canonical_context.py`, `raw_stage_renderer.py`); dropping them silently degrades the CEO timeline back to tool-only views.
-- The durable transcript still stores only the final assistant text per turn. The per-round narration is recovered on reload from the persisted `canonical_context` on the assistant entry, not from transcript content.
-- `RuntimeAgentSession`'s `analysis` progress handling is append-only for `latest_message` (it no longer overwrites the accumulated streamed text with the current round's narration). UI timelines must therefore be reconstructed from stage/round records; `latest_message` remains a preview/fallback bubble only.
+- `_frontdoor_stage_state_after_tool_cycle()` 在工具循环完成时写入精确的 round 级工具记录。每条记录携带稳定身份（`tool_call_id`）与展示字段（`tool_name`、`status`、`arguments_text`、`output_preview_text` / `output_text`、`output_ref`、`timestamp`、`kind`、`source`）；`tool_names` / `tool_call_ids` 是派生提示，不是第二真相源。
+- stage/round 账本还携带展示文本：每个 round 记录有 `text`（该循环的轮中叙述），`submit_next_stage` 创建的阶段携带 `preamble_text`（随阶段调用发出的叙述，属于新阶段并渲染在其上方）。两者都是展示导向、只服务 Web 时间线，必须存活于每一个归一化跳板（`_frontdoor_stage_state_snapshot`、`canonical_context.py`、`raw_stage_renderer.py`），且不得喂给 prompt 组装或转录权威链。
+- durable 转录每轮只存最终 assistant 文本；每轮叙述在 reload 时从 assistant 条目上持久化的 `canonical_context` 恢复。
+- `RuntimeAgentSession` 的 `analysis` 进度处理对 `latest_message` 是 append-only；UI 时间线从 stage/round 记录重建，`latest_message` 只是预览/回退气泡。
 
-When `RuntimeAgentSession` rebuilds `canonical_context`, the intended contract is:
+`RuntimeAgentSession` 重建 `canonical_context` 时的合同：
 
-- If a round already has `tools`, trust `round.tools` directly.
-- If an older round only has `tool_call_ids`, backfill only by exact `tool_call_id`.
-- Matching by `tool_name` alone is a regression risk because it can steal a later same-name tool result into an earlier round.
+- round 已有 `tools` 时，直接信任 `round.tools`。
+- 更老的 round 只有 `tool_call_ids` 时，只按精确 `tool_call_id` 回填。
+- 仅按 `tool_name` 匹配是回归风险：会把后面同名的工具结果偷进更早的 round。若发现更晚的 `exec` 出现在更早的 round，先检查存储的 round 是否缺 `tools`、持久化的 `tool_call_ids` 是否稳定且唯一。
 
-If a maintainer sees a CEO stage trace where a later `exec` appears inside an earlier round, first inspect whether the stored round was missing `tools` and whether the persisted `tool_call_ids` are stable and unique. Do not reintroduce any `tool_name`-only round fill path in session snapshot assembly.
+前门 tool promotion 与阶段工具显示是两条平行链路：执行循环直接基于 `raw_result` 处理 `load_tool_context` 的成功返回（不从 trailing `ToolMessage` / `result_text` 反推 hydration），`_frontdoor_stage_state_after_tool_cycle()` 只负责 round 记账与 `round.tools` 落盘；成功 payload 附带的 `tool_context_fingerprint` 只服务运行时 freshness / duplicate-read 判定，不属于 provider-facing schema 或 durable business state。`g3ku/runtime/frontdoor/ceo_agent_middleware.py` 只保留兼容/测试价值，线上行为排查优先看显式图节点与 checkpoint state。
 
-这次前门工具合同收敛还明确了另一个边界：
+维护上，动态 skill/tool 提示块里的说明不能覆盖 `ceo_frontdoor.md` 的 stage-first 协议。权威顺序是：无活动阶段时必须先经 `submit_next_stage` 进入新阶段（可以单独一轮，也可以是以 `submit_next_stage` 起手、紧跟普通工具的 mixed batch）；活动阶段存在后，动态暴露里的 `load_skill_context` / `load_tool_context` 提示才进入可执行顺序。排查“先调 `load_skill_context` 却撞上 no active stage”时，先检查稳定协议与 `stage_messages.py` 状态 overlay 是否一致，再检查 `prompt_builder.py` / `message_builder.py` 的动态提示是否与主协议竞争。`candidate_tools` / `candidate_skills` 两类候选的不对称语义详见 `tool-and-skill-system.md`「四个概念必须分清」。
 
-- CEO/frontdoor 的 tool promotion 已改为执行循环直接基于 `raw_result` 处理 `load_tool_context` 的成功返回，而不是再从 trailing `ToolMessage` / `result_text` 反推 hydration。
-- `_frontdoor_stage_state_after_tool_cycle()` 仍然只负责 round 记账和 `round.tools` 落盘；它不参与 tool promotion。
-- 因此前门的“tool contract 更新”和“阶段工具显示”是两条平行链路：
-  - promotion 改动只影响 callable/candidate/hydrated contract
-- `round.tools` inside `canonical_context` still depends only on the display-oriented fields derived from `tool_call_payloads + tool_results`
-- `load_tool_context` 成功 payload 现在还会附带内部用的 `tool_context_fingerprint`。它只服务于运行时 freshness / duplicate-read 判定，不属于 provider-facing schema，也不应用作 durable business state。
-- `g3ku/runtime/frontdoor/ceo_agent_middleware.py` 现在只剩兼容/测试价值，不再是生产前门的权威执行链。若线上 frontdoor 行为与预期不符，优先检查显式图节点和 checkpoint state，而不是先检查 middleware hook 次序。
-
-维护上一个容易误判的点是：动态 skill/tool 提示块里虽然会出现“如何读取 skill 正文”或“如何读取 tool 契约”的说明，但这些说明不能覆盖 `ceo_frontdoor.md` 里的 stage-first 协议。当前前门的权威顺序是：
-
-1. 先看静态协议是否要求“无活动阶段时必须先进入 `submit_next_stage` 所声明的新阶段”；这既可以是单独一轮 `submit_next_stage`，也可以是一个以 `submit_next_stage` 起手、随后紧跟普通工具的 mixed batch
-2. 只有在活动阶段已经存在后，动态 skill/tool 暴露里的 `load_skill_context` / `load_tool_context` 提示才真正进入可执行顺序
-
-同时要把前门 contract 里的 candidate tool 与 candidate skill 分开理解：
-
-- `candidate_tools` 仍然是“可见但默认不能直接执行”的 concrete tool 候选；读完 `load_tool_context` 后，普通 candidate tool 依旧要等下一轮 hydration/promote 才能直接调用
-- `candidate_skills` 则只是“可见且可通过 `load_skill_context(skill_id="...")` 读取正文”的 skill 候选；它们不走 hydration，也不应被模型误读成“还没安装好才不能读”的占位符
-- 因此前门 `## Runtime Tool Contract` 现在会显式把 `candidate_skills` 标成 loadable，并附带 `load_skill_context` 指引；如果线上 artifact 重新退化成只剩名字列表，维护上优先怀疑 contract 摘要文案回退而不是 selector 失效
-
-如果维护者在排查“为什么模型先调用了 `load_skill_context` 却撞上 no active stage”这类问题，不要只盯动态 skill 列表或 candidate tool 列表；要先检查 `ceo_frontdoor.md` 的稳定协议与 `stage_messages.py` 的当前状态 overlay 是否一致，再检查 `prompt_builder.py` / `message_builder.py` 是否把动态提示写成了会与主协议竞争的动作指令。
-
-heartbeat / cron 的维护语义也要分三条通道理解：
-
-- UI 展示通道：
-  - 前端继续通过 inflight/session snapshot 渲染 heartbeat / cron 的原始处理流程，包括开阶段、工具调用、执行轨迹和压缩状态。
-- 普通历史注入通道：
-  - 下一次真实用户 turn 的近场 prompt 历史仍可过滤 internal-only user 消息与 `history_visible=false` 的 assistant 消息。
-- 总压缩输入通道：
-  - heartbeat / cron 的 agent-side 原始执行上下文会进入全局语义摘要素材池。
-  - 因此前端能看到的 heartbeat / cron 处理流程，后续真实用户 turn 不一定原样继承 live snapshot，但应能通过 global summary 间接读到其关键语义。
+heartbeat / cron 的维护语义分两条通道：UI 展示通道上前端继续通过 inflight / session snapshot 渲染 heartbeat / cron 的原始处理流程（开阶段、工具调用、执行轨迹、压缩状态）；普通历史注入通道上，下一次真实用户 turn 的近场 prompt 历史过滤 internal-only user 消息与 `history_visible=false` 的 assistant 消息。内部轮次的请求组装、隐藏提示消息与工具合同继承详见 `heartbeat-system.md`「Continuation Contract」。
 
 相关文件：
 
 - `g3ku/runtime/frontdoor/ceo_runner.py`
 - `g3ku/runtime/frontdoor/prompt_builder.py`
 - `g3ku/runtime/frontdoor/message_builder.py`
-- `g3ku/runtime/semantic_context_summary.py`
 - `g3ku/runtime/stage_prompt_compaction.py`
 - `g3ku/runtime/frontdoor/task_ledger.py`
 
@@ -473,96 +242,26 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 - `main/storage/artifact_store.py`
 - `main/governance/`
 
-关于节点运行帧还要额外记住一个新的维护语义：
+关于节点运行帧还要额外记住一个维护语义：
 
-- `task_runtime_messages` / `runtime-frame-messages:{node_id}` artifact 不再只是当前 messages 列表；它现在还会在同一个 artifact 里累计 `callable_tool_snapshots`。
-- 同一个 artifact 现在还会保留节点输入层看到的 `contract_visible_skill_ids`，也就是 `runtime_service._node_context_selection_inputs()` 当轮拿到的 contract-visible skill id 快照。
-- 同一个 artifact 现在还会保留 `skill_visibility_diagnostics`，用来解释这些 `contract_visible_skill_ids` 是如何从 live skill registry / role / policy 判断收敛出来的。
-- 每条快照代表一次 `before_model` 轮次下，本地运行时真正记录的 callable/candidate 截面，包括 `callable_tool_names`、`candidate_tool_names`、`candidate_tool_items`、`candidate_skill_ids`、`candidate_skill_items`、`model_visible_tool_names`、`hydrated_executor_names` 和选择 trace。
-- 对 execution / acceptance 节点，如果当轮没有有效阶段，那么这些快照里的 `callable_tool_names` 与 `model_visible_tool_names` 都应只剩 `submit_next_stage`；候选集合仍保留在 `candidate_tool_names`，完整 callable pool 则留在选择 trace 里。
-- 对 execution / acceptance 节点，这些快照里如果 `candidate_tool_names=[]` 或 `candidate_skill_ids=[]`，则同一快照里的 `candidate_tool_items` / `candidate_skill_items` 也应已经被同步清空。若 items 仍保留旧值而 canonical name/id 列表已空，应按运行时 contract 重建分裂排查，而不是先怀疑 `load_tool_context` / `load_skill_context` 自身。
-- 对 execution / acceptance 节点与 CEO/frontdoor 都一样：`content_describe` / `content_open` / `content_search` 现在应默认出现在 candidate 侧，而不是 fresh-turn callable 侧；只有 hydration 成功后的后续快照才应把它们写进 `callable_tool_names` / `hydrated_executor_names`。
-- 因此当维护者排查“为什么这一轮模型明明 load 过工具却没法调用”时，先看这个 artifact 里的最近一条快照，再去看 transcript 或 stage trace；它比只看最终 messages 更能说明当轮可调用集到底是什么。
-- 执行节点与检验节点现在都应理解为“两层消息结构”：稳定 bootstrap user JSON 负责任务定义，只保留稳定节点上下文；`execution_stage` 不再写在 bootstrap 里。单独的动态 `node_runtime_tool_contract` user 消息负责当前轮的 callable/candidate tool/skill 合同，并且固定追加在当前 request 尾部。
-- 节点的 turn overlay / repair overlay 现在也必须遵守同一条 append-only 边界：它们只能作为新的 request-tail 消息追加，不能再把文本回写进任何已有的 bootstrap user 消息或持久化历史消息。排查缓存命中下降时，优先确认 stable prefix 是否仍保持逐轮不变。
-- 对节点运行时来说，`before_model` 当轮真正下发给模型的 schema 选择结果才是权威工具来源；runtime frame、restore/recovery 和 runtime messages artifact 都应从这份结果派生，而不是再从旧 bootstrap 文本反推。
-- 对节点运行时来说，skill 可见性也不能只绑定到“当前 prompt 里是否还保留着那条 dynamic contract user 消息”。`node_runtime_tool_contract` 仍是模型可见合同，但 runtime frame 才是 `candidate_skill_ids` / `candidate_skill_items` 的 canonical 恢复来源。
-- 这意味着排查“节点为什么说没有 candidate skills”时，不要只看 dynamic contract 文本。应同时看 `contract_visible_skill_ids` 与 `candidate_skill_ids`：前者回答“runtime_service 这一层当时看到了哪些可见 skills”，后者回答“selector 最终留下了哪些 canonical candidates”。
-- 如果 `contract_visible_skill_ids` 本身已经为空，继续往下看 `skill_visibility_diagnostics`：它能进一步回答“live resource registry 里有没有这些 skill”、“actor role 是否允许”、“policy effect 是否为 allow”，避免把输入层空集和 selector 空集混在一起。
-- 如果事件历史里看到“首轮 `candidate_skill_ids=[]`，但同一 turn 的 fresh contract 本应非空”，先不要直接怀疑 selector 或治理投影。优先判断当前 frame 是不是仍停留在 bootstrap 空 frame，以及 `react_loop` rebuild 是否错误地把这类空 frame 当成了 authoritative skill-contract frame。
-- CEO/frontdoor 也采用同样的分层思想：稳定会话前缀不再承担当前轮 callable/candidate tool 状态，当前轮工具合同放在 dynamic appendix，并随 turn state 刷新。
-- CEO/frontdoor 的普通 turn overlay 与 repair overlay 也应保持 append-only：它们属于当前 request 的尾部临时内容，不能再改写已有 stable/request 消息。维护时如果看到 prompt cache key 没变但缓存命中突然下跌，先检查是否有 overlay 被拼回了已有 user 消息。
-- 对维护者来说，这还意味着前门里的 `extension_tool_top_k` 只约束“最终候选工具数”，不是 dense 检索宽度；排查某个工具为何没进 candidate 时，要把 dense/rerank 命中和最终 top-k 截断分开看。
+- `task_runtime_messages` / `runtime-frame-messages:{node_id}` artifact 除当前 messages 列表外，还在同一个 artifact 里累计 `callable_tool_snapshots`、节点输入层的 `contract_visible_skill_ids`（`runtime_service._node_context_selection_inputs()` 当轮快照）与 `skill_visibility_diagnostics`（解释这些可见 skill 如何从 live registry / role / policy 收敛出来）。每条快照代表一次 `before_model` 轮次下本地运行时真正记录的 callable/candidate 截面：`callable_tool_names`、`candidate_tool_names`、`candidate_tool_items`、`candidate_skill_ids`、`candidate_skill_items`、`model_visible_tool_names`、`hydrated_executor_names` 和选择 trace。排查“这一轮模型 load 过工具却没法调用”时，先看最近一条快照再看 transcript / stage trace。
+- 对 execution / acceptance 节点，无有效阶段的快照里 `callable_tool_names` 与 `model_visible_tool_names` 只剩 `submit_next_stage`；候选集合留在 `candidate_tool_names`，完整 callable pool 留在选择 trace（`model_visible_tool_selection_trace.full_callable_tool_names`）。canonical name/id 列表为空时，同快照的 `candidate_tool_items` / `candidate_skill_items` 也必须同步清空。
+- 执行节点与检验节点是“两层消息结构”：稳定 bootstrap user JSON 只负责任务定义与稳定节点上下文（不含 `execution_stage`）；单独的动态 `node_runtime_tool_contract` user 消息负责当前轮的 callable/candidate tool/skill 合同，固定追加在当前 request 尾部。节点的 turn / repair overlay 同样遵守 append-only 边界：只能作为新的 request-tail 消息追加，不得回写已有 bootstrap 或持久化历史消息。
+- 对节点运行时，`before_model` 当轮真正下发给模型的 schema 选择结果是权威工具来源；runtime frame、restore/recovery 和 runtime messages artifact 都从这份结果派生。`node_runtime_tool_contract` 是模型可见合同，但 runtime frame 才是 `candidate_skill_ids` / `candidate_skill_items` 的 canonical 恢复来源。
+- 排查“节点为什么说没有 candidate skills”时，同时看 `contract_visible_skill_ids`（输入层可见性）与 `candidate_skill_ids`（selector 最终候选）；输入层为空时继续看 `skill_visibility_diagnostics`（registry 存在性 / role / policy effect）。首轮 `candidate_skill_ids=[]` 而 fresh contract 本应非空时，优先判断是否仍停留在 `initialize_task()` 的 bootstrap 空 frame。
+- CEO/frontdoor 采用同样的分层思想：稳定会话前缀不承担当前轮 callable/candidate tool 状态，当前轮工具合同放在 dynamic appendix 并随 turn state 刷新，overlay 保持 append-only。prompt cache key 未变但命中下跌时，先检查是否有 overlay 被拼回已有 user 消息。
 
 ## Prompt Cache Family And Actual Request
 
-- Caller-side prompt cache family is now defined only by the stable prefix plus explicit cache-family revision inputs.
-- Ordinary callable/candidate/hydrated tool drift, stage-gated schema shrink, and loader-driven hydration promotion may still change the actual provider request, but they must not rotate the caller family key by themselves.
-- CEO/frontdoor `call_model` must always send the request rebuilt for that exact turn together with the matching rebuilt `prompt_cache_key`. A rebuilt request paired with an older key is now considered a runtime bug because it hides whether a miss came from family churn or from the actual request changing.
-- Node execution follows the same rule: keep the static prefix append-only at the front, keep exactly one runtime contract at the tail, and debug `prompt_cache_key_hash` separately from `actual_request_hash`. Stale contracts and turn-only notes from earlier rounds are stripped out of carried history; the newest contract is re-injected at the tail each round.
-- Node runtime now also persists a dedicated per-round actual-request artifact for every `call_model`. `actual_request_ref` / `latest-context` should point to that artifact instead of reusing runtime-frame `messages_ref`.
-- That node artifact stores the runtime-side request projection (`model_messages`, `request_messages`, `actual_tool_schemas`, cache-family diagnostics) and, when available from the provider adapter, the final transport payload under `provider_request_meta` and `provider_request_body`.
-- Node actual-request persistence is now memory-guarded on its own write path. The normal path writes a dedicated JSON artifact directly, without routing the whole payload back through the generic text-artifact hash/dedupe lane.
-- If that dedicated JSON write still raises `MemoryError`, runtime retries with a degraded forensic payload (`artifact_persistence_mode=memory_guard_degraded`) and then a minimal forensic payload (`memory_guard_minimal`) instead of failing the whole node just because the artifact was too large to persist verbatim.
-- Those degraded node artifacts are forensics-first, not exact transport truth. They may replace `model_messages` / `request_messages` with summarized fields and clear `provider_request_body` in favor of `provider_request_body_summary`. Maintainers should therefore check `artifact_persistence_mode` before treating a node artifact as the exact provider-bound scaffold.
-- For node restart/resume specifically, `runtime_frame.messages` stays the durable projected-history view, not the authority for the exact provider body. The first resumed provider call may seed request assembly from the latest persisted node `actual_request_ref.request_messages` so same-turn append-only growth survives process restarts.
-- That node request-body seed is single-use scaffolding for the first resumed provider call only. It must not replace durable node history, and it must be discarded once the round either reconstructs a pending tool/child turn or emits a new real provider request.
-- When cache reuse drops while the family key stays stable, first inspect actual request growth or provider prefix reuse limits before blaming caller-side family churn.
-- CEO/frontdoor provider `tools` should stay on a stable superset aligned to the exposure-visible concrete tool set, not the narrower current-turn callable set. Hydration promotion and stage gating still change the tail runtime contract, but they should not churn provider `tools` schemas every round.
-- The provider-facing tool bundle is intentionally minimal. Rich tool and skill explanations belong in the tail `frontdoor_runtime_tool_contract`; provider `tools` keep only the smallest callable schema needed for function calling so cache misses are easier to attribute to real request growth instead of schema-text drift.
-- CEO/frontdoor now also persists the full provider-facing request for every `call_model` round. The full payload is written under `.g3ku/web-ceo-requests/<session>/...json`, while the live session snapshot only keeps the latest file path plus a short metadata history.
-- This split is intentional: the per-round JSON file is the authority for exact request-forensics, while inflight / paused session snapshots stay compact enough for websocket restore and UI debugging.
-- For CEO/frontdoor specifically, the saved actual request JSON is now the authoritative source of truth for provider-facing order. Session state may persist the request body without the current contract so the next round can rebuild a single fresh tail contract; that is expected, not evidence that the provider request lost the contract.
-- That same JSON now also stores the adapter-final request payload under `provider_request_meta` and `provider_request_body`. When debugging OpenAI `/responses` cache misses, treat those adapter fields as the final transport truth if they disagree with the higher-level `request_messages` / `tool_schemas` projection.
-- New-write frontdoor artifacts no longer duplicate the full request under both `messages` and `request_messages`. Treat `request_messages` as the compatibility-preserving authority for saved request order; the old `messages` mirror should not be reintroduced as a second fat copy.
-- Frontdoor artifact persistence now has a memory-pressure guard. The normal path still preserves `request_messages`, `tool_schemas`, and the adapter-final `provider_request_body`, but if serializing that record would raise `MemoryError`, runtime rewrites the artifact into a degraded forensic shape instead of failing the whole visible turn.
-- In that degraded shape, `request_messages` becomes a text-only / truncated forensic summary, `provider_request_body` is cleared, and `provider_request_body_summary` plus `artifact_persistence_mode` / `artifact_persistence_reason` explain what was omitted. Maintainers should read those markers before assuming the provider never saw multimodal input.
-- The session-scoped request-artifact lane is no longer limited to visible provider sends. `visible_frontdoor`, `token_compression`, and `inline_tool_reminder` now all persist under the same `.g3ku/web-ceo-requests/<session>/...json` family so request-forensics can explain ordinary sends and internal subrequests from one timeline.
-- Each saved frontdoor request artifact now also carries normalized `usage`, `frontdoor_history_shrink_reason`, and `frontdoor_token_preflight_diagnostics`. Maintainers should use those fields to compare "what preflight thought would be sent" against "what the provider actually billed," rather than reconstructing that relation from transcript timing alone.
-- To preserve prefix reuse inside one visible CEO turn, same-turn request growth now follows: previous request body -> newly appended assistant/tool transcript -> newest contract snapshot. The actual request carries **one** latest contract at the tail and **zero** stale contracts or turn-only notes inside the carried prefix; the worn-out "multiple contract snapshots during one turn" behavior was deliberately reversed (2026-08) so history never accumulates contracts. The durable post-turn transcript must still strip them back out.
-- `frontdoor_canonical_context` remains durable single-writer state. Turn finalization may merge completed-stage data into it, but session sync and request assembly must not write a visible projection back into the durable chain.
-- Provider-facing `tools[]` now have a separate stability rule from agent-facing callable tools: ordinary turns derive `provider_tool_names` from the current RBAC-visible concrete tool set for that path, while callable-stage gates still decide what the model is actually allowed to invoke this round.
-- The provider bundle is refreshed conditionally rather than through an active/pending commit machine. If the current RBAC-visible concrete membership changed, rebuild `provider_tool_names`; if the membership is effectively unchanged, keep the persisted order verbatim so prompt-cache prefixes and `provider_tool_exposure_revision` stay stable.
-- `token_compression` no longer publishes a new provider bundle for the same send. Compression turns keep the pre-existing persisted `provider_tool_names`, and the first post-compression turn is the point where a later ordinary refresh may apply the latest RBAC-visible concrete bundle.
-- `RuntimeAgentSession._frontdoor_request_body_messages` is now the session-owned request-body baseline for CEO/frontdoor continuity. It stores the rebuilt provider request body with dynamic contract messages stripped out, so the next round can append one fresh authoritative tail contract instead of replaying old catalogs as history.
-- Web CEO image uploads add one more boundary to that baseline contract: provider-visible image blocks are allowed only in the live request of the current turn when the selected model binding enables image multimodal input.
-- When that current-turn image expansion is active, the runtime must also replace the provider-visible attachment note with a direct-visual guidance note for the same turn. The model-facing text may describe that the image is attached directly in the request, but it must not expose the upload's local file path or tell the model to inspect local paths first.
-- Historical image reopen through `content_open` is a separate live-only lane from current-turn uploads. The durable baseline may keep the image `path` / `ref`, but direct visual reuse requires a fresh `content_open` call on a later turn.
-- The durable baseline must stay text-and-attachment only. `frontdoor_request_body_messages`, inflight/paused snapshots, and completed continuity sidecars must strip `image_url` / `input_image` blocks back to their text projection before persistence.
-- The saved actual-request artifact is the forensic exception on purpose. If you need to verify whether an image actually reached the provider, inspect `.g3ku/web-ceo-requests/<session>/...json` rather than the durable baseline.
-- Fresh CEO/frontdoor turns may seed prompt assembly from that session-owned body baseline when the graph state itself does not already carry a request body. This is the append-only continuity path for visible turns; it is not an old-session compatibility fallback.
-- That seed is no longer fed back into frontdoor prompt assembly as an ordinary checkpoint history candidate. Visible-turn continuation now treats it as an authoritative request-body prefix, so the next turn appends new user/runtime-tail content directly instead of asking the history selector whether the seed is "semantically complete".
-- The paired `frontdoor_history_shrink_reason` field is now part of the runtime contract between prompt assembly and session persistence. Only `token_compression` and `stage_compaction` are valid reasons for a shorter next-round baseline.
-- In practice, this means a visible CEO/frontdoor turn is now expected to keep growing or stay flat across turns unless the runtime explicitly records one of those two shrink reasons. A shorter baseline without an allowed reason should be treated as a runtime bug, not as normal prompt trimming.
-- Do not conflate those two shrink reasons with provider schema refresh. `frontdoor_history_shrink_reason=stage_compaction` must not rotate provider-facing `tools[]`, and `frontdoor_history_shrink_reason=token_compression` must also keep that same send's provider bundle unchanged. The refresh point is the next ordinary turn after compression.
-- The authoritative request-body baseline must also survive turn finalization. When a visible CEO turn finishes with a direct assistant reply, that final assistant message is now appended onto `frontdoor_request_body_messages` before session sync, so the next visible turn does not fall back to a shorter transcript/canonical replay view.
-- This visible-output append-back rule is not limited to `direct_reply`. If a visible CEO turn finishes with a user-visible `final_output` after ordinary tools such as `message`, that final assistant text must still be appended onto `frontdoor_request_body_messages`; otherwise the next fresh visible turn reopens from a stripped tool-only baseline and loses the last visible answer from continuity.
-- The same baseline must also cross the restorable snapshot boundary. `inflight_turn_snapshot` / `paused execution context` now need to carry `frontdoor_request_body_messages` together with `frontdoor_history_shrink_reason`; otherwise a recreated `RuntimeAgentSession` would silently fall back to transcript/history replay and shorten the next visible turn outside the allowed shrink paths.
-- Completed local CEO sessions now have a third restore source: `.g3ku/web-ceo-continuity/<session>.json`. It persists the latest authoritative request-body baseline, actual-request trace, stage/canonical/compression/semantic state, hydrated tools, and the last visible tool/skill exposure snapshot after each real provider-backed sync and after terminalized manual stop.
-- `RuntimeAgentSession` should restore CEO continuity in this order: paused snapshot first, inflight snapshot second, completed continuity sidecar third, latest actual-request artifact fourth, transcript/history fallback last. The first three are trusted sidecar restore lanes; the actual-request lane is the cache-preserving emergency fallback when the sidecars do not carry a usable `frontdoor_request_body_messages` baseline.
-- A restorable sidecar now only wins if it actually carries a usable `frontdoor_request_body_messages` baseline. The mere existence of an inflight or paused file must not suppress recovery from a richer later source.
-- If a fresh visible or heartbeat turn finds the in-memory baseline empty but a paused/inflight snapshot or completed continuity sidecar still has it, prompt assembly should recover that saved request-body baseline and immediately treat it as the session-owned append-only prefix. Maintainers should debug that as baseline restoration, not as a normal history compaction path.
-- Restart recovery is now intentionally two-step rather than “body restore only”: first restore the winning durable `frontdoor_request_body_messages` baseline from the highest-priority sidecar, then verify that the restored actual-request trace still points at a readable artifact whose durable body matches that same baseline.
-- If the winning sidecar baseline is present but its `frontdoor_actual_request_path/history` is missing, unreadable, or body-mismatched, runtime now enriches the restored session from the newest matching actual-request artifact in `.g3ku/web-ceo-requests/<session>/...json` without changing which sidecar won body restoration.
-- That enrichment only repairs request-trace authority (`frontdoor_actual_request_path/history/hash/message_count/tool_schema_hash`); it must not replace the restored durable baseline with the artifact's fat same-turn scaffold. The scaffold remains a first-hop request-construction aid, not a durable history source of truth.
-- Heartbeat/cron turns are not allowed to promote an internal-only durable body into the new session-owned baseline just because they produced an authoritative actual-request artifact. If the candidate body is mostly heartbeat rule/event text, is materially poorer than the current baseline, and no legal shrink reason applies, runtime should keep the richer baseline and treat the internal request as forensics-only continuity evidence.
-- Manual pause now has an extra token-compression continuity rule: if a visible turn pauses while the final preflight is already about to enter `token_compression`, the next fresh visible turn may recover `frontdoor_history_shrink_reason=token_compression` from the pending shrink marker or from the follow-up internal `token_compression` artifact linked through the previous actual-request history. This is the allowed race-resolution path for "pause right as compression starts," not arbitrary prompt trimming.
-- During a visible CEO/frontdoor turn, the session-owned request-body baseline must also keep up with real request growth: after each provider call it should reflect the latest provider request body with contract messages stripped out, and after each tool cycle it should fold the new assistant/tool transcript back into the same baseline before the next round.
-- When that baseline is reused as `request_body_seed_messages`, prompt assembly must preserve structural tool-call records as well as plain text. In particular, an assistant message with empty text but non-empty `tool_calls` is still part of the authoritative provider request body and must not be dropped as an "empty" history record.
-- Maintain the boundary between "prepare-only planned request" and "real provider-backed request body". `prepare_turn` may compute a new planned body for the current fresh visible turn, but that planned body must not replace the session-owned cross-turn baseline until a real provider request has been persisted for that turn. Otherwise a manual-pause/no-provider turn can steal the next turn's cache prefix even though no real request was ever sent.
-- In practice, new maintainers should treat `frontdoor_request_body_messages` and `frontdoor_actual_request_*` as a pair: cross-turn baseline replacement is only valid once the state already carries real actual-request evidence for that turn. Planned prompt-cache diagnostics alone are not enough to claim the baseline has advanced.
-- The same pair also matters at turn finalization: after a real provider request has already been persisted for the current visible turn, a later `finalize` update may extend the session-owned request-body baseline with the direct assistant reply even if that finalize payload no longer repeats `frontdoor_actual_request_path/history`. Maintainers should treat that as "same-turn completion of an already authoritative baseline", not as a fresh planned-body overwrite.
-- For ordinary fresh visible turns, the first rebuilt provider request may now borrow the previous turn's persisted actual-request scaffold to preserve provider-side prefix reuse, while still keeping the durable session baseline in stripped/finalized form. This is intentionally asymmetric: the scaffold is a request-construction aid for the first fresh turn only, not a new durable history source of truth.
-- Node execution now follows the same asymmetric rule on restart/resume: the first rebuilt node request may borrow the latest persisted node actual-request scaffold even when durable `frame.messages` is shorter, but durable node history still remains the projected/frame view plus later stable writes.
-- Reopened completed sessions now reuse that same scaffold rule by restoring the last completed turn's actual-request trace into current session state and letting the next fresh visible turn roll it into `previous_*`.
-- A completed-session restart is therefore not allowed to silently fall back from “matching previous actual-request scaffold available” to “durable-only first hop” unless a legal shrink reason applies. If the first post-restart request shape gets shorter without `token_compression` or `stage_compaction`, debug trace enrichment before blaming prompt assembly.
-- The stricter bridge rule is now: only when `visible_tool_ids` and `visible_skill_ids` exactly match the completed continuity snapshot may that reopened first hop also reuse the previous `provider_tool_schema_names` and `cache_family_revision` anchor. Any visible-set drift should preserve context but allow cache miss.
-- Runtime config refresh now also matters for in-flight retry loops. CEO/frontdoor provider retries and node execution provider retries no longer keep hammering the old model chain forever after a model-binding change has been applied to the current process.
-- The intended rule is: a request already in flight is not hot-swapped mid-attempt, but if the runtime enters provider-failure or empty-response retry sleep and the runtime model revision changes before the next retry, the old retry loop is invalidated and the current round restarts with freshly resolved model refs.
-- For CEO/frontdoor, that restart happens inside the current `call_model` round and the updated `model_refs` are written back into graph state for later rounds in the same visible turn.
-- For node execution, the same invalidation restarts the current `ReActToolLoop` model round so `model_refs_supplier()` can re-read the latest execution/inspection model chain before the next dispatch.
-- The outer provider-exhaustion retry lane is now intentionally bounded. After the inner provider/key/model-chain fallback already reports `PUBLIC_PROVIDER_FAILURE_MESSAGE`, CEO/frontdoor and node runtime each allow only 3 additional outer retries for the same round before surfacing the failure instead of staying in `before_model` / provider-retry sleep forever.
-- This means a task or session that still shows `is_paused=true` after such a stall is no longer "still retrying the provider". Treat that as a separate control action such as an explicit pause command, not as proof that the retry lane is still live.
+基线合同摘要（完整取证与排查归缓存排查文档）：
+
+- caller-side prompt cache family 只由稳定前缀加显式 cache-family revision 输入决定；普通 callable/candidate/hydrated 漂移、阶段门控收紧与 hydration promotion 可以改变 actual request，但不得自行轮转 family key。
+- 每次 `call_model` 必须把该轮重建的 request 与匹配重建的 `prompt_cache_key` 一起发送；CEO/frontdoor 与节点侧都保持静态前缀前置 append-only、请求尾部恰好一份当前 runtime 契约，携带历史中的旧契约与 turn-only note 一律剥掉。
+- 两侧都为每轮 `call_model` 持久化专用 actual-request artifact：CEO/frontdoor 写 `.g3ku/web-ceo-requests/<session>/...json`（`visible_frontdoor` / `token_compression` / `inline_tool_reminder` 共用同一条时间线），节点写专用 JSON 且 `actual_request_ref` / `latest-context` 指向它；这些 artifact 是 provider-facing 顺序的取证权威，durable baseline 与快照则在持久化前剥掉契约消息。
+- artifact 写入带内存压力守卫：`MemoryError` 时降级为 forensics-first payload（`artifact_persistence_mode=memory_guard_degraded` / `memory_guard_minimal`），不得因 artifact 过大而失败整个 turn/节点；读取降级 artifact 前先检查该标记。
+- `RuntimeAgentSession._frontdoor_request_body_messages` 是 session-owned request-body baseline：只在当轮已有真实 actual-request 证据后才允许跨回合替换，且只有 `token_compression` / `stage_compaction` 可以让下一轮基线变短；恢复顺序、scaffold 规则与收缩守卫细节归缓存排查文档。
+
+完整的 cache family / actual-request 取证、baseline 恢复顺序与诊断字段详见 `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」。
 
 ## 7. 新人阅读顺序建议
 
@@ -594,314 +293,150 @@ heartbeat / cron 的维护语义也要分三条通道理解：
 
 ## 9. Memory Runtime Notes
 
-The long-term memory runtime is no longer journal-first or structured-fact-first, and it is no longer a rule-only batch rewriter.
+长期记忆运行时是队列化的 Markdown memory 子系统：
 
-- `memory/memory_state.sqlite3` is now the durable long-term memory authority. Each row stores the full memory body, the minimal summary, `refresh_count`, `passed_count`, `is_compressed`, source, and `from_user` protection metadata.
-- `memory/MEMORY.md` is now a regenerated prompt snapshot derived from that SQLite state. It keeps the managed Markdown block shape for tooling and internal memory-agent inspection, but it is no longer the authoritative metadata store.
-- `memory/notes/` stores optional detailed note bodies referenced by `ref:note_xxxx`.
-- `memory/queue.jsonl` stores the single durable queue, including per-request processing state such as `pending`, `processing`, retry timing, and the latest error text.
-- `memory/ops.jsonl` now stores terminal batch history, not just successful writes. Applied batches and durable discarded outcomes such as `rejected` and `precheck_failed` land here together with final snapshot / compression metadata, while transient provider/config failures still remain on the queue head.
-- `.g3ku/memory-requests/` stores provider-facing memory request artifacts for hops that expose request metadata. Processed rows may point at these artifact paths for later forensics.
-- Dense/sparse catalog projections may still exist for tool/skill narrowing, but they are no longer the long-term memory truth source.
+- `memory/memory_state.sqlite3` 是长期记忆权威状态：每行存完整记忆正文、最小摘要、`refresh_count`、`passed_count`、`is_compressed`、来源与 `from_user` 保护元数据。
+- `memory/MEMORY.md` 是从 SQLite 状态再生的提示词快照，保留受管 Markdown 块形状供工具与内部 memory agent 检查，但不是权威元数据存储。
+- `memory/notes/` 存 `ref:note_xxxx` 引用的可选详细 note 正文，保持小而人类可读。
+- `memory/queue.jsonl` 是唯一持久队列，带每请求处理状态（`pending` / `processing`、重试计时、最新错误文本）。队列条目只有两种类型：`write`（显式或已提炼的记忆文本，等待真正的记忆处理）与 `delete`（自然语言记忆删除请求，等待内部 memory agent 解析成具体 id）。
+- `memory/ops.jsonl` 是滚动终态历史，不是进行中重试日志，也不是 append-forever 归档：applied 批次与 `rejected` / `precheck_failed` 等 durable discarded 结果连同最终 snapshot / compression 元数据一起落在这里；暂时性 provider/配置失败仍留在队列头错误字段；超过 7 天的行在正常运行时读写中自动清理。
+- `memory/review_state.json` 是 5-turn 普通复核窗口的按会话缓冲元数据，不是已提交的用户记忆。
+- `.g3ku/memory-requests/` 存暴露请求元数据的 memory 请求 artifact；processed 行可以指向这些路径供后续取证。
+- dense/sparse catalog 投影仍可用于 tool/skill 收窄，但不是长期记忆真相源。
 
-The runtime boundary changed in five important ways:
+维护边界：
 
-- CEO/frontdoor turns now read one frozen `MEMORY.md` snapshot at prompt-assembly time and inject a display-only rendering into the stable prefix. The surfaced rendering keeps only memory text separated by `---`; it strips memory ids and date/source headers even though the internal memory agent still sees the full managed snapshot.
-- Same-turn hot memory updates do not change the current prompt; newly committed memory only affects later turns.
-- `memory_write` and `memory_delete(content=...)` now only enqueue requests into the single memory queue. They do not mutate committed memory inline, and surfaced agents no longer pass memory ids when requesting deletion.
-- `RuntimeAgentSession` now buffers autonomous-review windows in `memory/review_state.json` and auto-enqueues a direct `write` batch at two points: the configured ordinary-turn window threshold and compression-stage flushes (`token_compression` / `stage_compaction`). Unsupported flush sources must leave the buffered window intact instead of manufacturing a queue row.
-- Those buffered review windows are now stage-delta based rather than canonical-stage snapshots. Each buffered turn still keeps its own user / assistant text, but the stored `stage_summary` only contains stages that are newly observed or materially changed since the session's previous memory-review turns.
-- `memory/review_state.json` therefore now keeps a per-session stage cursor in addition to `pending_turns`. Flushing a window clears only the buffered turns; it must preserve that stage cursor so later windows do not replay already-reviewed stages back into a new `write` payload. Only an explicit session review-state clear should drop both the pending turns and the remembered stage versions.
-- A dedicated internal memory agent now consumes the queue in FIFO same-op batches (`write` and `delete` never mix within one batch), runs with the `memory` model route, and only has a restricted tool surface for reading/writing `MEMORY.md` and note files. That internal agent resolves natural-language delete requests to concrete SQLite ids and can report `inspired_memory_ids` for rows that materially influenced the batch.
-- After every non-read mutation, the runtime mutates SQLite first, rebuilds `MEMORY.md`, and then checks snapshot size. If the rebuilt snapshot exceeds `document.compress_trigger_chars` (default `16000`), compression walks rows ordered by `passed_count DESC`, `refresh_count ASC`, first replacing full rows with `minimal_memory` and then deleting only already-compressed non-`from_user` rows until the snapshot returns to `document.compress_target_chars` (default `13000`) or no more safe compression work remains.
-- If an operator changes the `memory` model chain while one queue batch is already mid-repair, the currently in-flight provider call still finishes on its original binding. But the next internal repair attempt now re-reads runtime config and can continue with the refreshed `models.roles.memory` chain instead of staying pinned to the old route for the rest of that batch.
-- The queue consumer is now single-active across processes: every `run_due_batch_once()` attempt must first take a workspace-local memory-worker file lock, so extra web/worker processes become passive observers instead of double-consuming the same queue head.
-- The consumer also treats `request_id` as the durable idempotency key. Before processing a batch it drops any queue rows whose `request_id` already appears in `memory/ops.jsonl`, so a stale duplicate row should not create a second terminal processed record.
+- queue 文件是运行时元数据，不是用户记忆内容。
+- 权威/快照/笔记分工见上面的子系统列表；memory-worker lease 单活规则见下面的运行时合同。
 
-Maintainers should read the queue state machine like this:
+运行时合同：
 
-- `pending` means the request has not yet been claimed into a batch.
-- `processing` means the queue head batch is currently owned by the single memory worker.
-- If a process cannot take the memory-worker file lock, it should leave the queue untouched and report `worker_lease_unavailable`; this is normal in multi-process deployments where only one runtime instance should actively consume memory writes.
-- If the `memory` role is unconfigured or a provider call fails, the queue head remains `processing` with an attached error and blocks later requests.
-- A persisted `processing` head is durable restart state, not proof that a worker is currently live. After restart, the worker waits until the stored `retry_after` before retrying that same head batch.
-- `processing_started_at` records the first successful claim of that queue head batch and must stay stable across later retries; it is not a "last retry time" field.
-- Semantic-invalid model output is expected to repair inside the same processing batch before the runtime commits anything. If the batch still fails runtime precheck or the memory agent never produces a valid terminal tool result, the runtime now drops that queue batch into durable discarded history instead of leaving it as an endlessly retrying queue item.
-- Two terminal `ops.jsonl` rows with the same `request_id` are now treated as a bug signal pointing to historical multi-worker contention or an old pre-fix run, not as normal repeated writes.
+- CEO/frontdoor 轮次在 prompt 组装时读取一份冻结的 `MEMORY.md` 快照，并把只含 `---` 分隔记忆文本的展示渲染注入稳定前缀（剥掉记忆 id 与日期/来源头；内部 memory agent 仍看到完整受管快照）。同轮热更新不影响当前提示词，新提交记忆只影响后续轮次。
+- `memory_write` 与 `memory_delete(content=...)` 只向单一记忆队列入队，不内联修改已提交记忆；surfaced agent 请求删除时不传记忆 id。
+- `RuntimeAgentSession` 把自主复核窗口缓冲在 `memory/review_state.json`，并在两个时点自动入队直接 `write` 批次：配置的普通轮窗口阈值、压缩阶段冲刷（`token_compression` / `stage_compaction`）。不支持的冲刷来源必须保持缓冲窗口原样，不得制造队列行。缓冲窗口基于 stage delta：每轮保留自己的 user/assistant 文本，但 `stage_summary` 只含相对上一次复核新出现或实质变化的阶段；`review_state.json` 除 `pending_turns` 外还维护按会话 stage cursor，冲刷只清缓冲轮次、保留 cursor，只有显式清除会话复核状态才同时丢弃两者。
+- 专用内部 memory agent 以 FIFO 同-op 批次（`write` 与 `delete` 不混批）消费队列，走 `memory` 模型路由，只有读写 `MEMORY.md` 与 note 文件的受限工具面；它把自然语言删除请求解析成具体 SQLite id，并可报告实质影响该批次的 `inspired_memory_ids`。
+- 每次非读变更后，运行时先改 SQLite、再重建 `MEMORY.md`、最后检查快照大小：超过 `document.compress_trigger_chars`（默认 `16000`）时按 `passed_count DESC`、`refresh_count ASC` 顺序压缩，先把整行替换为 `minimal_memory`，再只删除已压缩的非 `from_user` 行，直到回到 `document.compress_target_chars`（默认 `13000`）或没有安全压缩工作。
+- 队列消费跨进程单活：每次 `run_due_batch_once()` 必须先拿 workspace 级 memory-worker 文件锁；拿不到锁的进程保持队列不动并报告 `worker_lease_unavailable`。`request_id` 是持久幂等键：处理批次前会丢弃 `memory/ops.jsonl` 中已出现过 `request_id` 的队列行。
 
-Maintainers should treat transient execution state as explicitly out of bounds for long-term memory:
+队列状态机语义：
 
-- pause/resume control data
-- in-progress task status
-- temporary repair markers
-- runtime-only coordination notes
+- `pending` 表示请求尚未被认领进批次；`processing` 表示队列头批次当前由唯一 memory worker 持有。
+- `memory` 角色未配置或 provider 调用失败时，队列头保持 `processing` 并携带错误，阻塞后续请求。
+- 持久化的 `processing` 队列头是重启恢复状态，不证明仍有活跃 worker；重启后等待存储的 `retry_after` 再重试同一头批次。`processing_started_at` 记录队列头批次首次成功认领，跨重试保持稳定，不是“最后重试时间”。
+- 语义非法的模型输出应在同一处理批次提交前完成自修复；若批次仍无法通过运行时 precheck 或 memory agent 始终给不出有效终态工具结果，运行时把该批次落入 durable discarded 历史，而不是无限重试。
+- `ops.jsonl` 出现两条相同 `request_id` 的终态行是 bug 信号（历史多 worker 竞争或旧版本运行），不是正常重复写入。
 
-Those belong in transcript, session, task, or stage runtime state, not in `MEMORY.md`.
+瞬时执行状态明确在长期记忆边界之外：pause/resume 控制数据、进行中任务状态、临时修复标记与 runtime-only 协调笔记属于 transcript、session、task 或 stage 运行时状态，不进入 `MEMORY.md`。
 
-Tool/skill catalog narrowing now goes through a catalog-only bridge and no longer delegates to the old `rag_memory` runtime. However, the catalog projection still lives under the same `memory/` tree, so a destructive reset of `memory/` may still remove catalog retrieval data together with user memory content. Catalog sync must be rebuilt after startup.
+tool/skill catalog 收窄走 catalog-only bridge；catalog 投影仍在同一 `memory/` 树下，因此对 `memory/` 的破坏性 reset 可能连同用户记忆内容一起删除 catalog 检索数据，catalog 同步必须在启动后重建。
 
-## CEO Frontdoor Legacy Compression Removal
-
-The CEO frontdoor no longer keeps a separate legacy history-compaction layer.
-
-- The earlier `_summarize_messages()` compatibility hook has been removed from runtime execution paths.
-- The one-shot structural "token preflight" compaction (`_run_frontdoor_token_preflight_compaction` / `compact_frontdoor_history_zone`) was dead code and has been deleted. Do not reintroduce a parallel structural compaction; the shared `stage_prompt_compaction` helpers are the single source of truth for stage-window trimming.
-- Frontdoor history now reaches the model either as local workset stage windows/blocks or through a same-turn `token_compression` rewrite when request size approaches the selected model window.
-- When the history source is the full transcript / continuity seed (not the checkpoint user-only path), the raw history is trimmed to the active stage window (`current_stage_active_window`, completed stages kept raw = 0) before the workset blocks are appended, so old stage prose is no longer carried twice alongside its compact block. The continuity seed is trimmed the same way (`_trim_frontdoor_seed_to_stage_window`, via `decompose_stage_prompt_messages`) so large existing baselines shrink instead of re-inflating.
-- Seed/continuity trimming needs a stage list to produce compact summaries; it sources `frontdoor_stage_state` first and falls back to `frontdoor_canonical_context.stages` when empty (connectivity). If neither carries stages, trimming is a safe no-op (no lossy drop) and reduction waits for the `token_compression` backstop. Maintainers debugging "seed never trims" should check that the session persists stages into one of those two sources.
-- If you are debugging long-context behavior, there is no intermediate "message-count compaction" stage to inspect anymore.
-
-This leaves three distinct mechanisms only:
-
-- Stage workset compaction for the near-field prompt (completed-stage compact blocks + retained raw replay), shared with the execution-stage prompt logic.
-- Stage archive/externalization (`stage_kind="compression"` + `archive_ref`) bounding the canonical stage state.
-- Inline `token_compression` for older body-history when the final provider-bound request approaches the selected model's `context_window_tokens`.
-
-For the CEO/frontdoor path, the near-field stage workset now has a stricter source-of-truth split:
-
-- Retained raw stage replay is rendered from `frontdoor_canonical_context` plus the current turn `frontdoor_stage_state`.
-- Transcript / checkpoint history no longer serves as the authoritative source for uncompressed stage replay. It still carries non-stage conversational continuity and global-summary source material.
-- Older completed stages still enter the prompt as `STAGE_COMPACT` / `STAGE_EXTERNALIZED` blocks, but those blocks now come from the canonical context chain rather than from historical assistant trace payloads.
-- The retained completed-stage window is computed from the combined canonical stage view for the session, while the current turn stage ledger remains a separate runtime-only write log until turn finalization.
-- Round-level tool records now preserve normalized raw `arguments` together with the existing output fields. Small outputs remain inline in `output_text`; large outputs still stay externalized as `output_ref` plus `output_preview_text`, and the prompt renderer does not read artifact bodies back inline.
-
-When a maintainer sees a prompt continuity issue, the first questions should now be:
-
-- Was the relevant context still inside the retained stage workset?
-- If not, did inline `token_compression` or `stage_compaction` legitimately shorten the next-round baseline?
+队列卡住、重复写入、调试顺序、CLI 与 reset 等 operator 工作流详见 `operations-and-maintenance.md`「Memory Queue Workflow」。
 
 ## Internal Turn Contract Notes
 
-Heartbeat and cron turns now share the same strict internal-turn contract.
+Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详见 `heartbeat-system.md`「Continuation Contract」与「Cron Reminder Contract」。本文只记运行时层不变量：
 
-- They still execute through `RuntimeAgentSession.prompt(...)` with their own internal source metadata.
-- Heartbeat / cron turns still clear live-only frontdoor debug surfaces such as `frontdoor_selection_debug` and per-round actual-request pointers, but they no longer blindly zero the session-owned request-body / stage / compression continuity state before prompt assembly.
-- Heartbeat / cron now use the same `ceo_frontdoor` continuation path as ordinary visible turns. The request starts from the session-owned `frontdoor_request_body_messages` / actual-request scaffold, then appends hidden internal prompt messages for the rule text and event payload.
-- The hidden internal prompt messages are durable prompt history, not live-only lane text. They should be persisted with `prompt_visible=true`, `ui_visible=false`, and an `internal_prompt_kind` such as `heartbeat_rule`, `heartbeat_event_bundle`, `cron_rule`, or `cron_event_bundle`.
-- Heartbeat still carries its event payload as a hidden `user` event-bundle message because that lane still models a session-owned follow-up event.
-- Cron no longer injects its reminder payload as a hidden `user` message. It now appends a second hidden `system` block that describes a structured reminder delivery event for the future agent.
-- When the prior frontdoor baseline already has contract state, heartbeat and cron internal turns also inherit the ordinary CEO tool/skill exposure contract rather than rebuilding or narrowing it from scratch. The only callable-tool special-case is that these internal turns bypass the usual “no valid stage => `submit_next_stage` only” shrink so the reminder/wakeup turn can act immediately on the inherited instruction context.
-- If no authoritative frontdoor baseline exists yet, heartbeat/cron fall back to the ordinary exposure assembly path for that round instead of inheriting a partial internal-only seed.
-- Visible heartbeat / cron assistant replies and tool traces remain ordinary durable turn output. They should stay `prompt_visible=true`, `ui_visible=true`, and continue to inherit the same continuity, token-preflight, token-compression, and pause contracts as visible user turns.
-- Service-layer code must not auto-retry tasks or synthesize fallback assistant replies on behalf of the model.
-- An internal turn that ends with `HEARTBEAT_OK` is still the one live-only ACK exception: the ACK event may surface in UI, but it must not create a new visible assistant transcript entry.
-- Maintainers should distinguish hidden internal prompt messages (`ui_visible=false`) from live-only ACK behavior. Hidden prompt messages are durable and prompt-visible; the ACK is not.
-
-Cron also has a new service-enforced repetition contract:
-
-- Cron payload now carries `max_runs`.
-- Cron state now carries `delivered_runs` plus optional `last_delivered_at_ms` for observability.
-- Reminder completion is counted by the scheduler after the cron internal prompt is durably accepted, not by the model's own natural-language reasoning.
-- Once the counter reaches `max_runs`, the cron service deletes the job immediately instead of asking the model to infer whether the reminder should stop.
-- The old stop-condition-based cron schema is intentionally not migrated. If the runtime loads an older cron store version, it clears that store and starts from an empty cron set.
+- 内部轮次与普通可见轮次一样通过 `RuntimeAgentSession.prompt(...)` 执行，携带各自的内部来源元数据；它们会清掉 live-only 调试面（`frontdoor_selection_debug`、每轮 actual-request 指针），但不在 prompt 组装前清零 session-owned 请求体 / 阶段 / 压缩连续性状态。
+- 规则文本与事件载荷以隐藏内部提示消息追加：`prompt_visible=true`、`ui_visible=false`，带 `internal_prompt_kind`（`heartbeat_rule` / `heartbeat_event_bundle` / `cron_rule` / `cron_event_bundle`）；heartbeat 追加 `system` 规则 + `user` event-bundle，cron 追加两个隐藏 `system` 块。存在权威 frontdoor 基线时，内部轮次直接继承普通 CEO tool/skill 暴露合同（含绕过“无有效阶段只剩 `submit_next_stage`”的收紧）。
+- 服务层不得替模型自动重试任务，也不得合成回退 assistant 回复。
+- `HEARTBEAT_OK` 是唯一的 live-only ACK 例外：ACK 事件可以在 UI 展示，但不得新建可见 assistant 转录条目；隐藏内部提示消息（`ui_visible=false`）是 durable 且 prompt-visible 的，与 live-only ACK 是两回事。
 
 ## Repeated Tool Call Guard Notes
 
-Execution-stage duplicate-call handling in `main/runtime/react_loop.py` now uses a soft-reject path instead of escalating directly to an engine failure.
-
-- When the model repeats the same ordinary tool signature several consecutive times in the same node, the runtime records the repeated assistant tool call, appends an error tool message explaining that the call is duplicated, and lets the next model turn repair itself.
-- This means a task should no longer fail immediately with `RuntimeError: repeated tool call detected: ...` only because the model repeated a non-control tool call such as `exec` with identical arguments.
-- Read-only duplicate retrieval guidance (`content.open/search`, `task_progress`, etc.) is still a separate guard path with its own repair messaging and escalation semantics.
-- If a maintainer is debugging a "stuck on the same tool" report, first inspect the latest tool/error messages in the node transcript and runtime frame before assuming the task was terminated by the runtime itself.
-
-The filesystem family no longer participates in that read-only retrieval branch.
-
-- `filesystem` is now a family/context id only, not a live callable tool.
-- The execution runtime only hydrates concrete mutation executors such as `filesystem_write`, `filesystem_edit`, `filesystem_copy`, `filesystem_move`, `filesystem_delete`, and `filesystem_propose_patch`.
-- This means repeated filesystem mutations now follow the ordinary duplicate-call soft-reject path, while retrieval-style guards remain reserved for `content_*`, `task_progress`, `task_node_detail`, and similar read-only tools.
+执行阶段重复工具调用的软拒绝、修复消息、升级语义与只读检索分支契约详见 `tool-and-skill-system.md`「Duplicate Tool Call Guard」。
 
 ## Resource Generation Checks For Semantic Catalog Freshness
 
-The runtime still does not keep a full watcher on `skills/` and `tools/`, but semantic catalog freshness is no longer tied only to explicit admin reloads.
-
-- `MainRuntimeService` keeps the last known top-level resource tree fingerprint state.
-- The CEO/frontdoor assembly path and node-context selection path now perform a throttled external resource generation check before semantic catalog narrowing.
-- The check interval is bounded by `resources.reload.poll_interval_ms`; the runtime does not rescan without limit on every low-level access.
-- When fingerprints differ, the service refreshes only the changed roots and then performs a targeted catalog sync for the changed resource ids.
-
-This gives maintainers a middle ground:
-
-- The resource runtime itself is still manual/release-triggered and does not promise instant discovery.
-- Runtime-facing semantic selection can still reconcile direct disk edits lazily on the next bounded generation check.
-- Metadata-only edits such as `display_name` / `description` changes now also invalidate the catalog summary hash, so catalog `l0` / `l1` no longer stay stale just because the正文 body stayed the same.
+语义目录新鲜度、节流资源代检查（`resources.reload.poll_interval_ms`）、指纹刷新与元数据编辑失效规则详见 `tool-and-skill-system.md`「Catalog Freshness」。
 
 ## CEO Frontdoor Canonical Context Contract
 
-The CEO/frontdoor path now has a single cross-turn stage truth source: `frontdoor_canonical_context`.
+`frontdoor_canonical_context` 是 CEO/frontdoor 唯一的跨回合阶段真相源：
 
-- `frontdoor_stage_state` and `compression_state` are still runtime working state, but CEO/frontdoor no longer assumes they must be blanked at every fresh user / heartbeat / cron turn before prompt assembly.
-- When graph-local state is empty, `prepare_turn` may now reuse the session-owned frontdoor request body plus these session snapshots to rebuild the next provider request window.
-- `frontdoor_canonical_context` is the durable cross-turn stage/history view. Turn-finalization merges the current turn stage ledger into this canonical structure.
-- Session/runtime sync must not persist a request-local projection back into `frontdoor_canonical_context`. Only turn finalization is allowed to append completed-stage data into the durable canonical chain; anything derived from `frontdoor_canonical_context + current frontdoor_stage_state` is visible-workset data for the current request only.
-- Prompt assembly no longer rebuilds retained stage history from transcript `execution_trace_summary` or flat `tool_events`.
-- The near-field stage workset is derived from `frontdoor_canonical_context + current frontdoor_stage_state`.
-- If the current turn stage state already contains a completed stage that is materially identical to one already present in `frontdoor_canonical_context`, prompt assembly must treat it as overlap and skip rebasing it into a new synthetic stage id. This prevents one completed stage from exploding into duplicated raw stage blocks across fresh-turn rebuilds.
-- Session state still owns the durable full `frontdoor_canonical_context`, but UI-facing turn payloads now expose a current-turn `canonical_context` slice rather than `execution_trace_summary` / `tool_events`.
-- In other words: prompt assembly reads the durable cross-turn canonical context, while inflight / paused / final-reply payloads should describe only the visible turn's own stage trace.
+- 它是 durable 的跨回合阶段/历史视图；turn finalization 把当前轮阶段账本并入该结构。`frontdoor_stage_state` 与 `compression_state` 是运行时工作状态，不需要在每个新用户 / heartbeat / cron 轮次的 prompt 组装前清空；graph-local 状态为空时，`prepare_turn` 可以复用 session-owned 请求体与这些快照重建下一个 provider 请求窗口。
+- session/runtime 同步不得把 request-local 投影写回 `frontdoor_canonical_context`：只有 turn finalization 允许向 durable canonical 链追加 completed-stage 数据；`frontdoor_canonical_context + 当前 frontdoor_stage_state` 派生出的一切只是当前请求的可见 workset 数据。
+- 近场 stage workset 从 `frontdoor_canonical_context + 当前 frontdoor_stage_state` 派生，不从 transcript `execution_trace_summary` 或平铺 `tool_events` 重建。round-level 工具记录同时保存归一化原始 `arguments`；小输出内联在 `output_text`，大输出外置为 `output_ref` + `output_preview_text`，prompt 渲染器不把 artifact 正文读回内联。
+- 若当前轮阶段状态里已包含与 `frontdoor_canonical_context` 中实质相同的 completed stage，prompt 组装必须按重叠处理、跳过把它 rebase 成新的合成 stage id——否则一个 completed stage 会在 fresh-turn 重建中膨胀成重复的原始阶段块。
+- UI 面向的 turn payload 暴露当前轮的 `canonical_context` 切片；prompt 组装读 durable 跨回合 canonical context，inflight / paused / final-reply payload 只描述可见轮自己的阶段轨迹。
 
-There is now a second explicit continuity contract for prompt assembly:
-
-- `frontdoor_request_body_messages` is the canonical session-owned provider request body baseline for the next CEO/frontdoor round.
-- That baseline intentionally excludes `frontdoor_runtime_tool_contract` messages; dynamic tool/skill exposure must still be rebuilt as a fresh tail contract for each round.
-- Prompt assembly is allowed to reduce this baseline only at the two documented information-loss boundaries: `token_compression` and same-turn `stage_compaction`.
-- For fresh visible CEO/frontdoor turns, this session-owned request body baseline now has priority over any graph-local checkpoint-style stage replay projection. If both exist, prompt assembly must continue from the body baseline instead of rebuilding a new main prefix from stage replay.
+第二条连续性合同：`frontdoor_request_body_messages` 是下一轮 CEO/frontdoor 的 session-owned provider 请求体基线，刻意不含 `frontdoor_runtime_tool_contract` 消息（动态工具暴露每轮作为新的尾部合同重建），且只允许在 `token_compression` 与同轮 `stage_compaction` 两个信息损失边界收缩（见本文「Frontdoor Context Compression (Current Contract)」）。fresh 可见轮次中该基线优先于任何 graph-local checkpoint 式阶段重放投影：两者同时存在时必须从请求体基线继续，而不是从阶段重放重建新的主前缀。
 
 ## Runtime Contract Lane
 
-- CEO/frontdoor and node runtime now both treat the model-facing runtime contract as an assistant summary block rather than a raw JSON user message.
-- The summary block is intentionally compact. It carries names-only callable and hydrated lists plus candidate summaries, while provider-native callable schemas still flow through provider `tools[]`.
-- The same summary block now also has a dedicated repair-required lane. Maintainers should therefore distinguish three agent-facing categories:
-  - ordinary callable/hydrated tools
-  - ordinary candidate tools/skills
-  - repair-required tools/skills that must be fixed before use or body load
-- The hot same-turn provider request carries only the newest contract snapshot at the tail; carried history keeps zero stale contract snapshots and zero stale turn-only notes, and the newest tail records are rebuilt each round. The newest contract summary in that request is the authoritative one for the current round.
-- Durable continuity baselines continue to strip runtime-contract messages before persistence. If a later turn appears to inherit an old contract summary as ordinary history, treat that as a contract-lane replay bug.
-- If the next baseline is shorter for any other reason, `prepare_turn` treats that as unexpected context loss and fails fast instead of silently continuing with a truncated request.
+模型面向的运行时契约是以 `## Runtime Tool Contract` 开头的 assistant summary 块（summary 形式、修复车道、“尾部只带最新快照”与基线剥离规则详见 `tool-and-skill-system.md`「四个概念必须分清」与 `context-and-cache-troubleshooting.md`「append-only 规则」）。本节记录本文拥有的 canonical 表示规则与运行时边界。
 
-Maintainers should treat the canonical context representation rules as the only allowed information-loss boundary:
+Canonical 阶段状态按以下表示规则收敛（这是 canonical 链唯一允许的信息损失边界）：
 
-- Latest 3 completed normal stages remain `raw`.
-- Older completed normal stages become `compact`.
-- When completed normal stages exceed 20, the oldest 10 are externalized into an archive-backed compression stage.
+- 最近 3 个完成的普通阶段保持 `raw`。
+- 更早的完成普通阶段变为 `compact`。
+- 完成普通阶段超过 20 个时，最旧的 10 个外置为归档支撑的压缩阶段。
 
-The prompt token trace also changed:
+另有两条运行时边界：
 
-- `pre_request_prompt_tokens` is the pre-send estimate before any inline `token_compression`, and it must include the stage workset.
-- `effective_prompt_tokens` is the estimate for the final model request actually sent after prompt assembly.
-- CEO/frontdoor now also runs a final token preflight immediately before provider send. This happens after fresh-turn request seeding, completed-continuity bridge decisions, provider tool-schema seeding, and frozen `MEMORY.md` injection have already produced the authoritative request projection.
-- Execution and acceptance nodes now have an equivalent final gate in `ReActToolLoop.run()`: after same-turn append-only request assembly but before chat dispatch, the runtime resolves the selected node model context window, estimates the provider-bound payload, and decides whether live-only token compression is required.
-- Both gates are now provider-agnostic ground-truth preflights rather than pure local estimators. They normalize provider usage first, compute `effective_input_tokens = input_tokens + cache_hit_tokens`, and only reuse that truth when continuity is provable against the previous actual request.
-- “Normalize provider usage first” now explicitly includes breakdown-style cache accounting. When a provider reports cached input under nested fields such as `input_tokens_details.cached_tokens` or `prompt_tokens_details.cached_tokens`, runtime must treat those fields as a breakdown of total input, subtract them back out of the stored `input_tokens`, and only then compute `effective_input_tokens`.
-- If a provider response omits input-side usage entirely but the send actually reached the model, runtime must not clear the truth lane. CEO/frontdoor and node runtime now fall back to the final send-side preflight estimate, persist that as `observed_input_truth`, and mark the source as `preflight_estimate`.
-- Web CEO image uploads now follow that same send-time contract. The runtime decides at prepare/send time whether uploads should expand into provider-visible multimodal blocks, and the preflight path must estimate the exact same expanded request shape that the real send will use.
-- The image expansion rule is binding-owned rather than provider-owned: if the selected model binding has `image_multimodal_enabled=false`, uploaded images stay in the text downgrade lane even if the upstream provider could accept images.
-- Historical image reopen through `content_open` follows the same gate. If the current node/frontdoor send route is not multimodal, the tool itself must reject the open with `非多模态模型无法打开图片` instead of pretending the image was read.
-- That rule applies to any current-turn upload boundary, not only the first user message of a turn. Follow-up batches that reach the safe pre-`call_model` merge point must use the same image expansion and the same path-free provider-visible note when the current follow-up batch contains images.
-- Successful image reopen results are consumed into a one-send live-only overlay whose text note is `图片已通过 content_open 打开，视觉内容已附带在本轮上下文中`. CEO/frontdoor and node runtime both append that overlay before the final send-side token preflight, then strip image blocks back out of durable history/baselines.
-- Because the overlay is consumed on the first send attempt, later turns fall back to the ordinary text/path baseline unless the model calls `content_open` again. This is intentional: a send that overflowed, compacted, or even failed should not make all future turns keep paying the same image token cost automatically.
-- Reopen payloads now survive node boundaries through the `pending_content_open_image_payloads` graph-state channel: the tool-execution step records them there, and the next `call_model` consumes them to build the overlay. Before this channel existed the payloads were dropped between graph nodes, so a successful `content_open` never actually delivered the image to the model. If a reopened image is missing from the request, inspect this channel and the overlay-injection step before suspecting the tool result.
-- The overlay is injected by replacing the trailing user message; when the last request record is not a user message (the usual case immediately after a tool result), the runtime instead appends a user message carrying the image blocks so the overlay is not silently dropped.
-- Query-text and preflight inputs must stay aligned with that same rule. For current-turn image uploads, semantic query/preflight text should come from the raw user text, not from the old local-path attachment note.
-- CEO/frontdoor now also uses one authority for both context-window resolution and multimodal gating: the live runtime config revision returned by `get_runtime_config(...)`, not a potentially stale `loop.app_config` snapshot. If artifacts disagree about `context_window_tokens` or `image_multimodal_enabled`, debug the live config resolution path first.
-- The final preflight estimate no longer treats inline image `data:` URLs as ordinary text whose token cost scales with base64 length. Frontdoor and node/runtime now both strip inline image bytes out of the estimation payload, estimate text/schema cost separately, and add a dedicated image-token heuristic instead.
-- That image heuristic is intentionally conservative and provider-agnostic. v1 uses an OpenAI-style fallback based on image dimensions and detail mode (with `detail=auto` treated as the high-detail lane), not on raw file bytes or serialized data-URL characters.
-- Web CEO also applies a hard single-image guard before expansion: any uploaded image larger than `5 MiB` is rejected instead of being inlined into the provider request or silently downgraded.
-- The `5 MiB` guard is lane-specific. Current-turn web uploads are rejected outright, but historical images reopened through `content_open` are auto-compressed (Pillow JPEG quality reduction, then progressive downscaling) to fit under the limit and still injected. Only when an image cannot be compressed under the limit, or the file is missing/unreadable, does the runtime skip that single image with a text note and continue. Per-image problems never abort the turn—the pending overlay always clears—so one bad image cannot poison every subsequent turn.
-- The authoritative preflight decision value is now `max(preview_estimate_tokens, usage_based_estimate_tokens)`. `usage_based_estimate_tokens` itself is only allowed when the runtime can prove append-only continuity plus stable enough tool schema continuity; otherwise the runtime must bail out to `preview_estimate`.
-- When the previous round had to persist `observed_input_truth` from `preflight_estimate` because the provider omitted input usage, that estimated truth is still allowed to seed the next round’s continuity check. Maintainers should therefore read `effective_input_tokens_source` / `observed_input_truth.source` before assuming that a high `usage_plus_delta` estimate came from provider-billed usage.
-- Both node runtime and CEO/frontdoor now use compression-first ordering. If the hybrid final estimate is already over the trigger or even over the full context window, runtime must still attempt live token compaction before producing the final overflow failure, except for the hard configuration guard `context_window_tokens <= 25000`.
-- The same node preflight helper is also used by `message_distribution` control turns in `NodeRunner._run_distribution_node()`. `spawn review` is intentionally excluded because it is an external inspection lane, not part of node-context continuity.
-- Node-side token compression is a live request rewrite only. It can shorten the provider-bound `request_messages`, but it must not rewrite durable stage history, frame `messages`, or the stable prompt-cache family inputs derived from `model_messages`.
-- When node preflight does shrink a send, the runtime frame now records `history_shrink_reason=token_compression` plus `token_preflight_diagnostics`. Maintainers should treat those fields as the node-side equivalent of frontdoor preflight observability.
-- The node preflight threshold contract is intentionally aligned with CEO/frontdoor: trigger at `context_window_tokens * 0.80 * 0.95`, and treat `context_window_tokens <= 25000` as a hard configuration failure rather than a soft hint.
-- That preflight is the final gate for provider-bound request size. If it compacts the request, `frontdoor_history_shrink_reason` must be `token_compression`; the runtime must not invent a second competing shrink-reason field.
-- The preflight emits additive diagnostics as `frontdoor_token_preflight_diagnostics` on graph state, inflight/paused snapshots, and completed continuity sidecars. Maintainers should treat that payload as observability for the final gate, not as a replacement for the request-body baseline contract.
-- For both node `token_preflight_diagnostics` and `frontdoor_token_preflight_diagnostics`, top-level fields now describe the authoritative post-compaction request when compaction was actually applied. The pre-compaction hybrid reasoning is preserved under `pre_compaction_*` keys so operators can still audit why compaction happened without confusing it with the request that was finally sent.
-- That preflight estimate must be derived from the raw provider-bound payload, not from summary-oriented serializers that truncate long fields for readability. If a huge `provider_request_body` still produces a tiny, suspiciously stable `final_request_tokens`, treat the estimator as broken before questioning the compression threshold.
-- For `/responses`-style providers, the preflight estimate now uses the adapter-final payload shape rather than the pre-adapter `request_messages` projection, because the transport rewrite can materially change the final token count.
-- The trigger also keeps a small safety margin below the nominal compression threshold (`effective_trigger_tokens`). This is intentional: maintainers should treat it as protection against estimator drift, not as evidence that the model context window itself changed.
+- prompt token trace 只有两个字段：`pre_request_prompt_tokens` 是内联 `token_compression` 之前的发送前估算（必须包含 stage workset）；`effective_prompt_tokens` 是 prompt 组装完成后最终真实发送请求的估算。
+- 节点侧 token 压缩只是针对当次请求的 live 重写：可以缩短 provider-bound `request_messages`，但不得改写持久阶段历史、frame `messages`，或从 `model_messages` 派生的稳定 prompt-cache family 输入。
+
+若下一轮基线以两个收缩边界之外的任何理由变短，按意外上下文损失排查；守卫自愈行为见本文「Frontdoor Context Compression (Current Contract)」。
+
+token preflight 估算、触发阈值、`effective_input_tokens` 真相车道、压缩优先顺序与诊断字段详见 `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」；图片上传与 `content_open` 的多模态展开、`5 MiB` 守卫与单次发送 overlay 规则详见 `web-and-admin.md`「Image Upload Gating」。
 
 ## CEO Inline Tool Reminder Sidecar
 
-CEO frontdoor direct long-running tools now have a separate inline reminder lane.
+CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车道，运行时边界如下：
 
-- Direct CEO tool executions register in `InlineToolExecutionRegistry` when they run without a detached `ToolExecutionManager` handoff.
-- This registry is separate from detached/background tool execution semantics. Maintainers should not treat an inline execution id as a detached watchdog execution id.
-- Reminder windows are fixed at `30 / 60 / 120 / 240 / 600` seconds, then repeat every 600 seconds after that.
-- CEO/frontdoor direct tools now have an argument-owned opt-out from this lane: if the normalized top-level tool arguments already contain an explicit timeout-bearing key such as `timeout_seconds`, the runtime skips the inline reminder sidecar entirely and lets the tool's own timeout/error contract speak for itself.
-- The old inline watchdog poll text is no longer the operator-facing mechanism for CEO direct tools. The direct tool keeps running inline, while reminder decisions happen in the sidecar lane.
+- 内联执行注册在 `InlineToolExecutionRegistry`，与 detached `ToolExecutionManager` 后台执行语义相互独立；内联执行 id 不是 detached watchdog 执行 id。
+- `CeoToolReminderService` 对会话持久化是只读车道：不调 `session.prompt(...)`、不取普通 turn 锁、不创建 heartbeat / internal turn；提醒文本与决策不写入 transcript、canonical context 或后续 prompt 历史注入。
+- 侧车道优先复用最近一份已持久化的 CEO actual-request artifact 作为 provider-facing scaffold，与主轮共享同一段可缓存前缀；artifact 因内存守卫降级（`artifact_persistence_mode=memory_guard_degraded` / `memory_guard_minimal`）时，退回 `CeoMessageBuilder.build_for_ceo(..., ephemeral_tail_messages=...)` 重建。
+- 侧车道停止决策以普通工具失败形式回到主轮（`reason_code=sidecar_timeout_stop`，per-tool 子取消令牌），与用户主动暂停/取消是两条不同路径。
 
-The reminder lane itself is deliberately read-only with respect to session persistence:
-
-- `CeoToolReminderService` does not call `session.prompt(...)`.
-- It does not take the normal turn lock or create a heartbeat/internal turn.
-- Its first choice is to reuse the latest persisted CEO actual-request artifact as the provider-facing scaffold so the sidecar request shares the same cacheable prefix as the main turn; only if that scaffold is missing does it fall back to `CeoMessageBuilder.build_for_ceo(..., ephemeral_tail_messages=...)`.
-- Because frontdoor artifact persistence is now memory-guarded, this scaffold lane is best-effort rather than absolute. If the latest artifact shows `artifact_persistence_mode=memory_guard_degraded` or `memory_guard_minimal`, maintainers should expect the reminder sidecar to fall back to a rebuilt prompt instead of reusing a complete adapter-final request body.
-- The reminder snapshot from `RuntimeAgentSession.reminder_context_snapshot()` therefore now needs to carry the latest actual-request pointer in addition to the current visible stage/canonical view, durable `frontdoor_canonical_context`, compression state, hydrated tools, selection debug, current visible user/assistant text, and the latest live `sidecar_observation` for the active tool when one exists.
-- Reminder decisions are no longer duration-only. Before the sidecar asks the reminder model whether it should `STOP` or `CONTINUE`, it now inspects runtime-owned tool context: current tool name, normalized arguments, and the latest live observation payload.
-- That live observation lane is generic. `agent_browser` is the first producer and emits best-effort command preview plus bounded stdout/stderr tails while the subprocess is still running; later tools may publish the same shape through progress events.
-- Sidecar stop/continue decisions are now parsed from a text-only reminder reply (`STOP` / `CONTINUE`). Reusing the main turn's provider-visible tool bundle is a cache-stability tactic, not permission to execute arbitrary returned tool calls in the sidecar lane.
-- The reminder text itself is live-only. It must not be written into transcript history, canonical context, or future prompt-history injection.
-
-### Timeout Stop Error Contract
-
-If the sidecar decides to stop a running tool, the main turn must see that as a normal tool failure with explicit provenance.
-
-- The registry stores `InlineToolStopDecisionMetadata` with `reason_code=sidecar_timeout_stop` and the elapsed runtime / reminder count at the stop point.
-- The direct CEO tool execution path checks that metadata and normalizes the tool result into `tool_error` / `status=error`.
-- The failure text is intentionally explanatory because the main agent does not share the sidecar reasoning context.
-- Sidecar stop no longer cancels the whole visible CEO turn through the shared session token. User pause/stop still cancels the turn token, but sidecar timeout-stop now targets a per-tool child cancellation token so later tool calls in the same turn are not poisoned.
-- If the latest observation already exposes a concrete hard failure such as `Navigation failed: net::ERR_CONNECTION_CLOSED`, the sidecar must not overwrite that condition with `sidecar_timeout_stop`; it should keep waiting and let the tool return its native error result.
-- If the latest observation already exposes positive progress such as a current URL, page title, or explicit progress marker, the sidecar should bias toward `CONTINUE` without issuing an early timeout stop.
-
-Example shape:
-
-`Error executing exec: stopped by sidecar timeout decision after 120.4s (2 reminders).`
-
-This is distinct from user-requested cancel/pause behavior. Only sidecar reminder stops use the timeout-stop contract. If the tool finishes successfully before the stop lands, the runtime clears the sidecar stop metadata and preserves the successful result.
+提醒窗口、观测感知决策、`STOP` / `CONTINUE` 语义、失败兜底与 timeout-stop 错误合同详见 `heartbeat-system.md`「CEO Inline Tool Reminder Sidecar」。
 
 ## Node Provider Request Scaffold
 
-Execution and acceptance nodes now keep two separate views of tool visibility:
+执行与检验节点保持两套工具可见性视图：
 
-- `tool_names`: the authoritative per-round callable tool set used by runtime contract enforcement.
-- `provider_tool_names`: the provider-facing schema bundle used when constructing the actual model request. On new writes it represents the persisted RBAC-visible concrete-tool bundle for that turn family.
-- `pending_provider_tool_names`: compatibility field only. New writes keep this as `[]`.
+- `tool_names`：运行时契约强制使用的每轮权威可调用工具集。
+- `provider_tool_names`：构造真实模型请求时使用的 provider-facing schema bundle；新写入代表该 turn 家族已持久化的 RBAC-visible concrete-tool bundle。`pending_provider_tool_names` 仅是兼容字段，新写入保持 `[]`。
+- 节点发送 artifact 还记录 `provider_tool_exposure_revision`（真正到达 provider 的已持久化 provider bundle 的短哈希）；`provider_tool_exposure_commit_reason` 仅是兼容字段，新写入保持 `""`。
 
-Artifacts for node sends now also record:
-
-- `provider_tool_exposure_revision`: a short hash of the actually persisted provider bundle that reached the provider.
-- `provider_tool_exposure_commit_reason`: compatibility field only. New writes keep this as `""`.
-
-This separation exists to improve prompt-cache stability without weakening stage gates or tool hydration rules.
-
-### Same-Turn Append-Only Rule
-
-Within one node's multi-round loop, provider-facing `request_messages` should now prefer:
-
-1. the previous actual request body,
-2. plus the newly produced assistant/tool result messages from the last round,
-3. plus the newest overlay / `node_runtime_tool_contract` tail.
-
-Maintainers should treat this as a request-construction scaffold only.
-
-- It does not replace the node's durable/compacted `message_history`.
-- It does not redefine which tools are callable.
-- It exists purely so the provider sees append-only growth instead of an early-prefix rewrite whenever stage compaction trims the active window.
-- It also means `provider_tool_bundle_seeded` is now only a compatibility/diagnostic hint. The actual behavior is driven by the active/pending exposure state plus the token-compression commit gate.
+这套分离只为在不削弱阶段门控与工具 hydration 规则的前提下提高 prompt cache 稳定性。同轮内节点多轮循环的 provider 请求构造走 append-only scaffold：上一份真实请求体 + 上一轮新增的 assistant / 工具结果消息 + 最新 overlay / `node_runtime_tool_contract` 尾部。它只是请求构造脚手架——不替代节点持久/压缩后的 `message_history`，也不重新定义哪些工具可调用；它存在的唯一目的是：当阶段压缩修剪活动窗口时，provider 看到的是 append-only 增长而不是早期前缀重写。`provider_tool_bundle_seeded` 只是兼容/诊断提示，真实行为由活跃/待定曝光状态加 token 压缩提交门控驱动。完整规则详见 `context-and-cache-troubleshooting.md`「append-only 规则」。
 
 ## Frontdoor Context Compression (Current Contract)
 
-The current CEO/frontdoor request-shrink model has only two information-loss boundaries:
+当前 CEO/frontdoor 请求收缩模型只有两个信息损失边界：
 
 - `stage_compaction`
 - `token_compression`
 
-Anything else that shortens the next-round request baseline should be treated as a regression.
+任何其他理由让下一轮请求基线变短，都应按回归排查。长上下文只由三项机制约束：近场 stage workset compaction（completed-stage compact 块 + 保留原始重放，与执行阶段提示词逻辑共享）、约束 canonical 阶段状态的阶段归档/外置（`stage_kind="compression"` + `archive_ref`）、以及在最终请求接近所选模型窗口时改写旧 body history 的内联 `token_compression`。
 
 ### `token_compression`
 
-- `token_compression` is an inline same-turn LLM rewrite that runs immediately before the provider send.
-- It keeps the stable system prefix, the latest runtime tool-contract tail, and the most recent body-history tail, then rewrites only the older body-history zone into one `G3KU_TOKEN_COMPACT_V2` marker block.
-- For both CEO/frontdoor and node runtime, `token_compression` is no longer a provider-bundle promotion boundary. The compression send keeps the already persisted `provider_tool_names`, and any later provider-bundle refresh happens on the first post-compression ordinary turn.
-- The trigger threshold is tied to the runtime-selected model's `context_window_tokens`, not to a separate semantic-summary config.
-- If estimated request size is `<= 80%` of the selected model window, frontdoor sends directly.
-- If estimated request size is between `80%` and `100%`, frontdoor attempts one inline compression.
-- If estimated request size is already `> 100%`, frontdoor fails before compression because even the compression attempt would not fit safely in the current model window.
+- 内联同轮 LLM 重写，在 provider 发送前立即执行：保留稳定 system 前缀、最新运行时工具契约尾与最近的 body-history 尾部，只把更早的 body-history 区间重写为一个 `G3KU_TOKEN_COMPACT_V2` 标记块。
+- 触发阈值绑定运行时所选模型的 `context_window_tokens`：估算请求 `<= 80%` 模型窗口时直接发送；介于 `80%` 与 `100%` 之间时尝试一次内联压缩；已超过 `100%` 时先失败，因为连压缩尝试本身都无法安全装进当前模型窗口。
+- 对 CEO/frontdoor 与节点运行时，`token_compression` 都不是 provider bundle 提升边界：压缩发送沿用已持久化的 `provider_tool_names`，任何 provider-bundle 刷新落在压缩后的第一个普通 turn。
 
 ### `stage_compaction`
 
-- `stage_compaction` may shorten the active history window or stage workset, and it is still a legitimate shrink reason for the next-round baseline.
-- It is not a provider schema refresh boundary. If `provider_tool_names` change on a send whose shrink reason is `stage_compaction`, treat that as a bug in the provider-bundle refresh path.
+- 可以缩短活动历史窗口或 stage workset，仍是下一轮基线的合法收缩理由。
+- 不是 provider schema 刷新边界：若某次发送的收缩原因是 `stage_compaction` 而 `provider_tool_names` 变了，按 provider-bundle 刷新路径 bug 排查。
 
 ### Removed Semantic Summary Path
 
-- The older semantic/global-summary lane is no longer part of prompt assembly.
-- `compression_state` now means live progress for inline `token_compression` only; it is no longer a durable "semantic summary ready" signal.
-- Continuity restore now depends on the authoritative frontdoor baseline, stage state, request traces, and shrink reason, not on a separate `semantic_context_state` handoff block.
+- 旧的语义/全局摘要 lane 不再参与 prompt assembly；`compression_state` 只表示内联 `token_compression` 的实时进度，不再是“语义摘要就绪”的 durable 信号。
+- 续跑恢复依赖权威 frontdoor 基线、阶段状态、请求痕迹与收缩原因，不依赖单独的 `semantic_context_state` 交接块。
+- 不存在中间的“按消息条数压缩”阶段：一次性结构式 preflight compaction（`_run_frontdoor_token_preflight_compaction` / `compact_frontdoor_history_zone`）与 `_summarize_messages()` 兼容钩子都不在执行路径上。不要重新引入平行的结构式压缩——共享的 `stage_prompt_compaction` helper 是 stage-window 修剪的唯一真相源。
+- 续跑 seed / 全量转录原始历史在拼接 workset 块之前先裁到活动阶段窗口（`_trim_frontdoor_seed_to_stage_window`，经 `decompose_stage_prompt_messages`），使存量大基线真正收缩，而不是携带未裁剪旧体重新膨胀。修剪需要阶段列表：优先取 `frontdoor_stage_state`，为空时退回 `frontdoor_canonical_context.stages`；两者都没有阶段时修剪是安全 no-op（不做有损删除），收缩交给 `token_compression` 兜底。排查“seed 从不收缩”时，先确认会话是否把阶段持久化进了这两个来源之一。
+
+### Shrink-Guard Self-Heal（`context_shrink_quarantine`）
+
+- finalize 前，运行时以同形归一方式比较下一轮请求体基线与会话基线：两侧都先剥掉工具契约消息、turn-only note 与多模态块，再估算 token。
+- 若下一轮基线变短且收缩原因不是上面两个允许理由，守卫不裸抛异常冻结会话：它把拒绝后的新种子以受控原因 `context_shrink_quarantine` 写回会话基线，累计连续隔离计数并打警告日志，使后续回合的对比保持一致、会话可自愈。
+- 连续隔离计数持续上升时，按 prompt 组装回归排查，不要解释成“正常上下文整理”。
 
 ### Pause During Compression
 
-- Manual pause during inline compression is terminal for the visible turn.
-- The runtime cancels the active compression generation and discards any late compression result instead of letting it update baseline or continue into the main provider send.
-- The next activation (new user input, heartbeat wakeup, etc.) must re-run prepare -> estimate -> optional compression -> send using the then-current model chain and context window.
+- 内联压缩进行中手动 pause 对该可见轮次是终态：运行时取消活跃的压缩生成，丢弃迟到的压缩结果，不让它更新基线或继续进入主 provider 发送。
+- 下一次激活（新用户输入、heartbeat 唤醒等）必须以当时的模型链与上下文窗口重新走 prepare → estimate → 可选压缩 → send。
+
+排查 prompt 连续性问题时的前两个问题：相关上下文是否仍在保留的 stage workset 内？若不在，内联 `token_compression` 或 `stage_compaction` 是否合法缩短了下一轮基线？基线与 artifact 的完整取证详见 `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」。

@@ -5,17 +5,20 @@ Start here when you are new to the repository or when a change crosses subsystem
 ## Reading Order
 
 1. `runtime-overview.md`
-2. `context-and-cache-troubleshooting.md` when the change touches prompt caching, context retention, append-only request growth, or request artifact forensics
-3. `tool-and-skill-system.md`
-4. `web-and-admin.md`
-5. `heartbeat-system.md` when the change touches heartbeat, long-running CEO tool wakeups, or live reminder behavior
-6. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
-7. `china-channels.md` when the change touches channel runtime or the Python/Node bridge
+2. `operations-and-maintenance.md` when you need to run, debug, or deploy the system
+3. `context-and-cache-troubleshooting.md` when the change touches prompt caching, context retention, append-only request growth, or request artifact forensics
+4. `tool-and-skill-system.md`
+5. `web-and-admin.md`
+6. `heartbeat-system.md` when the change touches heartbeat, long-running CEO tool wakeups, or live reminder behavior
+7. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
+8. `china-channels.md` when the change touches channel runtime or the Python/Node bridge
 
 ## Topic Guide
 
 - `runtime-overview.md`
   Use for session lifecycle, frontdoor/runtime flow, tool execution flow, and cross-module runtime behavior.
+- `operations-and-maintenance.md`
+  Use for startup workflows, troubleshooting order, high-risk change types, memory queue/reset workflows, and Docker deployment.
 - `context-and-cache-troubleshooting.md`
   Use for prompt cache misses, context shrink/continuity regressions, actual-request artifact forensics, and before changing node or CEO context strategies.
 - `tool-and-skill-system.md`
@@ -29,18 +32,37 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `china-channels.md`
   Use for session key rules and the channel bridge boundary.
 
-## Current Maintenance Note
+## Debugging Entry Points
 
-The CEO long-running direct-tool reminder lane is now documented as a live-only sidecar, not as a heartbeat turn. If you are debugging reminder UI, timeout-stop failures, or `ceo.tool.reminder`, read `runtime-overview.md`, `web-and-admin.md`, and `heartbeat-system.md` together.
+- Reminder UI or `ceo.tool.reminder` timeout-stop failures → `heartbeat-system.md` (+ `web-and-admin.md` for UI rendering)
+- Node cache misses, restart-seed continuity, token preflight/compression questions → `context-and-cache-troubleshooting.md` (+ `runtime-overview.md`)
+- Append-notice delivery, `waiting_children` replay, task-tree banner after distribution → `runtime-overview.md` + `operations-and-maintenance.md`
+- Execution/final-acceptance reflation (node vanishing from browser tree, acceptance visibility) → `runtime-overview.md` + `web-and-admin.md`
+- Multimodal image not reaching model or fabricated image content → `runtime-overview.md` + `china-channels.md` (channel inbound) or `web-and-admin.md` (web upload/reopen)
+- Broken image icons, file-route 400s, snapshot path mismatch → `web-and-admin.md` "Inline Markdown Image Rendering Contract"
 
-Node execution and `message_distribution` turns now also have a final send-side token preflight before provider dispatch. If you are debugging node cache misses, restart-seed continuity, or “distribution resumed but no new LLM request” symptoms, read `runtime-overview.md` and `context-and-cache-troubleshooting.md` together before changing node prompt assembly.
+## Maintenance Rules
 
-That final token preflight is no longer estimate-only. Node runtime and CEO/frontdoor now share the same provider-agnostic ground-truth contract: normalize usage first, treat `effective_input_tokens = input_tokens + cache_hit_tokens`, prefer `max(preview_estimate, usage_plus_delta)` when continuity is provable, and attempt compaction before failing when the hybrid estimate is already over the window. For providers that report cache hits as a nested breakdown of total input tokens (for example `input_tokens_details.cached_tokens` or `prompt_tokens_details.cached_tokens`), normalize `input_tokens` back to the uncached lane before computing `effective_input_tokens`. If the provider omits input-side usage entirely, persist `observed_input_truth` from the final preflight estimate instead of dropping the truth record. If you are debugging a “why did this miss compression?” or “why did the UI show a different context load than runtime used?” report, start with `runtime-overview.md` and `context-and-cache-troubleshooting.md` before changing thresholds.
+These rules prevent the docs from re-accumulating redundancy. Every edit to this directory must follow them:
 
-Task-wide append-notice delivery now uses a barrier / drain / distribute / resume flow. If you are debugging “root got the notice but children kept running”, “why is `waiting_children` replay still happening?”, or “why does the task tree still show a banner after distribution finished?”, read `runtime-overview.md`, `web-and-admin.md`, and `operations-and-maintenance.md` together.
+1. Update in place, never append. Rewrite the section that owns the topic; never add trailing addendum sections ("X Update", "X Notes").
+2. One contract, one home. State each contract only in its owning doc below; everywhere else use a pointer: `See <doc> "<topic>"` / `详见 <doc>「<topic>」`.
+3. Pointers name topics, never section numbers.
+4. Present tense only. No "now / no longer / previously / 现在 / 不再 / 曾经" — that is changelog language.
+5. Superseded text is deleted outright, never left as "obsolete notes".
+6. Word budgets: `runtime-overview` 9,000 / `web-and-admin` 8,500 / `tool-and-skill-system` 5,000 / `context-and-cache-troubleshooting` 4,000 / `operations-and-maintenance` 3,000 / `heartbeat-system` 2,600 / `config-and-models` 2,000 / `china-channels` 800. Over budget → condense before adding.
 
-Execution/final-acceptance now also use a shared reflation handshake. If you are debugging “execution succeeded but vanished from the browser tree”, “why is an acceptance node visible before activation or hidden after rejection?”, or “why did final acceptance reject once and the task kept running?”, read `runtime-overview.md`, `web-and-admin.md`, and `operations-and-maintenance.md` together before changing task-tree projection or terminal-task handling.
+## Topic Ownership
 
-Multimodal images now reach the model through three lanes—current-turn channel attachments, current-turn web uploads, and historical `content_open` reopen—all gated by the model binding's `image_multimodal_enabled`, and all injected only into that turn's live request while durable history stays text-only. Oversized `content_open` reopens are auto-compressed under the `5 MiB` limit, whereas oversized web uploads are rejected. If you are debugging “image not reaching the model” or “model fabricating image content”, read `runtime-overview.md` together with `china-channels.md` (channel inbound) or `web-and-admin.md` (web upload / reopen).
-
-Displaying images and files back to the user in the CEO chat is a separate contract from the model-facing lanes above. Assistant markdown local references are rewritten at the websocket egress (history snapshots, live turn patches, and the final reply event) by a media middle layer: raster images become <=100KB staged thumbnails with a signed click-through original viewer, and other local files render as file chips opening through the same signed route. If you are debugging “broken image icons in the browser”, “local path 400s from the file route”, or “snapshot content shows different paths than the transcript”, read `web-and-admin.md` sections 2.7 and 2.7.1 before touching the serving whitelist.
+| Topic | Owning doc |
+|---|---|
+| Runtime layering, message execution chain, session/task relationship, distribution / append-notice contract, provider timeout boundary | `runtime-overview.md` |
+| Frontdoor context compression contract (`token_compression` / `stage_compaction`) | `runtime-overview.md` |
+| Memory queue state/file semantics (`runtime-overview`); queue/reset operator workflows (`operations-and-maintenance`) | both, split as shown |
+| Heartbeat continuation contract, cron at-most-once delivery, reminder sidecar decision semantics, timeout stop, task terminal repair | `heartbeat-system.md` |
+| Tool/skill four concepts, candidate→callable chain, Tool Admin RBAC semantics, duplicate-call guard, catalog freshness | `tool-and-skill-system.md` |
+| Actual-request forensics, append-only rule, cache-miss triage, token preflight diagnostics | `context-and-cache-troubleshooting.md` |
+| Websocket/UI contracts, composer/media rendering, image upload gating, container deployment | `web-and-admin.md` |
+| Config schema, hot refresh, model bindings, secret location, deployment unlock | `config-and-models.md` |
+| China channel registry, session key rules, Python/Node bridge, canonical channel id list | `china-channels.md` |
+| Startup/deploy/troubleshooting order, memory CLI, Docker compose | `operations-and-maintenance.md` |

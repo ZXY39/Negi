@@ -22,12 +22,12 @@
 
 维护上要记住：
 
-- 这两个脚本现在都是普通用户首选入口
+- 这两个脚本是普通用户首选入口
 - 它们会在启动前默认清理当前仓库下已有的 g3ku web / worker 进程
 - 它们最终仍然是调用 `g3ku` bootstrap，再进入 `g3ku web`
 - 当脚本使用 reload 模式时，Web 侧自动托管 worker 会关闭；这时要单独运行 `g3ku worker`
-- `g3ku.cmd` / `g3ku.ps1` / `g3ku.sh` 是 CLI 透传包装；无参调用现在默认启动 `web`（历史上无参只打印 usage 就退出，右键/无参启动因此看起来像“坏了”）。任何入口的 web 启动都会在终端报告结果：成功横幅带 URL，失败横幅带子进程退出码和 `.g3ku/logs/console.log` 指引
-- web 启动在拿单实例锁（`.g3ku/start.lock`）之前会先自愈：杀掉本工作区残留的 g3ku web 服务进程（`-m g3ku web` 或 `-c ...run_web_server_entrypoint...` 形态，按 venv python 路径或进程 cwd 归属本工作区）。因此“端口/锁被占”不再是永久失败：再次启动会替换残留实例；若报错里 `pid=unknown`（持有者在加锁与写元数据之间被杀），用 `netstat` 查 web 端口定位占用者
+- `g3ku.cmd` / `g3ku.ps1` / `g3ku.sh` 是 CLI 透传包装；无参调用默认启动 `web`。任何入口的 web 启动都会在终端报告结果：成功横幅带 URL，失败横幅带子进程退出码和 `.g3ku/logs/console.log` 指引
+- web 启动在拿单实例锁（`.g3ku/start.lock`）之前会先自愈：杀掉本工作区残留的 g3ku web 服务进程（`-m g3ku web` 或 `-c ...run_web_server_entrypoint...` 形态，按 venv python 路径或进程 cwd 归属本工作区）。因此“端口/锁被占”不是永久失败：再次启动会替换残留实例；若报错里 `pid=unknown`（持有者在加锁与写元数据之间被杀），用 `netstat` 查 web 端口定位占用者
 
 ### CLI
 
@@ -75,7 +75,7 @@
 当前 `g3ku status` 的记忆区块应按 queued Markdown runtime 理解：
 
 - 它会显示 `Memory Notebook`、`Memory Notes Dir`、`Memory Queue`、`Memory Ops Log`、`Memory Checkpointer`
-- 它不再把 `Memory Mode`、`Memory Store(SQLite)`、`Memory Store(Qdrant)`、`pending_facts.jsonl`、`audit.jsonl` 当作当前长期记忆健康指标
+- `Memory Mode`、`Memory Store(SQLite)`、`Memory Store(Qdrant)`、`pending_facts.jsonl`、`audit.jsonl` 不作为当前长期记忆健康指标
 
 ## 3. 关键状态文件与目录
 
@@ -104,11 +104,7 @@
   completed Web CEO session continuity sidecars。重启后继续 completed session、manual pause terminal stop、以及异常中断后的最新 authoritative frontdoor baseline 恢复都先看这里。
 
 - `memory/`
-  Maintenance note:
-  For the queued Markdown memory runtime, inspect `memory/memory_state.sqlite3`, `memory/MEMORY.md`, `memory/notes/`, `memory/queue.jsonl`, and `memory/ops.jsonl` first. Dense store or checkpoint files are now secondary catalog/runtime projections rather than the primary long-term memory source.
-  The queue is now model-driven: a stuck queue head usually means the dedicated memory agent route, provider call, or runtime validation is failing, not that a synchronous tool write failed inline.
-  `memory/checkpoints.sqlite3` is now treated as a bounded short-term cache rather than an append-forever archive. The runtime trims older checkpoint rows per `(thread_id, checkpoint_ns)` automatically and CEO session deletion also purges that session key from the checkpointer. If file size stays high after deletes, inspect active threads and whether WAL truncation actually ran before assuming transcript cleanup failed.
-  记忆相关文件、qdrant、checkpoint 等
+  记忆目录；排障入口详见本文档「Memory Queue Workflow」章节。
 
 - `sessions/`
   会话持久化数据
@@ -155,48 +151,8 @@
 
 Maintenance note for `task_append_notice` / task message distribution:
 
-- If a task appears stuck in `barrier_requested`, `barrier_draining`, or `distributing`, inspect these together before blaming the model:
-  - `task_message_distribution_epochs` rows for the task
-  - `task_node_notifications` rows for the task
-  - `task_runtime_meta.distribution`
-  - the current runtime frames for the barrier / frontier nodes
-  - epoch payload fields such as `barrier_node_ids`, `drain_pending_node_ids`, `materialize_pending_entries`, `decision_records`, and `debug_trace`
-  - the target node's `append_notice_context` metadata when the symptom is “notice vanished after compaction/compression”
-- `decision_records` now separate delivered children from explicit skipped-child decisions. A frontier node with live children must account for every live child: delivered targets appear in `delivered_child_ids`, while non-delivered targets should appear in `skipped_child_decisions` with a reason. If a distribution turn fails with `distribution_decision_missing_child_decisions`, `distribution_decision_missing_should_distribute`, `distribution_decision_missing_reason`, or `distribution_decision_missing_message`, inspect the provider response/tool-call payload before treating the epoch as complete.
-- `debug_trace` is the fastest historical entrypoint when a frontier node looks like it “never distributed”. The trace should tell you whether the control turn reached send preflight, which tool-call names came back from the provider, and whether validation failed before any child delivery was persisted.
-- If `runtime_meta.distribution.state == "distributing"` and `frontier_node_ids` is still non-empty long after the previous frontier finished, check whether the runtime actually re-enqueued the task after writing `next_frontier_node_ids`. A successful root control turn plus durable child mailbox rows is not enough by itself; the next frontier still needs a fresh scheduler wakeup.
-- If a parent node clearly consumed a distribution notice but spawn review still blocks children as if the old requirement were active, inspect that node's `append_notice_context.notice_records` and the spawn-review request payload. Spawn review now receives those consumed notices as `consumed_distribution_notices`, and the latest consumed notice should outrank stale `user_request` / `core_requirement` / `root_prompt` wording during review.
-- If task-depth governance caps expansion unexpectedly, do not debug from generic task-tree text alone. Governance review now computes stats from execution nodes only, filters acceptance/inspection nodes out of the review tree entirely, and uses each execution node's full `prompt` as the main evidence for leaf complexity and work-boundary judgments.
-- If a task-depth governance decision looks wrong, inspect `task_runtime_meta.governance.history[*].review_artifact_ref` first. That ref now points at a dedicated `task_governance_review` JSON artifact containing the exact governance system prompt, request payload, raw response payload, parsed decision, and any error text for that review call.
-- `barrier_requested` means the append-notice transaction has captured the live tree and requested the task-wide barrier, but the tree has not started draining yet.
-- `barrier_draining` means some live node is still outside a safe boundary. Check whether that node is waiting on model/tool IO or whether a runtime-frame phase is unexpectedly stuck.
-- If `barrier_draining` persists while every known node frame already looks safe, inspect `materialize_pending_entries` in the epoch payload. That means the runtime is intentionally waiting for an active spawn round to finish creating child nodes before it snapshots the next distribution frontier. A non-empty `child_node_id` is no longer enough by itself; also verify that the child row exists and that its spawn-owner metadata matches the parent round entry.
-- If a parent appears to have spawned duplicate child rows for one spawn entry, inspect the child metadata owner tuple: `spawn_owner_parent_node_id`, `spawn_owner_round_id`, and `spawn_owner_entry_index`. Runtime reconcile should bind one canonical child into `spawn_operations.entries[*].child_node_id` and mark the other rows with `duplicate_spawn_child=true`; marked duplicates are intentionally excluded from live distribution and should not keep `barrier_draining` alive.
-- `distributing` means the active frontier is currently being processed through the ordinary task/node dispatcher. This is still queue-controlled node work, not a sidecar lane.
-- After the distribution epoch reaches `completed`, global distribution should no longer appear as active. `runtime_meta.distribution.state`, `mode`, and `active_epoch_id` should be empty even when `pending_notice_node_ids` or `pending_mailbox_count` remain non-empty. Those remaining fields are node-local pending-notice bookkeeping only.
-- If the frontend still paints the whole tree yellow after epoch completion, first check whether it is incorrectly treating non-empty `pending_notice_node_ids` or `pending_mailbox_count` as active global distribution. Only `barrier_requested`, `barrier_draining`, and `distributing` should drive whole-tree yellow distribution styling.
-- If the frontend still shows `接收到新消息，等待节点处理` after a node already exposes the delivered message as pending in its message list / `pending_notice_count`, debug the browser-side handoff logic first. That sticky notice should clear once delivery is visible at the node level; later consumption into ordinary prompt context is a separate state.
-- If root remains in `waiting_children` while `runtime_meta.distribution.mode == "task_wide_barrier"` still blocks that node, treat that as a barrier-priority regression before changing prompt logic.
-- If a parent shows pending local notice metadata but continues running child work, that can now be expected. Check the node metadata `pending_notice_state.resume_mode`:
-  - `ordinary` means the next resumed node turn may consume the notice immediately.
-  - `wait_for_children` means the notice is durable but intentionally held out of the prompt until the parent no longer owns an incomplete child round.
-- The same `pending_notice_state.resume_mode` contract now applies to child mailbox deliveries as well; child nodes are no longer allowed to bypass the `wait_for_children` boundary just because the notice arrived through `task_node_notifications`.
-- If a node is listed in `pending_notice_node_ids` after the epoch completed, inspect `pending_notice_state.resume_mode` before calling it a regression:
-  - `ordinary` means interrupted-turn recovery such as `pending_tool_turn` or `waiting_children` replay should still stay blocked until the pending local notice or mailbox delivery is consumed.
-  - `wait_for_children` means `waiting_children` replay is allowed to continue the existing child round, but that recovery pass must still stop before the next ordinary model turn. The held notice must stay out of the ordinary prompt and must not open a new spawn round yet.
-- If operators report `distribution finished but the parent stayed waiting`, inspect both:
-  - node metadata `pending_notice_state`
-  - parent `spawn_operations` / runtime frame `phase=waiting_children`
-  That combination now expresses the strong parent-waiting constraint, not a stuck distribution loop.
-- If a child execution node was previously terminal and now appears active again after append-notice, check whether its old acceptance node was logically invalidated rather than deleted. The acceptance record should still exist for audit, but it should no longer be authoritative for the current spawn entry.
-- If operators report that a child "disappeared" from the browser tree right after successful execution, first distinguish which projection is wrong:
-  - distribution recipient projection (`parent_visible`, handshake-driven recipient logic), or
-  - browser tree visibility projection (`tree_visible`, acceptance display phase, distribution-active force-show behavior)
-- Browser tree execution nodes should now remain visible in every status. If one disappears, treat that as a tree-visibility regression rather than expected `waiting_acceptance` behavior.
-- If a parent can still message an acceptance node that has not started checking yet, that is expected. Distribution may merge new requirements into an inactive acceptance node's context before activation; inspect the acceptance node's message list / mailbox rows before treating that as premature execution.
-- If an acceptance loop looks stuck after a rejection, inspect execution-node `metadata.acceptance_handshake` together with task-level `final_acceptance`. The expected sequence is still `waiting_acceptance -> waiting_execution_retry -> accepted|rejected_terminal`, but the default budget is now three total rejection outcomes: the first two rejections should return to `waiting_execution_retry`, and only the third should settle as `rejected_terminal`. Execution failure during any retry should end as `canceled_by_execution_failure`, not as another acceptance pass.
-- If a notice appears in mailbox rows but not in the next model request, inspect whether it is still in the raw notice window or has already been rolled into a compressed notice-tail segment. Those tail blocks are now intentionally kept ahead of stage archive blocks in prompt assembly.
-- If force delete is requested during message distribution, deletion should win immediately. Do not wait for the epoch to finish naturally; confirm instead that epochs/mailboxes were cancelled or purged before the task row disappeared.
+- If a task appears stuck in `barrier_requested`, `barrier_draining`, or `distributing`, do not blame the model first.
+- barrier/epoch/spawn/acceptance 的契约字段与完整排查路径详见 `runtime-overview.md`「frontdoor 与任务运行时的关系」。
 
 如果任务已经创建，但表现为“响应明显变慢”“长时间停在 `model.chat.await_response`”或“前端只看到 task-event 在刷”，优先同时对照：
 
@@ -214,17 +170,11 @@ Maintenance note for `task_append_notice` / task message distribution:
 
 Provider retry troubleshooting note:
 
-- 节点 `react_loop` 与 CEO/frontdoor `call_model` 的外层 provider-exhaustion 自动重试现在都是有限次：在底层 model/key/fallback chain 已经 exhausted 之后，当前 round 最多再做 3 次外层重试。
+- 节点 `react_loop` 与 CEO/frontdoor `call_model` 的外层 provider-exhaustion 自动重试是有限次：在底层 model/key/fallback chain 已经 exhausted 之后，当前 round 最多再做 3 次外层重试。
 - 因此如果你看到 `Error calling Responses API` 连续刷屏，但任务/会话迟迟不结束，不要先假设“它还在无限自动重试”。先确认这些日志是否真的属于同一个 task/session。
 - 当前 task 如果已经落到 `is_paused=true` / `pause_requested=true`，那说明另一个控制动作已经介入了；这和 provider retry 本身是两条不同的因果链。排查时应同时看 `task_commands` 是否出现 `pause_task`，而不是只盯着 provider 日志。
 
-并结合以下超时语义判断“慢”是不是异常：
-
-- 对 streaming-first chat provider（`ResponsesProvider`、`OpenAICodexProvider`、`CustomProvider`、`LiteLLMProvider`）：
-  - 60s 内必须收到首个 chunk（任意 chunk）
-  - 流开始后连续 60s 无新 chunk 触发超时
-  - 不支持流式时，同次 attempt 内自动回退非流式，非流式用 120s 首响应超时
-- 上述 provider 的外层包装不会再加单次 attempt 的 60s 硬总时长截断；只要 chunk 仍在持续到达，整体生成可超过 60s
+并结合 provider 超时边界判断“慢”是不是异常；超时语义详见 `runtime-overview.md`「Provider 超时边界」。
 
 日志里优先看这些字段：
 
@@ -243,14 +193,6 @@ Provider retry troubleshooting note:
 - `.g3ku/web-ceo-continuity/`
 - `sessions/`
 - 相关的 paused / inflight snapshot
-
-排障时不要只盯 `Input Tokens`。优先区分：
-
-- `prompt_cache_key_hash` 是否 churn
-- `actual_request_hash` 是否变化
-- `provider_request_body.input` 的公共前缀是否提前断裂
-- usage 记录是否能和本地 actual request artifact 对得上
-- completed session 重启后是否恢复到了 continuity sidecar，而不是直接退回 transcript/history fallback
 
 ### 工具调用异常
 
@@ -329,11 +271,7 @@ Provider retry troubleshooting note:
 
 ### Provider Bundle Refresh
 
-- `provider_tool_names` / provider-facing `tools[]` now track the current RBAC-visible concrete tool set for that path, not an old active-plus-pending exposure state machine.
-- Ordinary turns may refresh the bundle immediately when membership changed. If the recomputed bundle has the same names in a different order, keep the persisted order exactly as-is to protect prompt-cache stability.
-- A send that is already performing `token_compression` must keep the pre-existing provider bundle for that send. The first post-compression ordinary turn is the refresh point.
-- `pending_provider_tool_names` and `provider_tool_exposure_commit_reason` are compatibility fields only on new writes. Expect `[]` and `""`, not a live commit workflow.
-- Provider-facing schemas can now be broader than the callable contract for the round. That does not bypass runtime authorization: `tool_names` / callable contract still decides what the model is allowed to invoke this turn.
+- provider-facing tool bundle 的刷新时机、排序与压缩边界约定详见 `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」；bundle 变化会直接影响 prompt cache 前缀稳定性，改动后应验证缓存表现。
 
 ### 修改 China bridge 协议边界
 
@@ -425,24 +363,15 @@ Provider retry troubleshooting note:
 
 ## Memory Queue Workflow
 
-For the queued Markdown memory runtime, the first operator checks should now be:
+For the queued Markdown memory runtime, the first operator checks should be:
 
 1. Inspect `memory/memory_state.sqlite3` for the authoritative memory rows, `refresh_count`, `passed_count`, `is_compressed`, and `from_user` state.
 2. Inspect `memory/MEMORY.md` for the regenerated prompt snapshot currently injected into CEO/frontdoor.
 3. Inspect `memory/queue.jsonl` for pending `write` / `delete` requests.
-4. Inspect `memory/ops.jsonl` for the latest 7-day terminal batch history, including both applied rows and durable discarded rows plus final compression metadata.
+4. Inspect `memory/ops.jsonl` for the latest terminal batch history.
 5. If a processed row exposes `request_artifact_paths`, inspect the referenced files under `.g3ku/memory-requests/` before blaming prompt assembly or the provider adapter.
 6. Use `g3ku memory current`, `g3ku memory queue`, and `g3ku memory flush` when you need a quick operator view without manually opening files.
 7. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend or the catalog bridge.
-
-The important maintenance boundary is:
-
-- queue files are runtime metadata, not user memory content
-- `memory_state.sqlite3` is the authoritative long-term memory state; `MEMORY.md` is the regenerated prompt snapshot
-- `notes/` contains optional detail bodies and should stay small and human-readable
-- `review_state.json` is per-session buffering metadata for the 5-turn ordinary review window; it is not committed user memory
-- `ops.jsonl` is rolling terminal history, not an in-flight retry log or append-forever archive: applied rows and durable discarded outcomes belong there, queue-head error fields remain authoritative for engineering failures that are still retryable, and rows older than 7 days are pruned automatically during normal runtime reads/writes
-- only one live process should hold the memory-worker lease at a time; extra web/worker processes may exist, but they should leave queue consumption to the active lease holder
 
 Operator debugging order for a stuck queue head:
 
@@ -460,7 +389,7 @@ Operator debugging order for duplicated successful memory writes:
 
 ### Memory Maintenance CLI
 
-The memory CLI now keeps only the queued Markdown runtime operator surface:
+The memory CLI keeps only the queued Markdown runtime operator surface:
 
 - `g3ku memory current`
 - `g3ku memory queue`
@@ -470,7 +399,7 @@ The memory CLI now keeps only the queued Markdown runtime operator surface:
 - `g3ku memory import-legacy <path>`
 - `g3ku memory cleanup-legacy`
 
-The old legacy-only commands such as runtime stats/trace/explain, `migrate-v2`, `reset-runtime`, decay, and pending-fact review are no longer part of the active operator contract.
+The old legacy-only commands such as runtime stats/trace/explain, `migrate-v2`, `reset-runtime`, decay, and pending-fact review are not part of the active operator contract.
 
 The operator-oriented maintenance commands beyond `current`, `queue`, and `flush` are:
 
@@ -483,21 +412,10 @@ The operator-oriented maintenance commands beyond `current`, `queue`, and `flush
 
 Use them with these boundaries in mind:
 
-- `doctor` is inspection-only. It does not rewrite `MEMORY.md`, create notes, delete notes, or mutate queue state.
-- `doctor` also avoids implicit runtime bootstrap writes. If `memory/` (or `MEMORY.md`, `queue.jsonl`, `ops.jsonl`, `notes/`) does not exist yet, the command still reports health based on current disk state and does not create those paths.
-- `doctor` should be the first stop when an operator suspects notebook corruption or a blocked queue head. It checks:
-  - whether `MEMORY.md` still matches the managed Markdown block format
-  - whether every visible `ref:note_xxxx` points to an existing note file
-  - whether orphan note files exist under `memory/notes/`
-  - whether `memory/queue.jsonl` contains malformed JSON rows (reported with line-level diagnostics)
-  - whether `queue.jsonl` currently has an old `processing` head that looks stuck
-- If malformed queue rows are detected, `doctor` now reports them as explicit queue-parse issues and exits non-zero. It should not crash with a bare JSON decode exception.
-- `reconcile-notes` is the explicit repair path for note/file consistency. It may create placeholder note files for missing refs, and it only deletes orphan note files when the operator passes the explicit delete flag.
-- `import-legacy` is dry-run by default. The operator must pass `--apply` before it writes `MEMORY.md` or any note files.
-- The default dry-run path for `import-legacy` is inspection-only as well: it parses the legacy payload and prints a summary without creating `memory/`, `MEMORY.md`, `queue.jsonl`, `ops.jsonl`, or note files.
-- `import-legacy --apply` is intentionally conservative. The target memory notebook should already be empty, and the operator should not use it as a merge tool for a live non-empty queue.
-- `cleanup-legacy` is also dry-run by default. It lists removable legacy artifacts such as `HISTORY.md`, structured projections, sync journals, pending/audit files, and `context_store/`.
-- `cleanup-legacy --apply` refuses to delete data-bearing legacy artifacts while `MEMORY.md` is still empty. The intended order is to import or explicitly review old data first, then delete the leftovers once the new notebook already contains the migrated memory.
+- `doctor` is inspection-only: it never rewrites `MEMORY.md`, creates or deletes notes, mutates queue state, or bootstraps missing paths. It should be the first stop when an operator suspects notebook corruption or a blocked queue head. It checks the managed Markdown block format, note-ref consistency, orphan notes under `memory/notes/`, malformed `queue.jsonl` rows (line-level diagnostics), and stuck `processing` heads; malformed queue rows surface as explicit queue-parse issues with a non-zero exit instead of a bare JSON decode crash.
+- `reconcile-notes` is the explicit repair path for note/file consistency. It may create placeholder note files for missing refs and deletes orphan note files only when the operator passes the explicit delete flag.
+- `import-legacy` is dry-run by default: it parses the legacy payload and prints a summary without creating `memory/`, `MEMORY.md`, `queue.jsonl`, `ops.jsonl`, or note files. Writing requires `--apply`, and the target notebook should already be empty — do not use it as a merge tool for a live non-empty queue.
+- `cleanup-legacy` is dry-run by default and lists removable legacy artifacts (`HISTORY.md`, structured projections, sync journals, pending/audit files, `context_store/`). `--apply` refuses to delete data-bearing legacy artifacts while `MEMORY.md` is still empty: import or review old data first, then delete leftovers once the new notebook already contains the migrated memory.
 
 Recommended operator order:
 
@@ -512,14 +430,9 @@ Two queue-head recovery caveats matter during operations:
 - If `retry_after` is still in the future, the restarted worker should leave that head untouched and keep later items blocked. Once `retry_after` has passed, the same head becomes eligible for retry.
 - `processing_started_at` is the first-claim timestamp for that head batch. It should remain stable across retries, so a new `last_error_at` with an old `processing_started_at` is normal.
 
-Operator interpretation of the three queue entry types:
-
-- `write`: explicit or already-refined memory text waiting for real memory processing
-- `delete`: natural-language memory deletion request waiting for the internal memory agent to resolve it to concrete ids
-
 ## Docker / Compose Startup
 
-G3KU now has two supported operator startup modes:
+G3KU has two supported operator startup modes:
 
 - direct local startup through `start-g3ku.ps1` / `start-g3ku.sh`
 - container startup through `compose.yaml`
@@ -540,13 +453,13 @@ The required durable paths are:
 - `tools/`
 - `externaltools/`
 
-Do not treat only `.g3ku/` as sufficient persistence. Detached task temp files now live under `temp/tasks/`, external tool installs live under `externaltools/`, and mutable skill/tool resource copies may also need to survive restart.
+Do not treat only `.g3ku/` as sufficient persistence. Detached task temp files live under `temp/tasks/`, external tool installs live under `externaltools/`, and mutable skill/tool resource copies may also need to survive restart.
 
-Deployment unlock now has an operator-facing env contract:
+Deployment unlock has an operator-facing env contract:
 
 - `G3KU_BOOTSTRAP_PASSWORD` allows a locked project to auto-unlock at process start
 - `G3KU_INTERNAL_CALLBACK_URL` allows the worker container to call back into the web container over the Compose network instead of assuming `127.0.0.1`
-- The official container image now also pins text/runtime locale explicitly with `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, and `PYTHONIOENCODING=utf-8`. If container-only `exec`, validation-command, or Python traceback output shows mojibake, verify those three env vars before blaming prompt assembly or websocket rendering.
+- The official container image also pins text/runtime locale explicitly with `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, and `PYTHONIOENCODING=utf-8`. If container-only `exec`, validation-command, or Python traceback output shows mojibake, verify those three env vars before blaming prompt assembly or websocket rendering.
 
 If Docker startup appears healthy but detached tasks never report back, inspect these in order:
 
@@ -557,7 +470,7 @@ If Docker startup appears healthy but detached tasks never report back, inspect 
 
 ## 10. Memory Reset Workflow
 
-`memory/` now contains both user long-term memory data and unified-context retrieval state, including tool/skill catalog retrieval indexes. A full physical reset of the directory removes all of these together.
+`memory/` contains both user long-term memory data and unified-context retrieval state, including tool/skill catalog retrieval indexes. A full physical reset of the directory removes all of these together.
 
 Operator expectations:
 

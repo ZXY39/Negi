@@ -108,8 +108,8 @@
 还要额外记住一个新的运行时边界：
 
 - 配置刷新仍然不会把一个“已经发出去的单次 provider 请求”中途热切换到新模型。
-- 但对于已经进入 provider-failure retry 或 empty-response retry 的当前轮次，CEO/frontdoor 与节点运行时现在都会在下一次重试前检查 runtime revision。
-- Memory queue 内部的 memory agent 现在也遵循同样的 revision 边界，但它看的不是 CEO/node 的 provider retry，而是 memory 自己的同批次 validation/repair 重试点；普通 review window 已不再经过单独的 `assess -> apply` 交接。
+- 但对于已经进入 provider-failure retry 或 empty-response retry 的当前轮次，CEO/frontdoor 与节点运行时都会在下一次重试前检查 runtime revision。
+- Memory queue 内部的 memory agent 也遵循同样的 revision 边界，但它看的不是 CEO/node 的 provider retry，而是 memory 自己的同批次 validation/repair 重试点；普通 review window 不经过单独的 `assess -> apply` 交接。
 - 如果 revision 已变化，旧模型链的重试会失效，当前轮会用新的 model refs 重新开始，而不是继续无限重试旧链。
 
 维护上要把这理解成“重试边界上的重建”，而不是“请求中途热切模型”。如果用户反馈“改完模型链后旧重试还在跑”，重点检查：
@@ -190,15 +190,9 @@ G3KU 的模型系统分两层：
 
 loader 会显式拒绝 legacy `channels.*` 配置，这一点在迁移和排障时很重要。
 
-支持的 canonical ids：
+支持的 canonical ids 详见 `china-channels.md`「支持的 canonical channel ids」。
 
-- `qqbot`
-- `dingtalk`
-- `wecom`
-- `wecom-app`
-- `wecom-kf`
-- `wechat-mp`
-- `feishu-china`
+单个渠道的行为字段挂在对应渠道记录下、由 Node 宿主消费，例如 `chinaBridge.channels.qqbot.progressMode`（过程里程碑消息，`off` / `milestones`）与 `replyFinalOnly`。注意宿主侧合并账号配置（`mergeQQBotAccountConfig`）不走 zod parse 的默认值补全路径，这类字段的默认值需要在消费代码里用 `??` 兜底。
 
 ## 10. 常见排障入口
 
@@ -244,7 +238,7 @@ loader 会显式拒绝 legacy `channels.*` 配置，这一点在迁移和排障�
 
 ## Deployment Unlock Contract
 
-Container deployment now introduces a second bootstrap path besides the interactive unlock UI.
+Container deployment introduces a second bootstrap path besides the interactive unlock UI.
 
 - `G3KU_BOOTSTRAP_PASSWORD` may be provided at process start so web and worker containers can unlock the existing project automatically.
 - `G3KU_BOOTSTRAP_MASTER_KEY` still exists, but it remains the internal fast path for a web-managed child worker rather than the preferred Compose/operator contract.
@@ -265,32 +259,31 @@ If a worker container reports `project_locked` while the web container appears h
 
 ## Image Multimodal Binding Flag
 
-`models.catalog[]` now carries a second binding-owned chat field: `image_multimodal_enabled` (`imageMultimodalEnabled` in saved JSON / admin payload aliases).
+`models.catalog[]` carries a second binding-owned chat field: `image_multimodal_enabled` (`imageMultimodalEnabled` in saved JSON / admin payload aliases).
 
 - Default value is `false`.
 - Existing saved models that do not have the field must be treated as `false` at load time; there is no backfill migration that rewrites old configs just to add the default.
 - The flag belongs to the managed model binding layer, not to the provider config record. It must persist in `.g3ku/config.json` under `models.catalog[]`, and it must not be written into `.g3ku/llm-config/records/*.json`.
 - `/api/models` and `/api/llm/bindings` both expose and update this field because they are two views over the same binding-owned metadata.
-- The practical runtime meaning is intentionally narrow: Web CEO image uploads only expand into provider-visible multimodal request blocks when the currently selected chat binding has `image_multimodal_enabled=true`.
-- When the flag is `true` and the current turn actually uploads images, CEO/frontdoor also changes the provider-visible attachment note for that turn: the model sees a direct-visual guidance note rather than the old local-path attachment text. Attachment metadata and transcript/debugging storage still remain available outside the provider-visible prompt.
-- Historical image reopen through `content_open` now uses the same binding-owned gate at tool-execution time. The runtime context given to CEO/frontdoor tools must therefore carry the already-resolved `image_multimodal_enabled` value for the current `model_refs`, rather than forcing each tool to rediscover it independently.
+
+Runtime gating of image uploads by this flag: 详见 `web-and-admin.md`「Image Upload Gating」.
 
 ## Frontdoor Context Window Contract
 
-Frontdoor request-size control now comes from the selected chat model's `context_window_tokens`, not from a separate frontdoor summary tuning surface.
+Frontdoor request-size control comes from the selected chat model's `context_window_tokens`.
 
 - Every managed chat model and every `llm-config` chat binding must carry `context_window_tokens`.
 - The value is runtime-authoritative: CEO/frontdoor resolves the currently selected model, reads its `context_window_tokens`, and uses that number for pre-send checks.
-- For CEO/frontdoor, "runtime-authoritative" now explicitly means the current live config revision from `get_runtime_config(...)`. Maintainers should not treat `loop.app_config` as an equivalent source of truth for send-time context-window decisions, because it may lag behind recent admin/model edits.
-- There is no fallback to `loop.context_length`, no default floor, and no legacy global-summary threshold override.
+- For CEO/frontdoor, "runtime-authoritative" explicitly means the current live config revision from `get_runtime_config(...)`. Maintainers should not treat `loop.app_config` as an equivalent source of truth for send-time context-window decisions, because it may lag behind recent admin/model edits.
+- There is no fallback to `loop.context_length` and no default floor.
 - Inline legacy model payload migration must preserve `contextWindowTokens`; otherwise later `/api/models` reads and role-chain validation will misreport the model as missing a context window.
 
 ### Save-Time And Run-Time Validation
 
-- Model create/update now requires `context_window_tokens > 25000`.
+- Model create/update requires `context_window_tokens > 25000`.
 - Role-chain batch save fails if any referenced model is missing a valid `context_window_tokens`.
-  - The save path will now opportunistically backfill missing `models.catalog[].contextWindowTokens` from the bound `llm-config` record's `parameters.context_window_tokens` when possible (this mainly matters for older installs that upgraded after `context_window_tokens` became mandatory).
-- Old stored models may still exist without that field, but if one is actually selected at runtime the turn now fails fast instead of sending with an implicit unlimited window.
+  - The save path opportunistically backfills missing `models.catalog[].contextWindowTokens` from the bound `llm-config` record's `parameters.context_window_tokens` when possible (this mainly matters for older installs that upgraded after `context_window_tokens` became mandatory).
+- Old stored models may still exist without that field, but if one is actually selected at runtime the turn fails fast instead of sending with an implicit unlimited window.
 
 ### What To Check When It Breaks
 
@@ -299,47 +292,43 @@ If an operator reports frontdoor send failures after a model or chain change, ch
 1. The selected model binding in `/api/models` really exposes `context_window_tokens`.
 2. The saved `llm-config` record under `.g3ku/llm-config/records/*.json` kept the field during migration.
 3. The role chain only references models that have a valid window configured.
-4. The actual provider request estimate crossed the model's window, in which case frontdoor now stops before send instead of trying a legacy semantic-summary path.
+4. The actual provider request estimate crossed the model's window.
+
+Behavior once the estimate crosses the window: 详见 `runtime-overview.md`「Frontdoor Context Compression (Current Contract)」.
 
 ## Memory Runtime Settings Anchor
 
-`tools/memory_runtime/resource.yaml` is still the runtime settings anchor for long-term memory, but the meaning of that settings surface changed.
+`tools/memory_runtime/resource.yaml` is the runtime settings anchor for long-term memory. It mixes two boundaries:
 
-- `document.*` now controls the Markdown notebook layout, including `memory/MEMORY.md`, `memory/notes/`, the summary character limit, and the full document character ceiling.
-  - The current default `document.summary_max_chars` is `250`. When a memory candidate cannot be expressed within that one-line limit, the intended writer behavior is to compress it or switch to a one-line summary plus `note` pattern rather than overflowing the notebook line.
-  - `document.compress_trigger_chars` and `document.compress_target_chars` now define the post-commit snapshot compaction thresholds. The runtime rebuilds `MEMORY.md` from SQLite first, then starts compression only after the regenerated snapshot exceeds the trigger.
-- `queue.*` now controls the single durable queue, including `memory/queue.jsonl`, `memory/ops.jsonl`, batch size, max wait time, and the ordinary-turn review window size.
-- `agent.*` now controls the dedicated memory-maintenance worker behavior.
-- Older `store.*`, `retrieval.*`, and `embedding.*` sections still matter for the catalog bridge because tool/skill semantic narrowing still relies on that catalog-only projection, even though long-term memory正文 no longer depends on the old `rag_memory` runtime.
-- The earlier transition fields such as `mode`, `backend`, `bootstrap_mode`, and `compat.dual_write_legacy_files` are no longer part of the active memory runtime settings surface.
+- Markdown long-term memory notebook settings
+- Catalog bridge retrieval settings
 
-There is now also a project-config side contract that maintainers must keep straight:
+Settings surface:
+
+- `document.*` controls the Markdown notebook layout, including `memory/MEMORY.md`, `memory/notes/`, the summary character limit, and the full document character ceiling.
+  - The default `document.summary_max_chars` is `250`.
+  - `document.compress_trigger_chars` and `document.compress_target_chars` define the post-commit snapshot compaction thresholds.
+- `queue.*` controls the single durable queue, including `memory/queue.jsonl`, `memory/ops.jsonl`, batch size, max wait time, and the ordinary-turn review window size. `queue.review_interval_turns` is the per-session ordinary-turn review window size, defaulting to `5`.
+- `agent.*` controls the dedicated memory-maintenance worker behavior.
+- `store.*`, `retrieval.*`, and `embedding.*` sections matter for the catalog bridge: tool/skill semantic narrowing relies on that catalog-only projection.
+- `mode`, `backend`, `bootstrap_mode`, and `compat.dual_write_legacy_files` are not part of the active memory runtime settings surface.
+
+Project-config side keys:
 
 - `models.roles.memory` is the dedicated model chain for the internal memory agent.
 - `agents.roleIterations.memory` controls the memory agent's model-call round cap.
 - `agents.roleConcurrency.memory` is fixed to `1`; it is persisted for config/UI symmetry but is not an operator-tunable parallelism knob.
-- `models.roles.memory` may be empty, but when it is non-empty every referenced binding must have `capability=chat`. The admin route now rejects embedding/rerank or other non-chat bindings for the memory role instead of letting the queue fail later at runtime.
-- Unlike `ceo`, `execution`, and `inspection`, the `memory` role is allowed to be empty. That does not fail config load; instead it blocks the memory queue head at runtime until the role is configured.
-- If the queue head is already inside `processing` when an operator changes `models.roles.memory`, the already dispatched provider call is not hot-swapped. But before the next internal memory repair attempt, the runtime now re-reads the latest revision and re-resolves the memory model chain, so post-refresh repair rounds do not stay pinned to the old route forever.
+- `models.roles.memory` may be empty, but when it is non-empty every referenced binding must have `capability=chat`. The admin route rejects embedding/rerank or other non-chat bindings for the memory role.
+- Unlike `ceo`, `execution`, and `inspection`, the `memory` role is allowed to be empty; that does not fail config load.
+- If the queue head is already inside `processing` when an operator changes `models.roles.memory`, the already dispatched provider call is not hot-swapped. Before the next internal memory repair attempt, the runtime re-reads the latest revision and re-resolves the memory model chain.
 
-Maintainers should no longer read `tools/memory_runtime/resource.yaml` as "structured memory database tuning only". It now mixes two boundaries:
-
-- Markdown long-term memory notebook settings
-- Catalog bridge retrieval settings
+The active internal memory writer prompt is the file-backed runtime asset `main/prompts/memory_agent.md`.
 
 When debugging "memory queue stuck" reports, check both layers in order:
 
 1. `models.roles.memory` / `agents.roleIterations.memory` in `.g3ku/config.json`
 2. `tools/memory_runtime/resource.yaml` queue/document limits
 
-Two specific memory-runtime config semantics changed again:
+Do not assume a valid CEO model chain implies a valid memory-agent chain; the memory worker does not fall back to CEO.
 
-- `queue.review_interval_turns` now means the per-session ordinary-turn review window size, defaulting to `5`, not the earlier hashed sampling interval.
-- The active internal memory writer prompt is the file-backed runtime asset `main/prompts/memory_agent.md`. The old assessor prompt file may still exist for compatibility, but ordinary queued review windows no longer use a separate assessor lane.
-- The current writer prompt contract is intentionally stricter than the original rollout:
-  - admission is narrowed to durable dissatisfaction signals, reusable user suggestions, explicit remember requests, and repeated-mistake lessons
-  - memory summaries should read like `condition + requirement`
-  - semantic duplicates must prefer `rewrite` and must not be re-added as synonymous `adds`
-  - write batches may now also resolve through an explicit `noop_reason` path when the candidate should be ignored and the durable notebook should remain unchanged; this path is write-only and must not be combined with add/rewrite/delete/note changes
-
-Do not assume a valid CEO model chain implies a valid memory-agent chain. The memory worker no longer falls back to CEO.
+Queue execution and writer workflow: 详见 `operations-and-maintenance.md`「Memory Queue Workflow」.

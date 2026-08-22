@@ -16,7 +16,7 @@ When debugging behavior, first identify which side owns the state transition:
 
 ## Local Startup And Launcher Contract
 
-- `g3ku.cmd` / `g3ku.ps1` / `g3ku.sh` are thin CLI passthrough wrappers around `g3ku_bootstrap.py`; with no arguments they now default to `web` (historically they printed usage and exited, which made right-click / argument-less launches look broken). `start-g3ku.*` remains the explicit double-click entry with its own managed-process handling.
+- `g3ku.cmd` / `g3ku.ps1` / `g3ku.sh` are thin CLI passthrough wrappers around `g3ku_bootstrap.py`; with no arguments they default to `web`. `start-g3ku.*` remains the explicit double-click entry with its own managed-process handling.
 - For the `web` command the bootstrap parent stays in the terminal as a readiness supervisor: it spawns the server child, polls `http://127.0.0.1:<port>/api/bootstrap/status` (a g3ku-specific endpoint so a foreign process squatting on the port cannot fake readiness), and prints a terminal banner: success with the clickable URL, or failure with the child exit code plus a pointer to `.g3ku/logs/console.log` (where the child's stdout/stderr are appended). A slow-start warning appears after the probe deadline instead of a false failure.
 - `g3ku/web/launcher.py::prepare_web_server_start` self-heals before acquiring the single-instance lock: it terminates leftover web-server processes of this workspace (cmdline `-m g3ku web` or `-c "...run_web_server_entrypoint..."`, scoped by the workspace venv python path or the process working directory, excluding itself). Starting therefore replaces a stale/zombie server of the same workspace; two web servers for one workspace still cannot coexist.
 - The single-instance guard is `.g3ku/start.lock` (byte-range lock; metadata pid/port are written right after locking, so a holder killed between lock and write leaves an empty file and error messages may show `pid=unknown` — fall back to `netstat` on the web port when identifying squatters).
@@ -24,34 +24,22 @@ When debugging behavior, first identify which side owns the state transition:
 
 ## Memory Management Page And Admin Contract
 
-The browser shell now has a top-level `记忆管理` page. This is intentionally a read-only operator surface for the queued long-term memory runtime.
+The browser shell has a top-level `记忆管理` page. This is intentionally a read-only operator surface for the queued long-term memory runtime.
 
 ### Frontend Responsibilities
 
-- The left rail exposes `记忆管理` as its own top-level navigation item, not as a nested subsection of model configuration.
-- The page shows two independent columns:
-  - unprocessed queue items, oldest-first, in real queue order
-  - terminal processed batches, newest-first, including both applied and discarded outcomes
-- Queue cards default to collapsed and show runtime-owned state such as `pending` / `processing`, enqueue time, and the latest engineering error when present.
-- Processed cards default to collapsed and show batch-owned metadata such as processed time, terminal status, op type, token usage, model chain, attempts, discard reason when present, and note refs.
-- Applied `write` batches may now also carry a backend-owned `write_mode` detail (`add` / `rewrite` / `mixed`). The frontend should prefer that field when choosing the operator-visible action label (`增加` / `修改` / `混合变更`) instead of assuming every `write` means a new memory row was added.
-- Processed detail modals should treat the secondary text lane as mutation-oriented, not notebook-oriented. For ordinary applied writes, the operator-facing title is `变更内容` and the frontend should prefer backend `change_preview`; for no-op / discarded write rows, the title remains `无变更原因` and the body should still come from `noop_reason`.
-- Memory list cards are intentionally compact. Clicking a queue or processed card opens a frontend-owned read-only detail modal for the full payload instead of expanding the entire text inline inside the list.
-- The detail modal keeps long payloads inside scrollable text regions so one large row does not push the rest of the list off-screen.
-- Queue / processed detail text still treats `ref:note_xxxx` as a read-only preview trigger. Clicking a note ref opens a second frontend-owned drawer/modal that only fetches and displays the note body; it must not expose edit or save controls.
-- Page-level memory errors and queue-head blocked notices now use the shared app toast style instead of persistent inline banners under the memory page header.
-- The page is read-only in v1. There are no browser buttons for retry, delete, edit, or force-flush.
+- The left rail exposes `记忆管理` as its own top-level navigation item, not a nested subsection of model configuration.
+- The page shows two independent columns: unprocessed queue items oldest-first in real queue order, and terminal processed batches newest-first, including both applied and discarded outcomes.
+- Cards default to collapsed and stay compact; clicking a queue or processed card opens a frontend-owned read-only detail modal for the full payload, with long payloads kept inside scrollable text regions.
+- `ref:note_xxxx` text is a read-only preview trigger: clicking a note ref opens a second frontend-owned drawer that only fetches and displays the note body and must not expose edit or save controls.
+- The page is read-only. There are no browser buttons for retry, delete, edit, or force-flush.
 
 ### Backend Responsibilities
 
-- `GET /api/memory/queue` returns queue-owned runtime state directly from `memory/queue.jsonl`, including `status`, retry/error fields, and pagination metadata.
-- `GET /api/memory/processed` returns terminal batch records from `memory/ops.jsonl`, including both applied rows and durable discarded rows, also with pagination metadata.
-- For applied `write` rows, the processed payload may also include `write_mode` so the browser can distinguish a pure add from a rewrite or mixed write batch without reopening request artifacts.
-- Mutation-bearing processed rows may also include `change_preview`. This is a backend-owned summary of what changed in the current batch; it is intentionally different from `document_preview`, which is still a snapshot-oriented preview of the rebuilt notebook head.
-- `memory/ops.jsonl` is now a rolling processed-history surface rather than an append-forever archive. The backend prunes processed rows older than 7 days during normal processed-log reads/writes, so `/api/memory/processed` should be treated as the latest 7-day operator history window.
-- `GET /api/memory/notes/{ref}` is the minimal read-only note preview contract for the memory page. It returns the note body for an existing `ref:note_xxxx` entry and returns a clear not-found error when the referenced note file is missing.
-- `POST /api/memory/admin/retry-head` exists as a guarded operator contract, but it is disabled by default. When `G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS` is not enabled, the backend returns `403` with `detail.code=memory_admin_mutation_disabled`; successful calls append an audit record to `memory/admin_audit.jsonl`.
-- Older admin memory endpoints such as dense-index reset/rebuild and runtime stats still exist, but they are no longer the primary operator path for understanding whether long-term memory is healthy.
+- `GET /api/memory/queue` and `GET /api/memory/processed` return queue-owned runtime state and terminal batch records (applied rows plus durable discarded rows), each with pagination metadata.
+- `memory/ops.jsonl` is a rolling processed-history surface rather than an append-forever archive; the backend prunes processed rows older than 7 days, so `/api/memory/processed` is the latest 7-day operator history window.
+- `GET /api/memory/notes/{ref}` is the minimal read-only note preview contract, returning the note body for an existing `ref:note_xxxx` entry or a clear not-found error when the note file is missing.
+- `POST /api/memory/admin/retry-head` exists as a guarded operator contract but is disabled by default; unless `G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS` is enabled the backend returns `403` with `detail.code=memory_admin_mutation_disabled`, and successful calls append an audit record to `memory/admin_audit.jsonl`.
 
 ### Maintenance Boundary
 
@@ -97,7 +85,7 @@ The frontend language switcher is architecture-relevant because it changes opera
 
 ## CEO Composer Runtime
 
-The Leader/CEO composer now has two distinct runtime behaviors that maintainers need to keep straight.
+The Leader/CEO composer has two distinct runtime behaviors that maintainers need to keep straight.
 
 ### 1. Active-Turn Button Semantics
 
@@ -105,27 +93,27 @@ The Leader/CEO composer now has two distinct runtime behaviors that maintainers 
 - If a user-visible turn is currently running and the composer is empty, the primary button switches to `pause`.
 - If the composer contains text or attachments, the primary button switches back to `send` even when a user turn or heartbeat turn is still running.
 
-This is intentional. The composer button no longer means "pause whenever a turn is active"; it means "pause only when the user has not prepared a follow-up payload".
+This is intentional. The composer button means "pause only when the user has not prepared a follow-up payload", not "pause whenever a turn is active".
 
 ### 2. Queued Follow-Ups
 
 - Browser-side queued follow-ups are stored per session and rendered above the composer.
-- Sending while a turn is active still does not interrupt the current turn, but the browser now forwards that follow-up to the backend immediately instead of waiting for the turn to go idle first.
+- Sending while a turn is active still does not interrupt the current turn, but the browser forwards that follow-up to the backend immediately instead of waiting for the turn to go idle first.
 - The backend-owned follow-up queue is authoritative once that send succeeds. The local chip list remains a UI affordance only, and chips that were already handed off to the runtime must not be re-sent when the turn later closes.
-- CEO/frontdoor now consumes queued follow-ups at the safe boundary right before the next `call_model` send of the same visible turn. The runtime appends them as independent `user` messages to the current request body instead of concatenating them into one synthetic supplement string.
+- CEO/frontdoor consumes queued follow-ups at the safe boundary right before the next `call_model` send of the same visible turn. The runtime appends them as independent `user` messages to the current request body instead of concatenating them into one synthetic supplement string.
 - If the current visible turn finishes before another `call_model` round happens, the backend immediately starts the next fresh user turn from the queued follow-ups after the current turn closes.
 - Each queued item still remains its own user message in transcript persistence; batching only changes which next LLM request sees that group first.
 - Once a queued follow-up has been handed off to the backend, it should still remain in the composer-side queue lane until runtime snapshot/final-reply data can prove that the follow-up has been consumed into a visible turn.
 - Browser rendering must not create a provisional transcript bubble merely because a follow-up was accepted by the backend queue. Queue acceptance and visible conversation placement are intentionally different stages.
-- `ceo.reply.final` may now include `user_messages` for the just-finished visible turn. This is the authoritative current-turn user batch and exists specifically so the frontend can decide whether runtime-sent follow-ups belonged to that same reply or to a later chained turn.
+- `ceo.reply.final` may include `user_messages` for the just-finished visible turn. This is the authoritative current-turn user batch and exists specifically so the frontend can decide whether runtime-sent follow-ups belonged to that same reply or to a later chained turn.
 - If `ceo.reply.final.user_messages` includes a runtime-sent follow-up, the browser must rebuild the final visible order as `current turn user batch -> final assistant reply` and clear the matched queue entry.
 - If a runtime-sent follow-up does not appear in the just-finished turn's `user_messages`, the browser should keep it in the queue lane until a later fresh user turn or transcript snapshot represents it authoritatively.
 - `snapshot.ceo.messages` must also avoid replaying running-turn `pending` user transcript rows as ordinary history bubbles. During a live running turn, authoritative current-turn user placement comes from `inflight_turn.user_messages`, not from flat transcript replay.
-- When a running follow-up is actually consumed into the next model send of the same visible conversation lane, the runtime now also archives the pre-follow-up assistant execution bubble into visible UI history before the consumed user bubble is restored. That archive is UI-visible but prompt-hidden, so refresh/reconnect can preserve the same visual ordering without polluting later prompt history.
+- When a running follow-up is actually consumed into the next model send of the same visible conversation lane, the runtime also archives the pre-follow-up assistant execution bubble into visible UI history before the consumed user bubble is restored. That archive is UI-visible but prompt-hidden, so refresh/reconnect can preserve the same visual ordering without polluting later prompt history.
 
 ### 2.2. Regulatory Approval Flow
 
-- Web CEO now has a second blocking composer lane besides ordinary running turns: a pending `frontdoor_tool_approval_batch`.
+- Web CEO has a second blocking composer lane besides ordinary running turns: a pending `frontdoor_tool_approval_batch`.
 - The websocket/runtime path emits that batch through `ceo.turn.interrupt`, and reconnect/session-restore should also be able to rebuild it from `GET /api/ceo/sessions/{session_id}/pending-interrupts` or the paused snapshot lane.
 - The frontend review UX is intentionally split:
   - the operator reviews one risky tool call at a time in a toast-like approval card,
@@ -148,7 +136,7 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 ### 2.3. Streamed Reply Delta Contract
 
 - `/ws/ceo` remains the single duplex transport for Web CEO. Browser sends, pause/resume control, tool events, and assistant reply delivery still share the same websocket connection; streamed assistant text is not a separate SSE channel.
-- User-visible assistant text may now arrive on a dedicated live-only event `ceo.reply.delta`.
+- User-visible assistant text may arrive on a dedicated live-only event `ceo.reply.delta`.
 - The payload is intentionally small:
   - `turn_id`
   - `source`
@@ -165,38 +153,21 @@ This is intentional. The composer button no longer means "pause whenever a turn 
 - `ceo.reply.final` remains the authoritative closeout event for the assistant bubble. Final markdown rendering, transcript finalization, canonical-context finalization, and visible-turn completion still happen there.
 - The CEO turn body is rendered as a stage timeline reconstructed from the turn's canonical context / stage state, not as a single overwritten bubble: each stage renders its `preamble_text` (the narration that accompanied its creation) above the stage header, collapsed by default to stage titles with budget/progress meta; expanding a stage reveals per-round blocks carrying `rounds[].text` (the model's mid-turn narration) plus that round's tool cards (clickable for arguments/output, externalized refs resolved through the existing content API). The final output renders below the stage rail and user messages render right-aligned. The historical separate "Interaction Flow" details wrapper is retired for the CEO feed; rounds with no mid-turn text render tool cards only.
 - Because the timeline reads stage/round records, mid-turn narration survives page reloads via the persisted `canonical_context` on assistant transcript entries even though the transcript content itself stores only the final reply text.
-- `ceo.turn.patch` is no longer the high-frequency assistant-text streaming lane. It remains the lower-frequency lane for inflight/preserved snapshot refreshes, state transitions, reconnect bootstrap, and tool/interrupt-related snapshot changes.
+- `ceo.turn.patch` is not the high-frequency assistant-text streaming lane; it is the lower-frequency lane for inflight/preserved snapshot refreshes, state transitions, reconnect bootstrap, and tool/interrupt-related snapshot changes.
 
 ### 2.4. Runtime Error Contract
 
 - `/ws/ceo` may also emit `ceo.error` when a visible turn fails before `ceo.reply.final`.
 - The frontend should treat `ceo.error.data.message` as the authoritative operator-facing text for that failure boundary, not as optional debug metadata.
-- Backend error delivery now has an explicit empty-message fallback. If the raw exception string is empty (for example a bare `MemoryError`), websocket delivery must reuse the session snapshot `last_error.message` when available, and otherwise emit a non-empty fallback message instead of leaving the browser to show `unknown error`.
-- This matters especially for memory-pressure failures during request-artifact persistence: the operator-visible contract is now “a readable runtime failure message plus a terminal error state”, not “blank message that the browser turns into `unknown error`”.
+- Backend error delivery has an explicit empty-message fallback. If the raw exception string is empty (for example a bare `MemoryError`), websocket delivery must reuse the session snapshot `last_error.message` when available, and otherwise emit a non-empty fallback message instead of leaving the browser to show `unknown error`.
+- This matters especially for memory-pressure failures during request-artifact persistence: the operator-visible contract is “a readable runtime failure message plus a terminal error state”, not “blank message that the browser turns into `unknown error`”.
 
 ### 2.5. Image Upload Gating
 
-- Web CEO uploads still persist attachment metadata and transcript/debugging information about the stored local file, but provider-visible current-turn content no longer has to reuse that same local-path note.
-- The websocket/input layer no longer unconditionally turns uploaded images into provider-visible `image_url` blocks.
-- CEO/frontdoor now decides per turn whether uploaded images should expand into multimodal request content. The decision key is the selected model binding's `image_multimodal_enabled` flag.
-- If `image_multimodal_enabled=false`, uploads stay on the text downgrade path and the model only sees ordinary text plus the attachment note.
-- If `image_multimodal_enabled=true`, only the live request of the current visible turn may contain provider-visible image input. Durable transcript/baseline lanes still strip those image blocks back out.
-- When that live multimodal path is active and the current turn includes image uploads, the model-facing text note must switch to a generic "image is attached directly in this request" guidance note. It must not expose `local path` text or tell the model to inspect local files first.
-- That direct-visual note is no longer the only model-visible upload contract. CEO/frontdoor now also rebuilds a separate runtime-contract lane, `attachment_reopen_targets`, from current-turn `web_ceo_uploads` plus transcript-backed upload metadata from earlier visible user turns.
-- `attachment_reopen_targets` is the stable reopen lane for uploaded files/images after the provider-visible user text has been rewritten into the direct-visual note. Each target may include exact `path` and, when available, exact `ref`.
-- The runtime does not auto-fill detached task parameters from this lane. If the model calls `create_async_task` for work that must reopen an uploaded file/image, it is expected to copy the relevant `path` / `ref` from `attachment_reopen_targets` into `create_async_task.file_targets`.
-- That copy step now also has a runtime rejection boundary for path mode: if the model sends `file_targets.path`, it must already be the exact absolute path of an existing file. Frontdoor/browser state still stores upload metadata, but detached task creation no longer accepts bare filenames or relative paths as reopen handles.
-- Historical image reopen via `content_open` is a second, separate multimodal lane. The browser/runtime may continue to show or persist the stored local file path as ordinary attachment metadata, but that does not mean a later turn automatically re-sends the image pixels.
-- When a multimodal route successfully reopens a historical image, the next live request gets a runtime-owned overlay message whose text is `图片已通过 content_open 打开，视觉内容已附带在本轮上下文中`, plus the provider-visible image block. Durable transcript/session baselines must immediately strip the image block back out.
-- If the current model binding is not multimodal, reopening a historical image through `content_open` must fail with `非多模态模型无法打开图片` rather than silently degrading to a fake text preview.
-- That reopened-image overlay is single-send only. If the send that carried it later overflows, compresses, or errors, the following turn should continue from the ordinary text/path baseline unless the agent explicitly reopens the image again.
-- That direct-visual rule applies to both the initial user message of a visible turn and any queued follow-up batch that is merged into the same turn before the next `call_model` send.
-- Web CEO upload protection now has two layers:
-  - `/api/ceo/uploads` rejects any single image larger than `5 MiB`
-  - the runtime rechecks image size again before expanding the upload into a provider request, so bypassing the upload endpoint does not bypass the limit
-  - by contrast, a historical image reopened via `content_open` that exceeds `5 MiB` is auto-compressed (JPEG quality reduction, then downscaling) to fit under the limit and still injected, rather than rejected; only when it cannot be compressed under the limit, or the file is missing, is that single image skipped with a text note
-- `/api/content/read` is binary-safe: for image/binary targets it returns a short placeholder plus the real mime type instead of raising a UTF-8 decode 500. Content reading is a text/display surface; it is not the path that carries image pixels to the model (that is the upload-expansion / `content_open` overlay path).
-- Composer/preflight estimation must use the same expansion rule as the real send. If the current model binding would not expand images, the meter/preflight must estimate the downgraded text-only request instead of pretending an image will be sent.
+- Whether uploads become provider-visible image content is gated per turn by the selected model binding's `image_multimodal_enabled` flag: off keeps uploads on the text downgrade path; on lets only the current visible turn's live request carry provider-visible image input, while durable transcript/baseline lanes strip the image blocks back out.
+- A stable reopen lane, `attachment_reopen_targets`, rebuilt from current-turn uploads and earlier transcript metadata, lets uploaded files/images be reopened after the user text is rewritten into a direct-visual note. Detached task creation does not auto-fill from this lane; `create_async_task.file_targets.path` must already be the exact absolute path of an existing file.
+- Upload protection is two-layered: `/api/ceo/uploads` rejects a single image larger than `5 MiB`, and the runtime rechecks size before expanding an upload into a provider request, so bypassing the endpoint does not bypass the limit.
+- Historical reopen via `content_open` is a separate lane that injects a single-send runtime overlay plus the provider-visible image block; the overlay does not survive a later overflow, compression, or error, and a non-multimodal binding fails rather than degrading to a text preview.
 
 ### 2.6. Attachment Bubble Rendering Contract
 
@@ -209,43 +180,27 @@ This is intentional. The composer button no longer means "pause whenever a turn 
   - transcript/runtime messages may still carry the internal upload note in `content` for model/debugging purposes
   - `snapshot.ceo.messages[].content` must prefer `metadata.web_ceo_raw_text` whenever `metadata.web_ceo_uploads` is present, even when that raw text is the empty string
   - the authoritative user-facing attachment lane comes from `attachments`, not from reparsing the internal note text
-- The same persisted `metadata.web_ceo_uploads` lane is now also the source-of-truth for rebuilding `attachment_reopen_targets` in later frontdoor turns. If attachment bubbles still restore correctly but later runtime contracts lose reopen paths, debug transcript metadata preservation before debugging contract rendering.
+- The same persisted `metadata.web_ceo_uploads` lane is also the source-of-truth for rebuilding `attachment_reopen_targets` in later frontdoor turns. If attachment bubbles still restore correctly but later runtime contracts lose reopen paths, debug transcript metadata preservation before debugging contract rendering.
 - Non-image attachments should render as clickable file bubbles rather than inline text. Clicking them should open a new browser tab against the backend-owned read-only file route `GET /api/ceo/uploads/file`, not against a raw local filesystem path.
 - Image attachments should render as thumbnail bubbles, not as ordinary file pills. The same thumbnail should also be the click target that opens the underlying file in a new tab.
 - If refresh/reconnect shows the internal upload note instead of attachment bubbles, debug the snapshot builder in `g3ku/runtime/api/websocket_ceo.py` before debugging CSS or DOM layout.
 
-### 2.7. Inline Markdown Image Rendering Contract
+### 2.7. Inline Markdown Image Rendering And Media Middle Layer
 
-- The browser-side chat markdown renderer (`renderInlineMarkdown` in `g3ku/web/frontend/org_graph_app.js`) supports the standard image syntax `![描述](来源)` and renders it as an inline `<img class="msg-inline-image">`. This applies to both persisted history and live turns, since both flow through the same `renderMarkdown` pipeline.
-- `来源` is resolved as follows:
-  - `https://` / `http://` URLs render directly as the image source.
-  - absolute local filesystem paths (e.g. `C:\...\output\xx.png`) and workspace-relative paths resolve to the backend-owned read-only route `GET /api/ceo/uploads/file?session_id=...&path=...`.
-  - `data:` URIs and unknown schemes are rejected and render as nothing (no image, no stray link).
-- The file route serves from two allowed roots only: the per-session upload directory and `workspace_path()/output`. Paths outside either root return `400 upload_path_outside_session_dir`; missing files return `404`. This is enforced in `g3ku/runtime/api/websocket_ceo.py:_resolve_uploaded_file`.
-- In assistant content, local references are normally pre-rewritten by the media middle layer (2.7.1) before reaching the renderer: existing raster images arrive as staged thumbnail paths (served through the uploads/file route above) and other local files arrive as signed viewer URLs. The direct resolution rules in this section remain the fallback for remote URLs, already-servable paths, and failed rewrites.
-- The frontdoor system prompt (`g3ku/runtime/prompts/ceo_frontdoor.md`) instructs the agent to present images to the user with this markdown syntax instead of plain text paths or bare links; the renderer is the enforcement backstop.
-- This contract complements, and does not replace, the structured attachment lane in section 2.6: user uploads still render as attachment bubbles, while the agent's generated/returned images render inline via markdown.
-
-#### 2.7.1. Media Middle Layer (thumbnail staging + signed original viewer)
-
-Local paths referenced by the agent are usually outside the two allowed serving roots (channel media dirs, desktop, downloads...). Instead of widening the whitelist, `g3ku/runtime/api/ceo_media.py` rewrites assistant content at the snapshot egress so every local reference becomes servable without touching the persisted transcript:
-
-- Hook points: `_build_ceo_snapshot(..., session_id=...)` rewrites assistant `content` for history, `websocket_ceo.py:_rewrite_turn_snapshot_media` rewrites `assistant_text` inside both `inflight_turn` and `preserved_turn` live payloads, and the `ceo.reply.final` stream event carries rewritten text so a just-completed live bubble shows thumbnails without a page refresh. The transcript on disk keeps the agent's original paths; mid-stream the pending bubble intentionally shows raw text.
-- Raster image references (`png/jpg/jpeg/gif/webp/bmp`, existing file): a JPEG thumbnail of at most 100KB is generated with Pillow (size/quality ladder) and staged into `<session upload dir>/inline_media/thumb_<sha1(path|size|mtime)[:12]>_<name>.jpg` — already an allowed root, so the existing uploads/file route serves it. The hash includes size+mtime, so editing the source regenerates the thumbnail; `exists()` makes repeated snapshot builds cheap. The markdown is rewritten to `![描述](<thumb abs path> "<viewer url>")`, using the title slot as the click-through target; the frontend wraps such images in `<a class="msg-inline-image-link" target="_blank">` so clicking opens the original.
-- Local references that must not render as an inline thumbnail — plain links `[desc](path)` to any existing local file regardless of type, and image syntax around non-image files — are rewritten to `[desc](<viewer url>)`; the frontend renders any link whose href targets the viewer route as a file chip (`.msg-file-chip`) that opens in a new tab.
-- Original viewer route `GET /api/ceo/media/original?token=...`: the token is a stateless HMAC-signed payload `{path, exp}` (per-process secret, 24h TTL). Paths never appear as query parameters an external caller can choose, preserving the whitelist's purpose (the web app is unauthenticated and may bind 0.0.0.0). Response disposition is MIME-driven: raster images/pdf/text are `inline`; `image/svg+xml`, html and unknown types are forced to `attachment` to block top-level script rendering.
-- Security posture: only raster image bytes are ever staged into a serving root, and originals are only reachable via unguessable signed tokens, so prompt-injected content cannot turn the endpoint into an arbitrary file oracle beyond what the agent could already paste into its reply.
-- URLs and already-servable references pass through unchanged; missing files and failed thumbnail generation leave the original markdown untouched.
+- The chat markdown renderer (`renderInlineMarkdown` in `g3ku/web/frontend/org_graph_app.js`) renders `![desc](src)` as an inline image for both persisted history and live turns: `https`/`http` URLs render directly, local filesystem paths resolve to the read-only route `GET /api/ceo/uploads/file`, and `data:` URIs or unknown schemes render nothing. This inline path complements, rather than replaces, the structured attachment bubbles in section 2.6.
+- That file route serves from two allowed roots only — the per-session upload directory and `workspace_path()/output` — returning `400 upload_path_outside_session_dir` for paths outside either root and `404` for missing files.
+- Most assistant local references are rewritten at the snapshot egress by the media middle layer (`g3ku/runtime/api/ceo_media.py`) so they become servable without touching the on-disk transcript: raster images become staged thumbnails inside an already-allowed root, other local files become signed viewer URLs, and URLs, already-servable references, and failed rewrites pass through unchanged.
+- Originals are reachable only through the signed viewer route `GET /api/ceo/media/original?token=...`, which takes an unguessable signed token rather than a caller-chosen path. Because only raster image bytes are ever staged into a serving root, the endpoint cannot become an arbitrary file oracle.
 
 ### 3. Context Loader Notices
 
-- Successful CEO/frontdoor `load_tool_context` and `load_skill_context` calls are no longer shown as ordinary `Interaction Flow` steps under the assistant bubble.
+- Successful CEO/frontdoor `load_tool_context` and `load_skill_context` calls do not render as ordinary `Interaction Flow` steps under the assistant bubble.
 - Frontend loader-notice detection must treat both legacy and v2 loader names as the same UI family:
   - `load_tool_context` / `load_tool_context_v2` => tool notice
   - `load_skill_context` / `load_skill_context_v2` => skill notice
 - Instead, the browser shows a short-lived composer notice above the input row, using the loaded `tool_id` or `skill_id` when the runtime payload exposes it.
 - These notices are intentionally stackable rather than single-slot: multiple successful loader calls may coexist in one right-aligned floating column that lines up with the send-button edge.
-- The type-specific styling now comes from a leading icon instead of the older leading green dot:
+- The type-specific styling comes from a leading icon rather than a leading green dot:
   - tool notices use the same `wrench` icon family as the sidebar Tool page
   - skill notices use the same `sparkles` icon family as the sidebar Skill page
 - The risk-colored dot remains present on the trailing edge so operators can still distinguish low / medium / high loader risk at a glance.
@@ -254,12 +209,12 @@ Local paths referenced by the agent are usually outside the two allowed serving 
 
 ### Manual Pause Resume Rule
 
-- Manual pause still means “freeze the current round as previous-round context,” but the backend no longer leaves ordinary user sessions in a long-lived resumable `paused` state.
-- The operator-visible “pause” button is now a terminal stop for the current visible turn: the backend ends the runtime state as `completed` and tags it with `stop_reason=user_pause`.
+- Manual pause means “freeze the current round as previous-round context,” and the backend does not leave ordinary user sessions in a long-lived resumable `paused` state.
+- The operator-visible “pause” button is a terminal stop for the current visible turn: the backend ends the runtime state as `completed` and tags it with `stop_reason=user_pause`.
 - The next outbound user message after pause must start a new round.
 - The paused round's user message, execution trace, stage state, tool calls, and compression state are preserved in transcript and snapshot context so the next round can inherit them without rewriting the original user text.
-- Manual pause now writes a completed-session continuity sidecar immediately, then clears the ordinary paused/inflight restorable snapshots for that session.
-- The backend now archives the previous paused assistant bubble into a persisted assistant message with `status=paused` during the stop flow itself, not only when the next user turn is about to dispatch.
+- Manual pause writes a completed-session continuity sidecar immediately, then clears the ordinary paused/inflight restorable snapshots for that session.
+- The backend archives the previous paused assistant bubble into a persisted assistant message with `status=paused` during the stop flow itself, not only when the next user turn is about to dispatch.
 - That archived paused assistant is durable UI history for `snapshot.ceo` restore/reconnect, but it remains hidden from prompt-history assembly and session-summary counts via `history_visible=false`.
 - Browser-side restore should therefore render that persisted paused assistant as a paused bubble rather than a completed reply. The next ordinary user turn inherits context from visible history plus completed continuity state, not from resuming the old paused turn.
 
@@ -279,6 +234,8 @@ Local paths referenced by the agent are usually outside the two allowed serving 
 - Persisted assistant messages keep `canonical_context` (cumulative) and `canonical_context_delta` (relative to the previous assistant message); refresh and reconnect render the delta so each turn shows only its own stages. `preserved_turn` snapshots may still fall back to full context because follow-up archival can absorb their delta baseline.
 - `rounds[].text` carries the model's mid-turn narration for that tool round; a stage's `preamble_text` carries the narration from the response that created the stage (rendered above the stage title). Both are display-only fields of the stage state; prompt assembly, transcript durability, and archive semantics do not depend on them.
 - `ceo.reply.final` remains the authoritative closeout (final markdown plus final delta/trace when present). If the completed turn produced no stage trace, the final payload omits `canonical_context` and the browser must not backfill an older trace under the new bubble.
+- The frontend must not reconstruct CEO stage flow from flat `tool_events`; `canonical_context_delta` is computed server-side from message order, so refresh/reconnect rebuild the same per-bubble trace slices without a browser-local cursor.
+- Tool output rendering follows the canonical payload directly: a tool entry with `output_text` shows that inline full text, while a tool entry with only `output_ref` shows the preview text and keeps the artifact-open path for the full body. The frontend must not invent extra truncation or backfill old tool-event text when canonical context is present.
 
 The backend contract behind that UI behavior is:
 
@@ -286,7 +243,7 @@ The backend contract behind that UI behavior is:
 - Session snapshot assembly trusts stored `round.tools` first and only backfills legacy rounds by exact `tool_call_id`.
 - A `tool_name`-only fallback is considered a regression because it can make a later same-name tool appear inside an earlier stage round after refresh or transcript reload.
 - The browser still treats `round.tools` as authoritative input, but it filters successful `load_tool_context` / `load_skill_context` entries out of the visible stage-trace tool chips because those calls represent context acquisition rather than user-facing execution work.
-- `ceo.reply.final` now carries the authoritative final `canonical_context` when the completed turn has stage data; browsers should prefer that payload instead of reusing an older inflight snapshot.
+- `ceo.reply.final` carries the authoritative final `canonical_context` when the completed turn has stage data; browsers should prefer that payload instead of reusing an older inflight snapshot.
 - If the current turn never produced a stage trace, `ceo.reply.final` must omit `canonical_context` entirely rather than backfilling the previous persisted assistant trace. Reusing an older trace under a new direct-reply bubble is a frontend/backend contract bug.
 - Empty-delta rule: when the completed turn produced **no new stage progress** relative to the previous assistant message (i.e. the computed `canonical_context_delta` is empty), the final payload omits **both** `canonical_context` and `canonical_context_delta`. The shared final-payload assembler `final_reply_canonical_merge` (`g3ku/runtime/web_ceo_sessions.py`) enforces this in the userspace relay and the heartbeat publisher alike. On the browser, a message whose `canonical_context_delta` key is present but renders empty stages must render the plain text bubble with **no** stage rail, and `finalizeCeoTurn` must not fall back to `turn.lastExecutionTraceSummary` or to the session-cumulative `canonical_context`. The same rule applies to `renderPersistedCeoAssistantTurn` so refresh, reconnect, and in-memory session-cache replay stay identical to live.
 
@@ -294,55 +251,42 @@ The backend contract behind that UI behavior is:
 
 - Heartbeat turns count as active session work for the composer button and queueing logic.
 - Queued follow-ups should not interrupt heartbeat execution.
-- Active-turn follow-ups are now forwarded to the backend during heartbeat execution as well. They may be merged into the next safe `call_model` boundary of that same running turn, or become the next fresh user batch immediately after heartbeat finishes if no same-turn model round remains.
+- Active-turn follow-ups are forwarded to the backend during heartbeat execution as well. They may be merged into the next safe `call_model` boundary of that same running turn, or become the next fresh user batch immediately after heartbeat finishes if no same-turn model round remains.
 - Terminal-event delivery is idempotent per session: the heartbeat service records the `dedupe_key` of every `task_terminal` event for which a user-visible reply was persisted (`session.metadata["handled_terminal_dedupe_keys"]`, bounded and normalized). If the same terminal `dedupe_key` is delivered again (e.g. because a previous run persisted the reply but was interrupted before the outbox ack / queue pop), the re-delivery is acknowledged silently — popped from the queue and marked delivered — **without** running the agent or emitting a second `ceo.reply.final`. A fresh terminal for a different completion (`task_id`/`status`/`finished_at`) has a distinct `dedupe_key` and still produces its own reply.
 - Consequence: in the rare window where a run persists the reply but crashes before `ceo.reply.final` is actually published, the duplicate delivery is suppressed and the user sees the reply from the transcript snapshot (refresh / reconnect / next session sync) rather than a live push. The transcript remains authoritative.
 
 ### Task Hall Action Contract
 
-- The browser task hall now only exposes `pause`, `resume`, and `delete` task actions.
+- The browser task hall only exposes `pause`, `resume`, and `delete` task actions.
 - `retry`, `continue-evaluate`, and `open continuation` actions are removed from both the UI flow and the REST surface.
-- Task list and task detail status pills now derive from the current task `status` plus final-acceptance state; legacy continuation metadata fields are ignored even if older task records still carry them.
-- The task-hall multi-select `閫夋嫨` menu now has six backend-aligned buckets: `宸叉殏鍋? / `瀹屾垚` / `鏈` / `澶辫触` / `鏈€氳繃` / `杩涜涓?`.
-- `瀹屾垚` means strict `taskStatusKey(task) === "success"`, while `鏈€氳繃` means strict `taskStatusKey(task) === "unpassed"`. Maintainers should not fold `unpassed` into the failed bucket just because final acceptance ended in a business rejection.
-- Task-hall batch delete is now a backend-owned contract: the browser sends one `POST /api/tasks/bulk-delete` request with `task_ids` instead of fanning out one `DELETE /api/tasks/{task_id}` call per selected row.
+- Task list and task detail status pills derive from the current task `status` plus final-acceptance state; legacy continuation metadata fields are ignored even if older task records still carry them.
+- The task-hall multi-select `选择` menu has six backend-aligned buckets: `已暂停` / `完成` / `未读` / `失败` / `未通过` / `进行中`.
+- `完成` means strict `taskStatusKey(task) === "success"`, while `未通过` means strict `taskStatusKey(task) === "unpassed"`. Maintainers must not fold `unpassed` into the failed bucket just because final acceptance ended in a business rejection.
+- Task-hall batch delete is a backend-owned contract: the browser sends one `POST /api/tasks/bulk-delete` request with `task_ids` instead of fanning out one `DELETE /api/tasks/{task_id}` call per selected row.
 - The batch-delete response is per-task, not all-or-nothing. Frontend code should interpret each returned `items[]` row's `result` (`deleted`, `not_found`, `failed`) before choosing success/warn/error toast behavior.
 
 ### Task Message Distribution UI Contract
 
-- Task-tree distribution UI is now task-wide, not root-only. The frontend should treat `runtime_summary.distribution.mode == "task_wide_barrier"` as the authoritative banner source instead of inferring state only from the root node's pending notice count.
-- While the task is in `barrier_requested`, `barrier_draining`, or `distributing`, the task-tree view surfaces a task-local sticky notice above the tree with text equivalent to `接收到新消息，分发中`.
-- When the runtime enters `resume_ready`, the sticky notice may briefly switch to the pending-notice variant with text equivalent to `接收到新消息，等待节点处理`, but this is only a handoff hint while node-local pending state is not yet visible in the tree snapshot.
-- During the same distribution window, the execution-tree wrapper switches into a dedicated distribution visual mode and forces all connector lines into the same yellow family, regardless of the individual node success/running/failed color mapping.
-- Nodes in the live tree may render as distribution-blocked even when they are not the active frontier node. Backend tree snapshots now expose `distribution_status`, and `barrier_blocked` should render as a node-level yellow warning style.
-- This is intentionally task-scoped UI state, not a global shell toast. It should follow the currently opened task detail view, but once the target node already exposes the pending message through its backend-owned message list / `pending_notice_count`, the sticky notice should disappear even if that message has not yet been consumed into ordinary node context.
-- Node detail now receives a backend-owned message list contract instead of rendering appended messages as a pseudo execution stage. The frontend must not reconstruct these entries from raw mailbox tables or by parsing prompt tail blocks.
-- That same rule applies to root-node appended messages: the backend may expose them through the node detail message list even when the root has no `task_node_notifications` row, because root delivery uses node-local pending notice metadata rather than mailbox storage.
-- In the node detail drawer, the message list appears as its own section before `派生记录`. Each entry shows received time plus pending/consumed state, expands to the full message body, and includes the per-node distribution result from the epoch `decision_records` / child deliveries for that source turn.
-- That distribution result is backend-owned and may now contain both delivered child notices and explicit skipped-child decisions. Frontend rendering should show both: delivered targets with the propagated message, and skipped targets with the recorded non-distribution reason. The browser must not infer skipped decisions by diffing the child tree against mailbox rows.
-- Backend tree snapshots now expose two different visibility contracts that maintainers must not collapse back together:
-  - `parent_visible` / related handshake fields remain the distribution-oriented recipient projection
-  - frontend tree rendering must instead follow the browser-tree visibility fields
-- Browser task-tree execution nodes now stay visible in every status, including `waiting_acceptance` and terminal states.
-- Browser task-tree acceptance nodes stay hidden until activation. Once activated, they remain visible through checking, waiting-for-retry, and later terminal/retry outcomes.
-- When task-wide distribution is active, browser tree rendering may force-show all nodes for operator visibility, but that must not be treated as proof that all of those nodes were valid distribution recipients.
-- Acceptance nodes may appear in the tree before they are active and may receive distributed messages while still inactive. The browser must treat that as normal backend state rather than inferring that the tree is inconsistent or that the acceptance node has already finished.
+- Task-tree distribution UI is task-wide, not root-only: the frontend treats `runtime_summary.distribution.mode == "task_wide_barrier"` as the authoritative banner source instead of inferring state from the root node's pending-notice count alone.
+- While the task is in `barrier_requested`, `barrier_draining`, or `distributing`, the task-tree view shows a task-local sticky notice and the execution-tree wrapper switches connector lines into a yellow distribution mode. This is task-scoped state, not a global shell toast; the sticky notice disappears once the target node exposes the pending message through its backend-owned message list / `pending_notice_count`, and a node-level `distribution_status` of `barrier_blocked` renders as a yellow warning.
+- Node detail receives a backend-owned message list (its own section before `派生记录`) rather than a pseudo execution stage, and the frontend must not reconstruct entries from raw mailbox tables or prompt tail blocks. Distribution results are backend-owned and show both delivered targets (with the propagated message) and skipped targets (with the recorded reason).
+- Tree snapshots expose two visibility contracts that must not be collapsed: `parent_visible` / handshake fields are the distribution-oriented recipient projection, while browser rendering follows the browser-tree visibility fields. Execution nodes stay visible in every status; acceptance nodes stay hidden until activation. Force-showing all nodes while distribution is active is not proof that they were all valid recipients.
 
 ### Task Depth Default Contract
 
 - The task-hall "global task tree depth" control is a global main-runtime default, backed by `PUT /api/main-runtime/settings`.
-- New CEO/web sessions now inherit that global default lazily. The runtime must not freeze the current global depth into ordinary session metadata just because a session was created, listed, or reopened.
+- New CEO/web sessions inherit that global default lazily. The runtime must not freeze the current global depth into ordinary session metadata just because a session was created, listed, or reopened.
 - A CEO session only overrides the global task depth when the session has an explicit session-scoped override saved through `PATCH /api/ceo/sessions/{session_id}/task-defaults`.
 - That explicit override is persisted as session-owned metadata and remains authoritative for later `create_async_task` calls from that session until changed again.
 - Legacy session records that contain `task_defaults` without an explicit session-override marker must be treated as inherited/global, not as an override. Maintainers debugging "I changed global depth but new tasks still use an old value" should check for this distinction first.
 - The practical rule is:
   - global task-hall updates should affect later new tasks immediately;
   - explicit session overrides may intentionally diverge from the global default;
-  - unscoped legacy `task_defaults` should no longer pin later task creation to stale values.
+  - unscoped legacy `task_defaults` must not pin later task creation to stale values.
 
 ### Heartbeat Visible-Turn Contract
 
-- Browser-side CEO websocket payloads may now carry both `inflight_turn` and `preserved_turn`.
+- Browser-side CEO websocket payloads may carry both `inflight_turn` and `preserved_turn`.
 - `inflight_turn` is the current real running turn. For heartbeat this means the heartbeat turn itself, not the earlier user bubble that is being kept on screen temporarily.
 - `preserved_turn` is a live-only carryover bubble that should remain visible until a later `ceo.turn.discard` closes it.
 - `preserved_turn` only exists for an older bubble that has not yet been superseded by a persisted assistant transcript entry with the same `turn_id`. Once that assistant turn is durable history, the backend/frontend should stop surfacing the preserved copy.
@@ -351,22 +295,9 @@ The backend contract behind that UI behavior is:
 
 ### CEO Session List Interaction Contract
 
-- The session list distinguishes between "session switch is still settling" and "session catalog is being mutated".
-- Frontend `ceoSessionBusy` means the active-session switch is still waiting for the new CEO websocket snapshot / connection state to settle. This is a session-view readiness flag, not a general catalog lock.
-- Frontend `ceoSessionCatalogBusy` means the session catalog itself is being refreshed or mutated by create / rename / delete / bulk-delete checks.
-- Browser-side bulk session delete-check is now its own backend contract: `POST /api/ceo/sessions/delete-check` with `session_ids`.
-- Browser-side bulk session delete execution is also backend-owned: `POST /api/ceo/sessions/bulk-delete` with `session_ids` plus one shared `delete_task_records` flag for the whole confirmed batch.
-- Those batch session endpoints must return two different lanes in one payload:
-  - per-session delete results (`results[]`) for success/failure accounting
-  - the refreshed session catalog (`items`, `channel_groups`, `active_session_id`) for normal sidebar rebuild
-- The frontend should no longer loop `getCeoSessionDeleteCheck(...)` or `deleteCeoSession(...)` once per selected session when doing a bulk action. If an operator reports partial bulk-delete weirdness, inspect the batch routes first rather than assuming a frontend sequencing bug.
-
-The intended operator-visible behavior is:
-
-- During `ceoSessionBusy` alone, the left rail should still allow `new session` and bulk-selection entry/selection so operators do not get trapped in a fully disabled sidebar after switching sessions.
-- During `ceoSessionBusy`, composer send/pause and any action that depends on the active session being fully ready may still remain blocked.
-- Destructive or catalog-writing actions such as rename, delete, and bulk delete should continue to key off the stricter mutation-safe state rather than the relaxed selection state.
-- During `ceoSessionCatalogBusy`, pause requests, or attachment uploads, the left rail may still disable new-session creation and bulk-selection controls because those operations are competing with in-flight catalog or payload changes.
+- The session list distinguishes "session switch is still settling" (`ceoSessionBusy`, a session-view readiness flag, not a general catalog lock) from "session catalog is being mutated" (`ceoSessionCatalogBusy`, covering create / rename / delete / bulk-delete checks).
+- Bulk session delete-check and delete execution are backend-owned batch contracts (`POST /api/ceo/sessions/delete-check` and `POST /api/ceo/sessions/bulk-delete`, both with `session_ids` plus one shared `delete_task_records` flag). Each returns the per-session `results[]` and the refreshed session catalog (`items`, `channel_groups`, `active_session_id`) in one payload. The frontend does not loop per-session calls for a bulk action.
+- During `ceoSessionBusy` alone, the left rail still allows `new session` and bulk-selection entry so operators are not trapped in a fully disabled sidebar, though composer send/pause may stay blocked; destructive or catalog-writing actions key off the stricter mutation-safe state.
 
 If an operator reports "switching sessions makes the whole Leader sidebar unusable", inspect these frontend flags separately before changing button rules:
 
@@ -383,7 +314,7 @@ Do not treat `ceoSessionBusy` as equivalent to "all session-list mutations must 
 - Deleting a local session removes the session record itself. Deleting a channel session is a clear operation: the channel/account entry remains available, but the next reopened conversation must start from empty session context.
 - In the batch-delete contract, mixed local and channel selections are allowed in one request. Result rows therefore distinguish `deleted=true` local removals from `cleared=true` channel clears even though the refreshed catalog still arrives as one post-mutation snapshot.
 - Backend clear handling for channel sessions must remove the persisted `SessionManager` transcript for that `china:*` session key, invalidate any in-memory cached session object, and clear the same side artifacts that local-session deletion clears for that session id, including inflight snapshots, paused execution context, completed continuity sidecars, uploads, and frontdoor stage-archive artifacts.
-- Both local-session delete and channel-session clear now also ask the runtime to purge SQLite checkpointer rows for that exact session key. If the transcript is gone but old state still appears to resurrect after reopen, inspect the checkpointer purge path before blaming frontend cache.
+- Both local-session delete and channel-session clear also ask the runtime to purge SQLite checkpointer rows for that exact session key. If the transcript is gone but old state still appears to resurrect after reopen, inspect the checkpointer purge path before blaming frontend cache.
 - For DM channel rows, the catalog entry may still remain visible after clear because it is synthesized from enabled channel-account configuration rather than from transcript persistence alone.
 
 If an operator reports “the channel conversation was deleted but old context came back,” inspect these layers in order:
@@ -396,7 +327,7 @@ If an operator reports “the channel conversation was deleted but old context c
 ### Heartbeat/Cron Visibility Versus Prompt Inheritance
 
 - Browser-side CEO timeline rendering and inflight bubbles are allowed to show heartbeat / cron work as ordinary active turns.
-- The same heartbeat / cron round is also durable prompt history now, but visibility is split in two: prompt inheritance uses `prompt_visible`, while browser transcript/snapshot rendering uses `ui_visible`.
+- The same heartbeat / cron round is also durable prompt history, but visibility is split in two: prompt inheritance uses `prompt_visible`, while browser transcript/snapshot rendering uses `ui_visible`.
 - Maintainers should not assume "frontend cannot see the hidden rule/event bundle" means "the model cannot see it later". The hidden rule/event messages are intentionally persisted for later prompt reuse while remaining absent from UI transcript surfaces.
 
 The current rule is:
@@ -407,41 +338,13 @@ The current rule is:
 
 ## Actual Request Debugging Contract
 
-Node detail and latest-context views now expose two different debugging surfaces that maintainers must not mix up.
+See `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」 for request-artifact forensics: the split between projected input and the provider-facing request, the `actual_request_ref` / `actual_request_hash` / `actual_tool_schema_hash` fields, cache-family comparison, and runtime- vs provider-side tool-name accounting.
 
-- The existing node input / projected context view is still a projection-oriented operator surface. It is useful for understanding durable state and task intent, but it is not guaranteed to be the exact request body sent to the provider.
-- The actual provider request is represented separately through `actual_request_ref`, `actual_request_hash`, `actual_request_message_count`, and `actual_tool_schema_hash`.
-- For node runtime specifically, `actual_request_ref` is now a dedicated per-`call_model` artifact, not a reuse of runtime `messages_ref`. The artifact is the authority for request-forensics; projected input and runtime-frame messages remain separate lenses.
-- That node actual-request artifact stores both the runtime-side projection (`model_messages`, `request_messages`, `actual_tool_schemas`, cache-family hashes) and, when the provider adapter exposes them, the adapter-final transport payload (`provider_request_meta`, `provider_request_body`).
-- `prompt_cache_key_hash` now means the caller-side cache family key for that turn, not the actual serialized request body.
-- When a cache miss happens, compare `prompt_cache_key_hash` with `actual_request_hash` first:
-  - same family key + different actual request usually means append-only growth, overlay differences, or tool-schema drift inside the same family;
-  - different family key means the stable caller-side family boundary moved.
-- `latest-context` now prefers that dedicated node actual-request artifact and only falls back to `messages_ref` for legacy nodes that predate the split.
-- The node-detail `完整上下文` disclosure is intentionally on-demand. Frontend code should fetch `/latest-context` only when the operator explicitly expands that section; ordinary node-detail auto-refresh or patch reconciliation must not silently reload it in the background.
-- The `/latest-context` payload still carries `ref`, `actual_request_ref`, and hash/count diagnostics for forensics, but its `content` field is now a human-facing rendering of the latest received context body rather than the entire artifact JSON. Backend formatting should prefer `request_messages`, then adapter-final `provider_request_body.input`, and only fall back to legacy projected `messages_ref` content when no dedicated actual-request body exists.
-- For node troubleshooting, prefer `latest-context` or `actual_request_ref` when you need the latest provider-bound/request-facing context body, and treat the legacy projected input as a separate, compatibility-oriented lens.
+Web-specific artifact locations kept here:
 
-CEO/frontdoor now follows a parallel debugging pattern, but with session-scoped files instead of task artifacts.
-
-- Every CEO/frontdoor `call_model` round writes the full provider-facing request to `.g3ku/web-ceo-requests/<session>/...json`.
-- The same request-artifact timeline now also includes internal frontdoor lanes such as `token_compression` and `inline_tool_reminder`, not only visible provider sends.
-- Inflight / paused CEO snapshots expose only the latest `actual_request_path`, `prompt_cache_key_hash`, `actual_request_hash`, `actual_request_message_count`, `actual_tool_schema_hash`, and a short `actual_request_history`.
-- Reopened completed sessions also have a compact recovery sidecar at `.g3ku/web-ceo-continuity/<session>.json`. That file is the authority for “what baseline/stage/compression state should be restored before the first new visible turn after restart,” but it is not a replacement for the full request JSON when doing request forensics.
-- When debugging CEO prompt shrinkage or cache drops, inspect the saved request JSON first rather than inferring the request from `canonical_context`, stage rounds, or transcript-visible assistant/tool bubbles.
-- Checkpoint-side helper fields are intentionally lossy now. `stable_messages` strips multimodal blocks back to their text projection, and `response_payload.provider_request_body` stores only a compact summary. Use the saved actual request JSON whenever you need the exact provider-facing request body.
-- The corresponding session-state projection now has two different meanings:
-  - `dynamic_appendix_messages` keeps only the latest authoritative contract for rebuild purposes.
-  - The active-turn `messages` / saved actual request may still include earlier same-turn contract snapshots so the provider-facing body can remain append-only.
-- Those older contract snapshots are expected inside an active turn and should not be mistaken for durable-history leakage. After the turn closes, durable transcript messages must still be stripped back to non-contract history.
-- For `/responses`-style providers, that saved JSON now includes both layers:
-  - `request_messages` / `tool_schemas`: the runtime-side request projection before the provider adapter rewrites it
-  - `provider_request_meta` / `provider_request_body`: the adapter-final HTTP body that was actually prepared for transport
-- The saved JSON also carries `usage`, `frontdoor_history_shrink_reason`, and `frontdoor_token_preflight_diagnostics`, so the web/admin debugging flow can compare preflight estimates, allowed shrink reasons, and billed token usage from one record.
-- If cache accounting disagrees with the runtime projection, debug against `provider_request_body` first.
-- If a `/responses` gateway fails only when tools are present, inspect `provider_request_body.tools` before blaming the model route. The transport-facing schema bundle is intentionally sanitized to avoid unsupported combinators such as `anyOf`, `oneOf`, and `allOf`.
-- For stage-transition rounds specifically, it is now expected that the tail runtime contract may show `callable_tool_names=["submit_next_stage"]` while `provider_request_body.tools` still carries the stable runtime-visible tool bundle. That mismatch is intentional and no longer indicates a frontdoor contract leak.
-- For reopened completed sessions, the first fresh visible turn may bridge the previous `provider_tool_schema_names` and cache-family anchor only when the current `visible_tool_ids` plus `visible_skill_ids` exactly match the completed continuity snapshot. If the visible set changed, context should still restore but cache miss is allowed.
+- Every CEO/frontdoor `call_model` round writes the full provider-facing request to `.g3ku/web-ceo-requests/<session>/...json`, including internal lanes such as `token_compression` and `inline_tool_reminder`.
+- Inflight / paused CEO snapshots expose only the latest `actual_request_path`, hash/count fields, and a short `actual_request_history`.
+- Reopened completed sessions restore baseline state from a compact sidecar at `.g3ku/web-ceo-continuity/<session>.json`.
 
 ## Verification Pointers
 
@@ -452,7 +355,7 @@ Use these focused checks when validating i18n shell behavior:
 
 ## CEO Compression UI Contract
 
-The CEO composer now has a dedicated frontdoor-compression UI path that is separate from ordinary tool progress.
+The CEO composer has a dedicated frontdoor-compression UI path that is separate from ordinary tool progress. See `runtime-overview.md`「Frontdoor Context Compression (Current Contract)」 for the compression runtime behavior itself; this section covers only the operator-facing UI contract.
 
 - `compression_state` only means inline frontdoor `token_compression` progress. The frontend should treat `status === "running"` as "the runtime is compressing context right now" and should not infer any durable semantic-summary state from it.
 - While `compression_state.status === "running"`, the browser shows the `上下文压缩中` toast near the composer, but pause still goes through the existing primary send/pause button at the right side of the input row.
@@ -464,77 +367,35 @@ The CEO composer now has a dedicated frontdoor-compression UI path that is separ
 
 ### Context Window Error UX
 
-- If the estimated provider-bound request is already larger than the selected model's `context_window_tokens`, the frontend now shows an error toast instead of attempting a semantic/global-summary fallback.
+- If the estimated provider-bound request is already larger than the selected model's `context_window_tokens`, the frontend shows an error toast instead of attempting a semantic/global-summary fallback.
 - The canonical message is `上下文大小超出当前模型<展示名>，请更改模型链配置后继续`.
 - `<展示名>` is expected to come from the runtime-selected model's `provider_model`, with model `key` only as fallback.
 
 ### Composer Context Usage Meter
 
-- The Leader composer now has a second live-only context-size signal: a brain-shaped usage meter beside the attachment button, not a border around the textarea.
-- That meter is backend-driven rather than a frontend-only guess, but it now has two distinct authority lanes that maintainers must keep separate.
+- The Leader composer has a second live-only context-size signal: a brain-shaped usage meter beside the attachment button, not a border around the textarea.
+- That meter is backend-driven rather than a frontend-only guess, but it has two distinct authority lanes that maintainers must keep separate.
 - For idle/non-running sessions, the browser may debounce composer edits and call `POST /api/ceo/sessions/{session_id}/composer-preflight`.
 - That preflight request payload should represent the next outbound user batch for that session: existing queued follow-ups plus the current unsent draft/attachments, in FIFO order.
 - The preflight response should include the current model-facing estimate and threshold fields, including `estimated_total_tokens`, `context_window_tokens`, `ratio`, `provider_model`, `trigger_tokens`, `would_trigger_token_compression`, and `would_exceed_context_window`.
-- For multimodal drafts, that estimate is no longer allowed to scale with the raw `data:image/...;base64,...` string length. Backend preflight now derives image cost from a dedicated image-token heuristic plus text/schema cost, so a large inline data URL should not look like millions of text tokens just because it serialized to a huge JSON string.
+- For multimodal drafts, that estimate must not scale with the raw `data:image/...;base64,...` string length. Backend preflight derives image cost from a dedicated image-token heuristic plus text/schema cost, so a large inline data URL should not look like millions of text tokens just because it serialized to a huge JSON string.
 - For running sessions, the browser must stop treating composer-preflight as authoritative. The only valid source is the current inflight turn snapshot from `snapshot.ceo` / `ceo.turn.patch`, specifically the latest `frontdoor_token_preflight_diagnostics.final_request_tokens`, `frontdoor_token_preflight_diagnostics.max_context_tokens`, and `frontdoor_token_preflight_diagnostics.provider_model`.
-- This means the visible meter during a running turn is no longer "draft if sent now"; it is "the actual next provider-bound request the runtime is about to send."
+- This means the visible meter during a running turn is not "draft if sent now"; it is "the actual next provider-bound request the runtime is about to send."
 - When the current inflight snapshot does not yet carry an exact runtime request estimate, the meter must stay visually empty. Frontend code must not show `pending`, must not reuse the previous composer estimate, and must not infer a replacement value from the draft textarea, pinned sent entries, or `inflight_turn.user_message`.
 - The brain meter itself is live-only UI state. It must animate with the current ratio, clamp visual fill when the raw ratio exceeds `1.0`, and never create transcript messages, assistant bubbles, or persisted snapshot entries.
 - If the meter appears inconsistent with real send-time compression/error behavior, first check whether the browser is in the idle preflight lane or the running snapshot lane, then debug the corresponding backend source. Treat any browser-only fallback estimate during a running turn as a contract bug.
-- The runtime diagnostics for that meter now also expose additive image-estimation fields such as `estimated_image_tokens` and `image_estimation_method`. These are observability fields for operators and maintainers; they do not change the persisted transcript contract.
+- The runtime diagnostics for that meter also expose additive image-estimation fields such as `estimated_image_tokens` and `image_estimation_method`. These are observability fields for operators and maintainers; they do not change the persisted transcript contract.
 
 ## Tool Admin RBAC Contract
 
-Tool management now has a strict persisted-RBAC contract for surfaced tool families.
+Tool management uses a strict persisted-RBAC contract for surfaced tool families. See `tool-and-skill-system.md`「Tool Admin RBAC」 for the backend semantics: policy seeding, empty-list preservation and one-time repair, the `监管模式` approval switch, and `exec_runtime` execution mode.
 
-- The backend `PUT /api/resources/tools/{tool_id}/policy` path treats each action's `allowed_roles` as the authoritative whitelist.
-- Clearing all checkboxes for a surfaced action is valid and persists as `[]`, meaning deny-all.
-- Reopening the same tool after save or after `/api/resources/reload` must show the same empty-role state instead of silently restoring `ceo` or `execution`.
-- Freshly discovered surfaced tool actions now have one earlier seeding step before operator edits exist:
-  - if there is no persisted `tool_families` row/action yet, backend discovery seeds `allowed_roles` from the tool's discovery governance
-  - that discovery governance may come from explicit resource-local `governance.actions[].allowed_roles`, or from the implicit default mapping in `main/governance/action_mapper.py`
-  - once the family/action has been persisted, later reloads must preserve the stored value exactly, including `[]`
-- Older workspaces may also cross one compatibility boundary on upgrade:
-  - before `governance_meta.implicit_tool_role_backfill_v1_applied` is set, backend refresh may repair an older persisted empty surfaced-action role list from the newly discovered non-empty discovery-governance default
-  - after that one-time repair marker is written, later reloads stop auto-healing empty lists so operator-cleared `[]` remains authoritative
-
-The frontend responsibilities are now:
+The frontend responsibilities are:
 
 - reflect the backend-owned `allowed_roles` exactly,
 - allow all surfaced action role toggles to be unchecked,
 - avoid special-casing CEO for surfaced core tool families,
 - and show a clear operator-visible hint when an action is currently disabled for all roles.
-
-The backend responsibilities are now:
-
-- preserve explicit empty role lists through store readback and resource refresh,
-- make `/api/resources/tools` and `/api/resources/tools/{tool_id}` reflect the same registry/store-backed surfaced family state that runtime visibility checks use,
-- derive runtime visibility for surfaced tools from that persisted RBAC state,
-- and keep internal non-Tool-Admin tools outside the Tool Admin contract.
-
-Tool Admin also now owns one global operator switch above the Tool list: `监管模式`.
-
-- This switch is persisted separately from per-family RBAC and from `exec_runtime.execution_mode`.
-- Its purpose is CEO/frontdoor approval policy, not executor safety policy:
-  - off = no regulatory approval batch for risky CEO tool calls,
-  - on = medium/high-risk CEO tool calls enter the batch-review interrupt lane.
-- Changing the switch should take effect immediately for future approval boundaries in both new and already-running CEO sessions.
-- Existing sessions that are already paused inside a pending approval batch do not get rewritten in place. Treat the switch as “future boundary” config, not as a retroactive migration of existing interrupts.
-- If the UI shows the new switch state but runtime behavior still follows the old one, inspect the dedicated governance-mode endpoint/store first, not the ordinary tool family policy rows.
-
-Web/channel delivery maintenance note:
-
-- Tool Admin no longer surfaces a `messaging` tool family, and the web runtime no longer applies any `G3KU_WEB_DISABLE_MESSAGE_TOOL` compatibility rule.
-- Pure browser CEO chat replies are delivered through the websocket session/runtime path, not through a surfaced `message` tool.
-- China-channel replies continue to flow through `SessionRuntimeBridge` and `ChinaBridgeTransport`, which emit final `deliver_message` frames without depending on the removed model tool.
-- If an operator reports that `messaging` still appears in Tool Admin, debug resource discovery or stale frontend state first; the intended contract is absence, not "present but disabled".
-
-Exec runtime mode is now part of the same admin contract for `exec_runtime`:
-
-- `PUT /api/resources/tools/exec_runtime/policy` may carry `execution_mode` in addition to action-role edits.
-- Tool Admin is responsible for exposing and saving the operator's chosen mode, but the backend remains authoritative for validation and persistence.
-- Saving `execution_mode` must update the persisted surfaced family record immediately; operators should not need a project restart before later agent/tool calls observe the new mode.
-- Resource reload may still be used for catalog refresh, but it is no longer the mechanism that makes exec mode changes take effect. If a mode switch appears to require restart, first inspect the policy save payload and the persisted `tool_families` row before debugging frontend caching.
 
 If an operator reports "save succeeded but reopen restored the roles", first inspect:
 
@@ -551,17 +412,17 @@ If an operator reports "Tool 管理 shows one role set but runtime visibility be
 3. the derived `role_policy_matrix`
 4. the runtime-side `list_effective_tool_names(...)` result for the affected role/session
 
-Do not assume the browser has a second hidden RBAC source. For surfaced tool families, the API detail payload and runtime visibility should now be two views over the same backend-owned family/action state.
+Do not assume the browser has a second hidden RBAC source. For surfaced tool families, the API detail payload and runtime visibility are two views over the same backend-owned family/action state.
 
 ## Container Deployment Contract
 
-The web/admin stack now has an explicit container-safe startup mode.
+The web/admin stack has an explicit container-safe startup mode.
 
 - `g3ku web --no-worker` is the container-safe web entrypoint.
 - In this mode, the web process still owns FastAPI routes, websocket session/runtime integration, heartbeat startup, cron startup, and China bridge supervision.
 - Detached task execution is expected to come from a separate `g3ku worker` process or container rather than from the web-managed local child worker path.
 
-`/api/bootstrap/status` is also now the preferred healthcheck-friendly read endpoint for the web container:
+`/api/bootstrap/status` is also the preferred healthcheck-friendly read endpoint for the web container:
 
 - it is available even when the project is still locked
 - it reports both bootstrap mode and runtime readiness
@@ -575,84 +436,28 @@ There is also a new mutable-resource startup boundary maintainers should keep in
 
 If operators report "the image has the new built-in skill/tool but the running project still shows the old workspace copy", debug the persistent `skills/` / `tools/` volume contents first. In container mode, the mounted workspace copy is authoritative after startup.
 
-## CEO Canonical Context UI Contract
-
-The CEO browser/runtime integration now uses a two-lane stage-trace payload: full `canonical_context` plus UI-oriented `canonical_context_delta`.
-
-- Assistant transcript messages, `snapshot.ceo`, `ceo.turn.patch`, preserved-turn payloads, paused snapshots, and `ceo.reply.final` should carry a turn-scoped `canonical_context`.
-- Those same assistant-facing websocket payloads may now also carry `canonical_context_delta`. This is a UI-only trace lane that contains only the stage/round/tool delta that belongs to the current assistant bubble when compared against the previous persisted assistant canonical context.
-- The frontend should not read or reconstruct CEO stage flow from `execution_trace_summary` or flat `tool_events`.
-- `canonical_context.stages[].rounds[].tools[]` is the authoritative render source for the stage trace.
-- The frontend should treat full `canonical_context` as the durable turn/runtime truth source, but it should prefer `canonical_context_delta` when deciding what to render under one visible assistant bubble. If the delta lane is absent, falling back to full `canonical_context` is allowed for compatibility.
-- Because `canonical_context_delta` is computed server-side from message order, refresh/reconnect should rebuild the same per-bubble trace slices without relying on a browser-local cursor.
-
-Tool output rendering should follow the canonical payload directly:
-
-- if a tool entry has `output_text`, the browser should show that inline full text;
-- if a tool entry only has `output_ref`, the browser should show the preview text and keep the existing artifact-open path for the full body;
-- the frontend should not invent extra truncation or backfill old tool-event text when canonical context is present.
-
-The final-reply rule is now simpler:
-
-- `ceo.reply.final` may include `canonical_context` when the completed turn has stage data;
-- `ceo.reply.final` may also include `user_messages` for the authoritative current-turn user batch when follow-up ordering matters;
-- if the turn has no stage trace, omit `canonical_context` entirely rather than reusing an older turn's trace.
-
 ## Heartbeat/Cron ACK Contract
 
-The browser now handles a dedicated live-only ACK event for silent internal turns.
+The browser handles a dedicated live-only ACK event for silent internal turns.
 
-- `ceo.internal.ack` is emitted when a heartbeat or cron turn explicitly ends with `HEARTBEAT_OK`.
-- This event is not a normal assistant reply and must not reuse `ceo.reply.final` persistence or rendering rules.
-- Any non-silent heartbeat/cron assistant reply now uses the ordinary `message_end -> ceo.reply.final` path. The backend should no longer blanket-filter heartbeat assistant finals from websocket delivery just because the source is internal.
-- The frontend should render it as a distinct non-conversational bubble so operators can see that the internal turn was received and intentionally stayed silent.
-- That ACK bubble is intentionally ephemeral: it should not be appended to the CEO session snapshot `messages` list and should disappear on full refresh.
-- `ceo.turn.discard` still exists only to close a specific visible pending turn by `turn_id`.
-- `task_terminal` is now an explicit exception: heartbeat task-terminal turns should no longer reach the browser as `ceo.internal.ack`.
-- If the heartbeat model first produces `HEARTBEAT_OK` or empty text for a task terminal event, the backend now enters repair rounds and only sends `ceo.reply.final` once there is a user-visible result or the fixed fallback error is emitted.
+- `ceo.internal.ack` is emitted when a heartbeat or cron turn explicitly ends with `HEARTBEAT_OK`; it is not a normal assistant reply and must not reuse `ceo.reply.final` persistence or rendering rules. Non-silent heartbeat/cron assistant replies use the ordinary `message_end -> ceo.reply.final` path.
+- The frontend renders the ACK as a distinct non-conversational bubble so operators can see the internal turn was received and intentionally stayed silent.
+- That ACK bubble is ephemeral: it is not appended to the CEO session snapshot `messages` list and disappears on full refresh.
+- Heartbeat `task_terminal` turns do not reach the browser as `ceo.internal.ack`; `ceo.turn.discard` still only closes a specific visible pending turn by `turn_id`.
 
 ## CEO Live Tool Reminder Contract
 
-The CEO browser/runtime integration now has a second live-only status lane for long-running direct tools: `ceo.tool.reminder`.
+The CEO browser/runtime integration has a second live-only status lane for long-running direct tools: `ceo.tool.reminder`. It is intentionally different from both ordinary tool interaction steps and heartbeat turns.
 
-This is intentionally different from both ordinary tool interaction steps and heartbeat turns.
-
-- Backend reminder events are emitted only as websocket live events.
-- The payload includes `turn_id`, `execution_id`, `tool_name`, `elapsed_seconds`, `reminder_count`, `decision`, `label`, `source="reminder"`, and optional `terminal`.
-- Some direct CEO tools may never emit this event at all. If the tool call already declares its own timeout budget through a normalized top-level timeout-bearing argument such as `timeout_seconds`, the runtime skips the reminder sidecar and lets the tool surface its native timeout or error contract directly.
-- The frontend must not create a new assistant bubble and must not append a new interaction step for reminder events.
-- The current CEO frontend also no longer renders `label` as a visible reminder block under the pending turn. These events are kept as live-only bookkeeping signals so the UI stays clean while the authoritative tool outcome still arrives through the ordinary tool/error/final-reply path.
+- Backend reminder events are emitted only as websocket live events; the payload carries `turn_id`, `execution_id`, `tool_name`, `elapsed_seconds`, `reminder_count`, `decision`, `label`, `source="reminder"`, and an optional `terminal`.
+- The frontend must not create a new assistant bubble and must not append a new interaction step for reminder events. The CEO frontend does not render `label` as a visible reminder block under the pending turn; these events stay live-only bookkeeping signals while the authoritative tool outcome arrives through the ordinary tool/error/final-reply path.
 
 ### Persistence Rules
 
-- Reminder events are not part of `snapshot.ceo.messages`.
-- They must not be persisted into the transcript-backed CEO message list.
+- Reminder events are not part of `snapshot.ceo.messages` and must not be persisted into the transcript-backed CEO message list.
 - Refresh/reconnect should not restore an old reminder from cached snapshot state.
-- Any ephemeral reminder state should be cleared when the tool finishes, the turn finalizes, the turn is discarded, or a `terminal=true` reminder event arrives.
+- Any ephemeral reminder state is cleared when the tool finishes, the turn finalizes, the turn is discarded, or a `terminal=true` reminder event arrives.
 
-### Decision Semantics
+See `heartbeat-system.md`「CEO Inline Tool Reminder Sidecar」 for the reminder decision and timeout semantics (`decision=continue` / `stop` / `unavailable`, observation-aware sidecar review, the `timeout_seconds` skip rule, and tool-call-scoped timeout-stop).
 
-- `decision=continue` means the sidecar reviewed the context and decided to keep waiting.
-- `decision=stop` means the sidecar requested `stop_tool_execution`; the main turn will later surface the actual tool failure through the ordinary tool-result path.
-- `decision=unavailable` means the reminder sidecar failed or could not make a valid stop decision, so the tool keeps running.
-- For sidecar-managed tools, the reminder decision is observation-aware before the model is consulted. The sidecar can inspect the current tool name, normalized arguments, and the latest live `sidecar_observation` payload, including bounded stdout/stderr tails plus best-effort URL or page-title progress when a tool publishes them.
-- If the latest observation already shows a concrete hard error such as `Navigation failed: net::ERR_CONNECTION_CLOSED`, the sidecar should keep waiting so the tool can return that native failure instead of replacing it with a timeout-stop.
-- If the latest observation already shows positive progress such as a current URL, page title, or explicit progress marker, the sidecar should also keep waiting rather than issuing an early timeout-stop.
-- Sidecar timeout-stop no longer cancels the whole visible CEO turn. It only targets the active tool call, so later tool calls in the same turn are not supposed to inherit a stale cancelled state.
-
-Operators should therefore treat `ceo.tool.reminder` as a live runtime signal, not as durable conversation UI. The authoritative end state still arrives through the normal CEO tool/error/final-reply events.
-
-## Node Actual Request Forensics
-
-Node actual-request artifacts now expose a clearer split between runtime contract and provider cache scaffolding.
-
-- `callable_tool_names` records the real tool contract for that round.
-- `provider_tool_names` records the schema bundle actually sent to the model provider.
-- `provider_tool_bundle_seeded=true` means the node temporarily reused the prior provider bundle to avoid avoidable cache-family churn during a schema warm-up step.
-
-For cache troubleshooting, the most important invariant is now:
-
-- stage/tool governance still follows `callable_tool_names`;
-- cache behavior must be explained using `provider_request_body.input`, `provider_tool_names`, and `actual_tool_schema_hash`.
-
-If a node shows low cache hits even after `actual_tool_schema_hash` stops changing, operators should immediately compare consecutive node actual-request artifacts and verify that the provider input stayed append-only rather than replacing an earlier `function_call` / `function_call_output` pair near the front of the request.
+Operators should treat `ceo.tool.reminder` as a live runtime signal, not durable conversation UI; the authoritative end state still arrives through the normal CEO tool/error/final-reply events.

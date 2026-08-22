@@ -120,14 +120,47 @@
 
 - 渠道消息最终仍进入统一 `RuntimeAgentSession`
 - China 渠道不是单独的 Agent 实现
-- 入站用户内容必须保持「用户原始消息」。历史上 Node host 会在命中定时意图时把一段 cron 隐藏契约追加进 `CommandBody`，导致该契约被当作**用户消息内容**持久化并显示在会话里（影响美观、重复发送），还破坏 frontdoor 的当前用户精确匹配（答非所问）。现在注入已在宿主侧停用（`appendCronHiddenPrompt` 为 no-op），Python `ChinaBridgeTransport` 入站构造时也会用 `strip_cron_hidden_prompt` 兜底剥除旧污染；cron 的正确使用规范改由 cron 工具 toolskill 按需加载。排障「用户消息里多出一大段 cron 说明」或「定时相关消息答非所问」时，先确认这条隐藏契约注入是否复活。
+- 入站用户内容必须保持「用户原始消息」。cron 隐藏契约注入已在宿主侧停用（`appendCronHiddenPrompt` 为 no-op），Python `ChinaBridgeTransport` 入站构造时会用 `strip_cron_hidden_prompt` 兜底剥除；cron 的正确使用规范由 cron 工具 toolskill 按需加载。若出现「用户消息里多出 cron 说明」或「定时相关消息答非所问」，见 §11「常见排障入口」。
 
 ### 渠道入站图片 / 媒体
 
 - Node 侧把平台图片下载到本地并作为 attachments 归一化进 `inbound_message`；Python `ChinaBridgeTransport` 据此构造请求，生成 provider 可见的 `image_url` 块（`china_bridge_attachments` 元数据记录这些附件）。
-- 渠道入站图片能否真正进入模型，和 Web 上传一样由所选模型绑定的 `image_multimodal_enabled` 门控。此前 frontdoor 只在 `web_ceo_uploads` 存在时才注入图片块，渠道附件被忽略，模型只看到 `[Image: source: 路径]` 文本标记并凭空编造描述；现在只要当前轮内容携带图片块且模型多模态开启就会注入。
+- 渠道入站图片能否真正进入模型，和 Web 上传一样由所选模型绑定的 `image_multimodal_enabled` 门控：当前轮内容携带图片块且模型多模态开启时，frontdoor 即注入图片块；未注入时模型只能看到 `[Image: source: 路径]` 文本标记。
 - 与 Web 一致：图片块只注入到达当轮的 live 请求，历史/持久化仍是纯文本，后续轮次不会自动重发图片像素。跨轮再次查看同一张图需要重新 `content_open` 该路径。
 - 排障"渠道图识别错 / 编造内容"：先确认该轮请求是否真的携带 image 块（而不是只看文本标记），再确认模型绑定是否 `image_multimodal_enabled=true`。
+
+### 回合完整性：终止帧契约
+
+- 每条 `inbound_message` 的 `_run_turn(...)` 在**所有路径**上恰好发出一个终止帧（`turn_complete` 或 `turn_error`）。
+- `asyncio.CancelledError` 是 `BaseException`，会穿过 `except Exception`（例如 Web 端暂停、任务被取消）；传输层单独捕获它，先发 `turn_complete` 再 re-raise。
+- 背景：宿主按 `event_id` 关联每回合的 pending Promise，每会话串行派发队列依赖 pending settle。终止帧缺失 → pending 永不 settle → 该会话后续消息永久排队。历史上真实卡死过：Web 端暂停 QQ 会话后，QQ 再发消息永久无响应。
+- 排障「某渠道会话卡死不再响应」时，先确认对应回合的 Python 侧是否发出了终止帧。
+
+## QQ 渠道增强（仅 qqbot）：暂停 / 即时读取 / 过程信息流
+
+以下行为仅在 `envelope.channel == "qqbot"` 时启用（Python 传输层门控）；其他中国渠道保持原有行为。卡死修复（终止帧契约）对所有渠道生效。
+
+### QQ 暂停命令
+
+- 触发词：「暂停」/「暫停」/「pause」/「/pause」；带标点变体（「暂停。」）两侧归一化对齐（宿主 `isQQBotPauseCommandText` / Python `QQBOT_PAUSE_COMMANDS` + `_normalize_control_command_text`）。
+- 宿主 `handleQQBotDispatch` 识别暂停 → `markSessionDispatchAbort`（abort 代数抑制被取消回合的残留回复）+ `runImmediateSessionDispatch` 绕过忙碌队列立即执行；**暂停不丢弃排队消息**（区别于 stop：stop 额外 `dropQueuedSessionDispatches`）。
+- Python 侧经 `SessionRuntimeBridge.pause(session_key, manual=True)`：先做运行状态检查（`state.is_running` 或 `status == "running"`），空闲返回 0（避免空闲会话上 `session.pause(manual=True)` 产生多余转录归档）；运行中调用 `session.pause(manual=True)`。
+- 回执：「已暂停。」/「当前没有正在进行的任务。」+ `turn_complete`。
+
+### 运行中消息即时读取
+
+- 宿主：`hasSessionDispatchBacklog(queueKey)` 为真时，运行中到达的消息不再排队等当前回合结束，而是 `runImmediateSessionDispatch` 立即派发。
+- Python 分流：会话运行中 → `session.queue_follow_up_batch([msg], persist_transcript=True)` + 回执「收到，将在当前任务中一并处理。」+ `turn_complete`（frontdoor 在下一次调模型前注入排队内容，与 `websocket_ceo` 的 Web 行为一致）；空闲 → 正常新回合。
+- 排空兜底循环：`prompt` 正常返回后 `drain_queued_follow_up_messages()` 可能仍有残留（消息到达时模型已进入最后一段生成）；循环 `prompt_batch` 续跑直至排空（`archive_follow_up_chain_transition` 记录回合链），整个回合对外只发一个 `turn_complete`。
+- 保留语义：`session.cancel` 不清空 follow-up 队列；停止/暂停时已入队的消息会在下一回合继续跑。暂停恰好发生在入队与回执之间的窗口内，回执会被 abort 抑制但消息仍在队列（已知边缘情形）。
+
+### 过程信息流（progressMode）
+
+- 背景：QQ 端此前只能看到最终回复，工具调用与阶段进展不可见。QQ 官方机器人 API 不能编辑已发消息且有频率限制，因此实现为节流里程碑消息，而非 token 级流式。
+- 每回合构造 `_QQBotProgressCollector` 收集事件：`tool_execution_start`（「🔧 …」）、`tool_execution_end` 出错 / `error`（「⚠️ …」）、`message_delta` 的 progress/analysis channel（跳过 `deep_progress` 高噪声内容）。
+- 回合内单一 flush 任务按 `QQBOT_PROGRESS_MIN_INTERVAL_SECONDS`（5 秒）节流，合并至多 `QQBOT_PROGRESS_MAX_LINES_PER_FRAME`（3）行，以 `deliver_message(mode="progress", metadata.progress_kind="milestone")` 发出，**复用同一 `event_id`**（宿主按 event_id 关联 pending）。
+- 宿主 `runtime_bridge.ts` 仅在对应 `event_id` 的 pending 存在时转发 progress 帧（回合结束后的残留过程帧是噪声，不走 lateDeliverRoutes）；`bot.ts` deliver 识别 `kind: "progress"`，以纯文本发送、绕过 C2C markdown 缓冲，同样受 abort 代数抑制。
+- 配置：`channels.qqbot.progressMode: "off" | "milestones"`（默认 milestones）；`replyFinalOnly: true` 时过程帧一并禁用。
 
 ## 7. 出站消息链路
 
@@ -143,6 +176,7 @@ Python 输出到渠道时，主要走：
 
 - `_progress` / `_tool_hint` / `_session_event` 等内部消息不会直接发往渠道
 - 只发送最终对用户可见的文本
+- 例外：QQ 过程信息流在回合内直接发 `mode="progress"` 帧（见上文「QQ 渠道增强」），不走 `send_outbound(...)`；旧的渠道事件 → 出站路径（`build_channel_outbound_message`）已废弃（恒返回 None 且有测试锁定），不要复活。
 
 ## 8. session key 规则
 
@@ -178,7 +212,7 @@ Supervisor 会把 Python 当前 runtime config 导出为 host config，再传给
 - `build_runtime_config_payload(...)`
 - `ChinaBridgeSupervisor._write_host_runtime_config()`
 
-## 10. 当前已知维护风险
+## 10. 维护风险与高风险区域
 
 ### `controlToken` 默认值偏弱
 
@@ -194,7 +228,20 @@ Python 侧 `send_outbound()` 会过滤 `_progress`、`_tool_hint`、`_session_ev
 
 ### vendor 与 native 层边界必须守住
 
-`src/vendor/*` 应尽量贴近上游。G3KU 自定义逻辑优先放在 native wrapper 层，否则后续同步 upstream 会非常痛苦。
+`src/vendor/*` 应尽量贴近上游，不要把 G3KU 特化逻辑混进去；自定义逻辑优先放在 native wrapper 层，否则后续同步 upstream 会非常痛苦。
+
+既有偏离记录：vendor `qqbot/bot.ts` 已含 G3KU 特化的会话派发队列（串行/立即派发、abort 代数抑制）与停止/暂停控制命令处理——这些逻辑与上游差异较大，同步 upstream 时需逐段比对。新增渠道控制类行为时先评估能否放在 native 层。
+
+### 不要把 `_run_turn` 任务注册到真实 session key
+
+暂停链路 `_run_turn → bridge.pause → session.pause → cancel_session_tasks → gather` 全程在暂停任务自己的调用栈上。若 `_run_turn` 任务以真实 session key 注册进会话任务表，暂停时会自我聚集（`gather` 等待自己）→ 永久死锁。保持 `register_task(None, task)` 现状（engine 忽略空 key）。
+
+### 高风险文件
+
+- `g3ku/china_bridge/transport.py`：Python 会话层与 Node 协议层的边界。
+- `g3ku/china_bridge/supervisor.py`：同时管构建、进程、配置导出、状态写入。
+- `subsystems/china_channels_host/src/host.ts`：Node host 的真正调度中心。
+- `subsystems/china_channels_host/src/vendor/*`：见上条 vendor / native 边界。
 
 ## 11. 常见排障入口
 
@@ -230,36 +277,32 @@ Python 侧 `send_outbound()` 会过滤 `_progress`、`_tool_hint`、`_session_ev
 - `g3ku/china_bridge/session_keys.py`
 - `_run_turn(...)` 中 runtime chat id / memory chat id 的构造
 
-## 12. 维护高风险区域
+### 用户消息里多出 cron 说明 / 定时相关消息答非所问
 
-- `g3ku/china_bridge/transport.py`
-  因为它是 Python 会话层与 Node 协议层的边界。
+先看：
 
-- `g3ku/china_bridge/supervisor.py`
-  因为它同时管构建、进程、配置导出、状态写入。
+- Node host 的 cron 隐藏契约注入（`appendCronHiddenPrompt`）是否复活；它当前应为 no-op
+- Python `ChinaBridgeTransport` 入站的 `strip_cron_hidden_prompt` 兜底剥除是否生效
 
-- `subsystems/china_channels_host/src/vendor/*`
-  这里应尽量贴近上游；不要把 G3KU 特化逻辑随意混进去。
+### QQ 会话卡死 / 消息一直排队不处理
 
-- `subsystems/china_channels_host/src/host.ts`
-  这是 Node host 的真正调度中心。
+先看：
+
+- 该回合 Python 侧是否发出了终止帧（`turn_complete` / `turn_error`）；CancelledError 漏发终止帧是历史根因（已修复，见 §6「回合完整性」）
+- 宿主进程是否仍处于修复部署前的卡死状态：重启 China bridge 宿主与 Web runtime 解除
+- 宿主日志是否按预期出现 `session busy; dispatching inbound immediately` / `session pause command detected; executing immediately`
+- 运行中消息应收到回执「收到，将在当前任务中一并处理。」；若没有，确认 Python 侧 `get_existing_session` + 运行状态检查分支
+
 ## Containerized China Bridge
 
-Docker deployment does not split China bridge into a third long-lived service. The current contract remains:
+容器化部署不把 China bridge 拆成第三个长驻服务：`ChinaBridgeSupervisor` 仍由 web 进程 / web 容器持有，Node host 作为其受监管子进程运行，worker 容器不负责 China bridge 启动。整体容器部署契约详见 `web-and-admin.md`「Container Deployment Contract」。China bridge 特有要求：
 
-- the web process or web container owns `ChinaBridgeSupervisor`
-- the Node host still runs as a supervised child process of that web runtime
-- the worker container does not own China bridge startup
+- web 镜像构建需包含 Node 20 与包管理器工具链，且构建产物 `subsystems/china_channels_host/dist/index.js` 应已存在于镜像中，不依赖首次请求时的临时安装/构建。
+- bridge 运行时状态仍持久化在 `.g3ku/china-bridge/` 下。
 
-This matters for image construction and troubleshooting:
+容器化 China bridge 失败而 web runtime 其余部分健康时，按此顺序排查：
 
-- Node 20 and the package-manager toolchain belong in the web image build
-- the built host entry `subsystems/china_channels_host/dist/index.js` should already exist in the image, rather than relying on first-request ad-hoc setup
-- bridge runtime state still persists under `.g3ku/china-bridge/`
-
-If containerized China bridge fails while the rest of the web runtime is healthy, debug in this order:
-
-1. web container image contents for `subsystems/china_channels_host/dist/index.js`
-2. web container Node / pnpm availability
-3. shared `.g3ku/china-bridge/` status and logs
-4. exported host runtime config under the bridge state directory
+1. web 镜像中是否包含 `subsystems/china_channels_host/dist/index.js`
+2. web 容器内 Node / pnpm 是否可用
+3. 共享的 `.g3ku/china-bridge/` 状态与日志
+4. bridge 状态目录下的导出 host runtime config
