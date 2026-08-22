@@ -21,6 +21,7 @@ from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.stage_prompt_compaction import (
     STAGE_EXTERNALIZED_PREFIX,
     completed_stage_blocks,
+    current_stage_active_window,
     stage_prompt_prefix,
 )
 from g3ku.runtime.tool_visibility import (
@@ -2049,9 +2050,22 @@ class CeoMessageBuilder:
             combined_frontdoor_context,
             skip_stage_ids=retained_completed_stage_ids,
         )
+        # 当 history 是全量 transcript/续跑体时，把旧阶段原文裁到活动窗口，
+        # 只留前缀 + 最近窗口原文；workset(压缩块+STAGE_RAW) 另行补充。
+        # checkpoint 路径 raw 本来就只剩 user，裁剪为 no-op，不影响既有用例。
+        lead_prefix, raw_remainder = stage_prompt_prefix(
+            raw_history_messages,
+            preserve_leading_system=False,
+            preserve_leading_user=True,
+        )
+        raw_active_window = current_stage_active_window(
+            raw_remainder,
+            keep_completed_stages=0,
+        )
+        trimmed_raw_history = [*lead_prefix, *raw_active_window]
         stage_workset_history = [*list(completed_blocks), *list(retained_raw_stage_blocks)]
         history_zone_source = [
-            *list(raw_history_messages),
+            *list(trimmed_raw_history),
             *list(stage_workset_history),
             *self._hidden_internal_summary_messages(
                 persisted_session=persisted_session,
@@ -2060,7 +2074,7 @@ class CeoMessageBuilder:
         ]
         pre_request_messages = [
             {"role": "system", "content": str(context_sources["system_prompt"] or "")},
-            *raw_history_messages,
+            *trimmed_raw_history,
             *stage_workset_history,
         ]
         if not current_user_in_history:
@@ -2077,7 +2091,7 @@ class CeoMessageBuilder:
         if completed_blocks:
             frontdoor_history_shrink_reason = "stage_compaction"
         staged_history_for_injection = [
-            *raw_history_messages,
+            *trimmed_raw_history,
             *stage_workset_history,
         ]
         history_state['history_messages'] = staged_history_for_injection

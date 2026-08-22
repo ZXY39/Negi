@@ -43,11 +43,10 @@ from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
+from g3ku.runtime.stage_prompt_compaction import decompose_stage_prompt_messages
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
-    FRONTDOOR_COMPACTED_HISTORY_MAX_TOKENS,
     FrontdoorTokenPreflightResult,
-    compact_frontdoor_history_zone,
 )
 from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.models import normalize_execution_policy_metadata
@@ -154,27 +153,6 @@ class FrontdoorCompressionRuntimeError(RuntimeError):
         self.code = str(code or "").strip() or "runtime_error"
         self.message = str(message or "").strip()
         self.recoverable = bool(recoverable)
-
-
-@dataclass(frozen=True, slots=True)
-class _FrontdoorTokenPreflightPolicy:
-    max_context_tokens: int
-    trigger_ratio: float
-    trigger_tokens: int
-
-
-def _build_frontdoor_token_preflight_policy(
-    *,
-    max_context_tokens: int,
-    trigger_ratio: float,
-) -> _FrontdoorTokenPreflightPolicy:
-    normalized_max = max(0, int(max_context_tokens or 0))
-    normalized_ratio = max(0.0, float(trigger_ratio or 0.0))
-    return _FrontdoorTokenPreflightPolicy(
-        max_context_tokens=normalized_max,
-        trigger_ratio=normalized_ratio,
-        trigger_tokens=int(normalized_max * normalized_ratio),
-    )
 
 
 def _estimate_frontdoor_provider_request_tokens(
@@ -403,14 +381,6 @@ def _estimate_frontdoor_provider_request_token_breakdown(
         "image_count": len(image_blocks),
         "image_estimation_method": _DEFAULT_IMAGE_ESTIMATION_METHOD if image_blocks else "",
     }
-
-
-def _should_run_frontdoor_token_preflight(
-    *,
-    final_request_tokens: int,
-    policy: _FrontdoorTokenPreflightPolicy,
-) -> bool:
-    return int(final_request_tokens or 0) >= int(policy.trigger_tokens)
 
 
 class _CeoStructuredTool(StructuredTool):
@@ -744,6 +714,30 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             item
             for item in durable
             if not cls._is_frontdoor_tool_contract_record(item)
+        ]
+
+    @classmethod
+    def _trim_frontdoor_seed_to_stage_window(
+        cls,
+        seed: list[dict[str, Any]] | None,
+        stage_state: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """把续跑 seed（上一份请求体基线）裁到「前缀+压缩块+最近窗口」，
+        使存量大会话在续跑路径也能真正收缩，而不是携带未裁剪旧体重新膨胀。"""
+        records = [dict(item) for item in list(seed or []) if isinstance(item, dict)]
+        if not records or not list((stage_state or {}).get("stages") or []):
+            return records
+        parts = decompose_stage_prompt_messages(
+            records,
+            stage_state=stage_state,
+            keep_latest_completed_stages=3,
+            preserve_leading_system=True,
+            preserve_leading_user=True,
+        )
+        return [
+            *list(parts["prefix"]),
+            *list(parts["completed_blocks"]),
+            *list(parts["active_window"]),
         ]
 
     def _quarantine_frontdoor_shrink(
@@ -1150,104 +1144,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return records
 
     @classmethod
-    def _rewrite_frontdoor_request_messages_with_compacted_history(
-        cls,
-        *,
-        request_messages: list[dict[str, Any]],
-        compacted_history: Any,
-    ) -> list[dict[str, Any]]:
-        body_messages, contract_messages = cls._split_request_body_and_tool_contract_messages(request_messages)
-        if not body_messages:
-            return [dict(item) for item in list(request_messages or []) if isinstance(item, dict)]
-
-        normalized_body = [dict(item) for item in body_messages if isinstance(item, dict)]
-        system_prefix: list[dict[str, Any]] = []
-        if normalized_body and str(normalized_body[0].get("role") or "").strip().lower() == "system":
-            system_prefix = [dict(normalized_body[0])]
-            normalized_body = normalized_body[1:]
-
-        recent_tail_count = min(len(normalized_body), 4)
-        if recent_tail_count <= 0 or len(normalized_body) <= recent_tail_count:
-            return [*system_prefix, *normalized_body, *contract_messages]
-
-        recent_tail = [dict(item) for item in normalized_body[-recent_tail_count:]]
-        return [
-            *system_prefix,
-            dict(getattr(compacted_history, "compacted_block", {}) or {}),
-            *recent_tail,
-            *contract_messages,
-        ]
-
-    def _run_frontdoor_token_preflight_compaction(
-        self,
-        *,
-        state: CeoGraphState,
-        request_messages: list[dict[str, Any]],
-        tool_schemas: list[dict[str, Any]],
-        provider_request_body: dict[str, Any] | None,
-    ) -> FrontdoorTokenPreflightResult:
-        assembly_cfg = getattr(getattr(self._loop, "_memory_runtime_settings", None), "assembly", None)
-        policy = _build_frontdoor_token_preflight_policy(
-            max_context_tokens=int(
-                getattr(assembly_cfg, "frontdoor_compaction_max_context_tokens", 200000) or 200000
-            ),
-            trigger_ratio=float(
-                getattr(assembly_cfg, "frontdoor_compaction_trigger_ratio", 0.10) or 0.10
-            ),
-        )
-        final_request_tokens = _estimate_frontdoor_provider_request_tokens(
-            provider_request_body=provider_request_body,
-            request_messages=request_messages,
-            tool_schemas=tool_schemas,
-        )
-        diagnostics: dict[str, Any] = {
-            "applied": False,
-            "final_request_tokens": final_request_tokens,
-            "trigger_tokens": int(policy.trigger_tokens),
-            "max_context_tokens": int(policy.max_context_tokens),
-        }
-        if not _should_run_frontdoor_token_preflight(
-            final_request_tokens=final_request_tokens,
-            policy=policy,
-        ):
-            return FrontdoorTokenPreflightResult(
-                request_messages=list(request_messages),
-                final_request_tokens=final_request_tokens,
-                history_shrink_reason="",
-                diagnostics=diagnostics,
-            )
-
-        compacted_history = compact_frontdoor_history_zone(
-            raw_history_messages=self._request_body_messages_without_tool_contracts(request_messages),
-            frontdoor_stage_state=dict(state.get("frontdoor_stage_state") or {}),
-            max_compacted_tokens=FRONTDOOR_COMPACTED_HISTORY_MAX_TOKENS,
-        )
-        rewritten_messages = self._rewrite_frontdoor_request_messages_with_compacted_history(
-            request_messages=request_messages,
-            compacted_history=compacted_history,
-        )
-        rewritten_tokens = _estimate_frontdoor_provider_request_tokens(
-            provider_request_body=None,
-            request_messages=rewritten_messages,
-            tool_schemas=tool_schemas,
-        )
-        diagnostics.update(
-            {
-                "applied": True,
-                "compacted_block_tokens": int(getattr(compacted_history, "compacted_block_tokens", 0) or 0),
-                "retained_completed_stage_ids": list(
-                    getattr(compacted_history, "retained_completed_stage_ids", []) or []
-                ),
-                "final_request_tokens": rewritten_tokens,
-            }
-        )
-        return FrontdoorTokenPreflightResult(
-            request_messages=rewritten_messages,
-            final_request_tokens=rewritten_tokens,
-            history_shrink_reason="token_compression",
-            diagnostics=diagnostics,
-        )
-
     def _resolve_frontdoor_send_model_context_window(
         self,
         *,
@@ -5139,7 +5035,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             current_turn_user_content
         )
         if session_request_body_messages:
-            request_body_seed_messages = list(session_request_body_messages)
+            request_body_seed_messages = self._trim_frontdoor_seed_to_stage_window(
+                session_request_body_messages, current_frontdoor_stage_state
+            )
             checkpoint_messages = []
             builder_user_metadata["_frontdoor_history_seed"] = "session_window"
             has_prior_request_body_seed = True

@@ -3403,3 +3403,80 @@ async def test_ceo_context_assembly_keeps_memory_snapshot_out_of_turn_overlay_an
     assert "id:Ab12Z9" not in str(stable_messages[1]["content"] or "")
     assert "2026/4/18-user" not in str(stable_messages[1]["content"] or "")
     assert "Prefer concise answers" in str(stable_messages[1]["content"] or "")
+
+
+@pytest.mark.asyncio
+async def test_message_builder_trims_full_transcript_history_to_active_window() -> None:
+    """transcript/续跑全量历史必须裁到活动窗口，旧阶段原文不得与压缩块叠加重复。"""
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    transcript: list[dict[str, object]] = [{"role": "user", "content": "bootstrap request"}]
+    for index in range(1, 6):
+        transcript.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": f"call-stage-{index}",
+                        "type": "function",
+                        "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+        transcript.append(
+            {"role": "tool", "name": "submit_next_stage", "tool_call_id": f"call-stage-{index}", "content": '{"ok": true}'}
+        )
+        transcript.append({"role": "assistant", "content": f"stage {index} raw detail"})
+
+    stages = [
+        {
+            "stage_id": f"frontdoor-stage-{index}",
+            "stage_index": index,
+            "stage_kind": "normal",
+            "system_generated": False,
+            "status": "completed" if index < 5 else "active",
+            "stage_goal": f"inspect stage {index}",
+            "completed_stage_summary": f"finished stage {index}",
+            "key_refs": [],
+            "tool_round_budget": 2,
+            "tool_rounds_used": 1,
+        }
+        for index in range(1, 6)
+    ]
+    persisted = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        messages=transcript,
+        metadata={},
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+    )
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="continue",
+        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        persisted_session=persisted,
+        checkpoint_messages=None,
+        user_content="continue",
+        frontdoor_stage_state={
+            "active_stage_id": "frontdoor-stage-5",
+            "transition_required": False,
+            "stages": stages,
+        },
+    )
+
+    rendered = "\n\n".join(str(item.get("content") or "") for item in result.stable_messages)
+    # 旧阶段原文被裁掉（不再与压缩块叠加）
+    for index in range(1, 5):
+        assert f"stage {index} raw detail" not in rendered
+    # 活动窗口保留 active 阶段原文
+    assert "stage 5 raw detail" in rendered
+    # 首条用户请求保留，且有压缩/外部化块代表旧阶段
+    assert "bootstrap request" in rendered
+    assert ("[G3KU_STAGE_COMPACT_V1]" in rendered) or ("[G3KU_STAGE_EXTERNALIZED_V1]" in rendered)

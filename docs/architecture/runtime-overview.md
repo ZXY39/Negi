@@ -645,12 +645,15 @@ Tool/skill catalog narrowing now goes through a catalog-only bridge and no longe
 The CEO frontdoor no longer keeps a separate legacy history-compaction layer.
 
 - The earlier `_summarize_messages()` compatibility hook has been removed from runtime execution paths.
+- The one-shot structural "token preflight" compaction (`_run_frontdoor_token_preflight_compaction` / `compact_frontdoor_history_zone`) was dead code and has been deleted. Do not reintroduce a parallel structural compaction; the shared `stage_prompt_compaction` helpers are the single source of truth for stage-window trimming.
 - Frontdoor history now reaches the model either as local workset stage windows/blocks or through a same-turn `token_compression` rewrite when request size approaches the selected model window.
+- When the history source is the full transcript / continuity seed (not the checkpoint user-only path), the raw history is trimmed to the active stage window (`current_stage_active_window`, completed stages kept raw = 0) before the workset blocks are appended, so old stage prose is no longer carried twice alongside its compact block. The continuity seed is trimmed the same way (`_trim_frontdoor_seed_to_stage_window`) so large existing baselines shrink on the next over-budget turn instead of re-inflating.
 - If you are debugging long-context behavior, there is no intermediate "message-count compaction" stage to inspect anymore.
 
-This leaves two distinct mechanisms only:
+This leaves three distinct mechanisms only:
 
-- Stage workset compaction for the near-field prompt, shared with the execution-stage prompt logic.
+- Stage workset compaction for the near-field prompt (completed-stage compact blocks + retained raw replay), shared with the execution-stage prompt logic.
+- Stage archive/externalization (`stage_kind="compression"` + `archive_ref`) bounding the canonical stage state.
 - Inline `token_compression` for older body-history when the final provider-bound request approaches the selected model's `context_window_tokens`.
 
 For the CEO/frontdoor path, the near-field stage workset now has a stricter source-of-truth split:
