@@ -78,10 +78,7 @@ class CeoPromptBuilder:
                 continue
             label = display_name if display_name and display_name != skill_id else skill_id
             summary = l0 or description or display_name or skill_id
-            lines.append(
-                f'- `{skill_id}` ({label}): {summary}。'
-                f'它不走 hydration；如需读取完整工作流正文，仅在当前已经存在活动阶段后调用 `load_skill_context(skill_id="{skill_id}")`。'
-            )
+            lines.append(f'- `{skill_id}` ({label}): {summary}。')
         if not lines:
             return ''
         return '\n'.join(
@@ -89,7 +86,7 @@ class CeoPromptBuilder:
                 '## 本轮可见技能',
                 '- 只有以下 `skill_id` 在本轮可见，不要假设其他 skill 可用。',
                 '- “可见”不等于“本轮一开始就应该读取正文”；如果当前还没有活动阶段且你需要使用工具，第一步必须先调用 `submit_next_stage`。',
-                '- 仅当当前已经存在活动阶段且你确实需要完整工作流正文时，才可对下列 `skill_id` 调用 `load_skill_context`。',
+                '- 仅当当前已经存在活动阶段且你确实需要完整工作流正文时，才可对下列 `skill_id` 调用 `load_skill_context(skill_id="<skill_id>")`。',
                 '- candidate skill 不走 hydration；不要把候选 skill 误当成需要安装或等待下一轮才可读取正文的工具。',
                 *lines,
             ]

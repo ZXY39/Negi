@@ -129,14 +129,15 @@ def _render_candidate_tool_section(items: list[dict[str, str]] | None) -> list[s
     normalized_items = _normalized_candidate_tool_items(items)
     if not normalized_items:
         return ['candidate_tools: none']
-    lines = ['candidate_tools:']
+    lines = [
+        'candidate_tools:',
+        '- These tools are visible but not callable yet. To use one, call `load_tool_context(tool_id="<tool_id>")` first and wait for the next round before calling it directly.',
+    ]
     for item in normalized_items:
         tool_id = str(item.get('tool_id') or '').strip()
         description = str(item.get('description') or '').strip()
         detail = description if description else 'No description available.'
-        lines.append(
-            f'- `{tool_id}`: {detail} If it is still only listed here, load it with `load_tool_context(tool_id="{tool_id}")` and wait for the next round before calling it directly.'
-        )
+        lines.append(f'- `{tool_id}`: {detail}')
     return lines
 
 

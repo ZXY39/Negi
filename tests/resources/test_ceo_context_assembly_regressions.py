@@ -1546,7 +1546,12 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
     assert "candidate_tools:" in str(updated[0]["content"] or "")
     assert "candidate_skills (loadable with `load_skill_context`): `memory`" in str(updated[0]["content"] or "")
     assert "Skills listed in `candidate_skills` do not hydrate" in str(updated[0]["content"] or "")
-    assert 'load_tool_context(tool_id="agent_browser")' in str(updated[0]["content"] or "")
+    assert "`agent_browser`: Browser automation" in str(updated[0]["content"] or "")
+    assert (
+        'To use one, call `load_tool_context(tool_id="<tool_id>")` first and wait for the next round before calling it directly.'
+        in str(updated[0]["content"] or "")
+    )
+    assert 'load_tool_context(tool_id="agent_browser")' not in str(updated[0]["content"] or "")
     payload = contract.to_message_payload()
     assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
     assert payload["candidate_tools"] == [
