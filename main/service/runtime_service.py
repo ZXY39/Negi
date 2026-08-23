@@ -365,6 +365,13 @@ class MainRuntimeService:
         self._node_context_selection_cache: dict[tuple[str, str], dict[str, Any]] = {}
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(app_config)
         adaptive_budget_settings = self._adaptive_tool_budget_settings(app_config)
+        sample_seconds = float(adaptive_budget_settings['sample_seconds'])
+        gate_stale = float(adaptive_budget_settings['gate_stale_after_seconds'])
+        if gate_stale > 0.0:
+            # Never let the staleness fail-open threshold sit below the sampling cadence.
+            gate_stale = max(gate_stale, sample_seconds * 3.0)
+        self._pressure_gate_stale_after_seconds = gate_stale
+        self._pressure_gate_close_on_machine_critical = bool(adaptive_budget_settings['gate_close_on_machine_critical'])
         node_dispatch_limits = self._node_dispatch_concurrency_settings(app_config)
         execution_runtime_enabled = self.execution_mode == 'worker'
         execution_max_concurrency = (
@@ -488,6 +495,9 @@ class MainRuntimeService:
             machine_disk_busy_critical_percent=float(adaptive_budget_settings['machine_disk_busy_critical_percent']),
             process_cpu_warn_ratio=float(adaptive_budget_settings['process_cpu_warn_ratio']),
             process_cpu_safe_ratio=float(adaptive_budget_settings['process_cpu_safe_ratio']),
+            max_pressure_dwell_seconds=float(adaptive_budget_settings['max_pressure_dwell_seconds']),
+            max_tool_wait_ms=float(adaptive_budget_settings['max_tool_wait_ms']),
+            local_recovery_enabled=bool(adaptive_budget_settings['local_recovery_enabled']),
         ) if self.adaptive_tool_budget_controller is not None else None
         self.node_runner._adaptive_tool_budget_controller = self.adaptive_tool_budget_controller
         self.worker_heartbeat_service = WorkerHeartbeatServiceV2(
@@ -3605,6 +3615,11 @@ class MainRuntimeService:
             'machine_disk_busy_critical_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_disk_busy_critical_percent', 90.0) or 90.0)),
             'process_cpu_warn_ratio': max(0.0, float(getattr(parallelism, 'adaptive_process_cpu_warn_ratio', 0.85) or 0.85)),
             'process_cpu_safe_ratio': max(0.0, float(getattr(parallelism, 'adaptive_process_cpu_safe_ratio', 0.50) or 0.50)),
+            'max_pressure_dwell_seconds': max(0.0, float(getattr(parallelism, 'adaptive_pressure_max_dwell_seconds', 60.0) or 0.0)),
+            'max_tool_wait_ms': max(0.0, float(getattr(parallelism, 'adaptive_pressure_max_tool_wait_ms', 30000.0) or 0.0)),
+            'local_recovery_enabled': bool(getattr(parallelism, 'adaptive_pressure_local_recovery_enabled', True)) if parallelism is not None else True,
+            'gate_stale_after_seconds': max(0.0, float(getattr(parallelism, 'adaptive_pressure_gate_stale_after_seconds', 10.0) or 0.0)),
+            'gate_close_on_machine_critical': bool(getattr(parallelism, 'adaptive_pressure_gate_close_on_machine_critical', False)) if parallelism is not None else False,
         }
 
     @staticmethod
@@ -3876,6 +3891,12 @@ class MainRuntimeService:
         self.node_runner._max_parallel_child_pipelines = max_parallel_child_pipelines
         self.node_runner._parallel_child_pipelines_enabled = parallel_enabled
         adaptive_budget_settings = self._adaptive_tool_budget_settings(config)
+        reload_sample_seconds = float(adaptive_budget_settings['sample_seconds'])
+        reload_gate_stale = float(adaptive_budget_settings['gate_stale_after_seconds'])
+        if reload_gate_stale > 0.0:
+            reload_gate_stale = max(reload_gate_stale, reload_sample_seconds * 3.0)
+        self._pressure_gate_stale_after_seconds = reload_gate_stale
+        self._pressure_gate_close_on_machine_critical = bool(adaptive_budget_settings['gate_close_on_machine_critical'])
         if self.adaptive_tool_budget_controller is not None:
             self.adaptive_tool_budget_controller.configure(
                 normal_limit=int(adaptive_budget_settings['normal_limit']),
@@ -3923,6 +3944,9 @@ class MainRuntimeService:
                 machine_disk_busy_critical_percent=float(adaptive_budget_settings['machine_disk_busy_critical_percent']),
                 process_cpu_warn_ratio=float(adaptive_budget_settings['process_cpu_warn_ratio']),
                 process_cpu_safe_ratio=float(adaptive_budget_settings['process_cpu_safe_ratio']),
+                max_pressure_dwell_seconds=float(adaptive_budget_settings['max_pressure_dwell_seconds']),
+                max_tool_wait_ms=float(adaptive_budget_settings['max_tool_wait_ms']),
+                local_recovery_enabled=bool(adaptive_budget_settings['local_recovery_enabled']),
             )
         # Resource manager config binding and reload are handled by refresh_loop_runtime_config().
         # Rebinding here clears dynamic tool instances before CEO exposure is assembled.
@@ -7881,10 +7905,29 @@ class MainRuntimeService:
             snapshot = dict(monitor.snapshot() or {})
         except Exception:
             return True
-        budget_state = str(snapshot.get('budget_state') or snapshot.get('tool_pressure_state') or 'normal').strip().lower()
-        machine_state = str(snapshot.get('machine_pressure_state') or '').strip().lower()
+        # D) Staleness fail-open: never hold node turns on a stale critical state if the
+        # sampler thread stops producing. Use sample AGE, not pressure_snapshot_fresh
+        # (which is False whenever machine metrics are unavailable even when the sampler
+        # thread is healthy).
+        stale_after_seconds = float(getattr(self, '_pressure_gate_stale_after_seconds', 10.0) or 0.0)
+        if stale_after_seconds > 0.0:
+            raw_age_ms = snapshot.get('pressure_sample_age_ms')
+            try:
+                sample_age_ms = float(raw_age_ms) if raw_age_ms is not None else float('inf')
+            except (TypeError, ValueError):
+                sample_age_ms = float('inf')
+            if sample_age_ms > stale_after_seconds * 1000.0:
+                return True
+        # E) Only LOCAL critical closes the turn gate (slow down, don't freeze); machine
+        # pressure squeezes only the tool budget. Legacy behavior behind a toggle.
         local_state = str(snapshot.get('local_pressure_state') or '').strip().lower()
-        return budget_state != 'critical' and machine_state != 'critical' and local_state != 'critical'
+        if local_state == 'critical':
+            return False
+        if bool(getattr(self, '_pressure_gate_close_on_machine_critical', False)):
+            budget_state = str(snapshot.get('budget_state') or snapshot.get('tool_pressure_state') or 'normal').strip().lower()
+            machine_state = str(snapshot.get('machine_pressure_state') or '').strip().lower()
+            return budget_state != 'critical' and machine_state != 'critical'
+        return True
 
     def _node_turn_task_frozen(self, task_id: str) -> bool:
         meta = self.log_service.read_task_runtime_meta(str(task_id or '').strip()) or {}
@@ -8458,6 +8501,7 @@ class MainRuntimeService:
             'tool_pressure_last_transition_at': str(merged.get('tool_pressure_last_transition_at') or ''),
             'tool_pressure_throttled_since': str(merged.get('tool_pressure_throttled_since') or ''),
             'tool_pressure_critical_since': str(merged.get('tool_pressure_critical_since') or ''),
+            'tool_pressure_self_heal_reason': str(merged.get('tool_pressure_self_heal_reason') or ''),
             'worker_execution_state': str(merged.get('worker_execution_state') or merged.get('tool_pressure_state') or 'normal'),
             'worker_execution_target_limit': int(merged.get('worker_execution_target_limit') or merged.get('tool_pressure_target_limit') or 0),
             'worker_execution_running_count': int(merged.get('worker_execution_running_count') or merged.get('tool_pressure_running_count') or 0),

@@ -85,6 +85,9 @@ class WorkerPressureMonitor:
         machine_disk_busy_critical_percent: float = 90.0,
         process_cpu_warn_ratio: float = 0.85,
         process_cpu_safe_ratio: float = 0.50,
+        max_pressure_dwell_seconds: float = 60.0,
+        max_tool_wait_ms: float = 30000.0,
+        local_recovery_enabled: bool = True,
         system_metrics_sampler: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._controller = controller
@@ -92,7 +95,7 @@ class WorkerPressureMonitor:
         self._system_metrics_sampler = system_metrics_sampler
         self._lock = threading.RLock()
         self._sample_seconds = max(0.1, float(sample_seconds or 1.0))
-        self._recover_window_seconds = 1.0
+        self._recover_window_seconds = max(0.1, float(recover_window_seconds or 1.0))
         self._warn_consecutive_samples = max(1, int(warn_consecutive_samples or 1))
         self._safe_consecutive_samples = max(1, int(safe_consecutive_samples or 1))
         self._pressure_snapshot_stale_after_seconds = max(0.1, float(pressure_snapshot_stale_after_seconds or 3.0))
@@ -128,6 +131,11 @@ class WorkerPressureMonitor:
         self._consecutive_machine_warn = 0
         self._consecutive_machine_safe = 0
         self._consecutive_local_critical = 0
+        self._consecutive_local_safe = 0
+        self._restricted_since_mono = 0.0
+        self._max_pressure_dwell_seconds = max(0.0, float(max_pressure_dwell_seconds or 0.0))
+        self._max_tool_wait_ms = max(0.0, float(max_tool_wait_ms or 0.0))
+        self._local_recovery_enabled = bool(local_recovery_enabled)
         self._last_waiting_count = 0
         self._last_recovery_step_at = 0.0
         self._sample_mono = 0.0
@@ -152,6 +160,7 @@ class WorkerPressureMonitor:
             'budget_state': 'normal',
             'pressure_sample_at': '',
             'tool_pressure_sample_at': '',
+            'tool_pressure_self_heal_reason': '',
         }
 
     def configure(
@@ -185,10 +194,13 @@ class WorkerPressureMonitor:
         machine_disk_busy_critical_percent: float,
         process_cpu_warn_ratio: float,
         process_cpu_safe_ratio: float,
+        max_pressure_dwell_seconds: float = 60.0,
+        max_tool_wait_ms: float = 30000.0,
+        local_recovery_enabled: bool = True,
     ) -> None:
         with self._lock:
             self._sample_seconds = max(0.1, float(sample_seconds or 1.0))
-            self._recover_window_seconds = 1.0
+            self._recover_window_seconds = max(0.1, float(recover_window_seconds or 1.0))
             self._warn_consecutive_samples = max(1, int(warn_consecutive_samples or 1))
             self._safe_consecutive_samples = max(1, int(safe_consecutive_samples or 1))
             self._pressure_snapshot_stale_after_seconds = max(0.1, float(pressure_snapshot_stale_after_seconds or 3.0))
@@ -215,6 +227,9 @@ class WorkerPressureMonitor:
             self._machine_disk_busy_critical_percent = max(0.0, float(machine_disk_busy_critical_percent or 0.0))
             self._process_cpu_warn_ratio = max(0.0, float(process_cpu_warn_ratio or 0.0))
             self._process_cpu_safe_ratio = max(0.0, float(process_cpu_safe_ratio or 0.0))
+            self._max_pressure_dwell_seconds = max(0.0, float(max_pressure_dwell_seconds or 0.0))
+            self._max_tool_wait_ms = max(0.0, float(max_tool_wait_ms or 0.0))
+            self._local_recovery_enabled = bool(local_recovery_enabled)
 
     def snapshot(self) -> dict[str, Any]:
         current_mono = time.perf_counter()
@@ -253,7 +268,9 @@ class WorkerPressureMonitor:
     ) -> dict[str, Any]:
         current_mono = float(now_mono if now_mono is not None else time.perf_counter())
         timestamp = str(now_iso or _now_iso()).strip() or _now_iso()
-        waiting_count = int(self._controller.snapshot().get('worker_execution_waiting_count') or 0)
+        controller_snapshot = self._controller.snapshot()
+        waiting_count = int(controller_snapshot.get('worker_execution_waiting_count') or 0)
+        oldest_wait_ms = float(controller_snapshot.get('worker_execution_oldest_wait_ms') or 0.0)
         machine_available_bool = bool(machine_available)
         machine_warn = (
             machine_available_bool
@@ -343,21 +360,81 @@ class WorkerPressureMonitor:
                 self._consecutive_machine_safe = 0
             if local_critical:
                 self._consecutive_local_critical += 1
+                self._consecutive_local_safe = 0
             else:
                 self._consecutive_local_critical = 0
+                if local_safe:
+                    self._consecutive_local_safe += 1
+                else:
+                    self._consecutive_local_safe = 0
 
             current_state = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
             should_critical = bool(machine_critical or local_critical)
             should_throttle = machine_warn and self._consecutive_machine_warn >= self._warn_consecutive_samples
-            should_ease = machine_safe and self._consecutive_machine_safe >= self._safe_consecutive_samples
+            machine_recovery = machine_safe and self._consecutive_machine_safe >= self._safe_consecutive_samples
+            # C: local-driven recovery. Local health is sufficient to ease when the machine
+            # is not actively pressuring (also covers machine_state 'unknown' when machine
+            # metrics are unavailable).
+            local_recovery_ready = (
+                bool(self._local_recovery_enabled)
+                and self._consecutive_local_safe >= self._safe_consecutive_samples
+                and not machine_warn
+                and not machine_critical
+            )
+            should_ease = machine_recovery or local_recovery_ready
+
+            # A+B: escape valves for one-way throttling. Computed AFTER should_critical so
+            # forced easing can never override an active critical sample.
+            restricted_state = current_state in {'critical', 'throttled'}
+            if restricted_state and self._restricted_since_mono <= 0.0:
+                # Defensive: start timing a restricted episode we did not cause.
+                self._restricted_since_mono = current_mono
+            dwell_forced = (
+                self._max_pressure_dwell_seconds > 0.0
+                and restricted_state
+                and self._restricted_since_mono > 0.0
+                and (current_mono - self._restricted_since_mono) >= self._max_pressure_dwell_seconds
+            )
+            starvation_forced = (
+                self._max_tool_wait_ms > 0.0
+                and oldest_wait_ms >= self._max_tool_wait_ms
+                and current_state in {'critical', 'throttled', 'easing'}
+                and (
+                    restricted_state
+                    or current_mono - self._last_recovery_step_at >= self._recover_window_seconds
+                )
+            )
+            forced_ease = (not should_critical) and (dwell_forced or starvation_forced)
+            heal_reason = ''
 
             if should_critical:
                 self._controller.critical(at=timestamp)
                 self._last_recovery_step_at = current_mono
+                if self._restricted_since_mono <= 0.0:
+                    self._restricted_since_mono = current_mono
+            elif forced_ease:
+                heal_reason = 'dwell_timeout' if dwell_forced else 'starvation'
+                if waiting_count > 0:
+                    # One concrete recovery step (+1 target slot, drains oldest waiter)
+                    # regardless of machine_safe. step_easing (not begin_easing) because
+                    # begin_easing neither raises the limit nor drains waiters.
+                    self._controller.step_easing(at=timestamp)
+                    self._last_recovery_step_at = current_mono
+                elif current_state != 'normal':
+                    self._controller.set_budget_state('normal', at=timestamp)
+                    self._last_recovery_step_at = 0.0
+                self._restricted_since_mono = 0.0
+                # Hysteresis: require a fresh warn streak before re-throttling so the
+                # forced step is not immediately undone on the next sample.
+                self._consecutive_machine_warn = 0
             elif should_throttle:
                 self._controller.throttle(at=timestamp)
                 self._last_recovery_step_at = current_mono
+                if self._restricted_since_mono <= 0.0:
+                    self._restricted_since_mono = current_mono
             elif should_ease:
+                if local_recovery_ready and not machine_recovery:
+                    heal_reason = 'local_recovery'
                 if waiting_count > 0:
                     if current_state != 'easing':
                         self._controller.begin_easing(at=timestamp)
@@ -368,10 +445,12 @@ class WorkerPressureMonitor:
                 elif current_state != 'normal':
                     self._controller.set_budget_state('normal', at=timestamp)
                     self._last_recovery_step_at = 0.0
+                self._restricted_since_mono = 0.0
             elif current_state == 'easing' and waiting_count <= 0:
                 self._controller.set_budget_state('normal', at=timestamp)
                 self._last_recovery_step_at = 0.0
             self._snapshot['budget_state'] = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
+            self._snapshot['tool_pressure_self_heal_reason'] = heal_reason
             self._last_waiting_count = waiting_count
         return self.snapshot()
 

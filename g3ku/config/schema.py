@@ -478,6 +478,11 @@ class NodeParallelismConfig(Base):
     adaptive_sqlite_query_critical_ms: float = 250.0
     adaptive_process_cpu_warn_ratio: float = 0.85
     adaptive_process_cpu_safe_ratio: float = 0.50
+    adaptive_pressure_max_dwell_seconds: float = 60.0
+    adaptive_pressure_max_tool_wait_ms: float = 30000.0
+    adaptive_pressure_local_recovery_enabled: bool = True
+    adaptive_pressure_gate_stale_after_seconds: float = 10.0
+    adaptive_pressure_gate_close_on_machine_critical: bool = False
 
     @field_validator(
         "max_parallel_tool_calls_per_node",
@@ -528,6 +533,9 @@ class NodeParallelismConfig(Base):
         "adaptive_sqlite_query_critical_ms",
         "adaptive_process_cpu_warn_ratio",
         "adaptive_process_cpu_safe_ratio",
+        "adaptive_pressure_max_dwell_seconds",
+        "adaptive_pressure_max_tool_wait_ms",
+        "adaptive_pressure_gate_stale_after_seconds",
     )
     @classmethod
     def _clamp_positive_float(cls, value: float) -> float:
