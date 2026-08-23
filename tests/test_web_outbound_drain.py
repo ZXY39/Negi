@@ -85,6 +85,29 @@ async def test_drain_skips_non_china_channel_message() -> None:
 
 
 @pytest.mark.asyncio
+async def test_drain_survives_non_china_channel_message() -> None:
+    # Regression: poisoned session meta used to publish channel="china"
+    # messages, which the drain skipped. The skip must not kill the drain and
+    # subsequent china messages must still be delivered.
+    bus = MessageBus()
+    transport = _FakeTransport()
+    task = _start_china_outbound_drain(bus, transport)
+    try:
+        await bus.publish_outbound(
+            OutboundMessage(channel="china", chat_id="qqbot:default:dm", content="poisoned meta")
+        )
+        await bus.publish_outbound(
+            OutboundMessage(channel="qqbot", chat_id="default:dm:user-1", content="still delivered")
+        )
+        await _wait_until(lambda: len(transport.sent) == 1)
+        assert transport.sent[0].chat_id == "default:dm:user-1"
+        assert transport.sent[0].content == "still delivered"
+        assert not task.done()
+    finally:
+        await _stop(task)
+
+
+@pytest.mark.asyncio
 async def test_drain_survives_poison_message_and_keeps_draining() -> None:
     bus = MessageBus()
     transport = _FakeTransport()

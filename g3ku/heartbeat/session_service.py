@@ -9,6 +9,7 @@ from typing import Any
 
 from loguru import logger
 
+from g3ku.china_bridge.session_keys import normalize_account_id, parse_china_session_key
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
@@ -54,6 +55,35 @@ def _bundled_heartbeat_rules_text() -> str:
     except Exception:
         logger.debug("heartbeat rules read skipped")
         return ""
+
+
+def _derive_session_channel_chat(key: str) -> tuple[str, str]:
+    """Derive (channel, chat_id) for session registration.
+
+    China session keys must be parsed with the china session-key rules. A
+    naive first-colon split turns ``china:qqbot:default:dm`` into
+    channel="china"/chat_id="qqbot:default:dm", which poisons the runtime
+    session meta and later makes heartbeat reply routing publish
+    ``channel="china"`` outbound messages that the china drain silently
+    skips. Merged-DM keys carry no peer id; register without one so route
+    resolution falls back to scanning session messages for the real target.
+    """
+    raw_key = str(key or "").strip()
+    if raw_key.startswith("china:"):
+        parsed = parse_china_session_key(raw_key)
+        if parsed is not None:
+            account = normalize_account_id(parsed.account_id)
+            if parsed.chat_type == "group" and parsed.peer_id:
+                chat_id = f"{account}:group:{parsed.peer_id}"
+                if parsed.thread_id:
+                    chat_id = f"{chat_id}:thread:{parsed.thread_id}"
+            else:
+                chat_id = f"{account}:dm"
+            return parsed.channel, chat_id
+    if ":" in raw_key:
+        channel, chat_id = raw_key.split(":", 1)
+        return channel, chat_id
+    return "web", raw_key
 
 
 class WebSessionHeartbeatService:
@@ -1116,10 +1146,7 @@ class WebSessionHeartbeatService:
             self._session_manager.save(persisted_session)
 
         memory_scope = dict(normalized_metadata.get("memory_scope") or {})
-        if ":" in key:
-            channel, chat_id = key.split(":", 1)
-        else:
-            channel, chat_id = "web", key
+        channel, chat_id = _derive_session_channel_chat(key)
         session = self._runtime_manager.get_or_create(
             session_key=key,
             channel=channel or "web",

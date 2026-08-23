@@ -554,6 +554,15 @@ def _start_china_outbound_drain(bus: MessageBus, transport: ChinaBridgeTransport
                     except asyncio.TimeoutError:
                         continue
                 if pending.channel not in CHINA_CHANNELS:
+                    # Non-China outbound must never reach this drain; if it
+                    # does the publisher almost certainly resolved the wrong
+                    # channel (e.g. poisoned session meta). Surface it
+                    # instead of dropping silently.
+                    logger.warning(
+                        "china outbound drain skipped non-china message channel={} chat_id={}",
+                        pending.channel,
+                        pending.chat_id,
+                    )
                     pending = None
                     continue
                 await transport.send_outbound(pending)

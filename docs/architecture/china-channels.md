@@ -176,7 +176,10 @@ outbound drain（`g3ku/shells/web.py` 的 `_drain_outbound`）是总线出站队
 
 - 发送失败绝不能杀死任务：控制 WS 未连通等临时错误（`RuntimeError`）保留消息、每秒重试；其他异常只丢弃该条消息并记 error 日志。历史根因正是该任务只捕两种异常、静默死亡且无重启，导致定时提醒永久滞留队列。
 - `send_outbound(...)` 在 sender 未初始化时抛错而非静默返回，保证消息进入重试而不是无声丢失。
-- 发布/投递各有一条日志（`cron outbound published` / `china outbound drained`）；「队列有消息但渠道没收到」时先看这两条。
+- 非 China 渠道（`channel not in CHINA_CHANNELS`）的消息不应到达 drain；若到达说明发布方解析出了错误渠道，会记 warning 并丢弃，不再静默。
+- 发布/投递各有一条日志（`cron outbound published` / `china outbound drained`）；「队列有消息但渠道没收到」时先看这两条，再看是否出现 `skipped non-china message`。
+
+发布方的 `channel` 必须来自任务/会话的正确渠道，而不是从 session key 粗略拆分。历史上 heartbeat 回合曾用 `key.split(":", 1)` 把 `china:qqbot:default:dm` 拆成 `channel="china"`，并用它覆写运行时会话元数据，导致后续回以 `channel="china"` 发布、被 drain 静默丢弃。现在：`_derive_session_channel_chat` 对 `china:*` 键走 china session-key 解析；`SessionRuntimeManager` 的会话元数据「首次注册生效」，后来者不得覆写所属传输层登记的权威 `(channel, chat_id)`。
 
 Node 侧 `deliver_message` final 帧无对应 pending 回合时：qqbot 一律不复用 `lateDeliverRoutes` 里旧回合的 deliver 闭包（闭包内的 C2C markdown 缓冲是回合级状态，回合结束后无人冲洗，结构化文本会被永久困住；被动回复上下文也已过期），直接用帧自带的 channel/account/target 走平台主动发送兜底（`sendProactiveC2CMessage`）；其他渠道暂无主动兜底，仍按旧路由投递。兜底成功/失败分别有 `proactive fallback` 日志。`lateDeliverRoutes` 是内存表、宿主重启即清空——兜底同样覆盖这种"有帧无路由"场景。
 
@@ -301,12 +304,13 @@ Python 侧 `send_outbound()` 会过滤 `_progress`、`_tool_hint`、`_session_ev
 - 宿主日志是否按预期出现 `session busy; dispatching inbound immediately` / `session pause command detected; executing immediately`
 - 运行中消息应收到回执「收到，将在当前任务中一并处理。」；若没有，确认 Python 侧 `get_existing_session` + 运行状态检查分支
 
-### 定时提醒 / 主动推送没送达（本地会话里能看到内容）
+### 定时提醒 / 任务结果 / 主动推送没送达（本地会话里能看到内容）
 
 沿出站链路逐段看（§7）：
 
 - console.log 有没有 `cron outbound published for job ...`：没有 → 发布侧未过门条件，查任务 payload 的 `deliver` / `channel` / `to` 与会话上下文注入
-- 有没有 `china outbound drained: channel=...`：没有 → drain 任务异常；历史根因是任务只捕两种异常、静默死亡且不重启，现有全异常防护 + 重试，出现 `waiting for bridge connection` 属断连重试的正常告警
+- 有没有 `china outbound drained: channel=...`：没有 → 先看是否出现 `china outbound drain skipped non-china message channel=china ...`；有 → 发布方渠道解析错误（历史根因是 heartbeat 用首个冒号拆 session key 并覆写会话元数据，现已修复），再看 drain 任务是否异常（历史根因是只捕两种异常、静默死亡且不重启，现有全异常防护 + 重试，`waiting for bridge connection` 属断连重试的正常告警）
+- 任务结果（heartbeat 终态）推送还要确认心跳实例持有 `reply_notifier` 且事件未被滞留在未启动实例上：`build_web_session_heartbeat` 现复用存活实例而非每次重建
 - host.out.log 有没有 `outbound action=...` 或 `late deliver_message sent via proactive fallback`：没有 → 帧未到宿主（查控制 WS 与 `.g3ku/china-bridge/status.json`）；`proactive fallback delivery failed` → 平台主动发送被拒（频率限制 / 主动推送权限）
 
 ## Containerized China Bridge

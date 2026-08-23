@@ -54,7 +54,12 @@ class SessionRuntimeManager:
                 setattr(session, "_memory_channel", str(memory_channel or "").strip() or channel_value)
             if memory_chat_id:
                 setattr(session, "_memory_chat_id", str(memory_chat_id or "").strip() or chat_value)
-        self._meta[key] = (channel_value, chat_value)
+        # First registration wins. Later callers (e.g. heartbeat wake for an
+        # existing channel session) must not clobber the authoritative
+        # (channel, chat_id) recorded by the session's owning transport; a
+        # poisoned meta here corrupts heartbeat reply routing downstream.
+        if key not in self._meta:
+            self._meta[key] = (channel_value, chat_value)
         return session
 
     def bind_live_context(

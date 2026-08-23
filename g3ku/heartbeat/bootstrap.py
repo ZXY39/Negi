@@ -48,9 +48,14 @@ def build_web_session_heartbeat(
         and getattr(existing, "_runtime_manager", None) is runtime_manager
         and getattr(existing, "_main_task_service", None) is main_task_service
         and getattr(existing, "_session_manager", None) is session_manager
-        and getattr(existing, "_reply_notifier", None) is reply_notifier
     ):
+        # Reuse the live instance. Comparing reply_notifier by identity would
+        # always fail (callers pass a fresh closure each time) and rebuild a
+        # not-started heartbeat, orphaning the started one and stranding any
+        # enqueued events on it.
         heartbeat = existing
+        if getattr(heartbeat, "_reply_notifier", None) is None and reply_notifier is not None:
+            heartbeat._reply_notifier = reply_notifier
     else:
         heartbeat = WebSessionHeartbeatService(
             workspace=getattr(agent, "workspace", "."),
