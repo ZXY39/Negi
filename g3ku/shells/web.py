@@ -314,9 +314,19 @@ async def _sync_china_bridge_services_after_runtime_refresh(runtime_agent: Agent
     await _start_china_bridge_services_now(runtime_agent, config)
 
 
-async def refresh_web_agent_runtime(force: bool = False, reason: str = 'runtime') -> bool:
+async def refresh_web_agent_runtime(
+    force: bool = False,
+    reason: str = 'runtime',
+    *,
+    force_memory_sync: bool = False,
+) -> bool:
     runtime_agent = get_agent()
-    changed = refresh_loop_runtime_config(runtime_agent, force=force, reason=reason)
+    changed = refresh_loop_runtime_config(
+        runtime_agent,
+        force=force,
+        reason=reason,
+        force_memory_sync=force_memory_sync,
+    )
     await _sync_china_bridge_services_after_runtime_refresh(runtime_agent, runtime_agent.app_config)
     return changed
 

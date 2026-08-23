@@ -878,10 +878,10 @@ def _resource_delete_http_error(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=status_code, detail=detail)
 
 
-async def _refresh_runtime(reason: str) -> None:
+async def _refresh_runtime(reason: str, *, force_memory_sync: bool = False) -> None:
     web_refreshed = False
     try:
-        await refresh_web_agent_runtime(force=True, reason=reason)
+        await refresh_web_agent_runtime(force=True, reason=reason, force_memory_sync=force_memory_sync)
         web_refreshed = True
     except Exception as exc:
         if is_no_ceo_model_configured_error(exc) or str(exc or '').strip() == 'project is locked':
@@ -924,7 +924,7 @@ async def _refresh_runtime(reason: str) -> None:
         ) from exc
 
 
-async def _refresh_runtime_after_save(reason: str) -> dict[str, Any]:
+async def _refresh_runtime_after_save(reason: str, *, force_memory_sync: bool = False) -> dict[str, Any]:
     status: dict[str, Any] = {
         'saved': True,
         'web_refreshed': False,
@@ -935,7 +935,7 @@ async def _refresh_runtime_after_save(reason: str) -> dict[str, Any]:
         'reason': str(reason or '').strip() or 'runtime_refresh',
     }
     try:
-        await refresh_web_agent_runtime(force=True, reason=status['reason'])
+        await refresh_web_agent_runtime(force=True, reason=status['reason'], force_memory_sync=force_memory_sync)
         status['web_refreshed'] = True
     except Exception as exc:
         if is_no_ceo_model_configured_error(exc) or str(exc or '').strip() == 'project is locked':
@@ -1057,7 +1057,11 @@ async def _save_memory_embedding_atomically(
             embedding_config_id=next_embedding_config_id,
             rerank_config_id=next_rerank_config_id,
         )
-        await refresh_web_agent_runtime(force=True, reason='admin_llm_memory_embedding_atomic_save')
+        await refresh_web_agent_runtime(
+            force=True,
+            reason='admin_llm_memory_embedding_atomic_save',
+            force_memory_sync=True,
+        )
         manager = _runtime_memory_manager()
         reset_result = await manager.reset_dense_index(reason='embedding_model_changed')
         rebuild_result = await manager.rebuild_dense_index(reason='embedding_model_changed')
@@ -1080,7 +1084,11 @@ async def _save_memory_embedding_atomically(
                 embedding_config_id=original_binding['embedding_config_id'],
                 rerank_config_id=original_binding['rerank_config_id'],
             )
-            await refresh_web_agent_runtime(force=True, reason='admin_llm_memory_embedding_atomic_rollback')
+            await refresh_web_agent_runtime(
+                force=True,
+                reason='admin_llm_memory_embedding_atomic_rollback',
+                force_memory_sync=True,
+            )
         except Exception as rollback_exc:
             rollback_error = rollback_exc
 
@@ -2130,7 +2138,23 @@ async def update_llm_config(config_id: str, payload: dict = Body(...)):
         item = _llm_facade().update_config_record(config_id, payload)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    runtime_refresh = await _refresh_runtime_after_save('admin_llm_config_update')
+    # Only records referenced by the memory binding affect the memory
+    # runtime; forcing a reset for every record edit would needlessly close
+    # the active checkpointer under in-flight turns.
+    force_memory_sync = False
+    try:
+        binding = _llm_facade().get_memory_binding()
+        normalized_id = str(config_id or '').strip()
+        force_memory_sync = normalized_id in {
+            str(getattr(binding, 'embedding_config_id', '') or '').strip(),
+            str(getattr(binding, 'rerank_config_id', '') or '').strip(),
+        }
+    except Exception:
+        force_memory_sync = False
+    runtime_refresh = await _refresh_runtime_after_save(
+        'admin_llm_config_update',
+        force_memory_sync=force_memory_sync,
+    )
     return {'ok': True, 'item': item, 'runtime_refresh': runtime_refresh}
 
 
@@ -2311,7 +2335,9 @@ async def update_llm_memory_binding(payload: dict | None = Body(default=None)):
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await _refresh_runtime('admin_llm_memory_update')
+    # The memory binding lives outside the memory_runtime fingerprint tree and
+    # is baked into the store at init time, so the reset must be forced.
+    await _refresh_runtime('admin_llm_memory_update', force_memory_sync=True)
     return {'ok': True, 'item': result.model_dump(mode='json')}
 
 
@@ -2339,7 +2365,9 @@ async def run_llm_migration():
         load_config()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await _refresh_runtime('admin_llm_migrate')
+    # Legacy migration may (re)write the memory binding, which sits outside
+    # the memory_runtime fingerprint tree; force the memory runtime reset.
+    await _refresh_runtime('admin_llm_migrate', force_memory_sync=True)
     return {'ok': True}
 
 

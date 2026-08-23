@@ -134,7 +134,10 @@ class ModelConfigTool(Tool):
             from g3ku.config.loader import load_config
 
             cfg = load_config()
-            await self._refresh_runtime(kwargs)
+            # Legacy migration may rewrite memory embedding/rerank bindings,
+            # which live outside the memory_runtime fingerprint tree, so the
+            # memory runtime sync must be forced (mirrors admin /llm/migrate).
+            await self._refresh_runtime(kwargs, force_memory_sync=True)
             return {"ok": True, "workspace": str(cfg.workspace_path)}
 
         if action_name == "list_models":
@@ -199,16 +202,34 @@ class ModelConfigTool(Tool):
 
         return f"Error: unsupported action '{action_name}'"
 
-    async def _refresh_runtime(self, kwargs: dict[str, Any]) -> None:
+    async def _refresh_runtime(self, kwargs: dict[str, Any], *, force_memory_sync: bool = False) -> None:
         runtime = kwargs.get("__g3ku_runtime") if isinstance(kwargs.get("__g3ku_runtime"), dict) else {}
         loop = runtime.get("loop")
         if loop is None:
             return
         try:
             from g3ku.shells.web import refresh_web_agent_runtime, is_no_ceo_model_configured_error
-            await refresh_web_agent_runtime(force=True, reason="model_config_tool")
+            # Model routing changes do not alter the memory_runtime resource
+            # fingerprint, so the memory runtime sync stays fingerprint-gated
+            # (force_memory_sync defaults to False). Forcing it would close the
+            # active SQLite checkpointer mid-turn and fail the in-flight
+            # graph's final checkpoint write ("closed database"). Only actions
+            # that rewrite memory-affecting settings stored outside the
+            # fingerprint tree (migrate_legacy) opt into the forced reset.
+            await refresh_web_agent_runtime(
+                force=True, reason="model_config_tool", force_memory_sync=force_memory_sync
+            )
         except Exception as exc:
             if is_no_ceo_model_configured_error(exc):
+                return
+            if str(exc or "").strip() == "project is locked":
+                # Non-web shells (e.g. the local CLI) have no unlocked global
+                # web agent; refresh the executing loop directly instead.
+                from g3ku.runtime.config_refresh import refresh_loop_runtime_config
+
+                refresh_loop_runtime_config(
+                    loop, force=True, reason="model_config_tool", force_memory_sync=force_memory_sync
+                )
                 return
             raise RuntimeError(str(exc or "web_runtime_refresh_failed").strip() or "web_runtime_refresh_failed") from exc
         service = getattr(loop, "main_task_service", None)

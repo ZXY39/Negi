@@ -50,7 +50,7 @@ def test_first_model_can_be_created_without_role_assignments(tmp_path, monkeypat
     monkeypatch.chdir(workspace)
     ensure_startup_config_ready()
 
-    async def _fake_refresh(*, force: bool = False, reason: str = "runtime") -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = "runtime", force_memory_sync: bool = False) -> bool:
         _ = force, reason
         return False
 

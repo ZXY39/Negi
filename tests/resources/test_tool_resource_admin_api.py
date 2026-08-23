@@ -1500,7 +1500,7 @@ def test_main_runtime_settings_endpoint_reads_and_updates_global_depth(tmp_path:
 
     captured: dict[str, object] = {}
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -3459,7 +3459,7 @@ def test_model_retry_count_update_persists_and_refreshes_runtime(tmp_path: Path,
 
     captured: dict[str, object] = {}
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -3490,7 +3490,7 @@ def test_model_context_window_update_persists_and_reads_back(tmp_path: Path, mon
 
     captured: dict[str, object] = {}
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -3539,7 +3539,7 @@ def test_model_image_multimodal_update_persists_and_reads_back(tmp_path: Path, m
 
     captured: dict[str, object] = {}
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -3586,7 +3586,7 @@ def test_model_update_returns_503_when_worker_runtime_refresh_ack_fails(tmp_path
     _write_runtime_config(workspace)
     monkeypatch.chdir(workspace)
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         _ = force, reason
         return True
 
@@ -3629,7 +3629,7 @@ def test_llm_config_update_refreshes_runtime(monkeypatch):
             captured['payload'] = dict(payload)
             return {'config_id': config_id, 'provider_id': 'responses'}
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -3660,7 +3660,7 @@ def test_llm_config_update_returns_async_runtime_refresh_status_after_save(monke
             captured['payload'] = dict(payload)
             return {'config_id': config_id, 'provider_id': 'responses'}
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -3740,7 +3740,7 @@ def test_llm_binding_retry_count_update_persists_without_provider_probe(tmp_path
 
     captured: dict[str, object] = {}
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -3771,7 +3771,7 @@ def test_llm_binding_image_multimodal_update_persists_without_provider_probe(tmp
 
     captured: dict[str, object] = {}
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -3802,7 +3802,7 @@ def test_llm_binding_update_returns_async_runtime_refresh_status_after_save(tmp_
 
     captured: dict[str, object] = {}
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -3873,7 +3873,7 @@ def test_llm_binding_enable_returns_async_runtime_refresh_status_after_save(monk
                 'reason': reason,
             }
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -3922,7 +3922,7 @@ def test_llm_binding_disable_returns_async_runtime_refresh_status_after_save(mon
                 'reason': reason,
             }
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -3969,7 +3969,7 @@ def test_llm_binding_delete_returns_async_runtime_refresh_status_after_save(monk
                 'reason': reason,
             }
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -4036,7 +4036,7 @@ def test_llm_binding_per_key_concurrency_update_persists_without_provider_probe(
 
     captured: dict[str, object] = {}
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -4085,7 +4085,7 @@ def test_llm_memory_binding_update_refreshes_runtime(monkeypatch):
         def __init__(self):
             self.facade = _StubFacade()
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -4142,7 +4142,7 @@ def test_llm_memory_binding_partial_update_keeps_unspecified_side(monkeypatch):
         def __init__(self):
             self.facade = _StubFacade()
 
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime') -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
         captured['force'] = force
         captured['reason'] = reason
         return True
@@ -4317,8 +4317,8 @@ async def test_memory_embedding_atomic_save_rolls_back_on_rebuild_failure(monkey
             events.append(('rebuild_dense', reason))
             raise RuntimeError('dense rebuild failed')
 
-    async def _fake_refresh_web_agent_runtime(*, force=False, reason='runtime'):
-        events.append(('refresh', force, reason))
+    async def _fake_refresh_web_agent_runtime(*, force=False, reason='runtime', force_memory_sync=False):
+        events.append(('refresh', force, reason, force_memory_sync))
         return True
 
     monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh_web_agent_runtime)
@@ -4340,7 +4340,7 @@ async def test_memory_embedding_atomic_save_rolls_back_on_rebuild_failure(monkey
     assert ('reset_dense', 'embedding_model_changed') in events
     assert ('rebuild_dense', 'embedding_model_changed') in events
     assert ('set_binding', 'cfg-embedding-old', 'cfg-rerank-old') in events
-    assert ('refresh', True, 'admin_llm_memory_embedding_atomic_rollback') in events
+    assert ('refresh', True, 'admin_llm_memory_embedding_atomic_rollback', True) in events
 
 
 def test_load_config_backfills_missing_role_iterations(tmp_path: Path, monkeypatch):

@@ -127,6 +127,47 @@ def test_bootstrap_bridge_logs_runtime_reset_diagnostics_when_active_sessions_ex
     assert runner_invalidated == ["done"]
 
 
+def test_sync_memory_runtime_fingerprint_gate_controls_reset(monkeypatch) -> None:
+    descriptor = SimpleNamespace(fingerprint="fp-stable", metadata={"settings": {}})
+    loop = SimpleNamespace(
+        resource_manager=SimpleNamespace(
+            get_tool_descriptor=lambda name: descriptor if name == "memory_runtime" else None
+        ),
+        _internal_tool_settings_fingerprints={"memory_runtime": "fp-stable"},
+        _memory_runtime_settings=SimpleNamespace(),
+        memory_manager=object(),
+    )
+
+    bridge = RuntimeBootstrapBridge(loop)
+    reset_calls: list[str] = []
+    init_calls: list[object] = []
+    monkeypatch.setattr(
+        bridge, "_reset_memory_runtime", lambda reason="runtime": reset_calls.append(reason)
+    )
+    monkeypatch.setattr(bridge, "init_memory_runtime", lambda cfg: init_calls.append(cfg))
+
+    # Unchanged fingerprint + settings already initialized: the gate skips the
+    # reset entirely, so the active checkpointer is left alone.
+    assert bridge.sync_internal_tool_runtimes(force=False, reason="model_config_tool") is False
+    assert reset_calls == []
+    assert init_calls == []
+
+    # force=True bypasses the gate and resets + reinitializes.
+    assert bridge.sync_internal_tool_runtimes(force=True, reason="manual") is True
+    assert reset_calls == ["manual"]
+    assert len(init_calls) == 1
+
+    # A changed fingerprint triggers reset + reinit even without force, and the
+    # stored fingerprint is updated to the new value.
+    reset_calls.clear()
+    init_calls.clear()
+    loop._internal_tool_settings_fingerprints["memory_runtime"] = "fp-old"
+    assert bridge.sync_internal_tool_runtimes(force=False, reason="resource_snapshot") is True
+    assert reset_calls == ["resource_snapshot"]
+    assert len(init_calls) == 1
+    assert loop._internal_tool_settings_fingerprints["memory_runtime"] == "fp-stable"
+
+
 async def _noop(*_args, **_kwargs):
     return None
 

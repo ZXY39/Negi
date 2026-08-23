@@ -32,7 +32,7 @@ def test_llm_binding_update_route_accepts_model_keys_with_slashes(monkeypatch) -
         def save(self):
             captured["saved"] = True
 
-    async def _fake_refresh(*, force: bool = False, reason: str = "runtime") -> bool:
+    async def _fake_refresh(*, force: bool = False, reason: str = "runtime", force_memory_sync: bool = False) -> bool:
         captured["force"] = force
         captured["reason"] = reason
         return True

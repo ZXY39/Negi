@@ -7,7 +7,24 @@ from g3ku.providers.chatmodels import build_chat_model
 from g3ku.security import get_bootstrap_security_service
 
 
-def refresh_loop_runtime_config(loop, *, force: bool = False, reason: str = "runtime") -> bool:
+def refresh_loop_runtime_config(
+    loop,
+    *,
+    force: bool = False,
+    reason: str = "runtime",
+    force_memory_sync: bool = False,
+) -> bool:
+    """Refresh the loop's runtime config.
+
+    ``force_memory_sync`` controls whether the internal memory runtime sync is
+    forced to reset+reinitialize. By default (``False``) the memory runtime is
+    only reset when its resource fingerprint actually changed (see
+    ``RuntimeBootstrapBridge._sync_memory_runtime``), so routine config/model
+    refreshes do not close the active SQLite checkpointer out from under an
+    in-flight turn. Only callers that change memory-affecting settings stored
+    outside the ``tools/memory_runtime`` fingerprint tree (e.g. the admin
+    embedding/rerank binding endpoints) should pass ``True``.
+    """
     if force:
         security = get_bootstrap_security_service(
             getattr(getattr(loop, "app_config", None), "workspace_path", None)
@@ -39,7 +56,7 @@ def refresh_loop_runtime_config(loop, *, force: bool = False, reason: str = "run
 
     bootstrap = getattr(loop, "_bootstrap", None)
     if bootstrap is not None and hasattr(bootstrap, "sync_internal_tool_runtimes"):
-        bootstrap.sync_internal_tool_runtimes(force=True, reason=reason)
+        bootstrap.sync_internal_tool_runtimes(force=force_memory_sync, reason=reason)
 
     service = getattr(loop, "main_task_service", None)
     if service is not None and hasattr(service, "ensure_runtime_config_current"):
