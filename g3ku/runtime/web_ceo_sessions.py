@@ -979,7 +979,11 @@ def actual_request_dir_for_session(session_id: str, *, create: bool = True) -> P
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     directory = ensure_dir(path.parent)
-    temp_path = directory / f"{path.name}.{uuid.uuid4().hex}.tmp"
+    # Keep the temp suffix short: the full artifact name plus a 32-char uuid can
+    # push the temp path past the 260-char Windows MAX_PATH limit (long paths
+    # disabled), where open() fails with FileNotFoundError even though the
+    # parent directory exists.
+    temp_path = directory / f"{path.name}.{uuid.uuid4().hex[:12]}.tmp"
     with temp_path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     temp_path.replace(path)
