@@ -2642,6 +2642,30 @@ class RuntimeAgentSession:
             parts.append(f"is_error={bool(is_error)}")
         return " | ".join(parts)
 
+    def _resolve_runtime_error_dir(self) -> Path:
+        """Resolve the ``.g3ku/errors`` directory for the active runtime workspace.
+
+        Prefers the loop's real workspace (production ``AgentRuntimeEngine``),
+        then the session manager's workspace, then the configured workspace path,
+        and finally the current working directory. Never falls back to the source
+        tree, so error logs follow the runtime workspace instead of the repo.
+        Best-effort: any failure degrades to the next candidate.
+        """
+        loop = getattr(self, "_loop", None)
+        candidates = (
+            getattr(loop, "workspace", None),
+            getattr(getattr(loop, "sessions", None), "workspace", None),
+            getattr(getattr(loop, "app_config", None), "workspace_path", None),
+        )
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                return Path(candidate) / ".g3ku" / "errors"
+            except (TypeError, ValueError):
+                continue
+        return Path.cwd() / ".g3ku" / "errors"
+
     def _persist_runtime_error_file(
         self,
         exc: Exception,
@@ -2665,7 +2689,7 @@ class RuntimeAgentSession:
             session_key = str(self._state.session_key or "").strip() or "unknown"
             timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
             filename_fragment = self._sanitized_error_log_filename_fragment(session_key)
-            error_dir = Path(__file__).resolve().parents[2] / ".g3ku" / "errors"
+            error_dir = self._resolve_runtime_error_dir()
             error_dir.mkdir(parents=True, exist_ok=True)
             target = error_dir / f"{timestamp}-{filename_fragment}.log"
             traceback_text = "".join(

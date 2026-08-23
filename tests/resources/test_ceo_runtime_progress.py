@@ -4629,6 +4629,7 @@ async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
     loop = SimpleNamespace(
         model="gpt-test",
         reasoning_effort=None,
+        workspace=tmp_path,
         sessions=SessionManager(tmp_path),
         multi_agent_runner=_FakeRunner(),
         memory_manager=None,
@@ -4644,6 +4645,13 @@ async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
 
     with pytest.raises(RuntimeError, match="CEO frontdoor exceeded maximum iterations"):
         await session.prompt("Open bilibili")
+
+    # The runtime error log must land in the runtime workspace, not the repo.
+    error_logs = sorted((tmp_path / ".g3ku" / "errors").glob("*web-ceo-persist-failed-turn*.log"))
+    assert len(error_logs) == 1
+    error_text = error_logs[0].read_text(encoding="utf-8")
+    assert "session_key=web:ceo-persist-failed-turn" in error_text
+    assert "CEO frontdoor exceeded maximum iterations" in error_text
 
     reloaded_session = SessionManager(tmp_path).get_or_create(session_id)
     assert [message["role"] for message in reloaded_session.messages] == ["user", "assistant"]
@@ -4661,6 +4669,37 @@ async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
     recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)
     assert recent_history[-2] == {"role": "user", "content": "Open bilibili"}
     assert TURN_FAILED_FRIENDLY_TEXT in recent_history[-1]["content"]
+
+
+def test_persist_runtime_error_file_degrades_to_cwd_without_workspace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # A loop with no workspace / sessions / app_config must still persist the
+    # error log deterministically (cwd fallback) and must never write into the
+    # repository source tree.
+    monkeypatch.chdir(tmp_path)
+    loop = SimpleNamespace(model="gpt-test", reasoning_effort=None)
+    session = RuntimeAgentSession(
+        loop,
+        session_key="web:degraded-error-dir",
+        channel="web",
+        chat_id="degraded-error-dir",
+    )
+    session._persist_runtime_error_file(
+        RuntimeError("degraded fallback boom"),
+        user_text="degraded",
+        interaction_flow=None,
+        internal_source=None,
+        route_kind="",
+    )
+
+    logs = sorted((tmp_path / ".g3ku" / "errors").glob("*degraded-error-dir*.log"))
+    assert len(logs) == 1
+    assert "session_key=web:degraded-error-dir" in logs[0].read_text(encoding="utf-8")
+    # The repository source tree must not be polluted by the fallback.
+    repo_logs = list((REPO_ROOT / ".g3ku" / "errors").glob("*degraded-error-dir*.log"))
+    assert repo_logs == []
 
 
 @pytest.mark.asyncio
