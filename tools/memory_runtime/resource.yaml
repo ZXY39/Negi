@@ -53,6 +53,10 @@ settings:
   checkpointer:
     backend: sqlite
     path: memory/checkpoints.sqlite3
+    max_checkpoints_per_thread: 200
+    trim_interval_seconds: 300
+    vacuum_min_file_size_bytes: 536870912
+    vacuum_interval_seconds: 21600
   store:
     backend: hybrid
     qdrant_path: memory/qdrant

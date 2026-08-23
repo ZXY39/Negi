@@ -16,6 +16,7 @@ from main.service.task_stall_callback import (
     TASK_STALL_REASON_SUSPECTED_STALL,
     TASK_STALL_REASON_USER_PAUSED,
     TASK_STALL_REASON_WORKER_UNAVAILABLE,
+    build_task_stall_dedupe_key,
 )
 from main.service.task_stall_notifier import _next_bucket_minutes, stall_bucket_minutes
 
@@ -346,7 +347,14 @@ async def test_web_session_heartbeat_drops_task_stall_outbox_when_worker_offline
             last_visible_output_at=stale_at,
         )
         assert normalized == {}
-        dedupe_key = "task-stall-offline-replay"
+        # The endpoint/heartbeat now recompute the canonical dedupe key, so the
+        # outbox row must be written under that same canonical key for the
+        # offline-drop ack to land on it.
+        dedupe_key = build_task_stall_dedupe_key(
+            task_id=task.task_id,
+            bucket_minutes=10,
+            last_visible_output_at=stale_at,
+        )
         service.store.put_task_stall_outbox(
             dedupe_key=dedupe_key,
             task_id=task.task_id,

@@ -157,6 +157,96 @@ async def get_ceo_replay_diagnostics(
     return {"ok": True, "item": build_frontdoor_replay_diagnostics(snapshot)}
 
 
+@router.post("/admin/checkpoints/maintain")
+async def maintain_checkpoints():
+    """Trim old checkpoints and VACUUM the checkpoint file to reclaim space.
+
+    Runs on the live engine under the checkpointer lock; in-flight turns only
+    wait, never fail. Can take a while on a large file — use a generous client
+    timeout. See operations-and-maintenance "SQLite checkpointer capacity
+    governance".
+    """
+    agent = _checkpoint_agent()
+    reclaim = getattr(agent, "reclaim_checkpointer_space", None)
+    if not callable(reclaim):
+        raise HTTPException(status_code=503, detail="checkpointer_maintenance_unavailable")
+    try:
+        report = reclaim(force=True)
+        if isawaitable(report):
+            report = await report
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc or "checkpoint_maintain_failed")) from exc
+    return {"ok": True, "report": dict(report or {})}
+
+
+@router.get("/admin/checkpoints/status")
+async def get_checkpoints_status():
+    """Read-only capacity status: file size, reclaimable estimate, governance knobs."""
+    agent = _checkpoint_agent()
+    backend = str(getattr(agent, "_checkpointer_backend", "disabled") or "disabled").lower()
+    path = getattr(agent, "_checkpointer_path", None)
+    item: dict[str, Any] = {
+        "enabled": bool(getattr(agent, "_checkpointer_enabled", False)),
+        "backend": backend,
+        "path": str(path or ""),
+        "file_size_bytes": 0,
+        "wal_size_bytes": 0,
+        "checkpoint_rows": 0,
+        "writes_rows": 0,
+        "page_size": 0,
+        "page_count": 0,
+        "freelist_count": 0,
+        "reclaimable_estimate_bytes": 0,
+        "max_checkpoints_per_thread": int(getattr(agent, "_checkpointer_max_checkpoints_per_thread", 0) or 0),
+        "trim_interval_seconds": float(getattr(agent, "_checkpointer_trim_interval_seconds", 0.0) or 0.0),
+        "vacuum_min_file_size_bytes": int(getattr(agent, "_checkpointer_vacuum_min_file_size_bytes", 0) or 0),
+        "vacuum_interval_seconds": float(getattr(agent, "_checkpointer_vacuum_interval_seconds", 0.0) or 0.0),
+    }
+    if path:
+        try:
+            item["file_size_bytes"] = Path(str(path)).stat().st_size
+        except OSError:
+            item["file_size_bytes"] = 0
+        try:
+            item["wal_size_bytes"] = Path(f"{path}-wal").stat().st_size
+        except OSError:
+            item["wal_size_bytes"] = 0
+    checkpointer = getattr(agent, "_checkpointer", None)
+    connection = getattr(checkpointer, "conn", None)
+    if backend == "sqlite" and path and connection is not None and hasattr(connection, "execute"):
+        async def _scalar(sql: str) -> int:
+            cursor = await connection.execute(sql)
+            row = await cursor.fetchone()
+            close = getattr(cursor, "close", None)
+            if callable(close):
+                await close()
+            return int(row[0] or 0) if row else 0
+
+        async def _read_stats() -> dict[str, int]:
+            return {
+                "checkpoint_rows": await _scalar("SELECT COUNT(*) FROM checkpoints"),
+                "writes_rows": await _scalar("SELECT COUNT(*) FROM writes"),
+                "page_size": await _scalar("PRAGMA page_size"),
+                "page_count": await _scalar("PRAGMA page_count"),
+                "freelist_count": await _scalar("PRAGMA freelist_count"),
+            }
+
+        try:
+            lock = getattr(agent, "_checkpointer_lock", None)
+            if lock is not None:
+                async with lock:
+                    stats = await _read_stats()
+            else:
+                stats = await _read_stats()
+            item.update(stats)
+            item["reclaimable_estimate_bytes"] = int(stats.get("freelist_count", 0)) * int(stats.get("page_size", 0))
+        except Exception:
+            pass
+    return {"ok": True, "item": item}
+
+
 def _resolve_workspace_relative_path(workspace: Path, raw_path: str | Path | None, *, fallback: str) -> Path:
     candidate = Path(str(raw_path or fallback))
     if not candidate.is_absolute():

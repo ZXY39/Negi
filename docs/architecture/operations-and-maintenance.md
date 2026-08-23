@@ -481,3 +481,34 @@ Operator expectations:
 - On startup, the runtime should rebuild catalog retrieval automatically by syncing the resource catalog back into the unified context store.
 
 If tool/skill retrieval does not return after restart, first inspect resource runtime initialization and then confirm that the memory runtime reaches a healthy catalog-bridge state.
+
+## SQLite Checkpointer Capacity Governance
+
+`memory/checkpoints.sqlite3` is a bounded per-thread checkpoint cache, not an append-forever log. Two mechanisms keep it from growing without bound:
+
+- **Row trim**: each `(thread_id, checkpoint_ns)` keeps only the newest `max_checkpoints_per_thread` checkpoints; older rows are deleted. Because each checkpoint is a cumulative full graph snapshot, this knob is the biggest capacity lever — lowering it (e.g. 200 → 50) shrinks steady-state size far more than any VACUUM tuning.
+- **VACUUM**: row deletes only move pages to the SQLite freelist; the file does not shrink until a `VACUUM` rebuilds it. The engine runs a full `VACUUM` under the checkpointer lock when the file exceeds `vacuum_min_file_size_bytes` and at least `vacuum_interval_seconds` has passed since the last one. This is scheduled as a background task from `_ensure_checkpointer_ready`, so it never blocks the triggering turn. In-flight checkpoint writes serialize behind the VACUUM on the shared connection — they wait, they do not fail.
+
+Governance parameters live in `tools/memory_runtime/resource.yaml` under `settings.checkpointer`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_checkpoints_per_thread` | `200` | checkpoints retained per thread |
+| `trim_interval_seconds` | `300` | min seconds between opportunistic trims |
+| `vacuum_min_file_size_bytes` | `536870912` (512 MiB) | only VACUUM once the file is this large |
+| `vacuum_interval_seconds` | `21600` (6 h) | min seconds between VACUUMs |
+
+Editing `resource.yaml` changes the memory-runtime fingerprint, so the runtime rebuilds the memory runtime after sessions drain (see `runtime-overview.md`「Memory Runtime Reset Guard」).
+
+Manual reclaim, to shrink an already-large file now:
+
+1. Check status and headroom: `GET /api/admin/checkpoints/status`. Note `file_size_bytes` and `reclaimable_estimate_bytes` (`freelist_count × page_size`), and confirm free disk is at least the live data size.
+2. Trigger reclaim: `curl -X POST http://127.0.0.1:18790/api/admin/checkpoints/maintain` with a client timeout of at least 120 s. It trims and VACUUMs under the lock and returns `file_size_before` / `file_size_after`.
+
+Offline fallback when the runtime is stopped: `sqlite3 memory/checkpoints.sqlite3 "VACUUM;"`.
+
+Troubleshooting:
+
+- File large but `freelist_count` small → live data is genuinely large; lower `max_checkpoints_per_thread` rather than expecting VACUUM to help.
+- File large and `freelist_count` large but not shrinking → the size/interval gate has not fired (no frontdoor traffic); run the manual maintain endpoint.
+- VACUUM skipped with an operational error (lock contention or low disk) → it is logged and retried after `vacuum_interval_seconds`; check disk headroom.

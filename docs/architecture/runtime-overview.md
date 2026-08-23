@@ -42,7 +42,7 @@
   - `ToolExecutionManager`
   - session 取消令牌
   - memory/checkpointer/store
-  - SQLite checkpointer maintenance for short-term thread history. Treat it as a bounded per-thread cache rather than an append-forever log: CEO session deletion now purges that session key from the checkpointer, and the engine opportunistically trims older checkpoints per `(thread_id, checkpoint_ns)` while preserving only the newest retained rows.
+  - SQLite checkpointer maintenance for short-term thread history. Treat it as a bounded per-thread cache rather than an append-forever log: CEO session deletion purges that session key from the checkpointer, the engine opportunistically trims older checkpoints per `(thread_id, checkpoint_ns)` while preserving only the newest retained rows, and a size/interval-gated background VACUUM reclaims freed pages so the file does not grow without bound. Capacity knobs and manual reclaim live in `operations-and-maintenance.md`「SQLite Checkpointer Capacity Governance」.
   - bootstrap bridge 初始化默认工具和多 agent 运行时
 
 - `g3ku/runtime/manager.py`

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 import aiosqlite
@@ -314,3 +316,210 @@ async def test_trim_checkpointer_history_keeps_latest_rows_per_thread(tmp_path: 
 
     assert remaining_checkpoints == ["cp-2", "cp-3"]
     assert remaining_writes == ["cp-2", "cp-3"]
+
+
+def _seed_checkpoint_db(db_path: Path, *, rows: int, blob: bytes) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE checkpoints (
+                thread_id TEXT NOT NULL,
+                checkpoint_ns TEXT NOT NULL DEFAULT '',
+                checkpoint_id TEXT NOT NULL,
+                parent_checkpoint_id TEXT,
+                type TEXT,
+                checkpoint BLOB,
+                metadata BLOB,
+                PRIMARY KEY(thread_id, checkpoint_ns, checkpoint_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE writes (
+                thread_id TEXT NOT NULL,
+                checkpoint_ns TEXT NOT NULL DEFAULT '',
+                checkpoint_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                idx INTEGER NOT NULL,
+                channel TEXT NOT NULL,
+                type TEXT,
+                value BLOB,
+                PRIMARY KEY(thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+            )
+            """
+        )
+        for index in range(rows):
+            conn.execute(
+                "INSERT INTO checkpoints(thread_id, checkpoint_ns, checkpoint_id, type, checkpoint, metadata) VALUES (?, '', ?, 'msgpack', ?, X'02')",
+                ("web:shared", f"cp-{index:03d}", blob),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _make_sqlite_engine(db_path: Path, conn, *, max_per_thread: int = 2) -> AgentRuntimeEngine:
+    class _Checkpointer:
+        def __init__(self, conn) -> None:
+            self.conn = conn
+
+    engine = AgentRuntimeEngine.__new__(AgentRuntimeEngine)
+    engine._checkpointer_enabled = True
+    engine._checkpointer_backend = "sqlite"
+    engine._checkpointer_path = str(db_path)
+    engine._checkpointer = _Checkpointer(conn)
+    engine._checkpointer_cm = None
+    engine._checkpointer_lock = asyncio.Lock()
+    engine._checkpointer_max_checkpoints_per_thread = max_per_thread
+    engine._checkpointer_trim_interval_seconds = 0.0
+    engine._checkpointer_last_trim_monotonic = 0.0
+    engine._checkpointer_vacuum_min_file_size_bytes = 1
+    engine._checkpointer_vacuum_interval_seconds = 0.0
+    engine._checkpointer_last_vacuum_monotonic = 0.0
+    engine._checkpointer_vacuum_in_flight = False
+    engine._checkpointer_maintenance_tasks = set()
+    return engine
+
+
+@pytest.mark.asyncio
+async def test_reclaim_checkpointer_space_shrinks_file(tmp_path: Path) -> None:
+    db_path = tmp_path / "checkpoints.sqlite3"
+    blob = os.urandom(256 * 1024)
+    _seed_checkpoint_db(db_path, rows=40, blob=blob)
+    size_seeded = db_path.stat().st_size
+    assert size_seeded > 8 * 1024 * 1024
+
+    aconn = await aiosqlite.connect(db_path)
+    try:
+        engine = _make_sqlite_engine(db_path, aconn, max_per_thread=2)
+        # Keep the size threshold above the seeded file so _ensure_checkpointer_ready
+        # does not spawn a competing background vacuum task; reclaim(force=True)
+        # still vacuums because force bypasses the gate.
+        engine._checkpointer_vacuum_min_file_size_bytes = 10 * 1024 * 1024 * 1024
+
+        report = await AgentRuntimeEngine.reclaim_checkpointer_space(engine, force=True)
+
+        assert report["vacuumed"] is True
+        assert report["file_size_before"] >= size_seeded
+        assert report["file_size_after"] < size_seeded // 2
+        remaining = [
+            row[0]
+            async for row in (await aconn.execute(
+                "SELECT checkpoint_id FROM checkpoints WHERE thread_id = ? ORDER BY rowid",
+                ("web:shared",),
+            ))
+        ]
+        assert remaining == ["cp-038", "cp-039"]
+    finally:
+        await aconn.close()
+
+
+@pytest.mark.asyncio
+async def test_vacuum_skips_small_file_without_force(tmp_path: Path) -> None:
+    db_path = tmp_path / "checkpoints.sqlite3"
+    _seed_checkpoint_db(db_path, rows=3, blob=b"tiny")
+    aconn = await aiosqlite.connect(db_path)
+    try:
+        engine = _make_sqlite_engine(db_path, aconn)
+        engine._checkpointer_vacuum_min_file_size_bytes = 10 * 1024 * 1024
+        async with engine._checkpointer_lock:
+            report = await AgentRuntimeEngine._vacuum_checkpointer_locked(engine, force=False)
+        assert report["vacuumed"] is False
+        assert report["skipped_reason"] == "below_size_threshold"
+    finally:
+        await aconn.close()
+
+
+@pytest.mark.asyncio
+async def test_vacuum_skips_within_interval(tmp_path: Path) -> None:
+    db_path = tmp_path / "checkpoints.sqlite3"
+    blob = os.urandom(64 * 1024)
+    _seed_checkpoint_db(db_path, rows=3, blob=blob)
+    aconn = await aiosqlite.connect(db_path)
+    try:
+        engine = _make_sqlite_engine(db_path, aconn)
+        engine._checkpointer_vacuum_min_file_size_bytes = 1
+        engine._checkpointer_vacuum_interval_seconds = 3600.0
+        engine._checkpointer_last_vacuum_monotonic = time.monotonic()
+        async with engine._checkpointer_lock:
+            report = await AgentRuntimeEngine._vacuum_checkpointer_locked(engine, force=False)
+        assert report["vacuumed"] is False
+        assert report["skipped_reason"] == "within_interval"
+    finally:
+        await aconn.close()
+
+
+@pytest.mark.asyncio
+async def test_vacuum_degrades_on_operational_error(tmp_path: Path) -> None:
+    db_path = tmp_path / "checkpoints.sqlite3"
+    _seed_checkpoint_db(db_path, rows=3, blob=b"x")
+
+    class _FailingConn:
+        async def commit(self) -> None:
+            return None
+
+        async def execute(self, sql: str):
+            if str(sql).strip().upper().startswith("VACUUM"):
+                raise sqlite3.OperationalError("cannot VACUUM from within a transaction")
+            return None
+
+    class _Checkpointer:
+        def __init__(self, conn) -> None:
+            self.conn = conn
+
+    engine = AgentRuntimeEngine.__new__(AgentRuntimeEngine)
+    engine._checkpointer_enabled = True
+    engine._checkpointer_backend = "sqlite"
+    engine._checkpointer_path = str(db_path)
+    engine._checkpointer = _Checkpointer(_FailingConn())
+    engine._checkpointer_cm = None
+    engine._checkpointer_lock = asyncio.Lock()
+    engine._checkpointer_vacuum_min_file_size_bytes = 1
+    engine._checkpointer_vacuum_interval_seconds = 0.0
+    engine._checkpointer_last_vacuum_monotonic = 0.0
+
+    async with engine._checkpointer_lock:
+        report = await AgentRuntimeEngine._vacuum_checkpointer_locked(engine, force=True)
+
+    assert report["vacuumed"] is False
+    assert report["skipped_reason"] == "vacuum_failed"
+    # Timestamp advances even on failure so we do not retry every turn.
+    assert engine._checkpointer_last_vacuum_monotonic > 0
+
+
+@pytest.mark.asyncio
+async def test_ensure_ready_schedules_background_vacuum(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "checkpoints.sqlite3"
+    blob = os.urandom(64 * 1024)
+    _seed_checkpoint_db(db_path, rows=3, blob=blob)
+
+    engine = AgentRuntimeEngine.__new__(AgentRuntimeEngine)
+    engine._checkpointer_enabled = True
+    engine._checkpointer_backend = "sqlite"
+    engine._checkpointer_path = str(db_path)
+    engine._checkpointer = object()
+    engine._checkpointer_cm = None
+    engine._checkpointer_lock = asyncio.Lock()
+    engine._checkpointer_vacuum_min_file_size_bytes = 1
+    engine._checkpointer_vacuum_interval_seconds = 0.0
+    engine._checkpointer_last_vacuum_monotonic = 0.0
+    engine._checkpointer_vacuum_in_flight = False
+    engine._checkpointer_maintenance_tasks = set()
+
+    scheduled: list[bool] = []
+
+    async def _fake_vacuum_locked(self, *, force: bool = False):
+        scheduled.append(force)
+        return {"vacuumed": True}
+
+    monkeypatch.setattr(AgentRuntimeEngine, "_vacuum_checkpointer_locked", _fake_vacuum_locked)
+
+    engine._maybe_schedule_checkpointer_vacuum()
+    # Let the scheduled background task run.
+    await asyncio.sleep(0.05)
+
+    assert engine._checkpointer_maintenance_tasks == set()
+    assert engine._checkpointer_vacuum_in_flight is False
+    assert scheduled == [False]

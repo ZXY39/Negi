@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,8 @@ from g3ku.runtime.tool_watchdog import ToolExecutionManager
 
 _DEFAULT_CHECKPOINTER_MAX_CHECKPOINTS_PER_THREAD = 200
 _DEFAULT_CHECKPOINTER_TRIM_INTERVAL_SECONDS = 300.0
+_DEFAULT_CHECKPOINTER_VACUUM_MIN_FILE_SIZE_BYTES = 512 * 1024 * 1024
+_DEFAULT_CHECKPOINTER_VACUUM_INTERVAL_SECONDS = 21600.0
 
 
 class AgentRuntimeEngine:
@@ -92,6 +95,7 @@ class AgentRuntimeEngine:
         self._consolidation_locks: dict[str, asyncio.Lock] = {}
         self._consolidation_tasks: set[asyncio.Task[Any]] = set()
         self._commit_tasks: set[asyncio.Task[Any]] = set()
+        self._checkpointer_maintenance_tasks: set[asyncio.Task[Any]] = set()
         self._checkpointer_enabled = False
         self._checkpointer_backend = 'disabled'
         self._checkpointer_path = None
@@ -100,6 +104,10 @@ class AgentRuntimeEngine:
         self._checkpointer_max_checkpoints_per_thread = _DEFAULT_CHECKPOINTER_MAX_CHECKPOINTS_PER_THREAD
         self._checkpointer_trim_interval_seconds = _DEFAULT_CHECKPOINTER_TRIM_INTERVAL_SECONDS
         self._checkpointer_last_trim_monotonic = 0.0
+        self._checkpointer_vacuum_min_file_size_bytes = _DEFAULT_CHECKPOINTER_VACUUM_MIN_FILE_SIZE_BYTES
+        self._checkpointer_vacuum_interval_seconds = _DEFAULT_CHECKPOINTER_VACUUM_INTERVAL_SECONDS
+        self._checkpointer_last_vacuum_monotonic = 0.0
+        self._checkpointer_vacuum_in_flight = False
         self._store = None
         self._store_enabled = False
         self._memory_runtime_settings = None
@@ -430,6 +438,204 @@ class AgentRuntimeEngine:
         await self._purge_checkpointer_thread(session_key)
         return None
 
+    async def _vacuum_checkpointer_locked(self, *, force: bool = False) -> dict[str, Any]:
+        """Reclaim free pages from the checkpoint file via a full VACUUM.
+
+        The caller must hold ``_checkpointer_lock``. The VACUUM runs on the
+        shared checkpointer connection so it serializes with in-flight
+        checkpoint writes (they wait, they do not fail). Returns a report;
+        operational errors degrade to ``vacuumed=False`` instead of raising.
+        """
+        report: dict[str, Any] = {
+            "path": str(getattr(self, "_checkpointer_path", "") or ""),
+            "vacuumed": False,
+            "skipped_reason": "",
+            "file_size_before": 0,
+            "file_size_after": 0,
+        }
+        if not getattr(self, "_checkpointer_enabled", False):
+            report["skipped_reason"] = "checkpointer_disabled"
+            return report
+        backend = str(getattr(self, "_checkpointer_backend", "disabled") or "disabled").lower()
+        if backend != "sqlite" or not getattr(self, "_checkpointer_path", None):
+            report["skipped_reason"] = "not_sqlite"
+            return report
+        path = Path(self._checkpointer_path)
+        try:
+            file_size = path.stat().st_size
+        except OSError:
+            file_size = 0
+        report["file_size_before"] = file_size
+        now = time.monotonic()
+        min_size = int(
+            getattr(
+                self,
+                "_checkpointer_vacuum_min_file_size_bytes",
+                _DEFAULT_CHECKPOINTER_VACUUM_MIN_FILE_SIZE_BYTES,
+            )
+            or 0
+        )
+        interval = float(
+            getattr(
+                self,
+                "_checkpointer_vacuum_interval_seconds",
+                _DEFAULT_CHECKPOINTER_VACUUM_INTERVAL_SECONDS,
+            )
+            or 0.0
+        )
+        last_vacuum = float(getattr(self, "_checkpointer_last_vacuum_monotonic", 0.0) or 0.0)
+        if not force:
+            if file_size < min_size:
+                report["skipped_reason"] = "below_size_threshold"
+                return report
+            if interval > 0 and last_vacuum > 0 and (now - last_vacuum) < interval:
+                report["skipped_reason"] = "within_interval"
+                return report
+        checkpointer = getattr(self, "_checkpointer", None)
+        connection = getattr(checkpointer, "conn", None)
+        if checkpointer is None or connection is None or not hasattr(connection, "execute"):
+            report["skipped_reason"] = "no_connection"
+            return report
+        if not self._sqlite_checkpointer_is_active(checkpointer):
+            report["skipped_reason"] = "connection_inactive"
+            return report
+        started = time.monotonic()
+        try:
+            # Defensive commit so VACUUM never runs inside an open transaction.
+            commit = getattr(connection, "commit", None)
+            if callable(commit):
+                await self._maybe_await(commit())
+            await self._maybe_await(connection.execute("VACUUM"))
+            await self._checkpoint_wal_truncate(checkpointer)
+        except (sqlite3.OperationalError, OSError) as exc:
+            # Advance the timestamp on failure too, so we do not retry every turn.
+            self._checkpointer_last_vacuum_monotonic = time.monotonic()
+            logger.warning("SQLite checkpointer VACUUM skipped at {}: {}", path, exc)
+            report["skipped_reason"] = "vacuum_failed"
+            return report
+        self._checkpointer_last_vacuum_monotonic = time.monotonic()
+        try:
+            report["file_size_after"] = path.stat().st_size
+        except OSError:
+            report["file_size_after"] = file_size
+        report["vacuumed"] = True
+        report["duration_ms"] = int((time.monotonic() - started) * 1000)
+        logger.info(
+            "Vacuumed SQLite checkpointer at {} (file_size_before={}, file_size_after={}, duration_ms={})",
+            path,
+            report["file_size_before"],
+            report["file_size_after"],
+            report["duration_ms"],
+        )
+        return report
+
+    async def reclaim_checkpointer_space(self, *, force: bool = False) -> dict[str, Any]:
+        """Trim old checkpoints and reclaim file space via VACUUM.
+
+        Safe on a live engine: the work runs under the checkpointer lock on the
+        shared connection, so in-flight turns only wait, never fail.
+        """
+        report: dict[str, Any] = {
+            "path": str(getattr(self, "_checkpointer_path", "") or ""),
+            "deleted_checkpoints": 0,
+            "vacuumed": False,
+            "skipped_reason": "",
+            "file_size_before": 0,
+            "file_size_after": 0,
+            "duration_ms": 0,
+        }
+        if not getattr(self, "_checkpointer_enabled", False):
+            report["skipped_reason"] = "checkpointer_disabled"
+            return report
+        backend = str(getattr(self, "_checkpointer_backend", "disabled") or "disabled").lower()
+        if backend != "sqlite" or not getattr(self, "_checkpointer_path", None):
+            report["skipped_reason"] = "not_sqlite"
+            return report
+        await self._ensure_checkpointer_ready()
+        started = time.monotonic()
+        async with self._checkpointer_lock:
+            path = Path(self._checkpointer_path)
+            try:
+                report["file_size_before"] = path.stat().st_size
+            except OSError:
+                report["file_size_before"] = 0
+            report["deleted_checkpoints"] = await self._trim_checkpointer_history_locked(force=True)
+            vacuum_report = await self._vacuum_checkpointer_locked(force=force)
+        report["vacuumed"] = bool(vacuum_report.get("vacuumed"))
+        report["skipped_reason"] = str(vacuum_report.get("skipped_reason") or "")
+        report["file_size_after"] = int(vacuum_report.get("file_size_after") or report["file_size_before"])
+        report["duration_ms"] = int((time.monotonic() - started) * 1000)
+        return report
+
+    def _maybe_schedule_checkpointer_vacuum(self) -> None:
+        """Schedule a background vacuum if the file is large enough and due.
+
+        Runs outside any blocking work; the scheduled task re-checks the gate
+        under the lock. Never raises — maintenance must not disrupt the turn
+        that triggered it.
+        """
+        try:
+            if getattr(self, "_checkpointer_vacuum_in_flight", False):
+                return
+            if not getattr(self, "_checkpointer_enabled", False):
+                return
+            backend = str(getattr(self, "_checkpointer_backend", "disabled") or "disabled").lower()
+            if backend != "sqlite" or not getattr(self, "_checkpointer_path", None):
+                return
+            path = Path(self._checkpointer_path)
+            try:
+                file_size = path.stat().st_size
+            except OSError:
+                return
+            min_size = int(
+                getattr(
+                    self,
+                    "_checkpointer_vacuum_min_file_size_bytes",
+                    _DEFAULT_CHECKPOINTER_VACUUM_MIN_FILE_SIZE_BYTES,
+                )
+                or 0
+            )
+            if file_size < min_size:
+                return
+            interval = float(
+                getattr(
+                    self,
+                    "_checkpointer_vacuum_interval_seconds",
+                    _DEFAULT_CHECKPOINTER_VACUUM_INTERVAL_SECONDS,
+                )
+                or 0.0
+            )
+            last_vacuum = float(getattr(self, "_checkpointer_last_vacuum_monotonic", 0.0) or 0.0)
+            if interval > 0 and last_vacuum > 0 and (time.monotonic() - last_vacuum) < interval:
+                return
+
+            async def _run_background_vacuum() -> None:
+                try:
+                    async with self._checkpointer_lock:
+                        await self._vacuum_checkpointer_locked(force=False)
+                except Exception as exc:
+                    logger.warning(
+                        "Background checkpointer vacuum failed at {}: {}",
+                        getattr(self, "_checkpointer_path", ""),
+                        exc,
+                    )
+
+            task = asyncio.create_task(_run_background_vacuum())
+            self._checkpointer_vacuum_in_flight = True
+            tasks = getattr(self, "_checkpointer_maintenance_tasks", None)
+            if tasks is None:
+                tasks = set()
+                self._checkpointer_maintenance_tasks = tasks
+            tasks.add(task)
+
+            def _cleanup(done_task: asyncio.Task) -> None:
+                tasks.discard(done_task)
+                self._checkpointer_vacuum_in_flight = False
+
+            task.add_done_callback(_cleanup)
+        except Exception as exc:
+            logger.debug("Checkpointer vacuum scheduling skipped: {}", exc)
+
     async def _ensure_checkpointer_ready(self) -> None:
         if not self._checkpointer_enabled:
             return None
@@ -450,6 +656,7 @@ class AgentRuntimeEngine:
                             self._checkpointer_path,
                             exc,
                         )
+                    self._maybe_schedule_checkpointer_vacuum()
                     return None
                 logger.warning(
                     'SQLite checkpointer connection inactive; rebuilding at {}',
@@ -477,6 +684,7 @@ class AgentRuntimeEngine:
                         cp_path,
                         exc,
                     )
+                self._maybe_schedule_checkpointer_vacuum()
             except Exception as exc:
                 logger.warning(
                     'SQLite checkpointer bootstrap failed; fallback to session-file history: {}',
@@ -534,13 +742,18 @@ class AgentRuntimeEngine:
                 checkpointer_active,
             )
 
-        for task_set in (self._consolidation_tasks, self._commit_tasks):
+        for task_set in (
+            self._consolidation_tasks,
+            self._commit_tasks,
+            getattr(self, "_checkpointer_maintenance_tasks", ()),
+        ):
             tasks = list(task_set)
             for task in tasks:
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-            task_set.clear()
+            if hasattr(task_set, "clear"):
+                task_set.clear()
 
         pool = getattr(self, 'background_pool', None)
         if pool is not None and hasattr(pool, 'close'):

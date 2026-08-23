@@ -413,6 +413,20 @@ class RuntimeBootstrapBridge:
             cp_cfg = cfg.checkpointer
             backend = str(cp_cfg.backend or 'sqlite').lower()
             self._loop._checkpointer_backend = backend
+            # Capacity governance knobs (getattr so legacy/test configs without
+            # these attributes fall back to engine defaults).
+            self._loop._checkpointer_max_checkpoints_per_thread = int(
+                getattr(cp_cfg, 'max_checkpoints_per_thread', 200) or 200
+            )
+            self._loop._checkpointer_trim_interval_seconds = float(
+                getattr(cp_cfg, 'trim_interval_seconds', 300.0) or 0.0
+            )
+            self._loop._checkpointer_vacuum_min_file_size_bytes = int(
+                getattr(cp_cfg, 'vacuum_min_file_size_bytes', 512 * 1024 * 1024) or 0
+            )
+            self._loop._checkpointer_vacuum_interval_seconds = float(
+                getattr(cp_cfg, 'vacuum_interval_seconds', 21600.0) or 0.0
+            )
             if backend == 'memory':
                 from langgraph.checkpoint.memory import InMemorySaver
 

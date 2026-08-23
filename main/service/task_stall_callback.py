@@ -114,13 +114,14 @@ def normalize_task_stall_payload(payload: dict[str, Any] | None) -> dict[str, An
     )
     if not task_id or not last_visible_output_at or bucket_minutes <= 0:
         return {}
-    dedupe_key = str(source.get("dedupe_key") or source.get("dedupeKey") or "").strip()
-    if not dedupe_key:
-        dedupe_key = build_task_stall_dedupe_key(
-            task_id=task_id,
-            bucket_minutes=bucket_minutes,
-            last_visible_output_at=last_visible_output_at,
-        )
+    # The dedupe key is always recomputed server-side as the canonical key.
+    # Callers that supply their own dedupe_key/dedupeKey are ignored: variant
+    # keys used to bypass exact-key dedupe and re-trigger stall notifications.
+    dedupe_key = build_task_stall_dedupe_key(
+        task_id=task_id,
+        bucket_minutes=bucket_minutes,
+        last_visible_output_at=last_visible_output_at,
+    )
     return {
         "dedupe_key": dedupe_key,
         "task_id": task_id,

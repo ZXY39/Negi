@@ -60,7 +60,7 @@ from main.runtime.acceptance_handshake import (
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 from main.service.runtime_service import MainRuntimeService
-from main.service.task_stall_callback import normalize_task_stall_payload
+from main.service.task_stall_callback import build_task_stall_dedupe_key, normalize_task_stall_payload
 from main.service.task_terminal_callback import (
     TASK_TERMINAL_CALLBACK_TOKEN_ENV,
     TASK_TERMINAL_CALLBACK_URL_ENV,
@@ -941,6 +941,93 @@ def test_internal_task_stall_callback_persists_pending_outbox_and_dedupes(tmp_pa
     assert entry is not None
     assert entry["delivery_state"] == "pending"
     assert len(heartbeat.stall_payloads) == 1
+
+
+def test_internal_task_stall_callback_normalizes_caller_supplied_dedupe_key(tmp_path: Path, monkeypatch):
+    """Probe/retry variants of the stall dedupe key must not re-trigger notifications."""
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    heartbeat = _HeartbeatRecorder()
+    last_visible_output_at = now_iso()
+    base = {
+        "task_id": "task:demo-stall",
+        "session_id": "web:demo",
+        "title": "demo",
+        "bucket_minutes": 10,
+        "stalled_minutes": 12,
+        "last_visible_output_at": last_visible_output_at,
+        "brief_text": "stalled",
+        "latest_node_summary": "node waiting",
+        "runtime_summary_excerpt": "root phase=waiting",
+    }
+    canonical_key = build_task_stall_dedupe_key(
+        task_id="task:demo-stall",
+        bucket_minutes=10,
+        last_visible_output_at=normalize_task_stall_payload(base)["last_visible_output_at"],
+    )
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
+    monkeypatch.setattr("main.api.internal_rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    monkeypatch.setattr("main.api.internal_rest.get_web_heartbeat_service", lambda _agent=None: heartbeat)
+
+    async def _ensure_services(_agent=None) -> None:
+        return None
+
+    monkeypatch.setattr("main.api.internal_rest.ensure_web_runtime_services", _ensure_services)
+
+    client = TestClient(_build_app())
+    suffixes = ["", ":probe1", ":probe2"]
+    for index, suffix in enumerate(suffixes):
+        variant = dict(base)
+        if suffix:
+            variant["dedupe_key"] = f"{canonical_key}{suffix}"
+        response = client.post(
+            "/api/internal/task-stall",
+            json=variant,
+            headers={"x-g3ku-internal-token": "secret-token"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["dedupe_key"] == canonical_key
+        if index == 0:
+            assert body["duplicate"] is False
+        else:
+            assert body["duplicate"] is True
+
+    entry = service.store.get_task_stall_outbox(canonical_key)
+    assert entry is not None
+    for suffix in suffixes[1:]:
+        assert service.store.get_task_stall_outbox(f"{canonical_key}{suffix}") is None
+    assert len(heartbeat.stall_payloads) == 1
+    assert heartbeat.stall_payloads[0]["dedupe_key"] == canonical_key
+
+
+def test_normalize_task_stall_payload_overrides_custom_dedupe_key() -> None:
+    canonical = build_task_stall_dedupe_key(
+        task_id="task:demo", bucket_minutes=10, last_visible_output_at="2026-08-23T13:00:00+00:00"
+    )
+    custom = normalize_task_stall_payload(
+        {
+            "task_id": "task:demo",
+            "bucket_minutes": 10,
+            "last_visible_output_at": "2026-08-23T13:00:00+00:00",
+            "dedupe_key": "task-stall:task:demo:10:2026-08-23T13:00:00+00:00:probe1",
+        }
+    )
+    assert custom["dedupe_key"] == canonical
+    default = normalize_task_stall_payload(
+        {
+            "task_id": "task:demo",
+            "bucket_minutes": 10,
+            "last_visible_output_at": "2026-08-23T13:00:00+00:00",
+        }
+    )
+    assert default["dedupe_key"] == canonical
 
 
 def test_internal_task_event_callback_forwards_live_patch(tmp_path: Path, monkeypatch):

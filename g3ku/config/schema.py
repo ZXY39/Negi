@@ -595,6 +595,13 @@ class MemoryCheckpointerConfig(Base):
 
     backend: Literal["sqlite", "memory"] = "sqlite"
     path: str = "memory/checkpoints.sqlite3"
+    # Capacity governance: keep the bounded checkpoint cache from growing the
+    # file without bound. See operations-and-maintenance "SQLite checkpointer
+    # capacity governance".
+    max_checkpoints_per_thread: int = Field(default=200, ge=1)
+    trim_interval_seconds: float = Field(default=300.0, ge=0.0)
+    vacuum_min_file_size_bytes: int = Field(default=512 * 1024 * 1024, ge=0)
+    vacuum_interval_seconds: float = Field(default=21600.0, ge=0.0)
 
 
 class MemoryStoreBackendConfig(Base):
