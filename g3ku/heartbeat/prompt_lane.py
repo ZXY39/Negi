@@ -247,6 +247,10 @@ def build_heartbeat_prompt_lane(
         str(message.get("content") or "").strip()
         for message in [*stable_messages, *dynamic_appendix_messages]
         if str(message.get("content") or "").strip()
+        # The ledger is already present as the assistant stable message; do not
+        # duplicate it into the combined user message (it would persist into the
+        # durable baseline once per heartbeat turn and pollute context).
+        and not str(message.get("content") or "").strip().startswith("## Task Ledger")
     ]
     if combined_user_sections:
         request_messages.append(

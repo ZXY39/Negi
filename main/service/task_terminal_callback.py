@@ -224,9 +224,11 @@ def normalize_task_terminal_payload(payload: dict[str, Any] | None) -> dict[str,
     finished_at = str(source.get('finished_at') or source.get('finishedAt') or '').strip()
     if not task_id or status not in {'success', 'failed'}:
         return {}
-    dedupe_key = str(source.get('dedupe_key') or source.get('dedupeKey') or '').strip()
-    if not dedupe_key:
-        dedupe_key = build_task_terminal_dedupe_key(task_id=task_id, status=status, finished_at=finished_at)
+    # The dedupe key is always recomputed server-side as the canonical key.
+    # Callers that supply their own dedupe_key/dedupeKey are ignored: probe or
+    # retry variants of the key used to bypass exact-key dedupe and re-deliver
+    # the same task result to the user multiple times.
+    dedupe_key = build_task_terminal_dedupe_key(task_id=task_id, status=status, finished_at=finished_at)
     return {
         'dedupe_key': dedupe_key,
         'task_id': task_id,

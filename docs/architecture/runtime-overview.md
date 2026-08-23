@@ -332,6 +332,17 @@ tool/skill catalog 收窄走 catalog-only bridge；catalog 投影仍在同一 `m
 
 队列卡住、重复写入、调试顺序、CLI 与 reset 等 operator 工作流详见 `operations-and-maintenance.md`「Memory Queue Workflow」。
 
+## Memory Runtime Reset Guard
+
+bootstrap bridge 的 `_reset_memory_runtime(...)` 会重置 commit service、memory manager 与 SQLite checkpointer。其中 checkpointer 是进程共享句柄：在途回合编译出的图仍持有旧实例引用，若此时被关闭，该回合最终 `aput_writes` 会报 `Cannot operate on a closed database`。因此：
+
+- 存在活跃任务会话（`loop._active_tasks` 非空）且 checkpointer 存活时，重置**保留** checkpointer 及其 context manager 不关闭（`_checkpointer/_checkpointer_cm/_checkpointer_enabled/_checkpointer_backend/_checkpointer_path` 五字段作为整体保留，不允许中间态），只清理其余记忆资源，并置 `_checkpointer_reset_deferred = True`。
+- `init_memory_runtime(...)` 检测到存活 checkpointer 时跳过 checkpointer 重建，避免 orphan 在途引用。
+- `_sync_memory_runtime(...)` 入口处先做延迟补做：延迟标志置位且活跃会话已清空时，调 `_complete_deferred_checkpointer_reset(...)` 关闭保留句柄并强制走一次完整重置。这一步必须在指纹门控之前——延迟重置已经前移了存储指纹，若只靠门控，保留的旧 checkpointer 永远不会按新设置重建。
+- 失活连接的自愈仍由 engine 的 `_ensure_checkpointer_ready(...)` 懒重建兜底。
+
+排障「回合落库报 closed database」：先确认触发重置的来源（`reason=...`）发生在回合进行中，再看是否走了保留/延迟路径（日志 `Deferring checkpointer reset while active sessions exist` / `Completing deferred checkpointer reset`）。`force_memory_sync` 语义见 `config-and-models.md`「配置热刷新」。
+
 ## Internal Turn Contract Notes
 
 Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详见 `heartbeat-system.md`「Continuation Contract」与「Cron Reminder Contract」。本文只记运行时层不变量：
@@ -359,7 +370,7 @@ Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详�
 - 若当前轮阶段状态里已包含与 `frontdoor_canonical_context` 中实质相同的 completed stage，prompt 组装必须按重叠处理、跳过把它 rebase 成新的合成 stage id——否则一个 completed stage 会在 fresh-turn 重建中膨胀成重复的原始阶段块。
 - UI 面向的 turn payload 暴露当前轮的 `canonical_context` 切片；prompt 组装读 durable 跨回合 canonical context，inflight / paused / final-reply payload 只描述可见轮自己的阶段轨迹。
 
-第二条连续性合同：`frontdoor_request_body_messages` 是下一轮 CEO/frontdoor 的 session-owned provider 请求体基线，刻意不含 `frontdoor_runtime_tool_contract` 消息（动态工具暴露每轮作为新的尾部合同重建），且只允许在 `token_compression` 与同轮 `stage_compaction` 两个信息损失边界收缩（见本文「Frontdoor Context Compression (Current Contract)」）。fresh 可见轮次中该基线优先于任何 graph-local checkpoint 式阶段重放投影：两者同时存在时必须从请求体基线继续，而不是从阶段重放重建新的主前缀。
+第二条连续性合同：`frontdoor_request_body_messages` 是下一轮 CEO/frontdoor 的 session-owned provider 请求体基线，刻意不含 `frontdoor_runtime_tool_contract` 消息（动态工具暴露每轮作为新的尾部合同重建），也不含 `## Task Ledger` 内部账本的 assistant 记录与 `## 长期记忆` 快照（两者都是当轮 overlay，只在当轮请求可见，落史会逐轮累积污染上下文），且只允许在 `token_compression` 与同轮 `stage_compaction` 两个信息损失边界收缩（见本文「Frontdoor Context Compression (Current Contract)」）。fresh 可见轮次中该基线优先于任何 graph-local checkpoint 式阶段重放投影：两者同时存在时必须从请求体基线继续，而不是从阶段重放重建新的主前缀。
 
 ## Runtime Contract Lane
 

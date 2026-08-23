@@ -64,6 +64,8 @@ from main.service.task_stall_callback import normalize_task_stall_payload
 from main.service.task_terminal_callback import (
     TASK_TERMINAL_CALLBACK_TOKEN_ENV,
     TASK_TERMINAL_CALLBACK_URL_ENV,
+    build_task_terminal_dedupe_key,
+    enrich_task_terminal_payload,
     normalize_task_terminal_payload,
     save_task_terminal_callback_config,
 )
@@ -668,6 +670,119 @@ def test_internal_task_terminal_callback_persists_pending_outbox_and_dedupes(tmp
     assert entry is not None
     assert entry["delivery_state"] == "pending"
     assert len(heartbeat.payloads) == 1
+
+
+def test_internal_task_terminal_callback_normalizes_caller_supplied_dedupe_key(tmp_path: Path, monkeypatch):
+    """Probe/retry variants of the dedupe key must not re-deliver the same task result."""
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    heartbeat = _HeartbeatRecorder()
+    finished_at = now_iso()
+    base = {
+        "task_id": "task:demo-normalized",
+        "session_id": "web:demo",
+        "title": "demo",
+        "status": "success",
+        "brief_text": "done",
+        "finished_at": finished_at,
+    }
+    canonical_key = build_task_terminal_dedupe_key(
+        task_id="task:demo-normalized", status="success", finished_at=finished_at
+    )
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
+    monkeypatch.setattr("main.api.internal_rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    monkeypatch.setattr("main.api.internal_rest.get_web_heartbeat_service", lambda _agent=None: heartbeat)
+
+    async def _ensure_services(_agent=None) -> None:
+        return None
+
+    monkeypatch.setattr("main.api.internal_rest.ensure_web_runtime_services", _ensure_services)
+
+    client = TestClient(_build_app())
+    suffixes = ["", ":probe1", ":probe2", ":livecheck"]
+    for index, suffix in enumerate(suffixes):
+        variant = dict(base)
+        if suffix:
+            variant["dedupe_key"] = f"{canonical_key}{suffix}"
+        response = client.post(
+            "/api/internal/task-terminal",
+            json=variant,
+            headers={"x-g3ku-internal-token": "secret-token"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["dedupe_key"] == canonical_key
+        if index == 0:
+            assert body["duplicate"] is False
+            assert body["accepted"] is True
+        else:
+            assert body["duplicate"] is True
+            assert body["accepted"] is False
+
+    entry = service.store.get_task_terminal_outbox(canonical_key)
+    assert entry is not None
+    assert entry["delivery_state"] == "pending"
+    assert entry["accepted"] is True
+    # Only one outbox row: probe-suffixed keys collapsed onto the canonical key.
+    for suffix in suffixes[1:]:
+        assert service.store.get_task_terminal_outbox(f"{canonical_key}{suffix}") is None
+    assert len(heartbeat.payloads) == 1
+    assert heartbeat.payloads[0]["dedupe_key"] == canonical_key
+
+
+def test_normalize_task_terminal_payload_overrides_custom_dedupe_key() -> None:
+    canonical = build_task_terminal_dedupe_key(
+        task_id="task:demo", status="success", finished_at="2026-08-23T13:27:50+08:00"
+    )
+    custom = normalize_task_terminal_payload(
+        {
+            "task_id": "task:demo",
+            "status": "success",
+            "finished_at": "2026-08-23T13:27:50+08:00",
+            "dedupe_key": "task-terminal:task:demo:success:2026-08-23T13:27:50+08:00:probe1",
+        }
+    )
+    assert custom["dedupe_key"] == canonical
+    default = normalize_task_terminal_payload(
+        {
+            "task_id": "task:demo",
+            "status": "success",
+            "finished_at": "2026-08-23T13:27:50+08:00",
+        }
+    )
+    assert default["dedupe_key"] == canonical
+
+
+def test_enrich_task_terminal_payload_dedupe_key_idempotent() -> None:
+    task = SimpleNamespace(
+        task_id="task:demo",
+        root_node_id="node:root",
+        metadata={},
+        final_output="done",
+        final_output_ref="",
+        failure_reason="",
+    )
+    canonical = build_task_terminal_dedupe_key(
+        task_id="task:demo", status="success", finished_at="2026-08-23T13:27:50+08:00"
+    )
+    enriched = enrich_task_terminal_payload(
+        {
+            "task_id": "task:demo",
+            "status": "success",
+            "finished_at": "2026-08-23T13:27:50+08:00",
+            "dedupe_key": "task-terminal:task:demo:success:2026-08-23T13:27:50+08:00:probe1",
+        },
+        task=task,
+    )
+    assert enriched["dedupe_key"] == canonical
+    re_enriched = enrich_task_terminal_payload(enriched, task=task)
+    assert re_enriched["dedupe_key"] == canonical
 
 
 def test_internal_task_terminal_callback_rejects_already_accepted_pending_outbox(tmp_path: Path, monkeypatch):

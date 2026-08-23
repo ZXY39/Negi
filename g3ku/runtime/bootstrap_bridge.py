@@ -197,6 +197,14 @@ class RuntimeBootstrapBridge:
             fingerprints = {}
             self._loop._internal_tool_settings_fingerprints = fingerprints
 
+        # Complete a checkpointer reset that was deferred while task sessions
+        # were active. This must run before the fingerprint gate: the deferred
+        # reset already advanced the stored fingerprint, so the gate alone
+        # would never rebuild the retained (stale) checkpointer.
+        if getattr(self._loop, '_checkpointer_reset_deferred', False) and not self._active_task_session_keys():
+            self._complete_deferred_checkpointer_reset(reason=reason)
+            force = True
+
         if descriptor is None:
             had_runtime = bool(getattr(self._loop, '_memory_runtime_settings', None) or self._loop.memory_manager is not None)
             if had_runtime:
@@ -222,7 +230,18 @@ class RuntimeBootstrapBridge:
     def _reset_memory_runtime(self, *, reason: str = 'runtime') -> None:
         active_task_sessions = self._active_task_session_keys()
         checkpointer_id, checkpointer_active = self._checkpointer_diagnostics()
-        if active_task_sessions:
+        preserve_checkpointer = bool(active_task_sessions) and getattr(self._loop, '_checkpointer', None) is not None
+        if preserve_checkpointer:
+            logger.warning(
+                'Deferring checkpointer reset while active sessions exist '
+                '(reason={}, active_task_sessions={}, checkpointer_id={}, checkpointer_active={}); '
+                'the checkpointer stays open so the in-flight turn can finish its checkpoint writes',
+                reason,
+                ','.join(active_task_sessions),
+                checkpointer_id,
+                checkpointer_active,
+            )
+        elif active_task_sessions:
             logger.warning(
                 'Resetting memory runtime while active sessions exist '
                 '(reason={}, active_task_sessions={}, checkpointer_id={}, checkpointer_active={})',
@@ -252,26 +271,56 @@ class RuntimeBootstrapBridge:
         self._loop.memory_manager = None
         self._purge_stale_dense_backends(memory_cfg)
 
-        checkpointer = getattr(self._loop, '_checkpointer', None)
-        if checkpointer is not None:
-            self._close_value(checkpointer)
-        checkpointer_cm = getattr(self._loop, '_checkpointer_cm', None)
-        if checkpointer_cm is not None and hasattr(checkpointer_cm, '__aexit__'):
-            self._close_async(checkpointer_cm.__aexit__(None, None, None))
+        if preserve_checkpointer:
+            # Keep the checkpointer (and its context manager) alive: the
+            # in-flight turn still holds a reference and would crash with
+            # "Cannot operate on a closed database" otherwise. The deferred
+            # close+rebuild happens on the next sync once sessions drain.
+            self._loop._checkpointer_reset_deferred = True
+        else:
+            checkpointer = getattr(self._loop, '_checkpointer', None)
+            if checkpointer is not None:
+                self._close_value(checkpointer)
+            checkpointer_cm = getattr(self._loop, '_checkpointer_cm', None)
+            if checkpointer_cm is not None and hasattr(checkpointer_cm, '__aexit__'):
+                self._close_async(checkpointer_cm.__aexit__(None, None, None))
+            self._loop._checkpointer_enabled = False
+            self._loop._checkpointer_backend = 'disabled'
+            self._loop._checkpointer_path = None
+            self._loop._checkpointer = None
+            self._loop._checkpointer_cm = None
+            self._loop._checkpointer_reset_deferred = False
 
         self._loop._memory_runtime_settings = None
         self._loop._store = None
         self._loop._store_enabled = False
-        self._loop._checkpointer_enabled = False
-        self._loop._checkpointer_backend = 'disabled'
-        self._loop._checkpointer_path = None
-        self._loop._checkpointer = None
-        self._loop._checkpointer_cm = None
 
         runner = getattr(self._loop, 'multi_agent_runner', None)
         invalidate = getattr(runner, 'invalidate_runtime_bindings', None)
         if callable(invalidate):
             invalidate()
+
+    def _complete_deferred_checkpointer_reset(self, *, reason: str = 'runtime') -> None:
+        checkpointer = getattr(self._loop, '_checkpointer', None)
+        checkpointer_id, checkpointer_active = self._checkpointer_diagnostics()
+        logger.info(
+            'Completing deferred checkpointer reset now that sessions drained '
+            '(reason={}, checkpointer_id={}, checkpointer_active={})',
+            reason,
+            checkpointer_id,
+            checkpointer_active,
+        )
+        if checkpointer is not None:
+            self._close_value(checkpointer)
+        checkpointer_cm = getattr(self._loop, '_checkpointer_cm', None)
+        if checkpointer_cm is not None and hasattr(checkpointer_cm, '__aexit__'):
+            self._close_async(checkpointer_cm.__aexit__(None, None, None))
+        self._loop._checkpointer_enabled = False
+        self._loop._checkpointer_backend = 'disabled'
+        self._loop._checkpointer_path = None
+        self._loop._checkpointer = None
+        self._loop._checkpointer_cm = None
+        self._loop._checkpointer_reset_deferred = False
 
     def _purge_stale_dense_backends(self, memory_cfg: Any | None) -> None:
         store_cfg = getattr(memory_cfg, 'store', None) if memory_cfg is not None else None
@@ -349,6 +398,16 @@ class RuntimeBootstrapBridge:
             self._loop.memory_manager = None
             self._loop._store = None
             self._loop._store_enabled = False
+
+        if getattr(self._loop, '_checkpointer', None) is not None:
+            # A checkpointer is still alive (retained by a deferred reset while
+            # task sessions were active). Re-initializing here would orphan the
+            # in-flight reference; leave it untouched. A dead connection is
+            # self-healed lazily by the engine's _ensure_checkpointer_ready.
+            logger.debug(
+                'init_memory_runtime keeps the live checkpointer (deferred reset pending)'
+            )
+            return
 
         try:
             cp_cfg = cfg.checkpointer

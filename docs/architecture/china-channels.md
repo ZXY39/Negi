@@ -133,6 +133,7 @@
 
 - 每条 `inbound_message` 的 `_run_turn(...)` 在**所有路径**上恰好发出一个终止帧（`turn_complete` 或 `turn_error`）。
 - `asyncio.CancelledError` 是 `BaseException`，会穿过 `except Exception`（例如 Web 端暂停、任务被取消）；传输层单独捕获它，先发 `turn_complete` 再 re-raise。
+- `turn_error` 帧的 `error` 字段是面向渠道用户的固定友好文案（`TURN_FAILED_FRIENDLY_TEXT`），原始异常文本放在 `detail` 字段，仅供排障、宿主不展示。渠道用户不会看到诸如 `Cannot operate on a closed database` 这类原始报错。
 - 背景：宿主按 `event_id` 关联每回合的 pending Promise，每会话串行派发队列依赖 pending settle。终止帧缺失 → pending 永不 settle → 该会话后续消息永久排队。历史上真实卡死过：Web 端暂停 QQ 会话后，QQ 再发消息永久无响应。
 - 排障「某渠道会话卡死不再响应」时，先确认对应回合的 Python 侧是否发出了终止帧。
 
@@ -187,6 +188,7 @@ Node 侧 `deliver_message` final 帧无对应 pending 回合时：qqbot 一律�
 
 - `_progress` / `_tool_hint` / `_session_event` 等内部消息不会直接发往渠道
 - 只发送最终对用户可见的文本
+- 所有 `deliver_message` 帧在 `build_deliver_frame(...)` 统一清洗出站文本（`sanitize_channel_outbound_text`）：剥离开头的 `## Task Ledger` 内部账本块、截断 `[SESSION EVENTS]` 之后的内容。清洗后为空说明整条消息都是内部文本，直接跳过投递——`send_outbound(...)` 对此正常返回（drain 视为已送达并 ack），不抛 `RuntimeError`（那会触发重试风暴）。正文中间的 `## Task Ledger` 不剥，避免误伤用户引用。
 - 例外：QQ 过程信息流在回合内直接发 `mode="progress"` 帧（见上文「QQ 渠道增强」），不走 `send_outbound(...)`；旧的渠道事件 → 出站路径（`build_channel_outbound_message`）已废弃（恒返回 None 且有测试锁定），不要复活。
 
 ## 8. session key 规则

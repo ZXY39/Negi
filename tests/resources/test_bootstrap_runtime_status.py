@@ -120,11 +120,140 @@ def test_bootstrap_bridge_logs_runtime_reset_diagnostics_when_active_sessions_ex
     RuntimeBootstrapBridge(loop)._reset_memory_runtime(reason="resource_snapshot")
 
     warning_logs = [message for level, message in logs if level == "warning"]
-    assert any("Resetting memory runtime while active sessions exist" in message for message in warning_logs)
+    assert any("Deferring checkpointer reset while active sessions exist" in message for message in warning_logs)
     assert any("reason=resource_snapshot" in message for message in warning_logs)
     assert any("active_task_sessions=web:ceo-demo" in message for message in warning_logs)
     assert any("checkpointer_active=True" in message for message in warning_logs)
     assert runner_invalidated == ["done"]
+
+    # The checkpointer must stay alive so the in-flight turn can finish its
+    # checkpoint writes; a deferred reset is scheduled instead.
+    assert loop._checkpointer is checkpointer
+    assert loop._checkpointer_enabled is True
+    assert loop._checkpointer_backend == "sqlite"
+    assert loop._checkpointer_path == "memory/checkpoints.sqlite3"
+    assert loop._checkpointer_reset_deferred is True
+    # Non-checkpointer memory state is still cleared.
+    assert loop._memory_runtime_settings is None
+    assert loop._store is None
+    assert loop._store_enabled is False
+
+
+def test_reset_memory_runtime_closes_checkpointer_when_no_active_sessions(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "g3ku.runtime.bootstrap_bridge.logger",
+        SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None, debug=lambda *a, **k: None),
+    )
+
+    closed: list[str] = []
+
+    class _FakeCheckpointer:
+        def close(self):
+            closed.append("checkpointer")
+
+    loop = SimpleNamespace(
+        commit_service=None,
+        _memory_runtime_settings=SimpleNamespace(),
+        memory_manager=None,
+        _checkpointer=_FakeCheckpointer(),
+        _checkpointer_cm=None,
+        _checkpointer_enabled=True,
+        _checkpointer_backend="sqlite",
+        _checkpointer_path="memory/checkpoints.sqlite3",
+        _active_tasks={},
+        multi_agent_runner=SimpleNamespace(invalidate_runtime_bindings=lambda: None),
+    )
+
+    RuntimeBootstrapBridge(loop)._reset_memory_runtime(reason="manual")
+
+    assert closed == ["checkpointer"]
+    assert loop._checkpointer is None
+    assert loop._checkpointer_cm is None
+    assert loop._checkpointer_enabled is False
+    assert loop._checkpointer_backend == "disabled"
+    assert loop._checkpointer_path is None
+    assert loop._checkpointer_reset_deferred is False
+
+
+def test_init_memory_runtime_keeps_retained_checkpointer(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "g3ku.runtime.bootstrap_bridge.logger",
+        SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None, debug=lambda *a, **k: None),
+    )
+
+    retained = object()
+    loop = SimpleNamespace(
+        _memory_runtime_settings=None,
+        memory_manager=None,
+        _checkpointer=retained,
+        _checkpointer_cm=None,
+        _checkpointer_enabled=True,
+        _checkpointer_backend="sqlite",
+        _checkpointer_path="memory/checkpoints.sqlite3",
+    )
+
+    cfg = SimpleNamespace(enabled=True, checkpointer=SimpleNamespace(backend="sqlite", path="memory/checkpoints.sqlite3"))
+    RuntimeBootstrapBridge(loop).init_memory_runtime(cfg)
+
+    # The live checkpointer is kept untouched (no re-init / orphaning).
+    assert loop._checkpointer is retained
+    assert loop._checkpointer_enabled is True
+    assert loop._checkpointer_backend == "sqlite"
+    assert loop._checkpointer_path == "memory/checkpoints.sqlite3"
+
+
+def test_sync_memory_runtime_completes_deferred_checkpointer_reset_after_sessions_drain(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "g3ku.runtime.bootstrap_bridge.logger",
+        SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None, debug=lambda *a, **k: None),
+    )
+
+    closed: list[str] = []
+
+    class _FakeCheckpointer:
+        def close(self):
+            closed.append("checkpointer")
+
+    descriptor = SimpleNamespace(fingerprint="fp-1", metadata={"settings": {}})
+    loop = SimpleNamespace(
+        resource_manager=SimpleNamespace(
+            get_tool_descriptor=lambda name: descriptor if name == "memory_runtime" else None
+        ),
+        _internal_tool_settings_fingerprints={},
+        _memory_runtime_settings=SimpleNamespace(),
+        memory_manager=None,
+        commit_service=None,
+        _checkpointer=_FakeCheckpointer(),
+        _checkpointer_cm=None,
+        _checkpointer_enabled=True,
+        _checkpointer_backend="sqlite",
+        _checkpointer_path="memory/checkpoints.sqlite3",
+        _active_tasks={"web:ceo-demo": {object()}},
+        multi_agent_runner=SimpleNamespace(invalidate_runtime_bindings=lambda: None),
+    )
+
+    bridge = RuntimeBootstrapBridge(loop)
+    init_calls: list[object] = []
+    monkeypatch.setattr(bridge, "init_memory_runtime", lambda cfg: init_calls.append(cfg))
+
+    # Phase 1: an active session defers the checkpointer reset; the handle is
+    # retained and the fingerprint is already advanced.
+    assert bridge.sync_internal_tool_runtimes(force=True, reason="mid_turn") is True
+    assert closed == []
+    assert loop._checkpointer_reset_deferred is True
+    retained = loop._checkpointer
+    assert retained is not None
+    assert loop._internal_tool_settings_fingerprints["memory_runtime"] == "fp-1"
+    assert len(init_calls) == 1
+
+    # Phase 2: sessions drained -> the deferred close+rebuild completes even
+    # though the fingerprint is unchanged (the gate would otherwise skip it).
+    loop._active_tasks = {}
+    assert bridge.sync_internal_tool_runtimes(force=False, reason="post_turn") is True
+    assert closed == ["checkpointer"]
+    assert loop._checkpointer_reset_deferred is False
+    assert loop._checkpointer is None
+    assert len(init_calls) == 2
 
 
 def test_sync_memory_runtime_fingerprint_gate_controls_reset(monkeypatch) -> None:

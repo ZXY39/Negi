@@ -13,6 +13,7 @@ from g3ku.china_bridge.protocol import (
     build_turn_complete_frame,
     build_turn_error_frame,
     normalize_inbound_frame,
+    sanitize_channel_outbound_text,
 )
 from g3ku.china_bridge.session_keys import (
     build_memory_chat_id,
@@ -23,6 +24,7 @@ from g3ku.runtime.frontdoor.cron_hidden_prompt import strip_cron_hidden_prompt
 from g3ku.china_bridge.registry import china_channel_id_set
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.bridge import SessionRuntimeBridge, cli_event_text
+from g3ku.runtime.session_agent import TURN_FAILED_FRIENDLY_TEXT
 
 CHINA_CHANNELS = china_channel_id_set()
 
@@ -117,20 +119,21 @@ class _QQBotProgressCollector:
         if not text.strip():
             return
         envelope = self._envelope
-        await self._transport._emit(
-            build_deliver_frame(
-                event_id=envelope.event_id,
-                delivery_id=uuid.uuid4().hex,
-                channel=envelope.channel,
-                account_id=envelope.account_id,
-                target_kind=envelope.peer_kind,
-                target_id=envelope.peer_id,
-                text=text,
-                mode="progress",
-                reply_to=envelope.message_id,
-                metadata={"session_key": self._session_key, "progress_kind": "milestone"},
-            )
+        frame = build_deliver_frame(
+            event_id=envelope.event_id,
+            delivery_id=uuid.uuid4().hex,
+            channel=envelope.channel,
+            account_id=envelope.account_id,
+            target_kind=envelope.peer_kind,
+            target_id=envelope.peer_id,
+            text=text,
+            mode="progress",
+            reply_to=envelope.message_id,
+            metadata={"session_key": self._session_key, "progress_kind": "milestone"},
         )
+        if frame is None:
+            return
+        await self._transport._emit(frame)
 
 
 class ChinaBridgeTransport:
@@ -310,20 +313,21 @@ class ChinaBridgeTransport:
         metadata: dict[str, Any] = {"session_key": session_key}
         if extra_metadata:
             metadata.update(extra_metadata)
-        await self._emit(
-            build_deliver_frame(
-                event_id=envelope.event_id,
-                delivery_id=uuid.uuid4().hex,
-                channel=envelope.channel,
-                account_id=envelope.account_id,
-                target_kind=envelope.peer_kind,
-                target_id=envelope.peer_id,
-                text=text,
-                mode=mode,
-                reply_to=envelope.message_id,
-                metadata=metadata,
-            )
+        frame = build_deliver_frame(
+            event_id=envelope.event_id,
+            delivery_id=uuid.uuid4().hex,
+            channel=envelope.channel,
+            account_id=envelope.account_id,
+            target_kind=envelope.peer_kind,
+            target_id=envelope.peer_id,
+            text=text,
+            mode=mode,
+            reply_to=envelope.message_id,
+            metadata=metadata,
         )
+        if frame is None:
+            return
+        await self._emit(frame)
 
     async def _run_turn(self, payload: dict[str, Any]) -> None:
         envelope = normalize_inbound_frame(payload)
@@ -457,7 +461,15 @@ class ChinaBridgeTransport:
             await self._emit(build_turn_complete_frame(event_id=envelope.event_id))
             raise
         except Exception as exc:
-            await self._emit(build_turn_error_frame(event_id=envelope.event_id, error=str(exc)))
+            # Channel users see a fixed friendly message; the raw exception is
+            # preserved in the frame's ``detail`` for troubleshooting only.
+            await self._emit(
+                build_turn_error_frame(
+                    event_id=envelope.event_id,
+                    error=TURN_FAILED_FRIENDLY_TEXT,
+                    detail=str(exc),
+                )
+            )
 
     async def _drain_queued_follow_ups(
         self,
@@ -544,6 +556,12 @@ class ChinaBridgeTransport:
         metadata = dict(msg.metadata or {})
         if bool(metadata.get("_progress")) or bool(metadata.get("_tool_hint")) or bool(metadata.get("_session_event")):
             return
+        sanitized = sanitize_channel_outbound_text(str(msg.content or ""))
+        if not sanitized:
+            # The message was internal-only (e.g. a bare Task Ledger echo).
+            # Returning normally lets the drain loop ack it; raising would
+            # trigger a retry storm for content that must never be delivered.
+            return
         if self._sender is None:
             # Bus-driven outbound must never be dropped silently: the drain
             # loop treats RuntimeError as transient and retries once the
@@ -565,7 +583,7 @@ class ChinaBridgeTransport:
                 account_id=account_id,
                 target_kind=peer_kind,
                 target_id=peer_id,
-                text=str(msg.content or ""),
+                text=sanitized,
                 mode="final",
                 reply_to=str(msg.reply_to or (msg.metadata or {}).get("message_id") or "").strip() or None,
                 metadata={

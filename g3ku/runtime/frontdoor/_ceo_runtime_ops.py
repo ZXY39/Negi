@@ -671,6 +671,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return False
         return str(record.get("content") or "").strip().startswith("## 长期记忆\n")
 
+    @staticmethod
+    def _is_frontdoor_task_ledger_record(record: dict[str, Any] | None) -> bool:
+        if not isinstance(record, dict):
+            return False
+        if str(record.get("role") or "").strip().lower() != "assistant":
+            return False
+        return str(record.get("content") or "").strip().startswith("## Task Ledger\n")
+
     @classmethod
     def _split_request_body_and_tool_contract_messages(
         cls,
@@ -683,6 +691,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 continue
             record = dict(item)
             if cls._is_frontdoor_memory_snapshot_record(record):
+                continue
+            if cls._is_frontdoor_task_ledger_record(record):
+                # Task Ledger is turn-only overlay context; it must never be
+                # baked into the durable request-body baseline, otherwise the
+                # same ledger accumulates once per turn and pollutes context.
                 continue
             if cls._is_frontdoor_tool_contract_record(record):
                 contract_messages.append(record)

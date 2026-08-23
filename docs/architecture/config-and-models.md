@@ -105,6 +105,12 @@
 
 因此，`200 OK` 只表示配置已经保存成功；它不等价于“worker 已经确认加载新配置”。
 
+刷新还要区分“模型路由”与“记忆运行时”两类影响面，由 `refresh_web_agent_runtime(...)` / `refresh_loop_runtime_config(...)` 的 `force_memory_sync` 控制：
+
+- `force_memory_sync` 默认 `False`：记忆运行时同步走 `memory_runtime` 资源指纹门控，指纹未变就不重置。模型路由、CEO 链调整、回合中刷新（`provider_retry_invalidation`、`_resolve_ceo_model_refs`）都属此类。
+- 只有真正改写指纹树之外的记忆相关设置时才显式传 `True`：embedding/rerank 绑定的原子保存与回滚、`update_llm_memory_binding`、`run_llm_migration`、`model_config.migrate_legacy`，以及 `update_llm_config` 命中的是绑定引用的记录时。
+- 原因：强制重置会关闭进程共享的 SQLite checkpointer；若在途回合仍持有它，最终 checkpoint 写入会报 `Cannot operate on a closed database`。即便有活跃会话守卫（见 `runtime-overview.md`「Memory Runtime Reset Guard」），也不应对纯模型变更强制重置。
+
 还要额外记住一个新的运行时边界：
 
 - 配置刷新仍然不会把一个“已经发出去的单次 provider 请求”中途热切换到新模型。

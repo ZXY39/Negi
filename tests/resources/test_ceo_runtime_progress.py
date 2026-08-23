@@ -33,7 +33,7 @@ from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPendingInterrupt
 from g3ku.runtime.manager import SessionRuntimeManager
-from g3ku.runtime.session_agent import RuntimeAgentSession
+from g3ku.runtime.session_agent import TURN_FAILED_FRIENDLY_TEXT, RuntimeAgentSession
 from g3ku.session.manager import SessionManager
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
@@ -4648,7 +4648,7 @@ async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
     reloaded_session = SessionManager(tmp_path).get_or_create(session_id)
     assert [message["role"] for message in reloaded_session.messages] == ["user", "assistant"]
     assert reloaded_session.messages[0]["content"] == "Open bilibili"
-    assert reloaded_session.messages[1]["content"] == "运行出错：CEO frontdoor exceeded maximum iterations"
+    assert reloaded_session.messages[1]["content"] == TURN_FAILED_FRIENDLY_TEXT
     assert reloaded_session.messages[1]["metadata"] == {
         "source": "runtime_error",
         "error_code": "legacy_session_error",
@@ -4660,7 +4660,7 @@ async def test_runtime_agent_session_persists_failed_turn_for_follow_up_context(
 
     recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)
     assert recent_history[-2] == {"role": "user", "content": "Open bilibili"}
-    assert "运行出错：CEO frontdoor exceeded maximum iterations" in recent_history[-1]["content"]
+    assert TURN_FAILED_FRIENDLY_TEXT in recent_history[-1]["content"]
 
 
 @pytest.mark.asyncio

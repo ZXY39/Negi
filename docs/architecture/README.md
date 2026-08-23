@@ -39,6 +39,9 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Append-notice delivery, `waiting_children` replay, task-tree banner after distribution → `runtime-overview.md` + `operations-and-maintenance.md`
 - Execution/final-acceptance reflation (node vanishing from browser tree, acceptance visibility) → `runtime-overview.md` + `web-and-admin.md`
 - Multimodal image not reaching model or fabricated image content → `runtime-overview.md` + `china-channels.md` (channel inbound) or `web-and-admin.md` (web upload/reopen)
+- Turn checkpoint write fails with `Cannot operate on a closed database`, or a config refresh disrupts an in-flight turn → `runtime-overview.md`「Memory Runtime Reset Guard」+ `config-and-models.md`「配置热刷新」
+- Same task result pushed to the channel multiple times → `heartbeat-system.md`「Task Terminal Repair Contract」
+- Internal `## Task Ledger` text leaking to a channel user → `china-channels.md`「出站消息链路」
 - Broken image icons, file-route 400s, snapshot path mismatch → `web-and-admin.md` "Inline Markdown Image Rendering Contract"
 
 ## Maintenance Rules

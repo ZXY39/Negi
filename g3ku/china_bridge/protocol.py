@@ -15,6 +15,55 @@ def dumps(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+TASK_LEDGER_HEADER = "## Task Ledger"
+SESSION_EVENTS_MARKER = "[SESSION EVENTS]"
+
+
+def _strip_leading_task_ledger_blocks(text: str) -> str:
+    """Strip leading ``## Task Ledger`` blocks (header line + bullet body).
+
+    A block runs from its header line until the next blank line or markdown
+    heading. Only leading blocks are removed: occurrences in the middle of a
+    reply may be legitimate quotations, so they are left untouched.
+    """
+    lines = str(text or "").split("\n")
+    index = 0
+    stripped_any = False
+    while True:
+        probe = index
+        while probe < len(lines) and not lines[probe].strip():
+            probe += 1
+        if probe >= len(lines) or lines[probe].strip() != TASK_LEDGER_HEADER:
+            break
+        cursor = probe + 1
+        while cursor < len(lines):
+            line = lines[cursor].strip()
+            if not line or line.startswith("#"):
+                break
+            cursor += 1
+        index = cursor
+        stripped_any = True
+    if not stripped_any:
+        return str(text or "")
+    return "\n".join(lines[index:])
+
+
+def sanitize_channel_outbound_text(text: str) -> str:
+    """Remove internal-only artifacts from channel-bound reply text.
+
+    Models occasionally echo internal context blocks verbatim (see the
+    2026-08-23 QQ incident). This strips leading ``## Task Ledger`` blocks and
+    truncates everything from a ``[SESSION EVENTS]`` marker onward. The result
+    is stripped; an empty result means the whole message was internal-only and
+    must not be delivered.
+    """
+    cleaned = _strip_leading_task_ledger_blocks(str(text or ""))
+    marker_index = cleaned.find(SESSION_EVENTS_MARKER)
+    if marker_index >= 0:
+        cleaned = cleaned[:marker_index]
+    return cleaned.strip()
+
+
 def build_auth_frame(token: str) -> dict[str, Any]:
     return {"type": "auth", "token": str(token or ""), "client": "g3ku-python"}
 
@@ -31,7 +80,11 @@ def build_deliver_frame(
     mode: str,
     reply_to: str | None = None,
     metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
+    sanitized = sanitize_channel_outbound_text(text)
+    if not sanitized:
+        # Internal-only content (e.g. a bare Task Ledger echo): skip delivery.
+        return None
     return {
         "type": "deliver_message",
         "event_id": event_id,
@@ -40,7 +93,7 @@ def build_deliver_frame(
         "account_id": account_id,
         "target": {"kind": target_kind, "id": target_id},
         "reply_to": reply_to,
-        "payload": {"text": text, "attachments": [], "mode": mode},
+        "payload": {"text": sanitized, "attachments": [], "mode": mode},
         "metadata": dict(metadata or {}),
         "timestamp": now_iso(),
     }
@@ -50,13 +103,19 @@ def build_turn_complete_frame(*, event_id: str) -> dict[str, Any]:
     return {"type": "turn_complete", "event_id": event_id, "timestamp": now_iso()}
 
 
-def build_turn_error_frame(*, event_id: str, error: str) -> dict[str, Any]:
-    return {
+def build_turn_error_frame(*, event_id: str, error: str, detail: str = "") -> dict[str, Any]:
+    # ``error`` is the user-visible message (kept friendly); ``detail`` carries
+    # the raw exception text for troubleshooting and is never shown to users.
+    frame: dict[str, Any] = {
         "type": "turn_error",
         "event_id": event_id,
         "error": str(error or "unknown error"),
         "timestamp": now_iso(),
     }
+    detail_text = str(detail or "").strip()
+    if detail_text:
+        frame["detail"] = detail_text
+    return frame
 
 
 def normalize_inbound_frame(payload: dict[str, Any] | None) -> ChinaInboundEnvelope | None:

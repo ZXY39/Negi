@@ -178,6 +178,144 @@ async def test_transport_send_outbound_raises_when_sender_missing():
         )
 
 
+def test_sanitize_channel_outbound_text_strips_single_leading_ledger_block():
+    from g3ku.china_bridge.protocol import sanitize_channel_outbound_text
+
+    text = "## Task Ledger\n- task:1 done\n- task:2 running\n\nHere is the actual answer."
+    assert sanitize_channel_outbound_text(text) == "Here is the actual answer."
+
+
+def test_sanitize_channel_outbound_text_strips_multiple_leading_ledger_blocks():
+    from g3ku.china_bridge.protocol import sanitize_channel_outbound_text
+
+    text = (
+        "## Task Ledger\n- a\n\n"
+        "## Task Ledger\n- b\n- c\n\n"
+        "final reply"
+    )
+    assert sanitize_channel_outbound_text(text) == "final reply"
+
+
+def test_sanitize_channel_outbound_text_keeps_mid_text_ledger_reference():
+    from g3ku.china_bridge.protocol import sanitize_channel_outbound_text
+
+    text = "You asked about the format.\n## Task Ledger\n- example\nThat is all."
+    assert sanitize_channel_outbound_text(text) == text.strip()
+
+
+def test_sanitize_channel_outbound_text_truncates_session_events_marker():
+    from g3ku.china_bridge.protocol import sanitize_channel_outbound_text
+
+    text = "Visible reply.\n[SESSION EVENTS]\n## EVENT BUNDLE\ninternal stuff"
+    assert sanitize_channel_outbound_text(text) == "Visible reply."
+
+
+def test_sanitize_channel_outbound_text_internal_only_returns_empty():
+    from g3ku.china_bridge.protocol import sanitize_channel_outbound_text
+
+    assert sanitize_channel_outbound_text("## Task Ledger\n- only internal\n") == ""
+    assert sanitize_channel_outbound_text("[SESSION EVENTS]\ninternal") == ""
+
+
+@pytest.mark.asyncio
+async def test_transport_send_outbound_skips_message_that_sanitizes_to_empty():
+    frames: list[dict] = []
+    app_config = SimpleNamespace(china_bridge=SimpleNamespace(send_tool_hints=False, send_progress=True))
+    transport = ChinaBridgeTransport(runtime_bridge=_CaptureRuntimeBridge(), app_config=app_config)
+    transport.set_sender(lambda payload: frames.append(payload))
+
+    # Must return normally (not raise) so the drain loop acks the message.
+    await transport.send_outbound(
+        SimpleNamespace(
+            channel="qqbot",
+            chat_id="default:dm:user-1",
+            content="## Task Ledger\n- task:demo: internal only\n",
+            reply_to=None,
+            metadata={"_china_peer_id": "user-1", "_china_account_id": "default"},
+        )
+    )
+
+    assert frames == []
+
+
+@pytest.mark.asyncio
+async def test_transport_deliver_strips_leading_ledger_block_from_final_reply():
+    bridge = _ScriptedRuntimeBridge(
+        prompt_result=SimpleNamespace(output="## Task Ledger\n- x\n\nThe real result text.")
+    )
+    transport, frames = _make_transport(bridge)
+
+    await transport.handle_frame(_inbound_frame(event_id="evt-strip", text="hello"))
+    await _wait_for_terminal(frames)
+
+    final_frames = [
+        frame
+        for frame in frames
+        if frame["type"] == "deliver_message" and frame["payload"].get("mode") == "final"
+    ]
+    assert [frame["payload"]["text"] for frame in final_frames] == ["The real result text."]
+
+
+def test_build_deliver_frame_returns_none_for_internal_only_text():
+    from g3ku.china_bridge.protocol import build_deliver_frame
+
+    frame = build_deliver_frame(
+        event_id="evt",
+        delivery_id="d1",
+        channel="qqbot",
+        account_id="default",
+        target_kind="user",
+        target_id="user-1",
+        text="## Task Ledger\n- only\n",
+        mode="final",
+    )
+    assert frame is None
+
+    normal = build_deliver_frame(
+        event_id="evt",
+        delivery_id="d2",
+        channel="qqbot",
+        account_id="default",
+        target_kind="user",
+        target_id="user-1",
+        text="hello there",
+        mode="final",
+    )
+    assert normal is not None
+    assert normal["payload"]["text"] == "hello there"
+
+
+@pytest.mark.asyncio
+async def test_transport_turn_error_frame_hides_raw_exception():
+    bridge = _ScriptedRuntimeBridge(
+        prompt_side_effect=RuntimeError("Cannot operate on a closed database")
+    )
+    transport, frames = _make_transport(bridge)
+
+    await transport.handle_frame(_inbound_frame(event_id="evt-err", text="hello"))
+    await _wait_for_terminal(frames)
+
+    error_frames = [frame for frame in frames if frame["type"] == "turn_error"]
+    assert len(error_frames) == 1
+    frame = error_frames[0]
+    # The user-visible error must be the friendly text, not the raw exception.
+    assert "closed database" not in str(frame["error"])
+    assert frame["error"] == transport_module.TURN_FAILED_FRIENDLY_TEXT
+    # The raw exception is preserved for troubleshooting in ``detail``.
+    assert "Cannot operate on a closed database" in str(frame["detail"])
+
+
+def test_build_turn_error_frame_omits_detail_when_empty():
+    from g3ku.china_bridge.protocol import build_turn_error_frame
+
+    frame = build_turn_error_frame(event_id="evt", error="something went wrong")
+    assert frame["error"] == "something went wrong"
+    assert "detail" not in frame
+
+    with_detail = build_turn_error_frame(event_id="evt", error="oops", detail="raw traceback")
+    assert with_detail["detail"] == "raw traceback"
+
+
 def test_channel_event_builder_no_longer_emits_outbound_messages() -> None:
     outbound = build_channel_outbound_message(
         event=AgentEvent(type="tool_execution_update", payload={"text": "tool running"}),

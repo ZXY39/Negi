@@ -37,6 +37,13 @@ _TRANSCRIPT_STATE_COMPLETED = "completed"
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
 _ASSISTANT_STREAM_FLUSH_WINDOW_SECONDS = 0.075
 
+# User-facing message shown when a turn fails. The raw exception text is kept
+# for operators (error file / transcript metadata / "error" event) but never
+# surfaced to channel users verbatim.
+TURN_FAILED_FRIENDLY_TEXT = (
+    "这一轮处理没有完成，请稍后重试；如果反复出现，请查看任务面板或错误日志了解详情。"
+)
+
 
 class RuntimeAgentSession:
     """Primary AgentSession implementation backed by the runtime engine."""
@@ -2884,7 +2891,14 @@ class RuntimeAgentSession:
                     recoverable=True,
                 )
             self._state.last_error = error
-            error_reply = f"运行出错：{error.message}"
+            # Users see a fixed friendly message; the raw exception text stays
+            # in the error file, the transcript metadata, the "error" event and
+            # StructuredError (Web ops views render those), but is never shown
+            # to channel users verbatim.
+            if isinstance(exc, MemoryError):
+                error_reply = "运行时内存不足，未能完成当前轮次"
+            else:
+                error_reply = TURN_FAILED_FRIENDLY_TEXT
             self._state.latest_message = error_reply
             self._persist_runtime_error_file(
                 exc,

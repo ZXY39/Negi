@@ -90,3 +90,48 @@ def test_build_heartbeat_lane_reuses_stable_prefix_when_only_event_payload_chang
     assert list(_field(first, "dynamic_appendix_messages")) != list(_field(second, "dynamic_appendix_messages"))
     assert list(_field(first, "request_messages")) != list(_field(second, "request_messages"))
     assert str(_field(first, "retrieval_query") or "") != str(_field(second, "retrieval_query") or "")
+
+
+def test_build_heartbeat_lane_keeps_ledger_out_of_combined_user_message() -> None:
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+    from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
+
+    ledger = build_task_ledger_summary(
+        {
+            "task_ids": ["task:demo"],
+            "task_results": [
+                {
+                    "task_id": "task:demo",
+                    "node_id": "node:1",
+                    "node_kind": "execution",
+                    "output_excerpt": "result",
+                }
+            ],
+        }
+    )
+    assert ledger.startswith("## Task Ledger\n")
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="openai:gpt-4.1",
+        stable_rules_text="Keep the user informed.",
+        task_ledger_summary=ledger,
+        events=[{"reason": "task_terminal", "task_id": "task:demo", "status": "success"}],
+    )
+
+    stable_messages = list(_field(lane, "stable_messages"))
+    request_messages = list(_field(lane, "request_messages"))
+
+    # The ledger is still shown to the model this turn as the assistant stable message.
+    assert {"role": "assistant", "content": ledger} in stable_messages
+    assert {"role": "assistant", "content": ledger} in request_messages
+
+    # The trailing combined user message must not duplicate the ledger text.
+    combined_user_messages = [
+        message
+        for message in request_messages
+        if str(message.get("role") or "").strip().lower() == "user"
+        and "Keep the user informed." in str(message.get("content") or "")
+    ]
+    assert combined_user_messages
+    for message in combined_user_messages:
+        assert "## Task Ledger" not in str(message.get("content") or "")
