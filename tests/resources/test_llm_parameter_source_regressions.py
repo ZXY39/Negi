@@ -959,20 +959,31 @@ def test_frontdoor_token_preflight_re_exports_ground_truth_helpers() -> None:
     assert estimate.final_estimate_tokens == 17
 
 
-def test_frontdoor_token_preflight_policy_preserves_invalid_context_window_as_zero() -> None:
-    from g3ku.runtime.frontdoor._ceo_runtime_ops import (
-        _FrontdoorTokenPreflightPolicy,
-        _build_frontdoor_token_preflight_policy,
+def test_runtime_send_token_preflight_thresholds_preserve_invalid_context_window_as_zero() -> None:
+    from main.runtime.send_token_preflight import (
+        RuntimeSendTokenPreflightThresholds,
+        build_runtime_send_token_preflight_snapshot,
+        compute_runtime_send_token_preflight_thresholds,
     )
 
-    policy = _build_frontdoor_token_preflight_policy(
-        max_context_tokens=0,
-        trigger_ratio=0.8,
+    for invalid_context_window in (0, -100):
+        thresholds = compute_runtime_send_token_preflight_thresholds(
+            context_window_tokens=invalid_context_window,
+        )
+
+        assert isinstance(thresholds, RuntimeSendTokenPreflightThresholds)
+        assert thresholds.context_window_tokens == 0
+        assert thresholds.trigger_tokens == 0
+        assert thresholds.effective_trigger_tokens == 0
+
+    snapshot = build_runtime_send_token_preflight_snapshot(
+        context_window_tokens=0,
+        estimated_total_tokens=5000,
     )
 
-    assert isinstance(policy, _FrontdoorTokenPreflightPolicy)
-    assert policy.max_context_tokens == 0
-    assert policy.trigger_tokens == 0
+    assert snapshot.would_exceed_context_window is False
+    assert snapshot.would_trigger_token_compression is False
+    assert snapshot.ratio == 0.0
 
 
 def test_build_send_provider_request_preview_sanitizes_messages_and_synthesizes_prompt_cache_key(

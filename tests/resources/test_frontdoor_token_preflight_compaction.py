@@ -2,39 +2,49 @@ from __future__ import annotations
 
 import g3ku.runtime.frontdoor.token_preflight_compaction as token_preflight_compaction_module
 from g3ku.runtime.frontdoor._ceo_runtime_ops import (
-    _FrontdoorTokenPreflightPolicy,
-    _build_frontdoor_token_preflight_policy,
     _estimate_frontdoor_provider_request_tokens,
-    _should_run_frontdoor_token_preflight,
 )
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
-    FRONTDOOR_COMPACTED_HISTORY_MAX_TOKENS,
+    RuntimeSendTokenPreflightThresholds,
     build_runtime_observed_input_truth,
-    compact_frontdoor_history_zone,
+    compute_runtime_send_token_preflight_thresholds,
+    should_trigger_runtime_token_compression,
 )
 
 
 def test_frontdoor_token_preflight_compaction_public_boundary_stays_focused() -> None:
-    assert hasattr(token_preflight_compaction_module, "compact_frontdoor_history_zone")
-    assert hasattr(token_preflight_compaction_module, "build_runtime_observed_input_truth")
     assert hasattr(token_preflight_compaction_module, "FrontdoorTokenPreflightResult")
+    assert hasattr(token_preflight_compaction_module, "build_runtime_observed_input_truth")
+    assert hasattr(token_preflight_compaction_module, "compute_runtime_send_token_preflight_thresholds")
+    assert hasattr(token_preflight_compaction_module, "should_trigger_runtime_token_compression")
+    assert hasattr(token_preflight_compaction_module, "build_runtime_send_token_preflight_snapshot")
     assert hasattr(token_preflight_compaction_module, "build_frontdoor_token_preflight_policy") is False
     assert hasattr(token_preflight_compaction_module, "estimate_frontdoor_provider_request_tokens") is False
     assert hasattr(token_preflight_compaction_module, "should_run_frontdoor_token_preflight") is False
+    assert hasattr(token_preflight_compaction_module, "compact_frontdoor_history_zone") is False
+    assert hasattr(token_preflight_compaction_module, "FRONTDOOR_COMPACTED_HISTORY_MAX_TOKENS") is False
 
 
-def test_frontdoor_legacy_token_preflight_uses_fixed_max_context_and_ratio() -> None:
-    policy = _build_frontdoor_token_preflight_policy(
-        max_context_tokens=200_000,
-        trigger_ratio=0.10,
+def test_frontdoor_token_preflight_thresholds_use_fixed_context_window_ratios() -> None:
+    assert token_preflight_compaction_module.RUNTIME_SEND_TOKEN_COMPRESSION_TRIGGER_RATIO == 0.80
+    assert token_preflight_compaction_module.RUNTIME_SEND_TOKEN_COMPRESSION_ESTIMATE_SAFETY_RATIO == 0.95
+
+    thresholds = compute_runtime_send_token_preflight_thresholds(
+        context_window_tokens=200_000,
     )
 
-    assert isinstance(policy, _FrontdoorTokenPreflightPolicy)
-    assert policy.max_context_tokens == 200_000
-    assert policy.trigger_tokens == 20_000
-    assert FRONTDOOR_COMPACTED_HISTORY_MAX_TOKENS == 5000
-    assert _should_run_frontdoor_token_preflight(final_request_tokens=19_999, policy=policy) is False
-    assert _should_run_frontdoor_token_preflight(final_request_tokens=20_000, policy=policy) is True
+    assert isinstance(thresholds, RuntimeSendTokenPreflightThresholds)
+    assert thresholds.context_window_tokens == 200_000
+    assert thresholds.trigger_tokens == 160_000
+    assert thresholds.effective_trigger_tokens == 152_000
+    assert should_trigger_runtime_token_compression(
+        estimated_total_tokens=151_999,
+        thresholds=thresholds,
+    ) is False
+    assert should_trigger_runtime_token_compression(
+        estimated_total_tokens=152_000,
+        thresholds=thresholds,
+    ) is True
 
     truth = build_runtime_observed_input_truth(
         usage={"input_tokens": 12, "cache_hit_tokens": 3},
@@ -45,26 +55,7 @@ def test_frontdoor_legacy_token_preflight_uses_fixed_max_context_and_ratio() -> 
     assert truth.effective_input_tokens == 15
 
 
-def test_frontdoor_compaction_keeps_active_stage_and_latest_three_completed_stages() -> None:
-    stages = [
-        {"stage_id": f"stage-{index}", "stage_index": index, "status": "completed", "stage_goal": f"goal-{index}"}
-        for index in range(1, 6)
-    ] + [
-        {"stage_id": "stage-6", "stage_index": 6, "status": "active", "stage_goal": "goal-6"}
-    ]
-
-    result = compact_frontdoor_history_zone(
-        raw_history_messages=[{"role": "user", "content": f"user-{index}"} for index in range(6)],
-        frontdoor_stage_state={"active_stage_id": "stage-6", "transition_required": False, "stages": stages},
-        max_compacted_tokens=5000,
-    )
-
-    assert result.retained_completed_stage_ids == ["stage-3", "stage-4", "stage-5"]
-    assert result.active_stage_id == "stage-6"
-    assert result.compacted_block_tokens <= 5000
-
-
-def test_frontdoor_legacy_token_preflight_estimates_large_provider_payload_without_summary_truncation() -> None:
+def test_frontdoor_token_preflight_estimates_large_provider_payload_without_summary_truncation() -> None:
     huge_text = "A" * 120_000
     estimated = _estimate_frontdoor_provider_request_tokens(
         provider_request_body={
