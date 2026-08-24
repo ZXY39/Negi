@@ -221,7 +221,6 @@ def build_heartbeat_prompt_lane(
     *,
     provider_model: str,
     stable_rules_text: str,
-    task_ledger_summary: str,
     events: list[dict[str, Any]],
     output_inline_limit: int = 4000,
 ) -> HeartbeatPromptLane:
@@ -230,9 +229,6 @@ def build_heartbeat_prompt_lane(
     stable_rules = _non_empty_text(stable_rules_text)
     if stable_rules:
         stable_messages.append({"role": "system", "content": stable_rules})
-    ledger = _non_empty_text(task_ledger_summary)
-    if ledger:
-        stable_messages.append({"role": "assistant", "content": ledger})
     event_bundle_text, retrieval_query = _event_bundle_content(
         list(events or []),
         output_inline_limit=output_inline_limit,
@@ -247,10 +243,6 @@ def build_heartbeat_prompt_lane(
         str(message.get("content") or "").strip()
         for message in [*stable_messages, *dynamic_appendix_messages]
         if str(message.get("content") or "").strip()
-        # The ledger is already present as the assistant stable message; do not
-        # duplicate it into the combined user message (it would persist into the
-        # durable baseline once per heartbeat turn and pollute context).
-        and not str(message.get("content") or "").strip().startswith("## Task Ledger")
     ]
     if combined_user_sections:
         request_messages.append(

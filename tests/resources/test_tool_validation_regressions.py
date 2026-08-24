@@ -6,8 +6,6 @@ import pytest
 
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.registry import ToolRegistry
-from g3ku.runtime import web_ceo_sessions
-from g3ku.session.manager import SessionManager
 
 
 _PARAMETER_GUIDANCE_TEMPLATE = (
@@ -312,27 +310,3 @@ async def test_tool_registry_langchain_tool_normalizes_nested_array_object_argum
 
     assert result == {"items": [{"kind": "memory_write"}]}
 
-
-def test_build_last_task_memory_ignores_unverified_assistant_dispatch_claim(tmp_path) -> None:
-    session = SessionManager(tmp_path).get_or_create("web:shared")
-    session.add_message(
-        "assistant",
-        "Claude Code Haha 项目分析任务已在后台成功续跑。新任务 ID: `task:fake-123`。",
-    )
-
-    memory = web_ceo_sessions.build_last_task_memory(session)
-
-    assert memory["task_ids"] == []
-
-
-def test_build_last_task_memory_keeps_verified_assistant_task_metadata(tmp_path) -> None:
-    session = SessionManager(tmp_path).get_or_create("web:shared")
-    session.add_message(
-        "assistant",
-        "已开始处理，这个需求已转为异步任务。",
-        metadata={"task_ids": ["task:real-123"], "source": "transcript"},
-    )
-
-    memory = web_ceo_sessions.build_last_task_memory(session)
-
-    assert memory["task_ids"] == ["task:real-123"]

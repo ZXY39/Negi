@@ -558,7 +558,7 @@ class ChinaBridgeTransport:
             return
         sanitized = sanitize_channel_outbound_text(str(msg.content or ""))
         if not sanitized:
-            # The message was internal-only (e.g. a bare Task Ledger echo).
+            # The message was internal-only (e.g. a bare [SESSION EVENTS] echo).
             # Returning normally lets the drain loop ack it; raising would
             # trigger a retry storm for content that must never be delivered.
             return

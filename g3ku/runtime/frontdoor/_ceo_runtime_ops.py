@@ -672,14 +672,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return False
         return str(record.get("content") or "").strip().startswith("## 长期记忆\n")
 
-    @staticmethod
-    def _is_frontdoor_task_ledger_record(record: dict[str, Any] | None) -> bool:
-        if not isinstance(record, dict):
-            return False
-        if str(record.get("role") or "").strip().lower() != "assistant":
-            return False
-        return str(record.get("content") or "").strip().startswith("## Task Ledger\n")
-
     @classmethod
     def _split_request_body_and_tool_contract_messages(
         cls,
@@ -692,11 +684,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 continue
             record = dict(item)
             if cls._is_frontdoor_memory_snapshot_record(record):
-                continue
-            if cls._is_frontdoor_task_ledger_record(record):
-                # Task Ledger is turn-only overlay context; it must never be
-                # baked into the durable request-body baseline, otherwise the
-                # same ledger accumulates once per turn and pollutes context.
                 continue
             if cls._is_frontdoor_tool_contract_record(record):
                 contract_messages.append(record)
@@ -2400,11 +2387,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         ),
                     }
                 )
-            event_bundle_text = str(
-                metadata.get("heartbeat_event_bundle_text")
-                or metadata.get("heartbeat_task_ledger_summary")
-                or ""
-            ).strip()
+            event_bundle_text = str(metadata.get("heartbeat_event_bundle_text") or "").strip()
             if event_bundle_text:
                 event_metadata = _hidden_internal_prompt_message_metadata(
                     source=source,
@@ -2442,39 +2425,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     }
                 )
         return seed_messages, event_bundle_text, event_metadata
-
-    @classmethod
-    def _heartbeat_stable_prefix_messages(
-        cls,
-        *,
-        assembly: Any,
-        metadata: dict[str, Any],
-        live_request_messages: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        heartbeat_stable_rules_text = str(metadata.get("heartbeat_stable_rules_text") or "").strip()
-        if heartbeat_stable_rules_text:
-            metadata_stable_messages: list[dict[str, Any]] = [
-                {"role": "system", "content": heartbeat_stable_rules_text}
-            ]
-            heartbeat_task_ledger_summary = str(metadata.get("heartbeat_task_ledger_summary") or "").strip()
-            if heartbeat_task_ledger_summary:
-                metadata_stable_messages.append(
-                    {"role": "assistant", "content": heartbeat_task_ledger_summary}
-                )
-            return metadata_stable_messages
-        explicit_stable_messages = cls._prompt_message_records(getattr(assembly, "stable_messages", None))
-        if explicit_stable_messages:
-            return explicit_stable_messages
-        live_records = [dict(item) for item in list(live_request_messages or []) if isinstance(item, dict)]
-        if not live_records:
-            return []
-        if str(live_records[-1].get("role") or "").strip().lower() == "user":
-            fallback_prefix = live_records[:-1]
-            if fallback_prefix:
-                return fallback_prefix
-        if str(live_records[0].get("role") or "").strip().lower() == "system":
-            return [live_records[0]]
-        return []
 
     @staticmethod
     def _effective_turn_overlay_text(state: CeoGraphState) -> str:

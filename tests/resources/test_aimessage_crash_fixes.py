@@ -12,7 +12,6 @@ from langchain_core.messages import AIMessage
 
 from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.frontdoor._ceo_runtime_ops import _normalize_frontdoor_tool_arguments
-from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
 from g3ku.runtime.stage_prompt_compaction import (
     _message_role,
     decompose_stage_prompt_messages,
@@ -186,9 +185,3 @@ def test_context_assembly_ignores_non_dict_stable_messages() -> None:
     # system record must be dropped from recent_history without crashing.
     history = result.recent_history
     assert all(isinstance(item, dict) for item in history)
-
-
-def test_task_ledger_summary_guards_non_dict_payloads() -> None:
-    assert build_task_ledger_summary(None) == ""
-    assert build_task_ledger_summary("unexpected") == ""
-    assert build_task_ledger_summary(AIMessage(content="ledger")) == ""

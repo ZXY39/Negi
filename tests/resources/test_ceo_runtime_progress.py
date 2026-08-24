@@ -1955,14 +1955,6 @@ async def test_runtime_agent_session_persists_hidden_heartbeat_prompt_messages_a
         "user",
         "assistant",
     ]
-    assert persisted.metadata["last_task_memory"] == {
-        "version": web_ceo_sessions.TASK_MEMORY_VERSION,
-        "task_ids": ["task:demo-heartbeat"],
-        "source": "heartbeat",
-        "reason": "",
-        "updated_at": persisted.messages[2]["timestamp"],
-        "task_results": [],
-    }
 
 
 @pytest.mark.asyncio
@@ -6440,7 +6432,7 @@ def test_ceo_tool_event_serializer_falls_back_to_output_text_when_text_is_blank(
     assert serialized["tool_call_id"] == "call-load-tool-1"
 
 
-def test_execution_trace_snapshot_helpers_extract_task_ids_preview_and_updated_at() -> None:
+def test_execution_trace_snapshot_helpers_extract_preview_and_updated_at() -> None:
     snapshot = {
         "assistant_text": "",
         "canonical_context": {
@@ -6463,18 +6455,11 @@ def test_execution_trace_snapshot_helpers_extract_task_ids_preview_and_updated_a
         },
         "persisted_at": "2026-04-07T12:00:00",
     }
-    message = {
-        "role": "assistant",
-        "content": "",
-        "canonical_context": snapshot["canonical_context"],
-    }
 
-    task_ids = web_ceo_sessions._extract_task_ids_from_message(message)
     preview = web_ceo_sessions._inflight_preview_text(snapshot)
     updated_at = web_ceo_sessions._inflight_updated_at(snapshot)
     has_history = web_ceo_sessions._snapshot_has_material_live_history(snapshot, require_active_stage=False)
 
-    assert task_ids == ["task:demo-123"]
     assert "task:demo-123" in preview
     assert updated_at == "2026-04-07T12:10:00"
     assert has_history is True
@@ -6973,9 +6958,6 @@ async def test_web_session_heartbeat_repairs_task_terminal_when_model_returns_he
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
     assert reloaded.messages[-1]["content"] == "整理后的最终结论"
-    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == ["task:demo-terminal"]
-    assert reloaded.metadata.get("last_task_memory", {}).get("source") == "heartbeat"
-    assert reloaded.metadata.get("last_task_memory", {}).get("reason") == "task_terminal"
 
 
 @pytest.mark.asyncio
@@ -7022,8 +7004,6 @@ async def test_web_session_heartbeat_repairs_unpassed_task_terminal_when_model_r
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
     assert reloaded.messages[-1]["content"] == "虽然未通过验收，但结果已基本可交付。"
-    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == ["task:demo-unpassed"]
-    assert reloaded.metadata.get("last_task_memory", {}).get("reason") == "task_terminal"
 
 
 @pytest.mark.asyncio
@@ -7178,18 +7158,6 @@ async def test_web_session_heartbeat_prompt_includes_terminal_root_output_and_me
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
     assert reloaded.messages[-1]["content"] == "已读取 root 输出并整理回复。"
-    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == [task_id]
-    assert reloaded.metadata["last_task_memory"]["task_results"] == [
-        {
-            "task_id": task_id,
-            "node_id": "node:root",
-            "node_kind": "execution",
-            "node_reason": "root_terminal",
-            "output_excerpt": "Top 3 recommendation list",
-            "output_ref": "artifact:artifact:root-output",
-            "check_result": "accepted",
-        }
-    ]
 
 
 @pytest.mark.asyncio
@@ -7502,6 +7470,7 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
         "create_async_task",
         "task_list",
         "filesystem_write",
+        "submit_next_stage",
     ]
     assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
     assert state_update["frontdoor_selection_debug"]["hydrated_tool_names"] == ["filesystem_write"]
@@ -7535,7 +7504,10 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     ]
     assert len(contract_messages) == 1
     contract_text = str(contract_messages[0]["content"] or "")
-    assert "callable_tools: `create_async_task`, `task_list`, `filesystem_write`" in contract_text
+    assert (
+        "callable_tools: `create_async_task`, `task_list`, `filesystem_write`, `submit_next_stage`"
+        in contract_text
+    )
     assert "hydrated_tools: `filesystem_write`" in contract_text
     assert "candidate_skills (loadable with `load_skill_context`): `find-skills`" in contract_text
     assert 'Call `load_skill_context(skill_id="<skill_id>")`' in contract_text
@@ -7681,6 +7653,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
         "create_async_task",
         "task_list",
         "filesystem_write",
+        "submit_next_stage",
     ]
     assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
     assert state_update["frontdoor_selection_debug"]["hydrated_tool_names"] == ["filesystem_write"]
@@ -7726,7 +7699,10 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     ]
     assert len(contract_messages) == 1
     contract_text = str(contract_messages[0]["content"] or "")
-    assert "callable_tools: `create_async_task`, `task_list`, `filesystem_write`" in contract_text
+    assert (
+        "callable_tools: `create_async_task`, `task_list`, `filesystem_write`, `submit_next_stage`"
+        in contract_text
+    )
     assert "hydrated_tools: `filesystem_write`" in contract_text
     assert "candidate_skills (loadable with `load_skill_context`): `find-skills`" in contract_text
     assert 'Call `load_skill_context(skill_id="<skill_id>")`' in contract_text
@@ -7952,19 +7928,6 @@ async def test_web_session_heartbeat_prefers_acceptance_output_when_final_accept
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
     assert reloaded.messages[-1]["content"] == "已读取 acceptance 输出并整理回复。"
-    assert reloaded.metadata.get("last_task_memory", {}).get("task_ids") == [task_id]
-    assert reloaded.metadata["last_task_memory"]["task_results"] == [
-        {
-            "task_id": task_id,
-            "node_id": "node:acceptance",
-            "node_kind": "acceptance",
-            "node_reason": "acceptance_failed",
-            "output_excerpt": "Acceptance node full output",
-            "output_ref": "artifact:artifact:accept-output",
-            "check_result": "acceptance failed",
-            "failure_reason": "Acceptance Failure: evidence mismatch",
-        }
-    ]
 
 
 @pytest.mark.asyncio
@@ -8206,14 +8169,6 @@ async def test_web_session_heartbeat_second_visible_reply_is_not_appended_after_
             "turn_id": "turn-heartbeat-default",
         },
     ]
-    assert reloaded.metadata["last_task_memory"] == {
-        "version": web_ceo_sessions.TASK_MEMORY_VERSION,
-        "task_ids": ["task:demo-hidden-persist"],
-        "source": "heartbeat",
-        "reason": "task_terminal",
-        "updated_at": reloaded.metadata["last_task_memory"]["updated_at"],
-        "task_results": [{"task_id": "task:demo-hidden-persist"}],
-    }
 
 
 @pytest.mark.asyncio

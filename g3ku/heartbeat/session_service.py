@@ -16,14 +16,13 @@ from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
 from g3ku.runtime.frontdoor.canonical_context import canonical_context_delta
-from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
 from g3ku.runtime.web_ceo_sessions import (
     _extract_task_ids_from_text,
     clear_inflight_turn_snapshot,
+    ensure_ceo_session_metadata,
     final_reply_canonical_merge,
     latest_assistant_message_canonical_context,
     normalize_ceo_metadata,
-    update_ceo_session_after_heartbeat,
 )
 from main.models import TaskRecord
 from main.protocol import build_envelope, now_iso
@@ -1012,13 +1011,7 @@ class WebSessionHeartbeatService:
                 continue
             normalized_task_ids.append(task_id_text)
         normalized_results = [dict(item) for item in list(task_results or []) if isinstance(item, dict)]
-        update_ceo_session_after_heartbeat(
-            session,
-            task_ids=normalized_task_ids,
-            reason=reason,
-            task_results=normalized_results,
-            updated_at=now_iso(),
-        )
+        ensure_ceo_session_metadata(session)
         metadata_payload: dict[str, Any] = {
             "source": "heartbeat",
             "prompt_visible": True,
@@ -1095,11 +1088,9 @@ class WebSessionHeartbeatService:
             invalid_output=invalid_output,
         )
         stable_rules_text = str(heartbeat_prompt.partition("[SESSION EVENTS]")[0] or "").strip()
-        task_ledger_summary = build_task_ledger_summary(normalized_metadata.get("last_task_memory"))
         heartbeat_lane = build_heartbeat_prompt_lane(
             provider_model="",
             stable_rules_text=stable_rules_text,
-            task_ledger_summary=task_ledger_summary,
             events=[
                 {
                     **dict(event.payload or {}),
@@ -1115,7 +1106,6 @@ class WebSessionHeartbeatService:
             "heartbeat_prompt_lane": heartbeat_lane.scope,
             "heartbeat_retrieval_query": heartbeat_lane.retrieval_query,
             "heartbeat_stable_rules_text": stable_rules_text,
-            "heartbeat_task_ledger_summary": task_ledger_summary,
             "heartbeat_event_bundle_text": str(
                 (heartbeat_lane.request_messages[-1] if heartbeat_lane.request_messages else {}).get("content") or ""
             ),

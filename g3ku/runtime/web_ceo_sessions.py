@@ -28,7 +28,6 @@ DEFAULT_TASK_HARD_MAX_DEPTH = 4
 SESSION_TASK_DEFAULTS_SCOPE_KEY = "task_defaults_scope"
 SESSION_TASK_DEFAULTS_SCOPE_SESSION = "session"
 DEFAULT_LIVE_RAW_TAIL_TURNS = 4
-TASK_MEMORY_VERSION = 2
 _TASK_MEMORY_MAX_IDS = 3
 _TASK_ID_PATTERN = re.compile(r'task:[A-Za-z0-9][\w:-]*')
 _RECENT_HISTORY_TOOL_TRACE_LIMIT = 2
@@ -194,41 +193,6 @@ def message_metadata(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _looks_like_task_dispatch_claim(text: Any) -> bool:
-    normalized = str(text or '').strip().lower()
-    if not normalized or 'task:' not in normalized:
-        return False
-    markers = (
-        '后台',
-        '异步任务',
-        '续跑',
-        '成功续跑',
-        '已在后台',
-        '新任务 id',
-        '任务 id',
-        '重新为您创建',
-        '创建任务',
-        're-run in background',
-        'background',
-        'async task',
-        'new task id',
-        'created task',
-    )
-    return any(marker in normalized for marker in markers)
-
-
-def normalize_task_memory(payload: Any) -> dict[str, Any]:
-    source = dict(payload or {}) if isinstance(payload, dict) else {}
-    return {
-        'version': TASK_MEMORY_VERSION,
-        'task_ids': _normalize_task_ids(source.get('task_ids')),
-        'source': str(source.get('source') or '').strip(),
-        'reason': str(source.get('reason') or '').strip(),
-        'updated_at': str(source.get('updated_at') or '').strip(),
-        'task_results': _normalize_task_results(source.get('task_results', source.get('taskResults'))),
-    }
-
-
 def _normalize_task_results(values: Any, *, limit: int = _TASK_MEMORY_MAX_IDS) -> list[dict[str, str]]:
     items = list(values) if isinstance(values, (list, tuple, set)) else [values]
     normalized: list[dict[str, str]] = []
@@ -264,30 +228,6 @@ def _normalize_task_results(values: Any, *, limit: int = _TASK_MEMORY_MAX_IDS) -
     return normalized
 
 
-def _extract_task_ids_from_message(message: dict[str, Any], *, limit: int = _TASK_MEMORY_MAX_IDS) -> list[str]:
-    role = str(message.get('role') or '').strip().lower()
-    metadata = message.get('metadata') if isinstance(message.get('metadata'), dict) else {}
-    task_ids: list[str] = []
-    task_ids.extend(_normalize_task_ids(metadata.get('task_ids'), limit=limit))
-    if role != 'assistant' or not _looks_like_task_dispatch_claim(message.get('content')):
-        task_ids.extend(_extract_task_ids_from_text(message.get('content'), limit=limit))
-    canonical_context = (
-        message.get('canonical_context')
-        if isinstance(message.get('canonical_context'), dict)
-        else {}
-    )
-    for tool in canonical_context_tool_items(canonical_context):
-        if not isinstance(tool, dict):
-            continue
-        for candidate in (
-            tool.get('output_text'),
-            tool.get('output_preview_text'),
-            tool.get('arguments_text'),
-        ):
-            task_ids.extend(_extract_task_ids_from_text(candidate, limit=limit))
-    return _normalize_task_ids(task_ids, limit=limit)
-
-
 def is_internal_ceo_user_message(message: Any) -> bool:
     role = message_role(message)
     if role != 'user':
@@ -320,48 +260,6 @@ def is_ui_visible_message(message: Any) -> bool:
 
 def is_history_visible_message(message: Any) -> bool:
     return is_ui_visible_message(message)
-
-
-def build_last_task_memory(session: Any) -> dict[str, Any]:
-    remembered: list[str] = []
-    remembered_results: list[dict[str, str]] = []
-    source = ''
-    reason = ''
-    updated_at = ''
-    for raw in reversed(list(getattr(session, 'messages', []) or [])):
-        if not isinstance(raw, dict):
-            continue
-        if is_internal_ceo_user_message(raw):
-            continue
-        task_ids = _extract_task_ids_from_message(raw)
-        if not task_ids:
-            continue
-        for task_id in task_ids:
-            if task_id not in remembered:
-                remembered.append(task_id)
-                if len(remembered) >= _TASK_MEMORY_MAX_IDS:
-                    break
-        metadata = raw.get('metadata') if isinstance(raw.get('metadata'), dict) else {}
-        for item in _normalize_task_results(metadata.get('task_results')):
-            if item not in remembered_results:
-                remembered_results.append(item)
-        if not source:
-            source = str(metadata.get('source') or '').strip() or 'transcript'
-        if not reason:
-            reason = str(metadata.get('reason') or '').strip()
-        if not updated_at:
-            updated_at = str(raw.get('timestamp') or '').strip()
-        if len(remembered) >= _TASK_MEMORY_MAX_IDS:
-            break
-    return normalize_task_memory(
-        {
-            'task_ids': remembered,
-            'source': source,
-            'reason': reason,
-            'updated_at': updated_at,
-            'task_results': remembered_results,
-        }
-    )
 
 
 def _normalize_execution_snapshot(snapshot: Any) -> dict[str, Any] | None:
@@ -476,43 +374,6 @@ def _snapshot_has_material_live_history(
     if has_canonical_context or assistant_text or has_compression:
         return True
     return False
-
-
-def _build_task_memory_from_messages(
-    messages: list[dict[str, Any]],
-    *,
-    source: str,
-    reason: str,
-    updated_at: str,
-) -> dict[str, Any]:
-    remembered: list[str] = []
-    remembered_results: list[dict[str, str]] = []
-    for raw in reversed(list(messages or [])):
-        if not isinstance(raw, dict):
-            continue
-        task_ids = _extract_task_ids_from_message(raw)
-        if not task_ids:
-            continue
-        for task_id in task_ids:
-            if task_id not in remembered:
-                remembered.append(task_id)
-                if len(remembered) >= _TASK_MEMORY_MAX_IDS:
-                    break
-        metadata = raw.get('metadata') if isinstance(raw.get('metadata'), dict) else {}
-        for item in _normalize_task_results(metadata.get('task_results')):
-            if item not in remembered_results:
-                remembered_results.append(item)
-        if len(remembered) >= _TASK_MEMORY_MAX_IDS:
-            break
-    return normalize_task_memory(
-        {
-            'task_ids': remembered,
-            'source': source,
-            'reason': reason,
-            'updated_at': updated_at,
-            'task_results': remembered_results,
-        }
-    )
 
 
 def _compact_task_meta_payload(message: dict[str, Any]) -> dict[str, Any] | None:
@@ -830,6 +691,8 @@ def normalize_ceo_metadata(
 ) -> dict[str, Any]:
     payload = dict(metadata or {}) if isinstance(metadata, dict) else {}
     payload.pop("frontdoor_context", None)
+    payload.pop("last_task_memory", None)
+    payload.pop("lastTaskMemory", None)
     raw_task_defaults = payload.pop("task_defaults", payload.pop("taskDefaults", None))
     task_defaults_scope = ceo_session_task_defaults_scope(payload)
     payload.pop(SESSION_TASK_DEFAULTS_SCOPE_KEY, None)
@@ -845,13 +708,11 @@ def normalize_ceo_metadata(
         )
     else:
         memory_scope = normalize_memory_scope(payload.get("memory_scope"), fallback_session_key=session_key)
-    last_task_memory = normalize_task_memory(payload.get('last_task_memory', payload.get('lastTaskMemory')))
     normalized = {
         **payload,
         "title": title,
         "last_preview_text": preview_text,
         "memory_scope": memory_scope,
-        'last_task_memory': last_task_memory,
     }
     if task_defaults_scope == SESSION_TASK_DEFAULTS_SCOPE_SESSION:
         normalized["task_defaults"] = normalize_task_defaults(
@@ -896,43 +757,6 @@ def update_ceo_session_after_turn(
         changed = True
     if 'frontdoor_context' in metadata:
         metadata.pop('frontdoor_context', None)
-        changed = True
-    next_task_memory = build_last_task_memory(session)
-    if metadata.get('last_task_memory') != next_task_memory:
-        metadata['last_task_memory'] = next_task_memory
-        changed = True
-    if changed:
-        session.metadata = metadata
-    return changed
-
-
-def update_ceo_session_after_heartbeat(
-    session: Any,
-    *,
-    task_ids: list[str],
-    reason: str,
-    task_results: list[dict[str, Any]] | None = None,
-    updated_at: str,
-) -> bool:
-    changed = ensure_ceo_session_metadata(session)
-    metadata = dict(getattr(session, "metadata", {}) or {})
-    normalized_task_ids = _normalize_task_ids(list(task_ids or []))
-    normalized_results = _normalize_task_results(task_results)
-    if not normalized_task_ids:
-        normalized_task_ids = _normalize_task_ids(
-            [item.get("task_id") for item in normalized_results if isinstance(item, dict)]
-        )
-    next_task_memory = normalize_task_memory(
-        {
-            "task_ids": normalized_task_ids,
-            "source": "heartbeat",
-            "reason": str(reason or "").strip(),
-            "updated_at": str(updated_at or "").strip(),
-            "task_results": normalized_results,
-        }
-    )
-    if metadata.get("last_task_memory") != next_task_memory:
-        metadata["last_task_memory"] = next_task_memory
         changed = True
     if changed:
         session.metadata = metadata

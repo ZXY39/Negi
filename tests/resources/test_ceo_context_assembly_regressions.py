@@ -9,7 +9,6 @@ from langchain_core.messages import convert_to_messages
 
 import g3ku.runtime.context.frontdoor_catalog_selection as selection_module
 import g3ku.runtime.frontdoor.message_builder as message_builder_module
-import g3ku.runtime.web_ceo_sessions as web_ceo_sessions
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.context.types import RetrievedContextBundle
 from g3ku.runtime.frontdoor.capability_snapshot import build_capability_snapshot
@@ -2241,58 +2240,6 @@ async def test_message_builder_trace_includes_frontdoor_context_span_timings() -
     for value in spans.values():
         assert isinstance(value, (int, float))
         assert float(value) >= 0.0
-
-@pytest.mark.asyncio
-async def test_message_builder_task_ledger_preserves_continuity_when_history_visibility_filters_internal_status_turns() -> None:
-    prompt_builder = _SplitPromptBuilder()
-    memory_manager = _MemoryManager(response="")
-    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
-    persisted_session = Session(key="web:shared")
-    persisted_session.add_message("user", "Install the weather skill")
-    persisted_session.add_message("assistant", "I started the install.")
-    persisted_session.add_message(
-        "assistant",
-        "Background task task:demo-ledger finished successfully.",
-        metadata={
-            "source": "heartbeat",
-            "history_visible": False,
-            "task_ids": ["task:demo-ledger"],
-            "task_results": [
-                {
-                    "task_id": "task:demo-ledger",
-                    "node_id": "node:root",
-                    "node_kind": "execution",
-                    "node_reason": "root_terminal",
-                    "output": "Weather skill installed successfully",
-                    "output_ref": "artifact:weather-skill",
-                    "check_result": "accepted",
-                }
-            ],
-        },
-    )
-    persisted_session.metadata = {
-        "last_task_memory": web_ceo_sessions.build_last_task_memory(persisted_session),
-    }
-
-    result = await builder.build_for_ceo(
-        session=_session(),
-        query_text="what happened with that task?",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
-        persisted_session=persisted_session,
-        user_content="what happened with that task?",
-    )
-
-    stable_contents = [str(item.get("content") or "") for item in result.stable_messages]
-    overlay = str(result.turn_overlay_text or "")
-
-    assert "Background task task:demo-ledger finished successfully." not in "\n\n".join(stable_contents)
-    assert result.trace["transcript_message_count"] == 2
-    assert result.trace["history_source"] == "transcript"
-    assert "## Task Ledger" in overlay
-    assert "task:demo-ledger" in overlay
-    assert "Weather skill installed successfully" in overlay
-    assert "artifact:weather-skill" in overlay
-    assert any("## Task Ledger" in str(item.get("content") or "") for item in result.dynamic_appendix_messages)
 
 
 @pytest.mark.asyncio

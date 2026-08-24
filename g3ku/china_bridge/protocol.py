@@ -15,49 +15,18 @@ def dumps(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-TASK_LEDGER_HEADER = "## Task Ledger"
 SESSION_EVENTS_MARKER = "[SESSION EVENTS]"
-
-
-def _strip_leading_task_ledger_blocks(text: str) -> str:
-    """Strip leading ``## Task Ledger`` blocks (header line + bullet body).
-
-    A block runs from its header line until the next blank line or markdown
-    heading. Only leading blocks are removed: occurrences in the middle of a
-    reply may be legitimate quotations, so they are left untouched.
-    """
-    lines = str(text or "").split("\n")
-    index = 0
-    stripped_any = False
-    while True:
-        probe = index
-        while probe < len(lines) and not lines[probe].strip():
-            probe += 1
-        if probe >= len(lines) or lines[probe].strip() != TASK_LEDGER_HEADER:
-            break
-        cursor = probe + 1
-        while cursor < len(lines):
-            line = lines[cursor].strip()
-            if not line or line.startswith("#"):
-                break
-            cursor += 1
-        index = cursor
-        stripped_any = True
-    if not stripped_any:
-        return str(text or "")
-    return "\n".join(lines[index:])
 
 
 def sanitize_channel_outbound_text(text: str) -> str:
     """Remove internal-only artifacts from channel-bound reply text.
 
-    Models occasionally echo internal context blocks verbatim (see the
-    2026-08-23 QQ incident). This strips leading ``## Task Ledger`` blocks and
-    truncates everything from a ``[SESSION EVENTS]`` marker onward. The result
-    is stripped; an empty result means the whole message was internal-only and
+    Models occasionally echo internal context blocks verbatim. This truncates
+    everything from a ``[SESSION EVENTS]`` marker onward. The result is
+    stripped; an empty result means the whole message was internal-only and
     must not be delivered.
     """
-    cleaned = _strip_leading_task_ledger_blocks(str(text or ""))
+    cleaned = str(text or "")
     marker_index = cleaned.find(SESSION_EVENTS_MARKER)
     if marker_index >= 0:
         cleaned = cleaned[:marker_index]
@@ -83,7 +52,7 @@ def build_deliver_frame(
 ) -> dict[str, Any] | None:
     sanitized = sanitize_channel_outbound_text(text)
     if not sanitized:
-        # Internal-only content (e.g. a bare Task Ledger echo): skip delivery.
+        # Internal-only content (e.g. a bare [SESSION EVENTS] echo): skip delivery.
         return None
     return {
         "type": "deliver_message",

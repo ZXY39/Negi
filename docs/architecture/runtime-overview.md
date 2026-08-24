@@ -168,7 +168,6 @@ heartbeat / cron 的维护语义分两条通道：UI 展示通道上前端继续
 - `g3ku/runtime/frontdoor/prompt_builder.py`
 - `g3ku/runtime/frontdoor/message_builder.py`
 - `g3ku/runtime/stage_prompt_compaction.py`
-- `g3ku/runtime/frontdoor/task_ledger.py`
 
 一个实用理解方式：
 
@@ -370,7 +369,7 @@ Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详�
 - 若当前轮阶段状态里已包含与 `frontdoor_canonical_context` 中实质相同的 completed stage，prompt 组装必须按重叠处理、跳过把它 rebase 成新的合成 stage id——否则一个 completed stage 会在 fresh-turn 重建中膨胀成重复的原始阶段块。
 - UI 面向的 turn payload 暴露当前轮的 `canonical_context` 切片；prompt 组装读 durable 跨回合 canonical context，inflight / paused / final-reply payload 只描述可见轮自己的阶段轨迹。
 
-第二条连续性合同：`frontdoor_request_body_messages` 是下一轮 CEO/frontdoor 的 session-owned provider 请求体基线，刻意不含 `frontdoor_runtime_tool_contract` 消息（动态工具暴露每轮作为新的尾部合同重建），也不含 `## Task Ledger` 内部账本的 assistant 记录与 `## 长期记忆` 快照（两者都是当轮 overlay，只在当轮请求可见，落史会逐轮累积污染上下文），且只允许在 `token_compression` 与同轮 `stage_compaction` 两个信息损失边界收缩（见本文「Frontdoor Context Compression (Current Contract)」）。fresh 可见轮次中该基线优先于任何 graph-local checkpoint 式阶段重放投影：两者同时存在时必须从请求体基线继续，而不是从阶段重放重建新的主前缀。
+第二条连续性合同：`frontdoor_request_body_messages` 是下一轮 CEO/frontdoor 的 session-owned provider 请求体基线，刻意不含 `frontdoor_runtime_tool_contract` 消息（动态工具暴露每轮作为新的尾部合同重建），也不含 `## 长期记忆` 快照（当轮 overlay，只在当轮请求可见，落史会逐轮累积污染上下文），且只允许在 `token_compression` 与同轮 `stage_compaction` 两个信息损失边界收缩（见本文「Frontdoor Context Compression (Current Contract)」）。fresh 可见轮次中该基线优先于任何 graph-local checkpoint 式阶段重放投影：两者同时存在时必须从请求体基线继续，而不是从阶段重放重建新的主前缀。
 
 ## Runtime Contract Lane
 

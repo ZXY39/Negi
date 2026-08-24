@@ -1337,16 +1337,9 @@ class RuntimeAgentSession:
                 if hasattr(persisted_session, "updated_at"):
                     persisted_session.updated_at = datetime.now()
             if self._state.session_key.startswith("web:"):
-                from g3ku.runtime.web_ceo_sessions import build_last_task_memory, ensure_ceo_session_metadata
+                from g3ku.runtime.web_ceo_sessions import ensure_ceo_session_metadata
 
-                changed = ensure_ceo_session_metadata(persisted_session)
-                metadata_payload = dict(getattr(persisted_session, "metadata", {}) or {})
-                next_task_memory = build_last_task_memory(persisted_session)
-                if metadata_payload.get("last_task_memory") != next_task_memory:
-                    metadata_payload["last_task_memory"] = next_task_memory
-                    changed = True
-                if changed:
-                    persisted_session.metadata = metadata_payload
+                ensure_ceo_session_metadata(persisted_session)
             self._loop.sessions.save(persisted_session)
         except Exception:
             await self._emit(

@@ -84,7 +84,7 @@ Cron job delivery is claim-before-dispatch, which defines the restart/recovery g
 - Heartbeat task-terminal prompt assembly should therefore render both pieces when final acceptance fails:
   - the acceptance-node result (`Result output`, `Result check`, `Result failure reason`)
   - the root execution deliverable (`Execution output`, `Execution output ref`)
-- Compact task-memory / task-ledger summaries may continue to store only preview-sized excerpts. The full root execution output requirement applies to the heartbeat event bundle that the main agent reads, not to every later summary surface.
+- The full root execution output requirement applies to the heartbeat event bundle that the main agent reads, not to every later summary surface.
 - China-channel reply delivery: when the heartbeat session is a `china:*` session, the persisted reply is also handed to `reply_notifier` → `_notify_heartbeat_channel_reply`, which publishes an `OutboundMessage` onto the bus for the China drain. The channel/chat_id must come from china session-key parsing, never from a naive first-colon split of the key, and must not overwrite the owning transport's authoritative session meta; otherwise the outbound is published with a wrong `channel` and silently dropped. See `china-channels.md` §7.
 - Heartbeat service instance reuse: `build_web_session_heartbeat` reuses the live instance bound to the same agent/runtime-manager/task-service/session-manager instead of rebuilding it on every lookup. Comparing the reply-notifier closure by identity would always fail (callers pass a fresh closure) and rebuild a not-started instance, orphaning the started one and stranding enqueued events on it.
 

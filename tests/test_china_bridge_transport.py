@@ -178,31 +178,6 @@ async def test_transport_send_outbound_raises_when_sender_missing():
         )
 
 
-def test_sanitize_channel_outbound_text_strips_single_leading_ledger_block():
-    from g3ku.china_bridge.protocol import sanitize_channel_outbound_text
-
-    text = "## Task Ledger\n- task:1 done\n- task:2 running\n\nHere is the actual answer."
-    assert sanitize_channel_outbound_text(text) == "Here is the actual answer."
-
-
-def test_sanitize_channel_outbound_text_strips_multiple_leading_ledger_blocks():
-    from g3ku.china_bridge.protocol import sanitize_channel_outbound_text
-
-    text = (
-        "## Task Ledger\n- a\n\n"
-        "## Task Ledger\n- b\n- c\n\n"
-        "final reply"
-    )
-    assert sanitize_channel_outbound_text(text) == "final reply"
-
-
-def test_sanitize_channel_outbound_text_keeps_mid_text_ledger_reference():
-    from g3ku.china_bridge.protocol import sanitize_channel_outbound_text
-
-    text = "You asked about the format.\n## Task Ledger\n- example\nThat is all."
-    assert sanitize_channel_outbound_text(text) == text.strip()
-
-
 def test_sanitize_channel_outbound_text_truncates_session_events_marker():
     from g3ku.china_bridge.protocol import sanitize_channel_outbound_text
 
@@ -213,7 +188,6 @@ def test_sanitize_channel_outbound_text_truncates_session_events_marker():
 def test_sanitize_channel_outbound_text_internal_only_returns_empty():
     from g3ku.china_bridge.protocol import sanitize_channel_outbound_text
 
-    assert sanitize_channel_outbound_text("## Task Ledger\n- only internal\n") == ""
     assert sanitize_channel_outbound_text("[SESSION EVENTS]\ninternal") == ""
 
 
@@ -229,7 +203,7 @@ async def test_transport_send_outbound_skips_message_that_sanitizes_to_empty():
         SimpleNamespace(
             channel="qqbot",
             chat_id="default:dm:user-1",
-            content="## Task Ledger\n- task:demo: internal only\n",
+            content="[SESSION EVENTS]\ninternal only\n",
             reply_to=None,
             metadata={"_china_peer_id": "user-1", "_china_account_id": "default"},
         )
@@ -239,9 +213,9 @@ async def test_transport_send_outbound_skips_message_that_sanitizes_to_empty():
 
 
 @pytest.mark.asyncio
-async def test_transport_deliver_strips_leading_ledger_block_from_final_reply():
+async def test_transport_deliver_truncates_session_events_from_final_reply():
     bridge = _ScriptedRuntimeBridge(
-        prompt_result=SimpleNamespace(output="## Task Ledger\n- x\n\nThe real result text.")
+        prompt_result=SimpleNamespace(output="The real result text.\n[SESSION EVENTS]\ninternal")
     )
     transport, frames = _make_transport(bridge)
 
@@ -266,7 +240,7 @@ def test_build_deliver_frame_returns_none_for_internal_only_text():
         account_id="default",
         target_kind="user",
         target_id="user-1",
-        text="## Task Ledger\n- only\n",
+        text="[SESSION EVENTS]\ninternal\n",
         mode="final",
     )
     assert frame is None

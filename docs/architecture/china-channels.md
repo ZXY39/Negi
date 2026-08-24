@@ -188,7 +188,7 @@ Node 侧 `deliver_message` final 帧无对应 pending 回合时：qqbot 一律�
 
 - `_progress` / `_tool_hint` / `_session_event` 等内部消息不会直接发往渠道
 - 只发送最终对用户可见的文本
-- 所有 `deliver_message` 帧在 `build_deliver_frame(...)` 统一清洗出站文本（`sanitize_channel_outbound_text`）：剥离开头的 `## Task Ledger` 内部账本块、截断 `[SESSION EVENTS]` 之后的内容。清洗后为空说明整条消息都是内部文本，直接跳过投递——`send_outbound(...)` 对此正常返回（drain 视为已送达并 ack），不抛 `RuntimeError`（那会触发重试风暴）。正文中间的 `## Task Ledger` 不剥，避免误伤用户引用。
+- 所有 `deliver_message` 帧在 `build_deliver_frame(...)` 统一清洗出站文本（`sanitize_channel_outbound_text`）：截断 `[SESSION EVENTS]` 之后的内容。清洗后为空说明整条消息都是内部文本，直接跳过投递——`send_outbound(...)` 对此正常返回（drain 视为已送达并 ack），不抛 `RuntimeError`（那会触发重试风暴）。
 - 例外：QQ 过程信息流在回合内直接发 `mode="progress"` 帧（见上文「QQ 渠道增强」），不走 `send_outbound(...)`；旧的渠道事件 → 出站路径（`build_channel_outbound_message`）已废弃（恒返回 None 且有测试锁定），不要复活。
 
 ## 8. session key 规则

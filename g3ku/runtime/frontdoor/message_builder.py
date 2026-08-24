@@ -34,14 +34,12 @@ from g3ku.runtime.frontdoor.canonical_context import combine_canonical_context, 
 from g3ku.runtime.frontdoor.cron_hidden_prompt import strip_cron_hidden_prompt
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 from g3ku.runtime.frontdoor.raw_stage_renderer import retained_raw_stage_messages
-from g3ku.runtime.frontdoor.task_ledger import build_task_ledger_summary
 from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract, upsert_frontdoor_tool_contract_message
 from g3ku.runtime.web_ceo_sessions import (
     is_prompt_visible_message,
     is_history_visible_message,
     message_metadata,
     message_role,
-    normalize_task_memory,
     prompt_history_messages,
     transcript_messages,
 )
@@ -589,14 +587,6 @@ class CeoMessageBuilder:
         left = strip_cron_hidden_prompt(self._content_text(content)).strip()
         right = strip_cron_hidden_prompt(str(query_text or '')).strip()
         return left == right
-
-    @staticmethod
-    def _task_ledger_state(persisted_session: Any | None) -> dict[str, Any]:
-        if persisted_session is None:
-            return normalize_task_memory({})
-        metadata = getattr(persisted_session, 'metadata', None)
-        payload = dict(metadata or {}) if isinstance(metadata, dict) else {}
-        return normalize_task_memory(payload.get('last_task_memory', payload.get('lastTaskMemory')))
 
     def _render_retrieved_context(self, bundle: RetrievedContextBundle) -> str:
         records = list(bundle.records or [])
@@ -1773,14 +1763,7 @@ class CeoMessageBuilder:
             persisted_session=persisted_session,
             user_metadata=user_metadata,
         )
-        task_ledger_state = self._task_ledger_state(persisted_session)
-        task_ledger_text = build_task_ledger_summary(task_ledger_state)
         turn_overlay_parts = list(context_sources['turn_overlay_parts'])
-        if task_ledger_text:
-            insert_index = len(turn_overlay_parts)
-            if str(context_sources['retrieved_markdown'] or '').strip():
-                insert_index = max(0, insert_index - 1)
-            turn_overlay_parts.insert(insert_index, task_ledger_text)
 
         inject_started_at = time.perf_counter()
         (
@@ -1918,9 +1901,6 @@ class CeoMessageBuilder:
                 query_text=query_text,
                 user_metadata=user_metadata,
             ),
-            'task_ledger_present': bool(task_ledger_text),
-            'task_ledger_task_count': len(list(task_ledger_state.get('task_ids') or [])),
-            'task_ledger_result_count': len(list(task_ledger_state.get('task_results') or [])),
             'retrieved_record_count': len(list(context_sources['retrieved_bundle'].records or [])),
             'same_session_turn_memory_filtered_count': int(context_sources['same_session_turn_memory_filtered_count']),
             'model_messages_count': len(model_messages),
@@ -2097,14 +2077,7 @@ class CeoMessageBuilder:
         history_state['history_messages'] = staged_history_for_injection
         history_state['history_source'] = effective_history_source
         history_state['current_user_in_history'] = current_user_in_history
-        task_ledger_state = self._task_ledger_state(persisted_session)
-        task_ledger_text = build_task_ledger_summary(task_ledger_state)
         turn_overlay_parts = list(context_sources['turn_overlay_parts'])
-        if task_ledger_text:
-            insert_index = len(turn_overlay_parts)
-            if str(context_sources['retrieved_markdown'] or '').strip():
-                insert_index = max(0, insert_index - 1)
-            turn_overlay_parts.insert(insert_index, task_ledger_text)
         inject_started_at = time.perf_counter()
         model_messages, stable_messages, dynamic_appendix_messages, turn_overlay_text = self._inject_turn_context(
             system_prompt=str(context_sources['system_prompt'] or ''),
@@ -2216,9 +2189,6 @@ class CeoMessageBuilder:
             'current_user_in_checkpoint': bool(history_state['current_user_in_checkpoint']),
             'current_user_in_history': current_user_in_history,
             'current_user_in_transcript': bool(history_state['current_user_in_transcript']),
-            'task_ledger_present': bool(task_ledger_text),
-            'task_ledger_task_count': len(list(task_ledger_state.get('task_ids') or [])),
-            'task_ledger_result_count': len(list(task_ledger_state.get('task_results') or [])),
             'retrieved_record_count': len(list(context_sources['retrieved_bundle'].records or [])),
             'same_session_turn_memory_filtered_count': int(context_sources['same_session_turn_memory_filtered_count']),
             'model_messages_count': len(model_messages),

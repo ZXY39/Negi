@@ -188,7 +188,6 @@ def test_build_heartbeat_prompt_lane_includes_root_output_when_acceptance_failed
     lane = build_heartbeat_prompt_lane(
         provider_model="openai:gpt-4.1",
         stable_rules_text="Keep the user informed without exposing internal mechanics.",
-        task_ledger_summary="task:demo-acceptance-output failed after final acceptance.",
         events=[
             {
                 "reason": "task_terminal",
