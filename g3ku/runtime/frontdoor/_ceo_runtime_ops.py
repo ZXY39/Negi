@@ -5626,6 +5626,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             callback = getattr(runtime_session, "_handle_assistant_text_delta", None)
             if callable(callback):
                 assistant_text_delta_handler = callback
+            begin_segment = getattr(runtime_session, "_begin_assistant_text_segment", None)
+            if callable(begin_segment):
+                begin_segment()
         normalized_provider_tool_names = self._frontdoor_provider_visible_tool_names(
             list(state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or [])
         )

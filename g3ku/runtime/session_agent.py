@@ -1843,6 +1843,12 @@ class RuntimeAgentSession:
             return
         self._schedule_assistant_stream_flush()
 
+    def _begin_assistant_text_segment(self) -> None:
+        # 每次模型调用开始前清空进行中的思考文本，快照只显示最新一段。
+        self._state.latest_message = ""
+        self._assistant_stream_pending_text = ""
+        self._assistant_stream_last_emitted_text = ""
+
     def manual_pause_waiting_reason(self) -> bool:
         return False
 
@@ -2477,11 +2483,12 @@ class RuntimeAgentSession:
             return
 
         if kind == "analysis":
+            # 进行中的思考气泡只显示最新一段，避免跨迭代累加堆叠。
             text = str(content or "").strip()
             current = str(self._state.latest_message or "")
-            if text and not current.endswith(text):
-                self._state.latest_message = current + text if current else text
-                self._assistant_stream_pending_text = str(self._state.latest_message)
+            if text and text != current:
+                self._state.latest_message = text
+                self._assistant_stream_pending_text = text
                 self._assistant_stream_last_emitted_text = ""
                 await self._emit_state_snapshot()
 

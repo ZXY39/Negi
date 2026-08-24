@@ -148,7 +148,7 @@ CEO/frontdoor 路径上，`frontdoor_stage_state.stages[].rounds[].tools` 是“
 - `_frontdoor_stage_state_after_tool_cycle()` 在工具循环完成时写入精确的 round 级工具记录。每条记录携带稳定身份（`tool_call_id`）与展示字段（`tool_name`、`status`、`arguments_text`、`output_preview_text` / `output_text`、`output_ref`、`timestamp`、`kind`、`source`）；`tool_names` / `tool_call_ids` 是派生提示，不是第二真相源。
 - stage/round 账本还携带展示文本：每个 round 记录有 `text`（该循环的轮中叙述），`submit_next_stage` 创建的阶段携带 `preamble_text`（随阶段调用发出的叙述，属于新阶段并渲染在其上方）。两者都是展示导向、只服务 Web 时间线，必须存活于每一个归一化跳板（`_frontdoor_stage_state_snapshot`、`canonical_context.py`、`raw_stage_renderer.py`），且不得喂给 prompt 组装或转录权威链。
 - durable 转录每轮只存最终 assistant 文本；每轮叙述在 reload 时从 assistant 条目上持久化的 `canonical_context` 恢复。
-- `RuntimeAgentSession` 的 `analysis` 进度处理对 `latest_message` 是 append-only；UI 时间线从 stage/round 记录重建，`latest_message` 只是预览/回退气泡。
+- `RuntimeAgentSession` 的 `latest_message` 只保存最新一次模型调用段的 assistant 文本：每次模型调用开始清空，`analysis` 进度事件替换而非追加；UI 时间线从 stage/round 记录重建，`latest_message` 只是预览/回退气泡。
 
 `RuntimeAgentSession` 重建 `canonical_context` 时的合同：
 
