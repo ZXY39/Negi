@@ -76,6 +76,16 @@ _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION = '请在当前父节点内自行执行�
 _SPAWN_REVIEW_RETRY_DELAY_SECONDS = 0.1
 _SPAWN_REVIEW_REPAIR_PREFIX = '上一轮检验派生回复无效。'
 
+DISTRIBUTION_ACTION_DISTRIBUTE = 'distribute'
+DISTRIBUTION_ACTION_SKIP = 'skip'
+DISTRIBUTION_ACTION_TERMINATE = 'terminate'
+_DISTRIBUTION_ACTION_VALUES = {
+    DISTRIBUTION_ACTION_DISTRIBUTE,
+    DISTRIBUTION_ACTION_SKIP,
+    DISTRIBUTION_ACTION_TERMINATE,
+}
+_DISTRIBUTION_TERMINATE_REASON_PREFIX = 'terminated by parent distribution decision'
+
 
 _UNSET = object()
 
@@ -1740,6 +1750,15 @@ class NodeRunner:
         return {}
 
     @staticmethod
+    def _resolve_distribution_action(item: dict[str, Any]) -> str:
+        action = str((item or {}).get('action') or '').strip().lower()
+        if action in _DISTRIBUTION_ACTION_VALUES:
+            return action
+        if bool((item or {}).get('should_distribute')):
+            return DISTRIBUTION_ACTION_DISTRIBUTE
+        return DISTRIBUTION_ACTION_SKIP
+
+    @staticmethod
     def _validate_distribution_child_decisions(
         *,
         submitted_children: list[Any],
@@ -1767,12 +1786,17 @@ class NodeRunner:
             seen.add(target_node_id)
             if not isinstance(item.get('should_distribute'), bool):
                 return 'distribution_decision_missing_should_distribute'
-            reason = str(item.get('reason') or '').strip()
-            if not reason:
-                return 'distribution_decision_missing_reason'
+            raw_action = str(item.get('action') or '').strip().lower()
+            if raw_action and raw_action not in _DISTRIBUTION_ACTION_VALUES:
+                return 'distribution_decision_invalid_action'
+            action = NodeRunner._resolve_distribution_action(item)
             message = str(item.get('message') or '').strip()
-            if bool(item.get('should_distribute')) and not message:
-                return 'distribution_decision_missing_message'
+            reason = str(item.get('reason') or '').strip()
+            if action == DISTRIBUTION_ACTION_DISTRIBUTE:
+                if not message:
+                    return 'distribution_decision_missing_message'
+            elif not reason:
+                return 'distribution_decision_missing_reason'
         if seen != expected:
             return 'distribution_decision_missing_child_decisions'
         return ''
@@ -2171,21 +2195,39 @@ class NodeRunner:
         valid_child_ids = set(recipient_node_ids)
         delivered_child_ids: list[str] = []
         skipped_child_decisions: list[dict[str, str]] = []
+        terminated_child_decisions: list[dict[str, str]] = []
         for item in submitted_children:
             if not isinstance(item, dict):
                 continue
             target_node_id = str(item.get('target_node_id') or '').strip()
             child_message = str(item.get('message') or '').strip()
-            if not bool(item.get('should_distribute')):
-                if target_node_id and target_node_id in valid_child_ids:
-                    skipped_child_decisions.append(
-                        {
-                            'target_node_id': target_node_id,
-                            'reason': str(item.get('reason') or '').strip(),
-                        }
-                    )
+            if not target_node_id or target_node_id not in valid_child_ids:
                 continue
-            if not target_node_id or not child_message or target_node_id not in valid_child_ids:
+            action = self._resolve_distribution_action(item)
+            child_reason = str(item.get('reason') or '').strip()
+            if action == DISTRIBUTION_ACTION_TERMINATE:
+                await self._terminate_distribution_child(
+                    task_id=task.task_id,
+                    parent_node_id=node.node_id,
+                    child_node_id=target_node_id,
+                    reason=child_reason,
+                )
+                terminated_child_decisions.append(
+                    {
+                        'target_node_id': target_node_id,
+                        'reason': child_reason,
+                    }
+                )
+                continue
+            if action == DISTRIBUTION_ACTION_SKIP:
+                skipped_child_decisions.append(
+                    {
+                        'target_node_id': target_node_id,
+                        'reason': child_reason,
+                    }
+                )
+                continue
+            if not child_message:
                 continue
             self._persist_distribution_delivery(
                 task_id=task.task_id,
@@ -2220,6 +2262,7 @@ class NodeRunner:
                 'local_notice_kept': str(node.node_id or '').strip() == str(epoch.root_node_id or '').strip(),
                 'delivered_child_ids': list(delivered_child_ids),
                 'skipped_child_decisions': list(skipped_child_decisions),
+                'terminated_child_decisions': list(terminated_child_decisions),
                 'created_at': now_iso(),
             }
         )
@@ -3388,6 +3431,75 @@ class NodeRunner:
             if self._normalized_status(getattr(latest, 'status', '')) == STATUS_SUCCESS:
                 continue
             self._mark_finished(task_id, latest.node_id, terminal_result)
+
+    def _find_spawn_entry_for_child(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        child_node_id: str,
+    ) -> tuple[str, int, dict[str, Any], dict[str, Any]] | None:
+        parent = self._store.get_node(parent_node_id)
+        if parent is None or str(parent.task_id or '').strip() != str(task_id or '').strip():
+            return None
+        operations = (parent.metadata or {}).get('spawn_operations') if isinstance(parent.metadata, dict) else {}
+        if not isinstance(operations, dict):
+            return None
+        normalized_child_id = str(child_node_id or '').strip()
+        for cache_key, payload in operations.items():
+            if not isinstance(payload, dict) or bool(payload.get('completed')):
+                continue
+            for index, entry in enumerate(list(payload.get('entries') or [])):
+                if not isinstance(entry, dict):
+                    continue
+                if str(entry.get('child_node_id') or '').strip() != normalized_child_id:
+                    continue
+                return str(cache_key or '').strip(), index, dict(entry), copy.deepcopy(payload)
+        return None
+
+    async def _terminate_distribution_child(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        child_node_id: str,
+        reason: str,
+    ) -> None:
+        normalized_child_id = str(child_node_id or '').strip()
+        if not normalized_child_id:
+            return
+        reason_text = str(reason or '').strip()
+        terminal_reason = (
+            f'{_DISTRIBUTION_TERMINATE_REASON_PREFIX}: {reason_text}'
+            if reason_text
+            else _DISTRIBUTION_TERMINATE_REASON_PREFIX
+        )
+        located = self._find_spawn_entry_for_child(
+            task_id=task_id,
+            parent_node_id=parent_node_id,
+            child_node_id=normalized_child_id,
+        )
+        root_node_ids = {normalized_child_id}
+        if located is not None:
+            _cache_key, _index, entry, _payload = located
+            root_node_ids.update(self._spawn_entry_node_ids(entry))
+        subtree_node_ids = self._collect_descendant_node_ids(list(root_node_ids))
+        await self._cancel_spawn_subtrees(task_id=task_id, node_ids=subtree_node_ids)
+        await self._wait_for_terminal_nodes(node_ids=subtree_node_ids)
+        self._force_superseded_nodes_terminal(task_id=task_id, node_ids=subtree_node_ids, reason_text=terminal_reason)
+        if located is not None:
+            cache_key, index, _entry, cached_payload = located
+            self._update_spawn_entry(
+                task_id=task_id,
+                parent_node_id=parent_node_id,
+                cache_key=cache_key,
+                cached_payload=cached_payload,
+                index=index,
+                status='error',
+                finished_at=_now(),
+                check_status='failed',
+                runtime_error_text=terminal_reason,
+            )
 
     def _rebuild_spawn_entry_result(
         self,

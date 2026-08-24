@@ -309,6 +309,7 @@ class SubmitMessageDistributionTool(Tool):
                         'properties': {
                             'target_node_id': {'type': 'string'},
                             'should_distribute': {'type': 'boolean'},
+                            'action': {'type': 'string', 'enum': ['distribute', 'skip', 'terminate']},
                             'message': {'type': 'string'},
                             'reason': {'type': 'string'},
                         },

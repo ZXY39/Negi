@@ -897,6 +897,8 @@ def test_submit_message_distribution_tool_schema_uses_explicit_child_targets() -
 
     assert "target_node_id" in item["properties"]
     assert "should_distribute" in item["properties"]
+    assert "action" in item["properties"]
+    assert item["properties"]["action"]["enum"] == ["distribute", "skip", "terminate"]
     assert "message" in item["properties"]
     assert "reason" in item["properties"]
     assert "should_distribute" in item["required"]
@@ -1043,6 +1045,197 @@ async def test_distribution_turn_accepts_tool_call_request_objects(tmp_path: Pat
             }
         ]
         assert refreshed_epoch.payload["debug_trace"][2]["tool_call_names"] == ["submit_message_distribution"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_turn_mixed_distribute_and_terminate_single_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = LLMResponse(
+        content="",
+        tool_calls=[
+            ToolCallRequest(
+                id="call:distribution",
+                name="submit_message_distribution",
+                arguments={
+                    "children": [
+                        {
+                            "target_node_id": "CHILD_ONE",
+                            "should_distribute": True,
+                            "action": "distribute",
+                            "message": "branch-a continues with the update",
+                            "reason": "branch a is still relevant",
+                        },
+                        {
+                            "target_node_id": "CHILD_TWO",
+                            "should_distribute": False,
+                            "action": "terminate",
+                            "message": "",
+                            "reason": "branch-b work is voided by the task change",
+                        },
+                    ],
+                    "notes": "distribute to a, terminate b",
+                },
+            )
+        ],
+    )
+    backend = _QueuedChatBackend([response])
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        async def _no_wait(node_ids, timeout_seconds=2.0):
+            return set()
+
+        monkeypatch.setattr(service.node_runner, "_wait_for_terminal_nodes", _no_wait)
+
+        record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
+        await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="task changed; part of the work is void",
+            frontier_node_ids=[root.node_id],
+        )
+        response.tool_calls[0].arguments["children"][0]["target_node_id"] = branch_a.node_id
+        response.tool_calls[0].arguments["children"][1]["target_node_id"] = branch_b.node_id
+
+        task = service.get_task(record.task_id)
+        assert task is not None
+
+        result = await service.node_runner._run_distribution_node(task=task, node=root)
+
+        refreshed_epoch = service.store.list_active_task_message_distribution_epochs(record.task_id)[0]
+        assert result.status == "success"
+        # branch_a received the message and advances the frontier
+        assert [item.message for item in service.store.list_task_node_notifications(record.task_id, branch_a.node_id)] == [
+            "branch-a continues with the update"
+        ]
+        # branch_b terminated: no notification, forced terminal
+        assert service.store.list_task_node_notifications(record.task_id, branch_b.node_id) == []
+        terminated_branch_b = service.store.get_node(branch_b.node_id)
+        assert terminated_branch_b is not None
+        assert terminated_branch_b.status == "failed"
+        decision = refreshed_epoch.payload["decision_records"][0]
+        assert decision["delivered_child_ids"] == [branch_a.node_id]
+        assert decision["terminated_child_decisions"] == [
+            {"target_node_id": branch_b.node_id, "reason": "branch-b work is voided by the task change"}
+        ]
+        assert refreshed_epoch.payload["next_frontier_node_ids"] == [branch_a.node_id]
+        # spawn entry for branch_b marked terminated
+        refreshed_root = service.store.get_node(root.node_id)
+        assert refreshed_root is not None
+        entry_b = refreshed_root.metadata["spawn_operations"]["round-live"]["entries"][1]
+        assert entry_b["status"] == "error"
+        assert "terminated by parent distribution decision" in entry_b["runtime_error_text"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_turn_terminate_requires_reason(tmp_path: Path) -> None:
+    response = LLMResponse(
+        content="",
+        tool_calls=[
+            ToolCallRequest(
+                id="call:distribution",
+                name="submit_message_distribution",
+                arguments={
+                    "children": [
+                        {
+                            "target_node_id": "CHILD_ONE",
+                            "should_distribute": True,
+                            "message": "branch-a update",
+                            "reason": "affected",
+                        },
+                        {
+                            "target_node_id": "CHILD_TWO",
+                            "should_distribute": False,
+                            "action": "terminate",
+                            "message": "",
+                            "reason": "",
+                        },
+                    ],
+                    "notes": "",
+                },
+            )
+        ],
+    )
+    backend = _QueuedChatBackend([response])
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
+        await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="task changed",
+            frontier_node_ids=[root.node_id],
+        )
+        response.tool_calls[0].arguments["children"][0]["target_node_id"] = branch_a.node_id
+        response.tool_calls[0].arguments["children"][1]["target_node_id"] = branch_b.node_id
+
+        task = service.get_task(record.task_id)
+        assert task is not None
+
+        result = await service.node_runner._run_distribution_node(task=task, node=root)
+
+        assert result.status == "failed"
+        assert result.blocking_reason == "distribution_decision_missing_reason"
+        # nothing was delivered or terminated
+        assert service.store.list_task_node_notifications(record.task_id, branch_a.node_id) == []
+        assert service.store.get_node(branch_b.node_id).status == "in_progress"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_turn_rejects_invalid_action(tmp_path: Path) -> None:
+    response = LLMResponse(
+        content="",
+        tool_calls=[
+            ToolCallRequest(
+                id="call:distribution",
+                name="submit_message_distribution",
+                arguments={
+                    "children": [
+                        {
+                            "target_node_id": "CHILD_ONE",
+                            "should_distribute": True,
+                            "action": "explode",
+                            "message": "branch-a update",
+                            "reason": "affected",
+                        },
+                        {
+                            "target_node_id": "CHILD_TWO",
+                            "should_distribute": False,
+                            "message": "",
+                            "reason": "not affected",
+                        },
+                    ],
+                    "notes": "",
+                },
+            )
+        ],
+    )
+    backend = _QueuedChatBackend([response])
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
+        await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="task changed",
+            frontier_node_ids=[root.node_id],
+        )
+        response.tool_calls[0].arguments["children"][0]["target_node_id"] = branch_a.node_id
+        response.tool_calls[0].arguments["children"][1]["target_node_id"] = branch_b.node_id
+
+        task = service.get_task(record.task_id)
+        assert task is not None
+
+        result = await service.node_runner._run_distribution_node(task=task, node=root)
+
+        assert result.status == "failed"
+        assert result.blocking_reason == "distribution_decision_invalid_action"
     finally:
         await service.close()
 
