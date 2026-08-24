@@ -44,7 +44,7 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 
 - Cron is a structured reminder mechanism for the future agent, not a natural-language stop-condition engine.
 - Cron `message` should be understood as the reminder instruction for the future agent, not as a ready-to-send user reply.
-- Cron-internal turns are not a cron-only tool lane. When prior frontdoor contract state exists, they reuse the ordinary CEO/frontdoor tool exposure for the current role; the special-case is only that they bypass the normal “no valid stage => `submit_next_stage` only” shrink so a scheduled reminder can immediately call `create_async_task`, task query builtins, or other already-visible CEO tools.
+- Cron-internal and heartbeat-internal turns are not an internal-only tool lane. They reuse the ordinary CEO/frontdoor tool exposure for the current role (inheriting prior frontdoor contract state when it exists), and their callable/visible set always includes `submit_next_stage`, so an internal turn without an active stage opens a stage first and then proceeds with the reminded work; the execution gate and the exposed contract cannot disagree on internal turns.
 - The prompt-side cron rule is intentionally minimal: it tells the model that the reminder is an internal instruction, not a new user message, and that it should execute the reminded work immediately.
 - The runtime does not hard-code a prompt-side ban on cron-tool mutations during structured reminder turns. If the reminded work itself is “send a plain-text reminder”, “create another cron”, or any other currently visible CEO action, the model may use the ordinary CEO tool surface for that work.
 - Repetition is enforced by service-side counters:

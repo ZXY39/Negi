@@ -2274,6 +2274,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if isinstance(state, dict) and (
             bool(state.get("cron_internal")) or bool(state.get("heartbeat_internal"))
         ):
+            # Internal turns must keep the stage tool callable/visible even
+            # without an active stage, otherwise the execution gate (which
+            # only allows the stage tool before a stage exists) and the
+            # exposure disagree and the turn cannot use any tool at all.
+            if STAGE_TOOL_NAME not in normalized:
+                return [*normalized, STAGE_TOOL_NAME]
             return normalized
         if self._frontdoor_has_valid_stage(state):
             return normalized
@@ -2292,6 +2298,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if isinstance(state, dict) and (
             bool(state.get("cron_internal")) or bool(state.get("heartbeat_internal"))
         ):
+            if STAGE_TOOL_NAME not in normalized:
+                return [*normalized, STAGE_TOOL_NAME]
             return normalized
         if STAGE_TOOL_NAME not in normalized:
             return [*normalized, STAGE_TOOL_NAME]
