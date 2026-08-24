@@ -142,7 +142,7 @@ This is intentional. The composer button means "pause only when the user has not
   - `source`
   - `text`
   - `seq`
-- `text` is the authoritative assistant text of the latest model-call segment of the current visible turn at that stream point. The stream resets at the start of each model call, so the live block shows only the latest thinking/response segment instead of a whole-turn accumulation; it is not a raw provider token and not a stage-trace snapshot.
+- `text` is the authoritative assistant text of the latest thinking segment of the current visible turn at that stream point. The previous segment stays visible until a new one arrives — a model-call boundary resets the segment and the first streamed delta of the new call replaces it — so the live block shows only the latest segment instead of a whole-turn accumulation; it is not a raw provider token and not a stage-trace snapshot.
 - The browser should treat `ceo.reply.delta` as a cheap text-only lane:
   - render the latest-segment text as a transient live block inside the turn's stage rail (`.task-trace-live-text`), not into the final assistant bubble; the bubble only receives the authoritative final text at `ceo.reply.final`
   - update cached `inflight_turn.assistant_text` for reconnect/session restore

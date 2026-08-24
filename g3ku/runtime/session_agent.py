@@ -122,6 +122,7 @@ class RuntimeAgentSession:
         self._assistant_stream_last_emitted_text: str = ""
         self._assistant_stream_last_emit_monotonic: float = 0.0
         self._assistant_stream_flush_task: asyncio.Task[Any] | None = None
+        self._assistant_segment_open: bool = False
         self._turn_lock = asyncio.Lock()
         self._restore_frontdoor_persistent_state()
 
@@ -1776,6 +1777,7 @@ class RuntimeAgentSession:
         self._assistant_stream_pending_text = ""
         self._assistant_stream_last_emitted_text = ""
         self._assistant_stream_last_emit_monotonic = 0.0
+        self._assistant_segment_open = False
 
     def _schedule_assistant_stream_flush(self) -> None:
         task = self._assistant_stream_flush_task
@@ -1824,6 +1826,9 @@ class RuntimeAgentSession:
         normalized_text = str(text or "")
         if not normalized_text:
             return
+        if not self._assistant_segment_open:
+            self._state.latest_message = ""
+            self._assistant_segment_open = True
         current_text = str(self._state.latest_message or "")
         next_text = current_text + normalized_text
         if next_text == current_text:
@@ -1844,10 +1849,9 @@ class RuntimeAgentSession:
         self._schedule_assistant_stream_flush()
 
     def _begin_assistant_text_segment(self) -> None:
-        # 每次模型调用开始前清空进行中的思考文本，快照只显示最新一段。
-        self._state.latest_message = ""
-        self._assistant_stream_pending_text = ""
-        self._assistant_stream_last_emitted_text = ""
+        # 模型调用开始标记段边界：驻留文本不清空，等新一段首个流式
+        # delta 到达再整体覆盖，避免工具执行期间气泡空白。
+        self._assistant_segment_open = False
 
     def manual_pause_waiting_reason(self) -> bool:
         return False
@@ -2490,6 +2494,7 @@ class RuntimeAgentSession:
                 self._state.latest_message = text
                 self._assistant_stream_pending_text = text
                 self._assistant_stream_last_emitted_text = ""
+                self._assistant_segment_open = False
                 await self._emit_state_snapshot()
 
         channel = "analysis" if kind == "analysis" else "deep_progress" if (deep_progress or kind == "deep_progress") else "progress"
