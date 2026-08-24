@@ -401,6 +401,19 @@ class NodeRunner:
             return self._mark_failed(task_id, node.node_id, reason=terminal_reason)
         if task.cancel_requested:
             return self._mark_failed(task_id, node.node_id, reason='canceled')
+        freeze_reason = self._final_acceptance_freeze_reason(task=task, node=node)
+        if freeze_reason:
+            self._refresh_resume_ready_distribution_state(task_id=task_id)
+            self._log_service.refresh_task_view(task_id, mark_unread=True)
+            return NodeFinalResult(
+                status=STATUS_SUCCESS,
+                delivery_status='partial',
+                summary=freeze_reason,
+                answer='',
+                evidence=[],
+                remaining_work=[],
+                blocking_reason='',
+            )
         try:
             if self._context_preparer is not None:
                 await self._await_with_runtime_marker(
@@ -973,6 +986,27 @@ class NodeRunner:
             return None
         return acceptance
 
+    def _final_acceptance_freeze_reason(self, *, task, node: NodeRecord) -> str:
+        # 仅对"根执行节点的最终验收"生效：被检验节点仍有未消费通知时冻结验收，
+        # 等执行节点消费完通知并重新提交后再放行，避免验收抢跑在最终提交之前。
+        if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
+            return ''
+        execution = self._accepted_execution_node(task_id=task.task_id, acceptance=node)
+        if execution is None:
+            return ''
+        if str(getattr(execution, 'node_id', '') or '').strip() != str(getattr(task, 'root_node_id', '') or '').strip():
+            return ''
+        if self._normalized_status(getattr(execution, 'status', '')) in {STATUS_SUCCESS, STATUS_FAILED}:
+            return ''
+        execution_node_id = str(getattr(execution, 'node_id', '') or '').strip()
+        pending_node_ids = set(self.nodes_with_pending_distribution_notices(task_id=task.task_id))
+        if execution_node_id not in pending_node_ids:
+            return ''
+        return (
+            '最终验收冻结：被检验执行节点仍有未消费通知，'
+            '需待其消费通知并重新提交后再继续核验。'
+        )
+
     def _persist_acceptance_candidate_result(self, *, task_id: str, node_id: str, result: NodeFinalResult) -> str:
         self._persist_result_payload(task_id, node_id, result)
         latest = self._log_service.ensure_node_result_payload_externalized(task_id, node_id) or self._store.get_node(node_id)
@@ -1377,6 +1411,24 @@ class NodeRunner:
         acceptance = self._required_acceptance_node(task=task, node=node)
         if acceptance is None:
             return None
+        if self._normalized_status(getattr(acceptance, 'status', '')) in {STATUS_SUCCESS, STATUS_FAILED}:
+            # 验收节点已是终态：通知无法再唤醒它。重置回 in_progress，让正常握手
+            # 重新核验本次新提交，避免把通知投递给永不消费的终态节点导致死锁。
+            self._store.update_node(
+                acceptance.node_id,
+                lambda record: record.model_copy(
+                    update={
+                        'status': 'in_progress',
+                        'final_output': '',
+                        'final_output_ref': '',
+                        'failure_reason': '',
+                        'updated_at': _now(),
+                    }
+                ),
+            )
+            self._log_service.sync_node_read_model(task.task_id, acceptance.node_id)
+            self._log_service.refresh_task_view(task.task_id, mark_unread=True)
+            acceptance = self._store.get_node(acceptance.node_id) or acceptance
         result_ref = self._persist_acceptance_candidate_result(task_id=task.task_id, node_id=node.node_id, result=result)
         self._set_execution_waiting_acceptance_state(
             task_id=task.task_id,

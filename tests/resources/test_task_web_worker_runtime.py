@@ -7481,6 +7481,200 @@ async def test_root_final_acceptance_refreshes_eager_prompt_from_root_output(tmp
         await service.close()
 
 
+@pytest.mark.asyncio
+async def test_final_acceptance_frozen_while_root_has_pending_notices(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "root acceptance freeze",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance"))
+        acceptance = service.store.get_node(final_acceptance.node_id)
+        assert acceptance is not None
+
+        service.node_runner._set_execution_waiting_acceptance_state(
+            task_id=task.task_id,
+            execution_node_id=root.node_id,
+            acceptance_node_id=acceptance.node_id,
+            result_ref="artifact:result",
+            result_summary="draft answer",
+        )
+        service.store.upsert_task_node_notification(
+            TaskNodeNotification(
+                notification_id="notif:root-pending",
+                task_id=task.task_id,
+                node_id=root.node_id,
+                epoch_id="",
+                source_node_id=acceptance.node_id,
+                message="clarification notice",
+                status="delivered",
+                created_at=now_iso(),
+                delivered_at=now_iso(),
+                consumed_at="",
+                payload={},
+            )
+        )
+
+        # _build_service uses a backend that raises if called; a frozen acceptance
+        # node must return partial without invoking the model at all.
+        result = await service.node_runner.run_node(task.task_id, acceptance.node_id)
+        latest_acceptance = service.store.get_node(acceptance.node_id)
+
+        assert result.delivery_status == "partial"
+        assert latest_acceptance is not None
+        assert latest_acceptance.status == "in_progress"
+        notices = service.store.list_task_node_notifications(task.task_id, root.node_id)
+        assert [item.status for item in notices] == ["delivered"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_final_acceptance_runs_after_root_notices_consumed(tmp_path: Path) -> None:
+    backend = _QueuedChatBackend(
+        [
+            LLMResponse(
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:accept-final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "acceptance passed",
+                            "answer": "acceptance passed",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                content="",
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record = await service.create_task(
+            "root acceptance unfreeze",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance"))
+        acceptance = service.store.get_node(final_acceptance.node_id)
+        assert acceptance is not None
+
+        service.node_runner._set_execution_waiting_acceptance_state(
+            task_id=task.task_id,
+            execution_node_id=root.node_id,
+            acceptance_node_id=acceptance.node_id,
+            result_ref="artifact:result",
+            result_summary="draft answer",
+        )
+        # Root has no pending notices -> freeze must not trigger; acceptance runs.
+        result = await service.node_runner.run_node(task.task_id, acceptance.node_id)
+        latest_acceptance = service.store.get_node(acceptance.node_id)
+
+        assert result.status == "success"
+        assert latest_acceptance is not None
+        assert latest_acceptance.status == "success"
+        assert len(backend.calls) == 1
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_resubmission_after_terminal_acceptance_resets_and_reopens_handshake(tmp_path: Path) -> None:
+    backend = _QueuedChatBackend(
+        [
+            LLMResponse(
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:root-resubmit",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "revised report",
+                            "answer": "revised report",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                content="",
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record = await service.create_task(
+            "root acceptance reset",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance"))
+        acceptance = service.store.get_node(final_acceptance.node_id)
+        assert acceptance is not None
+
+        # Simulate acceptance having already passed (terminal success).
+        service.log_service.update_node_status(
+            record.task_id,
+            acceptance.node_id,
+            status="success",
+            final_output="verdict: pass",
+        )
+        service.node_runner._set_task_final_acceptance_state(
+            task_id=task.task_id,
+            acceptance_node_id=acceptance.node_id,
+            status="passed",
+        )
+
+        # Root resubmits a final result after acceptance passed.
+        result = await service.node_runner.run_node(task.task_id, root.node_id)
+
+        latest_acceptance = service.store.get_node(acceptance.node_id)
+        latest_task = service.get_task(record.task_id)
+        latest_root = service.store.get_node(root.node_id)
+
+        assert result.delivery_status == "partial"
+        # Terminal acceptance node is reset back to in_progress for re-verification.
+        assert latest_acceptance is not None
+        assert latest_acceptance.status == "in_progress"
+        assert latest_acceptance.final_output == ""
+        # A fresh verification notification is delivered to the (now live) acceptance node.
+        acceptance_notices = service.store.list_task_node_notifications(task.task_id, acceptance.node_id)
+        assert any(item.status == "delivered" for item in acceptance_notices)
+        # Handshake and task acceptance state reopened.
+        assert latest_root is not None
+        assert dict((latest_root.metadata or {}).get("acceptance_handshake") or {})["state"] == "waiting_acceptance"
+        assert latest_task is not None
+        reopened = normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance"))
+        assert reopened.status == "waiting_acceptance"
+    finally:
+        await service.close()
+
+
 def test_normalize_acceptance_handshake_defaults() -> None:
     assert normalize_acceptance_handshake(None) == {
         "state": ACCEPTANCE_STATE_IDLE,

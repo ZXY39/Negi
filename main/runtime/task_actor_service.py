@@ -883,6 +883,21 @@ class TaskActorService:
         if str(final_acceptance.status or '').strip().lower() in {'waiting_acceptance', 'waiting_execution_retry'}:
             return self._result_from_node(root)
 
+        existing_acceptance_node_id = str(final_acceptance.node_id or '').strip()
+        existing_acceptance = self._store.get_node(existing_acceptance_node_id) if existing_acceptance_node_id else None
+        if existing_acceptance is not None:
+            freeze_reason = self._node_runner._final_acceptance_freeze_reason(task=task, node=existing_acceptance)
+            if freeze_reason:
+                return NodeFinalResult(
+                    status='success',
+                    delivery_status='partial',
+                    summary=freeze_reason,
+                    answer='',
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason='',
+                )
+
         acceptance = await self._get_or_create_final_acceptance_node(
             task_id=task_id,
             task=task,
