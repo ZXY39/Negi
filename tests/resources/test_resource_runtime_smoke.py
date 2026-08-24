@@ -659,7 +659,7 @@ def test_content_split_tools_are_discoverable_and_merge_into_content_navigation_
     assert 'content_open' in action_map['open'].executor_names
 
 
-def test_tool_managed_builtin_family_defaults_to_deny_all_roles_on_first_discovery(tmp_path: Path):
+def test_tool_managed_builtin_family_seeds_default_governance_roles_on_first_discovery(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -672,7 +672,7 @@ def test_tool_managed_builtin_family_defaults_to_deny_all_roles_on_first_discove
     family = families['exec_runtime']
     action_map = {action.action_id: action for action in family.actions}
 
-    assert action_map['run'].allowed_roles == []
+    assert action_map['run'].allowed_roles == ['ceo', 'execution']
 
 
 @pytest.mark.asyncio
