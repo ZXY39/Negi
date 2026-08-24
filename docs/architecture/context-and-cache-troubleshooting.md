@@ -99,6 +99,7 @@ Memory guard 维护要点：
 - 坑：manual pause / no-provider turn 只走到 prepare 或 paused snapshot，却把 session-owned baseline 覆盖成 planned body；下一轮 fresh turn 直接从“未发出过的 baseline”续，cache 前缀大面积消失。
 - 不变量：只有带真实 actual-request 证据的状态才允许覆盖 cross-turn baseline；planned prompt-cache diagnostics 不是 actual-request 证据。
 - 症状：没有真实请求发出的下一轮，第一跳 request 形态与上一轮完全对不上。
+- 边界：no-provider turn 不覆盖基线，不代表被暂停回合的用户消息应缺席下一轮——它由 prepare 阶段的种子转录对账补回续跑种子，见「Baseline 合同与恢复顺序」。
 
 ### 3.4 finalize 没把 direct reply 补回 baseline
 
@@ -172,6 +173,7 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 
 - `RuntimeAgentSession._frontdoor_request_body_messages` 是 session-owned request-body baseline：保存剥掉动态契约后的重建 provider request body，下一轮在尾部重建唯一一份新的权威契约。它是普通可见 turn 的 append-only 续接来源（不是旧会话兼容回退）：新 user/runtime 尾部内容直接追加其上，不再交给历史选择器判断“语义完整性”。
 - visible turn 期间 baseline 必须跟上真实请求增长：每次 provider 调用后反映剥契约后的最新 body，每个工具循环后把新 assistant/tool transcript 折回同一份 baseline。它也必须跨过 finalize 与可恢复快照边界存活：`inflight_turn_snapshot` / paused execution context 必须连同 `frontdoor_history_shrink_reason` 一起携带它，否则重建的会话会悄悄退回 transcript/history replay，在允许路径之外缩短下一轮。
+- 手动暂停发生在该轮首次 provider 请求发出之前时，被暂停回合的用户消息不进入基线（基线只在有真实 actual-request 证据后回写），而续跑种子路径也不读转录，该消息会因此从后续模型上下文缺席。prepare 阶段对续跑种子做转录对账来保住它：把 `_transcript_state=paused` 且 prompt-visible 的用户回合按转录顺序补到种子尾部；与种子既有用户消息或当前回合用户消息同文本的不重复补。对账只是尾部追加——不改动缓存前缀、不构成收缩、不改变恢复顺序。
 - `frontdoor_canonical_context` 保持 durable 单写者：turn 收尾可以合并已完成阶段数据，但 session 同步与请求组装不得把 visible projection 写回 durable 链。
 - 图像边界：只有所选模型绑定启用图像多模态输入时，当前 turn 的 live request 才允许 provider 可见图像块，且同轮须把附件提示替换为直接视觉引导（不得暴露本地上传路径）；历史图像经 `content_open` 重开是独立的 live-only 通道——durable baseline 可保留 `path` / `ref`，但直接视觉复用需要后续 turn 重新 `content_open`。durable baseline、inflight/paused snapshot、completed continuity sidecar 持久化前必须把 `image_url` / `input_image` 剥回文本投影；saved actual-request artifact 是刻意的取证例外——验证图像是否到达 provider 要查 artifact，而不是 durable baseline。
 - CEO continuity 恢复顺序：paused snapshot → inflight snapshot → completed continuity sidecar（`.g3ku/web-ceo-continuity/<session>.json`）→ 最新 actual-request artifact → transcript/history fallback。前三条是可信 sidecar 通道，第四条是保缓存的应急回退；sidecar 只有真正携带可用 `frontdoor_request_body_messages` baseline 时才获胜，文件存在本身不得压制更晚、更完整的恢复源。

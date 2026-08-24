@@ -96,7 +96,7 @@
 
 另外两条不变量：
 
-- 手动 pause 的语义是“冻结上一轮”，不是“等待下一条输入来补写原请求”：session 以 `completed` + `stop_reason=user_pause` 收尾，pause 当下的轮次上下文照常持久化，收尾时立即写 completed continuity sidecar，并把 paused assistant 气泡归档成带 `status=paused`、`history_visible=false`、`source=manual_pause_archive` 的 durable 记录。后续输入必须作为新一轮 user turn 发送，不得走 `resume(additional_context=...)`。
+- 手动 pause 的语义是“冻结上一轮”，不是“等待下一条输入来补写原请求”：session 以 `completed` + `stop_reason=user_pause` 收尾，pause 当下的轮次上下文照常持久化，收尾时立即写 completed continuity sidecar，并把 paused assistant 气泡归档成带 `status=paused`、`history_visible=false`、`source=manual_pause_archive` 的 durable 记录。后续输入必须作为新一轮 user turn 发送，不得走 `resume(additional_context=...)`。被暂停回合的用户消息经续跑种子对账继承进下一轮模型上下文，即使暂停发生在任何 provider 请求发出之前；对账规则详见 `context-and-cache-troubleshooting.md`「Baseline 合同与恢复顺序」。
 - 运行中补充的消息作为一批独立 user message 持久化，在同一轮下一次 `call_model` 前一起注入，不拼接成一条文本；可见用户顺序的权威是 `inflight_turn.user_messages` 与 `ceo.reply.final.user_messages`（兼容字段 `user_message` 只保留批内最后一条），`pending` user rows 只是 durability/continuity 记录。
 
 手动暂停恢复规则、排队补充消息与 follow-up 消费的完整契约详见 `web-and-admin.md`「Manual Pause Resume Rule」与「Queued Follow-Ups」。

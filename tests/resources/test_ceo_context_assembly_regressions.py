@@ -3531,3 +3531,98 @@ async def test_seed_continuation_path_trims_old_raw_with_stage_summaries() -> No
     assert "stage 1 raw detail" not in rendered
     assert "stage 2 raw detail" in rendered
     assert ("[G3KU_STAGE_COMPACT_V1]" in rendered) or ("[G3KU_STAGE_EXTERNALIZED_V1]" in rendered)
+
+
+def _paused_user_transcript_message(text: str, **metadata_overrides: object) -> dict[str, object]:
+    metadata: dict[str, object] = {"_transcript_state": "paused"}
+    metadata.update(metadata_overrides)
+    return {"role": "user", "content": text, "metadata": metadata}
+
+
+def test_paused_user_turn_missing_from_seed_is_reconciled() -> None:
+    """发送后立即暂停：暂停回合的请求从未发出，其用户消息必须被对账进下一轮种子。"""
+    seed = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "介绍一下有关任务工具的作用"},
+        {"role": "assistant", "content": "好的，我来介绍……"},
+    ]
+    persisted_session = SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "介绍一下有关任务工具的作用", "metadata": {"_transcript_state": "completed"}},
+            {"role": "assistant", "content": "好的，我来介绍……"},
+            _paused_user_transcript_message("task_list里面的类型都代表了上面"),
+        ]
+    )
+
+    reconciled = CreateAgentCeoFrontDoorRunner._reconcile_paused_user_turns_into_seed(
+        seed, persisted_session, current_turn_user_content="代表了什么"
+    )
+
+    assert reconciled[-1] == {"role": "user", "content": "task_list里面的类型都代表了上面"}
+    # 种子前缀不被改动（缓存前缀稳定性）
+    assert reconciled[:3] == seed
+
+
+def test_paused_user_turn_dedupes_seed_and_current_turn() -> None:
+    """与种子已有用户消息或当前回合同文本的暂停消息不重复补。"""
+    seed = [
+        {"role": "user", "content": "第一条"},
+        {"role": "assistant", "content": "回复"},
+    ]
+    persisted_session = SimpleNamespace(
+        messages=[
+            _paused_user_transcript_message("第一条"),
+            _paused_user_transcript_message("当前这条"),
+            _paused_user_transcript_message("第三条"),
+        ]
+    )
+
+    reconciled = CreateAgentCeoFrontDoorRunner._reconcile_paused_user_turns_into_seed(
+        seed, persisted_session, current_turn_user_content="当前这条"
+    )
+
+    appended = [item for item in reconciled if item not in seed]
+    assert appended == [{"role": "user", "content": "第三条"}]
+
+
+def test_paused_user_turn_reconcile_keeps_transcript_order() -> None:
+    seed = [{"role": "user", "content": "第一条"}, {"role": "assistant", "content": "回复"}]
+    persisted_session = SimpleNamespace(
+        messages=[
+            _paused_user_transcript_message("暂停甲"),
+            _paused_user_transcript_message("暂停乙"),
+        ]
+    )
+
+    reconciled = CreateAgentCeoFrontDoorRunner._reconcile_paused_user_turns_into_seed(
+        seed, persisted_session, current_turn_user_content="补发"
+    )
+
+    assert [item.get("content") for item in reconciled[-2:]] == ["暂停甲", "暂停乙"]
+
+
+def test_paused_user_turn_reconcile_skips_hidden_and_non_paused() -> None:
+    """prompt 不可见的暂停消息不补；非 paused 状态的缺席消息（可能是裁剪产物）不补。"""
+    seed = [{"role": "user", "content": "第一条"}, {"role": "assistant", "content": "回复"}]
+    persisted_session = SimpleNamespace(
+        messages=[
+            _paused_user_transcript_message("隐藏的暂停消息", history_visible=False),
+            _paused_user_transcript_message("内部暂停消息", prompt_visible=False),
+            {"role": "user", "content": "被裁剪的历史消息", "metadata": {"_transcript_state": "completed"}},
+            _paused_user_transcript_message("可见的暂停消息"),
+        ]
+    )
+
+    reconciled = CreateAgentCeoFrontDoorRunner._reconcile_paused_user_turns_into_seed(
+        seed, persisted_session, current_turn_user_content="补发"
+    )
+
+    assert [item.get("content") for item in reconciled] == ["第一条", "回复", "可见的暂停消息"]
+
+
+def test_paused_user_turn_reconcile_noop_without_seed() -> None:
+    persisted_session = SimpleNamespace(messages=[_paused_user_transcript_message("暂停消息")])
+    reconciled = CreateAgentCeoFrontDoorRunner._reconcile_paused_user_turns_into_seed(
+        [], persisted_session, current_turn_user_content="补发"
+    )
+    assert reconciled == []

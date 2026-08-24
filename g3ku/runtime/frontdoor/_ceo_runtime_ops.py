@@ -89,6 +89,7 @@ from main.runtime.tool_call_repair import (
 from g3ku.runtime.web_ceo_sessions import (
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
     frontdoor_stage_archive_task_id,
+    is_prompt_visible_message,
     persist_frontdoor_actual_request,
     strip_multimodal_blocks_from_message_records,
 )
@@ -752,6 +753,52 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             *list(parts["completed_blocks"]),
             *list(parts["active_window"]),
         ]
+
+    @classmethod
+    def _reconcile_paused_user_turns_into_seed(
+        cls,
+        seed_messages: list[dict[str, Any]] | None,
+        persisted_session: Any,
+        current_turn_user_content: Any = None,
+    ) -> list[dict[str, Any]]:
+        """手动暂停发生在模型请求发出之前时，基线只在请求完成后回写，
+        被暂停回合的用户消息会永远缺席续跑种子（种子路径又不读转录）。
+        这里按转录对账：prompt-visible 的暂停用户回合若缺席种子，
+        按转录顺序补到种子尾部，使下一轮上下文默认继承它们。
+        与种子已有用户消息或当前回合用户消息同文本的不重复补。"""
+        records = [dict(item) for item in list(seed_messages or []) if isinstance(item, dict)]
+        transcript = (
+            list(getattr(persisted_session, "messages", []) or [])
+            if persisted_session is not None
+            else []
+        )
+        if not records or not transcript:
+            return records
+        known_user_texts = {
+            cls._content_text(record.get("content")).strip()
+            for record in records
+            if str(record.get("role") or "").strip().lower() == "user"
+        }
+        known_user_texts.discard("")
+        current_text = cls._content_text(current_turn_user_content).strip()
+        if current_text:
+            known_user_texts.add(current_text)
+        for message in transcript:
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "").strip().lower() != "user":
+                continue
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            if str(metadata.get("_transcript_state") or "").strip().lower() != "paused":
+                continue
+            if not is_prompt_visible_message(message):
+                continue
+            text = cls._content_text(message.get("content")).strip()
+            if not text or text in known_user_texts:
+                continue
+            known_user_texts.add(text)
+            records.append({"role": "user", "content": text})
+        return records
 
     def _quarantine_frontdoor_shrink(
         self,
@@ -5054,6 +5101,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 seed_stage_state = dict(current_frontdoor_canonical_context or {})
             request_body_seed_messages = self._trim_frontdoor_seed_to_stage_window(
                 session_request_body_messages, seed_stage_state
+            )
+            # 手动暂停回合的请求从未发出，其用户消息不在基线里；按转录对账补回，
+            # 避免“发送后立即暂停再补发”时暂停消息从模型上下文消失。
+            request_body_seed_messages = self._reconcile_paused_user_turns_into_seed(
+                request_body_seed_messages,
+                runtime_session,
+                current_turn_user_content=current_turn_user_content,
             )
             checkpoint_messages = []
             builder_user_metadata["_frontdoor_history_seed"] = "session_window"
