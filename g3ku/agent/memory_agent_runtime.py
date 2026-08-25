@@ -36,6 +36,10 @@ from main.runtime.chat_backend import build_actual_request_diagnostics
 from main.prompts import load_prompt
 
 _NOTE_REF_RE = re.compile(r"(?:\bref:|见noteid:)(?P<ref>[a-z0-9_]+)\b")
+_REVIEW_MAX_TOOL_RECORDS_PER_TURN = 8
+_REVIEW_TOOL_OUTPUT_MAX_CHARS = 400
+_REVIEW_TOOL_PREVIEW_MAX_CHARS = 240
+_REVIEW_REPORTED_TOOL_ID_CAP = 500
 _STAGED_DOCUMENT_UNSET = object()
 _LEGACY_CLEANUP_RELATIVE_PATHS: tuple[str, ...] = (
     "memory/HISTORY.md",
@@ -2153,9 +2157,19 @@ class MemoryManager:
                 for key, value in dict(raw_state.get("stage_versions") or {}).items()
                 if str(key or "").strip() and str(value or "").strip()
             }
+            reported_tool_keys: list[str] = []
+            seen_reported_tool_keys: set[str] = set()
+            for raw_reported_key in list(raw_state.get("reported_tool_keys") or []):
+                normalized_reported_key = str(raw_reported_key or "").strip()
+                if not normalized_reported_key or normalized_reported_key in seen_reported_tool_keys:
+                    continue
+                seen_reported_tool_keys.add(normalized_reported_key)
+                reported_tool_keys.append(normalized_reported_key)
+            reported_tool_keys = reported_tool_keys[-_REVIEW_REPORTED_TOOL_ID_CAP:]
             normalized_sessions[session_key] = {
                 "pending_turns": pending_turns,
                 "stage_versions": stage_versions,
+                "reported_tool_keys": reported_tool_keys,
             }
         return {"sessions": normalized_sessions}
 
@@ -2467,6 +2481,112 @@ class MemoryManager:
 
     @staticmethod
     @staticmethod
+    def _review_tool_record_key(*, stage_id: str, round_id: str, tool: dict[str, Any]) -> str:
+        tool_call_id = str(tool.get("tool_call_id") or "").strip()
+        if tool_call_id:
+            return tool_call_id
+        fingerprint_source = json.dumps(
+            {
+                "stage_id": str(stage_id or "").strip(),
+                "round_id": str(round_id or "").strip(),
+                "tool_name": str(tool.get("tool_name") or "").strip(),
+                "arguments_text": str(tool.get("arguments_text") or "").strip(),
+                "output_head": str(tool.get("output_text") or "").strip()[:64],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return f"fingerprint:{hashlib.sha256(fingerprint_source.encode('utf-8')).hexdigest()[:24]}"
+
+    @staticmethod
+    def _collect_visible_tool_records(canonical_summary: dict[str, Any] | None) -> list[dict[str, Any]]:
+        """Collect user-visible tool records from canonical stages that still carry rounds."""
+
+        records: list[dict[str, Any]] = []
+        if not isinstance(canonical_summary, dict):
+            return records
+        for stage in list(canonical_summary.get("stages") or []):
+            if not isinstance(stage, dict):
+                continue
+            stage_id = str(stage.get("stage_id") or "").strip()
+            rounds = [item for item in list(stage.get("rounds") or []) if isinstance(item, dict)]
+            if not rounds:
+                continue
+            for round_item in rounds:
+                round_id = str(round_item.get("round_id") or "").strip()
+                round_text = str(round_item.get("text") or "").strip()
+                for tool in list(round_item.get("tools") or []):
+                    if not isinstance(tool, dict):
+                        continue
+                    tool_name = str(tool.get("tool_name") or "").strip()
+                    if not tool_name:
+                        continue
+                    status = str(tool.get("status") or "").strip().lower()
+                    records.append(
+                        {
+                            "key": MemoryManager._review_tool_record_key(
+                                stage_id=stage_id,
+                                round_id=round_id,
+                                tool=tool,
+                            ),
+                            "stage_id": stage_id,
+                            "round_id": round_id,
+                            "round_text": round_text,
+                            "tool_name": tool_name,
+                            "status": status or "unknown",
+                            "is_error": bool(status) and status != "success",
+                            "arguments_text": str(tool.get("arguments_text") or "").strip(),
+                            "output_preview_text": str(tool.get("output_preview_text") or "").strip(),
+                            "output_text": str(tool.get("output_text") or "").strip(),
+                        }
+                    )
+        return records
+
+    @staticmethod
+    def _select_review_tool_records(new_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Pick at most the per-turn cap of records, errors first then most recent first."""
+
+        indexed = list(enumerate(list(new_records or [])))
+        ordered = sorted(indexed, key=lambda pair: (not bool(pair[1].get("is_error")), -pair[0]))
+        selected = ordered[: max(_REVIEW_MAX_TOOL_RECORDS_PER_TURN, 0)]
+        selected.sort(key=lambda pair: pair[0])
+        return [record for _index, record in selected]
+
+    @staticmethod
+    def _render_review_tool_records(records: list[dict[str, Any]]) -> list[str]:
+        lines: list[str] = []
+        rounds_with_text: set[str] = set()
+        for record in list(records or []):
+            stage_id = str(record.get("stage_id") or "").strip() or "(unknown-stage)"
+            tool_name = str(record.get("tool_name") or "").strip() or "tool"
+            status = str(record.get("status") or "").strip() or "unknown"
+            lines.append(f"- [{stage_id}] tool={tool_name} status={status}")
+            arguments_text = str(record.get("arguments_text") or "").strip()
+            if arguments_text:
+                lines.append(f"  args: {arguments_text}")
+            preview_text = MemoryManager._inline_preview_text(
+                record.get("output_preview_text"),
+                max_chars=_REVIEW_TOOL_PREVIEW_MAX_CHARS,
+            )
+            if preview_text:
+                lines.append(f"  output_preview: {preview_text}")
+            output_text = str(record.get("output_text") or "").strip()
+            if output_text:
+                truncated_output = MemoryManager._inline_preview_text(
+                    output_text,
+                    max_chars=_REVIEW_TOOL_OUTPUT_MAX_CHARS,
+                )
+                lines.append(f"  output_full: {truncated_output}")
+            round_key = str(record.get("round_id") or "").strip()
+            round_text = str(record.get("round_text") or "").strip()
+            # Round narration is user-visible as-is and is intentionally not truncated.
+            if round_text and (not round_key or round_key not in rounds_with_text):
+                if round_key:
+                    rounds_with_text.add(round_key)
+                lines.append(f"  中途输出: {round_text}")
+        return lines
+
+    @staticmethod
     def _review_window_payload(*, session_key: str, pending_turns: list[dict[str, Any]]) -> str:
         sections = [f"[session_key] {str(session_key or '').strip()}"]
         for index, item in enumerate(list(pending_turns or []), start=1):
@@ -2485,6 +2605,7 @@ class MemoryManager:
         assistant_text: str,
         compression_summary: dict[str, Any] | None,
         canonical_summary: dict[str, Any] | None,
+        tool_records: list[dict[str, Any]] | None = None,
     ) -> str:
         _ = compression_summary
         parts = [f"[turn_id] {str(turn_id or '').strip() or '(unknown)'}"]
@@ -2500,6 +2621,10 @@ class MemoryManager:
         if assistant:
             parts.append("assistant_text:")
             parts.append(assistant)
+        rendered_tool_records = MemoryManager._render_review_tool_records(tool_records)
+        if rendered_tool_records:
+            parts.append("可见工具记录:")
+            parts.extend(rendered_tool_records)
         compact_stage_summary = MemoryManager._compact_review_stage_summary(canonical_summary)
         if isinstance(compact_stage_summary, dict) and compact_stage_summary:
             parts.append("stage_summary:")
@@ -2527,6 +2652,20 @@ class MemoryManager:
             for key, value in dict(session_state.get("stage_versions") or {}).items()
             if str(key or "").strip() and str(value or "").strip()
         }
+        reported_tool_keys = [
+            str(key or "").strip()
+            for key in list(session_state.get("reported_tool_keys") or [])
+            if str(key or "").strip()
+        ]
+        reported_tool_key_set = set(reported_tool_keys)
+        collected_tool_records = self._collect_visible_tool_records(canonical_summary)
+        new_tool_records = [
+            record for record in collected_tool_records if record["key"] not in reported_tool_key_set
+        ]
+        selected_tool_records = self._select_review_tool_records(new_tool_records)
+        next_reported_tool_keys = (
+            reported_tool_keys + [str(record.get("key") or "").strip() for record in selected_tool_records]
+        )[-_REVIEW_REPORTED_TOOL_ID_CAP:]
         stage_summary_delta, next_stage_versions = self._compact_review_stage_summary_delta(
             canonical_summary=canonical_summary,
             stage_versions=stage_versions,
@@ -2542,6 +2681,7 @@ class MemoryManager:
             assistant_text=assistant_text,
             compression_summary=compression_summary,
             canonical_summary=stage_summary_delta,
+            tool_records=selected_tool_records,
         )
         if not payload_text:
             return {"ok": True, "status": "ignored", "reason": "empty_turn"}
@@ -2556,6 +2696,7 @@ class MemoryManager:
             sessions[normalized_session] = {
                 "pending_turns": pending_turns,
                 "stage_versions": next_stage_versions,
+                "reported_tool_keys": next_reported_tool_keys,
             }
             self._write_review_state({"sessions": sessions})
             return {
@@ -2576,6 +2717,7 @@ class MemoryManager:
         sessions[normalized_session] = {
             "pending_turns": [],
             "stage_versions": next_stage_versions,
+            "reported_tool_keys": next_reported_tool_keys,
         }
         self._write_review_state({"sessions": sessions})
         await self._append_queue_request(request)
@@ -2625,6 +2767,11 @@ class MemoryManager:
                 for key, value in dict(session_state.get("stage_versions") or {}).items()
                 if str(key or "").strip() and str(value or "").strip()
             },
+            "reported_tool_keys": [
+                str(key or "").strip()
+                for key in list(session_state.get("reported_tool_keys") or [])
+                if str(key or "").strip()
+            ][-_REVIEW_REPORTED_TOOL_ID_CAP:],
         }
         self._write_review_state({"sessions": sessions})
         await self._append_queue_request(request)

@@ -1739,10 +1739,13 @@ async def test_v2_flush_review_window_ignores_non_compression_trigger(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_v2_review_turn_payload_keeps_only_user_assistant_and_stage_summary(tmp_path: Path) -> None:
+async def test_v2_review_turn_payload_renders_visible_tool_records_with_limits(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
+        huge_output_text = "HUGE_TOOL_OUTPUT_HEAD_MARKER " + "x" * 500 + " HUGE_TOOL_OUTPUT_TAIL_MARKER"
+        long_preview_text = "PREVIEW_HEAD_MARKER " + "y" * 300 + " PREVIEW_TAIL_MARKER"
+        round_narration = "ROUND_NARRATION_START " + "z" * 600 + " ROUND_NARRATION_END"
         canonical_summary = {
             "active_stage_id": "frontdoor-stage-2",
             "stages": [
@@ -1752,12 +1755,18 @@ async def test_v2_review_turn_payload_keeps_only_user_assistant_and_stage_summar
                     "completed_stage_summary": "verified current ranking methodology",
                     "rounds": [
                         {
+                            "round_id": "frontdoor-stage-1:round-1",
+                            "text": round_narration,
                             "tools": [
                                 {
+                                    "tool_call_id": "call-visible-1",
                                     "tool_name": "web_fetch",
-                                    "output_text": "HUGE_TOOL_OUTPUT_SHOULD_NOT_APPEAR",
+                                    "status": "error",
+                                    "arguments_text": "url=https://example.com",
+                                    "output_preview_text": long_preview_text,
+                                    "output_text": huge_output_text,
                                 }
-                            ]
+                            ],
                         }
                     ],
                     "contract_revision": "exp:should-not-appear",
@@ -1780,7 +1789,21 @@ async def test_v2_review_turn_payload_keeps_only_user_assistant_and_stage_summar
         assert "assistant confirmed the preference" in payload_text
         assert "collect candidate pool" in payload_text
         assert "verified current ranking methodology" in payload_text
-        assert "HUGE_TOOL_OUTPUT_SHOULD_NOT_APPEAR" not in payload_text
+        # Visible tool record fields are present.
+        assert "可见工具记录:" in payload_text
+        assert "tool=web_fetch" in payload_text
+        assert "status=error" in payload_text
+        assert "url=https://example.com" in payload_text
+        # Full output is truncated: head appears, tail and full text do not.
+        assert "HUGE_TOOL_OUTPUT_HEAD_MARKER" in payload_text
+        assert "HUGE_TOOL_OUTPUT_TAIL_MARKER" not in payload_text
+        assert huge_output_text not in payload_text
+        # Preview is truncated the same way.
+        assert "PREVIEW_HEAD_MARKER" in payload_text
+        assert "PREVIEW_TAIL_MARKER" not in payload_text
+        # Round narration is user-visible and must not be truncated.
+        assert round_narration in payload_text
+        # Non-visible fields stay excluded.
         assert "TOKEN_COMPACTION_SHOULD_NOT_APPEAR" not in payload_text
         assert "exp:should-not-appear" not in payload_text
     finally:
@@ -1958,6 +1981,223 @@ async def test_v2_review_window_records_stage_when_summary_version_changes(tmp_p
         payload_text = queue_items[0]["payload_text"]
         assert payload_text.count("frontdoor-stage-alpha") == 2
         assert "stage alpha completed later" in payload_text
+    finally:
+        manager.close()
+
+
+def _canonical_with_visible_tool(
+    *,
+    stage_id: str = "frontdoor-stage-1",
+    tool_call_id: str = "",
+    tool_name: str = "web_search",
+    status: str = "success",
+    arguments_text: str = "q=hello",
+    output_text: str = "ok",
+    round_text: str = "narration",
+) -> dict[str, Any]:
+    return {
+        "active_stage_id": stage_id,
+        "stages": [
+            {
+                "stage_id": stage_id,
+                "stage_goal": f"goal {stage_id}",
+                "completed_stage_summary": f"summary {stage_id}",
+                "rounds": [
+                    {
+                        "round_id": f"{stage_id}:round-1",
+                        "text": round_text,
+                        "tools": [
+                            {
+                                "tool_call_id": tool_call_id,
+                                "tool_name": tool_name,
+                                "status": status,
+                                "arguments_text": arguments_text,
+                                "output_text": output_text,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_v2_review_window_reports_new_tool_records_once_per_window(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        canonical = _canonical_with_visible_tool(tool_call_id="call-1")
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-1",
+            user_messages=["first"],
+            assistant_text="first reply",
+            compression_summary={},
+            canonical_summary=canonical,
+        )
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-2",
+            user_messages=["second"],
+            assistant_text="second reply",
+            compression_summary={},
+            canonical_summary=canonical,
+        )
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-3",
+            user_messages=["third"],
+            assistant_text="third reply",
+            compression_summary={},
+            canonical_summary=_canonical_with_visible_tool(tool_call_id="call-2"),
+        )
+
+        state = manager._read_review_state()
+        pending = state["sessions"]["web:shared"]["pending_turns"]
+        assert len(pending) == 3
+        assert "tool=web_search" in pending[0]["payload_text"]
+        assert "可见工具记录:" not in pending[1]["payload_text"]
+        assert "tool=web_search" in pending[2]["payload_text"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_review_tool_record_cursor_survives_flush(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-1",
+            user_messages=["first"],
+            assistant_text="first reply",
+            compression_summary={},
+            canonical_summary=_canonical_with_visible_tool(tool_call_id="call-A"),
+        )
+        flush_result = await manager.flush_review_window(
+            session_key="web:shared",
+            trigger_source="token_compression",
+        )
+        assert flush_result["status"] == "queued"
+        state_after_flush = manager._read_review_state()
+        assert "call-A" in state_after_flush["sessions"]["web:shared"]["reported_tool_keys"]
+
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-2",
+            user_messages=["second"],
+            assistant_text="second reply",
+            compression_summary={},
+            canonical_summary=_canonical_with_visible_tool(tool_call_id="call-A"),
+        )
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-3",
+            user_messages=["third"],
+            assistant_text="third reply",
+            compression_summary={},
+            canonical_summary=_canonical_with_visible_tool(tool_call_id="call-B"),
+        )
+
+        state = manager._read_review_state()
+        pending = state["sessions"]["web:shared"]["pending_turns"]
+        assert len(pending) == 2
+        assert "可见工具记录:" not in pending[0]["payload_text"]
+        assert "tool=web_search" in pending[1]["payload_text"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_review_tool_records_per_turn_cap_prefers_errors(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        tools = []
+        for index in range(10):
+            tools.append(
+                {
+                    "tool_call_id": f"call-{index}",
+                    "tool_name": "web_search",
+                    "status": "error" if index in {3, 7} else "success",
+                    "arguments_text": f"q=item-{index}",
+                    "output_text": f"out-{index}",
+                }
+            )
+        canonical_summary = {
+            "active_stage_id": "frontdoor-stage-1",
+            "stages": [
+                {
+                    "stage_id": "frontdoor-stage-1",
+                    "stage_goal": "goal",
+                    "completed_stage_summary": "summary",
+                    "rounds": [{"round_id": "frontdoor-stage-1:round-1", "text": "", "tools": tools}],
+                }
+            ],
+        }
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-1",
+            user_messages=["first"],
+            assistant_text="first reply",
+            compression_summary={},
+            canonical_summary=canonical_summary,
+        )
+
+        state = manager._read_review_state()
+        payload_text = state["sessions"]["web:shared"]["pending_turns"][0]["payload_text"]
+        cap = module._REVIEW_MAX_TOOL_RECORDS_PER_TURN
+        assert payload_text.count("tool=web_search") == cap
+        # Both error records survive the cap.
+        assert "out-3" in payload_text
+        assert "out-7" in payload_text
+        # Oldest successful records are dropped first.
+        assert "out-0" not in payload_text
+        assert "out-1" not in payload_text
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_review_tool_records_empty_id_fingerprint_dedup(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        canonical = _canonical_with_visible_tool(tool_call_id="", output_text="same-output")
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-1",
+            user_messages=["first"],
+            assistant_text="first reply",
+            compression_summary={},
+            canonical_summary=canonical,
+        )
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-2",
+            user_messages=["second"],
+            assistant_text="second reply",
+            compression_summary={},
+            canonical_summary=canonical,
+        )
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-3",
+            user_messages=["third"],
+            assistant_text="third reply",
+            compression_summary={},
+            canonical_summary=_canonical_with_visible_tool(tool_call_id="", output_text="changed-output"),
+        )
+
+        state = manager._read_review_state()
+        pending = state["sessions"]["web:shared"]["pending_turns"]
+        assert len(pending) == 3
+        assert "tool=web_search" in pending[0]["payload_text"]
+        assert "可见工具记录:" not in pending[1]["payload_text"]
+        assert "tool=web_search" in pending[2]["payload_text"]
+        assert all(key.startswith("fingerprint:") for key in state["sessions"]["web:shared"]["reported_tool_keys"])
     finally:
         manager.close()
 
