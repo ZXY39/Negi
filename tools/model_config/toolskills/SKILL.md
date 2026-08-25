@@ -32,5 +32,19 @@ Manage .g3ku/config.json model catalog, provider templates/drafts/bindings, and 
 - `enable_model`, `disable_model`
 - `set_scope_chain`
 
+## When changes take effect
+- Writes land in `.g3ku/config.json` immediately and refresh the loop runtime.
+- A new turn/session resolves the updated chain at turn start.
+- For the turn currently running, the runtime re-resolves the role chain at the
+  next model call: after `set_scope_chain`, the next assistant step already uses
+  the new chain, and capability checks tied to it (e.g. `content_open`
+  multimodal gate) follow the new chain too. You can switch, then retry the
+  gated operation in a follow-up step; do not batch the switch and the gated
+  call as parallel tool calls in one step.
+- An already-sent single provider request is never hot-swapped mid-request; a
+  chain change only rebuilds the next request.
+- If the switch is temporary, note the previous chain first and restore it with
+  a follow-up `set_scope_chain` once done.
+
 ## Usage
 Use `model_config` only when it is the most direct way to complete the task.

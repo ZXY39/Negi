@@ -22,7 +22,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
 from g3ku.agent.tools.base import Tool
-from g3ku.config.live_runtime import get_runtime_config
+from g3ku.config.live_runtime import get_runtime_config, peek_runtime_revision
 from g3ku.core.messages import UserInputMessage
 from g3ku.json_schema_utils import (
     attach_raw_parameters_schema,
@@ -1730,6 +1730,62 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
         except Exception:
             return False
+
+    def _frontdoor_runtime_config_revision(self) -> int:
+        """Current runtime config revision after an mtime-gated reload check."""
+        try:
+            _config, revision, _changed = get_runtime_config(force=False)
+            return int(revision or 0)
+        except Exception:
+            try:
+                return int(peek_runtime_revision() or 0)
+            except Exception:
+                return 0
+
+    def _rotate_frontdoor_model_refs_if_stale(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Re-resolve ``model_refs`` when the runtime config revision moved on.
+
+        Model-chain edits (``model_config`` tool, admin routes) rewrite the
+        config and refresh the loop runtime, but the in-flight turn still
+        carries the ``model_refs`` captured at ``prepare_turn``. Each
+        ``call_model`` iteration builds a fresh provider request, so
+        re-resolving at this boundary is a rebuild point, not a mid-request
+        hot swap of an already-sent provider request.
+
+        Rotation only runs when a ``model_refs_revision`` baseline exists and
+        differs from the current revision. Legacy state without the baseline
+        keeps its existing refs untouched.
+        """
+        recorded_revision = state.get("model_refs_revision")
+        if recorded_revision is None:
+            return state
+        try:
+            recorded = int(recorded_revision)
+        except (TypeError, ValueError):
+            return state
+        current_revision = self._frontdoor_runtime_config_revision()
+        if recorded == current_revision:
+            return state
+        try:
+            new_refs = list(self._resolve_ceo_model_refs())
+        except Exception:
+            logger.warning(
+                "frontdoor model refs rotation skipped; resolve failed session={}",
+                str(state.get("session_key") or "").strip(),
+            )
+            return state
+        if not new_refs:
+            return state
+        rotated = dict(state)
+        rotated["model_refs"] = list(new_refs)
+        rotated["model_refs_revision"] = self._frontdoor_runtime_config_revision()
+        logger.info(
+            "frontdoor model refs rotated revision {} -> {} session={}",
+            recorded,
+            rotated["model_refs_revision"],
+            str(state.get("session_key") or "").strip(),
+        )
+        return rotated
 
     @staticmethod
     def _frontdoor_tool_schema_names(tool_schemas: list[dict[str, Any]] | None) -> list[str]:
@@ -5032,6 +5088,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             self._internal_prompt_seed_messages(metadata=metadata)
         )
         model_refs = self._resolve_ceo_model_refs()
+        model_refs_revision = self._frontdoor_runtime_config_revision()
         current_turn_user_content = (
             ""
             if cron_internal
@@ -5519,6 +5576,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "heartbeat_internal": heartbeat_internal,
             "cron_internal": cron_internal,
             "model_refs": model_refs,
+            "model_refs_revision": model_refs_revision,
             "stable_messages": self._checkpoint_safe_stable_messages(stable_messages),
             "dynamic_appendix_messages": persisted_dynamic_appendix_messages,
             "frontdoor_live_request_messages": list(live_request_messages),
@@ -5620,6 +5678,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             raise RuntimeError("CEO frontdoor exceeded maximum iterations")
 
         state_for_request = dict(state or {})
+        # Mid-turn model-chain switches (model_config tool / admin routes) only
+        # rewrite config; the turn state still carries prepare_turn's model_refs.
+        # Re-resolve at this iteration boundary so the next provider request and
+        # the downstream tool runtime context (multimodal gate) follow the new chain.
+        state_for_request = self._rotate_frontdoor_model_refs_if_stale(state_for_request)
         runtime_session = getattr(getattr(runtime, "context", None), "session", None)
         assistant_text_delta_handler = None
         if runtime_session is not None:
@@ -5897,6 +5960,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         raise
                     if self._refresh_runtime_config_for_retry_invalidation():
                         state_for_request["model_refs"] = list(self._resolve_ceo_model_refs())
+                        state_for_request["model_refs_revision"] = self._frontdoor_runtime_config_revision()
                         restart_with_refreshed_runtime = True
                         break
                     provider_retry_count += 1
@@ -5910,6 +5974,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 if self._is_empty_model_response(response_view):
                     if self._refresh_runtime_config_for_retry_invalidation():
                         state_for_request["model_refs"] = list(self._resolve_ceo_model_refs())
+                        state_for_request["model_refs_revision"] = self._frontdoor_runtime_config_revision()
                         restart_with_refreshed_runtime = True
                         break
                     empty_response_retry_count += 1
@@ -5954,6 +6019,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "frontdoor_live_request_messages": [],
             "pending_content_open_image_payloads": [],
             "model_refs": list(state_for_request.get("model_refs") or []),
+            "model_refs_revision": state_for_request.get("model_refs_revision"),
             "provider_tool_names": list(state_for_request.get("provider_tool_names") or []),
             "pending_provider_tool_names": list(
                 state_for_request.get("pending_provider_tool_names") or []

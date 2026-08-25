@@ -93,6 +93,8 @@ class CeoPersistentState(TypedDict, total=False):
 
     model_refs: list[str]
 
+    model_refs_revision: int
+
     prompt_cache_key: str
 
     prompt_cache_diagnostics: dict[str, Any]

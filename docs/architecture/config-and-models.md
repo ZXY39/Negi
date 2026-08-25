@@ -111,17 +111,17 @@
 - 只有真正改写指纹树之外的记忆相关设置时才显式传 `True`：embedding/rerank 绑定的原子保存与回滚、`update_llm_memory_binding`、`run_llm_migration`、`model_config.migrate_legacy`，以及 `update_llm_config` 命中的是绑定引用的记录时。
 - 原因：强制重置会关闭进程共享的 SQLite checkpointer；若在途回合仍持有它，最终 checkpoint 写入会报 `Cannot operate on a closed database`。即便有活跃会话守卫（见 `runtime-overview.md`「Memory Runtime Reset Guard」），也不应对纯模型变更强制重置。
 
-还要额外记住一个新的运行时边界：
+还要额外记住一个运行时边界——模型链变更何时作用于在途回合：
 
-- 配置刷新仍然不会把一个“已经发出去的单次 provider 请求”中途热切换到新模型。
-- 但对于已经进入 provider-failure retry 或 empty-response retry 的当前轮次，CEO/frontdoor 与节点运行时都会在下一次重试前检查 runtime revision。
-- Memory queue 内部的 memory agent 也遵循同样的 revision 边界，但它看的不是 CEO/node 的 provider retry，而是 memory 自己的同批次 validation/repair 重试点；普通 review window 不经过单独的 `assess -> apply` 交接。
-- 如果 revision 已变化，旧模型链的重试会失效，当前轮会用新的 model refs 重新开始，而不是继续无限重试旧链。
+- 配置刷新不会把一个“已经发出去的单次 provider 请求”中途热切换到新模型；切换只作用于边界处重建的下一个请求。
+- CEO/frontdoor 在每次 `call_model` 迭代边界（含 provider-failure retry / empty-response retry 边界）对比 runtime revision：revision 变化时重新解析当前角色模型链并写回轮状态，下一次 provider 请求、上下文窗口估算与绑定模型链的能力判定（如 `content_open` 的多模态闸门）都跟随新链。轮状态用 `model_refs_revision` 记录解析时的 revision，作为下一次边界对比的基线。
+- 因此 `model_config set_scope_chain` 之后，同一轮的下一次模型调用即用新链；在同一步把切链与被门控的工具调用作为并行工具调用发出时，闸门仍按切换前的链判定。
+- Main runtime 节点在 provider retry 边界检查 runtime revision；memory queue 内部 agent 看的不是 CEO/node 的 provider retry，而是 memory 自己的同批次 validation/repair 重试点，普通 review window 不经过单独的 `assess -> apply` 交接。
 
-维护上要把这理解成“重试边界上的重建”，而不是“请求中途热切模型”。如果用户反馈“改完模型链后旧重试还在跑”，重点检查：
+维护上把这理解成“迭代/重试边界上的重建”，而不是“请求中途热切模型”。如果用户反馈“改完模型链后旧模型还在用”，重点检查：
 
-1. 对应进程是否真的执行到了 runtime refresh
-2. 当前问题是否发生在 retry 边界，而不是单次 still-in-flight 的 provider request 内
+1. 对应进程是否真的执行到了 runtime refresh（日志 `Loop runtime config refreshed`）
+2. 问题是否发生在单次 still-in-flight 的 provider request 内（该请求不可热切），还是跨过后续迭代边界后仍未换链
 3. 当前运行路径是 CEO/frontdoor、main runtime worker/node，还是 memory queue 内部 worker
 
 ## 5. 模型系统不是只靠 `config.json`
