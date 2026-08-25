@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -898,7 +899,7 @@ async def test_run_due_batch_once_drops_request_already_recorded_in_processed_lo
                     "batch_id": "write_done_1",
                     "op": "write",
                     "source_op": "write",
-                    "processed_at": "2026-04-18T10:00:04+08:00",
+                    "processed_at": datetime.now().astimezone().isoformat(),
                     "request_ids": ["write_1"],
                     "request_count": 1,
                 },
