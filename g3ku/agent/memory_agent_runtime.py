@@ -1377,197 +1377,6 @@ class MemoryManager:
             return None
         return MemoryBatch(op=head.op, items=items)
 
-    async def enqueue_write_request(
-        self,
-        *,
-        session_key: str,
-        decision_source: str,
-        payload_text: str,
-        trigger_source: str,
-    ) -> dict[str, Any]:
-        classification = self.classify_memory_payload(
-            decision_source=decision_source,
-            payload_text=payload_text,
-            trigger_source=trigger_source,
-            op="write",
-        )
-        if not classification.enqueue:
-            return {
-                "ok": True,
-                "status": "ignored",
-                "reason": classification.reason,
-                "decision_source": classification.decision_source,
-            }
-        request = MemoryQueueRequest(
-            op="write",
-            decision_source=self._normalize_decision_source(classification.decision_source),
-            payload_text=classification.normalized_payload_text,
-            created_at=self._now_iso(),
-            session_key=str(session_key or "").strip(),
-            trigger_source=str(trigger_source or "").strip(),
-            request_id=self._request_id("write"),
-        )
-        await self._append_queue_request(request)
-        return {"ok": True, "request_id": request.request_id, "status": "queued"}
-
-    async def enqueue_delete_request(
-        self,
-        *,
-        session_key: str,
-        decision_source: str,
-        payload_text: str,
-        trigger_source: str,
-    ) -> dict[str, Any]:
-        classification = self.classify_memory_payload(
-            decision_source=decision_source,
-            payload_text=payload_text,
-            trigger_source=trigger_source,
-            op="delete",
-        )
-        if not classification.enqueue:
-            return {
-                "ok": True,
-                "status": "ignored",
-                "reason": classification.reason,
-                "decision_source": classification.decision_source,
-            }
-        request = MemoryQueueRequest(
-            op="delete",
-            decision_source=self._normalize_decision_source(classification.decision_source),
-            payload_text=classification.normalized_payload_text,
-            created_at=self._now_iso(),
-            session_key=str(session_key or "").strip(),
-            trigger_source=str(trigger_source or "").strip(),
-            request_id=self._request_id("delete"),
-        )
-        await self._append_queue_request(request)
-        return {"ok": True, "request_id": request.request_id, "status": "queued"}
-
-    async def enqueue_autonomous_review(
-        self,
-        *,
-        session_key: str,
-        channel: str,
-        chat_id: str,
-        user_messages: list[str],
-        assistant_text: str,
-        turn_id: str,
-    ) -> dict[str, Any]:
-        decision = self.should_enqueue_autonomous_review(
-            session_key=session_key,
-            turn_id=turn_id,
-            user_messages=user_messages,
-            assistant_text=assistant_text,
-        )
-        if not decision.enqueue:
-            return {
-                "ok": True,
-                "status": "ignored",
-                "reason": decision.reason,
-                "decision_source": decision.decision_source,
-            }
-        return await self.enqueue_write_request(
-            session_key=session_key,
-            decision_source=decision.decision_source,
-            payload_text=decision.payload_text,
-            trigger_source=f"autonomous_review:{str(turn_id or '').strip()}",
-        )
-
-    async def enqueue_pre_compression_flush(
-        self,
-        *,
-        session_key: str,
-        channel: str,
-        chat_id: str,
-        context_messages: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        payload_text = json.dumps(list(context_messages or []), ensure_ascii=False)
-        return await self.enqueue_write_request(
-            session_key=session_key,
-            decision_source="self",
-            payload_text=payload_text,
-            trigger_source="pre_compression_flush",
-        )
-
-    async def enqueue_session_boundary_flush(
-        self,
-        *,
-        session_key: str,
-        channel: str,
-        chat_id: str,
-        trigger_source: str,
-    ) -> dict[str, Any]:
-        return await self.enqueue_write_request(
-            session_key=session_key,
-            decision_source="self",
-            payload_text="session boundary flush",
-            trigger_source=str(trigger_source or "").strip() or "session_boundary_flush",
-        )
-
-    async def run_due_batch_once(self, *, now_iso: str | None = None) -> dict[str, Any]:
-        effective_now = str(now_iso or self._now_iso()).strip()
-        batch = await self.collect_due_batch(now_iso=effective_now)
-        if batch is None:
-            return {"ok": True, "status": "idle", "processed": 0}
-        if not batch.items:
-            return {"ok": True, "status": "idle", "processed": 0}
-        if str(batch.items[0].status or "pending").strip() != "processing":
-            self._mark_batch_processing(batch.items, effective_now)
-
-        try:
-            runtime_config, _revision, _changed = get_runtime_config()
-        except Exception as exc:
-            return self._mark_batch_error(batch, effective_now, str(exc or "memory runtime config unavailable"))
-
-        model_chain = self._memory_model_chain(runtime_config)
-        if not model_chain:
-            return self._mark_batch_blocked(batch, effective_now, "memory role not configured")
-
-        try:
-            result = await self._run_memory_agent_batch(
-                batch=batch,
-                runtime_config=runtime_config,
-                model_chain=model_chain,
-            )
-        except Exception as exc:
-            logger.warning("memory batch failed: {}", exc)
-            return self._mark_batch_error(batch, effective_now, str(exc or "memory batch failed"))
-
-        self._commit_validated_write(result["validated"])
-        self._drop_request_ids({item.request_id for item in batch.items})
-        processed_at = self._now_iso()
-        processed_payload = {
-            "batch_id": self._request_id(batch.op),
-            "op": batch.op,
-            "processed_at": processed_at,
-            "request_ids": [item.request_id for item in batch.items],
-            "request_count": len(batch.items),
-            "decision_sources": [item.decision_source for item in batch.items],
-            "payload_texts": [item.payload_text for item in batch.items],
-            "usage": {
-                "input_tokens": int(result["usage"]["input_tokens"]),
-                "output_tokens": int(result["usage"]["output_tokens"]),
-                "cache_read_tokens": int(result["usage"]["cache_read_tokens"]),
-            },
-            "model_chain": list(model_chain),
-            "attempt_count": int(result["attempt_count"]),
-            "memory_chars_after": int(result["validated"].memory_chars_after),
-            "note_refs_written": list(result["validated"].note_refs_written),
-            "document_preview": result["validated"].document_preview,
-        }
-        self._append_ops_payload(processed_payload)
-        return {
-            "ok": True,
-            "status": "applied",
-            "op": batch.op,
-            "processed": len(batch.items),
-            "request_ids": [item.request_id for item in batch.items],
-            "attempt_count": int(result["attempt_count"]),
-            "usage": dict(processed_payload["usage"]),
-            "model_chain": list(model_chain),
-            "processed_at": processed_at,
-        }
-
     def load_note(self, ref: str) -> str:
         path = self.notes_dir / note_file_name(ref)
         if not path.exists():
@@ -1989,42 +1798,6 @@ class MemoryManager:
         except Exception:
             return []
 
-    async def _run_memory_agent_batch(
-        self,
-        *,
-        batch: MemoryBatch,
-        runtime_config: Any,
-        model_chain: list[str],
-    ) -> dict[str, Any]:
-        before_text = self.snapshot_text()
-        total_usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
-        total_attempts = 1 + max(int(getattr(self.config.agent, "repair_attempt_limit", 1) or 0), 0)
-        last_error = "memory agent did not stage a document"
-        for attempt_index in range(total_attempts):
-            repair_reason = last_error if attempt_index > 0 else ""
-            attempt = await self._run_memory_agent_attempt(
-                batch=batch,
-                runtime_config=runtime_config,
-                before_text=before_text,
-                repair_reason=repair_reason,
-            )
-            self._merge_usage(total_usage, attempt.usage)
-            try:
-                validated = self._validate_candidate_state(
-                    batch=batch,
-                    before_text=before_text,
-                    session=attempt.session,
-                )
-                return {
-                    "validated": validated,
-                    "usage": total_usage,
-                    "attempt_count": attempt_index + 1,
-                }
-            except _MemoryAgentValidationError as exc:
-                last_error = str(exc or "memory agent output invalid").strip()
-                continue
-        raise _MemoryAgentRuntimeError(last_error)
-
     async def _run_memory_agent_attempt(
         self,
         *,
@@ -2088,76 +1861,8 @@ class MemoryManager:
             request_artifacts=request_artifacts,
         )
 
-    def _memory_agent_tools(self, session: _MemoryToolSession):
-        @tool("memory_read_note")
-        def memory_read_note(ref: str) -> str:
-            """Read one existing note by ref without the .md suffix."""
-
-            return session.read_note(ref)
-
-        @tool("memory_apply_batch")
-        def memory_apply_batch(
-            adds: list[dict[str, Any]] | None = None,
-            rewrites: list[dict[str, Any]] | None = None,
-            deletes: list[str] | None = None,
-            note_upserts: dict[str, str] | None = None,
-            inspired_memory_ids: list[str] | None = None,
-            noop_reason: str | None = None,
-        ) -> dict[str, Any]:
-            """Stage one complete memory mutation batch."""
-
-            return session.apply_batch(
-                adds=adds,
-                rewrites=rewrites,
-                deletes=deletes,
-                note_upserts=note_upserts,
-                inspired_memory_ids=inspired_memory_ids,
-                noop_reason=noop_reason,
-            )
-
-        return [memory_read_note, memory_apply_batch]
-
     def _memory_agent_system_prompt(self) -> str:
         return load_prompt("memory_agent.md").strip()
-
-    def _memory_agent_user_prompt(
-        self,
-        *,
-        batch: MemoryBatch,
-        snapshot_text: str,
-        repair_reason: str,
-    ) -> str:
-        note_index = sorted(path.stem for path in self.notes_dir.glob("*.md"))
-        strategy_snapshot = self._strategy.prompt_strategy_snapshot(batch=batch, snapshot_text=snapshot_text)
-        requests = [
-            {
-                "request_id": item.request_id,
-                "op": item.op,
-                "decision_source": item.decision_source,
-                "payload_text": item.payload_text,
-                "created_at": item.created_at,
-                "trigger_source": item.trigger_source,
-                "session_key": item.session_key,
-            }
-            for item in batch.items
-        ]
-        repair_block = f"\nPrevious attempt was invalid: {repair_reason}\nRepair it.\n" if repair_reason else ""
-        return (
-            f"Target MEMORY.md path: {self.memory_file}\n"
-            f"Target notes directory: {self.notes_dir}\n"
-            f"Existing note refs: {json.dumps(note_index, ensure_ascii=False)}\n"
-            f"Current frozen MEMORY.md snapshot:\n{snapshot_text or '(empty)'}\n\n"
-            f"Current batch op: {batch.op}\n"
-            f"Batch requests (keep FIFO intent):\n{json.dumps(requests, ensure_ascii=False, indent=2)}\n"
-            f"Memory strategy v2 snapshot:\n{json.dumps(strategy_snapshot, ensure_ascii=False, indent=2)}\n"
-            f"{repair_block}"
-        )
-
-    def _memory_agent_system_prompt(self) -> str:
-        return load_prompt("memory_agent.md").strip()
-
-    def _memory_assessor_system_prompt(self) -> str:
-        return load_prompt("memory_assessor.md").strip()
 
     @staticmethod
     def _response_text(response: Any) -> str:
@@ -2200,18 +1905,6 @@ class MemoryManager:
         return normalized
 
     @staticmethod
-    async def _execute_memory_tool(tools: list[Any], tool_call: dict[str, Any]) -> dict[str, Any]:
-        name = str(tool_call.get("name") or "").strip()
-        args = dict(tool_call.get("args") or {})
-        tool_map = {str(getattr(item, "name", "") or ""): item for item in list(tools or [])}
-        target = tool_map.get(name)
-        if target is None:
-            raise _MemoryAgentRuntimeError(f"unknown memory tool: {name}")
-        result = target.invoke(args)
-        if asyncio.iscoroutine(result):
-            result = await result
-        return {"ok": True, "tool": name, "result": result}
-
     @staticmethod
     def _extract_usage(response: Any) -> dict[str, int]:
         total = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
@@ -2236,19 +1929,6 @@ class MemoryManager:
     def _merge_usage(target: dict[str, int], delta: dict[str, int]) -> None:
         for key in ("input_tokens", "output_tokens", "cache_read_tokens"):
             target[key] = int(target.get(key, 0) or 0) + int(delta.get(key, 0) or 0)
-
-    def _validate_candidate_state(
-        self,
-        *,
-        batch: MemoryBatch,
-        before_text: str,
-        session: _MemoryToolSession,
-    ) -> _MemoryValidatedWrite:
-        return self._build_validated_write_from_apply_batch(
-            before_text=before_text,
-            session=session,
-            batch=batch,
-        )
 
     @staticmethod
     def _normalize_document_text(text: str) -> str:
@@ -2786,31 +2466,6 @@ class MemoryManager:
         return payload
 
     @staticmethod
-    def _review_turn_payload(
-        *,
-        turn_id: str,
-        user_messages: list[str],
-        assistant_text: str,
-        compression_summary: dict[str, Any] | None,
-        canonical_summary: dict[str, Any] | None,
-    ) -> str:
-        parts = [f"[turn_id] {str(turn_id or '').strip() or '(unknown)'}"]
-        normalized_user_messages = [str(item or "").strip() for item in list(user_messages or []) if str(item or "").strip()]
-        if normalized_user_messages:
-            parts.append("用户消息：")
-            parts.extend(f"- {item}" for item in normalized_user_messages)
-        assistant = str(assistant_text or "").strip()
-        if assistant:
-            parts.append("助手回复：")
-            parts.append(assistant)
-        if isinstance(compression_summary, dict) and compression_summary:
-            parts.append("压缩摘要：")
-            parts.append(json.dumps(compression_summary, ensure_ascii=False, sort_keys=True))
-        if isinstance(canonical_summary, dict) and canonical_summary:
-            parts.append("阶段摘要：")
-            parts.append(json.dumps(canonical_summary, ensure_ascii=False, sort_keys=True))
-        return "\n".join(str(item) for item in parts if str(item).strip()).strip()
-
     @staticmethod
     def _review_window_payload(*, session_key: str, pending_turns: list[dict[str, Any]]) -> str:
         sections = [f"[session_key] {str(session_key or '').strip()}"]
@@ -3152,14 +2807,6 @@ class MemoryManager:
             f"{repair_block}"
         )
 
-    def _memory_assessor_user_prompt(self, *, batch: MemoryBatch) -> str:
-        windows = [str(item.payload_text or "").strip() for item in batch.items if str(item.payload_text or "").strip()]
-        return (
-            "以下是待评估的对话窗口内容。\n"
-            "请只判断是否存在值得进入长期记忆的高价值内容。\n\n"
-            f"{chr(10).join(windows) or '(empty)'}\n"
-        )
-
     @staticmethod
     async def _execute_memory_tool(tools: list[Any], tool_call: dict[str, Any]) -> dict[str, Any]:
         name = str(tool_call.get("name") or "").strip()
@@ -3175,80 +2822,6 @@ class MemoryManager:
             return {"ok": True, "tool": name, "result": result}
         except Exception as exc:
             return {"ok": False, "tool": name, "error": str(exc or "memory tool failed").strip()}
-
-    async def _run_memory_assessor_batch(
-        self,
-        *,
-        batch: MemoryBatch,
-        runtime_config: Any,
-        model_chain: list[str],
-        queue_request_ids: list[str],
-    ) -> dict[str, Any]:
-        result_holder = {"content": None}
-
-        @tool("memory_assessment_result")
-        def memory_assessment_result(content: str) -> str:
-            """Record the assessor decision as either null or one refined memory text block."""
-
-            normalized = str(content or "").strip()
-            if not normalized:
-                raise ValueError("content must not be empty")
-            result_holder["content"] = normalized
-            return "assessment recorded"
-
-        model = build_chat_model(runtime_config, role="memory").bind_tools([memory_assessment_result])
-        messages: list[Any] = [
-            SystemMessage(content=self._memory_assessor_system_prompt()),
-            HumanMessage(content=self._memory_assessor_user_prompt(batch=batch)),
-        ]
-        usage_total = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
-        request_artifacts: list[dict[str, Any]] = []
-        round_limit = int(runtime_config.get_role_max_iterations("memory") or 6)
-        round_limit = max(round_limit, 1)
-        for _ in range(round_limit):
-            request_messages = self._memory_request_messages(messages)
-            response = await model.ainvoke(messages)
-            self._merge_usage(usage_total, self._extract_usage(response))
-            artifact = self._persist_memory_request_artifact(
-                phase="assessor",
-                batch_op=batch.op,
-                queue_request_ids=queue_request_ids,
-                model_chain=model_chain,
-                request_messages=request_messages,
-                response=response,
-            )
-            if artifact is not None:
-                request_artifacts.append(artifact)
-            final_text = self._response_text(response)
-            tool_calls = self._normalize_tool_calls(response)
-            if not tool_calls:
-                break
-            messages.append(AIMessage(content=final_text, tool_calls=tool_calls))
-            for tool_call in tool_calls:
-                result = await self._execute_memory_tool([memory_assessment_result], tool_call)
-                messages.append(
-                    ToolMessage(
-                        content=json.dumps(result, ensure_ascii=False),
-                        tool_call_id=str(tool_call.get("id") or ""),
-                        name=str(tool_call.get("name") or ""),
-                    )
-                )
-            if result_holder["content"] is not None:
-                break
-        if result_holder["content"] is None:
-            return {
-                "assessed_text": None,
-                "usage": usage_total,
-                "request_artifacts": request_artifacts,
-                "discard_reason": "rejected",
-                "error": "memory assessor must call memory_assessment_result",
-            }
-        assessed_text = str(result_holder["content"] or "").strip()
-        return {
-            "assessed_text": None if assessed_text.lower() == "null" else assessed_text,
-            "usage": usage_total,
-            "request_artifacts": request_artifacts,
-        }
 
     def _build_validated_write_from_apply_batch(
         self,
