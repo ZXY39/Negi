@@ -2553,38 +2553,109 @@ class MemoryManager:
         return [record for _index, record in selected]
 
     @staticmethod
-    def _render_review_tool_records(records: list[dict[str, Any]]) -> list[str]:
-        lines: list[str] = []
+    def _merge_review_stage_payload(
+        *,
+        canonical_summary: dict[str, Any] | None,
+        stage_delta: dict[str, Any] | None,
+        tool_records: list[dict[str, Any]] | None,
+    ) -> dict[str, Any] | None:
+        """Nest new tool records under their stages, mirroring the on-screen order."""
+
+        records_by_stage: dict[str, list[dict[str, Any]]] = {}
         rounds_with_text: set[str] = set()
-        for record in list(records or []):
-            stage_id = str(record.get("stage_id") or "").strip() or "(unknown-stage)"
-            tool_name = str(record.get("tool_name") or "").strip() or "tool"
-            status = str(record.get("status") or "").strip() or "unknown"
-            lines.append(f"- [{stage_id}] tool={tool_name} status={status}")
+        for record in list(tool_records or []):
+            entry: dict[str, Any] = {
+                "tool_name": str(record.get("tool_name") or "").strip() or "tool",
+                "status": str(record.get("status") or "").strip() or "unknown",
+            }
             arguments_text = str(record.get("arguments_text") or "").strip()
             if arguments_text:
-                lines.append(f"  args: {arguments_text}")
+                entry["args"] = arguments_text
             preview_text = MemoryManager._inline_preview_text(
                 record.get("output_preview_text"),
                 max_chars=_REVIEW_TOOL_PREVIEW_MAX_CHARS,
             )
             if preview_text:
-                lines.append(f"  output_preview: {preview_text}")
+                entry["output_preview"] = preview_text
             output_text = str(record.get("output_text") or "").strip()
             if output_text:
-                truncated_output = MemoryManager._inline_preview_text(
+                entry["output_full"] = MemoryManager._inline_preview_text(
                     output_text,
                     max_chars=_REVIEW_TOOL_OUTPUT_MAX_CHARS,
                 )
-                lines.append(f"  output_full: {truncated_output}")
             round_key = str(record.get("round_id") or "").strip()
             round_text = str(record.get("round_text") or "").strip()
             # Round narration is user-visible as-is and is intentionally not truncated.
             if round_text and (not round_key or round_key not in rounds_with_text):
                 if round_key:
                     rounds_with_text.add(round_key)
-                lines.append(f"  中途输出: {round_text}")
-        return lines
+                entry["中途输出"] = round_text
+            stage_id = str(record.get("stage_id") or "").strip() or "(unknown-stage)"
+            records_by_stage.setdefault(stage_id, []).append(entry)
+
+        delta_stages: dict[str, dict[str, Any]] = {}
+        for raw_stage in list((stage_delta or {}).get("stages") or []):
+            if not isinstance(raw_stage, dict):
+                continue
+            stage_id = str(raw_stage.get("stage_id") or "").strip()
+            if stage_id:
+                delta_stages[stage_id] = raw_stage
+
+        merged: list[dict[str, Any]] = []
+        emitted_stage_ids: set[str] = set()
+
+        def _build_stage_entry(stage_id: str) -> dict[str, Any] | None:
+            delta_entry = delta_stages.get(stage_id)
+            stage_records = records_by_stage.pop(stage_id, None)
+            if delta_entry is None and not stage_records:
+                return None
+            stage_entry: dict[str, Any] = {"stage_id": stage_id}
+            stage_goal = str((delta_entry or {}).get("stage_goal") or "").strip()
+            if stage_goal:
+                stage_entry["stage_goal"] = stage_goal
+            if stage_records:
+                stage_entry["tool_records"] = stage_records
+            completed_summary = str((delta_entry or {}).get("completed_stage_summary") or "").strip()
+            if completed_summary:
+                stage_entry["completed_stage_summary"] = completed_summary
+            return stage_entry
+
+        canonical_stages = (
+            list(canonical_summary.get("stages") or [])
+            if isinstance(canonical_summary, dict)
+            else []
+        )
+        for raw_stage in canonical_stages:
+            if not isinstance(raw_stage, dict):
+                continue
+            stage_id = str(raw_stage.get("stage_id") or "").strip()
+            if not stage_id or stage_id in emitted_stage_ids:
+                continue
+            stage_entry = _build_stage_entry(stage_id)
+            if stage_entry is None:
+                continue
+            emitted_stage_ids.add(stage_id)
+            merged.append(stage_entry)
+        for stage_id in list(records_by_stage.keys()) + [
+            stage_id for stage_id in delta_stages if stage_id not in emitted_stage_ids
+        ]:
+            if stage_id in emitted_stage_ids:
+                continue
+            stage_entry = _build_stage_entry(stage_id)
+            if stage_entry is None:
+                continue
+            emitted_stage_ids.add(stage_id)
+            merged.append(stage_entry)
+
+        active_stage_id = str((stage_delta or {}).get("active_stage_id") or "").strip()
+        if not merged and not active_stage_id:
+            return None
+        payload: dict[str, Any] = {}
+        if active_stage_id:
+            payload["active_stage_id"] = active_stage_id
+        if merged:
+            payload["stages"] = merged
+        return payload or None
 
     @staticmethod
     def _review_window_payload(*, session_key: str, pending_turns: list[dict[str, Any]]) -> str:
@@ -2605,6 +2676,7 @@ class MemoryManager:
         assistant_text: str,
         compression_summary: dict[str, Any] | None,
         canonical_summary: dict[str, Any] | None,
+        stage_delta: dict[str, Any] | None = None,
         tool_records: list[dict[str, Any]] | None = None,
     ) -> str:
         _ = compression_summary
@@ -2617,18 +2689,18 @@ class MemoryManager:
         if normalized_user_messages:
             parts.append("user_messages:")
             parts.extend(f"- {item}" for item in normalized_user_messages)
+        stage_payload = MemoryManager._merge_review_stage_payload(
+            canonical_summary=canonical_summary,
+            stage_delta=stage_delta,
+            tool_records=tool_records,
+        )
+        if isinstance(stage_payload, dict) and stage_payload:
+            parts.append("stages:")
+            parts.append(json.dumps(stage_payload, ensure_ascii=False, indent=2))
         assistant = str(assistant_text or "").strip()
         if assistant:
             parts.append("assistant_text:")
             parts.append(assistant)
-        rendered_tool_records = MemoryManager._render_review_tool_records(tool_records)
-        if rendered_tool_records:
-            parts.append("可见工具记录:")
-            parts.extend(rendered_tool_records)
-        compact_stage_summary = MemoryManager._compact_review_stage_summary(canonical_summary)
-        if isinstance(compact_stage_summary, dict) and compact_stage_summary:
-            parts.append("stage_summary:")
-            parts.append(json.dumps(compact_stage_summary, ensure_ascii=False, sort_keys=True))
         return "\n".join(str(item) for item in parts if str(item).strip()).strip()
 
     async def record_turn_for_review(
@@ -2680,7 +2752,8 @@ class MemoryManager:
             user_messages=user_messages,
             assistant_text=assistant_text,
             compression_summary=compression_summary,
-            canonical_summary=stage_summary_delta,
+            canonical_summary=canonical_summary,
+            stage_delta=stage_summary_delta,
             tool_records=selected_tool_records,
         )
         if not payload_text:

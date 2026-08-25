@@ -1790,9 +1790,9 @@ async def test_v2_review_turn_payload_renders_visible_tool_records_with_limits(t
         assert "collect candidate pool" in payload_text
         assert "verified current ranking methodology" in payload_text
         # Visible tool record fields are present.
-        assert "可见工具记录:" in payload_text
-        assert "tool=web_fetch" in payload_text
-        assert "status=error" in payload_text
+        assert "stages:" in payload_text
+        assert '"tool_name": "web_fetch"' in payload_text
+        assert '"status": "error"' in payload_text
         assert "url=https://example.com" in payload_text
         # Full output is truncated: head appears, tail and full text do not.
         assert "HUGE_TOOL_OUTPUT_HEAD_MARKER" in payload_text
@@ -2056,9 +2056,9 @@ async def test_v2_review_window_reports_new_tool_records_once_per_window(tmp_pat
         state = manager._read_review_state()
         pending = state["sessions"]["web:shared"]["pending_turns"]
         assert len(pending) == 3
-        assert "tool=web_search" in pending[0]["payload_text"]
-        assert "可见工具记录:" not in pending[1]["payload_text"]
-        assert "tool=web_search" in pending[2]["payload_text"]
+        assert '"tool_name": "web_search"' in pending[0]["payload_text"]
+        assert '"tool_name": "web_search"' not in pending[1]["payload_text"]
+        assert '"tool_name": "web_search"' in pending[2]["payload_text"]
     finally:
         manager.close()
 
@@ -2104,8 +2104,8 @@ async def test_v2_review_tool_record_cursor_survives_flush(tmp_path: Path) -> No
         state = manager._read_review_state()
         pending = state["sessions"]["web:shared"]["pending_turns"]
         assert len(pending) == 2
-        assert "可见工具记录:" not in pending[0]["payload_text"]
-        assert "tool=web_search" in pending[1]["payload_text"]
+        assert '"tool_name": "web_search"' not in pending[0]["payload_text"]
+        assert '"tool_name": "web_search"' in pending[1]["payload_text"]
     finally:
         manager.close()
 
@@ -2149,7 +2149,7 @@ async def test_v2_review_tool_records_per_turn_cap_prefers_errors(tmp_path: Path
         state = manager._read_review_state()
         payload_text = state["sessions"]["web:shared"]["pending_turns"][0]["payload_text"]
         cap = module._REVIEW_MAX_TOOL_RECORDS_PER_TURN
-        assert payload_text.count("tool=web_search") == cap
+        assert payload_text.count('"tool_name": "web_search"') == cap
         # Both error records survive the cap.
         assert "out-3" in payload_text
         assert "out-7" in payload_text
@@ -2194,9 +2194,9 @@ async def test_v2_review_tool_records_empty_id_fingerprint_dedup(tmp_path: Path)
         state = manager._read_review_state()
         pending = state["sessions"]["web:shared"]["pending_turns"]
         assert len(pending) == 3
-        assert "tool=web_search" in pending[0]["payload_text"]
-        assert "可见工具记录:" not in pending[1]["payload_text"]
-        assert "tool=web_search" in pending[2]["payload_text"]
+        assert '"tool_name": "web_search"' in pending[0]["payload_text"]
+        assert '"tool_name": "web_search"' not in pending[1]["payload_text"]
+        assert '"tool_name": "web_search"' in pending[2]["payload_text"]
         assert all(key.startswith("fingerprint:") for key in state["sessions"]["web:shared"]["reported_tool_keys"])
     finally:
         manager.close()
