@@ -8410,7 +8410,10 @@ async def test_run_node_appends_notice_delivered_after_first_model_response_befo
         )
         assert note_count == 1
         assert contract_count == 1
-        assert str(second_messages[-1].get("content") or "").startswith("## Runtime Tool Contract")
+        # 尾部顺序：契约在前、当轮 turn-only 阶段提示压尾（末位是 user 回合提示，
+        # 契约不再占据末位，避免被模型当作"上一条发言"回显）。
+        assert str(second_messages[-1].get("content") or "").startswith("System note for this turn only:")
+        assert str(second_messages[-2].get("content") or "").startswith("## Runtime Tool Contract")
 
         notice_indexes = [
             index

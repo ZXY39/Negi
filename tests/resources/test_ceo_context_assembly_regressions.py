@@ -1566,6 +1566,50 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
     assert "rbac_visible_skill_ids" not in payload
 
 
+def test_frontdoor_contract_detection_ignores_model_echo_declaring_tool_calls() -> None:
+    # 模型把契约抬头复读进自己携带工具调用的回复时，不得被当成注入契约剥离，
+    # 否则该回合只剩孤儿工具结果。
+    echoed_tool_turn = {
+        "role": "assistant",
+        "content": (
+            "## Runtime Tool Contract\n"
+            "kind: frontdoor_runtime_tool_contract\n"
+            "callable_tools: `filesystem_write`"
+        ),
+        "tool_calls": [
+            {
+                "id": "call_echo_frontdoor",
+                "type": "function",
+                "function": {"name": "filesystem_write", "arguments": "{}"},
+            }
+        ],
+    }
+
+    assert is_frontdoor_tool_contract_message(echoed_tool_turn) is False
+    assert frontdoor_tool_contract_payload_from_message(echoed_tool_turn) is None
+
+    json_echo_turn = {
+        "role": "assistant",
+        "content": json.dumps(
+            {"message_type": "frontdoor_runtime_tool_contract", "callable_tool_names": ["filesystem_write"]},
+            ensure_ascii=False,
+        ),
+        "tool_calls": [
+            {"id": "call_json_echo", "type": "function", "function": {"name": "filesystem_write", "arguments": "{}"}}
+        ],
+    }
+    assert is_frontdoor_tool_contract_message(json_echo_turn) is False
+    assert frontdoor_tool_contract_payload_from_message(json_echo_turn) is None
+
+    # 无工具调用的真契约（含 legacy user + dict content 形态）识别不变。
+    assert is_frontdoor_tool_contract_message(
+        {"role": "assistant", "content": "## Runtime Tool Contract\nkind: frontdoor_runtime_tool_contract"}
+    )
+    assert is_frontdoor_tool_contract_message(
+        {"role": "user", "content": {"message_type": "frontdoor_runtime_tool_contract"}}
+    )
+
+
 def test_frontdoor_tool_contract_renders_repair_required_sections_separately() -> None:
     contract = build_frontdoor_tool_contract(
         callable_tool_names=["submit_next_stage", "exec"],

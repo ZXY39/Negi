@@ -7,6 +7,8 @@ from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
     inject_node_dynamic_contract_message,
+    is_node_dynamic_contract_message,
+    strip_node_dynamic_contract_messages,
     upsert_node_dynamic_contract_message,
 )
 
@@ -215,3 +217,58 @@ def test_inject_node_dynamic_contract_message_appends_contract_to_request_tail()
     assert payload is not None
     assert payload["candidate_skills"] == [{"skill_id": "tmux", "description": "terminal workflow"}]
     assert payload["hydrated_executor_names"] == []
+
+
+def test_model_echo_of_contract_heading_with_tool_calls_is_not_a_contract_message() -> None:
+    # 回归：模型可能把请求末尾的契约块原样复读了进自己的回复，同时正常声明
+    # 工具调用（事故 task:38687a51b14d）。这类消息是模型回合本身，不得判为
+    # 注入契约——否则会被整体剥离，留下孤儿工具结果并触发孤儿子工具结果熔断。
+    echoed_tool_turn = {
+        "role": "assistant",
+        "content": (
+            "## Runtime Tool Contract\n"
+            "kind: node_runtime_tool_contract\n"
+            "callable_tools: `submit_next_stage`\n"
+            "已确认的核心事实（多源交叉）：事件经多轮检索交叉确认。"
+        ),
+        "tool_calls": [
+            {
+                "id": "call_c14c83473e364be98ad08c16",
+                "type": "function",
+                "function": {
+                    "name": "submit_next_stage",
+                    "arguments": json.dumps({"stage_goal": "核验通报原文", "tool_round_budget": 10}, ensure_ascii=False),
+                },
+            }
+        ],
+    }
+
+    assert is_node_dynamic_contract_message(echoed_tool_turn) is False
+    assert strip_node_dynamic_contract_messages([echoed_tool_turn]) == [echoed_tool_turn]
+    assert extract_node_dynamic_contract_payload([echoed_tool_turn]) is None
+
+    # JSON 形态的回显携带工具调用时同样不得解析为契约 payload。
+    json_echo_turn = {
+        "role": "assistant",
+        "content": json.dumps(
+            {"message_type": NODE_DYNAMIC_CONTRACT_KIND, "callable_tool_names": ["submit_next_stage"]},
+            ensure_ascii=False,
+        ),
+        "tool_calls": [
+            {
+                "id": "call_json_echo",
+                "type": "function",
+                "function": {"name": "submit_next_stage", "arguments": "{}"},
+            }
+        ],
+    }
+    assert is_node_dynamic_contract_message(json_echo_turn) is False
+    assert extract_node_dynamic_contract_payload([json_echo_turn]) is None
+
+    # 真正的注入契约（无 tool_calls）仍按原规则识别与剥离。
+    real_contract = {
+        "role": "assistant",
+        "content": "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `submit_next_stage`",
+    }
+    assert is_node_dynamic_contract_message(real_contract) is True
+    assert strip_node_dynamic_contract_messages([real_contract]) == []

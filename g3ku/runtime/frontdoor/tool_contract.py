@@ -391,8 +391,25 @@ def _frontdoor_tool_contract_payload_from_content(content: Any) -> dict[str, Any
     return payload
 
 
+def _frontdoor_message_declares_tool_calls(message: dict[str, Any] | None) -> bool:
+    if not isinstance(message, dict):
+        return False
+    for tool_call in list(message.get('tool_calls') or []):
+        if isinstance(tool_call, dict):
+            return True
+    function_call = message.get('function_call')
+    if isinstance(function_call, dict) and str(function_call.get('name') or '').strip():
+        return True
+    return False
+
+
 def frontdoor_tool_contract_payload_from_message(message: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(message, dict):
+        return None
+    # 运行时注入的契约消息从不携带工具调用。带 tool_calls 的 assistant 消息
+    # 是模型回合本身——即使其文本回显了契约抬头/契约 JSON——也不得判为契约
+    # 消息，否则该回合会被整体剥离，留下孤儿工具结果。
+    if _frontdoor_message_declares_tool_calls(message):
         return None
     payload = message.get(FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY)
     if isinstance(payload, dict):
@@ -446,9 +463,10 @@ def build_frontdoor_tool_contract(
 
 
 def is_frontdoor_tool_contract_message(message: dict[str, Any]) -> bool:
-    payload = frontdoor_tool_contract_payload_from_message(message)
-    if payload is not None:
+    if frontdoor_tool_contract_payload_from_message(message) is not None:
         return True
+    if _frontdoor_message_declares_tool_calls(message):
+        return False
     if str((message or {}).get('role') or '').strip().lower() != 'assistant':
         return False
     content = str((message or {}).get('content') or '').strip()

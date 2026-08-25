@@ -324,17 +324,20 @@ class ReActToolLoop:
                 ]
             )
             model_messages = self._prepare_messages(message_history, runtime_context=runtime_context)
+            # 契约先注入、当轮 overlay/repair 提示最后追加：请求末位保持 user
+            # 回合提示而不是契约块，避免模型把契约抬头当作"上一条发言"回显进
+            # 下一条 assistant 消息（回显消息携带工具调用时会被误判剥离）。
+            request_messages = inject_node_dynamic_contract_message(
+                model_messages,
+                dynamic_contract,
+            )
             overlay_parts = [
                 build_execution_stage_overlay(node_kind=node.node_kind, stage_gate=stage_gate),
                 repair_overlay_text,
             ]
             request_messages = self._apply_temporary_system_overlay(
-                model_messages,
-                overlay_text='\n\n'.join(str(part or '').strip() for part in overlay_parts if str(part or '').strip()),
-            )
-            request_messages = inject_node_dynamic_contract_message(
                 request_messages,
-                dynamic_contract,
+                overlay_text='\n\n'.join(str(part or '').strip() for part in overlay_parts if str(part or '').strip()),
             )
             if fresh_turn_request_seed_messages:
                 request_messages = self._fresh_turn_live_request_messages_from_seed_request(
@@ -3647,6 +3650,11 @@ class ReActToolLoop:
             if isinstance(item, dict)
         ]
         contract_tail: list[dict[str, Any]] = []
+        # 请求尾部顺序为「契约 + 当轮 turn-only note」；先暂存末尾 note，
+        # 收取契约尾后再把它放回契约之后，保持原顺序重建。
+        trailing_note: list[dict[str, Any]] = []
+        if normalized and is_turn_only_system_note_message(normalized[-1]):
+            trailing_note.append(normalized.pop())
         while normalized and is_node_dynamic_contract_message(normalized[-1]):
             contract_tail.insert(0, normalized.pop())
 
@@ -3673,6 +3681,7 @@ class ReActToolLoop:
             "compressible_history": compressible_history,
             "recent_tail": recent_tail,
             "contract_tail": contract_tail,
+            "trailing_note": trailing_note,
         }
 
     @classmethod
@@ -3715,6 +3724,7 @@ class ReActToolLoop:
             compacted_block,
             *list(parts.get("recent_tail") or []),
             *list(parts.get("contract_tail") or []),
+            *list(parts.get("trailing_note") or []),
         ]
         return rewritten, compacted_payload
 
@@ -5719,13 +5729,24 @@ class ReActToolLoop:
         blocks = self._content_open_image_overlay_message_blocks(payloads, runtime_context=runtime_context)
         if not blocks:
             return [dict(item) for item in list(request_messages or []) if isinstance(item, dict)]
+        if not request_messages:
+            return [{'role': 'user', 'content': blocks}]
+        last_message = dict(request_messages[-1] or {})
+        # 末位可能是当轮契约或 turn-only 阶段提示：替换为多模态块时把原文字
+        # 折进首个 text 块，避免当前轮契约/阶段引导信息丢失。
+        existing_text = str(last_message.get('content') or '').strip()
+        if existing_text:
+            blocks = [
+                {'type': 'text', 'text': f'{existing_text}\n\n{_CONTENT_OPEN_IMAGE_CONTEXT_TEXT}'},
+                *list(blocks[1:]),
+            ]
         return [
             *[dict(item) for item in list(request_messages[:-1] or []) if isinstance(item, dict)],
             {
-                **dict(request_messages[-1] or {}),
+                **last_message,
                 'content': blocks,
             },
-        ] if request_messages else [{'role': 'user', 'content': blocks}]
+        ]
 
     def _content_open_image_payloads_from_results(self, results: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         payloads: list[dict[str, Any]] = []

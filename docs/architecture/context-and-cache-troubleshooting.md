@@ -85,7 +85,7 @@ Memory guard 维护要点：
 ### 3.1 同 turn 的 append-only 规则被破坏
 
 - 坑：旧 contract snapshot 被提前剥掉，新 round 直接从 stripped body 继续，provider 前缀在第 3 条就断；或 overlay 被错误拼回已有消息，而不是作为新的 request-tail 消息追加。
-- 不变量：同一 visible turn 内 request 只增长、不重排；`request_messages` 在真实 transcript（system/user/历次 assistant 工具调用 + 工具结果）上保持 append-only，命中前缀逐轮变长。每个请求尾部恰好 1 份最新 `frontdoor_runtime_tool_contract` / `node_runtime_tool_contract`，被携带历史里 0 份；turn-only note（`System note for this turn only:`）同理，每个请求至多 1 份当前 note。契约块以 `## Runtime Tool Contract` 开头的 assistant summary 形式出现（不再是原始 JSON），仍属于 stable prefix 之外的动态契约尾记录，每轮整份替换；剥离尾部契约/note 不算非法 shrink，也不算前缀断裂。durable baseline / continuity 持久化前必须剥掉契约 summary，以及 `## 长期记忆` 这类当轮 overlay 的 assistant 记录（它们只在当轮请求可见，落史会逐轮累积）；后续轮若把旧 summary / overlay 当普通稳定历史重放而没有 `token_compression` / `stage_compaction`，按非法上下文携带排查。节点同 turn 请求同样走 append-only scaffold：上一请求 body + 上一轮 assistant/tool delta + 最新 overlay / 契约尾部。
+- 不变量：同一 visible turn 内 request 只增长、不重排；`request_messages` 在真实 transcript（system/user/历次 assistant 工具调用 + 工具结果）上保持 append-only，命中前缀逐轮变长。每个请求尾部区域恰好 1 份最新 `frontdoor_runtime_tool_contract` / `node_runtime_tool_contract`，被携带历史里 0 份；turn-only note（`System note for this turn only:`）同理，每个请求至多 1 份当前 note。尾部区域内契约排在当前 turn-only note / 当前 user 回合之前，末位保持 user 消息——契约块占据末位会诱导模型把契约抬头回显进下一条回复，而携带工具调用的回显消息若被当成契约剥离会留下孤儿工具结果。契约块以 `## Runtime Tool Contract` 开头的 assistant summary 形式出现，仍属于 stable prefix 之外的动态契约尾记录，每轮整份替换；剥离尾部契约/note 不算非法 shrink，也不算前缀断裂。durable baseline / continuity 持久化前必须剥掉契约 summary，以及 `## 长期记忆` 这类当轮 overlay 的 assistant 记录（它们只在当轮请求可见，落史会逐轮累积）；后续轮若把旧 summary / overlay 当普通稳定历史重放而没有 `token_compression` / `stage_compaction`，按非法上下文携带排查。节点同 turn 请求同样走 append-only scaffold：上一请求 body + 上一轮 assistant/tool delta + 最新契约 / turn-only note 尾部（契约在前、note 在后）。
 - 症状：命中前缀不再逐轮变长；前缀在契约或 overlay 位置提前分叉；旧契约出现在历史中段。
 
 ### 3.2 assistant 空文本 + tool_calls 被当成“空消息”丢掉
@@ -318,7 +318,7 @@ schema churn 停止后命中仍低时，先比较相邻节点 actual-request art
 
 至少要两套测试：同一 turn 内 round 1 → round 2 → round 3；上一轮结束 → 下一轮 fresh turn 第一跳。两类 bug 根因完全不同：same-turn bug 更像 request growth/append-only 问题；fresh-turn bug 更像 baseline handoff / family churn / scaffold 选择问题。
 
-两套测试都要断言同一条不变量：**每个请求尾部恰好 1 份契约、至多 1 份 turn-only note，被携带前缀里二者都是 0 份**。断言位置：
+两套测试都要断言同一条不变量：**每个请求尾部区域恰好 1 份契约、至多 1 份 turn-only note，契约排在 note / 当前 user 回合之前（末位是 user 消息），被携带前缀里契约与 note 都是 0 份**。断言位置：
 
 - same-turn：多轮 tool 调用后，检查实际请求 JSON 的契约/note 计数，以及“真实 transcript 前缀不携带陈旧契约/note”
 - fresh-turn：上一请求带陈旧契约/note 时，第一跳 scaffold 仍应正确回退/复用真实前缀，不被静默禁用

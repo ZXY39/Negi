@@ -3085,6 +3085,126 @@ async def test_react_loop_orphan_tool_result_circuit_breaker_fails_current_node(
 
 
 @pytest.mark.asyncio
+async def test_contract_echo_with_stage_tool_call_keeps_pairing_and_tail_order() -> None:
+    # 回归 task:38687a51b14d：阶段预算耗尽后，模型把请求末尾的
+    # `## Runtime Tool Contract` 块原样复读进回复文本，同时正常声明
+    # submit_next_stage 调用。旧实现按契约抬头把该 assistant 消息整体剥离，
+    # 留下孤儿工具结果，最终触发孤儿子工具结果熔断。修复后：
+    # 1) 携带工具调用的回显消息不再被判为注入契约（历史与请求 delta 都保留）；
+    # 2) 请求末位是当轮 turn-only 阶段提示，契约不再压尾。
+    gate_state = {"transition_required": True}
+
+    class _StageTransitionTool(_StageProtocolNoopTool):
+        async def execute(self, **kwargs):
+            gate_state["transition_required"] = False
+            return await super().execute(**kwargs)
+
+    requests: list[list[dict[str, object]]] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self._turn = 0
+
+        async def chat(self, **kwargs):
+            requests.append([dict(item) for item in list(kwargs.get("messages") or [])])
+            self._turn += 1
+            if self._turn == 1:
+                return LLMResponse(
+                    content=(
+                        "## Runtime Tool Contract\n"
+                        "kind: node_runtime_tool_contract\n"
+                        "callable_tools: `submit_next_stage`\n"
+                        "已确认的核心事实（多源交叉）：事件经多轮检索交叉确认。"
+                    ),
+                    tool_calls=[
+                        ToolCallRequest(
+                            id="call_echo_stage",
+                            name="submit_next_stage",
+                            arguments={"stage_goal": "核验通报原文并落盘报告", "tool_round_budget": 10},
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                    usage={"input_tokens": 8, "output_tokens": 3},
+                )
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call_final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "done",
+                            "answer": "done",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 3},
+            )
+
+    log_service = _FakeLogService()
+    log_service.execution_stage_gate_snapshot = lambda task_id, node_id: {
+        "has_active_stage": True,
+        "transition_required": bool(gate_state["transition_required"]),
+        "active_stage": {
+            "stage_id": "stage-echo",
+            "stage_goal": "首轮检索",
+            "tool_round_budget": 8,
+            "tool_rounds_used": 8,
+        },
+    }
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=5)
+
+    result = await loop.run(
+        task=SimpleNamespace(task_id="task-contract-echo"),
+        node=SimpleNamespace(node_id="node-contract-echo", depth=0, node_kind="execution"),
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-contract-echo","goal":"demo"}'},
+        ],
+        tools={
+            "submit_next_stage": _StageTransitionTool("submit_next_stage"),
+            "submit_final_result": _submit_final_result_tool(),
+        },
+        model_refs=["fake"],
+        runtime_context={"task_id": "task-contract-echo", "node_id": "node-contract-echo"},
+        max_iterations=5,
+    )
+
+    assert result.status == "success"
+    assert len(requests) >= 2
+
+    second_request = requests[1]
+    analysis = analyze_tool_call_history(second_request)
+    assert analysis.orphan_tool_result_ids == []
+    assert analysis.has_orphan_tool_results is False
+
+    echoed_declarations = [
+        message
+        for message in second_request
+        if str(message.get("role") or "") == "assistant"
+        and any(
+            str((tool_call or {}).get("id") or "") == "call_echo_stage"
+            for tool_call in list(message.get("tool_calls") or [])
+        )
+    ]
+    assert len(echoed_declarations) == 1
+    assert str(echoed_declarations[0].get("content") or "").startswith("## Runtime Tool Contract")
+
+    # 尾部顺序：契约在前、当轮 turn-only 阶段提示压尾（末位是 user 回合提示）。
+    assert str(second_request[-1].get("role") or "") == "user"
+    assert str(second_request[-1].get("content") or "").startswith("System note for this turn only:")
+    contract_message = second_request[-2]
+    assert str(contract_message.get("role") or "") == "assistant"
+    assert str(contract_message.get("content") or "").startswith("## Runtime Tool Contract")
+
+
+@pytest.mark.asyncio
 async def test_react_loop_writes_before_model_frame_before_chat_dispatch() -> None:
     log_service = _FakeLogService()
     final_tool = _submit_final_result_tool()
