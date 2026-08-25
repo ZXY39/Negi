@@ -361,6 +361,73 @@ async def test_runtime_agent_session_prompt_keeps_rag_ingest_payload_raw_and_ski
 
 
 @pytest.mark.asyncio
+async def test_runtime_agent_session_prompt_records_internal_turn_visible_surface_only(tmp_path, monkeypatch) -> None:
+    async def _noop_refresh(*, force: bool = False, reason: str = "") -> None:
+        _ = force, reason
+        return None
+
+    async def _noop_cancel(session_key: str) -> None:
+        _ = session_key
+        return None
+
+    monkeypatch.setattr(web_shell, "refresh_web_agent_runtime", _noop_refresh)
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+
+    class _ScriptedRunner(_MultiAgentRunner):
+        def __init__(self, reply: str) -> None:
+            self._reply = reply
+
+        async def run_turn(self, *, user_input, session, on_progress=None) -> str:
+            _ = user_input, on_progress
+            setattr(session, "_last_route_kind", "direct_reply")
+            return self._reply
+
+    hidden_bundle_text = "HIDDEN_EVENT_BUNDLE_SHOULD_NOT_APPEAR"
+
+    def _build_session(runner) -> tuple[RuntimeAgentSession, _IngestRecorder]:
+        memory_manager = _IngestRecorder()
+        session_manager = SessionManager(tmp_path)
+        loop = SimpleNamespace(
+            model="gpt-test",
+            reasoning_effort=None,
+            multi_agent_runner=runner,
+            sessions=session_manager,
+            memory_manager=memory_manager,
+            prompt_trace=False,
+            commit_service=_CommitRecorder(),
+            create_session_cancellation_token=lambda session_key: SimpleNamespace(cancel=lambda reason=None: None),
+            release_session_cancellation_token=lambda session_key, token: None,
+            cancel_session_tasks=_noop_cancel,
+        )
+        return RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared"), memory_manager
+
+    # Internal turn with a visible reply: recorded without the hidden event bundle.
+    runtime_session, memory_manager = _build_session(_ScriptedRunner("visible heartbeat reply"))
+    heartbeat_input = UserInputMessage(
+        content=hidden_bundle_text,
+        metadata={"heartbeat_internal": True},
+    )
+    result = await runtime_session.prompt(heartbeat_input)
+
+    assert result.output == "visible heartbeat reply"
+    assert len(memory_manager.calls) == 1
+    assert memory_manager.calls[0]["user_messages"] == []
+    assert memory_manager.calls[0]["assistant_text"] == "visible heartbeat reply"
+    assert hidden_bundle_text not in str(memory_manager.calls[0])
+
+    # Silent internal turn: nothing is recorded.
+    silent_session, silent_memory_manager = _build_session(_ScriptedRunner("HEARTBEAT_OK"))
+    silent_input = UserInputMessage(
+        content=hidden_bundle_text,
+        metadata={"heartbeat_internal": True},
+    )
+    silent_result = await silent_session.prompt(silent_input)
+
+    assert silent_result.output == "HEARTBEAT_OK"
+    assert silent_memory_manager.calls == []
+
+
+@pytest.mark.asyncio
 async def test_ceo_frontdoor_runner_directly_executes_visible_tool_without_stage(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None

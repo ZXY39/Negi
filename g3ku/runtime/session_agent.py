@@ -3000,12 +3000,18 @@ class RuntimeAgentSession:
                     route_kind=str(getattr(self, "_last_route_kind", "") or ""),
                     assistant_metadata=assistant_metadata,
                 )
-                if internal_source is None and getattr(self._loop, "memory_manager", None) is not None:
-                    user_messages = [
-                        self._history_text(item.content)
-                        for item in self._current_user_batch_inputs(user_input)
-                        if self._history_text(item.content).strip()
-                    ]
+                if getattr(self._loop, "memory_manager", None) is not None:
+                    # Memory review mirrors the user-visible surface: internal
+                    # heartbeat/cron turns only expose the assistant reply and the
+                    # visible stage rail, never the hidden event-bundle prompt.
+                    if internal_source is None:
+                        user_messages = [
+                            self._history_text(item.content)
+                            for item in self._current_user_batch_inputs(user_input)
+                            if self._history_text(item.content).strip()
+                        ]
+                    else:
+                        user_messages = []
                     try:
                         await self._loop.memory_manager.record_turn_for_review(
                             session_key=self._state.session_key,
