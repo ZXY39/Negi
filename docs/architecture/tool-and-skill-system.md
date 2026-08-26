@@ -63,8 +63,6 @@ G3KU 的工具/技能体系分成几层，而不是一次性把所有东西注�
 
 - `node_context_selection.py`
 - `execution_tool_selection.py`
-- `frontdoor_catalog_selection.py`
-- `frontdoor_query_rewriter.py`
 
 ### `main/service/runtime_service.py`
 
@@ -119,10 +117,9 @@ CEO/frontdoor 另有任务生命周期与分发控制类固定工具。各工具
 
 当前选择规则：
 
-- `candidate_tool_names` / `candidate_skill_ids` 同一语义：`RBAC 可见 ∩ 语义召回命中` 的当前候选集合；语义召回不可用时退化为 RBAC 可见集合，而不是停止运行。
-- 语义可用时，节点与 CEO/frontdoor 两条路径的 candidate tools / candidate skills 上限都固定为 16；前门对应 `skill_inventory_top_k=16` / `extension_tool_top_k=16`，实际来源是 `tools/memory_runtime/resource.yaml` / `MemoryAssemblyConfig`。前门先用更宽的 `tool_limit` 做 dense/rerank，`extension_tool_top_k` 只在最后一层收敛最终候选工具数，不等于 dense 检索宽度。
-- 语义 top-k 是扩展工具预算：CEO/frontdoor 语义收窄与节点上下文选择在 dense/rerank 之前，都会把 fixed builtin executors 从检索侧可见 family/executor 集合中移除；扩展工具没进候选时，先对过滤后的非固定 executor 集合排查语义召回。
-- 当 query 明显表达写入、改写、删除、移动、复制、补丁等变更意图时，query rewrite fallback 与本地候选打分都优先推 `filesystem_write` / `filesystem_edit` / `filesystem_delete` / `filesystem_move` / `filesystem_copy` / `filesystem_propose_patch` 这类 concrete ids；`exec` 虽然可作为固定 builtin 保持可调用，但在这类意图下不作为候选文件变更方案的首选。
+- `candidate_tool_names` / `candidate_skill_ids` 同一语义：当前候选集合等于 RBAC 可见集合；候选生成是 inventory-only，没有语义召回层。
+- 普通候选数量由 RBAC 可见家族/执行器决定，节点与 CEO/frontdoor 都不再按语义 top-k 截断。
+- 当 query 明显表达写入、改写、删除、移动、复制、补丁等变更意图时，本地候选打分优先推 `filesystem_write` / `filesystem_edit` / `filesystem_delete` / `filesystem_move` / `filesystem_copy` / `filesystem_propose_patch` 这类 concrete ids；`exec` 虽然可作为固定 builtin 保持可调用，但在这类意图下不作为候选文件变更方案的首选。
 
 加载门控：
 
@@ -136,7 +133,7 @@ exec 与 memory 工具家族：
 - `exec` 除 RBAC 外还有一条契约轴：surfaced family `exec_runtime` 可携带持久化 `metadata.execution_mode`；`governed` 保留 exec 侧守卫，`full_access` 移除 exec 侧 read-only / 路径 / 安全检查，但不绕过 Tool Admin 启用状态与 RBAC。当前模式的权威暴露位置是运行时工具合同 / `load_tool_context` payload。
 - `exec` 是发现/探测工具（目录结构、文件名搜索、环境检查）；具体本地文件正文证据应来自 `content_open(path=..., start_line, end_line)`。`exec` 长输出的 agent-facing payload 是有界流式捕获：`head_preview` + `tail_preview` + 截断/捕获字节元数据，供排查“关键结果在命令末尾”的场景；普通结果没有稳定的 `stdout_ref` / `stderr_ref`，不应期待隐藏全量输出 ref。节点反复用 `exec` 提取源码片段时，应把引导转向 `content_open(path)`。
 - `exec` 解码子进程 stdout/stderr 优先 UTF-8，Windows 上先回退宿主首选代码页再替换字节；Windows 子进程 Python 命令注入 `PYTHONIOENCODING=utf-8`（只稳定 Python traceback / `print()` 输出，不改变 RBAC 或 `execution_mode`）；文件系统校验命令、`agent_browser` 等子进程车道共用同一输出解码 helper——某条 Windows 路径仍乱码时，先确认它是否走了共享 subprocess-text helper。
-- committed 长期记忆通过注入的 `MEMORY.md` 快照交付（display-only：剥离 memory id 与日期/来源头，只保留以 `---` 分隔的记忆文本块）；agent-facing 契约没有记忆检索工具，`memory_note(ref)` 是唯一的按需详细记忆加载器。节点执行/验收路径不注入额外记忆检索块，只用 catalog bridge 做工具/技能收窄；该 bridge 是 catalog-only：只负责 context-record 存储与稠密/稀疏 tool-skill 收窄数据。
+- committed 长期记忆通过注入的 `MEMORY.md` 快照交付（display-only：剥离 memory id 与日期/来源头，只保留以 `---` 分隔的记忆文本块）；agent-facing 契约没有记忆检索工具，`memory_note(ref)` 是唯一的按需详细记忆加载器。节点执行/验收路径不注入额外记忆检索块。
 - `memory_write` / `memory_delete` 是 queue-submit 工具：只请求记忆运行时稍后批处理，不在当前轮同步改写 committed 记忆；`memory_delete(content=...)` 接受对要遗忘内容的自然语言描述。实际改写/删除决策委托给带受限工具面的内部记忆 agent（不属于常规 agent-facing 目录，也不按 surfaced Tool Admin family 排查）；它把描述解析成具体 SQLite id，并可能就实质影响该批次的行报告 `inspired_memory_ids`。
 
 状态与显示层：
@@ -145,7 +142,7 @@ exec 与 memory 工具家族：
 - `candidate_tool_names` 是运行时去重、hydration 排除、恢复和 gate 判断用的 canonical name list；`candidate_tool_items`（`{tool_id, description}`）只是它的显示层缓存，用于 contract rebuild / refresh 后保留描述文本。agent 只应看到结构化 `candidate_tools`；`candidate_tool_items` 不是第二份权威候选集——canonical `candidate_tool_names=[]` 时，agent-facing `candidate_tools` 也必须为空，不从旧 contract、旧 items 或旧动态消息把失效候选补回 prompt。
 - 对执行/验收节点，canonical `candidate_skill_ids` 落在 runtime frame，`candidate_skill_items` 随 frame 持久化，供阶段切换、prompt compaction 之后的下一轮 contract 刷新从 frame 恢复。`_enrich_node_messages()` 注入、且已携带 `candidate_skills` / `contract_visible_skill_ids` / `skill_visibility_diagnostics` 的 fresh skill 合同是 first-turn truth source：默认空 bootstrap frame 只负责占位与 phase 跟踪，不能把这些字段覆写成空；同一 turn 内 `_prepare_messages()` 裁掉尾部合同消息后，fresh skill 合同摘要沿 runtime context 继续传给 `react_loop`。
 - 字段级排障入口：`contract_visible_skill_ids` 是 `runtime_service._node_context_selection_inputs()` 当轮记下的 contract-visible skill 快照（输入层证据，随 runtime frame 与 `runtime-frame-messages:{node_id}` artifact 落盘）；`skill_visibility_diagnostics.entries` 携带 `registry_skill_ids` 与逐 skill 的 `enabled` / `available` / `allowed_for_actor_role` / `policy_effect` / `included_in_contract_visible`，用于定位是 live `resource_registry`、`allowed_roles` 还是治理策略拦掉了 skill；节点 context selection cache 与 `persisted_frame_router` 都带 live-visibility freshness gate——复用旧 selection 前重新对照当前 `session_key` / `actor_role` / `visible_tool_names` / `contract_visible_skill_ids` / `registry_skill_ids`，一旦漂移就丢弃旧 selection，重新跑 `_node_context_selection_inputs()` 与 `build_node_context_selection(...)`。这挡的是“外部 resource/governance refresh 改了可见性，但节点长期沿用旧 cache / 旧 frame”的回归（尤其“首轮 skill 可见集为空，后续轮次一直空”）。
-- 前门候选生成诊断同步在 session snapshot 的 `frontdoor_selection_debug`：`semantic_frontdoor` 回答 rewrite 结果与 dense/rerank 命中，`tool_selection` 回答命中项为什么没进最终 `candidate_tool_names`。
+- 前门候选生成诊断同步在 session snapshot 的 `frontdoor_selection_debug`：`tool_selection` 回答命中项为什么没进最终 `candidate_tool_names`。
 
 ### 3.3 candidate skills
 
@@ -190,7 +187,7 @@ promotion 与前门状态：
 - CEO/frontdoor 的 stage gate 由 `execute_tools` 真正执行：普通工具在无活动阶段或预算耗尽时直接收到 gate error；同一批 tool calls 同时包含 `submit_next_stage` 和普通工具时，先执行 `submit_next_stage`，再把同批普通工具当作新阶段的第一批调用，并在该新阶段上记账预算。
 - 当前没有“有效阶段”（含预算耗尽、必须换阶段）时，agent-facing `frontdoor_runtime_tool_contract.callable_tool_names` 收紧到只剩 `submit_next_stage`；execution / acceptance 节点采用同样收紧，没有例外。这不同步收紧 provider body 里的 `tools[]`：为保持 prompt cache 前缀稳定，provider-facing 继续使用稳定的 runtime-visible tool bundle，阶段控制交给动态合同与执行门控（详见下文「CEO Provider Tool Surface」）。
 - execution / acceptance 节点不必把 `submit_next_stage` 单独拆成一轮：阶段切换成功时，同批普通工具作为新阶段首轮执行；切换失败时，同批剩余普通工具被批内阻断，不回退旧阶段继续执行。执行层的 `stage_gate_error_for_tool()` 是 schema 收紧之外的兜底防线：模型通过恢复态或手工构造仍尝试普通工具时，返回 `no active stage` / `current stage budget is exhausted`。
-- 这组收紧不改变 candidate 语义：`candidate_tool_names` / `candidate_skill_ids` 仍表达“RBAC 可见 ∩ 语义召回命中”的候选集合，只是无有效阶段时这些候选不同时出现在 agent-facing callable contract 里。
+- 这组收紧不改变 candidate 语义：`candidate_tool_names` / `candidate_skill_ids` 仍表达 RBAC 可见集合的候选集，只是无有效阶段时这些候选不同时出现在 agent-facing callable contract 里。
 - 内部轮次继承：当前 session 已有权威 frontdoor baseline 与前序 contract state 时，`heartbeat_internal` / `cron_internal` 不被收紧、也不重跑 candidate/hydration/skill selection，而是直接继承上一轮的 callable / candidate / hydrated / provider-tool / visible-skill 状态；从 agent 视角看，它们就是在上一轮 frontdoor contract 上追加隐藏内部提示后的普通 CEO/frontdoor 轮次，可以直接输出，也可以立即开始阶段并调用已继承的普通工具。尚无权威 baseline 时，内部轮次回退到普通 exposure assembly。`cron_internal` 的其余特例只有两点：reminder 正文是隐藏的结构化 `system` 事件块；cron 任务的停止与删除由 scheduler 侧的 `payload.max_runs` / `state.delivered_runs` 计数器负责。
 - 当前 `cron` 工具合同是“结构化提醒”：`message` = 给未来 agent 的提醒动作；`max_runs` = 成功送达上限，省略默认 1；`at` = 只接受创建时仍在未来的单次触发时间，真正执行 `add_job()` 时该时间已过则拒绝创建，并提示 `任务定时已过期，当前时间为<service-local time>，请立即执行或视情况废弃而不要创建过期任务`；`stop_condition` 是兼容字段，不参与运行时停止判断。`cron` 的使用规范（提醒写成内部指令、调度三选一、投递目标由运行时从当前会话上下文自动推导、模型不传 `delivery.*` / `sessionTarget` / `payload.*`）放在 cron 工具的 toolskill 里，按需 `load_tool_context("cron")` 加载；模型对 cron 用法理解过时时，改 toolskill 而不是改注入逻辑。排查“为什么没有自动停止”先看 cron store 的 `payload.max_runs` / `state.delivered_runs`；排查“cron 到点了但没创建/查询任务、只重复谈 cron 自己”，先检查 frontdoor tool exposure 是否被错误缩成 `cron`，而不是先怀疑 scheduler 没触发。
 - `submit_next_stage` 的阶段预算在 execution / acceptance / CEO-frontdoor 三条路径统一为 `1-10`，允许在预算未耗尽前提前切到下一阶段；预算是“本阶段声明的上限窗口”，不是“必须烧满的最小轮数”。
@@ -238,8 +235,8 @@ CEO/frontdoor 合同载体：
 
 排查顺序：
 
-- 当前轮合同先看 request 尾部唯一的 `frontdoor_runtime_tool_contract`，再看 internal state 的 `tool_names` / `candidate_tool_names` / `candidate_tool_items` / `hydrated_tool_names`；稳定 prompt 前缀、旧 overlay 文本、旧 transcript 里的 tool/skill 名单都不是当前轮权威合同。“load 成功但下一轮没调用”时，对照 canonical runtime frame / frontdoor state 与 runtime messages snapshot；旧 bootstrap 文本与当前 snapshot 冲突时，以当前 snapshot 为准。“某工具为什么没进前门候选集”看 `frontdoor_selection_debug.semantic_frontdoor`（rewrite 后的 query、dense/rerank 命中）与 `frontdoor_selection_debug.tool_selection`（命中项为什么没进 `candidate_tool_names`）。
-- 排查 CEO/frontdoor cache drop 时区分：`messages` 保存的是“下一次重建 request body 的基线”，`dynamic_appendix_messages` 只是“当前轮唯一尾部合同”；两边都出现完整 catalog 或检索 context 副本，说明 runtime contract 重复注入。
+- 当前轮合同先看 request 尾部唯一的 `frontdoor_runtime_tool_contract`，再看 internal state 的 `tool_names` / `candidate_tool_names` / `candidate_tool_items` / `hydrated_tool_names`；稳定 prompt 前缀、旧 overlay 文本、旧 transcript 里的 tool/skill 名单都不是当前轮权威合同。“load 成功但下一轮没调用”时，对照 canonical runtime frame / frontdoor state 与 runtime messages snapshot；旧 bootstrap 文本与当前 snapshot 冲突时，以当前 snapshot 为准。“某工具为什么没进前门候选集”看 `frontdoor_selection_debug.tool_selection`（命中项为什么没进 `candidate_tool_names`）。
+- 排查 CEO/frontdoor cache drop 时区分：`messages` 保存的是“下一次重建 request body 的基线”，`dynamic_appendix_messages` 只是“当前轮唯一尾部合同”；两边都出现完整候选/合同副本，说明 runtime contract 重复注入。
 
 优先级边界：
 
@@ -320,37 +317,6 @@ Tool visibility and callable status do not guarantee that the runtime will keep 
 - If a node loops on one tool, inspect the transcript/tool messages first: the absence of a fresh tool result may mean the runtime intentionally rejected a duplicate call rather than that the tool executor failed.
 
 `runtime-overview.md`「Repeated Tool Call Guard」一节是指向本节守卫的摘要引用。
-
-## 10. Catalog Freshness And External Disk Edits
-
-Tool/skill semantic retrieval depends on the unified context catalog under the `("catalog", "global")` namespace. Maintainers should keep three separate freshness boundaries in mind:
-
-- The live resource registry is the source of truth for what exists and what is visible.
-- The catalog is a retrieval projection built from those resources.
-- `l0` / `l1` are layered catalog summaries, not raw manifest fields.
-
-Current catalog summary rules:
-
-- For skills, the catalog summary source is `display_name + description + SKILL.md body` when the body exists. If `SKILL.md` is missing, the description becomes the body fallback.
-- For tools, the catalog is written per concrete executor, not per tool family: a `filesystem` family with `filesystem_copy` / `filesystem_write` produces separate records such as `tool:filesystem_copy` and `tool:filesystem_write`. Each concrete tool record carries its family context through tags such as `family:<tool_id>`, so targeted refresh/removal keeps working when a whole family changes.
-- The tool catalog summary source is the concrete executor's toolskill body when present; with a missing concrete toolskill body, the runtime falls back to the family description.
-- `l0` stays the one-line semantic label; `l1` stays the short structured overview used by retrieval and prompt injection. Dense vectors index `l1` first and fall back to `l0`, so refreshing `l0` / `l1` is what keeps the vector projection aligned.
-
-Metadata-only edits count as real catalog changes:
-
-- Changing only `display_name` or `description` is enough to invalidate the existing catalog hash; “body unchanged” does not mean the catalog summary is still current.
-- Dense/rerank and frontdoor candidate selection hit concrete `tool:<executor_name>` records directly. When a concrete tool misses the candidate set, first check its own record rather than family-level hits.
-
-G3KU does not run a full filesystem watcher for `skills/` and `tools/`:
-
-- `ResourceManager` remains manual/release-triggered at the resource-runtime layer; direct edits on disk are therefore not discovered immediately just because a file changed.
-- Runtime-facing paths use a throttled generation check: the CEO/frontdoor path and node-context selection path ask `MainRuntimeService` to perform an external resource generation check before semantic catalog selection. The check is throttled by `resources.reload.poll_interval_ms`; it is not performed on every internal access without limit. It compares the last known top-level skill/tool tree fingerprints with the current fingerprints; when a difference is found, the service refreshes only the changed roots and then performs a targeted catalog sync for the changed `skill_id` / `tool_id` set.
-
-For maintainers, the key implication is:
-
-- “No watcher” does not mean “restart required”. It means external disk edits are picked up lazily at the next throttled runtime check, then reconciled through targeted refresh + targeted catalog sync.
-
-`runtime-overview.md`「Resource Generation Checks」一节是指向本节规则的摘要引用。
 
 ## 11. Tool Admin RBAC For Surfaced Tool Families
 

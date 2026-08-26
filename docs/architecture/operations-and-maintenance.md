@@ -85,7 +85,7 @@
   项目配置
 
 - `.g3ku/llm-config/`
-  模型配置仓库与 memory binding
+  模型配置仓库（provider/binding record）
 
 - `.g3ku/main-runtime/`
   任务运行时 SQLite、artifacts、event history
@@ -211,7 +211,7 @@ Provider retry troubleshooting note:
   - `entries[*].included_in_contract_visible`：回答该 skill 最终有没有进入 `contract_visible_skill_ids`
 - 排障顺序应先分层：
   - `contract_visible_skill_ids=[]`：优先怀疑 RBAC / governance / resource visibility 输入层
-  - `contract_visible_skill_ids` 非空但 `candidate_skill_ids=[]`：优先怀疑 selector、dense fallback、或 contract/frame 重建链路
+  - `contract_visible_skill_ids` 非空但 `candidate_skill_ids=[]`：优先怀疑 selector 或 contract/frame 重建链路
   - 两者都非空但模型文本里的前门 contract 已经把 `candidate_skills` 渲染成 `none`（无论文案是旧的 `candidate_skills: none`，还是新的 loadable 提示版本）：优先怀疑动态 contract 重建或 stale frame/消息恢复问题
 
 ### 模型配置不生效
@@ -371,7 +371,7 @@ For the queued Markdown memory runtime, the first operator checks should be:
 4. Inspect `memory/ops.jsonl` for the latest terminal batch history.
 5. If a processed row exposes `request_artifact_paths`, inspect the referenced files under `.g3ku/memory-requests/` before blaming prompt assembly or the provider adapter.
 6. Use `g3ku memory current`, `g3ku memory queue`, and `g3ku memory flush` when you need a quick operator view without manually opening files.
-7. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend or the catalog bridge.
+7. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend.
 
 Operator debugging order for a stuck queue head:
 

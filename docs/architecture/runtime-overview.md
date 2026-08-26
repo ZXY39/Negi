@@ -198,7 +198,7 @@ heartbeat / cron 的维护语义分两条通道：UI 展示通道上前端继续
 - provider 自己管理流式超时（`manages_request_timeout_internally=True`）
 - 仍由外层统一 `wait_for` 管理超时
 
-对第一类（目前包括 `ResponsesProvider`、`OpenAICodexProvider`、`CustomProvider`、`LiteLLMProvider`）：
+对第一类（包括 `ResponsesProvider`、`OpenAIChatProvider`）：
 
 - 外层不会再施加单次 attempt 的硬总时长截断（避免“流式在持续出 chunk 但被总时长误杀”）
 - provider 内部采用“streaming-first”语义：
@@ -302,7 +302,6 @@ heartbeat / cron 的维护语义分两条通道：UI 展示通道上前端继续
 - `memory/ops.jsonl` 是滚动终态历史，不是进行中重试日志，也不是 append-forever 归档：applied 批次与 `rejected` / `precheck_failed` 等 durable discarded 结果连同最终 snapshot / compression 元数据一起落在这里；暂时性 provider/配置失败仍留在队列头错误字段；超过 7 天的行在正常运行时读写中自动清理。终态行不记录入队侧 `trigger_source`；区分普通窗口批次与压缩冲刷批次要对照会话转录时间线。
 - `memory/review_state.json` 是普通复核窗口的按会话缓冲元数据：缓冲轮次载荷、阶段 delta cursor、已上报可见工具记录 cursor；不是已提交的用户记忆。
 - `.g3ku/memory-requests/` 存暴露请求元数据的 memory 请求 artifact；processed 行可以指向这些路径供后续取证。
-- dense/sparse catalog 投影仍可用于 tool/skill 收窄，但不是长期记忆真相源。
 
 维护边界：
 
@@ -327,8 +326,6 @@ heartbeat / cron 的维护语义分两条通道：UI 展示通道上前端继续
 - `ops.jsonl` 出现两条相同 `request_id` 的终态行是 bug 信号（历史多 worker 竞争或旧版本运行），不是正常重复写入。
 
 瞬时执行状态明确在长期记忆边界之外：pause/resume 控制数据、进行中任务状态、临时修复标记与 runtime-only 协调笔记属于 transcript、session、task 或 stage 运行时状态，不进入 `MEMORY.md`。
-
-tool/skill catalog 收窄走 catalog-only bridge；catalog 投影仍在同一 `memory/` 树下，因此对 `memory/` 的破坏性 reset 可能连同用户记忆内容一起删除 catalog 检索数据，catalog 同步必须在启动后重建。
 
 队列卡住、重复写入、调试顺序、CLI 与 reset 等 operator 工作流详见 `operations-and-maintenance.md`「Memory Queue Workflow」。
 

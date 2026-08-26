@@ -63,7 +63,7 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Frontdoor context compression contract (`token_compression` / `stage_compaction`) | `runtime-overview.md` |
 | Memory queue state/file semantics (`runtime-overview`); queue/reset operator workflows (`operations-and-maintenance`) | both, split as shown |
 | Heartbeat continuation contract, cron at-most-once delivery, reminder sidecar decision semantics, timeout stop, task terminal repair | `heartbeat-system.md` |
-| Tool/skill four concepts, candidate→callable chain, Tool Admin RBAC semantics, duplicate-call guard, catalog freshness | `tool-and-skill-system.md` |
+| Tool/skill four concepts, candidate→callable chain, Tool Admin RBAC semantics, duplicate-call guard | `tool-and-skill-system.md` |
 | Actual-request forensics, append-only rule, cache-miss triage, token preflight diagnostics | `context-and-cache-troubleshooting.md` |
 | Websocket/UI contracts, composer/media rendering, image upload gating, container deployment | `web-and-admin.md` |
 | Config schema, hot refresh, model bindings, secret location, deployment unlock | `config-and-models.md` |

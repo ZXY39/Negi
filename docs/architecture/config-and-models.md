@@ -108,7 +108,7 @@
 刷新还要区分“模型路由”与“记忆运行时”两类影响面，由 `refresh_web_agent_runtime(...)` / `refresh_loop_runtime_config(...)` 的 `force_memory_sync` 控制：
 
 - `force_memory_sync` 默认 `False`：记忆运行时同步走 `memory_runtime` 资源指纹门控，指纹未变就不重置。模型路由、CEO 链调整、回合中刷新（`provider_retry_invalidation`、`_resolve_ceo_model_refs`）都属此类。
-- 只有真正改写指纹树之外的记忆相关设置时才显式传 `True`：embedding/rerank 绑定的原子保存与回滚、`update_llm_memory_binding`、`run_llm_migration`、`model_config.migrate_legacy`，以及 `update_llm_config` 命中的是绑定引用的记录时。
+- 只有真正改写指纹树之外的记忆相关设置时才显式传 `True`：`run_llm_migration`、`model_config.migrate_legacy`，以及 `update_llm_config` 命中的是绑定引用的记录时。
 - 原因：强制重置会关闭进程共享的 SQLite checkpointer；若在途回合仍持有它，最终 checkpoint 写入会报 `Cannot operate on a closed database`。即便有活跃会话守卫（见 `runtime-overview.md`「Memory Runtime Reset Guard」），也不应对纯模型变更强制重置。
 
 还要额外记住一个运行时边界——模型链变更何时作用于在途回合：
@@ -149,7 +149,6 @@ G3KU 的模型系统分两层：
 
 - provider config record 的增删改查
 - 绑定模型 key 到 config record
-- memory embedding / rerank 绑定
 - 导出 runtime target
 - 把 secrets 存进安全 overlay，而不是明文长期放在 record 中
 
@@ -216,13 +215,6 @@ loader 会显式拒绝 legacy `channels.*` 配置，这一点在迁移和排障�
 - `models.roles.ceo`
 - `models.catalog`
 - `g3ku/llm_config/facade.py`
-
-### memory embedding / rerank 不生效
-
-先看：
-
-- `.g3ku/llm-config/memory_binding.json`
-- `LLMConfigFacade.get_memory_binding()`
 
 ### China bridge 配置改了但宿主行为没更新
 
@@ -304,10 +296,7 @@ Behavior once the estimate crosses the window: 详见 `runtime-overview.md`「Fr
 
 ## Memory Runtime Settings Anchor
 
-`tools/memory_runtime/resource.yaml` is the runtime settings anchor for long-term memory. It mixes two boundaries:
-
-- Markdown long-term memory notebook settings
-- Catalog bridge retrieval settings
+`tools/memory_runtime/resource.yaml` is the runtime settings anchor for long-term memory. It holds the Markdown notebook, durable queue, and memory-agent settings.
 
 Settings surface:
 
@@ -316,7 +305,6 @@ Settings surface:
   - `document.compress_trigger_chars` and `document.compress_target_chars` define the post-commit snapshot compaction thresholds.
 - `queue.*` controls the single durable queue, including `memory/queue.jsonl`, `memory/ops.jsonl`, batch size, max wait time, and the ordinary-turn review window size. `queue.review_interval_turns` is the per-session ordinary-turn review window size, defaulting to `5`.
 - `agent.*` controls the dedicated memory-maintenance worker behavior.
-- `store.*`, `retrieval.*`, and `embedding.*` sections matter for the catalog bridge: tool/skill semantic narrowing relies on that catalog-only projection.
 - `mode`, `backend`, `bootstrap_mode`, and `compat.dual_write_legacy_files` are not part of the active memory runtime settings surface.
 
 Project-config side keys:
@@ -324,7 +312,7 @@ Project-config side keys:
 - `models.roles.memory` is the dedicated model chain for the internal memory agent.
 - `agents.roleIterations.memory` controls the memory agent's model-call round cap.
 - `agents.roleConcurrency.memory` is fixed to `1`; it is persisted for config/UI symmetry but is not an operator-tunable parallelism knob.
-- `models.roles.memory` may be empty, but when it is non-empty every referenced binding must have `capability=chat`. The admin route rejects embedding/rerank or other non-chat bindings for the memory role.
+- `models.roles.memory` may be empty, but when it is non-empty every referenced binding must have `capability=chat`. The admin route rejects non-chat bindings for the memory role.
 - Unlike `ceo`, `execution`, and `inspection`, the `memory` role is allowed to be empty; that does not fail config load.
 - If the queue head is already inside `processing` when an operator changes `models.roles.memory`, the already dispatched provider call is not hot-swapped. Before the next internal memory repair attempt, the runtime re-reads the latest revision and re-resolves the memory model chain.
 
