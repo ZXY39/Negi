@@ -221,9 +221,10 @@ heartbeat / cron 的维护语义分两条通道：UI 展示通道上前端继续
 - transcript / session messages
 - paused execution context
 - inflight turn snapshot
+- frontdoor completed continuity sidecar（`frontdoor_request_body_messages` 基线、actual-request trace、阶段/规范化/压缩状态）
 - latest message / pending interrupts
 
-主要由 `RuntimeAgentSession` 和 `g3ku/session/manager.py` 协调。
+主要由 `RuntimeAgentSession` 和 `g3ku/session/manager.py` 协调。frontdoor continuity 的写盘与恢复覆盖所有 frontdoor 会话命名空间（`web:`、`china:`、`cron:`），渠道会话的基线同样跨进程重启存活；恢复顺序详见 `context-and-cache-troubleshooting.md`「Baseline 合同与恢复顺序」。
 
 ### 任务侧
 
@@ -348,6 +349,7 @@ Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详�
 
 - 内部轮次与普通可见轮次一样通过 `RuntimeAgentSession.prompt(...)` 执行，携带各自的内部来源元数据；它们会清掉 live-only 调试面（`frontdoor_selection_debug`、每轮 actual-request 指针），但不在 prompt 组装前清零 session-owned 请求体 / 阶段 / 压缩连续性状态。
 - 规则文本与事件载荷以隐藏内部提示消息追加：`prompt_visible=true`、`ui_visible=false`，带 `internal_prompt_kind`（`heartbeat_rule` / `heartbeat_event_bundle` / `cron_rule` / `cron_event_bundle`）；heartbeat 追加 `system` 规则 + `user` event-bundle，cron 追加两个隐藏 `system` 块。存在权威 frontdoor 基线时，内部轮次直接继承普通 CEO tool/skill 暴露合同（含绕过“无有效阶段只剩 `submit_next_stage`”的收紧）。
+- 无基线的内部轮（重启后首轮、全新会话首轮）不进入续跑分支：内部事件消息单独交给 prompt 组装，由新建路径注入，基础系统提示保持首位。续跑分支只在存在真实请求体基线时使用——否则仅有的内部事件消息会冒充完整旧请求体、让基础提示被静默丢掉。内部轮基线/恢复细节见 `context-and-cache-troubleshooting.md`「heartbeat / cron 按普通 continuation shrink 规则排查」与「Baseline 合同与恢复顺序」。
 - 服务层不得替模型自动重试任务，也不得合成回退 assistant 回复。
 - `HEARTBEAT_OK` 是唯一的 live-only ACK 例外：ACK 事件可以在 UI 展示，但不得新建可见 assistant 转录条目；隐藏内部提示消息（`ui_visible=false`）是 durable 且 prompt-visible 的，与 live-only ACK 是两回事。
 

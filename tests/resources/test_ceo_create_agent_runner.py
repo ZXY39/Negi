@@ -1902,6 +1902,7 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_cron_internal_event_
 
     async def _build_for_ceo(**kwargs):
         captured["request_body_seed_messages"] = list(kwargs.get("request_body_seed_messages") or [])
+        captured["internal_seed_messages"] = list(kwargs.get("internal_seed_messages") or [])
         captured["user_content"] = kwargs.get("user_content")
         stable_messages = list(kwargs.get("request_body_seed_messages") or [])
         return SimpleNamespace(
@@ -1947,10 +1948,13 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_cron_internal_event_
     )
 
     assert captured["user_content"] == ""
+    # 冷启动（无基线）时续跑种子为空，内部事件改经独立参数下发，不再混入种子。
     seed_messages = [dict(item) for item in list(captured["request_body_seed_messages"] or [])]
-    assert [message["role"] for message in seed_messages] == ["system", "system"]
-    assert str(seed_messages[0]["content"]).startswith("你接收到了之前你定时的任务，如下：")
-    assert str(seed_messages[1]["content"]).startswith("[CRON INTERNAL EVENT]")
+    assert seed_messages == []
+    internal_messages = [dict(item) for item in list(captured["internal_seed_messages"] or [])]
+    assert [message["role"] for message in internal_messages] == ["system", "system"]
+    assert str(internal_messages[0]["content"]).startswith("你接收到了之前你定时的任务，如下：")
+    assert str(internal_messages[1]["content"]).startswith("[CRON INTERNAL EVENT]")
     assert not any(
         str(item.get("role") or "").strip().lower() == "user"
         and str(item.get("content") or "").strip() == "Report the current time to the user."
@@ -2934,6 +2938,102 @@ def test_runtime_agent_session_keeps_completed_continuity_restore_without_trace_
     assert restored._frontdoor_actual_request_path == ""
     assert restored._frontdoor_actual_request_history == []
     assert restored._frontdoor_completed_continuity_bridge_pending is False
+
+
+def _china_loop() -> SimpleNamespace:
+    return SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None, sessions=SimpleNamespace())
+
+
+def test_channel_session_completed_continuity_write_and_restore_roundtrip(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # 渠道会话（china:*）的 completed-continuity 写盘/恢复回环：重启后基线不丢。
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    session_key = "china:qqbot:default:dm"
+    baseline = [
+        {"role": "system", "content": "BASE SYSTEM PROMPT"},
+        {"role": "user", "content": "channel question"},
+        {"role": "assistant", "content": "channel answer"},
+    ]
+    stage_state = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [
+            {"stage_id": "frontdoor-stage-1", "stage_index": 1, "stage_kind": "normal", "status": "completed"}
+        ],
+    }
+    canonical_context = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [
+            {"stage_id": "frontdoor-stage-1", "stage_index": 1, "stage_kind": "normal", "status": "completed"}
+        ],
+    }
+
+    writer = RuntimeAgentSession(
+        _china_loop(),
+        session_key=session_key,
+        channel="qqbot",
+        chat_id="default:dm",
+    )
+    writer._frontdoor_request_body_messages = list(baseline)
+    writer._frontdoor_history_shrink_reason = "stage_compaction"
+    writer._frontdoor_stage_state = dict(stage_state)
+    writer._frontdoor_canonical_context = dict(canonical_context)
+    writer._sync_completed_continuity_snapshot(source_reason="finalize")
+
+    snapshot_path = web_ceo_sessions.completed_continuity_snapshot_path_for_session(session_key, create=False)
+    assert snapshot_path.exists()
+
+    restored = RuntimeAgentSession(
+        _china_loop(),
+        session_key=session_key,
+        channel="qqbot",
+        chat_id="default:dm",
+    )
+    assert restored._frontdoor_request_body_messages == baseline
+    assert restored._frontdoor_history_shrink_reason == "stage_compaction"
+    assert restored._frontdoor_stage_state == stage_state
+    assert restored._frontdoor_canonical_context == canonical_context
+    assert restored._frontdoor_restore_source == "completed_continuity"
+
+
+def test_cron_session_continuity_is_persisted_and_restored(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # cron: 兜底会话命名空间同样参与连续性生命周期。
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    session_key = "cron:job-123"
+    baseline = [
+        {"role": "system", "content": "BASE SYSTEM PROMPT"},
+        {"role": "user", "content": "cron run"},
+    ]
+    writer = RuntimeAgentSession(_china_loop(), session_key=session_key, channel="cron", chat_id="job-123")
+    writer._frontdoor_request_body_messages = list(baseline)
+    writer._sync_completed_continuity_snapshot(source_reason="finalize")
+
+    restored = RuntimeAgentSession(_china_loop(), session_key=session_key, channel="cron", chat_id="job-123")
+    assert restored._frontdoor_request_body_messages == baseline
+    assert restored._frontdoor_restore_source == "completed_continuity"
+
+
+def test_non_frontdoor_session_namespace_skips_continuity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # 非 frontdoor 命名空间（如 task:/memory:）不参与连续性生命周期。
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    session_key = "task:some-task"
+    writer = RuntimeAgentSession(_china_loop(), session_key=session_key, channel="task", chat_id="some-task")
+    writer._frontdoor_request_body_messages = [
+        {"role": "system", "content": "BASE SYSTEM PROMPT"},
+        {"role": "user", "content": "task turn"},
+    ]
+    writer._sync_completed_continuity_snapshot(source_reason="finalize")
+    snapshot_path = web_ceo_sessions.completed_continuity_snapshot_path_for_session(session_key, create=False)
+    assert not snapshot_path.exists()
 
 
 @pytest.mark.asyncio

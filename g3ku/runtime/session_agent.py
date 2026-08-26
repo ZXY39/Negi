@@ -44,6 +44,22 @@ TURN_FAILED_FRIENDLY_TEXT = (
     "这一轮处理没有完成，请稍后重试；如果反复出现，请查看任务面板或错误日志了解详情。"
 )
 
+# Session-key namespaces that run the CEO frontdoor and therefore participate in
+# the persisted frontdoor continuity lifecycle (completed-continuity snapshot
+# write + restore). This used to be web-only, which meant a channel session
+# (china:*) lost its entire baseline on process restart; the first post-restart
+# internal (cron/heartbeat) turn then rebuilt the prompt with no base system
+# prompt. Continuity must apply to every frontdoor session regardless of the
+# channel it arrived on.
+_FRONTDOOR_CONTINUITY_SESSION_KEY_PREFIXES = ("web:", "china:", "cron:")
+
+
+def _frontdoor_continuity_session_key(session_key: str) -> bool:
+    key = str(session_key or "").strip()
+    return any(
+        key.startswith(prefix) for prefix in _FRONTDOOR_CONTINUITY_SESSION_KEY_PREFIXES
+    )
+
 
 class RuntimeAgentSession:
     """Primary AgentSession implementation backed by the runtime engine."""
@@ -544,7 +560,7 @@ class RuntimeAgentSession:
 
     def _restore_frontdoor_persistent_state(self) -> str:
         session_key = str(self._state.session_key or "").strip()
-        if not session_key.startswith("web:"):
+        if not _frontdoor_continuity_session_key(session_key):
             self._frontdoor_restore_source = "none"
             return "none"
         if getattr(self._loop, "sessions", None) is None:
@@ -615,7 +631,7 @@ class RuntimeAgentSession:
 
     def _sync_completed_continuity_snapshot(self, *, source_reason: str) -> None:
         session_key = str(self._state.session_key or "").strip()
-        if not session_key.startswith("web:"):
+        if not _frontdoor_continuity_session_key(session_key):
             return
         try:
             from g3ku.runtime.web_ceo_sessions import write_completed_continuity_snapshot

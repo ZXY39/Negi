@@ -149,6 +149,7 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 
 - 坑：把 heartbeat shrink/缓存差异解释成“现在是另一条 prompt 通道”；或把内部 heartbeat artifact 直接提升为新的 durable baseline。
 - 不变量：heartbeat/cron 请求变短必须由 `token_compression` 或 `stage_compaction` 解释；隐藏的 heartbeat 规则与 event-bundle 消息是 durable prompt history，应出现在 actual-request artifact、completed continuity sidecar 与 prompt assembly 中（UI 以 `ui_visible=false` 隐藏）。若候选 body 以 heartbeat 文本为主、明显劣于现有 baseline 且无合法 shrink reason，视为被拦截的 baseline 覆盖，内部请求只作 forensics-only 证据。
+- 冷启动边界：内部事件消息只有在存在真实续跑基线时才并入续跑种子；无基线的内部轮（重启后首轮、全新会话首轮）必须走新建组装路径注入内部消息，基础系统提示保持首位。绝不能让仅有的内部事件消息冒充"完整旧请求体"触发续跑分支——续跑分支假定种子自带基础系统提示，会把基础提示静默丢掉，表现为内部轮模型行为失范、看不到人设/规则。
 - 症状：把上一真实请求与新的 heartbeat/cron 请求作 append-only 续接比较时出现大面积前缀断裂——通常说明 baseline 恢复、tool-schema seeding 或压缩发生了变化，而不是 runtime 切到了单独通道。
 
 ## 4. Prompt Cache Family 与 Actual Request
@@ -178,7 +179,7 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 - 图像边界：只有所选模型绑定启用图像多模态输入时，当前 turn 的 live request 才允许 provider 可见图像块，且同轮须把附件提示替换为直接视觉引导（不得暴露本地上传路径）；历史图像经 `content_open` 重开是独立的 live-only 通道——durable baseline 可保留 `path` / `ref`，但直接视觉复用需要后续 turn 重新 `content_open`。durable baseline、inflight/paused snapshot、completed continuity sidecar 持久化前必须把 `image_url` / `input_image` 剥回文本投影；saved actual-request artifact 是刻意的取证例外——验证图像是否到达 provider 要查 artifact，而不是 durable baseline。
 - CEO continuity 恢复顺序：paused snapshot → inflight snapshot → completed continuity sidecar（`.g3ku/web-ceo-continuity/<session>.json`）→ 最新 actual-request artifact → transcript/history fallback。前三条是可信 sidecar 通道，第四条是保缓存的应急回退；sidecar 只有真正携带可用 `frontdoor_request_body_messages` baseline 时才获胜，文件存在本身不得压制更晚、更完整的恢复源。
 - 重启恢复刻意分两步：先从最高优先级 sidecar 恢复 durable `frontdoor_request_body_messages` baseline，再校验恢复出的 actual-request trace 仍指向可读、且 durable body 与该 baseline 匹配的 artifact；不匹配时按 §3.8 做 trace enrichment。
-- completed continuity sidecar 在每次真实 provider-backed 同步与 terminalized manual stop 之后，持久化最新权威 baseline、actual-request trace、stage/canonical/compression 状态、hydrated tools 与最近一次 visible tool/skill exposure 快照。
+- completed continuity sidecar 在每次真实 provider-backed 同步与 terminalized manual stop 之后，持久化最新权威 baseline、actual-request trace、stage/canonical/compression 状态、hydrated tools 与最近一次 visible tool/skill exposure 快照。写入与恢复覆盖所有 CEO frontdoor 会话命名空间（`web:`、`china:`、`cron:`）——渠道会话与兜底 cron 会话的基线同样跨进程重启存活；`task:` 等非 frontdoor 命名空间不参与该生命周期。渠道会话因此不会在重启后丢失基线、退化成无基础系统提示的冷启动。
 - reopened completed session 把上一完成轮的 actual-request trace 恢复进当前会话状态，供下一个 fresh visible turn 滚入 `previous_*`；没有合法 shrink reason 时，不允许从“匹配的上一请求 scaffold 可用”悄悄退回“durable-only 第一跳”——先查 trace enrichment，再怪 prompt assembly。
 - 若 fresh visible / heartbeat turn 发现内存 baseline 为空而 paused/inflight snapshot 或 completed continuity sidecar 里仍有，prompt assembly 应恢复该 baseline 并立即视为 session-owned append-only 前缀——按 baseline restoration 排查，不是普通 history compaction 路径。
 

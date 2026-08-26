@@ -7840,7 +7840,10 @@ async def test_ceo_frontdoor_prepare_turn_internal_turn_without_prior_baseline_f
     )
 
     assert captured["resolver_called"] == {"actor_role": "ceo", "session_id": "web:shared"}
-    assert captured["builder_kwargs"]["request_body_seed_messages"] == [
+    # 冷启动（无基线）的内部轮：续跑种子为空，内部规则改经独立参数下发，
+    # 不再混入种子冒充完整旧请求体。
+    assert captured["builder_kwargs"]["request_body_seed_messages"] == []
+    assert captured["builder_kwargs"]["internal_seed_messages"] == [
         {
             "role": "system",
             "content": heartbeat_rules_text,

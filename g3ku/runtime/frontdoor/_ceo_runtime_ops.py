@@ -5001,7 +5001,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             checkpoint_messages = []
             builder_user_metadata["_frontdoor_history_seed"] = "session_window"
             has_prior_request_body_seed = True
-        if internal_seed_messages:
+        # 仅当存在真实的续跑种子（非空基线）时才把内部事件并入其中。冷启动（无基线，
+        # 如进程重启后首轮或全新会话首轮）时，这两条内部消息绝不能冒充"完整旧请求体"：
+        # 那会让本轮被误判为续跑、走假定种子已含基础系统提示的续跑分支，从而静默
+        # 丢掉基础提示。冷启动时内部事件单独传给 builder，由新建路径注入。
+        if internal_seed_messages and request_body_seed_messages:
             request_body_seed_messages = [*list(request_body_seed_messages), *list(internal_seed_messages)]
         inherited_internal_contract_state = (
             self._inherited_internal_turn_contract_state(state=state, session=session)
@@ -5117,6 +5121,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 persisted_session=runtime_session,
                 checkpoint_messages=checkpoint_messages,
                 request_body_seed_messages=request_body_seed_messages,
+                internal_seed_messages=internal_seed_messages,
                 user_content=current_turn_user_content,
                 user_metadata=builder_user_metadata,
                 frontdoor_stage_state=current_frontdoor_stage_state,

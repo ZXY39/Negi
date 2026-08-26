@@ -1957,6 +1957,7 @@ class CeoMessageBuilder:
         persisted_session: Any | None,
         checkpoint_messages: list[dict[str, Any]] | None = None,
         request_body_seed_messages: list[dict[str, Any]] | None = None,
+        internal_seed_messages: list[dict[str, Any]] | None = None,
         user_content: Any | None = None,
         user_metadata: dict[str, Any] | None = None,
         frontdoor_stage_state: dict[str, Any] | None = None,
@@ -1995,6 +1996,9 @@ class CeoMessageBuilder:
                 collect_elapsed_ms=collect_elapsed_ms,
                 history_elapsed_ms=0.0,
             )
+        # 冷启动新建路径：内部事件消息（cron/heartbeat）不进入续跑种子，改在这里
+        # 注入历史区，保证基础系统提示由 _inject_turn_context 正常前置。
+        internal_seed_records = self._request_body_seed_records(internal_seed_messages)
         history_started_at = time.perf_counter()
         history_state = self._resolve_history_injection(
             persisted_session=persisted_session,
@@ -2067,11 +2071,13 @@ class CeoMessageBuilder:
                 persisted_session=persisted_session,
                 checkpoint_messages=checkpoint_messages,
             ),
+            *internal_seed_records,
         ]
         pre_request_messages = [
             {"role": "system", "content": str(context_sources["system_prompt"] or "")},
             *trimmed_raw_history,
             *stage_workset_history,
+            *internal_seed_records,
         ]
         if not current_user_in_history:
             pre_request_messages.append({"role": "user", "content": str(context_sources["user_content"] or "")})
@@ -2087,6 +2093,7 @@ class CeoMessageBuilder:
         staged_history_for_injection = [
             *trimmed_raw_history,
             *stage_workset_history,
+            *internal_seed_records,
         ]
         history_state['history_messages'] = staged_history_for_injection
         history_state['history_source'] = effective_history_source

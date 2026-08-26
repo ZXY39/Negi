@@ -3623,3 +3623,100 @@ def test_paused_user_turn_reconcile_noop_without_seed() -> None:
         [], persisted_session, current_turn_user_content="补发"
     )
     assert reconciled == []
+
+
+@pytest.mark.asyncio
+async def test_builder_fresh_path_injects_internal_seed_messages_after_base_prompt() -> None:
+    # 冷启动（无续跑种子）的 cron 内部轮：内部事件消息必须走新建路径注入，
+    # 基础系统提示保持首位，不能因种子只有内部消息而丢失。
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    internal_seed = [
+        {"role": "system", "content": "CRON REMINDER"},
+        {"role": "system", "content": "CRON EVENT BUNDLE"},
+    ]
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="执行每日新闻推送",
+        exposure={"skills": [], "tool_families": [], "tool_names": []},
+        persisted_session=None,
+        checkpoint_messages=[],
+        request_body_seed_messages=[],
+        internal_seed_messages=list(internal_seed),
+        user_content="",
+    )
+
+    stable = list(result.stable_messages)
+    contents = [str(item.get("content") or "") for item in stable]
+    roles = [str(item.get("role") or "") for item in stable]
+    # 基础系统提示在第一位
+    assert roles[0] == "system"
+    assert contents[0].startswith("BASE PROMPT")
+    # 内部事件消息被注入（在基础提示之后），且未冒充续跑种子
+    assert "CRON REMINDER" in contents
+    assert "CRON EVENT BUNDLE" in contents
+    assert contents.index("CRON REMINDER") > 0
+    # model_messages 首位同样是基础提示
+    assert str(result.model_messages[0].get("content") or "").startswith("BASE PROMPT")
+
+
+@pytest.mark.asyncio
+async def test_builder_fresh_path_without_internal_seed_keeps_base_prompt() -> None:
+    # 冷启动的普通交互轮（无内部事件）：基础提示照常注入。
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="你好",
+        exposure={"skills": [], "tool_families": [], "tool_names": []},
+        persisted_session=None,
+        checkpoint_messages=[],
+        request_body_seed_messages=[],
+        internal_seed_messages=[],
+        user_content="你好",
+    )
+
+    stable = list(result.stable_messages)
+    assert str(stable[0].get("role") or "") == "system"
+    assert str(stable[0].get("content") or "").startswith("BASE PROMPT")
+    # 当前用户消息被追加
+    assert any(
+        str(item.get("role") or "") == "user" and str(item.get("content") or "") == "你好"
+        for item in stable
+    )
+
+
+@pytest.mark.asyncio
+async def test_builder_continuation_path_ignores_separate_internal_seed_param() -> None:
+    # 有真实续跑种子时走续跑路径；internal_seed_messages 不再参与（避免重复注入），
+    # 内部事件此时已由 prepare 合并进种子。
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    body = [
+        {"role": "system", "content": "BASE PROMPT"},
+        {"role": "user", "content": "上一轮问题"},
+        {"role": "assistant", "content": "上一轮回答"},
+    ]
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="本轮问题",
+        exposure={"skills": [], "tool_families": [], "tool_names": []},
+        persisted_session=None,
+        checkpoint_messages=[],
+        request_body_seed_messages=list(body),
+        internal_seed_messages=[{"role": "system", "content": "CRON REMINDER"}],
+        user_content="本轮问题",
+    )
+
+    stable = list(result.stable_messages)
+    contents = [str(item.get("content") or "") for item in stable]
+    # 续跑路径以种子为准，基础提示来自种子首位
+    assert contents[0] == "BASE PROMPT"
+    # internal_seed_messages 未被重复注入（续跑路径不使用该参数）
+    assert contents.count("CRON REMINDER") == 0
